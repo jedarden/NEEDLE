@@ -161,6 +161,18 @@ use serial_test::serial;
 /// test racing one still corrupts it. The lock below makes isolation exclusive.
 static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Take the HOME lock for tests that set HOME manually rather than via HomeGuard.
+///
+/// `#[serial]` is not sufficient on its own: it orders serial-marked tests against each
+/// other, but the ~24 HomeGuard users are not serial, so a guard dropping in another
+/// thread restores HOME mid-test. That is how a tilde expansion resolved to the real
+/// `/root` under CI. Hold this for the whole test, before touching HOME.
+fn lock_home() -> std::sync::MutexGuard<'static, ()> {
+    HOME_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 struct HomeGuard {
     _temp_dir: tempfile::TempDir,
     original_home: Option<std::ffi::OsString>,
@@ -206,6 +218,31 @@ impl Drop for HomeGuard {
 }
 
 // ─── Shared test infrastructure ──────────────────────────────────────────────
+
+/// Write an isolated global needle config for a spawned worker; returns its config dir.
+///
+/// A spawned worker resolves its GLOBAL config (`$XDG_CONFIG_HOME/needle/config.yaml`),
+/// not the workspace `.needle.yaml`, and two defaults there will otherwise stall it:
+///
+/// - the pre-construction resource gate retries for up to 120s whenever
+///   load/num_cpus exceeds `cpu_load_warn`, printing nothing while it waits. On a small
+///   CI box running the suite in parallel it trips, and the spawning test's own timeout
+///   expires inside it -- reported only as "possible hang or deadlock".
+/// - default model routing rewrites sonnet/opus/fable/haiku to the operator-provided
+///   `claude-print` adapter, whose YAML does not exist under an isolated HOME.
+///
+/// Callers must pass the returned directory as XDG_CONFIG_HOME to the child, because it
+/// takes precedence over $HOME/.config and CI images set one. See needle-ab52a15a.
+fn isolated_worker_config(home: &std::path::Path) -> PathBuf {
+    let cfg_dir = home.join(".config").join("needle");
+    std::fs::create_dir_all(&cfg_dir).expect("failed to create isolated needle config dir");
+    std::fs::write(
+        cfg_dir.join("config.yaml"),
+        "worker:\n  cpu_load_warn: 1.0\n  memory_free_warn_mb: 0\nagent:\n  routing: ~\n",
+    )
+    .expect("failed to write isolated needle config");
+    home.join(".config")
+}
 
 fn configured_forge_store(workspace: PathBuf) -> needle::bead_store::CliBeadStore {
     // bead-rs (`bead`), not bead-forge (`bf`).
@@ -1511,7 +1548,10 @@ async fn worker_boot_rejects_nonexistent_adapter() {
     let nonexistent_adapter = "nonexistent-test-adapter-xyz-999";
 
     // Spawn the needle binary with the nonexistent adapter
+    let xdg_cfg = isolated_worker_config(temp_dir.path());
     let output = std::process::Command::new(&bin_path)
+        .env("XDG_CONFIG_HOME", &xdg_cfg)
+        .env("NEEDLE_SKIP_LAUNCH_RESOURCE_CHECK", "1")
         // NEEDLE_INNER=1 runs the worker loop in THIS process.
         // Without it, `needle run` detaches into a tmux session and the parent exits 0
         // immediately -- so adapter preflight happens in the detached worker and this
@@ -1877,7 +1917,10 @@ async fn subprocess_nonexistent_adapter_produces_actionable_error_message() {
     let nonexistent_adapter = "totally-fake-adapter-xyz-999";
 
     // Spawn the needle binary with the nonexistent adapter
+    let xdg_cfg = isolated_worker_config(temp_dir.path());
     let output = std::process::Command::new(&bin_path)
+        .env("XDG_CONFIG_HOME", &xdg_cfg)
+        .env("NEEDLE_SKIP_LAUNCH_RESOURCE_CHECK", "1")
         // NEEDLE_INNER=1 runs the worker loop in THIS process.
         // Without it, `needle run` detaches into a tmux session and the parent exits 0
         // immediately -- so adapter preflight happens in the detached worker and this
@@ -2712,8 +2755,9 @@ async fn cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead() {
 
     let remote_dir = tempfile::tempdir().unwrap();
     let remote_workspace = remote_dir.path().to_path_buf();
-    let remote_beads_dir = remote_workspace.join(".beads");
-    fs::create_dir_all(&remote_beads_dir).unwrap();
+    // Deliberately NOT pre-creating .beads: `bead init` creates it, and refuses to run
+    // when an empty one already exists ("not a bead-rs workspace ... config.json is
+    // absent", exit 3). The directory was only ever created to be created.
 
     // Initialize the bead workspace first.
     let init_output = std::process::Command::new("bead")
@@ -2873,8 +2917,9 @@ async fn cross_workspace_mend_skips_beads_with_live_assignees() {
 
     let remote_dir = tempfile::tempdir().unwrap();
     let remote_workspace = remote_dir.path().to_path_buf();
-    let remote_beads_dir = remote_workspace.join(".beads");
-    fs::create_dir_all(&remote_beads_dir).unwrap();
+    // Deliberately NOT pre-creating .beads: `bead init` creates it, and refuses to run
+    // when an empty one already exists ("not a bead-rs workspace ... config.json is
+    // absent", exit 3). The directory was only ever created to be created.
 
     // Initialize the bead workspace first.
     let init_output = std::process::Command::new("bead")
@@ -3019,8 +3064,9 @@ async fn cross_workspace_mend_skips_own_worker_beads() {
 
     let remote_dir = tempfile::tempdir().unwrap();
     let remote_workspace = remote_dir.path().to_path_buf();
-    let remote_beads_dir = remote_workspace.join(".beads");
-    fs::create_dir_all(&remote_beads_dir).unwrap();
+    // Deliberately NOT pre-creating .beads: `bead init` creates it, and refuses to run
+    // when an empty one already exists ("not a bead-rs workspace ... config.json is
+    // absent", exit 3). The directory was only ever created to be created.
 
     // Initialize the bead workspace. An empty .beads/ directory is not a workspace:
     // bead-rs needs `init` to create the schema, so `create` below failed without it.
@@ -3473,7 +3519,14 @@ async fn dead_worker_cleanup_integration() {
         // routing: ~ is required. The default rules rewrite any sonnet/opus/fable/haiku
         // model to the operator-provided `claude-print` adapter, whose YAML does not
         // exist under an isolated HOME, so preflight aborts before the worker can run.
-        "worker:\n  idle_action: exit\n  allow_exit_without_supervisor: true\nagent:\n  routing: ~\n",
+        //
+        // cpu_load_warn/memory_free_warn_mb disable the pre-construction resource gate.
+        // It retries for up to 120s when load/num_cpus exceeds the threshold and prints
+        // nothing while waiting, so on a small CI box running the suite in parallel the
+        // worker silently stalls there and this test's timeout expires inside it. A test
+        // spawning a worker must not be gated on host load. See needle-ab52a15a.
+        "worker:\n  idle_action: exit\n  allow_exit_without_supervisor: true\n  \
+         cpu_load_warn: 1.0\n  memory_free_warn_mb: 0\nagent:\n  routing: ~\n",
     )
     .unwrap();
 
@@ -3524,6 +3577,12 @@ async fn dead_worker_cleanup_integration() {
     // contaminating the test environment (see ADR-006 and the 2026-07-20 contamination incident).
     let bin_path = std::env::var("CARGO_BIN_EXE_needle").unwrap_or_else(|_| "needle".to_string());
     let mut cmd = Command::new(&bin_path);
+    // NOT isolated_worker_config(): this test writes its own richer config above
+    // (idle_action: exit, allow_exit_without_supervisor, routing: ~) and the helper
+    // would overwrite that file, dropping idle_action and leaving the worker looping
+    // in the Wait backoff until this test times out. Point at the same dir instead.
+    cmd.env("XDG_CONFIG_HOME", temp_dir.path().join(".config"));
+    cmd.env("NEEDLE_SKIP_LAUNCH_RESOURCE_CHECK", "1");
     // NEEDLE_INNER=1 runs the worker loop in THIS process. Without it, `needle run`
     // detaches into a tmux session and the parent exits 0 immediately, so the spawned
     // process reports success regardless of what the worker does. The systemd unit
@@ -3549,6 +3608,7 @@ async fn dead_worker_cleanup_integration() {
         // elsewhere, it would miss the idle_action=exit written above, default to Wait,
         // and loop on the 60-120s idle backoff until this test's timeout.
         .env("XDG_CONFIG_HOME", temp_dir.path().join(".config"))
+        .env("NEEDLE_SKIP_LAUNCH_RESOURCE_CHECK", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -4365,6 +4425,7 @@ exit 0
         "test should use isolated temp directory, not real HOME"
     );
 
+    let _home_lock = lock_home();
     env::set_var("HOME", &isolated_home);
 
     // Test basic tilde expansion function
@@ -4448,6 +4509,7 @@ async fn worker_binary_path_tilde_expansion_trailing_slashes() {
 
     // Save the original HOME and set our isolated home
     let original_home = env::var("HOME").ok();
+    let _home_lock = lock_home();
     env::set_var("HOME", &isolated_home);
 
     // Test 1: Bare tilde with trailing slash (~/)
@@ -4549,6 +4611,7 @@ async fn worker_binary_path_tilde_expansion_parent_directories() {
 
     // Save the original HOME and set our isolated home
     let original_home = env::var("HOME").ok();
+    let _home_lock = lock_home();
     env::set_var("HOME", &isolated_home);
 
     // Test 1: Direct parent directory reference (~/..)
@@ -4678,6 +4741,7 @@ async fn workspace_home_tilde_expansion() {
         "test should use isolated temp directory, not real HOME"
     );
 
+    let _home_lock = lock_home();
     env::set_var("HOME", &isolated_home);
 
     // Test 1: Tilde-prefixed path (~/.custom-needle)
@@ -4802,6 +4866,7 @@ async fn workspace_default_tilde_expansion() {
         "test should use isolated temp directory, not real HOME"
     );
 
+    let _home_lock = lock_home();
     env::set_var("HOME", &isolated_home);
 
     // Test 1: Tilde-prefixed path (~/dev/my-workspace)
@@ -4939,6 +5004,7 @@ async fn workspace_home_and_default_tilde_expansion_combined() {
 
     // Save the original HOME and set our isolated home
     let original_home = env::var("HOME").ok();
+    let _home_lock = lock_home();
     env::set_var("HOME", &isolated_home);
 
     // Test combined tilde expansion in both fields
@@ -5028,6 +5094,7 @@ async fn agent_adapters_dir_tilde_expansion() {
 
     // Save the original HOME and set our isolated home
     let original_home = env::var("HOME").ok();
+    let _home_lock = lock_home();
     env::set_var("HOME", &isolated_home);
 
     // Test 1: Tilde-prefixed path (~/.custom-adapters)
@@ -5140,6 +5207,7 @@ async fn bead_cli_path_tilde_expansion() {
 
     // Save the original HOME and set our isolated home
     let original_home = env::var("HOME").ok();
+    let _home_lock = lock_home();
     env::set_var("HOME", &isolated_home);
 
     // Test 1: Tilde-prefixed path (~/.local/bin/custom-bead)
@@ -5274,6 +5342,7 @@ async fn explore_workspace_root_tilde_expansion() {
 
     // Save the original HOME and set our isolated home
     let original_home = env::var("HOME").ok();
+    let _home_lock = lock_home();
     env::set_var("HOME", &isolated_home);
 
     // Test 1: Tilde-prefixed path (~/dev-workspaces)
@@ -5393,6 +5462,7 @@ async fn explore_workspaces_tilde_expansion() {
     let original_home = env::var("HOME").ok();
 
     // Set our isolated home
+    let _home_lock = lock_home();
     env::set_var("HOME", &isolated_home);
 
     // Ensure HOME is restored even on panic
@@ -5541,6 +5611,7 @@ async fn learning_global_learnings_file_tilde_expansion() {
 
     // Save the original HOME and set our isolated home
     let original_home = env::var("HOME").ok();
+    let _home_lock = lock_home();
     env::set_var("HOME", &isolated_home);
 
     // Test 1: Tilde-prefixed path (~/.config/needle/global-learnings.md)
@@ -5668,6 +5739,7 @@ async fn telemetry_log_dir_tilde_expansion() {
 
     // Save the original HOME and set our isolated home
     let original_home = env::var("HOME").ok();
+    let _home_lock = lock_home();
     env::set_var("HOME", &isolated_home);
 
     // Test 1: Tilde-prefixed path (~/.needle-logs)
@@ -5816,6 +5888,7 @@ async fn supervisor_heartbeat_path_tilde_expansion() {
 
     // Save the original HOME and set our isolated home
     let original_home = env::var("HOME").ok();
+    let _home_lock = lock_home();
     env::set_var("HOME", &isolated_home);
 
     // Test 1: Tilde-prefixed path (~/.needle-heartbeat/supervisor.heartbeat)
@@ -5955,6 +6028,7 @@ async fn prompt_context_files_tilde_expansion() {
     let original_home = env::var("HOME").ok();
 
     // Set our isolated home
+    let _home_lock = lock_home();
     env::set_var("HOME", &isolated_home);
 
     // Ensure HOME is restored even on panic
@@ -7647,6 +7721,8 @@ async fn subprocess_adapter_failure_exits_nonzero() {
     // Spawn the needle binary with our test config
     let bin_path = std::env::var("CARGO_BIN_EXE_needle").unwrap_or_else(|_| "needle".to_string());
     let mut cmd = Command::new(&bin_path);
+    cmd.env("XDG_CONFIG_HOME", isolated_worker_config(temp_dir.path()));
+    cmd.env("NEEDLE_SKIP_LAUNCH_RESOURCE_CHECK", "1");
     // NEEDLE_INNER=1 runs the worker loop in THIS process. Without it, `needle run`
     // detaches into a tmux session and the parent exits 0 immediately, so the spawned
     // process reports success regardless of what the worker does. The systemd unit

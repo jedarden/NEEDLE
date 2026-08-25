@@ -1011,6 +1011,7 @@ pub fn detect_bead_backend(workspace_root: &Path) -> Result<(Backend, PathBuf)> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     /// Delegates to the single crate-wide env lock so that `HOME`/`PATH`
     /// mutation here excludes — and is excluded by — every other test that
@@ -1223,16 +1224,30 @@ mod tests {
         assert!(err.contains("explicit bead CLI path does not exist"));
     }
 
+    #[serial]
     #[test]
     fn test_resolve_bead_cli_explicit_path_relative_format() {
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let bead_bin = tmp_dir.path().join("bead");
+        // This test must set the process-wide CWD: resolve_bead_cli() checks that an
+        // explicit relative path exists, which is only meaningful relative to CWD.
+        //
+        // CWD is global, so while it points here every other test thread inherits it.
+        // If this directory were then removed, those threads' Command::spawn() would
+        // fail with NotFound -- which is exactly how this surfaced, as an unrelated
+        // flaky "git failed" in commit_hook::tests::concurrent_inject_never_cross_tags.
+        // Keep the directory for the life of the process so that window cannot exist;
+        // it is a few bytes under the system temp dir and the OS reaps it.
+        let tmp_path = tempfile::tempdir().unwrap().keep();
+        let bead_bin = tmp_path.join("bead");
         std::fs::write(&bead_bin, "#!/bin/sh\necho test").unwrap();
         make_executable(&bead_bin);
 
-        // Change to temp directory and use relative path
+        // Restore CWD even if an assertion below panics; leaving the process in a
+        // stale CWD would break every later test that spawns a process.
         let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(tmp_dir.path()).unwrap();
+        let _cwd_guard = scopeguard::guard(original_dir, |dir| {
+            let _ = std::env::set_current_dir(dir);
+        });
+        std::env::set_current_dir(&tmp_path).unwrap();
 
         let config = BeadCliConfig {
             backend: BeadBackend::Bead,
@@ -1245,8 +1260,7 @@ mod tests {
         assert_eq!(path, PathBuf::from("./bead"));
         // Relative path should exist from the current working directory
         assert!(path.exists());
-
-        std::env::set_current_dir(original_dir).unwrap();
+        // CWD restored by _cwd_guard.
     }
 
     #[test]
@@ -1378,6 +1392,7 @@ mod tests {
         assert_eq!(path, custom_binary);
     }
 
+    #[serial]
     #[test]
     fn test_resolve_bead_cli_auto_precedence_bead_first() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -1409,6 +1424,7 @@ mod tests {
         assert_eq!(path, bead_bin);
     }
 
+    #[serial]
     #[test]
     fn test_resolve_bead_cli_auto_fallback_to_bf() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -1453,6 +1469,7 @@ mod tests {
         assert_eq!(path, br_bin);
     }
 
+    #[serial]
     #[test]
     fn test_resolve_bead_cli_auto_ignores_deprecated_br() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -1483,6 +1500,7 @@ mod tests {
         assert_eq!(path, bead_bin);
     }
 
+    #[serial]
     #[test]
     fn test_resolve_bead_cli_auto_precedence_bead_third() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -1510,6 +1528,7 @@ mod tests {
         assert_eq!(path, bead_bin);
     }
 
+    #[serial]
     #[test]
     fn test_resolve_bead_cli_auto_no_binary_error() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -1533,6 +1552,7 @@ mod tests {
         assert!(err.contains("no bead CLI found"));
     }
 
+    #[serial]
     #[test]
     fn test_resolve_bead_cli_bf_backend_not_found() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -1556,6 +1576,7 @@ mod tests {
         assert!(err.contains("bf CLI not found"));
     }
 
+    #[serial]
     #[test]
     fn test_resolve_bead_cli_bf_backend_finds_on_path() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -1583,6 +1604,7 @@ mod tests {
         assert_eq!(path, bf_bin);
     }
 
+    #[serial]
     #[test]
     fn test_resolve_bead_cli_bf_backend_falls_back_to_local_bin() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -1610,6 +1632,7 @@ mod tests {
         assert_eq!(path, bf_local);
     }
 
+    #[serial]
     #[test]
     fn test_resolve_bead_cli_bf_backend_returns_bf_variant() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -1637,6 +1660,7 @@ mod tests {
         assert_eq!(path, bf_bin);
     }
 
+    #[serial]
     #[test]
     fn test_resolve_bead_cli_auto_error_no_cli_found() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -1684,6 +1708,7 @@ mod tests {
         );
     }
 
+    #[serial]
     #[test]
     fn test_resolve_bead_cli_auto_error_cli_without_execute_permission() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -1719,6 +1744,7 @@ mod tests {
         );
     }
 
+    #[serial]
     #[test]
     fn test_resolve_bead_cli_auto_error_nonexistent_path_directories() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -1762,6 +1788,7 @@ mod tests {
     /// Per ADR-013 §7: auto detection prefers bead (bead-rs primary), then bf (bead-forge secondary).
     /// This test verifies the complete chain by placing CLIs in different positions
     /// and asserting that the search follows the documented order.
+    #[serial]
     #[test]
     fn test_auto_fallback_chain_search_order_bead_then_bf_then_error() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -1821,6 +1848,7 @@ mod tests {
     /// - Bead is searched across all PATH directories first (primary backend priority)
     /// - Bf is searched across all PATH directories only if bead is not found
     /// - The search prioritizes backend type over PATH ordering
+    #[serial]
     #[test]
     fn test_auto_fallback_chain_path_search_primary_beats_secondary() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -1895,6 +1923,7 @@ mod tests {
     /// - Search stops immediately when a valid CLI is found
     /// - Later search locations are not checked once a match succeeds
     /// - The chain is exhaustive (all locations are checked until first match)
+    #[serial]
     #[test]
     fn test_auto_fallback_chain_exhaustive_stops_at_first_match() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -1937,6 +1966,7 @@ mod tests {
     ///
     /// Verifies that when PATH is empty or unset, the fallback chain
     /// correctly checks ~/.local/bin locations before erroring.
+    #[serial]
     #[test]
     fn test_auto_fallback_chain_empty_path_falls_back_to_home() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -1974,6 +2004,7 @@ mod tests {
     /// Verifies that when bead is installed via `cargo install` (which places
     /// binaries in /usr/local/cargo/bin), it is found as the third fallback
     /// location after PATH search and ~/.local/bin/bead fail.
+    #[serial]
     #[test]
     fn test_auto_fallback_chain_cargo_bin_location() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -2014,6 +2045,7 @@ mod tests {
     ///
     /// Verifies that the search handles non-existent PATH directories gracefully
     /// and continues checking other search locations.
+    #[serial]
     #[test]
     fn test_auto_fallback_chain_nonexistent_path_continues_to_fallback() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -2054,6 +2086,7 @@ mod tests {
     ///
     /// Verifies that symlinked binaries are treated as valid executables
     /// and are resolved correctly by the fallback chain.
+    #[serial]
     #[test]
     fn test_auto_fallback_chain_symlinked_cli_resolved_correctly() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -2117,6 +2150,7 @@ mod tests {
     /// 3. /usr/local/cargo/bin/bead
     /// 4. bf on PATH (secondary)
     /// 5. ~/.local/bin/bf
+    #[serial]
     #[test]
     fn test_auto_fallback_chain_comprehensive_order_adr013_compliant() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -2190,6 +2224,7 @@ mod tests {
         );
     }
 
+    #[serial]
     #[test]
     fn test_resolve_bead_cli_bead_backend_finds_on_path() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -2217,6 +2252,7 @@ mod tests {
         assert_eq!(path, bead_bin);
     }
 
+    #[serial]
     #[test]
     fn test_resolve_bead_cli_bead_backend_falls_back_to_local_bin() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -2244,6 +2280,7 @@ mod tests {
         assert_eq!(path, bead_local);
     }
 
+    #[serial]
     #[test]
     fn test_resolve_bead_cli_bead_backend_falls_back_to_cargo_bin() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -2280,6 +2317,7 @@ mod tests {
         assert!(err.contains("/usr/local/cargo/bin/bead"));
     }
 
+    #[serial]
     #[test]
     fn test_resolve_bead_cli_bead_backend_not_found_error() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -2304,6 +2342,7 @@ mod tests {
         assert!(err.contains("/usr/local/cargo/bin/bead"));
     }
 
+    #[serial]
     #[test]
     fn test_resolve_bead_cli_bead_backend_returns_bead_variant() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -2330,6 +2369,7 @@ mod tests {
         assert!(matches!(backend, Backend::Bead));
     }
 
+    #[serial]
     #[test]
     fn test_resolve_bead_cli_br_backend_finds_on_path() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -2357,6 +2397,7 @@ mod tests {
         assert_eq!(path, bead_bin);
     }
 
+    #[serial]
     #[test]
     fn test_resolve_bead_cli_br_backend_falls_back_to_local_bin() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -2384,6 +2425,7 @@ mod tests {
         assert_eq!(path, bead_local);
     }
 
+    #[serial]
     #[test]
     fn test_resolve_bead_cli_br_backend_falls_back_to_cargo_bin() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -2409,6 +2451,7 @@ mod tests {
         assert!(err.contains("/usr/local/cargo/bin/bead"));
     }
 
+    #[serial]
     #[test]
     fn test_resolve_bead_cli_br_backend_not_found_error() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -2441,6 +2484,7 @@ mod tests {
     ///
     /// When auto mode is used on a host with only bf installed (no br, no bead),
     /// it must resolve to the exact same path that the current hardcoded chain produces.
+    #[serial]
     #[test]
     fn test_regression_auto_bf_only_host_matches_hardcoded_chain() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -2872,6 +2916,7 @@ path: ./local/bin/bf
         assert!(debug_str.contains("/test/bead"));
     }
 
+    #[serial]
     #[test]
     fn test_resolve_bead_cli_error_when_no_binary_found() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -2975,6 +3020,7 @@ path: /path with spaces/to/bead
 
     // ─── detect_bead_backend tests ─────────────────────────────────────────────────────
 
+    #[serial]
     #[test]
     fn test_detect_bead_backend_config_set_to_bead() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -3004,6 +3050,7 @@ path: /path with spaces/to/bead
         assert_eq!(path, bead_bin);
     }
 
+    #[serial]
     #[test]
     fn test_detect_bead_backend_config_set_to_bf() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -3029,6 +3076,7 @@ path: /path with spaces/to/bead
         assert_eq!(path, bf_bin);
     }
 
+    #[serial]
     #[test]
     fn test_detect_bead_backend_config_set_to_auto_detects_bead() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -3057,6 +3105,7 @@ path: /path with spaces/to/bead
         assert_eq!(path, bead_bin);
     }
 
+    #[serial]
     #[test]
     fn test_detect_bead_backend_auto_falls_back_to_bf_when_bead_missing() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -3082,6 +3131,7 @@ path: /path with spaces/to/bead
         assert_eq!(path, bf_bin);
     }
 
+    #[serial]
     #[test]
     fn test_detect_bead_backend_auto_falls_back_to_br() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -3107,6 +3157,7 @@ path: /path with spaces/to/bead
         assert_eq!(path, br_bin);
     }
 
+    #[serial]
     #[test]
     fn test_detect_bead_backend_no_config_detects_bead() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -3132,6 +3183,7 @@ path: /path with spaces/to/bead
         assert_eq!(path, bead_bin);
     }
 
+    #[serial]
     #[test]
     fn test_detect_bead_backend_none_available_returns_error() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -3152,6 +3204,7 @@ path: /path with spaces/to/bead
         assert!(err_msg.contains("no bead CLI") || err_msg.contains("not found"));
     }
 
+    #[serial]
     #[test]
     fn test_detect_bead_backend_config_invalid_backend_value() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -3171,6 +3224,7 @@ path: /path with spaces/to/bead
         assert!(err_msg.contains("unknown bead_cli.backend"));
     }
 
+    #[serial]
     #[test]
     fn test_detect_bead_backend_config_uses_bead_alias() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -3199,6 +3253,7 @@ path: /path with spaces/to/bead
         assert_eq!(path, bead_bin);
     }
 
+    #[serial]
     #[test]
     fn test_detect_bead_backend_config_uses_bf_alias() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -3224,6 +3279,7 @@ path: /path with spaces/to/bead
         assert_eq!(path, bf_bin);
     }
 
+    #[serial]
     #[test]
     fn test_detect_bead_backend_config_br_backend() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -3502,6 +3558,7 @@ path: /path/to/./bf
 
     // ─── Auto backend CLI discovery tests ────────────────────────────────────────
 
+    #[serial]
     #[test]
     fn test_resolve_bead_cli_auto_finds_bead_on_path() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -3533,6 +3590,7 @@ path: /path/to/./bf
         assert_eq!(path, bead_bin, "Should return the PATH bead binary");
     }
 
+    #[serial]
     #[test]
     fn test_resolve_bead_cli_auto_finds_bead_in_local_bin() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -3567,6 +3625,7 @@ path: /path/to/./bf
         );
     }
 
+    #[serial]
     #[test]
     fn test_resolve_bead_cli_auto_finds_bead_in_cargo_bin() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -3600,6 +3659,7 @@ path: /path/to/./bf
         );
     }
 
+    #[serial]
     #[test]
     fn test_resolve_bead_cli_auto_finds_bf_on_path() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -3631,6 +3691,7 @@ path: /path/to/./bf
         assert_eq!(path, bf_bin, "Should return the PATH bf binary");
     }
 
+    #[serial]
     #[test]
     fn test_resolve_bead_cli_auto_finds_bf_in_local_bin() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -3662,6 +3723,7 @@ path: /path/to/./bf
         assert_eq!(path, bf_local, "Should return the ~/.local/bin/bf binary");
     }
 
+    #[serial]
     #[test]
     fn test_resolve_bead_cli_auto_complete_fallback_chain() {
         let (_lock, _env) = isolate_bead_cli_env();
@@ -3742,6 +3804,7 @@ path: /path/to/./bf
         assert_eq!(path, bf_local, "Should fall back to ~/.local/bin/bf");
     }
 
+    #[serial]
     #[test]
     fn test_resolve_bead_cli_auto_error_neither_cli_found() {
         let (_lock, _env) = isolate_bead_cli_env();

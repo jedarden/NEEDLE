@@ -305,6 +305,7 @@ async fn already_has_trailer(workspace: &str, bead_id: &BeadId) -> Result<bool> 
 
 #[cfg(test)]
 mod tests {
+    use serial_test::serial;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::Command;
@@ -373,6 +374,7 @@ mod tests {
         (repo_path, temp)
     }
 
+    #[serial]
     #[tokio::test]
     async fn concurrent_inject_never_cross_tags() {
         use super::inject_bead_id_trailer;
@@ -491,6 +493,7 @@ mod tests {
         assert_eq!(parent, head_after_a, "HEAD's parent should be A's commit");
     }
 
+    #[serial]
     #[tokio::test]
     async fn identity_check_skips_mismatched_commit() {
         use super::inject_bead_id_trailer;
@@ -529,6 +532,7 @@ mod tests {
         assert!(trailers.is_empty() || !trailers.contains(bead_a_id.as_ref()));
     }
 
+    #[serial]
     #[tokio::test]
     async fn identity_check_allows_matched_commit() {
         use super::inject_bead_id_trailer;
@@ -565,6 +569,7 @@ mod tests {
         assert!(trailers.contains(bead_id.as_ref()));
     }
 
+    #[serial]
     #[tokio::test]
     async fn skips_trailer_injection_when_head_already_pushed() {
         use super::inject_bead_id_trailer;
@@ -655,6 +660,7 @@ mod tests {
         );
     }
 
+    #[serial]
     #[tokio::test]
     async fn injects_trailer_when_head_not_pushed() {
         use super::inject_bead_id_trailer;

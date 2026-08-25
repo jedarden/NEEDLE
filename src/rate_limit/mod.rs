@@ -426,6 +426,21 @@ impl RateLimiter {
         memory_free_warn_mb: u64,
         telemetry: &Telemetry,
     ) -> Result<()> {
+        // Explicit opt-out for callers that must launch regardless of host load.
+        //
+        // `cpu_load_warn` is a normalized ratio capped at 1.0 by config validation, so
+        // it cannot express "never defer": any box with load above its core count trips
+        // the gate, and the caller then retries for up to 120s. That is correct for a
+        // fleet worker and wrong for a test harness spawning one -- the test's own
+        // timeout expires inside the wait, reporting only a hang. It is also a
+        // reasonable deliberate operator override when launching onto a busy box.
+        if std::env::var("NEEDLE_SKIP_LAUNCH_RESOURCE_CHECK").as_deref() == Ok("1") {
+            tracing::debug!(
+                "NEEDLE_SKIP_LAUNCH_RESOURCE_CHECK=1: skipping pre-launch resource gate"
+            );
+            return Ok(());
+        }
+
         // CPU load: read /proc/loadavg on Linux.
         if let Ok(loadavg) = std::fs::read_to_string("/proc/loadavg") {
             if let Some(load_str) = loadavg.split_whitespace().next() {

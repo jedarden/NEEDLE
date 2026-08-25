@@ -732,6 +732,7 @@ pub(crate) mod test_env {
 mod tests {
     use super::*;
     use chrono::{Datelike, Timelike};
+    use serial_test::serial;
     use std::env;
     use std::path::PathBuf;
 
@@ -2078,6 +2079,7 @@ echo "Warning: deprecated flag" >&2
         std::env::set_var("PATH", path);
     }
 
+    #[serial]
     #[test]
     fn test_probe_bead_cli_with_bead_available() {
         use std::os::unix::fs::PermissionsExt;
@@ -2117,6 +2119,7 @@ echo "bead 0.1.3"
         assert_eq!(cli.path, fake_bead, "should return correct path to bead");
     }
 
+    #[serial]
     #[test]
     fn test_probe_bead_cli_with_bf_available() {
         use std::os::unix::fs::PermissionsExt;
@@ -2162,6 +2165,7 @@ echo "bf 0.4.1"
         assert_eq!(cli.path, fake_bf, "should return correct path to bf");
     }
 
+    #[serial]
     #[test]
     fn test_probe_bead_cli_with_br_available() {
         use std::os::unix::fs::PermissionsExt;
@@ -2204,6 +2208,7 @@ echo "br (deprecated)"
         assert_eq!(cli.path, fake_br, "should return correct path to br");
     }
 
+    #[serial]
     #[test]
     fn test_probe_bead_cli_with_none_available() {
         let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
@@ -2224,6 +2229,7 @@ echo "br (deprecated)"
         );
     }
 
+    #[serial]
     #[test]
     fn test_probe_bead_cli_priority_order() {
         use std::os::unix::fs::PermissionsExt;
@@ -2286,6 +2292,7 @@ echo "br (deprecated)"
         assert_eq!(cli.name, "bead", "should prioritize bead over bf and br");
     }
 
+    #[serial]
     #[test]
     fn test_probe_bead_cli_bf_priority_over_br() {
         use std::os::unix::fs::PermissionsExt;
@@ -2335,6 +2342,7 @@ echo "br (deprecated)"
         assert_eq!(cli.name, "bf", "should prioritize bf over br");
     }
 
+    #[serial]
     #[test]
     fn test_resolve_command_in_path_with_which() {
         use std::os::unix::fs::PermissionsExt;
@@ -2415,6 +2423,7 @@ echo "test output"
         }
     }
 
+    #[serial]
     #[test]
     fn test_probe_bead_cli_path_with_spaces() {
         use std::os::unix::fs::PermissionsExt;
