@@ -5558,6 +5558,16 @@ impl Worker {
     }
 
     /// Request a graceful shutdown (sets the internal shutdown flag).
+    /// A handle that can request this worker stop from another task.
+    ///
+    /// `run()` borrows the worker mutably for the entire loop, so `request_shutdown()`
+    /// cannot be called while it is running. Callers that need to stop a running
+    /// worker -- a supervisor, or a test driving one concurrently -- take this handle
+    /// before calling `run()` and set it when they want the loop to exit.
+    pub fn shutdown_handle(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.shutdown)
+    }
+
     pub fn request_shutdown(&self) {
         self.shutdown.store(true, Ordering::SeqCst);
     }
@@ -5810,6 +5820,12 @@ mod tests {
         let mut config = valid_test_config();
         config.worker.config_reload_check_interval_secs = 60;
         config.worker.idle_action = IdleAction::Exit;
+        // boot() silently rewrites Exit -> Wait when no supervisor is detected
+        // (the idle_action_validation step). Tests have no supervisor, so without
+        // this opt-in the worker takes the Wait arm and sleeps the 60-120s idle
+        // backoff in a loop instead of stopping -- the test then hangs forever
+        // rather than failing. See needle-ab52a15a.
+        config.worker.allow_exit_without_supervisor = true;
         config.worker.enforce_shipped_work = false;
         config.workspace.home = home.path().join(".needle");
         config.workspace.default = workspace.path().to_path_buf();
@@ -5867,6 +5883,9 @@ mod tests {
         config.agent.adapters_dir = home.path().join("adapters");
         config.worker.config_reload_check_interval_secs = 1;
         config.worker.idle_action = IdleAction::Exit;
+        // Opt in to Exit: boot() downgrades it to Wait without a supervisor.
+        // See needle-ab52a15a.
+        config.worker.allow_exit_without_supervisor = true;
         config.worker.enforce_shipped_work = false;
         config.workspace.home = home.path().join(".needle");
         config.workspace.default = workspace.path().to_path_buf();
@@ -6916,6 +6935,9 @@ mod tests {
         let store = Arc::new(MockStore::empty());
         let mut config = valid_test_config();
         config.worker.idle_action = IdleAction::Exit;
+        // Opt in to Exit: boot() downgrades it to Wait without a supervisor.
+        // See needle-ab52a15a.
+        config.worker.allow_exit_without_supervisor = true;
         config.self_modification.hot_reload = false;
         config.strands.explore.enabled = false;
         // Pin workspace_root to prevent Explore strand from scanning real home
@@ -7019,6 +7041,9 @@ mod tests {
         let store = Arc::new(MockStore::empty());
         let mut config = valid_test_config();
         config.worker.idle_action = IdleAction::Exit;
+        // Opt in to Exit: boot() downgrades it to Wait without a supervisor.
+        // See needle-ab52a15a.
+        config.worker.allow_exit_without_supervisor = true;
         config.self_modification.hot_reload = false;
         // Disable Explore strand so it doesn't scan the real filesystem —
         // safe today only because run_inner()'s loop checks `shutdown` before
@@ -7176,13 +7201,17 @@ mod tests {
 
         assert_eq!(worker.last_outcome.as_deref(), Some("failure"));
         assert_eq!(action, BeadAction::Released);
+
+        // The state-machine boundary must consume the action before advancing.
+        // do_handle() only DECIDES the action; apply_bead_action() performs it, so the
+        // store must be inspected after this call -- checking before it would simply
+        // observe the bead still in_progress and prove nothing about the leak.
+        worker.apply_bead_action(action).await.unwrap();
+        assert_eq!(*worker.state(), WorkerState::Logging);
+
         let released = store.show(&incident.id).await.unwrap();
         assert_eq!(released.status, BeadStatus::Open);
         assert_eq!(released.assignee, None);
-
-        // The state-machine boundary must consume the action before advancing.
-        worker.apply_bead_action(action).await.unwrap();
-        assert_eq!(*worker.state(), WorkerState::Logging);
 
         // Defense in depth: recreate the historical leaked state and attempt
         // the same-worker, same-bead re-dispatch. Single-claim enforcement must
@@ -8263,6 +8292,9 @@ mod tests {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut config = valid_test_config();
         config.worker.idle_action = IdleAction::Exit;
+        // Opt in to Exit: boot() downgrades it to Wait without a supervisor.
+        // See needle-ab52a15a.
+        config.worker.allow_exit_without_supervisor = true;
         config.self_modification.hot_reload = false;
         let mut worker = Worker::new(config, "test-exhaust-exit".to_string(), store);
         worker.boot().unwrap();
@@ -8277,8 +8309,13 @@ mod tests {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut config = valid_test_config();
         config.worker.idle_action = IdleAction::Wait;
-        // Use a very short timeout so the test doesn't block.
+        // The idle sleep is driven by idle_backoff_min/max (compute_jittered_backoff),
+        // NOT idle_timeout -- which defaults to 60..120s, so this test previously slept
+        // in a loop forever rather than returning. idle_timeout is kept at 0 for intent,
+        // but the backoff bounds are what actually make this terminate. See needle-ab52a15a.
         config.worker.idle_timeout = 0;
+        config.worker.idle_backoff_min = 0;
+        config.worker.idle_backoff_max = 0;
         config.self_modification.hot_reload = false;
         let mut worker = Worker::new(config, "test-exhaust-wait".to_string(), store);
         worker.boot().unwrap();
@@ -8363,6 +8400,9 @@ mod tests {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::new(vec![bead]));
         let mut config = Config::default();
         config.worker.idle_action = IdleAction::Exit;
+        // Opt in to Exit: boot() downgrades it to Wait without a supervisor.
+        // See needle-ab52a15a.
+        config.worker.allow_exit_without_supervisor = true;
         // Disable hot-reload in tests — it would re-exec into a different binary.
         config.self_modification.hot_reload = false;
         // Use a simple echo adapter so the test finishes quickly.
@@ -8372,6 +8412,15 @@ mod tests {
         // Set workspace.default to match the bead's workspace so the remote
         // store switch logic doesn't fire.
         config.workspace.default = std::path::PathBuf::from("/tmp/test-workspace");
+        // Isolate workspace.home. It otherwise defaults to the REAL ~/.needle, and
+        // two things follow from that: the heartbeat emitter writes into the live
+        // fleet's ~/.needle/state/heartbeats/, and check_hot_reload() compares this
+        // test binary against the operator's ~/.needle/bin/needle-stable, finds a
+        // different hash, and calls std::process::exit(72) -- killing the whole test
+        // harness mid-run. (self_modification.hot_reload = false does NOT prevent
+        // this: the flag is never read at the call site.) An isolated home has no
+        // bin/needle-stable, so the check returns Skipped. See needle-ab52a15a.
+        config.workspace.home = crate::util::test_env::isolated_home();
         // Disable Explore: once the MockStore's one bead is processed and
         // `run()` loops again, Pluck/Mend return NoWork and the waterfall
         // previously fell through to a real Explore scan of $HOME, claiming

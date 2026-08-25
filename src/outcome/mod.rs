@@ -525,9 +525,13 @@ impl OutcomeHandler {
                             let mut release_events =
                                 self.prepare_release_events(store, bead).await?;
                             events.append(&mut release_events);
-                            let release_succeeded = events
+                            // The release itself now happens later in the worker's apply_bead_action(),
+                            // so no BeadReleased event exists here. Testing for one made this always
+                            // false, silently disabling the failure-count/quarantine follow-up. Treat
+                            // the prepare step as successful when it reported no error.
+                            let release_succeeded = !events
                                 .iter()
-                                .any(|e| matches!(e, EventKind::BeadReleased { .. }));
+                                .any(|e| matches!(e, EventKind::WorkerHandlingTimeout { .. }));
                             if release_succeeded {
                                 let _ = self.increment_failure_count(store, bead).await;
                             }
@@ -543,9 +547,13 @@ impl OutcomeHandler {
                             let mut release_events =
                                 self.prepare_release_events(store, bead).await?;
                             events.append(&mut release_events);
-                            let release_succeeded = events
+                            // The release itself now happens later in the worker's apply_bead_action(),
+                            // so no BeadReleased event exists here. Testing for one made this always
+                            // false, silently disabling the failure-count/quarantine follow-up. Treat
+                            // the prepare step as successful when it reported no error.
+                            let release_succeeded = !events
                                 .iter()
-                                .any(|e| matches!(e, EventKind::BeadReleased { .. }));
+                                .any(|e| matches!(e, EventKind::WorkerHandlingTimeout { .. }));
                             if release_succeeded {
                                 let _ = self.increment_failure_count(store, bead).await;
                             }
@@ -705,9 +713,13 @@ impl OutcomeHandler {
         // ARMOR/bf-135k storm ran one bead 24 times in a single day, each
         // attempt leaving another commit behind. A gate failure is no less
         // repeatable than an agent failure and must respect the same ceiling.
-        let release_succeeded = events
+        // The release itself now happens later in the worker's apply_bead_action(),
+        // so no BeadReleased event exists here. Testing for one made this always
+        // false, silently disabling the failure-count/quarantine follow-up. Treat
+        // the prepare step as successful when it reported no error.
+        let release_succeeded = !events
             .iter()
-            .any(|e| matches!(e, EventKind::BeadReleased { .. }));
+            .any(|e| matches!(e, EventKind::WorkerHandlingTimeout { .. }));
         let mut action = BeadAction::Released;
         if release_succeeded {
             match self.increment_failure_count(store, bead).await {
@@ -783,9 +795,13 @@ impl OutcomeHandler {
         // also closes the mitosis `NotSplittable` fallthrough (worker/mod.rs):
         // that verdict no longer matters for beads at or past the ceiling,
         // since this check already ran before mitosis evaluation this cycle.
-        let release_succeeded = events
+        // The release itself now happens later in the worker's apply_bead_action(),
+        // so no BeadReleased event exists here. Testing for one made this always
+        // false, silently disabling the failure-count/quarantine follow-up. Treat
+        // the prepare step as successful when it reported no error.
+        let release_succeeded = !events
             .iter()
-            .any(|e| matches!(e, EventKind::BeadReleased { .. }));
+            .any(|e| matches!(e, EventKind::WorkerHandlingTimeout { .. }));
         let mut action = BeadAction::Released;
         if release_succeeded {
             match self.increment_failure_count(store, bead).await {
@@ -850,9 +866,13 @@ impl OutcomeHandler {
         let mut events = self.prepare_release_events(store, bead).await?;
 
         // If release succeeded, increment failure count and add deferred label.
-        let release_succeeded = events
+        // The release itself now happens later in the worker's apply_bead_action(),
+        // so no BeadReleased event exists here. Testing for one made this always
+        // false, silently disabling the failure-count/quarantine follow-up. Treat
+        // the prepare step as successful when it reported no error.
+        let release_succeeded = !events
             .iter()
-            .any(|e| matches!(e, EventKind::BeadReleased { .. }));
+            .any(|e| matches!(e, EventKind::WorkerHandlingTimeout { .. }));
         if release_succeeded {
             // Increment failure count for auto-split tracking.
             if let Err(e) = self.increment_failure_count(store, bead).await {
@@ -1624,10 +1644,8 @@ mod tests {
                 .any(|e| matches!(e, EventKind::BeadOrphaned { .. })),
             "an unverified exit must never enter the success/orphan path"
         );
-        assert!(
-            actions.iter().any(|a| matches!(a, StoreAction::Release(_))),
-            "the bead must not remain in_progress after an unverified exit"
-        );
+        // The handler no longer calls store.release() -- apply_bead_action() does.
+        // "must not remain in_progress" is asserted above via result.bead_action.
     }
 
     #[tokio::test]
@@ -1646,12 +1664,9 @@ mod tests {
         assert!(!result.telemetry_events.is_empty());
 
         let actions = store.actions();
-        assert!(
-            actions
-                .iter()
-                .any(|a| matches!(a, StoreAction::Release(id) if id == "needle-test")),
-            "failure must release bead"
-        );
+        // NOTE: the handler no longer calls store.release() -- release is applied by
+        // the worker via apply_bead_action(). The release intent is asserted above as
+        // result.bead_action; a StoreAction::Release here would now never appear.
         assert!(
             actions.iter().any(
                 |a| matches!(a, StoreAction::AddLabel(_, label) if label == "failure-count:1")
@@ -1817,12 +1832,9 @@ mod tests {
         assert_eq!(result.bead_action, BeadAction::Deferred);
 
         let actions = store.actions();
-        assert!(
-            actions
-                .iter()
-                .any(|a| matches!(a, StoreAction::Release(id) if id == "needle-test")),
-            "timeout must release bead"
-        );
+        // NOTE: the handler no longer calls store.release() -- release is applied by
+        // the worker via apply_bead_action(). The release intent is asserted above as
+        // result.bead_action; a StoreAction::Release here would now never appear.
         assert!(
             actions
                 .iter()
@@ -1846,12 +1858,9 @@ mod tests {
         assert_eq!(result.bead_action, BeadAction::Alerted);
 
         let actions = store.actions();
-        assert!(
-            actions
-                .iter()
-                .any(|a| matches!(a, StoreAction::Release(id) if id == "needle-test")),
-            "crash must release bead"
-        );
+        // NOTE: the handler no longer calls store.release() -- release is applied by
+        // the worker via apply_bead_action(). The release intent is asserted above as
+        // result.bead_action; a StoreAction::Release here would now never appear.
         assert!(
             actions.iter().any(
                 |a| matches!(a, StoreAction::CreateBead(title, _) if title.contains("needle-test"))
@@ -1889,13 +1898,9 @@ mod tests {
         assert_eq!(result.outcome, Outcome::AgentNotFound);
         assert_eq!(result.bead_action, BeadAction::Released);
 
-        let actions = store.actions();
-        assert!(
-            actions
-                .iter()
-                .any(|a| matches!(a, StoreAction::Release(id) if id == "needle-test")),
-            "agent_not_found must release bead"
-        );
+        // NOTE: the handler no longer calls store.release() -- release is applied by
+        // the worker via apply_bead_action(). The release intent is asserted above as
+        // result.bead_action; a StoreAction::Release here would now never appear.
     }
 
     #[tokio::test]
@@ -1912,13 +1917,9 @@ mod tests {
         assert_eq!(result.outcome, Outcome::Interrupted);
         assert_eq!(result.bead_action, BeadAction::Interrupted);
 
-        let actions = store.actions();
-        assert!(
-            actions
-                .iter()
-                .any(|a| matches!(a, StoreAction::Release(id) if id == "needle-test")),
-            "interrupted must release bead"
-        );
+        // NOTE: the handler no longer calls store.release() -- release is applied by
+        // the worker via apply_bead_action(). The release intent is asserted above as
+        // result.bead_action; a StoreAction::Release here would now never appear.
     }
 
     #[tokio::test]
@@ -2014,12 +2015,9 @@ mod tests {
         assert_eq!(result.bead_action, BeadAction::Released);
 
         let actions = store.actions();
-        assert!(
-            actions
-                .iter()
-                .any(|a| matches!(a, StoreAction::Release(id) if id == "needle-test")),
-            "verification failure must release bead"
-        );
+        // NOTE: the handler no longer calls store.release() -- release is applied by
+        // the worker via apply_bead_action(). The release intent is asserted above as
+        // result.bead_action; a StoreAction::Release here would now never appear.
         assert!(
             actions.iter().any(
                 |a| matches!(a, StoreAction::AddLabel(_, label) if label == "verification-failed")
@@ -2049,12 +2047,9 @@ mod tests {
                 .any(|a| matches!(a, StoreAction::Reopen(id) if id == "needle-test")),
             "verification failure on closed bead must reopen it first"
         );
-        assert!(
-            actions
-                .iter()
-                .any(|a| matches!(a, StoreAction::Release(id) if id == "needle-test")),
-            "verification failure must release bead after reopening"
-        );
+        // NOTE: the handler no longer calls store.release() -- release is applied by
+        // the worker via apply_bead_action(). The release intent is asserted above as
+        // result.bead_action; a StoreAction::Release here would now never appear.
     }
 
     #[tokio::test]
@@ -2237,15 +2232,20 @@ mod tests {
             }
 
             async fn release(&self, _id: &BeadId) -> Result<()> {
-                // Simulate a slow release that times out.
-                tokio::time::sleep(std::time::Duration::from_secs(35)).await;
+                // Not exercised any more: the handler never calls release() -- the
+                // worker's apply_bead_action() does. Kept fast so this store cannot
+                // silently reintroduce a 35s stall if a caller is added back.
                 Ok(())
             }
             async fn block(&self, id: &BeadId) -> Result<()> {
                 self.inner.block(id).await
             }
             async fn flush(&self) -> Result<()> {
-                self.inner.flush().await
+                // The pre-release flush is now the slow operation the handler performs,
+                // so this is where the timeout must be exercised. timeout_op() caps at
+                // 30s, so sleep past it.
+                tokio::time::sleep(std::time::Duration::from_secs(35)).await;
+                Ok(())
             }
             async fn reopen(&self, id: &BeadId) -> Result<()> {
                 self.inner.reopen(id).await
@@ -2308,11 +2308,14 @@ mod tests {
         // The bead action should still be Released (best-effort).
         assert_eq!(result.bead_action, BeadAction::Released);
 
-        // Should emit a release failure event.
+        // Should report the failed prepare step. This is WorkerHandlingTimeout rather
+        // than BeadReleaseFailed: the release itself has not been attempted yet at this
+        // point (apply_bead_action() performs it), so what timed out is the pre-release
+        // flush, and claiming "release failed" here would be inaccurate.
         assert!(result
             .telemetry_events
             .iter()
-            .any(|e| matches!(e, EventKind::BeadReleaseFailed { .. })));
+            .any(|e| matches!(e, EventKind::WorkerHandlingTimeout { .. })));
     }
 
     #[tokio::test]
@@ -2577,12 +2580,12 @@ mod tests {
                 let count = self
                     .show_fail_count
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                if count < 2 {
-                    self.inner.show(_id).await
-                } else {
-                    // After 2 successful calls, the workspace vanishes
-                    anyhow::bail!("workspace directory vanished: getcwd failed")
-                }
+                // handle_success calls show() exactly once, so this must fail on the
+                // first call. A "succeed twice, then vanish" mock silently never fired
+                // once the release path moved out of the handler, and the regression
+                // this test exists for went unexercised.
+                let _ = count;
+                anyhow::bail!("workspace directory vanished: getcwd failed")
             }
 
             async fn claim(&self, id: &BeadId, actor: &str) -> Result<ClaimResult> {

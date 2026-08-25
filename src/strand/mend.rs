@@ -457,15 +457,22 @@ impl MendStrand {
         };
 
         for hb in &heartbeats {
-            let worker_key = if hb.qualified_id.is_empty() {
-                &hb.worker_id
-            } else {
-                &hb.qualified_id
-            };
-
             // Only track workers that are actually alive (PID check).
-            if HealthMonitor::check_pid_alive(hb.pid) {
-                worker_current_beads.insert(worker_key.clone(), hb.current_bead.clone());
+            if !HealthMonitor::check_pid_alive(hb.pid) {
+                continue;
+            }
+
+            // Index under BOTH identities. A heartbeat carries a qualified_id
+            // ("<adapter>-<worker>") while a bead's assignee may be written in either
+            // form depending on which code path claimed it. Indexing only the
+            // qualified form made every lookup miss for a plain-name assignee, so the
+            // code fell through to the registry branch, saw the worker alive, and
+            // declared the assignee fresh -- leaving the bead assigned forever.
+            if !hb.qualified_id.is_empty() {
+                worker_current_beads.insert(hb.qualified_id.clone(), hb.current_bead.clone());
+            }
+            if !hb.worker_id.is_empty() {
+                worker_current_beads.insert(hb.worker_id.clone(), hb.current_bead.clone());
             }
         }
 
@@ -512,9 +519,18 @@ impl MendStrand {
                             active_bead_id != &bead.id
                         }
                         None => {
-                            // Worker is alive but idle (no current bead)
-                            // Don't clear - they may resume work on this bead
-                            false
+                            // Worker is alive but idle (no current bead).
+                            //
+                            // This IS stale. An assignee on an OPEN bead is not an
+                            // active claim -- claiming sets in_progress -- so an idle
+                            // worker holding one has already finished or abandoned it
+                            // and will not "resume" it. Treating it as fresh is what
+                            // let these accumulate: `--count 1` workers relaunch under
+                            // the same name forever, so the name stays alive and the
+                            // assignee was never reaped, while the bead stayed
+                            // invisible to the ready frontier and could never be
+                            // claimed by anyone.
+                            true
                         }
                     }
                 }
@@ -809,7 +825,29 @@ impl MendStrand {
                     continue;
                 }
 
-                if dep.status == "closed" {
+                // bead-rs does not carry a per-dependency status in its JSON (bf did),
+                // so `dep.status` is the serde default of "" on the canonical backend
+                // and this check could never fire -- stale-dependency cleanup was dead
+                // code there. Resolve the blocker's status directly when the edge does
+                // not carry one. See needle-ab52a15a.
+                let blocker_closed = if dep.status.is_empty() {
+                    match store.show(&dep.id).await {
+                        Ok(blocker) => blocker.status.is_done(),
+                        Err(e) => {
+                            tracing::debug!(
+                                bead_id = %bead.id,
+                                blocker_id = %dep.id,
+                                error = %e,
+                                "mend: could not resolve blocker status; leaving dependency in place"
+                            );
+                            false
+                        }
+                    }
+                } else {
+                    dep.status == "closed"
+                };
+
+                if blocker_closed {
                     tracing::info!(
                         bead_id = %bead.id,
                         blocker_id = %dep.id,

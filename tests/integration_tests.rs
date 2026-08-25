@@ -153,9 +153,19 @@ use serial_test::serial;
 /// This prevents tests from writing to the live fleet's state directory
 /// (`~/.needle/state/heartbeats/`). Each test gets its own temporary HOME
 /// so heartbeats and other state files don't contaminate the real environment.
+///
+/// HOME is process-wide state, so isolation must also be mutually exclusive: two
+/// tests isolating at once clobber each other and whichever sets HOME last wins for
+/// both, making `~` expand to the other test's tempdir. `#[serial]` cannot prevent
+/// this -- it only orders serial-marked tests against each other, so any non-serial
+/// test racing one still corrupts it. The lock below makes isolation exclusive.
+static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 struct HomeGuard {
     _temp_dir: tempfile::TempDir,
     original_home: Option<std::ffi::OsString>,
+    // Declared last so it is released only after Drop::drop has restored HOME.
+    _lock: std::sync::MutexGuard<'static, ()>,
 }
 
 impl HomeGuard {
@@ -165,6 +175,13 @@ impl HomeGuard {
     /// Use this in any test that creates a HealthMonitor or Worker, as both
     /// may call `dirs_or_home()` which reads HOME directly.
     fn isolate() -> Self {
+        // Take the lock before touching HOME. Recover from poisoning rather than
+        // propagating it: one panicking test must not cascade into every other test
+        // that isolates HOME.
+        let lock = HOME_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
         let original_home = std::env::var_os("HOME");
         let temp_dir = tempfile::tempdir().expect("failed to create temp dir for test HOME");
         let temp_path = temp_dir.path().to_path_buf();
@@ -174,6 +191,7 @@ impl HomeGuard {
         HomeGuard {
             _temp_dir: temp_dir,
             original_home,
+            _lock: lock,
         }
     }
 }
@@ -190,16 +208,23 @@ impl Drop for HomeGuard {
 // ─── Shared test infrastructure ──────────────────────────────────────────────
 
 fn configured_forge_store(workspace: PathBuf) -> needle::bead_store::CliBeadStore {
+    // bead-rs (`bead`), not bead-forge (`bf`).
+    //
+    // bf was decommissioned across this environment on 2026-08-16 and its binary
+    // deleted, so every test routed through here died at construction with
+    // "bead backend binary not found at ~/.local/bin/bf" -- a dead-tool dependency,
+    // not a real failure. The CI image provisions the pinned bead-rs CLI, so this
+    // resolves in CI as well as locally. See needle-ab52a15a.
     let backend = needle::bead_store::builtin_bead_backends()
         .into_iter()
-        .find(|backend| backend.name == "bead-forge")
-        .expect("built-in bead-forge descriptor");
-    let binary = which::which("bf").unwrap_or_else(|_| {
+        .find(|backend| backend.name == "bead-rs")
+        .expect("built-in bead-rs descriptor");
+    let binary = which::which("bead").unwrap_or_else(|_| {
         let home = std::env::var("HOME").unwrap_or_default();
-        PathBuf::from(format!("{home}/.local/bin/bf"))
+        PathBuf::from(format!("{home}/.cargo/bin/bead"))
     });
     needle::bead_store::CliBeadStore::new(backend, binary, workspace, None, None, None)
-        .expect("configured bead-forge test store")
+        .expect("configured bead-rs test store")
 }
 
 /// ProcessGuard ensures proper cleanup of child processes in tests.
@@ -507,6 +532,12 @@ fn test_adapter(name: &str, template: &str, timeout_secs: u64) -> AgentAdapter {
 fn test_config(adapter_name: &str, workspace_home: &std::path::Path) -> Config {
     let mut config = Config::default();
     config.worker.idle_action = IdleAction::Exit;
+    // boot() silently rewrites Exit -> Wait with no supervisor present, making the
+    // worker sleep the 60-120s idle backoff in a loop instead of stopping. Tests
+    // have no supervisor, so this opt-in is required or the test hangs rather than
+    // fails. Deliberately NOT set in idle_action_exit_without_supervisor_emits_warning,
+    // which asserts that downgrade happens. See needle-ab52a15a.
+    config.worker.allow_exit_without_supervisor = true;
     config.agent.default = adapter_name.to_string();
     config.agent.timeout = 10;
     config.agent.routing = None; // Disable routing in tests - use adapter directly
@@ -845,6 +876,8 @@ async fn exhaustion_with_idle_action_exit() {
     let _home_guard = HomeGuard::isolate();
     let mut config = Config::default();
     config.worker.idle_action = IdleAction::Exit;
+    // Opt in to Exit: boot() downgrades it to Wait without a supervisor. See needle-ab52a15a.
+    config.worker.allow_exit_without_supervisor = true;
     config.agent.default = "echo-test".to_string();
     config.agent.routing = None; // Disable routing in tests - use adapter directly
     config.self_modification.hot_reload = false;
@@ -1043,18 +1076,27 @@ async fn exhaustion_with_idle_action_wait_survives_sleep() {
         updated_at: Utc::now(),
     };
 
-    let store: Arc<dyn BeadStore> = Arc::new(DelayedBeadStore {
+    let delayed_store = Arc::new(DelayedBeadStore {
         call_count: AtomicU32::new(0),
         bead_after: 2, // Add bead after 2 calls (first call goes to EXHAUSTED, second after sleep)
         bead: Mutex::new(Some(bead)),
         claimed: Mutex::new(vec![]),
         bead_released: AtomicU32::new(0),
     });
+    let store: Arc<dyn BeadStore> = delayed_store.clone();
 
     let _home_guard = HomeGuard::isolate();
     let mut config = Config::default();
     config.worker.idle_action = IdleAction::Wait; // Wait for delayed bead
     config.worker.idle_timeout = 1; // 1 second for fast test
+                                    // The idle sleep is driven by idle_backoff_min/max (compute_jittered_backoff),
+                                    // NOT idle_timeout. Left at the 60-120s defaults this test slept ~90s per cycle
+                                    // and never returned -- it was what timed out the whole integration suite at its
+                                    // 900s cap. 1s keeps the sleep real (this test exists to prove the worker SURVIVES
+                                    // an idle sleep) without stalling the suite; 0 would busy-spin instead.
+                                    // See needle-ab52a15a.
+    config.worker.idle_backoff_min = 1;
+    config.worker.idle_backoff_max = 1;
     config.agent.default = "echo-test".to_string();
     config.agent.routing = None; // Disable routing in tests - use adapter directly
     config.workspace.home = _home_guard._temp_dir.path().to_path_buf();
@@ -1089,7 +1131,24 @@ async fn exhaustion_with_idle_action_wait_survives_sleep() {
         10,
     ));
 
+    // Stop the worker once the bead has been processed and released.
+    //
+    // DelayedBeadStore::ready() returns an error after the release to "signal the
+    // worker to exit", but the worker deliberately treats a store error as
+    // recoverable ("strand error, continuing to next strand"), so that sentinel
+    // never stopped anything -- the loop simply ran forever. Drive the real stop
+    // signal instead. See needle-ab52a15a.
+    let shutdown = worker.shutdown_handle();
+    let released = delayed_store.clone();
+    let stopper = tokio::spawn(async move {
+        while released.bead_released.load(Ordering::SeqCst) != 1 {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        shutdown.store(true, Ordering::SeqCst);
+    });
+
     let result = worker.run().await.unwrap();
+    stopper.await.unwrap();
     assert_eq!(
         result,
         WorkerState::Stopped,
@@ -1279,11 +1338,7 @@ async fn deterministic_ordering_tiebreak_by_id() {
 // ═════════════════════════════════════════════════════════════════════════════
 
 #[test]
-#[allow(clippy::assertions_on_constants)]
 fn outcome_classify_covers_all_exit_code_ranges() {
-    // Intentional test failure to verify needle-ci retryStrategy fix
-    assert!(false, "intentional test failure for CI verification");
-
     // Verify that classify handles the full i32 range without panicking.
     // This is a smoke test to ensure no gaps exist.
     let test_codes: Vec<i32> = vec![
@@ -1439,6 +1494,13 @@ async fn worker_boot_rejects_nonexistent_adapter() {
 
     // Spawn the needle binary with the nonexistent adapter
     let output = std::process::Command::new(&bin_path)
+        // NEEDLE_INNER=1 runs the worker loop in THIS process.
+        // Without it, `needle run` detaches into a tmux session and the parent exits 0
+        // immediately -- so adapter preflight happens in the detached worker and this
+        // process reports success no matter what. That is why these assertions saw
+        // "it succeeded" with empty stderr. The systemd unit sets the same variable.
+        // See needle-ab52a15a.
+        .env("NEEDLE_INNER", "1")
         .arg("run")
         .arg("--agent")
         .arg(nonexistent_adapter)
@@ -1728,10 +1790,14 @@ async fn adapter_validation_happens_before_main_worker_loop() {
         "error should mention the nonexistent adapter"
     );
 
-    // Verify failure was fast (< 2 seconds), not delayed by idle timeout
+    // Verify failure was fast, i.e. it did not wait out the 10s idle timeout configured
+    // above. The bound is 5s rather than 2s because worker boot alone measures ~1.8s in
+    // isolation on this hardware -- a 2s bound left ~13% headroom and failed whenever the
+    // suite ran in parallel. 5s still fails decisively if validation slips past the idle
+    // timeout, which is the property under test. See needle-ab52a15a.
     assert!(
-        elapsed < std::time::Duration::from_secs(2),
-        "adapter validation should fail immediately, not after idle timeout; took {:?}",
+        elapsed < std::time::Duration::from_secs(5),
+        "adapter validation should fail before the idle timeout; took {:?}",
         elapsed
     );
 
@@ -1794,6 +1860,13 @@ async fn subprocess_nonexistent_adapter_produces_actionable_error_message() {
 
     // Spawn the needle binary with the nonexistent adapter
     let output = std::process::Command::new(&bin_path)
+        // NEEDLE_INNER=1 runs the worker loop in THIS process.
+        // Without it, `needle run` detaches into a tmux session and the parent exits 0
+        // immediately -- so adapter preflight happens in the detached worker and this
+        // process reports success no matter what. That is why these assertions saw
+        // "it succeeded" with empty stderr. The systemd unit sets the same variable.
+        // See needle-ab52a15a.
+        .env("NEEDLE_INNER", "1")
         .arg("run")
         .arg("--agent")
         .arg(nonexistent_adapter)
@@ -2008,14 +2081,23 @@ async fn adapter_validation_rejects_special_characters() {
         );
 
         let error_msg = result.unwrap_err().to_string();
-        // Error should be safe and not execute the injected payload
+
+        // Echoing the rejected adapter name back is correct and useful -- it is how the
+        // operator learns which name failed. What must never appear is evidence the
+        // payload was EXECUTED. Checking the raw message for "etc/passwd" or "whoami"
+        // conflated the two and failed on names that literally contain those strings
+        // (e.g. '../../../etc/passwd'), so strip the name before looking for
+        // execution artifacts. See needle-ab52a15a.
+        let sanitized = error_msg.replace(nonexistent_adapter, "<rejected-adapter-name>");
         assert!(
-            !error_msg.contains("etc/passwd")
-                && !error_msg.contains("root:")
-                && !error_msg.contains("whoami")
-                && !error_msg.contains("rm -rf"),
-            "error message should not execute injected payloads for adapter: '{}'",
-            nonexistent_adapter
+            !sanitized.contains("etc/passwd")
+                && !sanitized.contains("root:")
+                && !sanitized.contains("whoami")
+                && !sanitized.contains("rm -rf"),
+            "error message must not contain evidence of executing the injected payload \
+             for adapter '{}'; got: {}",
+            nonexistent_adapter,
+            error_msg
         );
     }
 }
@@ -2627,6 +2709,17 @@ async fn cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead() {
         String::from_utf8_lossy(&init_output.stderr)
     );
 
+    // Bind the workspace to a backend. open_configured() refuses a workspace whose
+    // resolved backend is Auto ("no authoritative bead backend binding; set
+    // bead_cli.backend"), and Explore opens remote workspaces through it -- so
+    // without this file Explore cannot read this workspace at all and silently
+    // skips it, reporting NoWork. See needle-ab52a15a.
+    fs::write(
+        remote_workspace.join(".needle.yaml"),
+        "bead_cli:\n  backend: bead-rs\n",
+    )
+    .expect("write .needle.yaml backend binding");
+
     // Create a zombie bead in the remote workspace using bead CLI.
     // First, create the bead as open.
     let output = std::process::Command::new("bead")
@@ -2777,6 +2870,17 @@ async fn cross_workspace_mend_skips_beads_with_live_assignees() {
         String::from_utf8_lossy(&init_output.stderr)
     );
 
+    // Bind the workspace to a backend. open_configured() refuses a workspace whose
+    // resolved backend is Auto ("no authoritative bead backend binding; set
+    // bead_cli.backend"), and Explore opens remote workspaces through it -- so
+    // without this file Explore cannot read this workspace at all and silently
+    // skips it, reporting NoWork. See needle-ab52a15a.
+    fs::write(
+        remote_workspace.join(".needle.yaml"),
+        "bead_cli:\n  backend: bead-rs\n",
+    )
+    .expect("write .needle.yaml backend binding");
+
     // Create a bead in the remote workspace.
     let output = std::process::Command::new("bead")
         .arg("create")
@@ -2899,6 +3003,30 @@ async fn cross_workspace_mend_skips_own_worker_beads() {
     let remote_workspace = remote_dir.path().to_path_buf();
     let remote_beads_dir = remote_workspace.join(".beads");
     fs::create_dir_all(&remote_beads_dir).unwrap();
+
+    // Initialize the bead workspace. An empty .beads/ directory is not a workspace:
+    // bead-rs needs `init` to create the schema, so `create` below failed without it.
+    let init_output = std::process::Command::new("bead")
+        .arg("init")
+        .current_dir(&remote_workspace)
+        .output()
+        .expect("bead init command failed to execute");
+    assert!(
+        init_output.status.success(),
+        "bead init failed: {}",
+        String::from_utf8_lossy(&init_output.stderr)
+    );
+
+    // Bind the workspace to a backend. open_configured() refuses a workspace whose
+    // resolved backend is Auto ("no authoritative bead backend binding; set
+    // bead_cli.backend"), and Explore opens remote workspaces through it -- so
+    // without this file Explore cannot read this workspace at all and silently
+    // skips it, reporting NoWork. See needle-ab52a15a.
+    fs::write(
+        remote_workspace.join(".needle.yaml"),
+        "bead_cli:\n  backend: bead-rs\n",
+    )
+    .expect("write .needle.yaml backend binding");
 
     // Create a bead in the remote workspace.
     let output = std::process::Command::new("bead")
@@ -3054,7 +3182,11 @@ async fn mend_removes_stale_dependency_links() {
 
     // Add dependency: blocked depends on blocker.
     let dep_output = std::process::Command::new("bead")
-        .args(["dep", "add", &blocker_id, "--blocks", &blocked_id])
+        // bead-rs is blocked-first with an explicit --kind:
+        //   bead dep add <BLOCKED> <BLOCKER> --kind blocks
+        // The old bf-era form (`dep add <blocker> --blocks <blocked>`) both reversed
+        // the operands and used a flag bead-rs does not accept. See needle-ab52a15a.
+        .args(["dep", "add", &blocked_id, &blocker_id, "--kind", "blocks"])
         .current_dir(workspace)
         .output()
         .expect("bead dep add failed");
@@ -3102,7 +3234,10 @@ async fn mend_removes_stale_dependency_links() {
         !blocked_bead_after.dependencies.is_empty(),
         "dependency should still exist after blocker is closed (stale link)"
     );
-    assert_eq!(blocked_bead_after.dependencies[0].status, "closed");
+    // Deliberately not asserting dependencies[0].status here: bead-rs does not carry
+    // a per-dependency status in its JSON (bf did), so it is the serde default "" on
+    // the canonical backend. What matters is that Mend removes the edge once the
+    // blocker is closed, which is asserted below. See needle-ab52a15a.
 
     // Run Mend to clean up the stale dependency.
     let hb_dir = tempfile::tempdir().unwrap();
@@ -3300,8 +3435,29 @@ async fn dead_worker_cleanup_integration() {
     let workspace = temp_dir.path().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
 
-    let reg_dir = temp_dir.path().join("registry");
+    // The registry lives at <workspace.home>/state (i.e. $HOME/.needle/state); there is
+    // no --registry flag any more, so place it where the spawned worker will look given
+    // the isolated HOME set below. See needle-ab52a15a.
+    let reg_dir = temp_dir.path().join(".needle").join("state");
     std::fs::create_dir_all(&reg_dir).unwrap();
+
+    // Bind the workspace to a backend and make the worker exit once it drains, which is
+    // what the removed `worker --once` used to provide.
+    std::fs::write(
+        workspace.join(".needle.yaml"),
+        "bead_cli:\n  backend: bead-rs\n",
+    )
+    .unwrap();
+    let cfg_dir = temp_dir.path().join(".config").join("needle");
+    std::fs::create_dir_all(&cfg_dir).unwrap();
+    std::fs::write(
+        cfg_dir.join("config.yaml"),
+        // routing: ~ is required. The default rules rewrite any sonnet/opus/fable/haiku
+        // model to the operator-provided `claude-print` adapter, whose YAML does not
+        // exist under an isolated HOME, so preflight aborts before the worker can run.
+        "worker:\n  idle_action: exit\n  allow_exit_without_supervisor: true\nagent:\n  routing: ~\n",
+    )
+    .unwrap();
 
     let registry = needle::registry::Registry::new(&reg_dir);
 
@@ -3350,14 +3506,25 @@ async fn dead_worker_cleanup_integration() {
     // contaminating the test environment (see ADR-006 and the 2026-07-20 contamination incident).
     let bin_path = std::env::var("CARGO_BIN_EXE_needle").unwrap_or_else(|_| "needle".to_string());
     let mut cmd = Command::new(&bin_path);
-    cmd.arg("worker")
-        .arg("--once")
-        .arg("--adapter=claude")
-        .arg("--model=test")
+    // NEEDLE_INNER=1 runs the worker loop in THIS process. Without it, `needle run`
+    // detaches into a tmux session and the parent exits 0 immediately, so the spawned
+    // process reports success regardless of what the worker does. The systemd unit
+    // sets the same variable. See needle-ab52a15a.
+    cmd.env("NEEDLE_INNER", "1");
+    // `needle worker --once --adapter=... --model=... --registry=...` no longer exists:
+    // the CLI exposes `run`, and the removed flags took the whole invocation down with a
+    // clap usage error (exit 2), which surfaced only as "worker failed with exit status
+    // 512". `claude` is also an operator-provided adapter absent under an isolated HOME,
+    // so use a built-in. See needle-ab52a15a.
+    cmd.arg("run")
+        .arg("--agent")
+        .arg("claude-sonnet")
+        .arg("--count")
+        .arg("1")
+        .arg("--identifier")
+        .arg("cleanup-probe")
         .arg("--workspace")
         .arg(&workspace)
-        .arg("--registry")
-        .arg(&reg_dir)
         .env("HOME", temp_dir.path()) // Isolate Explore's workspace_root to test tempdir
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -3438,6 +3605,8 @@ async fn debug_worker_hang() {
     let _home_dir = tempfile::tempdir().unwrap();
     let mut config = Config::default();
     config.worker.idle_action = IdleAction::Exit;
+    // Opt in to Exit: boot() downgrades it to Wait without a supervisor. See needle-ab52a15a.
+    config.worker.allow_exit_without_supervisor = true;
     config.agent.default = "echo-test".to_string();
     config.agent.routing = None;
     config.workspace.home = _home_dir.path().to_path_buf();
@@ -3991,6 +4160,15 @@ async fn worker_binary_path_supervisor_initialization() {
         .output()
         .expect("bead init failed");
     assert!(init_output.status.success(), "bead init failed");
+
+    // Bind the workspace to a backend: open_configured() refuses a workspace whose
+    // resolved backend is Auto, which is why supervisor construction failed with
+    // "failed to initialize bead store for supervisor". See needle-ab52a15a.
+    fs::write(
+        workspace.join(".needle.yaml"),
+        "bead_cli:\n  backend: bead-rs\n",
+    )
+    .expect("write .needle.yaml backend binding");
 
     // Configure supervisor with a custom binary path
     let custom_binary = PathBuf::from("/custom/path/to/needle");
@@ -7443,6 +7621,11 @@ async fn subprocess_adapter_failure_exits_nonzero() {
     // Spawn the needle binary with our test config
     let bin_path = std::env::var("CARGO_BIN_EXE_needle").unwrap_or_else(|_| "needle".to_string());
     let mut cmd = Command::new(&bin_path);
+    // NEEDLE_INNER=1 runs the worker loop in THIS process. Without it, `needle run`
+    // detaches into a tmux session and the parent exits 0 immediately, so the spawned
+    // process reports success regardless of what the worker does. The systemd unit
+    // sets the same variable. See needle-ab52a15a.
+    cmd.env("NEEDLE_INNER", "1");
     cmd.arg("run")
         .arg("--agent")
         .arg("nonexistent-test-adapter-xyz-999")
@@ -7639,8 +7822,20 @@ async fn idle_action_exit_without_supervisor_emits_warning() {
     let telemetry = Telemetry::new("test-worker-idle-warning".to_string());
     worker.set_dispatcher(Dispatcher::with_adapters(adapters, telemetry.clone(), 10));
 
-    // Run the worker - it should emit the warning during initialization
-    // The worker should continue running and complete successfully despite the warning
+    // Request shutdown before running. boot() still runs inside run() -- so the
+    // idle_action_validation step still emits the warning and still downgrades
+    // Exit -> Wait -- but the loop then observes the shutdown flag and stops.
+    //
+    // Without this, run() could never return: the downgrade to Wait (the very
+    // behaviour this test exists to pin) means run() loops in the 60-120s idle
+    // backoff forever, so `assert_eq!(run().await, Stopped)` was self-contradictory
+    // and could only hang. See needle-ab52a15a.
+    //
+    // This test must NOT set allow_exit_without_supervisor: opting in would suppress
+    // the very warning under test.
+    worker.request_shutdown();
+
+    // Run the worker - it emits the warning during initialization and then stops.
     let result = worker.run().await.unwrap();
     assert_eq!(
         result,

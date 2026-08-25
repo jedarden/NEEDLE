@@ -178,6 +178,12 @@ impl Claimer {
 
         let mut attempts = 0u32;
 
+        // Tracks whether any candidate produced a ClaimError. The trailing
+        // "all_race_lost" span record below must not overwrite a real error reason:
+        // last-write-wins on the span attribute would otherwise report a lost race
+        // for what was actually a store error, discarding the reason entirely.
+        let mut had_claim_error = false;
+
         for candidate in &eligible {
             if attempts >= self.max_retries {
                 tracing::Span::current().record("needle.claim.result", "max_retries_exceeded");
@@ -317,6 +323,7 @@ impl Claimer {
                     continue;
                 }
                 Ok(ClaimResult::ClaimError { reason }) => {
+                    had_claim_error = true;
                     tracing::Span::current().record("needle.claim.result", &reason);
                     self.telemetry.emit(EventKind::ClaimFailed {
                         bead_id: bead_id.clone(),
@@ -403,8 +410,12 @@ impl Claimer {
             }
         }
 
-        // Exhausted all eligible candidates without success
-        tracing::Span::current().record("needle.claim.result", "all_race_lost");
+        // Exhausted all eligible candidates without success.
+        // Only claim the span's result attribute if no candidate reported an error --
+        // an error reason recorded above is the more specific and more useful result.
+        if !had_claim_error {
+            tracing::Span::current().record("needle.claim.result", "all_race_lost");
+        }
         // Set Error status on the bead.claim span
         tracing::Span::current().record("otel.status_code", 2u64);
         tracing::Span::current().record("otel.status_description", "all_race_lost");
@@ -1686,7 +1697,13 @@ mod tests {
         let bead = make_bead("needle-tel-ok", "/tmp/ws");
         let store = Arc::new(MockBeadStore::new(vec![bead.clone()]));
         let (sink, events) = MemorySink::new();
-        let telemetry = Telemetry::with_sink("test-worker".to_string(), sink);
+        // Telemetry::with_sink() calls tokio::spawn() for its writer task, which
+        // panics with "there is no reactor running" outside a runtime context.
+        // The runtime here is only entered later via block_on, so enter it now.
+        let telemetry = {
+            let _guard = runtime.enter();
+            Telemetry::with_sink("test-worker".to_string(), sink)
+        };
         let claimer = Claimer::new(store, std::env::temp_dir(), 5, 10, telemetry.clone());
 
         let outcome = tracing::subscriber::with_default(subscriber, || {
@@ -1706,7 +1723,11 @@ mod tests {
 
         drop(claimer);
         drop(telemetry);
-        std::thread::sleep(Duration::from_millis(50));
+        // The telemetry writer is a tokio::spawn'd task, so it only makes progress
+        // while the runtime is being driven. block_on has already returned here, so
+        // a std::thread::sleep would let the process idle without ever draining the
+        // sink -- the events would never arrive and the assertions below would fail.
+        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(50)).await });
 
         let captured = captured_events(&events);
         let attempt = captured
@@ -1757,7 +1778,13 @@ mod tests {
             ]),
         );
         let (sink, events) = MemorySink::new();
-        let telemetry = Telemetry::with_sink("test-worker".to_string(), sink);
+        // Telemetry::with_sink() calls tokio::spawn() for its writer task, which
+        // panics with "there is no reactor running" outside a runtime context.
+        // The runtime here is only entered later via block_on, so enter it now.
+        let telemetry = {
+            let _guard = runtime.enter();
+            Telemetry::with_sink("test-worker".to_string(), sink)
+        };
         let claimer = Claimer::new(store, std::env::temp_dir(), 5, 10, telemetry.clone());
 
         let outcome = tracing::subscriber::with_default(subscriber, || {
@@ -1774,7 +1801,11 @@ mod tests {
 
         drop(claimer);
         drop(telemetry);
-        std::thread::sleep(Duration::from_millis(50));
+        // The telemetry writer is a tokio::spawn'd task, so it only makes progress
+        // while the runtime is being driven. block_on has already returned here, so
+        // a std::thread::sleep would let the process idle without ever draining the
+        // sink -- the events would never arrive and the assertions below would fail.
+        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(50)).await });
 
         let captured = captured_events(&events);
         let race_lost = captured
@@ -1827,7 +1858,13 @@ mod tests {
             ]),
         );
         let (sink, events) = MemorySink::new();
-        let telemetry = Telemetry::with_sink("test-worker".to_string(), sink);
+        // Telemetry::with_sink() calls tokio::spawn() for its writer task, which
+        // panics with "there is no reactor running" outside a runtime context.
+        // The runtime here is only entered later via block_on, so enter it now.
+        let telemetry = {
+            let _guard = runtime.enter();
+            Telemetry::with_sink("test-worker".to_string(), sink)
+        };
         let claimer = Claimer::new(store, std::env::temp_dir(), 5, 10, telemetry.clone());
 
         let mut last_outcome = None;
@@ -1860,7 +1897,11 @@ mod tests {
 
         drop(claimer);
         drop(telemetry);
-        std::thread::sleep(Duration::from_millis(50));
+        // The telemetry writer is a tokio::spawn'd task, so it only makes progress
+        // while the runtime is being driven. block_on has already returned here, so
+        // a std::thread::sleep would let the process idle without ever draining the
+        // sink -- the events would never arrive and the assertions below would fail.
+        runtime.block_on(async { tokio::time::sleep(Duration::from_millis(50)).await });
 
         let captured = captured_events(&events);
         assert_eq!(
