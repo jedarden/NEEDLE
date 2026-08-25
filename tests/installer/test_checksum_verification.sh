@@ -6,6 +6,15 @@
 
 set -euo pipefail
 
+# Resolve the repo root from this script's own location. These paths were
+# hardcoded to /home/coding/NEEDLE, which exists only on one developer machine:
+# the tests passed there and failed everywhere else, including CI, with
+# "bash: /home/coding/NEEDLE/install.sh: No such file or directory".
+# test_e2e_install.sh already derives it this way. See needle-ab52a15a.
+INSTALLER_TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_INSTALL_SH="$INSTALLER_TEST_DIR/../../install.sh"
+
+
 # Test framework helpers
 TEST_COUNT=0
 PASS_COUNT=0
@@ -249,7 +258,7 @@ test_help_documents_security_tradeoff() {
     setup
 
     # Run install.sh with --help
-    local install_script="/home/coding/NEEDLE/install.sh"
+    local install_script="$REPO_INSTALL_SH"
     local help_output
     help_output=$(bash "$install_script" --help 2>&1 || true)
 
@@ -426,7 +435,7 @@ test_version_discovery_no_curl_pipe() {
 
     setup
 
-    local install_script="/home/coding/NEEDLE/install.sh"
+    local install_script="$REPO_INSTALL_SH"
     if grep -qE 'curl [^|]*\|[[:space:]]*(grep|head)' "$install_script"; then
         echo "  ✗ version discovery pipes curl into an early-exiting reader (broken-pipe risk)"
         ((FAIL_COUNT++)) || true

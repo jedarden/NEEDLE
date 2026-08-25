@@ -1316,8 +1316,25 @@ mod tests {
         let long_prompt = "x".repeat(100000);
         let result = resolver.invoke_resolve_agent(&long_prompt).await;
 
-        // Should timeout
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("timed out"));
+        let err_msg = result.unwrap_err().to_string();
+
+        // invoke_resolve_agent() spawns the `claude` CLI. Where that binary exists the
+        // 100ms budget is what fails, and asserting on "timed out" is meaningful. CI
+        // images do not ship it, so the call fails at spawn() instead and never reaches
+        // the timeout -- this test asserted the timeout unconditionally and so passed
+        // only on machines that happen to have `claude` installed. Assert whichever
+        // failure the environment can actually produce. See needle-ab52a15a.
+        if which::which("claude").is_ok() {
+            assert!(
+                err_msg.contains("timed out"),
+                "with the claude CLI present the 100ms budget should be what fails; got: {err_msg}"
+            );
+        } else {
+            assert!(
+                err_msg.contains("failed to spawn resolve agent"),
+                "without the claude CLI the call should fail at spawn; got: {err_msg}"
+            );
+        }
     }
 }

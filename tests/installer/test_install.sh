@@ -6,6 +6,15 @@
 
 set -euo pipefail
 
+# Resolve the repo root from this script's own location. These paths were
+# hardcoded to /home/coding/NEEDLE, which exists only on one developer machine:
+# the tests passed there and failed everywhere else, including CI, with
+# "bash: /home/coding/NEEDLE/install.sh: No such file or directory".
+# test_e2e_install.sh already derives it this way. See needle-ab52a15a.
+INSTALLER_TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_INSTALL_SH="$INSTALLER_TEST_DIR/../../install.sh"
+
+
 # Test framework helpers
 TEST_COUNT=0
 PASS_COUNT=0
@@ -298,7 +307,7 @@ test_help_documents_security_tradeoff() {
     setup
 
     # Run install.sh with --help
-    local install_script="/home/coding/NEEDLE/install.sh"
+    local install_script="$REPO_INSTALL_SH"
     local help_output
     help_output=$(bash "$install_script" --help 2>&1 || true)
 
@@ -431,7 +440,7 @@ test_uses_temp_directory() {
 
     setup
 
-    local install_script="/home/coding/NEEDLE/install.sh"
+    local install_script="$REPO_INSTALL_SH"
     # Check that install.sh uses mktemp for temp directory
     if grep -q "temp_dir=\$(mktemp -d)" "$install_script"; then
         echo "  ✓ install.sh uses mktemp -d for temp directory"
@@ -451,7 +460,7 @@ test_cleanup_trap_set() {
 
     setup
 
-    local install_script="/home/coding/NEEDLE/install.sh"
+    local install_script="$REPO_INSTALL_SH"
     # Check that install.sh sets EXIT trap
     if grep -q 'trap.*rm -rf.*temp_dir.*EXIT' "$install_script"; then
         echo "  ✓ install.sh sets EXIT trap for cleanup"
@@ -471,7 +480,7 @@ test_binary_verification() {
 
     setup
 
-    local install_script="/home/coding/NEEDLE/install.sh"
+    local install_script="$REPO_INSTALL_SH"
     # Check that install.sh verifies the binary works
     if grep -q '--version' "$install_script"; then
         echo "  ✓ install.sh verifies binary with --version"
@@ -491,7 +500,7 @@ test_install_path_configurable() {
 
     setup
 
-    local install_script="/home/coding/NEEDLE/install.sh"
+    local install_script="$REPO_INSTALL_SH"
     # Check that install.sh respects NEEDLE_INSTALL_PATH
     if grep -q 'NEEDLE_INSTALL_PATH' "$install_script"; then
         echo "  ✓ install.sh supports NEEDLE_INSTALL_PATH"

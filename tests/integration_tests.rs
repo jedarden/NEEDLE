@@ -268,6 +268,24 @@ impl ProcessGuard {
         }
     }
 
+    /// Kill the child and return whatever it wrote to stdout/stderr.
+    ///
+    /// For diagnosing a timed-out child: panicking without its output leaves a CI
+    /// failure that says only "possible hang or deadlock".
+    fn kill_and_collect_output(&mut self) -> (String, String) {
+        let _ = self.kill();
+        match self.inner.take() {
+            Some(child) => match child.wait_with_output() {
+                Ok(out) => (
+                    String::from_utf8_lossy(&out.stdout).to_string(),
+                    String::from_utf8_lossy(&out.stderr).to_string(),
+                ),
+                Err(e) => (String::new(), format!("<failed to collect output: {e}>")),
+            },
+            None => (String::new(), "<no child process>".to_string()),
+        }
+    }
+
     /// Send a kill signal to the child process.
     fn kill(&mut self) -> std::io::Result<()> {
         if let Some(ref mut child) = self.inner {
@@ -3526,6 +3544,11 @@ async fn dead_worker_cleanup_integration() {
         .arg("--workspace")
         .arg(&workspace)
         .env("HOME", temp_dir.path()) // Isolate Explore's workspace_root to test tempdir
+        // Pin XDG_CONFIG_HOME too. Config resolution prefers it over $HOME/.config, so
+        // an ambient XDG_CONFIG_HOME (CI images set one) would send the worker looking
+        // elsewhere, it would miss the idle_action=exit written above, default to Wait,
+        // and loop on the 60-120s idle backoff until this test's timeout.
+        .env("XDG_CONFIG_HOME", temp_dir.path().join(".config"))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -3542,9 +3565,12 @@ async fn dead_worker_cleanup_integration() {
 
     let exit_status = loop {
         if start_time.elapsed() > timeout_duration {
+            // Surface the child's own output. Panicking bare here made a CI failure
+            // unactionable: "possible hang or deadlock" with nothing about why.
+            let output = guard.kill_and_collect_output();
             panic!(
-                "Worker did not complete within {:?} - possible hang or deadlock",
-                timeout_duration
+                "Worker did not complete within {:?} - possible hang or deadlock\n                 --- worker stdout ---\n{}\n--- worker stderr ---\n{}",
+                timeout_duration, output.0, output.1
             );
         }
 
