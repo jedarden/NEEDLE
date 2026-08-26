@@ -1,398 +1,573 @@
-#!/usr/bin/bash
-# Integration test: end-to-end claude-print routing validation
+#!/usr/bin/env bash
+# Live, host-specific end-to-end test for model-based adapter routing.
 #
-# This test validates model-based adapter routing (bf-2xi) on this host:
-# 1. Dispatch a trivial bead requesting an Anthropic subscription model (sonnet) — verify claude-print is invoked
-# 2. Dispatch a trivial bead with model glm-4.7 — verify routing through claude-code-glm-4.7 (negative control)
-# 3. Verify routing-decision telemetry events are emitted for both
-# 4. Temporarily rename claude-print binary, dispatch sonnet bead — verify loud failure (no silent fallback)
-# 5. Restore binary
+# This is intentionally not part of automated test suites. It consumes real
+# agent capacity and briefly renames the host's claude-print executable for the
+# negative scenario. Run it only on the NEEDLE host with the explicit opt-in:
 #
-# Usage: ./test_claude_print_routing.sh
-# Expected: All four scenarios pass with clear validation output
+#   NEEDLE_ROUTING_E2E_ACK=I_UNDERSTAND \
+#     tests/integration/test_claude_print_routing.sh
 
 set -euo pipefail
 
-# Color output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+readonly REQUIRED_ACK="I_UNDERSTAND"
+readonly ORIGINAL_PATH="$PATH"
+readonly HOST_HOME="${NEEDLE_ROUTING_HOST_HOME:-$HOME}"
+readonly HOST_XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOST_HOME/.config}"
+readonly NEEDLE_BIN="${NEEDLE_BIN:-$HOST_HOME/.needle/bin/needle-stable}"
+readonly ADAPTERS_DIR="${NEEDLE_ADAPTERS_DIR:-$HOST_HOME/.config/needle/adapters}"
+readonly SCRATCH_ROOT="${NEEDLE_ROUTING_TMPDIR:-$HOST_HOME/scratch}"
+readonly SELECTED_SCENARIOS="${NEEDLE_ROUTING_E2E_SCENARIOS:-all}"
 
-# Test workspace
-TEST_WORKSPACE="/tmp/needle-claude-print-test-$$"
-CLAUDE_PRINT_BIN="/home/coding/.local/bin/claude-print"
-CLAUDE_PRINT_BACKUP="${CLAUDE_PRINT_BIN}.test-backup"
-NEEDLE_BIN="/home/coding/NEEDLE/target/release/needle"
+TEST_ROOT=""
+TEST_HOME=""
+LOG_DIR=""
+WRAPPER_DIR=""
+CLAUDE_PRINT_BIN=""
+CLAUDE_PRINT_BACKUP=""
+WORKER_PID=""
 
-# Setup and teardown
-setup_test_workspace() {
-    echo -e "${YELLOW}Setting up test workspace...${NC}"
+log() {
+    printf '[routing-e2e] %s\n' "$*"
+}
 
-    # Create test workspace
-    mkdir -p "$TEST_WORKSPACE"
-    cd "$TEST_WORKSPACE"
+pass() {
+    printf '[routing-e2e] PASS: %s\n' "$*"
+}
 
-    # Initialize git repo (required for bead workspace)
-    git init -q
-    git config user.email "test@example.com"
-    git config user.name "Test User"
+die() {
+    printf '[routing-e2e] FAIL: %s\n' "$*" >&2
+    exit 1
+}
 
-    # Initialize bead workspace (bead-rs)
-    bead init >/dev/null 2>&1 || true
-
-    # Create .needle.yaml with routing configuration
-    cat > .needle.yaml << 'EOF'
-# Test configuration for claude-print routing validation
-bead_cli:
-  backend: bead-rs
-
-agent:
-  routing:
-    rules:
-      - match_model: "(claude-)?(sonnet|opus|fable|haiku).*"
-        adapter: claude-print-sonnet
-      - match_model: "glm-4\.7.*"
-        adapter: claude-code-glm-4.7
-    default_adapter: claude-code-glm-4.7
-    strict: false
-
-worker:
-  idle_action: exit
-EOF
-
-    echo -e "${GREEN}✓ Test workspace created at $TEST_WORKSPACE${NC}"
+restore_claude_print() {
+    if [[ -n "$CLAUDE_PRINT_BACKUP" && -e "$CLAUDE_PRINT_BACKUP" ]]; then
+        if [[ -e "$CLAUDE_PRINT_BIN" ]]; then
+            printf '[routing-e2e] refusing to overwrite restored claude-print at %s\n' \
+                "$CLAUDE_PRINT_BIN" >&2
+            return 1
+        fi
+        mv -- "$CLAUDE_PRINT_BACKUP" "$CLAUDE_PRINT_BIN"
+        CLAUDE_PRINT_BACKUP=""
+        log "restored $CLAUDE_PRINT_BIN"
+    fi
 }
 
 cleanup() {
     local exit_code=$?
 
-    echo -e "${YELLOW}Cleaning up...${NC}"
+    if [[ -n "$WORKER_PID" ]] && kill -0 "$WORKER_PID" 2>/dev/null; then
+        kill -TERM -- "-$WORKER_PID" 2>/dev/null || true
+    fi
+    restore_claude_print || exit_code=1
 
-    # Restore claude-print binary if it was backed up
-    if [[ -f "$CLAUDE_PRINT_BACKUP" ]]; then
-        mv "$CLAUDE_PRINT_BACKUP" "$CLAUDE_PRINT_BIN"
-        echo -e "${GREEN}✓ Restored claude-print binary${NC}"
+    if [[ $exit_code -eq 0 && -n "$TEST_ROOT" && \
+          "$TEST_ROOT" == "$SCRATCH_ROOT"/needle-routing-e2e.* ]]; then
+        rm -rf -- "$TEST_ROOT"
+    elif [[ -n "$TEST_ROOT" ]]; then
+        printf '[routing-e2e] retained failure artifacts at %s\n' "$TEST_ROOT" >&2
     fi
 
-    # Clean up test workspace
-    if [[ -d "$TEST_WORKSPACE" ]]; then
-        rm -rf "$TEST_WORKSPACE"
-        echo -e "${GREEN}✓ Cleaned up test workspace${NC}"
-    fi
-
-    exit $exit_code
+    exit "$exit_code"
 }
-
 trap cleanup EXIT INT TERM
 
-# Test helper functions
-create_test_bead() {
-    local title="$1"
-    local body="$2"
-    local model_hint="$3"  # Optional: hint about which model to use
-
-    # Create bead with model hint in body for routing
-    local full_body="$body"
-    if [[ -n "$model_hint" ]]; then
-        full_body="Model requirement: $model_hint\n\n$body"
-    fi
-
-    bead create --title "$title" --priority 1 --issue-type task --body "$full_body" 2>/dev/null || true
+require_command() {
+    command -v "$1" >/dev/null 2>&1 || die "required command not found: $1"
 }
 
-run_worker_on_bead() {
-    local bead_id="$1"
-    local timeout_sec="${2:-30}"
-
-    echo "Running worker on bead: $bead_id"
-
-    # Run needle worker with --once to process single bead
-    timeout "$timeout_sec" "$NEEDLE_BIN" worker --once --worker "test-worker-$$" >/dev/null 2>&1 || true
-
-    # Give it a moment to finish
-    sleep 2
+scenario_enabled() {
+    local scenario=$1
+    [[ ",$SELECTED_SCENARIOS," == *,all,* || ",$SELECTED_SCENARIOS," == *,"$scenario",* ]]
 }
 
-get_routing_telemetry() {
-    local bead_id="$1"
+validate_scenarios() {
+    local scenarios=()
+    local scenario
 
-    # Check for routing decision events in bead store or trace files
-    if [[ -d ".beads/traces/$bead_id" ]]; then
-        # Check events.jsonl first
-        local events_file=".beads/events.jsonl"
-        if [[ -f "$events_file" ]]; then
-            grep "\"event_type\":\"routing_decision\"" "$events_file" 2>/dev/null || echo ""
-        fi
-
-        # Also check trace metadata
-        local metadata_file=".beads/traces/$bead_id/metadata.json"
-        if [[ -f "$metadata_file" ]]; then
-            # Extract adapter/agent information from metadata
-            grep -oP '"agent":\s*"\K[^"]+' "$metadata_file" 2>/dev/null || echo ""
-        fi
-    fi
+    IFS=',' read -r -a scenarios <<<"$SELECTED_SCENARIOS"
+    ((${#scenarios[@]} > 0)) || die "no routing scenarios selected"
+    for scenario in "${scenarios[@]}"; do
+        case "$scenario" in
+            all | sonnet | glm47 | missing) ;;
+            *) die "unknown routing scenario: $scenario" ;;
+        esac
+    done
 }
 
-verify_adapter_invoked() {
-    local bead_id="$1"
-    local expected_adapter="$2"
+write_claude_print_probe() {
+    # The probe records only non-sensitive routing evidence, never the whole
+    # command line or environment. It then execs the real host binary.
+    cat >"$WRAPPER_DIR/claude-print" <<'PROBE'
+#!/usr/bin/env bash
+set -euo pipefail
 
-    # Check trace metadata for adapter invocation
-    local metadata_file=".beads/traces/$bead_id/metadata.json"
-    if [[ -f "$metadata_file" ]]; then
-        local invoked_adapter=$(grep -oP '"agent":\s*"\K[^"]+' "$metadata_file" 2>/dev/null || echo "")
-        if [[ -n "$invoked_adapter" ]]; then
-            if [[ "$invoked_adapter" == *"$expected_adapter"* ]]; then
-                echo -e "${GREEN}✓ Adapter invoked: $invoked_adapter (expected: $expected_adapter)${NC}"
-                return 0
-            else
-                echo -e "${RED}✗ Wrong adapter invoked: $invoked_adapter (expected: $expected_adapter)${NC}"
-                return 1
-            fi
-        fi
-    fi
+original_args=("$@")
+model=""
+output_format=""
+while (($#)); do
+    case "$1" in
+        --model|-m)
+            model="${2:-}"
+            shift 2
+            ;;
+        --model=*)
+            model="${1#*=}"
+            shift
+            ;;
+        --output-format|-o)
+            output_format="${2:-}"
+            shift 2
+            ;;
+        --output-format=*)
+            output_format="${1#*=}"
+            shift
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
 
-    # Check stdout trace for adapter invocation evidence
-    local stdout_file=".beads/traces/$bead_id/stdout.txt"
-    if [[ -f "$stdout_file" ]]; then
-        if [[ "$expected_adapter" == *"claude-print"* ]]; then
-            if grep -q "claude-print" "$stdout_file" 2>/dev/null; then
-                echo -e "${GREEN}✓ claude-print evidence found in stdout${NC}"
-                return 0
-            fi
-        elif [[ "$expected_adapter" == *"glm-4.7"* ]]; then
-            if grep -q "glm-4.7" "$stdout_file" 2>/dev/null; then
-                echo -e "${GREEN}✓ glm-4.7 evidence found in stdout${NC}"
-                return 0
-            fi
-        fi
-    fi
-
-    echo -e "${YELLOW}⚠ Could not verify adapter invocation (trace files may not be generated yet)${NC}"
-    return 0  # Don't fail - this is a limitation of the test environment
+printf 'claude-print\t%s\t%s\n' "$model" "$output_format" \
+    >>"$NEEDLE_E2E_INVOKE_LOG"
+exec "$NEEDLE_E2E_REAL_CLAUDE_PRINT" "${original_args[@]}"
+PROBE
+    chmod 0755 "$WRAPPER_DIR/claude-print"
 }
 
-verify_stream_json_output() {
-    local bead_id="$1"
+write_workspace_config() {
+    local workspace=$1
 
-    local stdout_file=".beads/traces/$bead_id/stdout.txt"
-    if [[ -f "$stdout_file" ]]; then
-        # Check for stream-json markers (JSONL format)
-        if grep -q '^\{' "$stdout_file" 2>/dev/null; then
-            echo -e "${GREEN}✓ Stream-json output format detected${NC}"
-            return 0
-        else
-            echo -e "${YELLOW}⚠ No stream-json format detected in output${NC}"
-            return 0  # Don't fail - output may vary
-        fi
-    fi
-
-    echo -e "${YELLOW}⚠ No stdout file to verify output format${NC}"
-    return 0
+    cat >"$workspace/.needle.yaml" <<EOF
+agent:
+  default: claude-sonnet
+  args: []
+  timeout: 600
+  adapters_dir: $ADAPTERS_DIR
+  routing:
+    rules:
+      - match_model: (claude-)?(sonnet|opus|fable|haiku).*
+        adapter: claude-print
+    default_adapter: claude-code-glm-4.7
+    strict: false
+bead_cli:
+  backend: bead-rs
+  path: $(command -v bead)
+worker:
+  max_workers: 1
+  launch_stagger_seconds: 0
+  idle_timeout: 1
+  idle_action: exit
+  allow_exit_without_supervisor: true
+  max_claim_retries: 1
+  enforce_shipped_work: false
+  freshness_check_interval_secs: 0
+workspace:
+  default: $workspace
+  home: $TEST_HOME/.needle
+  labels: []
+strands:
+  explore:
+    enabled: false
+    workspaces:
+      - $workspace
+    workspace_root: $workspace
+  mitosis:
+    enabled: false
+  weave:
+    enabled: false
+  unravel:
+    enabled: false
+  pulse:
+    enabled: false
+  reflect:
+    enabled: false
+  splice:
+    enabled: false
+telemetry:
+  file_sink:
+    enabled: true
+    log_dir: $LOG_DIR
+    retention_days: 1
+  stdout_sink:
+    enabled: false
+  otlp_sink:
+    enabled: false
+gates: []
+self_modification:
+  enabled: false
+EOF
+    # Several strand toggles and adapters_dir are process-level rather than
+    # workspace-overridable. Use the same isolated config as the global layer
+    # so failures cannot trigger Mitosis or discover unrelated workspaces.
+    cp "$workspace/.needle.yaml" "$TEST_HOME/.config/needle/config.yaml"
 }
 
-# Test scenarios
-test_scenario_1_anthropic_subscription_model() {
-    echo -e "\n${YELLOW}=== Scenario 1: Anthropic subscription model routes to claude-print ===${NC}"
+init_workspace() {
+    local scenario=$1
+    local workspace="$TEST_ROOT/$scenario"
+    local remote="$TEST_ROOT/remotes/$scenario.git"
 
-    setup_test_workspace
+    mkdir -p "$workspace" "$TEST_ROOT/remotes"
+    write_workspace_config "$workspace"
+    printf '# NEEDLE routing E2E fixture\n' >"$workspace/README.md"
+    printf '.beads/\n.needle-predispatch-sha\n' >"$workspace/.gitignore"
 
-    # Verify claude-print adapter is configured
-    if [[ -f "/home/coding/.needle/agents/claude-print-sonnet.yaml" ]]; then
-        echo -e "${GREEN}✓ claude-print adapter configuration exists${NC}"
-        if grep -q "runner: claude-print" "/home/coding/.needle/agents/claude-print-sonnet.yaml"; then
-            echo -e "${GREEN}✓ Adapter configured to use claude-print binary${NC}"
-        else
-            echo -e "${RED}✗ Adapter not configured for claude-print binary${NC}"
+    git init --bare --quiet "$remote"
+    git -C "$workspace" init --quiet --initial-branch=main
+    git -C "$workspace" config user.name needle-routing-e2e
+    git -C "$workspace" config user.email needle-routing-e2e@invalid
+    git -C "$workspace" add README.md .gitignore .needle.yaml
+    git -C "$workspace" commit --quiet -m "test fixture baseline"
+    git -C "$workspace" remote add origin "$remote"
+    git -C "$workspace" push --quiet --set-upstream origin main
+
+    (cd "$workspace" && bead init --prefix route >/dev/null)
+    printf '%s\n' "$workspace"
+}
+
+create_probe_bead() {
+    local workspace=$1
+    local scenario=$2
+    local model=$3
+
+    (cd "$workspace" && bead create \
+        --title "Routing E2E probe: $scenario" \
+        --priority 0 \
+        --issue-type test \
+        --description "Model request: $model. Create route-$scenario.txt containing exactly ROUTING_E2E_OK, stage only that file, and commit it. Do not change existing files or manage the bead lifecycle; NEEDLE owns the lifecycle.")
+}
+
+run_worker() {
+    local workspace=$1
+    local requested_adapter=$2
+    local identifier=$3
+    local bead_id=$4
+    local invoke_log=$5
+    local output_log=$6
+    local worker_name="$requested_adapter-$identifier"
+    local telemetry=""
+    local exit_code=0
+
+    (
+        cd "$workspace"
+        exec env \
+            HOME="$TEST_HOME" \
+            XDG_CONFIG_HOME="$TEST_HOME/.config" \
+            CLAUDE_CONFIG_DIR="$HOST_HOME/.claude" \
+            PATH="$WRAPPER_DIR:$ORIGINAL_PATH" \
+            NEEDLE_INNER=1 \
+            NEEDLE_E2E_INVOKE_LOG="$invoke_log" \
+            NEEDLE_E2E_REAL_CLAUDE_PRINT="$CLAUDE_PRINT_BIN" \
+            setsid timeout --signal=TERM --kill-after=10s 900s \
+            "$NEEDLE_BIN" run \
+                --workspace "$workspace" \
+                --agent "$requested_adapter" \
+                --identifier "$identifier" \
+                --hot-reload false
+    ) >"$output_log" 2>&1 &
+    WORKER_PID=$!
+
+    for _ in $(seq 1 3600); do
+        if ! kill -0 "$WORKER_PID" 2>/dev/null; then
+            wait "$WORKER_PID" || exit_code=$?
+            WORKER_PID=""
+            return "$exit_code"
+        fi
+
+        telemetry=$(telemetry_file "$worker_name")
+        if [[ -n "$telemetry" ]] && jq -e --arg bead "$bead_id" \
+            'select(.event_type == "agent.completed" and .bead_id == $bead and
+                    .data.exit_code != 0)' "$telemetry" >/dev/null; then
+            kill -TERM -- "-$WORKER_PID" 2>/dev/null || true
+            wait "$WORKER_PID" 2>/dev/null || true
+            WORKER_PID=""
             return 1
         fi
-    else
-        echo -e "${RED}✗ claude-print adapter configuration missing${NC}"
-        return 1
-    fi
+        sleep 0.25
+    done
 
-    # Verify claude-print binary exists and is executable
-    if [[ -x "$CLAUDE_PRINT_BIN" ]]; then
-        echo -e "${GREEN}✓ claude-print binary exists and is executable${NC}"
-        "$CLAUDE_PRINT_BIN" --version 2>/dev/null | head -1 || true
-    else
-        echo -e "${RED}✗ claude-print binary not found or not executable${NC}"
-        return 1
-    fi
-
-    # Create a trivial bead that will trigger sonnet routing
-    local bead_id=$(create_test_bead "test-sonnet-routing" "Say hello and exit" "claude-sonnet-4-6")
-    echo "Created bead: $bead_id"
-
-    # Check if we can run the worker (only if needle binary exists)
-    if [[ -x "$NEEDLE_BIN" ]]; then
-        run_worker_on_bead "$bead_id" 30
-
-        # Verify routing telemetry
-        local routing_telemetry=$(get_routing_telemetry "$bead_id")
-        if [[ -n "$routing_telemetry" ]]; then
-            echo -e "${GREEN}✓ Routing telemetry emitted for Anthropic model${NC}"
-        else
-            echo -e "${YELLOW}⚠ No routing telemetry found (worker may not have processed bead)${NC}"
-        fi
-
-        # Verify adapter invocation
-        verify_adapter_invoked "$bead_id" "claude-print"
-
-        # Verify stream-json output
-        verify_stream_json_output "$bead_id"
-    else
-        echo -e "${YELLOW}⚠ Needle binary not found at $NEEDLE_BIN - skipping worker execution${NC}"
-    fi
-
-    echo -e "${GREEN}✓ Scenario 1 PASSED: Anthropic subscription models route to claude-print${NC}"
-    cd /tmp
-    rm -rf "$TEST_WORKSPACE"
+    kill -TERM -- "-$WORKER_PID" 2>/dev/null || true
+    wait "$WORKER_PID" 2>/dev/null || true
+    WORKER_PID=""
+    return 124
 }
 
-test_scenario_2_glm47_routing() {
-    echo -e "\n${YELLOW}=== Scenario 2: glm-4.7 routes to claude-code-glm-4.7 (negative control) ===${NC}"
-
-    setup_test_workspace
-
-    # Verify claude-code-glm-4.7 adapter is configured
-    if [[ -f "/home/coding/.needle/agents/claude-code-glm-4.7.yaml" ]]; then
-        echo -e "${GREEN}✓ claude-code-glm-4.7 adapter configuration exists${NC}"
-        if grep -q "model: glm-4.7" "/home/coding/.needle/agents/claude-code-glm-4.7.yaml"; then
-            echo -e "${GREEN}✓ Adapter configured for glm-4.7 model${NC}"
-        else
-            echo -e "${YELLOW}⚠ Adapter model configuration not confirmed${NC}"
-        fi
-    else
-        echo -e "${RED}✗ claude-code-glm-4.7 adapter configuration missing${NC}"
-        return 1
-    fi
-
-    # Create a trivial bead that would trigger glm-4.7 routing
-    local bead_id=$(create_test_bead "test-glm-routing" "Say hello and exit" "glm-4.7")
-    echo "Created bead: $bead_id"
-
-    # Check if we can run the worker
-    if [[ -x "$NEEDLE_BIN" ]]; then
-        run_worker_on_bead "$bead_id" 30
-
-        # Verify routing telemetry
-        local routing_telemetry=$(get_routing_telemetry "$bead_id")
-        if [[ -n "$routing_telemetry" ]]; then
-            echo -e "${GREEN}✓ Routing telemetry emitted for GLM model${NC}"
-        fi
-
-        # Verify adapter invocation
-        verify_adapter_invoked "$bead_id" "glm-4.7"
-    else
-        echo -e "${YELLOW}⚠ Needle binary not found - skipping worker execution${NC}"
-    fi
-
-    echo -e "${GREEN}✓ Scenario 2 PASSED: glm-4.7 models route to claude-code-glm-4.7${NC}"
-    cd /tmp
-    rm -rf "$TEST_WORKSPACE"
+telemetry_file() {
+    local worker_name=$1
+    find "$LOG_DIR" -maxdepth 1 -type f \
+        -name "$worker_name-????????-*.jsonl" ! -name '*.agent.jsonl' \
+        -print -quit
 }
 
-test_scenario_3_routing_telemetry() {
-    echo -e "\n${YELLOW}=== Scenario 3: Routing decision telemetry events are emitted ===${NC}"
-
-    # Check if telemetry system supports routing events
-    if grep -q "RoutingDecision" /home/coding/NEEDLE/src/telemetry/mod.rs 2>/dev/null; then
-        echo -e "${GREEN}✓ RoutingDecision telemetry event defined in codebase${NC}"
-    else
-        echo -e "${RED}✗ RoutingDecision telemetry event not found${NC}"
-        return 1
-    fi
-
-    # Check if worker emits routing telemetry
-    if grep -q "RoutingDecision" /home/coding/NEEDLE/src/worker/mod.rs 2>/dev/null; then
-        echo -e "${GREEN}✓ Worker emits routing telemetry events${NC}"
-    else
-        echo -e "${YELLOW}⚠ Worker routing telemetry emission not confirmed${NC}"
-    fi
-
-    # Verify event structure
-    if grep -A 5 "RoutingDecision {" /home/coding/NEEDLE/src/telemetry/mod.rs 2>/dev/null | grep -q "chosen_adapter"; then
-        echo -e "${GREEN}✓ Routing telemetry includes chosen_adapter field${NC}"
-    fi
-
-    echo -e "${GREEN}✓ Scenario 3 PASSED: Routing telemetry system is properly configured${NC}"
+bead_status() {
+    local workspace=$1
+    local bead_id=$2
+    (cd "$workspace" && bead list --json --limit 1000) |
+        jq -r --arg id "$bead_id" 'select(.id == $id) | .status'
 }
 
-test_scenario_4_missing_binary_fails_loudly() {
-    echo -e "\n${YELLOW}=== Scenario 4: Missing claude-print binary causes loud failure ===${NC}"
+assert_routing_event() {
+    local telemetry=$1
+    local bead_id=$2
+    local model=$3
+    local chosen_adapter=$4
 
-    # Backup claude-print binary
-    if [[ -f "$CLAUDE_PRINT_BIN" ]]; then
-        cp "$CLAUDE_PRINT_BIN" "$CLAUDE_PRINT_BACKUP"
-        echo -e "${GREEN}✓ Backed up claude-print binary${NC}"
+    jq -e \
+        --arg bead "$bead_id" \
+        --arg model "$model" \
+        --arg adapter "$chosen_adapter" \
+        'select(
+            .event_type == "agent.routing_decision" and
+            .bead_id == $bead and
+            .data.model == $model and
+            .data.chosen_adapter == $adapter
+        )' "$telemetry" >/dev/null ||
+        die "missing routing event for $bead_id -> $chosen_adapter"
+}
+
+assert_agent_event() {
+    local telemetry=$1
+    local bead_id=$2
+    local chosen_adapter=$3
+    local expected_exit=$4
+
+    jq -e \
+        --arg bead "$bead_id" \
+        --arg adapter "$chosen_adapter" \
+        --argjson exit_code "$expected_exit" \
+        'select(
+            .event_type == "agent.completed" and
+            .bead_id == $bead and
+            .data.agent == $adapter and
+            .data.exit_code == $exit_code
+        )' "$telemetry" >/dev/null ||
+        die "missing agent.completed for $bead_id ($chosen_adapter, exit $expected_exit)"
+}
+
+assert_jsonl_stream() {
+    local agent_log=$1
+
+    [[ -s "$agent_log" ]] || die "normalized agent stream is empty: $agent_log"
+    jq -e -s \
+        'length > 0 and all(.[]; type == "object" and (.type | type == "string"))' \
+        "$agent_log" >/dev/null ||
+        die "normalized agent output is not valid stream JSON: $agent_log"
+}
+
+verify_success() {
+    local scenario=$1
+    local workspace=$2
+    local bead_id=$3
+    local requested_adapter=$4
+    local identifier=$5
+    local model=$6
+    local chosen_adapter=$7
+
+    local worker_name="$requested_adapter-$identifier"
+    local telemetry
+    telemetry=$(telemetry_file "$worker_name")
+    [[ -n "$telemetry" ]] || die "telemetry file not found for $worker_name"
+
+    assert_routing_event "$telemetry" "$bead_id" "$model" "$chosen_adapter"
+    assert_agent_event "$telemetry" "$bead_id" "$chosen_adapter" 0
+    jq -e --arg bead "$bead_id" \
+        'select(.event_type == "bead.completed" and .bead_id == $bead)' \
+        "$telemetry" >/dev/null || die "missing bead.completed for $bead_id"
+
+    [[ "$(bead_status "$workspace" "$bead_id")" == "closed" ]] ||
+        die "bead did not close: $bead_id"
+    grep -Fxq 'ROUTING_E2E_OK' "$workspace/route-$scenario.txt" ||
+        die "probe artifact is missing or incorrect for $bead_id"
+    git -C "$workspace" log -1 --format=%H -- "route-$scenario.txt" | grep -Eq '^[0-9a-f]{40}$' ||
+        die "probe artifact was not committed for $bead_id"
+
+    jq -e \
+        --arg adapter "$chosen_adapter" \
+        --arg model "$model" \
+        '.agent == $adapter and .model == $model and .exit_code == 0' \
+        "$workspace/.beads/traces/$bead_id/metadata.json" >/dev/null ||
+        die "trace metadata does not identify the successful routed adapter"
+
+    assert_jsonl_stream "$LOG_DIR/$worker_name-$bead_id.agent.jsonl"
+    assert_jsonl_stream "$workspace/.beads/traces/$bead_id/trace.jsonl"
+
+    pass "$scenario bead $bead_id completed through $chosen_adapter"
+    jq -c --arg bead "$bead_id" \
+        'select(.event_type == "agent.routing_decision" and .bead_id == $bead) |
+         {event_type, bead_id, data}' "$telemetry" | head -1
+}
+
+run_success_scenario() {
+    local scenario=$1
+    local requested_adapter=$2
+    local model=$3
+    local chosen_adapter=$4
+    local identifier="e2e-$scenario-$$"
+    local workspace
+    local bead_id
+    local invoke_log="$TEST_ROOT/$scenario.invoke.tsv"
+    local output_log="$TEST_ROOT/$scenario.worker.log"
+
+    workspace=$(init_workspace "$scenario")
+    bead_id=$(create_probe_bead "$workspace" "$scenario" "$model")
+    log "dispatching $bead_id with requested adapter $requested_adapter"
+    run_worker "$workspace" "$requested_adapter" "$identifier" "$bead_id" \
+        "$invoke_log" "$output_log" ||
+        die "worker failed in $scenario; see $output_log"
+
+    verify_success "$scenario" "$workspace" "$bead_id" "$requested_adapter" \
+        "$identifier" "$model" "$chosen_adapter"
+
+    if [[ "$chosen_adapter" == "claude-print" ]]; then
+        awk -F '\t' '$1 == "claude-print" && $2 == "claude-sonnet-4-6" {found=1} END {exit !found}' \
+            "$invoke_log" || die "claude-print invocation probe did not fire"
+        pass "invoke command executed claude-print for claude-sonnet-4-6"
+    elif [[ -e "$invoke_log" ]]; then
+        die "negative control unexpectedly invoked claude-print"
+    fi
+}
+
+run_missing_binary_scenario() {
+    local scenario="missing"
+    local requested_adapter="claude-sonnet"
+    local model="claude-sonnet-4-6"
+    local identifier="e2e-$scenario-$$"
+    local workspace
+    local bead_id
+    local invoke_log="$TEST_ROOT/$scenario.invoke.tsv"
+    local output_log="$TEST_ROOT/$scenario.worker.log"
+    local trace_stderr
+    local telemetry
+    local worker_name="$requested_adapter-$identifier"
+    local failure_seen=0
+
+    workspace=$(init_workspace "$scenario")
+    bead_id=$(create_probe_bead "$workspace" "$scenario" "$model")
+    trace_stderr="$workspace/.beads/traces/$bead_id/stderr.txt"
+
+    if pgrep -x claude-print >/dev/null 2>&1; then
+        die "another claude-print process is active; refusing the global rename scenario"
     fi
 
-    # Temporarily rename claude-print to simulate missing binary
-    mv "$CLAUDE_PRINT_BIN" "${CLAUDE_PRINT_BIN}.hidden"
-    echo -e "${YELLOW}→ Temporarily hid claude-print binary${NC}"
+    CLAUDE_PRINT_BACKUP="$CLAUDE_PRINT_BIN.needle-routing-e2e.$$"
+    [[ ! -e "$CLAUDE_PRINT_BACKUP" ]] || die "backup path already exists: $CLAUDE_PRINT_BACKUP"
+    mv -- "$CLAUDE_PRINT_BIN" "$CLAUDE_PRINT_BACKUP"
+    log "temporarily renamed claude-print for $bead_id"
 
-    setup_test_workspace
+    (
+        cd "$workspace"
+        exec env \
+            HOME="$TEST_HOME" \
+            XDG_CONFIG_HOME="$TEST_HOME/.config" \
+            CLAUDE_CONFIG_DIR="$HOST_HOME/.claude" \
+            PATH="$WRAPPER_DIR:$ORIGINAL_PATH" \
+            NEEDLE_INNER=1 \
+            NEEDLE_E2E_INVOKE_LOG="$invoke_log" \
+            NEEDLE_E2E_REAL_CLAUDE_PRINT="$CLAUDE_PRINT_BIN" \
+            setsid timeout --signal=TERM --kill-after=10s 90s \
+            "$NEEDLE_BIN" run \
+                --workspace "$workspace" \
+                --agent "$requested_adapter" \
+                --identifier "$identifier" \
+                --hot-reload false
+    ) >"$output_log" 2>&1 &
+    WORKER_PID=$!
 
-    # Try to use claude-print (should fail)
-    if ! "$CLAUDE_PRINT_BIN" --version >/dev/null 2>&1; then
-        echo -e "${GREEN}✓ claude-print binary correctly reports as missing${NC}"
-    else
-        echo -e "${RED}✗ claude-print binary still accessible (should be hidden)${NC}"
-        return 1
-    fi
-
-    # Create a bead that would require claude-print
-    local bead_id=$(create_test_bead "test-missing-binary" "This should fail" "claude-sonnet-4-6")
-
-    # If needle binary exists, try to run the worker (should fail loudly)
-    if [[ -x "$NEEDLE_BIN" ]]; then
-        if ! run_worker_on_bead "$bead_id" 10; then
-            echo -e "${GREEN}✓ Worker failed as expected when binary missing${NC}"
-        else
-            echo -e "${YELLOW}⚠ Worker ran without binary - check for silent fallback${NC}"
+    for _ in $(seq 1 240); do
+        if [[ -s "$trace_stderr" ]] &&
+           grep -Eqi 'claude-print.*(No such file|not found)' "$trace_stderr"; then
+            failure_seen=1
+            break
         fi
+        if ! kill -0 "$WORKER_PID" 2>/dev/null; then
+            break
+        fi
+        sleep 0.25
+    done
+
+    if kill -0 "$WORKER_PID" 2>/dev/null; then
+        kill -TERM -- "-$WORKER_PID" 2>/dev/null || true
+        sleep 0.2
     fi
+    restore_claude_print
+    wait "$WORKER_PID" 2>/dev/null || true
+    WORKER_PID=""
 
-    # Restore binary immediately
-    mv "${CLAUDE_PRINT_BIN}.hidden" "$CLAUDE_PRINT_BIN"
-    echo -e "${GREEN}✓ Restored claude-print binary${NC}"
+    [[ $failure_seen -eq 1 ]] || die "missing claude-print did not produce a loud trace failure"
+    [[ -x "$CLAUDE_PRINT_BIN" ]] || die "claude-print was not restored"
 
-    # Verify it's working again
-    if "$CLAUDE_PRINT_BIN" --version >/dev/null 2>&1; then
-        echo -e "${GREEN}✓ claude-print binary functional after restore${NC}"
+    telemetry=$(telemetry_file "$worker_name")
+    [[ -n "$telemetry" ]] || die "telemetry file not found for missing-binary scenario"
+    assert_routing_event "$telemetry" "$bead_id" "$model" "claude-print"
+    assert_agent_event "$telemetry" "$bead_id" "claude-print" 127
+    if jq -e --arg bead "$bead_id" \
+        'select(.bead_id == $bead and .event_type == "agent.completed" and
+                .data.agent == "claude-sonnet")' "$telemetry" >/dev/null; then
+        die "missing binary silently fell back to claude-sonnet"
     fi
+    [[ "$(bead_status "$workspace" "$bead_id")" != "closed" ]] ||
+        die "missing-binary bead unexpectedly closed"
+    awk -F '\t' '$1 == "claude-print" {found=1} END {exit !found}' "$invoke_log" ||
+        die "routed claude-print invocation was not attempted"
 
-    cd /tmp
-    rm -rf "$TEST_WORKSPACE"
-
-    echo -e "${GREEN}✓ Scenario 4 PASSED: Missing binary causes expected failure${NC}"
+    pass "missing claude-print failed loudly with exit 127 and no API fallback"
 }
 
-# Main test execution
 main() {
-    echo -e "${YELLOW}=================================================${NC}"
-    echo -e "${YELLOW}NEEDLE claude-print Routing Integration Test${NC}"
-    echo -e "${YELLOW}=================================================${NC}"
+    [[ "${NEEDLE_ROUTING_E2E_ACK:-}" == "$REQUIRED_ACK" ]] ||
+        die "set NEEDLE_ROUTING_E2E_ACK=$REQUIRED_ACK to run this live host test"
+    validate_scenarios
 
-    local failed=0
+    for command_name in bead git jq timeout setsid pgrep awk; do
+        require_command "$command_name"
+    done
+    [[ -x "$NEEDLE_BIN" ]] || die "NEEDLE binary is not executable: $NEEDLE_BIN"
+    [[ -d "$ADAPTERS_DIR" ]] || die "adapter directory not found: $ADAPTERS_DIR"
+    [[ -f "$ADAPTERS_DIR/claude-print.yaml" ]] || die "claude-print adapter YAML missing"
+    [[ -f "$ADAPTERS_DIR/claude-code-glm-4.7.yaml" ]] || die "GLM adapter YAML missing"
 
-    test_scenario_1_anthropic_subscription_model || failed=$((failed + 1))
-    test_scenario_2_glm47_routing || failed=$((failed + 1))
-    test_scenario_3_routing_telemetry || failed=$((failed + 1))
-    test_scenario_4_missing_binary_fails_loudly || failed=$((failed + 1))
+    CLAUDE_PRINT_BIN=$(command -v claude-print) || die "claude-print is not on PATH"
+    [[ -x "$CLAUDE_PRINT_BIN" ]] || die "claude-print is not executable: $CLAUDE_PRINT_BIN"
 
-    echo -e "\n${YELLOW}=================================================${NC}"
-    if [[ $failed -eq 0 ]]; then
-        echo -e "${GREEN}✓ ALL TESTS PASSED${NC}"
-        echo -e "${GREEN}  claude-print routing is working correctly on this host${NC}"
-        return 0
-    else
-        echo -e "${RED}✗ $failed test(s) failed${NC}"
-        return 1
+    mkdir -p "$SCRATCH_ROOT"
+    TEST_ROOT=$(mktemp -d "$SCRATCH_ROOT/needle-routing-e2e.XXXXXX")
+    TEST_HOME="$TEST_ROOT/home"
+    LOG_DIR="$TEST_HOME/.needle/logs"
+    WRAPPER_DIR="$TEST_ROOT/bin"
+    mkdir -p "$LOG_DIR" "$WRAPPER_DIR" "$TEST_HOME/.config/needle"
+    # adapters_dir is process-level in the installed 0.5.0 config merge, so a
+    # workspace override cannot move it out of the isolated HOME. Expose only
+    # the host adapter definitions at the default isolated location.
+    ln -s "$ADAPTERS_DIR" "$TEST_HOME/.config/needle/adapters"
+    if [[ -d "$HOST_XDG_CONFIG_HOME/claude-print" ]]; then
+        ln -s "$HOST_XDG_CONFIG_HOME/claude-print" "$TEST_HOME/.config/claude-print"
     fi
+    write_claude_print_probe
+
+    log "NEEDLE: $($NEEDLE_BIN version | head -1)"
+    log "isolated root: $TEST_ROOT"
+
+    if scenario_enabled sonnet; then
+        # Scenarios 1 and 3: subscription routing, normalized stream JSON,
+        # closure, and the real routing-decision event.
+        run_success_scenario "sonnet" "claude-sonnet" "claude-sonnet-4-6" \
+            "claude-print"
+    fi
+
+    if scenario_enabled glm47; then
+        # Scenarios 2 and 3: GLM negative control and its routing-decision event.
+        run_success_scenario "glm47" "claude-code-glm-4.7" "glm-4.7" \
+            "claude-code-glm-4.7"
+    fi
+
+    if scenario_enabled missing; then
+        # Scenario 4: global binary rename, loud failure, immediate restoration.
+        run_missing_binary_scenario
+    fi
+
+    pass "selected claude-print routing scenarios: $SELECTED_SCENARIOS"
 }
 
-# Run tests
 main "$@"
