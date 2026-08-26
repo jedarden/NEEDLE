@@ -504,6 +504,13 @@ impl BeadStore for CliBeadStore {
     async fn reopen(&self, id: &BeadId) -> Result<()> {
         self.mutate("reopen", &[("id", id.to_string())]).await
     }
+    async fn close(&self, id: &BeadId, reason: &str) -> Result<()> {
+        self.mutate(
+            "close",
+            &[("id", id.to_string()), ("reason", reason.to_string())],
+        )
+        .await
+    }
     async fn labels(&self, id: &BeadId) -> Result<Vec<String>> {
         Ok(self.show(id).await?.labels)
     }

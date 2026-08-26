@@ -1292,6 +1292,17 @@ pub trait BeadStore: Send + Sync {
     /// already closed the bead.
     async fn reopen(&self, id: &BeadId) -> Result<()>;
 
+    /// Close a bead with durable operator-visible reasoning.
+    ///
+    /// The historical worker path lets agents close their implementation bead
+    /// directly, but asynchronous reconciler-owned beads need a first-class
+    /// close operation.  Backends that do not expose the declared `close`
+    /// operation retain the explicit error rather than silently pretending the
+    /// CI lifecycle completed.
+    async fn close(&self, _id: &BeadId, _reason: &str) -> Result<()> {
+        bail!("configured bead backend does not implement close")
+    }
+
     /// List all labels on a bead.
     async fn labels(&self, id: &BeadId) -> Result<Vec<String>>;
 

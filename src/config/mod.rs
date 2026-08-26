@@ -509,6 +509,102 @@ pub struct WorkspaceConfig {
     pub labels: Vec<String>,
 }
 
+/// Repository-specific authoritative post-push CI selection.
+///
+/// The result URL is intentionally a template rather than a credential-bearing
+/// URL.  Credentials are read from `auth_token_env` only by the reconciler and
+/// are never written to the durable CI ledger.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CiRepositoryConfig {
+    /// Forgejo/Argo workflow identity.  When omitted, the global default is used.
+    #[serde(default)]
+    pub workflow: Option<String>,
+    /// Optional repository-specific result endpoint template.
+    #[serde(default)]
+    pub result_url_template: Option<String>,
+    /// Optional repository-specific timeout in seconds.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+    /// Optional repository-specific transient retry limit.
+    #[serde(default)]
+    pub max_retries: Option<u32>,
+}
+
+/// Asynchronous authoritative CI policy for pushed commits.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PostPushCiConfig {
+    /// Whether workers register pushed commits for asynchronous CI.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Default workflow identity used when a repository has no override.
+    #[serde(default = "PostPushCiConfig::default_workflow")]
+    pub default_workflow: String,
+    /// Forgejo/Argo result endpoint template.  Supported placeholders are
+    /// `{repository}`, `{sha}`, and `{workflow}`.
+    #[serde(default)]
+    pub result_url_template: Option<String>,
+    /// Environment variable containing the read-only API token, if required.
+    #[serde(default)]
+    pub auth_token_env: Option<String>,
+    /// Default maximum age of a pending CI run.
+    #[serde(default = "PostPushCiConfig::default_timeout_secs")]
+    pub timeout_secs: u64,
+    /// Default number of transient retries before the check is escalated.
+    #[serde(default = "PostPushCiConfig::default_max_retries")]
+    pub max_retries: u32,
+    /// Poll interval used by the worker-free reconciler daemon.
+    #[serde(default = "PostPushCiConfig::default_poll_interval_secs")]
+    pub poll_interval_secs: u64,
+    /// Optional durable ledger directory.  Defaults to `<repo>/.needle/ci`.
+    #[serde(default)]
+    pub state_dir: Option<PathBuf>,
+    /// Exact normalized repository identity to per-repository policy.
+    #[serde(default)]
+    pub repositories: BTreeMap<String, CiRepositoryConfig>,
+}
+
+impl Default for PostPushCiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            default_workflow: Self::default_workflow(),
+            result_url_template: None,
+            auth_token_env: None,
+            timeout_secs: Self::default_timeout_secs(),
+            max_retries: Self::default_max_retries(),
+            poll_interval_secs: Self::default_poll_interval_secs(),
+            state_dir: None,
+            repositories: BTreeMap::new(),
+        }
+    }
+}
+
+impl PostPushCiConfig {
+    fn default_workflow() -> String {
+        "needle-ci".to_string()
+    }
+
+    fn default_timeout_secs() -> u64 {
+        3600
+    }
+
+    fn default_max_retries() -> u32 {
+        3
+    }
+
+    fn default_poll_interval_secs() -> u64 {
+        30
+    }
+}
+
+impl ConfigTier for PostPushCiConfig {
+    fn reload_tier(&self) -> ReloadTier {
+        // The reconciler reads this policy at each cycle; changing it does not
+        // require restarting an agent worker.
+        ReloadTier::Live
+    }
+}
+
 impl Default for WorkspaceConfig {
     fn default() -> Self {
         WorkspaceConfig {
@@ -5956,6 +6052,9 @@ pub struct WorkspaceOverrides {
     /// Pluggable validation gates.
     #[serde(default)]
     pub gates: Option<Vec<GateConfig>>,
+    /// Authoritative asynchronous CI policy for this repository.
+    #[serde(default)]
+    pub post_push_ci: Option<PostPushCiConfig>,
     /// Workspace identity labels (overridable per-workspace).
     ///
     /// Set in `.needle.yaml` under `workspace.labels`. Used for cross-workspace
@@ -6037,6 +6136,9 @@ pub struct Config {
     /// Pluggable validation gates.
     #[serde(default)]
     pub gates: Vec<GateConfig>,
+    /// Asynchronous authoritative CI reconciliation policy.
+    #[serde(default)]
+    pub post_push_ci: PostPushCiConfig,
     /// Self-modification (hot-reload) configuration.
     #[serde(default)]
     pub self_modification: SelfModificationConfig,
@@ -6088,6 +6190,9 @@ impl Config {
         // strands.splice section
         self.strands.splice.report_workspace =
             expand_tilde_option(&self.strands.splice.report_workspace);
+
+        // asynchronous CI ledger location
+        self.post_push_ci.state_dir = expand_tilde_option(&self.post_push_ci.state_dir);
 
         // strands.pulse.scanners[].command paths are strings, not PathBuf, so skip
 
@@ -6153,6 +6258,7 @@ impl Config {
     /// - `outcome` → OutcomeConfig (Tier A: live swap, no rebuild needed)
     /// - `budget` → BudgetConfig (Tier A: live swap, no rebuild needed)
     /// - `pricing` → PricingConfig (Tier A: live swap, no rebuild needed)
+    /// - `post_push_ci` → PostPushCiConfig (Tier A: live swap, no rebuild needed)
     /// - `tsnet` → TsnetConfig (Tier C: restart required)
     ///
     /// # Hash Stability
@@ -6200,6 +6306,7 @@ impl Config {
         hashes.insert("outcome".to_string(), hash_section(&self.outcome));
         hashes.insert("budget".to_string(), hash_section(&self.budget));
         hashes.insert("pricing".to_string(), hash_section(&self.pricing));
+        hashes.insert("post_push_ci".to_string(), hash_section(&self.post_push_ci));
 
         // Tier B sections (component rebuild)
         hashes.insert("telemetry".to_string(), hash_section(&self.telemetry));
@@ -6454,6 +6561,7 @@ pub fn validate_key_path(key_path: &str) -> Result<(), ConfigError> {
         "outcome",
         "tsnet",
         "validation",
+        "post_push_ci",
     ];
 
     if !valid_top_level.contains(&root) {
@@ -6482,11 +6590,39 @@ pub fn validate_key_path(key_path: &str) -> Result<(), ConfigError> {
         "strands" => validate_strands_field(second, &segments[2..], key_path),
         "telemetry" => validate_telemetry_field(second, &segments[2..], key_path),
         "prompt" => validate_prompt_field(second, key_path),
+        "post_push_ci" => validate_post_push_ci_field(second, key_path),
         _ => {
             // For other top-level configs, accept any nested field for now
             // This can be extended later with specific validation
             Ok(())
         }
+    }
+}
+
+/// Validate PostPushCiConfig field names used by runtime overrides.
+fn validate_post_push_ci_field(field: &str, key_path: &str) -> Result<(), ConfigError> {
+    let valid_fields = [
+        "enabled",
+        "default_workflow",
+        "result_url_template",
+        "auth_token_env",
+        "timeout_secs",
+        "max_retries",
+        "poll_interval_secs",
+        "state_dir",
+        "repositories",
+    ];
+    if valid_fields.contains(&field) {
+        Ok(())
+    } else {
+        Err(ConfigError {
+            field: key_path.to_string(),
+            message: format!(
+                "unknown post_push_ci field '{}'. Valid fields are: {}",
+                field,
+                valid_fields.join(", ")
+            ),
+        })
     }
 }
 
@@ -7026,6 +7162,11 @@ impl ConfigLoader {
             sources.insert("gates".to_string(), source.clone());
         }
 
+        if let Some(ref post_push_ci) = overrides.post_push_ci {
+            config.post_push_ci = post_push_ci.clone();
+            sources.insert("post_push_ci".to_string(), source.clone());
+        }
+
         if let Some(ref ws) = overrides.workspace {
             if !ws.labels.is_empty() {
                 config.workspace.labels = ws.labels.clone();
@@ -7435,6 +7576,50 @@ impl ConfigLoader {
             });
         }
 
+        if config.post_push_ci.enabled {
+            if config.post_push_ci.default_workflow.trim().is_empty() {
+                errors.push(ConfigError {
+                    field: "post_push_ci.default_workflow".to_string(),
+                    message: "must not be empty when post-push CI is enabled".to_string(),
+                });
+            }
+            if config.post_push_ci.timeout_secs == 0 {
+                errors.push(ConfigError {
+                    field: "post_push_ci.timeout_secs".to_string(),
+                    message: "must be at least 1 when post-push CI is enabled".to_string(),
+                });
+            }
+            if config.post_push_ci.poll_interval_secs == 0 {
+                errors.push(ConfigError {
+                    field: "post_push_ci.poll_interval_secs".to_string(),
+                    message: "must be at least 1 when post-push CI is enabled".to_string(),
+                });
+            }
+            if config.post_push_ci.result_url_template.is_none()
+                && (config.post_push_ci.repositories.is_empty()
+                    || config
+                        .post_push_ci
+                        .repositories
+                        .values()
+                        .any(|repo| repo.result_url_template.is_none()))
+            {
+                errors.push(ConfigError {
+                    field: "post_push_ci.result_url_template".to_string(),
+                    message: "must be set globally or for every configured repository".to_string(),
+                });
+            }
+            for (repository, repo) in &config.post_push_ci.repositories {
+                if let Some(workflow) = &repo.workflow {
+                    if workflow.trim().is_empty() {
+                        errors.push(ConfigError {
+                            field: format!("post_push_ci.repositories[{repository}].workflow"),
+                            message: "must not be empty".to_string(),
+                        });
+                    }
+                }
+            }
+        }
+
         if config.worker.cpu_load_warn <= 0.0 || config.worker.cpu_load_warn > 1.0 {
             errors.push(ConfigError {
                 field: "worker.cpu_load_warn".to_string(),
@@ -7545,6 +7730,26 @@ impl ConfigLoader {
             (
                 "worker.scratch_sweep.ttl_hours",
                 config.worker.scratch_sweep.ttl_hours.to_string(),
+            ),
+            (
+                "post_push_ci.enabled",
+                config.post_push_ci.enabled.to_string(),
+            ),
+            (
+                "post_push_ci.default_workflow",
+                config.post_push_ci.default_workflow.clone(),
+            ),
+            (
+                "post_push_ci.timeout_secs",
+                config.post_push_ci.timeout_secs.to_string(),
+            ),
+            (
+                "post_push_ci.max_retries",
+                config.post_push_ci.max_retries.to_string(),
+            ),
+            (
+                "post_push_ci.poll_interval_secs",
+                config.post_push_ci.poll_interval_secs.to_string(),
             ),
             (
                 "health.heartbeat_interval_secs",
@@ -12097,6 +12302,25 @@ resource_attributes:
             err.message.contains("unknown worker field"),
             "error should have clear message about unknown worker field"
         );
+    }
+
+    #[test]
+    fn post_push_ci_configuration_fields_are_validated() {
+        for field in [
+            "post_push_ci.enabled",
+            "post_push_ci.default_workflow",
+            "post_push_ci.result_url_template",
+            "post_push_ci.auth_token_env",
+            "post_push_ci.timeout_secs",
+            "post_push_ci.max_retries",
+            "post_push_ci.poll_interval_secs",
+            "post_push_ci.state_dir",
+            "post_push_ci.repositories",
+        ] {
+            assert!(validate_key_path(field).is_ok(), "{field} should be valid");
+        }
+        let error = validate_key_path("post_push_ci.unknown_field").unwrap_err();
+        assert!(error.message.contains("unknown post_push_ci field"));
     }
 
     #[test]

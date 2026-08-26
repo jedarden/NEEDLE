@@ -380,6 +380,17 @@ pub enum CliCommand {
         #[arg(short = 'w', long)]
         workspace: Option<PathBuf>,
     },
+
+    /// Reconcile authoritative Forgejo/Argo CI without occupying an agent slot.
+    #[command(name = "ci-reconcile")]
+    CiReconcile {
+        /// Repository to reconcile (defaults to the configured workspace).
+        #[arg(short = 'w', long)]
+        workspace: Option<PathBuf>,
+        /// Run one bounded poll cycle and exit.
+        #[arg(long)]
+        once: bool,
+    },
 }
 
 /// Output format for the list command.
@@ -486,12 +497,71 @@ pub fn run() -> Result<()> {
             format,
         } => cmd_stats(by, since, until, format),
         CliCommand::Supervise { workspace } => cmd_supervise(workspace),
+        CliCommand::CiReconcile { workspace, once } => cmd_ci_reconcile(workspace, once),
     }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Command handlers
 // ──────────────────────────────────────────────────────────────────────────────
+
+/// `needle ci-reconcile` — run the worker-free post-push CI reconciler.
+fn cmd_ci_reconcile(workspace: Option<PathBuf>, once: bool) -> Result<()> {
+    let workspace_root = match workspace {
+        Some(workspace) => workspace.canonicalize().unwrap_or(workspace),
+        None => ConfigLoader::load_global()?.workspace.default,
+    };
+    let (config, _) = ConfigLoader::load_resolved(
+        &workspace_root,
+        CliOverrides {
+            workspace: Some(workspace_root.clone()),
+            ..Default::default()
+        },
+    )?;
+    if !config.post_push_ci.enabled {
+        bail!("post_push_ci is disabled for {}", workspace_root.display());
+    }
+    let source = crate::ci::ForgejoArgoResultSource::new(config.post_push_ci.clone())?;
+    let store = crate::bead_store::open_configured(
+        &config.bead_cli,
+        workspace_root.clone(),
+        None,
+        Some("needle-ci-reconciler".to_string()),
+        Some(env!("CARGO_PKG_VERSION").to_string()),
+    )?;
+    let telemetry = Telemetry::from_config("needle-ci-reconciler".to_string(), &config.telemetry)
+        .unwrap_or_else(|error| {
+            tracing::warn!(error = %error, "failed to configure CI reconciler telemetry");
+            Telemetry::new("needle-ci-reconciler".to_string())
+        });
+    let coordinator = crate::ci::CiCoordinator::new(
+        store.as_ref(),
+        config.post_push_ci.clone(),
+        Some(telemetry.clone()),
+    );
+    let poll_interval = config.post_push_ci.poll_interval_secs.max(1);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to create CI reconciler runtime")?;
+    rt.block_on(async move {
+        telemetry.start_and_wait().await?;
+        loop {
+            let outcomes = coordinator.reconcile_once(&workspace_root, &source).await?;
+            tracing::info!(
+                workspace = %workspace_root.display(),
+                outcomes = outcomes.len(),
+                "authoritative CI reconciliation cycle completed"
+            );
+            if once {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(poll_interval)).await;
+        }
+        telemetry.shutdown().await;
+        Ok::<(), anyhow::Error>(())
+    })
+}
 
 /// `needle run` — launch a worker.
 ///

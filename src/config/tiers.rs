@@ -85,6 +85,7 @@ fn assert_all_config_fields_have_tiers(config: &Config) {
         ref fabric,
         ref supervisor,
         ref outcome,
+        ref post_push_ci,
     } = config;
 
     // Verify tier A assignments
@@ -93,6 +94,7 @@ fn assert_all_config_fields_have_tiers(config: &Config) {
     let _ = strands.reload_tier();
     let _ = budget.reload_tier();
     let _ = pricing.reload_tier();
+    let _ = post_push_ci.reload_tier();
 
     // Verify tier B assignments
     let _ = telemetry.reload_tier();

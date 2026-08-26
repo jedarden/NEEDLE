@@ -8,6 +8,7 @@ pub mod build_metadata;
 pub mod canary;
 pub mod cargo_test;
 pub mod checkpoint_utils;
+pub mod ci;
 pub mod claim;
 pub mod claude_md_placement;
 pub mod cli;

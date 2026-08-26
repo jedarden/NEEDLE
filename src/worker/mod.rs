@@ -31,6 +31,7 @@ use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering as AtomicOrdering};
 
 use crate::bead_store::BeadStore;
 use crate::canary::CanaryRunner;
+use crate::ci::{self, RegistrationResult};
 use crate::claim::Claimer;
 use crate::commit_hook;
 use crate::config::{CliOverrides, Config, ConfigLoader, ConfigSource, SourceMap};
@@ -3383,12 +3384,12 @@ impl Worker {
 
         // On success, inject Bead-Id trailer into the latest commit (non-fatal if it fails).
         if handler_result.outcome == Outcome::Success {
+            let workspace = if is_workspace_unset(&bead.workspace) {
+                self.config.workspace.default.clone()
+            } else {
+                bead.workspace.clone()
+            };
             if let Some(ref pre_head) = self.pre_dispatch_head {
-                let workspace = if is_workspace_unset(&bead.workspace) {
-                    self.config.workspace.default.clone()
-                } else {
-                    bead.workspace.clone()
-                };
                 // Wrap commit hook in timeout to prevent indefinite hang.
                 match tokio::time::timeout(
                     std::time::Duration::from_secs(30),
@@ -3414,6 +3415,80 @@ impl Worker {
                             bead_id = %bead.id,
                             "Bead-Id trailer injection timed out after 30s (non-fatal)"
                         );
+                    }
+                }
+            }
+
+            // A pushed implementation commit is not complete until the
+            // authoritative Forgejo/Argo workflow has passed.  Register the
+            // check and release this worker slot immediately; the dedicated
+            // reconciler owns the long-running CI wait and later closure.
+            if self.config.post_push_ci.enabled {
+                let result = tokio::time::timeout(
+                    Duration::from_secs(30),
+                    ci::register_post_push_commit(
+                        &self.config.post_push_ci,
+                        self.store.as_ref(),
+                        Some(self.telemetry.clone()),
+                        &workspace,
+                        &bead.id,
+                        self.pre_dispatch_head.as_deref(),
+                    ),
+                )
+                .await;
+                match result {
+                    Ok(Ok(RegistrationResult::Registered { key, check_id })) => {
+                        tracing::info!(
+                            bead_id = %bead.id,
+                            check_id = %check_id,
+                            repository = %key.repository,
+                            commit_sha = %key.commit_sha,
+                            workflow = %key.workflow,
+                            "post-push CI check registered; releasing worker slot"
+                        );
+                        cancelled.store(true, Ordering::Release);
+                        heartbeat_task.abort();
+                        return BeadAction::Released;
+                    }
+                    Ok(Ok(RegistrationResult::CorrelationFailed(error))) => {
+                        tracing::warn!(
+                            bead_id = %bead.id,
+                            error = %error,
+                            "post-push CI correlation failed safely; leaving implementation open"
+                        );
+                        cancelled.store(true, Ordering::Release);
+                        heartbeat_task.abort();
+                        return BeadAction::Released;
+                    }
+                    Ok(Ok(RegistrationResult::Disabled | RegistrationResult::NoPushedCommit)) => {}
+                    Ok(Err(error)) => {
+                        tracing::error!(
+                            bead_id = %bead.id,
+                            error = %error,
+                            "post-push CI registration failed; reopening implementation bead"
+                        );
+                        if let Ok(current) = self.store.show(&bead.id).await {
+                            if current.status.is_done() {
+                                let _ = self.store.reopen(&bead.id).await;
+                            }
+                        }
+                        cancelled.store(true, Ordering::Release);
+                        heartbeat_task.abort();
+                        return BeadAction::Released;
+                    }
+                    Err(_) => {
+                        tracing::error!(
+                            bead_id = %bead.id,
+                            "post-push CI registration timed out; reopening implementation bead"
+                        );
+                        if let Ok(current) = self.store.show(&bead.id).await {
+                            if current.status.is_done() {
+                                let _ = self.store.reopen(&bead.id).await;
+                            }
+                        }
+                        cancelled.store(true, Ordering::Release);
+                        heartbeat_task.abort();
+                        return BeadAction::Released;
                     }
                 }
             }
@@ -4158,6 +4233,7 @@ impl Worker {
         replace!("agent.args", next.agent.args, candidate.agent.args);
         replace!("agent.timeout", next.agent.timeout, candidate.agent.timeout);
         replace!("agent.routing", next.agent.routing, candidate.agent.routing);
+        replace!("post_push_ci", next.post_push_ci, candidate.post_push_ci);
 
         // Worker fields declared Tier A. Identity, launch, and reload-poller
         // settings are Tier C and therefore intentionally excluded.
