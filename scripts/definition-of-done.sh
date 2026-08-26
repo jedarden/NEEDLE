@@ -169,6 +169,30 @@ fi
 if [[ "$LANE" == "slow" ]] || [[ "$LANE" == "all" ]]; then
   echo "=== Slow Lane Checks ==="
 
+  # Compile every test target BEFORE the timed checks below.
+  #
+  # Each `timeout 900` wraps `cargo test`, which compiles AND runs. That makes
+  # the cap bound compile+run rather than run, so the identical commit passes
+  # with a warm sccache and fails cold. That is exactly how needle-ci went red
+  # on 2026-08-25: run 6k6ff started 55s after 213f61e was pushed, built cold,
+  # and was killed in verify; a later run on the same commit reported a 99.07%
+  # sccache hit rate and passed with 0 failures. Seven consecutive runs failed
+  # this way and read as a broken test suite.
+  #
+  # integration_tests alone executes ~520s against its 900s cap, so there is no
+  # headroom to absorb a cold build. Building first restores each cap to what
+  # it is documented to be: a bound on test execution.
+  #
+  # This does not add work -- it moves compilation out of windows that were
+  # never meant to measure it.
+  run_check "cargo test --no-run (build all test targets)" \
+    timeout --kill-after=30 1800 cargo test --no-run \
+      --lib \
+      --test integration_tests \
+      --test p2_integration_tests \
+      --test p3_integration_tests \
+      --test real_br_integration_tests
+
   # cargo test --lib (unit tests)
   run_check "cargo test --lib" timeout --kill-after=30 900 cargo test --lib
 
