@@ -3947,7 +3947,7 @@ path: /path/to/./bf
 }
 
 /// Pluck strand configuration (primary bead selection).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluckConfig {
     /// Labels to exclude from selection.
     #[serde(default)]
@@ -3962,14 +3962,26 @@ pub struct PluckConfig {
     #[serde(default = "PluckConfig::default_split_after_failures")]
     pub split_after_failures: u32,
 
-    /// Write persistent starvation records to NEEDLE workspace (default: false).
+    /// Write persistent starvation records and diagnostic snapshots to the
+    /// NEEDLE workspace (default: true).
     ///
     /// When enabled, starvation events are written to a persistent log file in
     /// NEEDLE's workspace (~/.needle/state/starvation-records.jsonl) rather than
     /// only being emitted as telemetry. Records are never written to target scanned
-    /// workspaces, only to NEEDLE's own workspace.
+    /// workspaces, only to NEEDLE's own workspace. Set this to false to opt out
+    /// of both the legacy summary and the full `starvation_events.jsonl` stream.
     #[serde(default = "PluckConfig::default_persistent_starvation_records")]
     pub persistent_starvation_records: bool,
+}
+
+impl Default for PluckConfig {
+    fn default() -> Self {
+        Self {
+            exclude_labels: Vec::new(),
+            split_after_failures: Self::default_split_after_failures(),
+            persistent_starvation_records: Self::default_persistent_starvation_records(),
+        }
+    }
 }
 
 impl PluckConfig {
@@ -3978,7 +3990,7 @@ impl PluckConfig {
     }
 
     fn default_persistent_starvation_records() -> bool {
-        false
+        true
     }
 }
 
@@ -9197,6 +9209,13 @@ strands:
         assert_eq!(config.default, "claude");
         assert_eq!(config.timeout, 3600);
         assert!(config.args.is_empty());
+    }
+
+    #[test]
+    fn default_pluck_config_persists_starvation_diagnostics() {
+        let config = PluckConfig::default();
+        assert_eq!(config.split_after_failures, 3);
+        assert!(config.persistent_starvation_records);
     }
 
     #[test]

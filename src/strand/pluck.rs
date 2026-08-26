@@ -9,11 +9,11 @@
 use crate::bead_store::{BeadStore, Filters};
 use crate::mitosis::detects_needle_internal_config;
 use crate::telemetry::Telemetry;
-use crate::types::{Bead, BeadId, StrandError, StrandResult};
+use crate::types::{Bead, BeadId, BrDependency, Comment, StrandError, StrandResult};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{atomic::AtomicUsize, atomic::Ordering, Mutex};
 
@@ -197,6 +197,190 @@ fn is_finished_status(status: &str) -> bool {
     )
 }
 
+/// Whether a bead belongs in the open-work inventory used by starvation
+/// diagnostics.  In-progress beads have an owner already and therefore do not
+/// represent work that is invisible to this worker.
+fn is_open_work_bead(bead: &Bead) -> bool {
+    !bead.status.is_done() && !matches!(bead.status, crate::types::BeadStatus::InProgress)
+}
+
+fn dependency_is_blocking(
+    dependency: &BrDependency,
+    finished_by_id: &HashMap<BeadId, bool>,
+) -> bool {
+    let is_blocking = dependency.dependency_type.is_empty()
+        || dependency.dependency_type.eq_ignore_ascii_case("blocks");
+    if !is_blocking {
+        return false;
+    }
+
+    match finished_by_id.get(&dependency.id) {
+        Some(finished) => !finished,
+        // A missing blocker cannot be proven complete.  Treat it as blocking so
+        // a partially synced store is represented honestly in the snapshot.
+        None => !is_finished_status(&dependency.status),
+    }
+}
+
+/// Explain every exclusion that can be inferred from the inventory and the
+/// worker-local filters.  Multiple reasons are retained because a single bead
+/// can be hidden by both a dependency and a label, for example.
+fn exclusion_reasons_for_bead(
+    bead: &Bead,
+    beads: &[Bead],
+    exclude_labels: &[String],
+    exclude_ids: &HashSet<BeadId>,
+) -> Vec<String> {
+    let finished_by_id: HashMap<BeadId, bool> = beads
+        .iter()
+        .map(|candidate| (candidate.id.clone(), candidate.status.is_done()))
+        .collect();
+    let mut reasons = Vec::new();
+
+    for dependency in &bead.dependencies {
+        if dependency_is_blocking(dependency, &finished_by_id) {
+            reasons.push(format!("dependency:{}", dependency.id));
+        }
+    }
+
+    for label in &bead.labels {
+        if exclude_labels.contains(label) {
+            reasons.push(format!("label:{label}"));
+        }
+    }
+
+    match &bead.status {
+        crate::types::BeadStatus::Open => {
+            if let Some(assignee) = &bead.assignee {
+                reasons.push(format!("assignee:{assignee}"));
+            }
+        }
+        crate::types::BeadStatus::Blocked => reasons.push("status:blocked".to_string()),
+        crate::types::BeadStatus::Deferred => reasons.push("status:deferred".to_string()),
+        crate::types::BeadStatus::InProgress
+        | crate::types::BeadStatus::Done
+        | crate::types::BeadStatus::Closed => {}
+    }
+
+    if exclude_ids.contains(&bead.id) {
+        reasons.push("worker_exclusion".to_string());
+    }
+
+    reasons
+}
+
+fn open_bead_diagnostic(
+    bead: &Bead,
+    beads: &[Bead],
+    exclude_labels: &[String],
+    exclude_ids: &HashSet<BeadId>,
+) -> OpenBeadDiagnostic {
+    let inferred_exclusion_reasons =
+        exclusion_reasons_for_bead(bead, beads, exclude_labels, exclude_ids);
+    let is_ready = inferred_exclusion_reasons.is_empty();
+    let exclusion_reasons = if is_ready {
+        // The backend can omit a bead from ready() without exposing a
+        // corresponding state predicate.  Preserve that fact instead of
+        // recording an empty explanation.
+        vec!["not_in_ready_frontier".to_string()]
+    } else {
+        inferred_exclusion_reasons
+    };
+    OpenBeadDiagnostic {
+        id: bead.id.to_string(),
+        title: bead.title.clone(),
+        description: bead.body.clone(),
+        status: bead.status.to_string(),
+        assignee: bead.assignee.clone(),
+        priority: bead.priority,
+        labels: bead.labels.clone(),
+        workspace: bead.workspace.display().to_string(),
+        dependencies: bead.dependencies.clone(),
+        dependents: bead.dependents.clone(),
+        comments: bead.comments.clone(),
+        created_at: bead.created_at,
+        updated_at: bead.updated_at,
+        is_ready,
+        exclusion_reasons,
+    }
+}
+
+fn starvation_diagnostic_snapshot(
+    beads: &[Bead],
+    stats: &FilteringStats,
+    exclude_labels: &[String],
+    exclude_ids: &HashSet<BeadId>,
+    worker_id: &str,
+    relaxation_tier: RelaxationTier,
+    split_after_failures: u32,
+) -> StarvationDiagnosticSnapshot {
+    let timestamp = Utc::now();
+    let open_beads: Vec<OpenBeadDiagnostic> = beads
+        .iter()
+        .filter(|bead| is_open_work_bead(bead))
+        .map(|bead| open_bead_diagnostic(bead, beads, exclude_labels, exclude_ids))
+        .collect();
+
+    let mut exclusion_reason_counts = BTreeMap::new();
+    for bead in &open_beads {
+        for reason in &bead.exclusion_reasons {
+            *exclusion_reason_counts.entry(reason.clone()).or_insert(0) += 1;
+        }
+    }
+
+    let mut excluded_ids: Vec<String> = exclude_ids.iter().map(ToString::to_string).collect();
+    excluded_ids.sort();
+    let dropped_constraints: Vec<String> = relaxation_tier
+        .dropped_constraints()
+        .iter()
+        .map(|constraint| (*constraint).to_string())
+        .collect();
+
+    StarvationDiagnosticSnapshot {
+        schema_version: 1,
+        event: "pluck.starvation",
+        timestamp,
+        target_workspace: workspace_from_inventory(beads),
+        summary: StarvationSummary {
+            message: format!(
+                "Pluck returned zero candidates while {} open beads remained",
+                open_beads.len()
+            ),
+            detected_at: timestamp,
+            open_bead_count: open_beads.len(),
+            candidate_count: 0,
+            excluded_bead_count: stats.excluded_count,
+            exclusion_reason_counts,
+        },
+        open_beads,
+        worker_constraints: WorkerConstraints {
+            worker_id: worker_id.to_string(),
+            assignee: None,
+            exclude_labels: exclude_labels.to_vec(),
+            exclude_ids: excluded_ids.clone(),
+            relaxation_tier: relaxation_tier.name().to_string(),
+            dropped_constraints,
+        },
+        pluck_parameters: PluckParameters {
+            configured_exclude_labels: exclude_labels.to_vec(),
+            default_exclude_labels: DEFAULT_EXCLUDE_LABELS
+                .iter()
+                .map(|label| (*label).to_string())
+                .collect(),
+            split_after_failures,
+            candidate_sort_order: vec![
+                "priority ASC".to_string(),
+                "failure_count ASC".to_string(),
+                "created_at ASC".to_string(),
+                "id ASC".to_string(),
+            ],
+            ready_query_assignee: None,
+            ready_query_exclude_ids: excluded_ids,
+            final_relaxation_tier: relaxation_tier.name().to_string(),
+        },
+    }
+}
+
 fn normalized_label(label: &str) -> String {
     label.trim().to_ascii_lowercase()
 }
@@ -271,6 +455,101 @@ struct StarvationRecord {
     exclusion_reasons: Vec<String>,
 }
 
+/// The durable, machine-readable starvation snapshot.
+///
+/// This deliberately lives beside the legacy [`StarvationRecord`] instead of
+/// replacing it.  The legacy record is consumed by older operators, while
+/// this record contains enough point-in-time state to explain a starvation
+/// event without querying a store that may already have changed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StarvationDiagnosticSnapshot {
+    /// Schema version for readers of the JSONL file.
+    schema_version: u8,
+    /// Stable event name for filtering a mixed diagnostic stream.
+    event: &'static str,
+    /// UTC time at which the empty candidate result was observed.
+    timestamp: chrono::DateTime<chrono::Utc>,
+    /// Workspace whose Pluck query returned no candidates.
+    target_workspace: String,
+    /// Timestamped, aggregate explanation of the event.
+    summary: StarvationSummary,
+    /// Every open work bead as observed during the diagnostic inventory pass.
+    open_beads: Vec<OpenBeadDiagnostic>,
+    /// Filters and exclusions active for this worker at evaluation time.
+    worker_constraints: WorkerConstraints,
+    /// Pluck configuration and the query tier that produced the empty result.
+    pluck_parameters: PluckParameters,
+}
+
+/// Aggregate counts and a stable human-readable explanation of starvation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StarvationSummary {
+    /// Short explanation suitable for log viewers.
+    message: String,
+    /// Explicit timestamp for consumers that index the summary independently.
+    detected_at: chrono::DateTime<chrono::Utc>,
+    /// Number of open work beads in the inventory.
+    open_bead_count: usize,
+    /// Number of candidates returned after the final filtering pass.
+    candidate_count: usize,
+    /// Number of open work beads omitted from the candidate result.
+    excluded_bead_count: usize,
+    /// Count of each per-bead exclusion reason.
+    exclusion_reason_counts: BTreeMap<String, usize>,
+}
+
+/// Complete point-in-time state for one open work bead.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OpenBeadDiagnostic {
+    id: String,
+    title: String,
+    description: Option<String>,
+    status: String,
+    assignee: Option<String>,
+    priority: u8,
+    labels: Vec<String>,
+    workspace: String,
+    dependencies: Vec<BrDependency>,
+    dependents: Vec<BrDependency>,
+    comments: Vec<Comment>,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+    /// Whether the state itself looks claimable despite the empty ready result.
+    is_ready: bool,
+    /// All reasons this bead was not claimable in this snapshot.
+    exclusion_reasons: Vec<String>,
+}
+
+/// The worker-local constraints that can make an otherwise open bead
+/// invisible to Pluck.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct WorkerConstraints {
+    /// Stable identity of the worker that captured the snapshot.
+    worker_id: String,
+    /// Assignee predicate; `None` means Pluck searches unassigned work.
+    assignee: Option<String>,
+    /// Labels excluded by the active Pluck configuration.
+    exclude_labels: Vec<String>,
+    /// Bead IDs temporarily excluded by the worker (for example after a race).
+    exclude_ids: Vec<String>,
+    /// Query tier used for the final empty result.
+    relaxation_tier: String,
+    /// Constraints dropped by that tier.
+    dropped_constraints: Vec<String>,
+}
+
+/// Pluck algorithm parameters needed to reproduce or interpret a snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PluckParameters {
+    configured_exclude_labels: Vec<String>,
+    default_exclude_labels: Vec<String>,
+    split_after_failures: u32,
+    candidate_sort_order: Vec<String>,
+    ready_query_assignee: Option<String>,
+    ready_query_exclude_ids: Vec<String>,
+    final_relaxation_tier: String,
+}
+
 /// The Pluck strand — primary work selection.
 pub struct PluckStrand {
     /// Labels to exclude from candidate selection.
@@ -281,7 +560,8 @@ pub struct PluckStrand {
     telemetry: Telemetry,
     /// NEEDLE workspace path for persistent starvation records.
     needle_workspace: Option<PathBuf>,
-    /// Whether to write persistent starvation records to NEEDLE workspace.
+    /// Whether to write persistent starvation records and diagnostic snapshots
+    /// to the NEEDLE workspace.
     persistent_starvation_records: bool,
     /// Count of open beads from the most recent evaluation.
     /// Uses AtomicUsize for thread-safe interior mutability.
@@ -348,10 +628,12 @@ impl PluckStrand {
         }
     }
 
-    /// Create a new PluckStrand with persistent starvation records enabled.
+    /// Create a new PluckStrand with persistent starvation records configured.
     ///
     /// When `persistent_starvation_records` is true, starvation events are
-    /// written to `needle_workspace/state/starvation-records.jsonl`.
+    /// written to `needle_workspace/state/starvation-records.jsonl` and full
+    /// snapshots are appended to
+    /// `needle_workspace/state/starvation_events.jsonl`.
     /// Records are never written to target workspaces, only to NEEDLE workspace.
     pub fn with_persistent_records(
         exclude_labels: Vec<String>,
@@ -598,6 +880,86 @@ impl PluckStrand {
             "Wrote persistent starvation record"
         );
 
+        Ok(())
+    }
+
+    /// Append a complete starvation snapshot to NEEDLE's durable diagnostic
+    /// stream.  The lock covers serialization and the newline write so two
+    /// workers cannot interleave JSON objects in the same JSONL file.
+    fn write_starvation_diagnostic(&self, snapshot: &StarvationDiagnosticSnapshot) -> Result<()> {
+        let needle_home = self
+            .needle_workspace
+            .as_ref()
+            .context("needle_workspace not set - cannot write diagnostic snapshot")?;
+        let state_dir = needle_home.join("state");
+        std::fs::create_dir_all(&state_dir).with_context(|| {
+            format!(
+                "failed to create starvation diagnostics directory: {}",
+                state_dir.display()
+            )
+        })?;
+
+        let record_path = state_dir.join("starvation_events.jsonl");
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&record_path)
+            .with_context(|| {
+                format!(
+                    "failed to open starvation diagnostics file: {}",
+                    record_path.display()
+                )
+            })?;
+
+        use fs2::FileExt;
+        file.lock_exclusive().with_context(|| {
+            format!(
+                "failed to lock starvation diagnostics file: {}",
+                record_path.display()
+            )
+        })?;
+
+        let write_result = (|| -> Result<()> {
+            use std::io::Write;
+            serde_json::to_writer(&mut file, snapshot)
+                .context("failed to serialize starvation diagnostic snapshot")?;
+            file.write_all(b"\n").with_context(|| {
+                format!(
+                    "failed to write starvation diagnostic snapshot to: {}",
+                    record_path.display()
+                )
+            })?;
+            file.flush().with_context(|| {
+                format!(
+                    "failed to flush starvation diagnostic snapshot to: {}",
+                    record_path.display()
+                )
+            })?;
+            file.sync_data().with_context(|| {
+                format!(
+                    "failed to persist starvation diagnostic snapshot to: {}",
+                    record_path.display()
+                )
+            })?;
+            Ok(())
+        })();
+
+        let unlock_result = fs2::FileExt::unlock(&file).with_context(|| {
+            format!(
+                "failed to unlock starvation diagnostics file: {}",
+                record_path.display()
+            )
+        });
+
+        write_result?;
+        unlock_result?;
+
+        tracing::debug!(
+            record_path = %record_path.display(),
+            target_workspace = %snapshot.target_workspace,
+            open_bead_count = snapshot.open_beads.len(),
+            "Wrote starvation diagnostic snapshot"
+        );
         Ok(())
     }
 }
@@ -948,6 +1310,32 @@ impl super::Strand for PluckStrand {
                     excluded_count: stats.excluded_count,
                     candidate_exclusion_reasons: stats.exclusion_reasons.clone(),
                 });
+
+            // Persist a point-in-time snapshot whenever the inventory proves
+            // that open work remained.  This is intentionally outside the
+            // starvation-alert-bead branch: a dependency-only inventory is
+            // still valuable evidence, even when it is not actionable
+            // starvation and no alert bead is created.
+            if self.persistent_starvation_records && stats.open_count > 0 {
+                if let Some(beads) = all_beads.as_deref() {
+                    let snapshot = starvation_diagnostic_snapshot(
+                        beads,
+                        &stats,
+                        &self.exclude_labels,
+                        exclusions,
+                        self.telemetry.worker_id(),
+                        relaxation_tier,
+                        self.split_after_failures,
+                    );
+                    if let Err(error) = self.write_starvation_diagnostic(&snapshot) {
+                        tracing::warn!(
+                            error = %error,
+                            target_workspace = %snapshot.target_workspace,
+                            "Failed to write starvation diagnostic snapshot"
+                        );
+                    }
+                }
+            }
 
             // An empty inventory (or an inventory containing only in-progress
             // work) is ordinary idleness, not starvation. Keep the telemetry for
@@ -2640,6 +3028,123 @@ mod tests {
         assert!(
             target_workspace_field.contains(target_workspace_path.to_str().unwrap()),
             "record should reference the target workspace, not the NEEDLE workspace"
+        );
+    }
+
+    #[tokio::test]
+    async fn starvation_diagnostic_snapshot_captures_full_state_and_constraints() {
+        use crate::telemetry::test_utils::TestHelper;
+
+        let helper = TestHelper::new("diagnostic-worker");
+        let needle_workspace = tempfile::tempdir().unwrap();
+
+        let mut assigned = make_bead_with_assignee("assigned-bead", "other-worker");
+        assigned.body = Some("Keep the complete description in the snapshot.".to_string());
+        assigned.labels = vec!["deferred".to_string()];
+
+        let mut dependency_blocked = make_bead_with_labels("dependency-bead", 2, vec!["blocked"]);
+        dependency_blocked.dependencies.push(BrDependency {
+            id: BeadId::from("missing-blocker"),
+            title: "Missing blocker".to_string(),
+            status: "open".to_string(),
+            priority: 1,
+            dependency_type: "blocks".to_string(),
+        });
+
+        // UnfilteredStore models a backend that returns rows from ready() but
+        // fails to apply labels.  Pluck's defensive filter then produces the
+        // zero-candidate path while the inventory still contains both beads.
+        let store = UnfilteredStore {
+            beads: vec![assigned, dependency_blocked],
+        };
+        let strand = PluckStrand::with_persistent_records(
+            vec![],
+            3,
+            helper.telemetry().clone(),
+            needle_workspace.path().to_path_buf(),
+            true,
+        );
+
+        assert!(matches!(
+            strand.evaluate(&store, &HashSet::new()).await,
+            StrandResult::NoWork
+        ));
+
+        let record_path = needle_workspace
+            .path()
+            .join("state")
+            .join("starvation_events.jsonl");
+        let content = std::fs::read_to_string(&record_path).unwrap();
+        let record: serde_json::Value = serde_json::from_str(content.lines().last().unwrap())
+            .expect("diagnostic record should be one valid JSON object per line");
+
+        assert_eq!(record["schema_version"], 1);
+        assert_eq!(record["event"], "pluck.starvation");
+        assert_eq!(record["target_workspace"], "/tmp/test");
+        assert!(record["timestamp"].as_str().is_some());
+        assert_eq!(record["summary"]["candidate_count"], 0);
+        assert_eq!(record["summary"]["open_bead_count"], 2);
+        assert_eq!(record["summary"]["excluded_bead_count"], 2);
+        assert!(record["summary"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("2 open beads remained"));
+
+        let open_beads = record["open_beads"].as_array().unwrap();
+        assert_eq!(open_beads.len(), 2);
+        let assigned_snapshot = open_beads
+            .iter()
+            .find(|bead| bead["id"] == "assigned-bead")
+            .expect("assigned bead should be captured");
+        assert_eq!(assigned_snapshot["status"], "open");
+        assert_eq!(assigned_snapshot["assignee"], "other-worker");
+        assert_eq!(
+            assigned_snapshot["description"],
+            "Keep the complete description in the snapshot."
+        );
+        assert_eq!(assigned_snapshot["labels"], serde_json::json!(["deferred"]));
+        assert!(assigned_snapshot["exclusion_reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| reason == "assignee:other-worker"));
+
+        let dependency_snapshot = open_beads
+            .iter()
+            .find(|bead| bead["id"] == "dependency-bead")
+            .expect("dependency bead should be captured");
+        assert_eq!(
+            dependency_snapshot["dependencies"][0]["id"],
+            "missing-blocker"
+        );
+        assert!(dependency_snapshot["exclusion_reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| reason == "dependency:missing-blocker"));
+
+        assert_eq!(
+            record["worker_constraints"]["exclude_labels"],
+            serde_json::json!(["deferred", "human", "blocked"])
+        );
+        assert_eq!(
+            record["worker_constraints"]["exclude_ids"],
+            serde_json::json!([])
+        );
+        assert_eq!(record["worker_constraints"]["relaxation_tier"], "initial");
+        assert_eq!(record["pluck_parameters"]["split_after_failures"], 3);
+        assert_eq!(
+            record["pluck_parameters"]["candidate_sort_order"],
+            serde_json::json!([
+                "priority ASC",
+                "failure_count ASC",
+                "created_at ASC",
+                "id ASC"
+            ])
+        );
+        assert_eq!(
+            record["summary"]["exclusion_reason_counts"]["dependency:missing-blocker"],
+            1
         );
     }
 
