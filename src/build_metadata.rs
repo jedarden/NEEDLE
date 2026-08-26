@@ -11,6 +11,15 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// The full version string reported by `needle --version`: semver plus the
+/// commit and build timestamp the binary was produced from, with a `-dirty`
+/// marker when the working tree had uncommitted changes.
+///
+/// `CARGO_PKG_VERSION` alone cannot identify a build, because it stays fixed
+/// for the whole window between releases. Every binary built in that window
+/// reports the same version while being different code.
+pub const VERSION_STRING: &str = env!("NEEDLE_VERSION_STRING");
+
 /// Build metadata embedded in the needle binary.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BuildMetadata {

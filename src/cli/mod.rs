@@ -53,7 +53,7 @@ fn sanitize_session_name(name: &str) -> String {
 ///
 /// Deterministic bead processing with explicit outcome paths.
 #[derive(Debug, Parser)]
-#[command(name = "needle", version, about, long_about = None)]
+#[command(name = "needle", version = crate::build_metadata::VERSION_STRING, about, long_about = None)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: CliCommand,
