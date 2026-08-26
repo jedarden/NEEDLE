@@ -1825,7 +1825,7 @@ async fn adapter_validation_happens_before_main_worker_loop() {
     let mut config = Config::default();
     config.agent.default = nonexistent_adapter.to_string();
     config.worker.idle_action = IdleAction::Wait;
-    config.worker.idle_timeout = 10; // 10 second idle timeout
+    config.worker.idle_timeout = 60; // see the timing assertion below
     config.workspace.home = _home_dir.path().to_path_buf();
     // Confine Explore strand to test's tempdir to prevent scanning real user directories
     config.strands.explore.workspace_root = _home_dir.path().to_path_buf();
@@ -1848,13 +1848,22 @@ async fn adapter_validation_happens_before_main_worker_loop() {
         "error should mention the nonexistent adapter"
     );
 
-    // Verify failure was fast, i.e. it did not wait out the 10s idle timeout configured
-    // above. The bound is 5s rather than 2s because worker boot alone measures ~1.8s in
-    // isolation on this hardware -- a 2s bound left ~13% headroom and failed whenever the
-    // suite ran in parallel. 5s still fails decisively if validation slips past the idle
-    // timeout, which is the property under test. See needle-ab52a15a.
+    // Verify failure was fast, i.e. it did not wait out the idle timeout
+    // configured above. The property under test is that adapter validation
+    // runs BEFORE the worker loop, so what matters is that the failure lands
+    // well short of that timeout -- not a precise wall-clock budget.
+    //
+    // This bound was 2s, then 5s (needle-ab52a15a), and still failed in CI at
+    // 5.1s on a 3-CPU container: worker boot alone measures ~1.8s in isolation,
+    // so a 5s bound against a 10s timeout left too little room once the suite
+    // ran under contention. Squeezing the assertion cannot fix that -- it is
+    // pinned by the timeout it is proving it beats.
+    //
+    // Widening BOTH keeps the property intact with real headroom: 20s against a
+    // 60s timeout is the same 1:3 ratio the original 2s:10s intended, and it
+    // still fails decisively if validation ever slips past the idle path.
     assert!(
-        elapsed < std::time::Duration::from_secs(5),
+        elapsed < std::time::Duration::from_secs(20),
         "adapter validation should fail before the idle timeout; took {:?}",
         elapsed
     );
