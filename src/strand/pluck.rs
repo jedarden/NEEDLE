@@ -188,6 +188,14 @@ impl FilteringStats {
         stats.excluded_count = stats.open_count;
         stats
     }
+
+    /// Whether at least one open bead has no unresolved blocking dependency.
+    ///
+    /// Dependency-only queues are waiting for their blockers to finish; they
+    /// are not evidence that Pluck is starving ready work.
+    fn has_unblocked_open_bead(&self) -> bool {
+        self.open_count > self.exclusion_counts.blocked
+    }
 }
 
 fn is_finished_status(status: &str) -> bool {
@@ -1340,87 +1348,101 @@ impl super::Strand for PluckStrand {
             // An empty inventory (or an inventory containing only in-progress
             // work) is ordinary idleness, not starvation. Keep the telemetry for
             // observability, but do not create a self-contradictory alert.
+            //
+            // Only create a starvation alert when at least one open bead has
+            // no blocking dependencies. A dependency-only queue is expected
+            // idleness while the blockers are being worked.
             if stats.open_count > 0 {
-                // Write persistent starvation record to NEEDLE workspace if enabled.
-                if self.persistent_starvation_records {
-                    let reason_summary = stats.exclusion_counts.summary_vec();
-                    if let Err(e) = self.write_starvation_record(
-                        &workspace_path,
-                        stats.open_count,
-                        stats.excluded_count,
-                        &reason_summary,
-                    ) {
-                        tracing::warn!(
-                            error = %e,
-                            "Failed to write persistent starvation record"
-                        );
-                    }
-                }
-
-                // Create or update a starvation alert bead with deduplication.
-                // This prevents creating duplicate starvation beads for the same workspace.
-                // Uses a stable dedup label format: alert:starvation:<workspace>
-                let dedup_label = format!(
-                    "alert:starvation:{}",
-                    sanitize_workspace_name(&workspace_path)
-                );
-
-                // Check if an open starvation bead already exists for this workspace.
-                let existing_starvation_bead = all_beads.as_deref().and_then(|beads| {
-                    beads
-                        .iter()
-                        .filter(|b| {
-                            b.status == crate::types::BeadStatus::Open
-                                && b.labels.iter().any(|l| l == &dedup_label)
-                        })
-                        .min_by_key(|b| &b.created_at)
-                        .map(|b| b.id.clone())
-                });
-
-                let body = starvation_alert_body(&workspace_path, &stats);
-
-                if let Some(existing_id) = existing_starvation_bead {
-                    // Update existing bead by adding a comment with the new stats.
-                    let comment = format!(
-                        "Starvation recurred at {}: {} open, {} excluded; reasons: {}",
-                        Utc::now().to_rfc3339(),
-                        stats.open_count,
-                        stats.excluded_count,
-                        stats.exclusion_counts.summary()
-                    );
-                    // Note: BeadStore doesn't have a add_comment method, so we emit telemetry instead.
+                if !stats.has_unblocked_open_bead() {
                     tracing::info!(
-                        bead_id = %existing_id,
                         workspace = %workspace_path,
-                        "Starvation recurred - would update existing bead with comment: {}",
-                        comment
+                        open_count = stats.open_count,
+                        blocked_count = stats.exclusion_counts.blocked,
+                        reason = "blocked_on_dependencies",
+                        "Skipping starvation alert because every open bead has a blocking dependency"
                     );
                 } else {
-                    // Create a new starvation alert bead with the dedup label.
-                    let title = format!(
-                        "Starvation alert: beads invisible in {}",
-                        workspace_path.rsplit('/').next().unwrap_or("workspace")
-                    );
-                    let labels: Vec<&str> = vec![
-                        "starvation-alert",
-                        &dedup_label,
-                        "human", // Requires human review
-                    ];
+                    // Write persistent starvation record to NEEDLE workspace if enabled.
+                    if self.persistent_starvation_records {
+                        let reason_summary = stats.exclusion_counts.summary_vec();
+                        if let Err(e) = self.write_starvation_record(
+                            &workspace_path,
+                            stats.open_count,
+                            stats.excluded_count,
+                            &reason_summary,
+                        ) {
+                            tracing::warn!(
+                                error = %e,
+                                "Failed to write persistent starvation record"
+                            );
+                        }
+                    }
 
-                    if let Err(e) = store.create_bead(&title, &body, &labels).await {
-                        tracing::warn!(
-                            error = %e,
+                    // Create or update a starvation alert bead with deduplication.
+                    // This prevents creating duplicate starvation beads for the same workspace.
+                    // Uses a stable dedup label format: alert:starvation:<workspace>
+                    let dedup_label = format!(
+                        "alert:starvation:{}",
+                        sanitize_workspace_name(&workspace_path)
+                    );
+
+                    // Check if an open starvation bead already exists for this workspace.
+                    let existing_starvation_bead = all_beads.as_deref().and_then(|beads| {
+                        beads
+                            .iter()
+                            .filter(|b| {
+                                b.status == crate::types::BeadStatus::Open
+                                    && b.labels.iter().any(|l| l == &dedup_label)
+                            })
+                            .min_by_key(|b| &b.created_at)
+                            .map(|b| b.id.clone())
+                    });
+
+                    let body = starvation_alert_body(&workspace_path, &stats);
+
+                    if let Some(existing_id) = existing_starvation_bead {
+                        // Update existing bead by adding a comment with the new stats.
+                        let comment = format!(
+                            "Starvation recurred at {}: {} open, {} excluded; reasons: {}",
+                            Utc::now().to_rfc3339(),
+                            stats.open_count,
+                            stats.excluded_count,
+                            stats.exclusion_counts.summary()
+                        );
+                        // Note: BeadStore doesn't have a add_comment method, so we emit telemetry instead.
+                        tracing::info!(
+                            bead_id = %existing_id,
                             workspace = %workspace_path,
-                            "Failed to create starvation alert bead"
+                            "Starvation recurred - would update existing bead with comment: {}",
+                            comment
                         );
                     } else {
-                        tracing::info!(
-                            workspace = %workspace_path,
-                            open_count = stats.open_count,
-                            excluded_count = stats.excluded_count,
-                            "Created starvation alert bead with dedup label: {}",
-                            dedup_label
+                        // Create a new starvation alert bead with the dedup label.
+                        let title = format!(
+                            "Starvation alert: beads invisible in {}",
+                            workspace_path.rsplit('/').next().unwrap_or("workspace")
                         );
+                        let labels: Vec<&str> = vec![
+                            "starvation-alert",
+                            &dedup_label,
+                            "human", // Requires human review
+                        ];
+
+                        if let Err(e) = store.create_bead(&title, &body, &labels).await {
+                            tracing::warn!(
+                                error = %e,
+                                workspace = %workspace_path,
+                                "Failed to create starvation alert bead"
+                            );
+                        } else {
+                            tracing::info!(
+                                workspace = %workspace_path,
+                                open_count = stats.open_count,
+                                excluded_count = stats.excluded_count,
+                                "Created starvation alert bead with dedup label: {}",
+                                dedup_label
+                            );
+                        }
                     }
                 }
             }
@@ -2219,6 +2241,34 @@ mod tests {
 
         assert_eq!(stats.exclusion_counts.deferred_assignee, 1);
         assert_eq!(stats.exclusion_counts.summary(), "deferred_assignee=1");
+    }
+
+    #[test]
+    fn dependency_only_inventory_has_no_unblocked_open_bead() {
+        let stats = FilteringStats {
+            open_count: 2,
+            exclusion_counts: ExclusionCounts {
+                blocked: 2,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        assert!(!stats.has_unblocked_open_bead());
+    }
+
+    #[test]
+    fn mixed_inventory_has_an_unblocked_open_bead() {
+        let stats = FilteringStats {
+            open_count: 2,
+            exclusion_counts: ExclusionCounts {
+                blocked: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        assert!(stats.has_unblocked_open_bead());
     }
 
     #[test]
