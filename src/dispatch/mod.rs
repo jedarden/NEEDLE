@@ -1205,20 +1205,45 @@ impl Dispatcher {
         let rendered_clone = rendered.clone();
         let child_env_clone = child_env.clone();
         let adapter_name_clone = adapter.name.clone();
+        let input_method_clone = adapter.input_method.clone();
+        let prompt_file_clone = prompt_file.to_path_buf();
         let mut child = spawn_with_etxtbsy_retry_child(
             || {
                 let rendered = rendered_clone.clone();
                 let child_env = child_env_clone.clone();
                 let adapter_name = adapter_name_clone.clone();
+                let input_method = input_method_clone.clone();
+                let prompt_file = prompt_file_clone.clone();
                 async move {
+                    let prompt_stdin = match input_method {
+                        InputMethod::Stdin => {
+                            Some(std::fs::File::open(&prompt_file).map_err(|error| {
+                                std::io::Error::new(
+                                    error.kind(),
+                                    format!(
+                                        "failed to open prompt file for stdin '{}': {error}",
+                                        prompt_file.display()
+                                    ),
+                                )
+                            })?)
+                        }
+                        InputMethod::File { .. } | InputMethod::Args { .. } => None,
+                    };
+
+                    let mut command = tokio::process::Command::new("bash");
+                    command
+                        .arg("-c")
+                        .arg(&rendered)
+                        .stdout(std::process::Stdio::piped())
+                        .stderr(std::process::Stdio::piped())
+                        .envs(&child_env);
+                    if let Some(prompt_stdin) = prompt_stdin {
+                        command.stdin(std::process::Stdio::from(prompt_stdin));
+                    }
+
                     // Safety: setpgid(0,0) is async-signal-safe and idempotent.
                     unsafe {
-                        tokio::process::Command::new("bash")
-                            .arg("-c")
-                            .arg(&rendered)
-                            .stdout(std::process::Stdio::piped())
-                            .stderr(std::process::Stdio::piped())
-                            .envs(&child_env)
+                        command
                             .pre_exec(|| {
                                 libc::setpgid(0, 0);
                                 Ok(())
@@ -3046,6 +3071,28 @@ output_transform: "needle-transform-custom"
 
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.stdout.trim(), "prompt-content-here");
+    }
+
+    #[tokio::test]
+    async fn dispatch_stdin_input_method_delivers_prompt_without_template_redirect() {
+        let mut adapters = HashMap::new();
+        adapters.insert("cat".to_string(), test_adapter("cat", "cat"));
+        let dispatcher = test_dispatcher(adapters);
+        let adapter = dispatcher.adapter("cat").unwrap().clone();
+        let prompt = "prompt delivered through configured stdin";
+
+        let result = dispatcher
+            .dispatch(
+                &BeadId::from("nd-stdin-method"),
+                &test_prompt(prompt),
+                &adapter,
+                Path::new("/tmp"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, prompt);
     }
 
     #[tokio::test]

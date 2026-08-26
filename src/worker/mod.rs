@@ -5529,7 +5529,7 @@ impl Worker {
 
         // Check if we should use SPLIT mode.
         let threshold = self.config.strands.pluck.split_after_failures;
-        if failure_count >= threshold {
+        if split_threshold_reached(failure_count, threshold) {
             tracing::info!(
                 bead_id = %bead.id,
                 failure_count,
@@ -5571,6 +5571,14 @@ impl Worker {
     pub fn request_shutdown(&self) {
         self.shutdown.store(true, Ordering::SeqCst);
     }
+}
+
+/// Return whether automatic split mode should run for a bead.
+///
+/// A zero threshold explicitly disables splitting, matching `PluckConfig` and
+/// the selection strand's behavior.
+fn split_threshold_reached(failure_count: u32, threshold: u32) -> bool {
+    threshold > 0 && failure_count >= threshold
 }
 
 impl Drop for Worker {
@@ -5631,6 +5639,19 @@ mod tests {
     use async_trait::async_trait;
     use std::io::Write;
     use std::sync::Mutex;
+
+    #[test]
+    fn zero_split_threshold_disables_worker_split_mode() {
+        assert!(!split_threshold_reached(0, 0));
+        assert!(!split_threshold_reached(u32::MAX, 0));
+    }
+
+    #[test]
+    fn positive_split_threshold_requires_enough_failures() {
+        assert!(!split_threshold_reached(2, 3));
+        assert!(split_threshold_reached(3, 3));
+        assert!(split_threshold_reached(4, 3));
+    }
 
     // ── Tests for truncate_for_display ──
 
