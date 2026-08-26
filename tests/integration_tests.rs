@@ -7789,9 +7789,18 @@ async fn subprocess_adapter_failure_exits_nonzero() {
         exit_code
     );
 
-    // The failure should be fast (< 5 seconds), not delayed by idle timeouts
+    // The failure must not be delayed by an idle timeout. The regression this
+    // guards is boot() taking the idle-backoff path, which sleeps 60-120s, so
+    // the meaningful distinction is "seconds" vs "at least a minute" -- not a
+    // precise wall-clock budget.
+    //
+    // 5s sat close enough to normal process-spawn time that a loaded machine
+    // tripped it on scheduling noise alone: needle-ci-v050-8sc47 failed at
+    // 5.130087175s inside a 3-CPU container while the same commit passed on an
+    // unloaded box. 20s keeps a 3x margin below the shortest idle backoff and
+    // still fails loudly if boot() ever takes that path again.
     assert!(
-        start_time.elapsed() < Duration::from_secs(5),
+        start_time.elapsed() < Duration::from_secs(20),
         "adapter validation should fail immediately, not after idle timeout; took {:?}",
         start_time.elapsed()
     );
