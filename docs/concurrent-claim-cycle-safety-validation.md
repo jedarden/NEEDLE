@@ -235,10 +235,18 @@ T12    │                 │                │ └─ CLAIMING    │ C on de
 // T3: Worker-B claims (RaceLost)
 ```
 
-**Solution:** 
-1. **Primary:** `claim_auto()` uses server-side atomic selection
-2. **Fallback:** Per-workspace flock serialization + exclusion tracking
-3. **Guard:** Consecutive race_lost counter prevents infinite loops
+**Solution:**
+1. **Selection policy:** the strand waterfall runs first, so Pluck applies its
+   configured excluded-label filter before a bead is selected.
+2. **Claim serialization:** the selected bead is claimed through the
+   per-workspace flock and revision-guarded `claim_one()` path.
+3. **Guard:** consecutive `race_lost` tracking prevents retry loops.
+
+`claim_auto()` is intentionally not used before the waterfall: the current
+backend operation accepts no label predicate, so its server-side selection
+would bypass Pluck and could claim a deferred, human, or blocked bead. It can
+only be restored when the backend exposes an atomic selection interface that
+accepts the same filters as Pluck.
 
 #### ✅ SOLVED: Span Leak Across Await (bf-3uj6i)
 **Problem:** Previous code held `EnteredSpan` guards across `.await` points:
