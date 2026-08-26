@@ -1762,59 +1762,11 @@ impl Worker {
             Some(self.config.workspace.default.as_path()),
         );
 
-        // Try atomic claim_auto first (server-selected bead in one transaction).
-        // This eliminates the race condition where two workers both see the same
-        // bead in ready() and race to claim it.
-        let strand = "auto";
-        let claim = self.claimer.claim_auto(&self.qualified_id(), strand).await;
-
-        match claim {
-            Ok(ClaimResult::Claimed(bead)) => {
-                tracing::info!(bead_id = %bead.id, "atomically claimed bead via claim_auto");
-                let workspace = if is_workspace_unset(&bead.workspace) {
-                    self.current_workspace.clone()
-                } else {
-                    bead.workspace.clone()
-                };
-                if !is_workspace_unset(&workspace) {
-                    self.telemetry.set_workspace(workspace);
-                }
-                crate::hoop_hooks::emit_needle_event(
-                    &self.current_workspace,
-                    &self.worker_name,
-                    Some(bead.id.as_ref()),
-                    Some(strand),
-                    "claim",
-                    serde_json::json!({}),
-                );
-                self.current_bead = Some(bead);
-                self.current_strand = Some(strand.to_string());
-                self.health.update_strand(Some(strand));
-                self.consecutive_race_lost = 0;
-                self.set_state(WorkerState::Building)?;
-                return Ok(());
-            }
-            Ok(ClaimResult::NotClaimable { reason }) => {
-                tracing::debug!(
-                    reason,
-                    "claim_auto returned no beads, falling back to strand waterfall"
-                );
-                // Fall through to strand waterfall
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "claim_auto failed, falling back to strand waterfall");
-                // Fall through to strand waterfall
-            }
-            Ok(other) => {
-                tracing::warn!(
-                    ?other,
-                    "claim_auto returned unexpected result, falling back to strand waterfall"
-                );
-                // Fall through to strand waterfall
-            }
-        }
-
-        // Fallback: run strand waterfall to find a candidate bead.
+        // Select through the strand waterfall before claiming. The backend's
+        // atomic `claim_auto` operation has no excluded-label predicate, so
+        // calling it first bypasses Pluck's deferred/human/blocked policy.
+        // `do_claim` uses the existing revision-guarded, flock-serialized
+        // claim path after Pluck has applied the configured filters.
         let exclusions = self.current_exclusions();
         let candidate = self
             .strands
@@ -7092,10 +7044,39 @@ mod tests {
         worker.boot().unwrap();
 
         worker.do_select().await.unwrap();
-        // With claim_auto, successful claim transitions directly to Building
-        // (skips Claiming state which was used in the old two-phase select/claim flow)
-        assert_eq!(*worker.state(), WorkerState::Building);
+        assert_eq!(*worker.state(), WorkerState::Claiming);
         assert!(worker.current_bead.is_some());
+    }
+
+    #[tokio::test]
+    async fn do_select_applies_pluck_label_filters_before_claiming() {
+        let mut deferred = make_test_bead("needle-deferred");
+        deferred.labels = vec!["deferred".to_string()];
+        let eligible = make_test_bead("needle-eligible");
+        let store = Arc::new(MockStore::new(vec![deferred.clone(), eligible.clone()]));
+        let mut worker = make_worker(store.clone());
+        worker.boot().unwrap();
+
+        worker.do_select().await.unwrap();
+
+        assert_eq!(*worker.state(), WorkerState::Claiming);
+        assert_eq!(
+            worker.current_bead.as_ref().map(|bead| &bead.id),
+            Some(&eligible.id),
+            "Pluck must select an eligible bead rather than bypass its label filters"
+        );
+
+        worker.do_claim().await.unwrap();
+
+        assert_eq!(*worker.state(), WorkerState::Building);
+        assert_eq!(
+            store.show(&deferred.id).await.unwrap().status,
+            BeadStatus::Open
+        );
+        assert_eq!(
+            store.show(&eligible.id).await.unwrap().status,
+            BeadStatus::InProgress
+        );
     }
 
     #[tokio::test]
