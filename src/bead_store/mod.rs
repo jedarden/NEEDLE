@@ -1221,6 +1221,15 @@ pub trait BeadStore: Send + Sync {
     /// path from `ready()` to avoid v1's false-positive bug.
     async fn list_all(&self) -> Result<Vec<Bead>>;
 
+    /// List the complete inventory with any backend-specific metadata needed
+    /// to explain why the ready frontier omitted beads.
+    ///
+    /// The default is the ordinary full projection. Backends may override it
+    /// when their list projection omits readiness facts such as manual blocks.
+    async fn starvation_inventory(&self) -> Result<Vec<Bead>> {
+        self.list_all().await
+    }
+
     /// Fetch a single bead by ID.
     async fn show(&self, id: &BeadId) -> Result<Bead>;
 

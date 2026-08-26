@@ -13,12 +13,54 @@ use crate::types::{Bead, BeadId, StrandError, StrandResult};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{atomic::AtomicUsize, atomic::Ordering, Mutex};
 
 /// Default labels excluded from Pluck selection when not configured.
 const DEFAULT_EXCLUDE_LABELS: &[&str] = &["deferred", "human", "blocked"];
+
+/// Counts of the high-level reasons an open bead was not claimable.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ExclusionCounts {
+    /// Beads with an unfinished `blocks` dependency.
+    blocked: usize,
+    /// Beads explicitly blocked by an operator (or the equivalent label).
+    manual_blocked: usize,
+    /// Beads carrying a human-owned or otherwise human-review exclusion label.
+    human: usize,
+    /// Beads deferred by status/label or held by an existing assignee.
+    deferred_assignee: usize,
+}
+
+impl ExclusionCounts {
+    /// Render non-zero counts in a stable order for the alert body.
+    fn summary(&self) -> String {
+        let mut reasons = Vec::new();
+        if self.blocked > 0 {
+            reasons.push(format!("blocked={}", self.blocked));
+        }
+        if self.manual_blocked > 0 {
+            reasons.push(format!("manual_blocked={}", self.manual_blocked));
+        }
+        if self.human > 0 {
+            reasons.push(format!("human={}", self.human));
+        }
+        if self.deferred_assignee > 0 {
+            reasons.push(format!("deferred_assignee={}", self.deferred_assignee));
+        }
+        if reasons.is_empty() {
+            "none identified".to_string()
+        } else {
+            reasons.join(", ")
+        }
+    }
+
+    /// Return the same summary as a list for persistent JSONL records.
+    fn summary_vec(&self) -> Vec<String> {
+        self.summary().split(", ").map(str::to_string).collect()
+    }
+}
 
 /// Statistics collected during candidate filtering for starvation telemetry.
 #[derive(Debug, Default)]
@@ -29,6 +71,147 @@ struct FilteringStats {
     excluded_count: usize,
     /// Aggregated reasons why candidates were excluded.
     exclusion_reasons: Vec<String>,
+    /// Counts used to explain starvation in the human-facing alert.
+    exclusion_counts: ExclusionCounts,
+}
+
+impl FilteringStats {
+    /// Build starvation metadata from the complete bead inventory.
+    ///
+    /// `ready()` intentionally returns only the candidate frontier, so it cannot
+    /// explain beads omitted by dependency, manual-block, or label predicates.
+    /// This inventory pass is the equivalent of joining those predicates back to
+    /// the full issue set. Dependency edges from bead-rs are lean and only carry
+    /// the blocker ID/kind, so blocker status is resolved from the inventory map.
+    fn from_inventory(beads: &[Bead], exclude_labels: &[String]) -> Self {
+        let finished_by_id: HashMap<BeadId, bool> = beads
+            .iter()
+            .map(|bead| (bead.id.clone(), bead.status.is_done()))
+            .collect();
+        let mut stats = Self::default();
+
+        for bead in beads {
+            // In-progress beads are already being worked and must not turn an
+            // empty ready frontier into a starvation alert. Done/closed beads
+            // are not open work either. Blocked and deferred are retained as
+            // open work because they are precisely the exclusions we report.
+            if bead.status.is_done() || matches!(bead.status, crate::types::BeadStatus::InProgress)
+            {
+                continue;
+            }
+
+            stats.open_count += 1;
+
+            if bead.dependencies.iter().any(|dependency| {
+                let is_blocking = dependency.dependency_type.is_empty()
+                    || dependency.dependency_type.eq_ignore_ascii_case("blocks");
+                if !is_blocking {
+                    return false;
+                }
+
+                match finished_by_id.get(&dependency.id) {
+                    Some(finished) => !finished,
+                    // A missing blocker cannot be proven complete. Count it so
+                    // the alert remains useful for partially synced stores.
+                    None => !is_finished_status(&dependency.status),
+                }
+            }) {
+                stats.exclusion_counts.blocked += 1;
+            }
+
+            if matches!(bead.status, crate::types::BeadStatus::Blocked)
+                || bead.labels.iter().any(|label| is_manual_block_label(label))
+            {
+                stats.exclusion_counts.manual_blocked += 1;
+            }
+
+            if bead
+                .labels
+                .iter()
+                .any(|label| is_human_like_label(label, exclude_labels))
+            {
+                stats.exclusion_counts.human += 1;
+            }
+
+            if matches!(bead.status, crate::types::BeadStatus::Deferred)
+                || bead.labels.iter().any(|label| is_deferred_label(label))
+                || bead.assignee.is_some()
+            {
+                stats.exclusion_counts.deferred_assignee += 1;
+            }
+        }
+
+        // This helper is called only after the final candidate list is empty;
+        // therefore every open bead in the inventory is excluded from work.
+        stats.excluded_count = stats.open_count;
+        stats
+    }
+}
+
+fn is_finished_status(status: &str) -> bool {
+    matches!(
+        status.trim().to_ascii_lowercase().as_str(),
+        "closed" | "completed" | "done"
+    )
+}
+
+fn normalized_label(label: &str) -> String {
+    label.trim().to_ascii_lowercase()
+}
+
+fn is_manual_block_label(label: &str) -> bool {
+    matches!(
+        normalized_label(label).as_str(),
+        "blocked" | "manual_blocked" | "manual-blocked" | "blocked:manual"
+    )
+}
+
+fn is_deferred_label(label: &str) -> bool {
+    let label = normalized_label(label);
+    label == "deferred" || label.starts_with("deferred:")
+}
+
+fn is_human_like_label(label: &str, exclude_labels: &[String]) -> bool {
+    let label = normalized_label(label);
+    if is_deferred_label(&label) || is_manual_block_label(&label) {
+        return false;
+    }
+
+    label == "human"
+        || label.starts_with("human:")
+        || label == "human-owned"
+        || label == "owner:human"
+        || exclude_labels.iter().any(|excluded| {
+            normalized_label(excluded) == label
+                && !is_deferred_label(excluded)
+                && !is_manual_block_label(excluded)
+        })
+}
+
+fn workspace_from_inventory(beads: &[Bead]) -> String {
+    beads
+        .iter()
+        .filter_map(|bead| bead.workspace.to_str())
+        .map(str::trim)
+        .find(|workspace| !workspace.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn starvation_alert_body(workspace_path: &str, stats: &FilteringStats) -> String {
+    format!(
+        "Pluck found no candidates but open beads exist.\n\n\
+         **Workspace:** {}\n\
+         **Open beads:** {}\n\
+         **Excluded beads:** {}\n\
+         **Exclusion reasons:** {}\n\n\
+         **Timestamp:** {}",
+        workspace_path,
+        stats.open_count,
+        stats.excluded_count,
+        stats.exclusion_counts.summary(),
+        Utc::now().to_rfc3339()
+    )
 }
 
 /// Persistent starvation record written to NEEDLE workspace.
@@ -574,17 +757,39 @@ impl super::Strand for PluckStrand {
         *self.last_exclusion_reasons.lock().unwrap() = stats.exclusion_reasons.clone();
 
         if candidates.is_empty() {
-            // Extract workspace path from store for telemetry.
-            // All beads in a single store should have the same workspace.
-            // Follow KnotStrand pattern (src/strand/knot.rs lines 224-233).
-            let workspace_path = if let Ok(beads) = store.list_all().await {
-                beads
-                    .first()
-                    .and_then(|b| b.workspace.to_str().map(|s| s.to_string()))
-                    .unwrap_or_else(|| "unknown".to_string())
-            } else {
-                "unknown".to_string()
+            // The ready query only contains the candidate frontier. Re-read the
+            // complete inventory so starvation metadata reflects the beads that
+            // were omitted by readiness predicates as well.
+            let all_beads = match store.starvation_inventory().await {
+                Ok(beads) => Some(beads),
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "Unable to load full bead inventory for starvation metadata"
+                    );
+                    None
+                }
             };
+
+            let workspace_path = all_beads
+                .as_deref()
+                .map(workspace_from_inventory)
+                .unwrap_or_else(|| "unknown".to_string());
+
+            if let Some(beads) = all_beads.as_deref() {
+                let inventory_stats = FilteringStats::from_inventory(beads, &self.exclude_labels);
+                stats.open_count = inventory_stats.open_count;
+                stats.excluded_count = inventory_stats.excluded_count;
+                stats.exclusion_counts = inventory_stats.exclusion_counts;
+            }
+
+            // Refresh the strand's observable statistics after the inventory
+            // pass, rather than exposing the ready-query count.
+            self.last_open_count
+                .store(stats.open_count, Ordering::Relaxed);
+            self.last_excluded_count
+                .store(stats.excluded_count, Ordering::Relaxed);
+            *self.last_exclusion_reasons.lock().unwrap() = stats.exclusion_reasons.clone();
 
             // Emit PluckStarvationDetected telemetry event with filtering statistics.
             let _ = self
@@ -596,98 +801,91 @@ impl super::Strand for PluckStrand {
                     candidate_exclusion_reasons: stats.exclusion_reasons.clone(),
                 });
 
-            // Write persistent starvation record to NEEDLE workspace if enabled.
-            if self.persistent_starvation_records {
-                if let Err(e) = self.write_starvation_record(
-                    &workspace_path,
-                    stats.open_count,
-                    stats.excluded_count,
-                    &stats.exclusion_reasons,
-                ) {
-                    tracing::warn!(
-                        error = %e,
-                        "Failed to write persistent starvation record"
-                    );
+            // An empty inventory (or an inventory containing only in-progress
+            // work) is ordinary idleness, not starvation. Keep the telemetry for
+            // observability, but do not create a self-contradictory alert.
+            if stats.open_count > 0 {
+                // Write persistent starvation record to NEEDLE workspace if enabled.
+                if self.persistent_starvation_records {
+                    let reason_summary = stats.exclusion_counts.summary_vec();
+                    if let Err(e) = self.write_starvation_record(
+                        &workspace_path,
+                        stats.open_count,
+                        stats.excluded_count,
+                        &reason_summary,
+                    ) {
+                        tracing::warn!(
+                            error = %e,
+                            "Failed to write persistent starvation record"
+                        );
+                    }
                 }
-            }
 
-            // Create or update a starvation alert bead with deduplication.
-            // This prevents creating duplicate starvation beads for the same workspace.
-            // Uses a stable dedup label format: alert:starvation:<workspace>
-            let dedup_label = format!(
-                "alert:starvation:{}",
-                sanitize_workspace_name(&workspace_path)
-            );
-
-            // Check if an open starvation bead already exists for this workspace.
-            let existing_starvation_bead = if let Ok(all_beads) = store.list_all().await {
-                all_beads
-                    .iter()
-                    .filter(|b| {
-                        b.status == crate::types::BeadStatus::Open
-                            && b.labels.iter().any(|l| l == &dedup_label)
-                    })
-                    .min_by_key(|b| &b.created_at)
-                    .map(|b| b.id.clone())
-            } else {
-                None
-            };
-
-            let body = format!(
-                "Pluck found no candidates but open beads exist.\n\n\
-                 **Workspace:** {}\n\
-                 **Open beads:** {}\n\
-                 **Excluded beads:** {}\n\
-                 **Exclusion reasons:** {}\n\n\
-                 **Timestamp:** {}",
-                workspace_path,
-                stats.open_count,
-                stats.excluded_count,
-                stats.exclusion_reasons.join(", "),
-                Utc::now().to_rfc3339()
-            );
-
-            if let Some(existing_id) = existing_starvation_bead {
-                // Update existing bead by adding a comment with the new stats.
-                let comment = format!(
-                    "Starvation recurred at {}: {} open, {} excluded",
-                    Utc::now().to_rfc3339(),
-                    stats.open_count,
-                    stats.excluded_count
+                // Create or update a starvation alert bead with deduplication.
+                // This prevents creating duplicate starvation beads for the same workspace.
+                // Uses a stable dedup label format: alert:starvation:<workspace>
+                let dedup_label = format!(
+                    "alert:starvation:{}",
+                    sanitize_workspace_name(&workspace_path)
                 );
-                // Note: BeadStore doesn't have a add_comment method, so we emit telemetry instead.
-                tracing::info!(
-                    bead_id = %existing_id,
-                    workspace = %workspace_path,
-                    "Starvation recurred - would update existing bead with comment: {}",
-                    comment
-                );
-            } else {
-                // Create a new starvation alert bead with the dedup label.
-                let title = format!(
-                    "Starvation alert: beads invisible in {}",
-                    workspace_path.rsplit('/').next().unwrap_or("workspace")
-                );
-                let labels: Vec<&str> = vec![
-                    "starvation-alert",
-                    &dedup_label,
-                    "human", // Requires human review
-                ];
 
-                if let Err(e) = store.create_bead(&title, &body, &labels).await {
-                    tracing::warn!(
-                        error = %e,
+                // Check if an open starvation bead already exists for this workspace.
+                let existing_starvation_bead = all_beads.as_deref().and_then(|beads| {
+                    beads
+                        .iter()
+                        .filter(|b| {
+                            b.status == crate::types::BeadStatus::Open
+                                && b.labels.iter().any(|l| l == &dedup_label)
+                        })
+                        .min_by_key(|b| &b.created_at)
+                        .map(|b| b.id.clone())
+                });
+
+                let body = starvation_alert_body(&workspace_path, &stats);
+
+                if let Some(existing_id) = existing_starvation_bead {
+                    // Update existing bead by adding a comment with the new stats.
+                    let comment = format!(
+                        "Starvation recurred at {}: {} open, {} excluded; reasons: {}",
+                        Utc::now().to_rfc3339(),
+                        stats.open_count,
+                        stats.excluded_count,
+                        stats.exclusion_counts.summary()
+                    );
+                    // Note: BeadStore doesn't have a add_comment method, so we emit telemetry instead.
+                    tracing::info!(
+                        bead_id = %existing_id,
                         workspace = %workspace_path,
-                        "Failed to create starvation alert bead"
+                        "Starvation recurred - would update existing bead with comment: {}",
+                        comment
                     );
                 } else {
-                    tracing::info!(
-                        workspace = %workspace_path,
-                        open_count = stats.open_count,
-                        excluded_count = stats.excluded_count,
-                        "Created starvation alert bead with dedup label: {}",
-                        dedup_label
+                    // Create a new starvation alert bead with the dedup label.
+                    let title = format!(
+                        "Starvation alert: beads invisible in {}",
+                        workspace_path.rsplit('/').next().unwrap_or("workspace")
                     );
+                    let labels: Vec<&str> = vec![
+                        "starvation-alert",
+                        &dedup_label,
+                        "human", // Requires human review
+                    ];
+
+                    if let Err(e) = store.create_bead(&title, &body, &labels).await {
+                        tracing::warn!(
+                            error = %e,
+                            workspace = %workspace_path,
+                            "Failed to create starvation alert bead"
+                        );
+                    } else {
+                        tracing::info!(
+                            workspace = %workspace_path,
+                            open_count = stats.open_count,
+                            excluded_count = stats.excluded_count,
+                            "Created starvation alert bead with dedup label: {}",
+                            dedup_label
+                        );
+                    }
                 }
             }
 
@@ -717,7 +915,7 @@ impl super::Strand for PluckStrand {
 mod tests {
     use super::*;
     use crate::bead_store::RepairReport;
-    use crate::types::{BeadId, BeadStatus, ClaimResult};
+    use crate::types::{BeadId, BeadStatus, BrDependency, ClaimResult};
 
     use anyhow::Result;
     use chrono::{TimeZone, Utc};
@@ -1402,6 +1600,74 @@ mod tests {
         assert_eq!(strand.exclude_labels, vec!["custom"]);
     }
 
+    #[test]
+    fn starvation_inventory_counts_dependency_and_manual_exclusions() {
+        let blocker = make_bead("blocker", 1, "2026-01-01 00:00:00");
+        let mut dependency_blocked = make_bead("dependency-blocked", 1, "2026-01-01 00:00:00");
+        dependency_blocked.dependencies.push(BrDependency {
+            id: blocker.id.clone(),
+            title: String::new(),
+            status: String::new(),
+            priority: 1,
+            dependency_type: "blocks".to_string(),
+        });
+
+        let manual_blocked = make_bead_with_status("manual-blocked", 1, BeadStatus::Blocked);
+        let human = make_bead_with_labels("human", 1, vec!["human-owned"]);
+        let deferred = make_bead_with_labels("deferred", 1, vec!["deferred"]);
+
+        let stats = FilteringStats::from_inventory(
+            &[blocker, dependency_blocked, manual_blocked, human, deferred],
+            &DEFAULT_EXCLUDE_LABELS
+                .iter()
+                .map(|label| (*label).to_string())
+                .collect::<Vec<_>>(),
+        );
+
+        assert_eq!(stats.open_count, 5);
+        assert_eq!(stats.excluded_count, 5);
+        assert_eq!(stats.exclusion_counts.blocked, 1);
+        assert_eq!(stats.exclusion_counts.manual_blocked, 1);
+        assert_eq!(stats.exclusion_counts.human, 1);
+        assert_eq!(stats.exclusion_counts.deferred_assignee, 1);
+        assert_eq!(
+            stats.exclusion_counts.summary(),
+            "blocked=1, manual_blocked=1, human=1, deferred_assignee=1"
+        );
+    }
+
+    #[test]
+    fn starvation_inventory_counts_assigned_beads_as_deferred_assignees() {
+        let assigned = make_bead_with_assignee("assigned", "old-worker");
+        let stats = FilteringStats::from_inventory(&[assigned], &[]);
+
+        assert_eq!(stats.exclusion_counts.deferred_assignee, 1);
+        assert_eq!(stats.exclusion_counts.summary(), "deferred_assignee=1");
+    }
+
+    #[test]
+    fn starvation_alert_body_contains_counted_exclusion_reasons() {
+        let stats = FilteringStats {
+            open_count: 2,
+            excluded_count: 2,
+            exclusion_counts: ExclusionCounts {
+                blocked: 1,
+                manual_blocked: 1,
+                human: 1,
+                deferred_assignee: 1,
+            },
+            ..Default::default()
+        };
+
+        let body = starvation_alert_body("/workspace", &stats);
+
+        assert!(body.contains("**Open beads:** 2"));
+        assert!(body.contains("**Excluded beads:** 2"));
+        assert!(body.contains(
+            "**Exclusion reasons:** blocked=1, manual_blocked=1, human=1, deferred_assignee=1"
+        ));
+    }
+
     // ──────────────────────────────────────────────────────────────────────────
     // Split trigger tests
     // ──────────────────────────────────────────────────────────────────────────
@@ -1786,16 +2052,16 @@ mod tests {
             panic!("workspace field missing from starvation event");
         }
 
-        // Verify open_count - should be 3 (all beads returned by store)
+        // Verify open_count - should be 0 (in-progress beads are not open work)
         if let Some(open_count) = event.data.get("open_count") {
-            assert_eq!(open_count.as_u64(), Some(3));
+            assert_eq!(open_count.as_u64(), Some(0));
         } else {
             panic!("open_count field missing from starvation event");
         }
 
-        // Verify excluded_count - should be 3 (all excluded due to InProgress status)
+        // Verify excluded_count - should be 0 (there are no open beads to exclude)
         if let Some(excluded_count) = event.data.get("excluded_count") {
-            assert_eq!(excluded_count.as_u64(), Some(3));
+            assert_eq!(excluded_count.as_u64(), Some(0));
         } else {
             panic!("excluded_count field missing from starvation event");
         }
@@ -2313,8 +2579,8 @@ mod tests {
         let starvation_event = helper
             .find_event("strand.pluck.starvation_detected")
             .unwrap();
-        assert_eq!(starvation_event.data["open_count"], 3);
-        assert_eq!(starvation_event.data["excluded_count"], 3);
+        assert_eq!(starvation_event.data["open_count"], 2);
+        assert_eq!(starvation_event.data["excluded_count"], 2);
 
         // Verify exclusion reasons contain assignee and status exclusions
         let reasons = starvation_event.data["candidate_exclusion_reasons"]

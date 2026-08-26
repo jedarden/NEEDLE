@@ -323,6 +323,63 @@ impl CliBeadStore {
             }),
         }
     }
+
+    /// Add the bead-rs manual-block marker to the common bead projection.
+    ///
+    /// bead-rs deliberately keeps `manual_blocked` separate from the base
+    /// `status` in `list --json`, while `why --json` exposes the effective
+    /// blocking flag.  Pluck's starvation pass needs that flag when it joins
+    /// the full inventory back to the ready frontier.  Represent it as an
+    /// internal label so the common `Bead` model remains compatible with both
+    /// backends and existing callers.
+    async fn enrich_manual_block_labels(&self, beads: &mut [Bead]) {
+        if self.backend.name != "bead-rs" {
+            return;
+        }
+
+        for bead in beads.iter_mut() {
+            if bead.status != BeadStatus::Open {
+                continue;
+            }
+
+            let args = vec![
+                "why".to_string(),
+                "--id".to_string(),
+                bead.id.to_string(),
+                "--json".to_string(),
+            ];
+            let output = match self.run_argv("why", &args, DEFAULT_TIMEOUT_SECS).await {
+                Ok(output) => output,
+                Err(error) => {
+                    tracing::debug!(
+                        bead_id = %bead.id,
+                        error = %error,
+                        "Unable to inspect bead-rs manual block flag"
+                    );
+                    continue;
+                }
+            };
+
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(output.trim()) else {
+                tracing::debug!(
+                    bead_id = %bead.id,
+                    "bead-rs why response was not JSON"
+                );
+                continue;
+            };
+            let value = value
+                .as_array()
+                .and_then(|items| items.first())
+                .unwrap_or(&value);
+            if value
+                .get("manual_blocked")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                bead.labels.push("manual_blocked".to_string());
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -375,6 +432,19 @@ impl BeadStore for CliBeadStore {
         let values = HashMap::from([("limit", limit.to_string())]);
         let stdout = self.run_operation("list_all", &values).await?;
         self.parse_beads("list_all", &stdout)
+    }
+
+    async fn starvation_inventory(&self) -> Result<Vec<Bead>> {
+        let limit = if self.has_quirk("limit_zero_returns_empty_set") {
+            "999999"
+        } else {
+            "0"
+        };
+        let values = HashMap::from([("limit", limit.to_string())]);
+        let stdout = self.run_operation("list_all", &values).await?;
+        let mut beads = self.parse_beads("list_all", &stdout)?;
+        self.enrich_manual_block_labels(&mut beads).await;
+        Ok(beads)
     }
 
     async fn show(&self, id: &BeadId) -> Result<Bead> {
