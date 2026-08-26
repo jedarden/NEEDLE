@@ -20,6 +20,48 @@ use std::sync::{atomic::AtomicUsize, atomic::Ordering, Mutex};
 /// Default labels excluded from Pluck selection when not configured.
 const DEFAULT_EXCLUDE_LABELS: &[&str] = &["deferred", "human", "blocked"];
 
+/// Constraint relaxation level used when the normal ready query is empty.
+///
+/// The current bead-store abstraction does not expose a separate priority
+/// predicate, but keeping that level explicit makes the fallback observable
+/// and gives backends that do have one a stable place to add it later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RelaxationTier {
+    Initial,
+    WorkerLabels,
+    Priority,
+    StatusOnly,
+}
+
+impl RelaxationTier {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Initial => "initial",
+            Self::WorkerLabels => "worker-labels",
+            Self::Priority => "priority",
+            Self::StatusOnly => "status-only",
+        }
+    }
+
+    fn dropped_constraints(self) -> &'static [&'static str] {
+        match self {
+            Self::Initial => &[],
+            Self::WorkerLabels => &["worker label constraints"],
+            Self::Priority => &["worker label constraints", "priority constraints"],
+            Self::StatusOnly => &[
+                "worker label constraints",
+                "priority constraints",
+                "readiness constraints",
+                "assignee constraints",
+            ],
+        }
+    }
+
+    fn ignores_labels(self) -> bool {
+        !matches!(self, Self::Initial)
+    }
+}
+
 /// Counts of the high-level reasons an open bead was not claimable.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct ExclusionCounts {
@@ -338,6 +380,113 @@ impl PluckStrand {
         }
     }
 
+    /// Query for work, progressively relaxing constraints when the ready
+    /// frontier is empty.
+    ///
+    /// The first retry drops configured worker-label exclusions. The second
+    /// retry also drops any priority predicate (the current `Filters` type has
+    /// no priority field, but the tier is retained for backend/config parity).
+    /// The final retry reads the complete inventory and accepts only beads
+    /// whose status is `open`.
+    async fn query_with_relaxation(
+        &self,
+        store: &dyn BeadStore,
+    ) -> Result<(Vec<Bead>, RelaxationTier)> {
+        let initial_filters = Filters {
+            assignee: None,
+            exclude_labels: self.exclude_labels.clone(),
+            exclude_ids: HashSet::new(),
+        };
+
+        tracing::debug!(
+            filters = ?initial_filters,
+            "Querying bead store for ready candidates"
+        );
+        tracing::info!(
+            tier = RelaxationTier::Initial.name(),
+            assignee = ?initial_filters.assignee,
+            exclude_labels = ?initial_filters.exclude_labels,
+            exclude_ids_count = initial_filters.exclude_ids.len(),
+            dropped_constraints = ?RelaxationTier::Initial.dropped_constraints(),
+            "Executing Pluck query with filters"
+        );
+
+        let candidates = store.ready(&initial_filters).await?;
+        tracing::debug!(
+            tier = RelaxationTier::Initial.name(),
+            count = candidates.len(),
+            "Bead store returned candidates"
+        );
+        if !candidates.is_empty() {
+            return Ok((candidates, RelaxationTier::Initial));
+        }
+
+        let relaxed_filters = Filters {
+            assignee: None,
+            exclude_labels: Vec::new(),
+            exclude_ids: HashSet::new(),
+        };
+
+        for tier in [RelaxationTier::WorkerLabels, RelaxationTier::Priority] {
+            tracing::warn!(
+                tier = tier.name(),
+                dropped_constraints = ?tier.dropped_constraints(),
+                "Pluck query returned no candidates; retrying with relaxed constraints"
+            );
+            tracing::info!(
+                tier = tier.name(),
+                assignee = ?relaxed_filters.assignee,
+                exclude_labels = ?relaxed_filters.exclude_labels,
+                exclude_ids_count = relaxed_filters.exclude_ids.len(),
+                dropped_constraints = ?tier.dropped_constraints(),
+                "Executing Pluck relaxation query"
+            );
+
+            let candidates = store.ready(&relaxed_filters).await?;
+            tracing::debug!(
+                tier = tier.name(),
+                count = candidates.len(),
+                "Bead store returned candidates after relaxation"
+            );
+            if !candidates.is_empty() {
+                tracing::warn!(
+                    tier = tier.name(),
+                    candidate_count = candidates.len(),
+                    dropped_constraints = ?tier.dropped_constraints(),
+                    "Pluck is proceeding with relaxed constraints"
+                );
+                return Ok((candidates, tier));
+            }
+        }
+
+        let tier = RelaxationTier::StatusOnly;
+        tracing::warn!(
+            tier = tier.name(),
+            dropped_constraints = ?tier.dropped_constraints(),
+            "Pluck ready queries returned no candidates; retrying with status=open as the sole filter"
+        );
+        let inventory = store.starvation_inventory().await?;
+        let candidates: Vec<Bead> = inventory
+            .into_iter()
+            .filter(|bead| bead.status == crate::types::BeadStatus::Open)
+            .collect();
+        tracing::debug!(
+            tier = tier.name(),
+            count = candidates.len(),
+            dropped_constraints = ?tier.dropped_constraints(),
+            "Bead store returned candidates after status-only relaxation"
+        );
+        if !candidates.is_empty() {
+            tracing::warn!(
+                tier = tier.name(),
+                candidate_count = candidates.len(),
+                dropped_constraints = ?tier.dropped_constraints(),
+                "Pluck is proceeding with relaxed constraints"
+            );
+        }
+        Ok((candidates, tier))
+    }
+
     /// Extract the failure count from a bead's labels.
     ///
     /// Labels follow the pattern `failure-count:N`. Returns the count if found,
@@ -512,35 +661,10 @@ impl super::Strand for PluckStrand {
             };
         }
 
-        // 1. Query bead store for ready, unassigned beads.
-        let filters = Filters {
-            assignee: None,
-            exclude_labels: self.exclude_labels.clone(),
-            exclude_ids: HashSet::new(),
-        };
-
-        tracing::debug!(
-            filters = ?filters,
-            "Querying bead store for ready candidates"
-        );
-
-        // Log the complete query before execution
-        tracing::info!(
-            assignee = ?filters.assignee,
-            exclude_labels = ?filters.exclude_labels,
-            exclude_ids_count = filters.exclude_ids.len(),
-            "Executing Pluck query with filters"
-        );
-
-        let mut candidates = match store.ready(&filters).await {
-            Ok(beads) => {
-                tracing::debug!(
-                    count = beads.len(),
-                    "Bead store returned {} candidates",
-                    beads.len()
-                );
-                beads
-            }
+        // 1. Query bead store for ready, unassigned beads. If the normal
+        // query is empty, retry through the bounded relaxation waterfall.
+        let (mut candidates, relaxation_tier) = match self.query_with_relaxation(store).await {
+            Ok(result) => result,
             Err(e) => {
                 // Log the full error chain to capture stderr/exit code details.
                 // The Display impl (%e) only shows the top-level message, losing
@@ -559,13 +683,21 @@ impl super::Strand for PluckStrand {
             }
         };
 
+        tracing::debug!(
+            tier = relaxation_tier.name(),
+            dropped_constraints = ?relaxation_tier.dropped_constraints(),
+            count = candidates.len(),
+            "Pluck candidate query completed"
+        );
+
         // Initialize filtering statistics for starvation telemetry.
         let mut stats = FilteringStats {
             open_count: candidates.len(),
             ..Default::default()
         };
 
-        // 2. Filter: remove beads with excluded labels.
+        // 2. Filter: remove beads with excluded labels unless a relaxation
+        // tier explicitly dropped the worker-label constraint.
         //    Defensive guard — store.ready() passes exclude_labels in its Filters,
         //    but the backing CLI may not include label data in every query type.
         //    Filtering here guarantees excluded-label beads are never presented as
@@ -573,16 +705,21 @@ impl super::Strand for PluckStrand {
         //    SELECTING→CLAIMING→RETRYING spin loop observed when br ready --json
         //    omits label fields for some beads.
         let before_label_filter = candidates.len();
+        let label_exclusions = if relaxation_tier.ignores_labels() {
+            &[]
+        } else {
+            self.exclude_labels.as_slice()
+        };
 
         // First pass: collect excluded beads and their reasons for telemetry.
         let excluded_beads: Vec<_> = candidates
             .iter()
-            .filter(|b| b.labels.iter().any(|l| self.exclude_labels.contains(l)))
+            .filter(|b| b.labels.iter().any(|l| label_exclusions.contains(l)))
             .map(|b| {
                 let excluded_labels: Vec<_> = b
                     .labels
                     .iter()
-                    .filter(|l| self.exclude_labels.contains(l))
+                    .filter(|l| label_exclusions.contains(l))
                     .cloned()
                     .collect();
                 (b.id.as_ref().to_string(), excluded_labels)
@@ -590,7 +727,7 @@ impl super::Strand for PluckStrand {
             .collect();
 
         // Second pass: perform the actual filtering.
-        candidates.retain(|b| !b.labels.iter().any(|l| self.exclude_labels.contains(l)));
+        candidates.retain(|b| !b.labels.iter().any(|l| label_exclusions.contains(l)));
         let after_label_filter = candidates.len();
 
         if before_label_filter != after_label_filter {
@@ -600,7 +737,7 @@ impl super::Strand for PluckStrand {
             tracing::debug!(
                 excluded_count = label_excluded_count,
                 remaining = after_label_filter,
-                excluded_labels = ?self.exclude_labels,
+                excluded_labels = ?label_exclusions,
                 "Label filtering excluded {} beads",
                 label_excluded_count
             );
@@ -625,33 +762,44 @@ impl super::Strand for PluckStrand {
             );
         }
 
-        // 3. Filter: remove beads that are actively in_progress (claimed by another worker)
-        //    and Open beads with a stale assignee. These are never claimable — the claimer
-        //    will reject them every time, causing a hot loop.
+        // 3. Apply the normal readiness guards unless the final fallback was
+        // selected. The status-only tier intentionally keeps `status=open` as
+        // its sole filter, including beads with stale assignees.
         let before_status_filter = candidates.len();
 
-        // First pass: collect excluded beads and their reasons for telemetry.
-        let excluded_by_status: Vec<_> = candidates
-            .iter()
-            .filter(|b| {
-                matches!(b.status, crate::types::BeadStatus::InProgress)
-                    || (b.status == crate::types::BeadStatus::Open && b.assignee.is_some())
-            })
-            .map(|b| {
-                let reason = if matches!(b.status, crate::types::BeadStatus::InProgress) {
-                    "status:in_progress".to_string()
-                } else {
-                    format!("assignee:{}", b.assignee.as_ref().unwrap())
-                };
-                (b.id.as_ref().to_string(), reason)
-            })
-            .collect();
+        let excluded_by_status: Vec<_> = if relaxation_tier == RelaxationTier::StatusOnly {
+            candidates
+                .iter()
+                .filter(|b| b.status != crate::types::BeadStatus::Open)
+                .map(|b| (b.id.as_ref().to_string(), format!("status:{}", b.status)))
+                .collect()
+        } else {
+            candidates
+                .iter()
+                .filter(|b| {
+                    matches!(b.status, crate::types::BeadStatus::InProgress)
+                        || (b.status == crate::types::BeadStatus::Open && b.assignee.is_some())
+                })
+                .map(|b| {
+                    let reason = if matches!(b.status, crate::types::BeadStatus::InProgress) {
+                        "status:in_progress".to_string()
+                    } else {
+                        format!("assignee:{}", b.assignee.as_ref().unwrap())
+                    };
+                    (b.id.as_ref().to_string(), reason)
+                })
+                .collect()
+        };
 
         // Second pass: perform the actual filtering.
-        candidates.retain(|b| {
-            !(matches!(b.status, crate::types::BeadStatus::InProgress)
-                || (b.status == crate::types::BeadStatus::Open && b.assignee.is_some()))
-        });
+        if relaxation_tier == RelaxationTier::StatusOnly {
+            candidates.retain(|b| b.status == crate::types::BeadStatus::Open);
+        } else {
+            candidates.retain(|b| {
+                !(matches!(b.status, crate::types::BeadStatus::InProgress)
+                    || (b.status == crate::types::BeadStatus::Open && b.assignee.is_some()))
+            });
+        }
         let after_status_filter = candidates.len();
 
         if before_status_filter != after_status_filter {
@@ -1427,6 +1575,46 @@ mod tests {
             }
             other => panic!("expected BeadFound, got: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn retries_with_worker_labels_relaxed_when_ready_is_empty() {
+        let store = MemoryStore {
+            beads: vec![make_bead_with_labels("human-bead", 1, vec!["human"])],
+        };
+
+        let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()));
+        let result = strand.evaluate(&store, &HashSet::new()).await;
+
+        match result {
+            StrandResult::BeadFound(beads) => {
+                assert_eq!(beads.len(), 1);
+                assert_eq!(beads[0].id.as_ref(), "human-bead");
+            }
+            other => panic!("expected relaxed query to find the bead, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn relaxation_tiers_report_the_constraints_they_drop() {
+        assert!(RelaxationTier::Initial.dropped_constraints().is_empty());
+        assert_eq!(
+            RelaxationTier::WorkerLabels.dropped_constraints(),
+            &["worker label constraints"]
+        );
+        assert_eq!(
+            RelaxationTier::Priority.dropped_constraints(),
+            &["worker label constraints", "priority constraints"]
+        );
+        assert_eq!(
+            RelaxationTier::StatusOnly.dropped_constraints(),
+            &[
+                "worker label constraints",
+                "priority constraints",
+                "readiness constraints",
+                "assignee constraints"
+            ]
+        );
     }
 
     // These tests use UnfilteredStore, which returns all beads from ready()
