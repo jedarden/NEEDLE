@@ -90,8 +90,11 @@ pub enum DownloadToTestingResult {
 /// Check GitHub for the latest release.
 ///
 /// Returns information about the latest release compared to the current version.
+/// Emits telemetry events for the check attempt and outcome.
 pub fn check_for_update() -> Result<UpdateCheck> {
-    check_for_update_with_telemetry(None)
+    // Create a telemetry emitter for this check to ensure events are always emitted
+    let tel = Telemetry::new("upgrade_check".to_string());
+    check_for_update_with_telemetry(Some(&tel))
 }
 
 /// Check GitHub for the latest release with telemetry.
@@ -201,6 +204,8 @@ fn classify_upgrade_error(error: &anyhow::Error) -> String {
 /// testing binary already exists to avoid clobbering an in-flight self-modification
 /// candidate.
 ///
+/// Emits telemetry events for the check attempt and outcome.
+///
 /// # Returns
 ///
 /// - `Ok(Downloaded)` if download succeeded
@@ -208,7 +213,9 @@ fn classify_upgrade_error(error: &anyhow::Error) -> String {
 /// - `Ok(NoUpdateAvailable)` if already at latest version
 /// - `Err` if download failed
 pub fn download_to_testing_channel() -> Result<DownloadToTestingResult> {
-    download_to_testing_channel_with_telemetry(None)
+    // Create a telemetry emitter for this check to ensure events are always emitted
+    let tel = Telemetry::new("download_to_testing".to_string());
+    download_to_testing_channel_with_telemetry(Some(&tel))
 }
 
 /// Download a newer GitHub release to the testing channel with telemetry.
@@ -485,8 +492,11 @@ fn install_transform_binaries(install_dir: &Path, platform_suffix: &str) {
 /// Download and install the latest version of needle.
 ///
 /// Returns the path to the new binary.
+/// Emits telemetry events for all upgrade operations.
 pub fn perform_upgrade() -> Result<PathBuf> {
-    perform_upgrade_with_telemetry(None)
+    // Create a telemetry emitter for this upgrade to ensure events are always emitted
+    let tel = Telemetry::new("upgrade".to_string());
+    perform_upgrade_with_telemetry(Some(&tel))
 }
 
 /// Download and install the latest version of needle with telemetry.
