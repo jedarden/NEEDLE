@@ -2,6 +2,7 @@
 //!
 //! Depends on: nothing (leaf module — only `libc`).
 
+use std::process::Child as StdChild;
 use tokio::process::Child;
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -75,6 +76,66 @@ impl Drop for ProcessGuard {
             // Child was not waited on - kill it to prevent orphaning.
             // Best-effort: ignore errors if already dead.
             let _ = child.start_kill();
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// ProcessGuard (sync)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Guard for a spawned child process that ensures cleanup on drop.
+///
+/// Wraps a `std::process::Child` and provides a `wait()` method. If dropped
+/// before `wait()` is called, the child process is killed to prevent orphaning.
+pub struct ProcessGuardSync {
+    pub(crate) child: Option<StdChild>,
+    pid: u32,
+}
+
+impl ProcessGuardSync {
+    /// Create a new ProcessGuard from a spawned Child.
+    ///
+    /// # Arguments
+    /// * `child` - The spawned child process to guard
+    pub fn new(child: StdChild) -> Self {
+        let pid = child.id();
+        Self {
+            child: Some(child),
+            pid,
+        }
+    }
+
+    /// Get the process ID.
+    pub fn id(&self) -> u32 {
+        self.pid
+    }
+
+    /// Wait for the child to exit and return its exit status.
+    ///
+    /// This consumes the guard and returns the exit status. After calling this,
+    /// the child is considered reaped and no cleanup will be performed on drop.
+    pub fn wait(mut self) -> std::io::Result<std::process::ExitStatus> {
+        if let Some(mut child) = self.child.take() {
+            child.wait()
+        } else {
+            Err(std::io::Error::other("child already reaped"))
+        }
+    }
+
+    /// Get a mutable reference to the inner child (for operations like start_kill).
+    pub fn get_mut(&mut self) -> Option<&mut StdChild> {
+        self.child.as_mut()
+    }
+}
+
+impl Drop for ProcessGuardSync {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            // Child was not waited on - kill it to prevent orphaning.
+            // Best-effort: ignore errors if already dead.
+            let _ = child.kill();
+            let _ = child.wait();
         }
     }
 }

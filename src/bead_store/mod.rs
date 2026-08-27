@@ -28,6 +28,7 @@ use std::sync::Arc;
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 
+use crate::process_guard::ProcessGuardSync;
 use crate::types::{Bead, BeadId, ClaimResult};
 use tracing::{debug, warn};
 
@@ -124,7 +125,7 @@ fn verify_backend_identity(
             )
         })?;
 
-    let mut child = spawn_with_etxtbsy_retry_sync_child(
+    let child = spawn_with_etxtbsy_retry_sync_child(
         || {
             std::process::Command::new(binary)
                 .args(&descriptor.version_command)
@@ -141,19 +142,33 @@ fn verify_backend_identity(
             binary.display()
         )
     })?;
+    let mut guard = ProcessGuardSync::new(child);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let status = loop {
-        if let Some(status) = child.try_wait().with_context(|| {
-            format!(
-                "failed waiting for bead CLI identity at {}",
-                binary.display()
-            )
-        })? {
-            break status;
+        match guard.get_mut().map(|c| c.try_wait()) {
+            Some(Ok(Some(status))) => {
+                break status;
+            }
+            Some(Ok(None)) => {
+                // Still running, check timeout
+            }
+            Some(Err(e)) => {
+                bail!(
+                    "failed waiting for bead CLI identity at {}: {}",
+                    binary.display(),
+                    e
+                );
+            }
+            None => {
+                bail!("child already consumed");
+            }
         }
         if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
+            // Kill the child process - guard will wait on drop
+            if let Some(child) = guard.get_mut() {
+                let _ = child.kill();
+            }
+            let _ = guard.wait();
             bail!(
                 "timed out verifying bead backend identity for workspace {} at {}",
                 workspace.display(),
@@ -164,10 +179,10 @@ fn verify_backend_identity(
     };
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
-    if let Some(mut stream) = child.stdout.take() {
+    if let Some(mut stream) = guard.get_mut().and_then(|c| c.stdout.take()) {
         stream.read_to_end(&mut stdout)?;
     }
-    if let Some(mut stream) = child.stderr.take() {
+    if let Some(mut stream) = guard.get_mut().and_then(|c| c.stderr.take()) {
         stream.read_to_end(&mut stderr)?;
     }
     let stdout = String::from_utf8_lossy(&stdout);

@@ -32,6 +32,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::process_guard::ProcessGuardSync;
 use crate::util::capture_timestamp;
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -495,8 +496,9 @@ impl TestRunner {
     fn execute_with_timeout(&self, mut cmd: Command) -> Result<Option<Output>> {
         let timeout = Duration::from_secs(self.timeout_secs);
 
-        // Spawn the process
-        let mut child = cmd.spawn().context("failed to spawn cargo test process")?;
+        // Spawn the process with guard
+        let child = cmd.spawn().context("failed to spawn cargo test process")?;
+        let mut guard = ProcessGuardSync::new(child);
 
         // Wait for completion with timeout
         let start = Instant::now();
@@ -505,25 +507,38 @@ impl TestRunner {
             if start.elapsed() > timeout {
                 tracing::error!(timeout_secs = self.timeout_secs, "cargo test timed out");
 
-                // Kill the child process
-                let _ = child.kill();
-                let _ = child.wait();
+                // Kill the child process - guard will wait on drop
+                if let Some(child) = guard.get_mut() {
+                    let _ = child.kill();
+                }
+                let _ = guard.wait();
 
                 return Ok(None);
             }
 
             // Try to wait with a small timeout
-            match child.try_wait() {
-                Ok(Some(_status)) => {
-                    // Process has exited
-                    return Ok(Some(child.wait_with_output()?));
+            match guard.get_mut().map(|c| c.try_wait()) {
+                Some(Ok(Some(_status))) => {
+                    // Process has exited - extract child and get output
+                    // We need to take the child out of the guard to call wait_with_output
+                    let mut child_option = None;
+                    std::mem::swap(&mut child_option, &mut guard.child);
+                    if let Some(child) = child_option {
+                        return Ok(Some(child.wait_with_output()?));
+                    }
+                    return Err(anyhow::anyhow!("child already consumed"))
+                        .context("failed to wait for cargo test process");
                 }
-                Ok(None) => {
+                Some(Ok(None)) => {
                     // Still running, sleep a bit and retry
                     std::thread::sleep(Duration::from_millis(100));
                 }
-                Err(e) => {
+                Some(Err(e)) => {
                     return Err(anyhow::anyhow!("error waiting for cargo test: {}", e))
+                        .context("failed to wait for cargo test process");
+                }
+                None => {
+                    return Err(anyhow::anyhow!("child already consumed"))
                         .context("failed to wait for cargo test process");
                 }
             }

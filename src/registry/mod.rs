@@ -17,6 +17,9 @@ use chrono::{DateTime, Utc};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
+#[allow(unused_imports)]
+use crate::process_guard::ProcessGuardSync;
+
 // ──────────────────────────────────────────────────────────────────────────────
 // PID liveness checking (platform-specific)
 // ──────────────────────────────────────────────────────────────────────────────
@@ -765,10 +768,11 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn is_pid_alive_returns_false_for_a_zombie() {
-        let mut child = std::process::Command::new("true")
+        let child = std::process::Command::new("true")
             .spawn()
             .expect("failed to spawn `true`");
-        let pid = child.id();
+        let guard = ProcessGuardSync::new(child);
+        let pid = guard.id();
 
         let mut became_zombie = false;
         for _ in 0..200 {
@@ -790,7 +794,7 @@ mod tests {
         );
 
         // Clean up: reap for real so we don't leak a zombie from the test run.
-        let _ = child.wait();
+        let _ = guard.wait();
     }
 
     #[test]
