@@ -8281,7 +8281,7 @@ async fn trace_metadata_written_after_bead_action() {
     let temp_dir = TempDir::new().unwrap();
     let workspace = temp_dir.path();
     let bead_id = BeadId::from("test-bead");
-    let mut capture = TraceCapture::new(&bead_id, workspace).unwrap();
+    let capture = TraceCapture::new(&bead_id, workspace).unwrap();
 
     // Set metadata (simulating what happens in dispatch)
     let metadata = TraceMetadata {
@@ -8301,23 +8301,15 @@ async fn trace_metadata_written_after_bead_action() {
         template_version: None,
         timeout_reason: None,
     };
-    capture.set_metadata(metadata);
+    // Simulate what happens in apply_bead_action - write metadata AFTER bead action succeeds
+    capture.write_metadata(&metadata).unwrap();
 
-    // Verify metadata is NOT written yet
+    // Verify metadata IS written after bead action
     let metadata_path = workspace
         .join(".beads")
         .join("traces")
         .join(bead_id.as_ref())
         .join("metadata.json");
-    assert!(
-        !metadata_path.exists(),
-        "metadata should not be written before bead action"
-    );
-
-    // Now simulate what happens in apply_bead_action - write pending metadata
-    capture.write_pending_metadata().unwrap();
-
-    // Verify metadata IS written after bead action
     assert!(
         metadata_path.exists(),
         "metadata should be written after bead action succeeds"
@@ -8342,29 +8334,9 @@ async fn trace_metadata_written_after_bead_action() {
         metadata_content
     );
 
-    // Test the failure case: if bead action fails, metadata should not be written
+    // Test the failure case: if worker is killed before bead action, metadata should not be written
     let bead_id2 = BeadId::from("test-bead-2");
-    let mut capture2 = TraceCapture::new(&bead_id2, workspace).unwrap();
-    let metadata2 = TraceMetadata {
-        bead_id: bead_id2.clone(),
-        agent: "test-agent".to_string(),
-        provider: Some("test-provider".to_string()),
-        model: Some("test-model".to_string()),
-        exit_code: 0,
-        outcome: "success".to_string(),
-        duration_ms: 1000,
-        input_tokens: None,
-        output_tokens: None,
-        cost_usd: None,
-        captured_at: chrono::Utc::now(),
-        trace_format: TraceFormat::RawText,
-        pruned: false,
-        template_version: None,
-        timeout_reason: None,
-    };
-    capture2.set_metadata(metadata2);
-
-    // Simulate worker being killed before bead action - don't write pending metadata
+    // Simulate worker being killed before bead action - metadata is never written
     let metadata_path2 = workspace
         .join(".beads")
         .join("traces")

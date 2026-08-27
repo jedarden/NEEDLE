@@ -60,7 +60,7 @@ try:
 except (KeyError, TypeError, json.JSONDecodeError) as error:
     raise SystemExit(f"invalid checkpoint pointer: {error}")
 
-if not isinstance(path, str) or not re.fullmatch(r"objects/gen-[0-9a-f]+\.jsonl", path):
+if not isinstance(path, str) or not re.fullmatch(r"objects/[0-9a-f]+\.jsonl", path):
     raise SystemExit(f"invalid active_root path: {path!r}")
 if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
     raise SystemExit(f"invalid active_root sha256: {digest!r}")
