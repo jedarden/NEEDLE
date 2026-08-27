@@ -194,7 +194,12 @@ export NEEDLE_INNER=1
 
 TELEMETRY_DIR="$HOME/.needle/logs"
 EXIT_CODE=0
-timeout 60 "$NEEDLE_BIN" run \
+# Set timeout to 180 seconds to allow for:
+# - 3 failure cycles (up to 30s each = 90s)
+# - Mitosis evaluation and child creation (~20s)
+# - Worker claiming a child bead (~10s)
+# - Safety margin for system load (~60s)
+timeout 180 "$NEEDLE_BIN" run \
     --workspace "$WORKSPACE" \
     --agent failing-agent \
     --count 1 \
