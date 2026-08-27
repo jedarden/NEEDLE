@@ -356,6 +356,17 @@ Before making gates mandatory, clean existing debt:
 | commitgraph | ✅ | ✅      | ❌ (old separate checks) | ❌ | commitgr-44a76623 (go test failing) |
 | SEAM   | ❌     | ❌ (old gofmt-only) | ❌ | ❌ | Unknown |
 
+## Adopting This Pattern in Your Repo
+
+See **[Definition of Done Adoption Guide](definition-of-done-adoption-guide.md)** for step-by-step instructions on how to adopt this pattern in a new repository, including:
+
+- Language-specific templates (Rust, Go, TypeScript/Node, Python)
+- Pre-commit hook setup
+- NEEDLE gate configuration
+- CI integration
+- Troubleshooting guide
+- Rollout checklist
+
 ## Related Work
 
 - `needle-3386daef`: Fixes WHERE acceptance authority lives (verification, not exit code)
