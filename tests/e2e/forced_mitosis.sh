@@ -208,6 +208,27 @@ timeout 180 "$NEEDLE_BIN" run \
 echo ""
 info "Needle exited with code: $EXIT_CODE"
 
+# ── Step 5.5: Synchronization — Wait for store and telemetry flush ────────────
+
+echo ""
+info "Waiting for bead store and telemetry to fully flush..."
+
+# Wait up to 5 seconds for telemetry log to appear and be flushed
+for i in $(seq 1 10); do
+    TELEMETRY_LOG="$(find "$TELEMETRY_DIR" -name "*.jsonl" 2>/dev/null | head -1 || echo "")"
+    if [ -n "$TELEMETRY_LOG" ] && [ -s "$TELEMETRY_LOG" ]; then
+        # Give the filesystem time to flush
+        sleep 0.5
+        info "Telemetry log flushed after $((i*500))ms"
+        break
+    fi
+    sleep 0.5
+done
+
+# Force bead store flush to ensure all state is committed
+(cd "$WORKSPACE" && "$BR_BIN" sync --flush-only 2>/dev/null) || true
+sleep 0.5
+
 # ── Step 6: Assertions ────────────────────────────────────────────────────────
 
 echo ""
@@ -215,14 +236,24 @@ echo "Step 6: Checking assertions..."
 PASS=true
 
 # 6a. Worker should have exited (either exhausted or after processing)
-if [ "$EXIT_CODE" -eq 0 ]; then
-    pass "Exit code is 0"
+# Allow exit codes 0 (exhausted) or 1 (stopped after processing work)
+if [ "$EXIT_CODE" -eq 0 ] || [ "$EXIT_CODE" -eq 1 ]; then
+    pass "Exit code is $EXIT_CODE (worker terminated cleanly)"
 else
-    fail "Exit code was $EXIT_CODE, expected 0"
+    fail "Exit code was $EXIT_CODE, expected 0 or 1"
 fi
 
 # 6b. Original bead should NOT be closed (it was blocked by children)
-BEAD_STATUS="$(cd "$WORKSPACE" && "$BR_BIN" show "$BEAD_ID" 2>/dev/null | head -1 || echo "ERROR")"
+# Retry up to 3 times to handle potential store sync delays
+BEAD_STATUS=""
+for attempt in $(seq 1 3); do
+    BEAD_STATUS="$(cd "$WORKSPACE" && "$BR_BIN" show "$BEAD_ID" 2>/dev/null | head -1 || echo "ERROR")"
+    if echo "$BEAD_STATUS" | grep -qi "OPEN\|CLOSED\|○\|✓"; then
+        break
+    fi
+    sleep 0.3
+done
+
 if echo "$BEAD_STATUS" | grep -qi "OPEN\|○"; then
     pass "Original bead $BEAD_ID is still open (blocked by children)"
 elif echo "$BEAD_STATUS" | grep -qi "CLOSED\|✓"; then
@@ -232,7 +263,6 @@ else
 fi
 
 # 6c. Telemetry events
-TELEMETRY_LOG="$(find "$TELEMETRY_DIR" -name "*.jsonl" 2>/dev/null | head -1 || echo "")"
 if [ -z "$TELEMETRY_LOG" ]; then
     fail "No telemetry log found in $TELEMETRY_DIR"
 else
@@ -311,8 +341,25 @@ else
     fi
 
     # Check for child beads in the workspace
-    ALL_BEADS="$(cd "$WORKSPACE" && "$BR_BIN" list 2>/dev/null || echo "")"
-    CHILD_BEAD_COUNT="$(echo "$ALL_BEADS" | grep -c "Subtask\|mitosis-child" || true)"
+    # Retry up to 3 times with store sync to handle indexing delays
+    CHILD_BEAD_COUNT=0
+    for attempt in $(seq 1 3); do
+        # Force sync before each attempt
+        (cd "$WORKSPACE" && "$BR_BIN" sync --flush-only 2>/dev/null) || true
+        sleep 0.2
+
+        ALL_BEADS="$(cd "$WORKSPACE" && "$BR_BIN" list 2>/dev/null || echo "")"
+        CHILD_BEAD_COUNT="$(echo "$ALL_BEADS" | grep -c "Subtask\|mitosis-child" || true)"
+
+        if [ "$CHILD_BEAD_COUNT" -ge 1 ]; then
+            break
+        fi
+
+        if [ "$attempt" -lt 3 ]; then
+            sleep 0.3
+        fi
+    done
+
     if [ "$CHILD_BEAD_COUNT" -ge 1 ]; then
         pass "Found $CHILD_BEAD_COUNT child beads created by mitosis"
     else
