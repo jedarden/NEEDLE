@@ -433,13 +433,20 @@ fn workspace_from_inventory(beads: &[Bead]) -> String {
 }
 
 fn starvation_alert_body(workspace_path: &str, stats: &FilteringStats) -> String {
+    let message = if stats.open_count > 0 {
+        "Pluck found no candidates but open beads exist"
+    } else {
+        "Pluck found no candidates and queue is empty"
+    };
+
     format!(
-        "Pluck found no candidates but open beads exist.\n\n\
+        "{}.\n\n\
          **Workspace:** {}\n\
          **Open beads:** {}\n\
          **Excluded beads:** {}\n\
          **Exclusion reasons:** {}\n\n\
          **Timestamp:** {}",
+        message,
         workspace_path,
         stats.open_count,
         stats.excluded_count,
