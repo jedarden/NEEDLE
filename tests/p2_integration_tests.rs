@@ -303,14 +303,18 @@ async fn multi_worker_claiming_no_duplicates() {
         .collect();
     let store: Arc<dyn BeadStore> = Arc::new(ConcurrentMockStore::new(beads.clone()));
 
+    // Create individual tempdirs for each worker to ensure proper cleanup
+    let mut tempdirs = Vec::new();
     let mut handles = Vec::new();
 
     for worker_idx in 0..5u32 {
         let store = store.clone();
         let beads = beads.clone();
+        let tempdir = tempfile::tempdir().unwrap();
+        let lock_dir = tempdir.path().to_path_buf();
+        tempdirs.push(tempdir); // Keep tempdir alive until all tasks complete
+
         let handle = tokio::spawn(async move {
-            let lock_dir = std::env::temp_dir().join(format!("needle-test-mw-{worker_idx}"));
-            let _ = std::fs::create_dir_all(&lock_dir);
             let claimer = Claimer::new(
                 store,
                 lock_dir,
@@ -357,13 +361,17 @@ async fn multi_worker_all_beads_eventually_claimed() {
     let store = Arc::new(ConcurrentMockStore::new(beads.clone()));
     let store_dyn: Arc<dyn BeadStore> = store.clone();
 
+    // Create individual tempdirs for each worker to ensure proper cleanup
+    let mut tempdirs = Vec::new();
     let mut handles = Vec::new();
     for worker_idx in 0..3u32 {
         let store = store_dyn.clone();
         let beads = beads.clone();
+        let tempdir = tempfile::tempdir().unwrap();
+        let lock_dir = tempdir.path().to_path_buf();
+        tempdirs.push(tempdir); // Keep tempdir alive until all tasks complete
+
         let handle = tokio::spawn(async move {
-            let lock_dir = std::env::temp_dir().join(format!("needle-test-allclaim-{worker_idx}"));
-            let _ = std::fs::create_dir_all(&lock_dir);
             let claimer = Claimer::new(
                 store,
                 lock_dir,
@@ -1709,6 +1717,10 @@ async fn mitosis_concurrent_workers_flock_serializes() {
         2,
         "exactly 2 children total — flock prevented duplicate creation"
     );
+
+    // Explicit drop to ensure tempdirs are cleaned up after all tasks complete
+    drop(lock_dir);
+    drop(ws);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
