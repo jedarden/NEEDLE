@@ -82,6 +82,63 @@ pub struct TelemetryEvent {
     pub span_id: Option<String>,
 }
 
+// ─── Starvation Diagnostic Types ───────────────────────────────────────────────
+
+/// Snapshot of a single open bead for starvation diagnostics.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenBeadSnapshot {
+    /// Bead ID
+    pub id: String,
+    /// Bead title
+    pub title: String,
+    /// Current status
+    pub status: String,
+    /// Assignee (if any)
+    pub assignee: Option<String>,
+    /// Priority
+    pub priority: i32,
+    /// Labels
+    pub labels: Vec<String>,
+    /// Workspace path
+    pub workspace: String,
+    /// Whether this bead is ready (unassigned and not blocked)
+    pub is_ready: bool,
+    /// Number of blocking dependencies
+    pub blocking_count: usize,
+    /// List of blocking bead IDs (if any)
+    pub blocking_dependencies: Vec<String>,
+    /// Reason why this bead is not ready (empty if is_ready=true)
+    pub exclusion_reason: String,
+}
+
+/// Snapshot of worker constraints for starvation diagnostics.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerConstraintsSnapshot {
+    /// Maximum worker limit
+    pub max_workers: u32,
+    /// Currently active workers
+    pub active_workers: u32,
+    /// Worker label filters (if any)
+    pub label_filters: Vec<String>,
+    /// Worker priority filters (if any)
+    pub priority_filters: Vec<i32>,
+    /// Workspace filters (if any)
+    pub workspace_filters: Vec<String>,
+}
+
+/// Snapshot of fleet state for starvation diagnostics.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FleetStateSnapshot {
+    /// Total workers in fleet
+    pub total_workers: u32,
+    /// Active workers
+    pub active_workers: u32,
+    /// Draining workers
+    pub draining_workers: u32,
+    /// Supervisor poll interval (seconds)
+    pub poll_interval_secs: u64,
+}
+
 // ─── EventKind ───────────────────────────────────────────────────────────────
 
 /// Typed event variants emitted by all NEEDLE components.
@@ -851,6 +908,21 @@ pub enum EventKind {
         /// Path to the new binary
         new_binary: String,
     },
+    /// Emitted when the supervisor detects starvation: no ready beads but open beads exist
+    SupervisorStarvationDetected {
+        /// Total number of open beads across all workspaces
+        open_beads_count: usize,
+        /// Number of ready beads (should be 0 when this event is emitted)
+        ready_beads_count: usize,
+        /// Detailed snapshot of all open beads with their state
+        open_beads_snapshot: Vec<OpenBeadSnapshot>,
+        /// Active worker constraints
+        worker_constraints: WorkerConstraintsSnapshot,
+        /// Timestamp of detection (ISO 8601)
+        detected_at: String,
+        /// Fleet state at detection time
+        fleet_state: FleetStateSnapshot,
+    },
 
     // ── Explore strand telemetry ──
     ExploreScanSummary {
@@ -1045,6 +1117,7 @@ impl EventKind {
             EventKind::SupervisorWorkerDrainStarted { .. } => "supervisor.worker_drain_started",
             EventKind::SupervisorWorkerDrainCompleted { .. } => "supervisor.worker_drain_completed",
             EventKind::SupervisorWorkerRelaunched { .. } => "supervisor.worker_relaunched",
+            EventKind::SupervisorStarvationDetected { .. } => "supervisor.starvation_detected",
             EventKind::ExploreScanSummary { .. } => "explore.scan_summary",
             EventKind::ExploreStarvationAlarm { .. } => "explore.starvation_alarm",
             EventKind::SinkError { .. } => "telemetry.sink_error",
@@ -1199,7 +1272,8 @@ impl EventKind {
             | EventKind::SupervisorBinaryRotationDetected { .. }
             | EventKind::SupervisorWorkerDrainStarted { .. }
             | EventKind::SupervisorWorkerDrainCompleted { .. }
-            | EventKind::SupervisorWorkerRelaunched { .. } => None,
+            | EventKind::SupervisorWorkerRelaunched { .. }
+            | EventKind::SupervisorStarvationDetected { .. } => None,
             EventKind::ExploreScanSummary { .. } => None,
             EventKind::ExploreStarvationAlarm { .. } => None,
             EventKind::SpawnPathModifiedInPlace { .. } => None,
@@ -2423,6 +2497,21 @@ impl EventKind {
                 "workers_count": workers_count,
                 "new_binary": new_binary,
             }),
+            EventKind::SupervisorStarvationDetected {
+                open_beads_count,
+                ready_beads_count,
+                open_beads_snapshot,
+                worker_constraints,
+                detected_at,
+                fleet_state,
+            } => serde_json::json!({
+                "open_beads_count": open_beads_count,
+                "ready_beads_count": ready_beads_count,
+                "open_beads_snapshot": open_beads_snapshot,
+                "worker_constraints": worker_constraints,
+                "detected_at": detected_at,
+                "fleet_state": fleet_state,
+            }),
         }
     }
 
@@ -2562,6 +2651,7 @@ impl EventKind {
             | EventKind::SupervisorWorkerDrainStarted { .. }
             | EventKind::SupervisorWorkerDrainCompleted { .. }
             | EventKind::SupervisorWorkerRelaunched { .. }
+            | EventKind::SupervisorStarvationDetected { .. }
             | EventKind::ExploreStarvationAlarm { .. }
             | EventKind::SinkError { .. }
             | EventKind::OtlpDropped { .. }
@@ -4627,6 +4717,74 @@ pub fn compute_cost_by_workspace(events: &[TelemetryEvent]) -> Vec<WorkspaceCost
             .partial_cmp(&a.total_cost_usd)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+    result
+}
+
+/// Per-worker statistics for query operations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerStats {
+    /// Worker identifier
+    pub worker_id: String,
+    /// Total number of events from this worker
+    pub event_count: u64,
+    /// Last activity timestamp
+    pub last_activity: DateTime<Utc>,
+    /// Count of events by type
+    pub event_types: std::collections::HashMap<String, u64>,
+    /// Beads processed by this worker
+    pub beads_processed: u64,
+    /// Session ID for this worker
+    pub session_id: String,
+}
+
+/// Compute per-worker statistics from telemetry events.
+///
+/// Aggregates events by worker_id, computing:
+/// - Total event count
+/// - Last activity timestamp
+/// - Event counts by type
+/// - Beads processed
+///
+/// Returns one entry per worker, sorted by last activity (most recent first).
+pub fn compute_worker_stats(events: &[TelemetryEvent]) -> Vec<WorkerStats> {
+    let mut map: std::collections::HashMap<String, WorkerStats> = std::collections::HashMap::new();
+
+    for event in events {
+        let entry = map
+            .entry(event.worker_id.clone())
+            .or_insert_with(|| WorkerStats {
+                worker_id: event.worker_id.clone(),
+                event_count: 0,
+                last_activity: event.timestamp,
+                event_types: std::collections::HashMap::new(),
+                beads_processed: 0,
+                session_id: event.session_id.clone(),
+            });
+
+        // Update last activity
+        if event.timestamp > entry.last_activity {
+            entry.last_activity = event.timestamp;
+        }
+
+        // Increment total event count
+        entry.event_count += 1;
+
+        // Increment event type count
+        *entry
+            .event_types
+            .entry(event.event_type.clone())
+            .or_insert(0) += 1;
+
+        // Track beads processed from worker.stopped or worker.completed events
+        if event.event_type == "worker.stopped" {
+            if let Some(beads) = event.data["beads_processed"].as_u64() {
+                entry.beads_processed = beads;
+            }
+        }
+    }
+
+    let mut result: Vec<WorkerStats> = map.into_values().collect();
+    result.sort_by_key(|b| std::cmp::Reverse(b.last_activity));
     result
 }
 

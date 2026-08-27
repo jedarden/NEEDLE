@@ -371,6 +371,37 @@ pub enum CliCommand {
         format: ListFormat,
     },
 
+    /// Query stored telemetry logs and return per-worker statistics.
+    ///
+    /// Reads JSONL telemetry files from log_dir and aggregates event counts,
+    /// last activity, and beads processed per worker.
+    ///
+    /// Examples:
+    ///   needle query --worker-id alpha
+    ///   needle query --since 24h
+    ///   needle query --event-type bead.claim.succeeded
+    Query {
+        /// Filter by worker ID (partial match supported).
+        #[arg(long)]
+        worker_id: Option<String>,
+
+        /// Include only events since this time (e.g., 1h, 24h, 7d, 2026-03-20).
+        #[arg(long)]
+        since: Option<String>,
+
+        /// Include only events until this time (e.g., 1h, 24h, 7d, 2026-03-20T15:00:00Z).
+        #[arg(long)]
+        until: Option<String>,
+
+        /// Filter by event type (supports glob patterns like bead.*).
+        #[arg(long)]
+        event_type: Option<String>,
+
+        /// Output format.
+        #[arg(long, value_enum, default_value = "table")]
+        format: ListFormat,
+    },
+
     /// Run the fleet supervisor daemon (auto-scale workers based on queue depth).
     Supervise {
         /// Workspace to monitor exclusively. The supervisor spawns workers
@@ -498,6 +529,23 @@ pub fn run() -> Result<()> {
         } => cmd_stats(by, since, until, format),
         CliCommand::Supervise { workspace } => cmd_supervise(workspace),
         CliCommand::CiReconcile { workspace, once } => cmd_ci_reconcile(workspace, once),
+        CliCommand::Query {
+            worker_id,
+            since,
+            until,
+            event_type,
+            format,
+        } => {
+            bail!(
+                "Query command is not yet implemented. \
+                 Called with worker_id={:?}, since={:?}, until={:?}, event_type={:?}, format={:?}",
+                worker_id,
+                since,
+                until,
+                event_type,
+                format
+            )
+        }
     }
 }
 
@@ -4725,6 +4773,8 @@ fn print_log_event(
     }
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Query command
 // ──────────────────────────────────────────────────────────────────────────────
 // Status helpers
 // ──────────────────────────────────────────────────────────────────────────────
