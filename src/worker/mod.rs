@@ -4987,6 +4987,7 @@ impl Worker {
                 self.telemetry.emit(EventKind::StateTransition {
                     from: WorkerState::Exhausted,
                     to: WorkerState::Selecting,
+                    entered_at: None,
                 })?;
 
                 // Force-flush AFTER state transition to ensure it's persisted.
@@ -5221,6 +5222,7 @@ impl Worker {
         let _ = self.telemetry.emit_try_lock(EventKind::StateTransition {
             from,
             to: to.clone(),
+            entered_at: self.handling_state_entered_at,
         });
 
         // Update heartbeat shared state with the new worker state.

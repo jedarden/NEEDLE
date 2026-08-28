@@ -205,6 +205,8 @@ pub enum EventKind {
     StateTransition {
         from: WorkerState,
         to: WorkerState,
+        /// Optional timestamp of when the state was entered (e.g., for watchdog monitoring)
+        entered_at: Option<std::time::Instant>,
     },
     InitStepStarted {
         step: String,
@@ -1340,8 +1342,24 @@ impl EventKind {
             EventKind::WorkerIdle { backoff_seconds } => {
                 serde_json::json!({ "backoff_seconds": backoff_seconds })
             }
-            EventKind::StateTransition { from, to } => {
-                serde_json::json!({ "from": format!("{from}"), "to": format!("{to}") })
+            EventKind::StateTransition {
+                from,
+                to,
+                entered_at,
+            } => {
+                let mut data =
+                    serde_json::json!({ "from": format!("{from}"), "to": format!("{to}") });
+                if let Some(instant) = entered_at {
+                    if let Some(obj) = data.as_object_mut() {
+                        // Convert Instant to elapsed duration since it's not directly serializable
+                        // Use elapsed time as a proxy for when the state was entered
+                        obj.insert(
+                            "entered_at_elapsed_ms".to_string(),
+                            serde_json::json!(instant.elapsed().as_millis()),
+                        );
+                    }
+                }
+                data
             }
             EventKind::InitStepStarted { step } => {
                 serde_json::json!({ "step": step })
@@ -4972,6 +4990,7 @@ mod tests {
             EventKind::StateTransition {
                 from: WorkerState::Booting,
                 to: WorkerState::Selecting,
+                entered_at: None,
             }
             .event_type(),
             "worker.state_transition"
@@ -5574,6 +5593,7 @@ mod tests {
             EventKind::StateTransition {
                 from: WorkerState::Booting,
                 to: WorkerState::Selecting,
+                entered_at: None,
             },
             EventKind::StrandEvaluated {
                 strand_name: "pluck".to_string(),
