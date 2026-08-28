@@ -117,23 +117,14 @@ impl GateReport {
 }
 
 /// Execution mode for a gate command.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum RunIn {
     /// Run in a clean extraction of committed state (git archive HEAD).
+    #[default]
     Clean,
     /// Run in the shared workspace checkout (may contain uncommitted changes).
     Workspace,
-}
-
-impl Default for RunIn {
-    fn default() -> Self {
-        Self::Clean
-    }
-}
-
-fn default_run_in() -> RunIn {
-    RunIn::Clean
 }
 
 /// Configuration for a single gate from `.needle.yaml`.
@@ -156,7 +147,7 @@ pub enum GateConfig {
         /// runs directly in the shared checkout. Use `workspace` only for
         /// gates that must see uncommitted state (e.g., testing a build cache).
         /// See ADR-020 for the full rationale.
-        #[serde(default = "default_run_in")]
+        #[serde(default)]
         run_in: RunIn,
     },
 }
@@ -801,6 +792,7 @@ mod tests {
     use super::*;
     use crate::types::{Bead, BeadId, BeadStatus};
     use chrono::Utc;
+    use tempfile::TempDir;
 
     fn test_bead() -> Bead {
         Bead {
@@ -1221,9 +1213,9 @@ mod tests {
 
         // Initialize a git repo
         git_init(workspace);
-        std::fs::write(workspace.join("README.md"), "test repo\n").unwrap();
+        std::fs::write(workspace.join("README.md"), "test repo\\n").unwrap();
         git_add(workspace, ".");
-        git_commit(workspace, "initial commit");
+        git_commit(workspace, "initial commit\\n");
 
         // Create a committed Rust file that references a function from an untracked module
         std::fs::create_dir_all(workspace.join("src")).unwrap();
@@ -1256,13 +1248,13 @@ pub fn uncommitted_function() {
         git_commit(workspace, "add main.rs");
 
         // Create a CommandGate that runs `cargo check` (which will fail in clean mode, pass in workspace)
-        let gate = CommandGate::new(vec!["cargo check".to_string()], 65536, RunIn::Clean);
+        let gate = CommandGate::with_options(vec!["cargo check".to_string()], 65536, RunIn::Clean);
 
         let bead = crate::types::Bead {
-            id: crate::types::BeadId("test-bead".to_string()),
-            title: "Test Bead".to_string(),
+            id: "test-bead".into(),
+            title: "Test Bead\\n".to_string(),
             body: None,
-            priority: crate::types::Priority::P0,
+            priority: 0u8,
             status: crate::types::BeadStatus::Open,
             assignee: None,
             labels: Vec::new(),
@@ -1304,7 +1296,7 @@ pub fn uncommitted_function() {
             .any(|entry| {
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
-                name_str.contains("needle-clean") || name_str.contains(&bead.id)
+                name_str.contains("needle-clean") || name_str.contains(bead.id.as_ref())
             });
         assert!(
             !clean_dirs,
@@ -1322,9 +1314,9 @@ pub fn uncommitted_function() {
 
         // Initialize a git repo
         git_init(workspace);
-        std::fs::write(workspace.join("README.md"), "test repo\n").unwrap();
+        std::fs::write(workspace.join("README.md"), "test repo\\n").unwrap();
         git_add(workspace, ".");
-        git_commit(workspace, "initial commit");
+        git_commit(workspace, "initial commit\\n");
 
         // Create a simple committed file that will pass `cargo check`
         std::fs::create_dir_all(workspace.join("src")).unwrap();
@@ -1341,13 +1333,13 @@ pub fn simple_function() -> i32 {
         git_add(workspace, "src/lib.rs");
         git_commit(workspace, "add lib.rs");
 
-        let gate = CommandGate::new(vec!["cargo check".to_string()], 65536, RunIn::Clean);
+        let gate = CommandGate::with_options(vec!["cargo check".to_string()], 65536, RunIn::Clean);
 
         let bead = crate::types::Bead {
-            id: crate::types::BeadId("test-bead-both-pass".to_string()),
-            title: "Test Bead".to_string(),
+            id: BeadId::from("test-bead-both-pass"),
+            title: "Test Bead\\n".to_string(),
             body: None,
-            priority: crate::types::Priority::P0,
+            priority: 1,
             status: crate::types::BeadStatus::Open,
             assignee: None,
             labels: Vec::new(),
@@ -1370,7 +1362,7 @@ pub fn simple_function() -> i32 {
             .any(|entry| {
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
-                name_str.contains("needle-clean") || name_str.contains(&bead.id)
+                name_str.contains("needle-clean") || name_str.contains(bead.id.as_ref())
             });
         assert!(!clean_dirs, "Clean extraction should be removed on success");
     }
@@ -1385,9 +1377,9 @@ pub fn simple_function() -> i32 {
 
         // Initialize a git repo
         git_init(workspace);
-        std::fs::write(workspace.join("README.md"), "test repo\n").unwrap();
+        std::fs::write(workspace.join("README.md"), "test repo\\n").unwrap();
         git_add(workspace, ".");
-        git_commit(workspace, "initial commit");
+        git_commit(workspace, "initial commit\\n");
 
         // Create a committed file with a real syntax error
         std::fs::create_dir_all(workspace.join("src")).unwrap();
@@ -1404,13 +1396,22 @@ pub fn broken_function( -> i32 {
         git_add(workspace, "src/lib.rs");
         git_commit(workspace, "add broken lib.rs");
 
-        let gate = CommandGate::new(vec!["cargo check".to_string()], 65536, RunIn::Clean);
+        let gate = CommandGate::with_options(vec!["cargo check".to_string()], 65536, RunIn::Clean);
 
         let bead = crate::types::Bead {
-            id: "test-bead-both-fail".to_string(),
-            title: "Test Bead".to_string(),
+            id: BeadId::from("test-bead-both-fail"),
+            title: "Test Bead\\n".to_string(),
+            body: None,
+            priority: 1,
+            status: crate::types::BeadStatus::Open,
+            assignee: None,
+            labels: Vec::new(),
             workspace: workspace.to_path_buf(),
-            ..Default::default()
+            dependencies: Vec::new(),
+            dependents: Vec::new(),
+            comments: Vec::new(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
         };
 
         // Run validation - should fail in clean mode
@@ -1439,7 +1440,7 @@ pub fn broken_function( -> i32 {
             .any(|entry| {
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
-                name_str.contains("needle-clean") || name_str.contains(&bead.id)
+                name_str.contains("needle-clean") || name_str.contains(bead.id.as_ref())
             });
         assert!(
             clean_dirs,
@@ -1451,7 +1452,7 @@ pub fn broken_function( -> i32 {
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
-                if name_str.contains("needle-clean") || name_str.contains(&bead.id) {
+                if name_str.contains("needle-clean") || name_str.contains(bead.id.as_ref()) {
                     let _ = std::fs::remove_dir_all(entry.path());
                 }
             }
@@ -1467,17 +1468,18 @@ pub fn broken_function( -> i32 {
 
         // Initialize a git repo
         git_init(workspace);
-        std::fs::write(workspace.join("README.md"), "test repo\n").unwrap();
+        std::fs::write(workspace.join("README.md"), "test repo\\n").unwrap();
         git_add(workspace, ".");
-        git_commit(workspace, "initial commit");
+        git_commit(workspace, "initial commit\\n");
 
-        let gate = CommandGate::new(vec!["echo test".to_string()], 65536, RunIn::Workspace);
+        let gate =
+            CommandGate::with_options(vec!["echo test\\n".to_string()], 65536, RunIn::Workspace);
 
         let bead = crate::types::Bead {
-            id: crate::types::BeadId("test-bead-workspace-mode".to_string()),
-            title: "Test Bead".to_string(),
+            id: BeadId::from("test-bead-workspace-mode"),
+            title: "Test Bead\\n".to_string(),
             body: None,
-            priority: crate::types::Priority::P0,
+            priority: 1,
             status: crate::types::BeadStatus::Open,
             assignee: None,
             labels: Vec::new(),
@@ -1500,7 +1502,7 @@ pub fn broken_function( -> i32 {
             .any(|entry| {
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
-                name_str.contains("needle-clean") || name_str.contains(&bead.id)
+                name_str.contains("needle-clean") || name_str.contains(bead.id.as_ref())
             });
         assert!(
             !clean_dirs,
@@ -1518,9 +1520,9 @@ pub fn broken_function( -> i32 {
 
         // Initialize a git repo
         git_init(workspace);
-        std::fs::write(workspace.join("README.md"), "test repo\n").unwrap();
+        std::fs::write(workspace.join("README.md"), "test repo\\n").unwrap();
         git_add(workspace, ".");
-        git_commit(workspace, "initial commit");
+        git_commit(workspace, "initial commit\\n");
 
         // Create a committed Rust file that references multiple untracked modules
         std::fs::create_dir_all(workspace.join("src")).unwrap();
@@ -1563,13 +1565,22 @@ pub fn func2() {
         git_add(workspace, "src/main.rs");
         git_commit(workspace, "add main.rs");
 
-        let gate = CommandGate::new(vec!["cargo check".to_string()], 65536, RunIn::Clean);
+        let gate = CommandGate::with_options(vec!["cargo check".to_string()], 65536, RunIn::Clean);
 
         let bead = crate::types::Bead {
-            id: "test-bead-multiple-untracked".to_string(),
-            title: "Test Bead".to_string(),
+            id: BeadId::from("test-bead-multiple-untracked"),
+            title: "Test Bead\\n".to_string(),
+            body: None,
+            priority: 1,
+            status: crate::types::BeadStatus::Open,
+            assignee: None,
+            labels: Vec::new(),
             workspace: workspace.to_path_buf(),
-            ..Default::default()
+            dependencies: Vec::new(),
+            dependents: Vec::new(),
+            comments: Vec::new(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
         };
 
         // Run validation - should detect uncommitted dependency
@@ -1624,7 +1635,7 @@ pub fn func2() {
             .args(["add", path])
             .current_dir(dir)
             .output()
-            .expect("Failed to git add");
+            .expect("Failed to run git add");
     }
 
     fn git_commit(dir: &Path, message: &str) {
@@ -1632,6 +1643,6 @@ pub fn func2() {
             .args(["commit", "-m", message])
             .current_dir(dir)
             .output()
-            .expect("Failed to git commit");
+            .expect("Failed to run git commit");
     }
 }
