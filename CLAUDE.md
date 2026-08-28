@@ -177,6 +177,23 @@ The reopen contract:
 If you need a specific worker to continue a reopened bead, manually reassign
 it after reopening with `bead update <id> --assignee <worker>`.
 
+## Capabilities Negotiation
+
+NEEDLE uses the `bead capabilities --profile native-v1` command to verify backend
+compatibility at workspace-open time. This is **mandatory** for bead-rs backends.
+
+**Required contract:** The command must return JSON with:
+- `implementation: "bead-rs"` — backend identity verification
+- `atomic_claim: true` — asserts atomic claim operations (critical for multi-worker safety)
+- `statuses: ["open", "in_progress", "deferred", "closed"]` — all four required
+- `schemas: [...]` — all three required URNs (issue, event, field-guide)
+
+**Failure mode:** Missing or invalid capabilities cause workspace open to fail
+closed. This is intentional — capability gaps can silently break safety guarantees.
+
+**See:** `docs/capabilities-negotiation.md` for the full contract, validation logic,
+and backend capability descriptors.
+
 ## Checkpoint Commits
 
 When committing checkpoint changes (anything under `.beads/checkpoint/`), you

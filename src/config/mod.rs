@@ -954,15 +954,62 @@ fn is_executable(path: &Path) -> bool {
 /// Infers the backend from the filename: "bf" selects bead-forge; every other
 /// name selects bead-rs.
 fn detect_backend_from_path(path: &Path) -> Result<Backend> {
+    use std::io::Read;
+    use std::process::Stdio;
+
+    // Determine expected backend from filename
     let file_name = path
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| anyhow!("invalid binary path: no filename"))?;
 
-    match file_name {
-        "bf" => Ok(Backend::Bf),
-        _ => Ok(Backend::Bead), // Default to Bead for unknown names
+    let expected_from_filename = match file_name {
+        "bf" => Backend::Bf,
+        _ => Backend::Bead, // bead, br, etc. default to bead-rs
+    };
+
+    // Run the binary to get its actual identity
+    let output = std::process::Command::new(path)
+        .arg("--version")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .with_context(|| format!("failed to run {} --version", path.display()))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let identity = format!("{stdout}{stderr}");
+
+    // Parse the actual backend from the version output
+    let actual_backend = match identity.trim().split_whitespace().next() {
+        Some("bf") => Backend::Bf,
+        Some("bead") | Some("bead-rs") => Backend::Bead,
+        None => bail!("empty version output from {}", path.display()),
+        Some(actual_name) => bail!(
+            "unrecognized backend '{actual_name}' at {} (expected 'bf' or 'bead')",
+            path.display()
+        ),
+    };
+
+    // Check for identity mismatch and fail explicitly with clear error
+    if actual_backend != expected_from_filename {
+        let expected_name = match expected_from_filename {
+            Backend::Bf => "bead-forge",
+            Backend::Bead => "beads-rust",
+        };
+        let actual_name = match actual_backend {
+            Backend::Bf => "bead-forge",
+            Backend::Bead => "beads-rust",
+        };
+        bail!(
+            "Expected {} at {} but found {} identity",
+            expected_name,
+            path.display(),
+            actual_name
+        );
     }
+
+    Ok(actual_backend)
 }
 
 /// Detect bead CLI backend by checking workspace config then probing PATH.
@@ -1237,16 +1284,26 @@ mod tests {
 
     #[test]
     fn test_detect_backend_from_path() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+
+        // Test 1: bf binary that reports "bf" identity
+        let bf_bin = tmp_dir.path().join("bf");
+        std::fs::write(&bf_bin, "#!/bin/sh\necho \"bf 0.4.1\"").unwrap();
+        make_executable(&bf_bin);
+        assert_eq!(detect_backend_from_path(&bf_bin).unwrap(), Backend::Bf);
+
+        // Test 2: bead binary that reports "bead" identity
+        let bead_bin = tmp_dir.path().join("bead");
+        std::fs::write(&bead_bin, "#!/bin/sh\necho \"bead 0.1.3\"").unwrap();
+        make_executable(&bead_bin);
+        assert_eq!(detect_backend_from_path(&bead_bin).unwrap(), Backend::Bead);
+
+        // Test 3: custom-named bead-rs binary that reports "bead" identity
+        let custom_bin = tmp_dir.path().join("my-custom-bead");
+        std::fs::write(&custom_bin, "#!/bin/sh\necho \"bead 0.1.3\"").unwrap();
+        make_executable(&custom_bin);
         assert_eq!(
-            detect_backend_from_path(PathBuf::from("/usr/bin/bf").as_path()).unwrap(),
-            Backend::Bf
-        );
-        assert_eq!(
-            detect_backend_from_path(PathBuf::from("/usr/bin/bead").as_path()).unwrap(),
-            Backend::Bead
-        );
-        assert_eq!(
-            detect_backend_from_path(PathBuf::from("/usr/bin/my-custom-bead").as_path()).unwrap(),
+            detect_backend_from_path(&custom_bin).unwrap(),
             Backend::Bead
         );
     }
@@ -1254,6 +1311,42 @@ mod tests {
     #[test]
     fn test_detect_backend_from_path_no_filename() {
         assert!(detect_backend_from_path(PathBuf::from("/").as_path()).is_err());
+    }
+
+    #[test]
+    fn test_detect_backend_from_path_mismatch_fails_explicitly() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+
+        // Test: filename says "br" (should be bead-rs) but identity says "bf" (bead-forge)
+        let wrong_bin = tmp_dir.path().join("br");
+        std::fs::write(&wrong_bin, "#!/bin/sh\necho \"bf 0.4.1\"").unwrap();
+        make_executable(&wrong_bin);
+
+        let error = detect_backend_from_path(&wrong_bin).err().unwrap();
+        let error_msg = error.to_string();
+
+        // Error must mention both the path and the actual identity found
+        assert!(error_msg.contains("Expected beads-rust"));
+        assert!(error_msg.contains("but found bead-forge"));
+        assert!(error_msg.contains(&wrong_bin.display().to_string()));
+    }
+
+    #[test]
+    fn test_detect_backend_from_path_reverse_mismatch_fails_explicitly() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+
+        // Test: filename says "bf" (should be bead-forge) but identity says "bead" (bead-rs)
+        let wrong_bin = tmp_dir.path().join("bf");
+        std::fs::write(&wrong_bin, "#!/bin/sh\necho \"bead 0.1.3\"").unwrap();
+        make_executable(&wrong_bin);
+
+        let error = detect_backend_from_path(&wrong_bin).err().unwrap();
+        let error_msg = error.to_string();
+
+        // Error must mention both the path and the actual identity found
+        assert!(error_msg.contains("Expected bead-forge"));
+        assert!(error_msg.contains("but found beads-rust"));
+        assert!(error_msg.contains(&wrong_bin.display().to_string()));
     }
 
     #[test]
