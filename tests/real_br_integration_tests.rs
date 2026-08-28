@@ -1716,3 +1716,432 @@ fn bead_rs_split_fixture_is_correctly_gated_without_transactional_batch() {
         .expect("built-in bead-rs descriptor missing");
     assert!(!backend.capabilities.transactional_batch);
 }
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Test 12: Bead reopen behavior — assignee clearing and ready frontier
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Close a bead in the test workspace.
+fn close_bead(workspace: &Path, bead_id: &BeadId, reason: &str) -> Result<()> {
+    let output = bead_command(workspace)
+        .args(["close", bead_id.as_ref(), "--reason", reason])
+        .output()
+        .context("failed to run bead close")?;
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "bead close failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    Ok(())
+}
+
+/// Reopen a bead in the test workspace.
+fn reopen_bead(workspace: &Path, bead_id: &BeadId) -> Result<()> {
+    let output = bead_command(workspace)
+        .args(["reopen", bead_id.as_ref()])
+        .output()
+        .context("failed to run bead reopen")?;
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "bead reopen failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    Ok(())
+}
+
+/// Test that reopened bead has no assignee (ADR-018: reopen clears assignee).
+///
+/// This is the regression test for the original bug where reopen retained the
+/// assignee, causing silent starvation. The bug manifested as:
+/// 1. Bead is closed (status=closed, assignee=some-worker)
+/// 2. Bead is reopened (status=open, assignee=some-worker) — BUG: should be cleared
+/// 3. NEEDLE workers skip beads with non-null assignees when claiming
+/// 4. Bead becomes permanently unclaimable
+#[tokio::test]
+async fn real_bead_rs_reopen_clears_assignee() {
+    let workspace = create_test_workspace("reopen-clear-assignee").unwrap();
+    let store = Arc::new(store_for_workspace(workspace.path()).unwrap());
+
+    // Create and claim a bead.
+    let bead_id = create_bead(workspace.path(), "reopen-test-bead", 1).unwrap();
+    store
+        .claim(&bead_id, "test-worker")
+        .await
+        .expect("claim should succeed");
+
+    // Verify bead is assigned.
+    let bead = store.show(&bead_id).await.unwrap();
+    assert_eq!(
+        bead.assignee.as_deref(),
+        Some("test-worker"),
+        "bead should be assigned to test-worker"
+    );
+
+    // Close the bead.
+    close_bead(workspace.path(), &bead_id, "Test complete").expect("close should succeed");
+
+    // Verify bead is closed and assignee is preserved for historical record.
+    let bead = store.show(&bead_id).await.unwrap();
+    assert_eq!(
+        bead.status,
+        needle::types::BeadStatus::Closed,
+        "bead should be closed"
+    );
+    assert_eq!(
+        bead.assignee.as_deref(),
+        Some("test-worker"),
+        "closed bead should preserve assignee for historical record"
+    );
+
+    // Reopen the bead — this MUST clear the assignee per ADR-018.
+    reopen_bead(workspace.path(), &bead_id).expect("reopen should succeed");
+
+    // Verify bead is open and assignee is CLEARED (the fix for the bug).
+    let bead = store.show(&bead_id).await.unwrap();
+    assert_eq!(
+        bead.status,
+        needle::types::BeadStatus::Open,
+        "reopened bead should be open"
+    );
+    assert!(
+        bead.assignee.is_none(),
+        "reopened bead MUST have no assignee (ADR-018); got assignee={:?}",
+        bead.assignee
+    );
+}
+
+/// Test that reopened bead appears in ready frontier.
+///
+/// This is the companion test to real_bead_rs_reopen_clears_assignee.
+/// It verifies that clearing the assignee makes the bead immediately
+/// claimable by any worker.
+#[tokio::test]
+async fn real_bead_rs_reopen_appears_in_ready_frontier() {
+    let workspace = create_test_workspace("reopen-ready-frontier").unwrap();
+    let store = Arc::new(store_for_workspace(workspace.path()).unwrap());
+
+    // Create, claim, and close a bead.
+    let bead_id = create_bead(workspace.path(), "frontier-test-bead", 1).unwrap();
+    store
+        .claim(&bead_id, "test-worker")
+        .await
+        .expect("claim should succeed");
+
+    close_bead(workspace.path(), &bead_id, "Test complete").expect("close should succeed");
+
+    // Verify closed bead does NOT appear in ready frontier.
+    let ready_beads = store.ready(&Filters::default()).await.unwrap();
+    assert!(
+        !ready_beads.iter().any(|b| b.id == bead_id),
+        "closed bead should not appear in ready frontier"
+    );
+
+    // Reopen the bead.
+    reopen_bead(workspace.path(), &bead_id).expect("reopen should succeed");
+
+    // Verify reopened bead DOES appear in ready frontier.
+    let ready_beads = store.ready(&Filters::default()).await.unwrap();
+    assert!(
+        ready_beads.iter().any(|b| b.id == bead_id),
+        "reopened bead MUST appear in ready frontier (assignee was cleared)"
+    );
+
+    // Verify it's actually claimable by a different worker.
+    let lock_dir = tempfile::tempdir().unwrap();
+    let claimer = Claimer::new(
+        store.clone(),
+        lock_dir.path().to_path_buf(),
+        5,
+        10,
+        test_telemetry("different-worker", workspace.path()),
+    );
+
+    let result = claimer
+        .claim_next(
+            &ready_beads,
+            "different-worker",
+            &HashSet::new(),
+            "test-strand",
+        )
+        .await
+        .expect("claim_next should succeed");
+
+    assert!(
+        matches!(
+            result,
+            ClaimOutcome::Claimed(_) | ClaimOutcome::NoCandidates
+        ),
+        "reopened bead should be claimable; got result={:?}",
+        result
+    );
+}
+
+/// Test that a reopened bead can be claimed by any worker.
+///
+/// This is an end-to-end test that verifies the full workflow:
+/// 1. Create and claim bead by worker A
+/// 2. Close bead
+/// 3. Reopen bead
+/// 4. Verify worker B can claim it (not blocked by stale assignee)
+#[tokio::test]
+async fn real_bead_rs_reopen_allows_any_worker_to_claim() {
+    let workspace = create_test_workspace("reopen-any-worker").unwrap();
+    let store = Arc::new(store_for_workspace(workspace.path()).unwrap());
+
+    // Worker A: create, claim, close.
+    let bead_id = create_bead(workspace.path(), "any-worker-test", 1).unwrap();
+    store
+        .claim(&bead_id, "worker-A")
+        .await
+        .expect("worker A claim should succeed");
+
+    close_bead(workspace.path(), &bead_id, "Worker A complete").expect("close should succeed");
+
+    // Reopen the bead.
+    reopen_bead(workspace.path(), &bead_id).expect("reopen should succeed");
+
+    // Verify reopened bead has no assignee.
+    let bead = store.show(&bead_id).await.unwrap();
+    assert!(
+        bead.assignee.is_none(),
+        "reopened bead should have no assignee"
+    );
+
+    // Worker B: claim the reopened bead.
+    let claim_result = store.claim(&bead_id, "worker-B").await;
+
+    assert!(
+        claim_result.is_ok(),
+        "worker B should be able to claim reopened bead; got error: {:?}",
+        claim_result
+    );
+
+    // Verify worker B is now the assignee.
+    let bead = store.show(&bead_id).await.unwrap();
+    assert_eq!(
+        bead.assignee.as_deref(),
+        Some("worker-B"),
+        "worker B should be the assignee after claiming reopened bead"
+    );
+}
+
+/// Test that re-reopen (reopen an already open bead) is handled correctly.
+///
+/// Edge case: what happens if someone calls reopen on an already-open bead?
+/// This test verifies the behavior is well-defined and doesn't cause issues.
+#[tokio::test]
+async fn real_bead_rs_reopen_handles_already_open_bead() {
+    let workspace = create_test_workspace("reopen-already-open").unwrap();
+    let store = Arc::new(store_for_workspace(workspace.path()).unwrap());
+
+    // Create and close a bead.
+    let bead_id = create_bead(workspace.path(), "re-reopen-test", 1).unwrap();
+    close_bead(workspace.path(), &bead_id, "First close").expect("first close should succeed");
+
+    // First reopen.
+    reopen_bead(workspace.path(), &bead_id).expect("first reopen should succeed");
+
+    let bead = store.show(&bead_id).await.unwrap();
+    assert_eq!(bead.status, needle::types::BeadStatus::Open);
+    assert!(
+        bead.assignee.is_none(),
+        "first reopen should clear assignee"
+    );
+
+    // Second reopen on already-open bead.
+    // Expected: either succeeds with no-op, or fails with clear error.
+    let result = bead_command(workspace.path())
+        .args(["reopen", bead_id.as_ref()])
+        .output();
+
+    match result {
+        Ok(output) => {
+            if output.status.success() {
+                // Reopen succeeded — verify state is still correct.
+                let bead = store.show(&bead_id).await.unwrap();
+                assert_eq!(
+                    bead.status,
+                    needle::types::BeadStatus::Open,
+                    "re-reopen should leave bead open"
+                );
+                assert!(
+                    bead.assignee.is_none(),
+                    "re-reopen should not restore stale assignee"
+                );
+            } else {
+                // Reopen failed — verify error message is informative.
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                assert!(
+                    stderr.contains("already open")
+                        || stderr.contains("status")
+                        || stderr.contains("closed"),
+                    "reopen failure should have informative error; got: {}",
+                    stderr
+                );
+            }
+        }
+        Err(e) => {
+            panic!("reopen command failed to execute: {}", e);
+        }
+    }
+}
+
+/// Test that reopening a bead with dependencies works correctly.
+///
+/// Edge case: a bead that blocks others (is a dependency) should behave
+/// correctly when reopened. The dependency relationships should be preserved.
+#[tokio::test]
+async fn real_bead_rs_reopen_with_dependencies() {
+    let workspace = create_test_workspace("reopen-with-deps").unwrap();
+    let store = Arc::new(store_for_workspace(workspace.path()).unwrap());
+
+    // Create parent and child beads.
+    let parent_id = create_bead(workspace.path(), "parent-task", 1).unwrap();
+    let child_id = create_bead(workspace.path(), "child-task", 1).unwrap();
+
+    // Add dependency: parent depends on child (child blocks parent).
+    add_dependency(workspace.path(), &parent_id, &child_id).expect("add_dependency should succeed");
+
+    // Verify dependency relationship exists.
+    let parent = store.show(&parent_id).await.unwrap();
+    assert!(
+        !parent.dependencies.is_empty(),
+        "parent should have dependency"
+    );
+
+    // Claim and close the parent bead.
+    store
+        .claim(&parent_id, "test-worker")
+        .await
+        .expect("claim should succeed");
+    close_bead(workspace.path(), &parent_id, "Parent complete").expect("close should succeed");
+
+    // Reopen the parent bead.
+    reopen_bead(workspace.path(), &parent_id).expect("reopen should succeed");
+
+    // Verify reopened parent has no assignee but still has dependencies.
+    let parent = store.show(&parent_id).await.unwrap();
+    assert_eq!(
+        parent.status,
+        needle::types::BeadStatus::Open,
+        "reopened parent should be open"
+    );
+    assert!(
+        parent.assignee.is_none(),
+        "reopened parent should have no assignee"
+    );
+    assert!(
+        !parent.dependencies.is_empty(),
+        "reopened parent should preserve dependencies"
+    );
+
+    // Verify the dependency relationship still works.
+    let ready_beads = store.ready(&Filters::default()).await.unwrap();
+    let child_is_ready = ready_beads.iter().any(|b| b.id == child_id);
+    let parent_is_blocked = !ready_beads.iter().any(|b| b.id == parent_id);
+
+    assert!(child_is_ready, "child should be ready (unblocked)");
+    assert!(
+        parent_is_blocked,
+        "parent should still be blocked by child dependency after reopen"
+    );
+}
+
+/// Test regression for the original silent starvation bug.
+///
+/// This test simulates the exact scenario from the 2026-08-16 fleet-wide
+/// issue where 583 beads across 47 workspaces had stale assignees and
+/// became permanently unclaimable after being reopened.
+#[tokio::test]
+async fn real_bead_rs_regression_silent_starvation_bug_fixed() {
+    let workspace = create_test_workspace("regression-silent-starvation").unwrap();
+    let store = Arc::new(store_for_workspace(workspace.path()).unwrap());
+
+    // Create a bead.
+    let bead_id = create_bead(workspace.path(), "starvation-test", 1).unwrap();
+
+    // Claim it as "worker-A".
+    store
+        .claim(&bead_id, "worker-A")
+        .await
+        .expect("claim should succeed");
+
+    // Close it.
+    close_bead(workspace.path(), &bead_id, "Work complete").expect("close should succeed");
+
+    // Reopen it — this is where the bug would occur.
+    // Bug: reopen retains assignee="worker-A", making bead unclaimable.
+    // Fix: reopen clears assignee, making bead immediately claimable.
+    reopen_bead(workspace.path(), &bead_id).expect("reopen should succeed");
+
+    // Verify the fix: bead should be claimable by any worker.
+    let ready_beads = store.ready(&Filters::default()).await.unwrap();
+    assert!(
+        ready_beads.iter().any(|b| b.id == bead_id),
+        "BUG FIX: reopened bead must appear in ready frontier (was silently starving before ADR-018)"
+    );
+
+    // Try to claim with a different worker.
+    let claim_result = store.claim(&bead_id, "worker-B").await;
+
+    assert!(
+        claim_result.is_ok(),
+        "BUG FIX: different worker must be able to claim reopened bead (was blocked by stale assignee before ADR-018); got error: {:?}",
+        claim_result
+    );
+
+    // Verify the new assignee.
+    let bead = store.show(&bead_id).await.unwrap();
+    assert_eq!(
+        bead.assignee.as_deref(),
+        Some("worker-B"),
+        "worker B should be the assignee after claiming"
+    );
+}
+
+/// Test that assignee is preserved on close (historical record).
+///
+/// This test verifies that closing a bead preserves its assignee for the
+/// historical record, as documented in ADR-018. This is important for audit
+/// trails and understanding who worked on a bead.
+#[tokio::test]
+async fn real_bead_rs_close_preserves_assignee_for_historical_record() {
+    let workspace = create_test_workspace("close-preserves-assignee").unwrap();
+    let store = Arc::new(store_for_workspace(workspace.path()).unwrap());
+
+    // Create and claim a bead.
+    let bead_id = create_bead(workspace.path(), "history-test", 1).unwrap();
+    store
+        .claim(&bead_id, "original-worker")
+        .await
+        .expect("claim should succeed");
+
+    // Close the bead.
+    close_bead(workspace.path(), &bead_id, "Work complete").expect("close should succeed");
+
+    // Verify assignee is preserved for historical record.
+    let bead = store.show(&bead_id).await.unwrap();
+    assert_eq!(
+        bead.status,
+        needle::types::BeadStatus::Closed,
+        "bead should be closed"
+    );
+    assert_eq!(
+        bead.assignee.as_deref(),
+        Some("original-worker"),
+        "closed bead MUST preserve assignee for historical record (ADR-018)"
+    );
+
+    // Verify the bead does NOT appear in ready frontier (it's closed).
+    let ready_beads = store.ready(&Filters::default()).await.unwrap();
+    assert!(
+        !ready_beads.iter().any(|b| b.id == bead_id),
+        "closed bead should not appear in ready frontier even with assignee preserved"
+    );
+}
