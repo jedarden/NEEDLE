@@ -231,12 +231,12 @@ impl ProcessObservation {
     /// Check whether the idle deadline has expired.
     ///
     /// # Returns
-    /// * `Some(true)` - idle deadline is set and has expired
-    /// * `Some(false)` - idle deadline is set but has not yet expired
-    /// * `None` - no idle deadline is set (idle timeout disabled)
-    pub fn is_idle_expired(&self) -> Option<bool> {
+    /// * `true` - idle deadline is set and has expired
+    /// * `false` - idle deadline is not set or has not yet expired
+    pub fn is_idle_expired(&self) -> bool {
         self.idle_deadline
             .map(|deadline| tokio::time::Instant::now() >= deadline)
+            .unwrap_or(false)
     }
 
     /// Check if an idle deadline is currently active.
@@ -2751,7 +2751,7 @@ output_transform: "needle-transform-custom"
         let obs = ProcessObservation::new();
         assert!(!obs.has_idle_deadline());
         assert!(obs.idle_deadline().is_none());
-        assert_eq!(obs.is_idle_expired(), None);
+        assert!(!obs.is_idle_expired());
     }
 
     #[test]
@@ -2759,7 +2759,7 @@ output_transform: "needle-transform-custom"
         let obs = ProcessObservation::default();
         assert!(!obs.has_idle_deadline());
         assert!(obs.idle_deadline().is_none());
-        assert_eq!(obs.is_idle_expired(), None);
+        assert!(!obs.is_idle_expired());
     }
 
     #[test]
@@ -2776,7 +2776,7 @@ output_transform: "needle-transform-custom"
         let obs = ProcessObservation::with_idle_deadline(timeout);
 
         // A newly created deadline should not be expired
-        assert_eq!(obs.is_idle_expired(), Some(false));
+        assert!(!obs.is_idle_expired());
     }
 
     #[test]
@@ -2785,7 +2785,7 @@ output_transform: "needle-transform-custom"
         let obs = ProcessObservation::with_idle_deadline(timeout);
 
         // Zero timeout means deadline is already in the past
-        assert_eq!(obs.is_idle_expired(), Some(true));
+        assert!(obs.is_idle_expired());
     }
 
     #[test]
