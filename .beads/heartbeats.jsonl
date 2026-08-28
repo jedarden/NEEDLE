@@ -1984,3 +1984,4 @@
 {"last_strand":null,"state":"idle","ts":"2026-08-23T11:15:45.441909786+00:00","worker":"test-worker"}
 {"last_strand":null,"state":"idle","ts":"2026-08-23T11:15:45.452780933+00:00","worker":"shutdown-handler-test"}
 {"last_strand":null,"state":"idle","ts":"2026-08-23T11:15:45.478892387+00:00","worker":"state-test"}
+{"last_strand":null,"state":"idle","ts":"2026-08-28T13:33:19.484469852+00:00","worker":"test-worker"}

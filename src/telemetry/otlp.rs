@@ -3572,7 +3572,9 @@ mod tests {
         // The actual username may be returned on systems with a passwd entry,
         // but we verify that the fallback format is valid when it occurs
         if owner.starts_with("uid:") {
-            let uid_str = owner.strip_prefix("uid:").expect("uid: prefix must be present");
+            let uid_str = owner
+                .strip_prefix("uid:")
+                .expect("uid: prefix must be present");
             let uid = uid_str.parse::<u32>().expect("uid must be numeric");
             assert!(uid < 1_000_000, "uids are typically less than 1M");
         }
@@ -3599,9 +3601,6 @@ mod tests {
             .expect("process.owner must be in resource attributes");
 
         let owner_value = process_owner.1.as_str();
-        assert!(
-            !owner_value.is_empty(),
-            "process.owner must never be empty"
-        );
+        assert!(!owner_value.is_empty(), "process.owner must never be empty");
     }
 }

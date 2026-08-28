@@ -288,6 +288,14 @@ pub enum EventKind {
         consecutive_errors: u32,
         last_error: String,
     },
+    ClaimVerifyStarted {
+        bead_id: BeadId,
+        expected_actor: String,
+    },
+    ClaimVerifySuccess {
+        bead_id: BeadId,
+        expected_actor: String,
+    },
     ClaimVerifyFailed {
         bead_id: BeadId,
         expected_actor: String,
@@ -1000,6 +1008,8 @@ impl EventKind {
             EventKind::ClaimRaceLostSkipped { .. } => "bead.claim.race_lost_skipped",
             EventKind::ClaimFailed { .. } => "bead.claim.failed",
             EventKind::ClaimErrorThreshold { .. } => "bead.claim.error_threshold",
+            EventKind::ClaimVerifyStarted { .. } => "bead.claim.verify_started",
+            EventKind::ClaimVerifySuccess { .. } => "bead.claim.verify_success",
             EventKind::ClaimVerifyFailed { .. } => "bead.claim.verify_failed",
             EventKind::BeadReleased { .. } => "bead.released",
             EventKind::BeadReleaseFailed { .. } => "bead.release.failed",
@@ -1137,6 +1147,8 @@ impl EventKind {
             | EventKind::ClaimRaceLost { bead_id }
             | EventKind::ClaimFailed { bead_id, .. }
             | EventKind::ClaimErrorThreshold { bead_id, .. }
+            | EventKind::ClaimVerifyStarted { bead_id, .. }
+            | EventKind::ClaimVerifySuccess { bead_id, .. }
             | EventKind::ClaimVerifyFailed { bead_id, .. }
             | EventKind::BeadReleased { bead_id, .. }
             | EventKind::BeadReleaseFailed { bead_id, .. }
@@ -2425,6 +2437,20 @@ impl EventKind {
                 "actual_status": actual_status,
                 "actual_assignee": actual_assignee,
             }),
+            EventKind::ClaimVerifyStarted {
+                bead_id,
+                expected_actor,
+            } => serde_json::json!({
+                "bead_id": bead_id,
+                "expected_actor": expected_actor,
+            }),
+            EventKind::ClaimVerifySuccess {
+                bead_id,
+                expected_actor,
+            } => serde_json::json!({
+                "bead_id": bead_id,
+                "expected_actor": expected_actor,
+            }),
             EventKind::MendStaleAssigneeCleared { bead_id, assignee } => serde_json::json!({
                 "bead_id": bead_id,
                 "assignee": assignee,
@@ -2683,6 +2709,8 @@ impl EventKind {
             | EventKind::WorkerFoundButExcluded { .. }
             | EventKind::EventDrivenWakeup { .. }
             | EventKind::ClaimErrorThreshold { .. }
+            | EventKind::ClaimVerifyStarted { .. }
+            | EventKind::ClaimVerifySuccess { .. }
             | EventKind::ClaimVerifyFailed { .. }
             | EventKind::MendStaleAssigneeCleared { .. }
             | EventKind::MendAssigneeClearFailed { .. }
@@ -3820,9 +3848,10 @@ impl Telemetry {
 
     /// Update the cached workspace basename.
     ///
-    /// This is a private setter that will be wired up by the next bead to keep
-    /// the basename in sync with the full workspace path.
-    fn set_workspace_basename(&self, basename: Option<String>) {
+    /// Keeps the basename in sync with the full workspace path. Call this
+    /// after updating the workspace to ensure OTLP sinks have access to the
+    /// basename without recomputing it on every event.
+    pub fn set_workspace_basename(&self, basename: Option<String>) {
         match self.current_workspace_basename.lock() {
             Ok(mut current) => *current = basename,
             Err(poisoned) => {
@@ -4049,6 +4078,7 @@ impl Telemetry {
             session_id,
             sequence,
             current_workspace: Self::new_workspace_cell(),
+            current_workspace_basename: Self::new_basename_cell(),
             sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
             writer_handle: Arc::new(std::sync::Mutex::new(None)),

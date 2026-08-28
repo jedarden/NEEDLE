@@ -294,6 +294,14 @@ impl Claimer {
                     // Clear error counter on successful claim
                     self.clear_claim_errors(bead_id);
                     self.telemetry.set_workspace(bead.workspace.clone());
+                    // Update basename cell using workspace_label pattern
+                    let workspace_basename = bead
+                        .workspace
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .filter(|name| !name.is_empty())
+                        .map(|name| name.to_string());
+                    self.telemetry.set_workspace_basename(workspace_basename);
                     self.telemetry.emit(EventKind::ClaimSuccess {
                         bead_id: bead_id.clone(),
                         priority: candidate.priority as i32,
@@ -492,6 +500,12 @@ impl Claimer {
         bead_id: &BeadId,
         expected_actor: &str,
     ) -> Result<bool> {
+        // Emit start event
+        self.telemetry.emit(EventKind::ClaimVerifyStarted {
+            bead_id: bead_id.clone(),
+            expected_actor: expected_actor.to_string(),
+        })?;
+
         // Use claim_status to query the live store with revision information
         match self.store.claim_status(bead_id).await {
             Ok(claim_status) => {
@@ -522,6 +536,11 @@ impl Claimer {
                         revision = ?claim_status.revision,
                         "atomic claim verification at dispatch passed"
                     );
+                    // Emit success event
+                    self.telemetry.emit(EventKind::ClaimVerifySuccess {
+                        bead_id: bead_id.clone(),
+                        expected_actor: expected_actor.to_string(),
+                    })?;
                 }
                 Ok(is_valid)
             }
@@ -583,6 +602,14 @@ impl Claimer {
                 tracing::Span::current().record("needle.bead.id", bead.id.as_ref());
                 tracing::Span::current().record("needle.claim.result", "succeeded");
                 self.telemetry.set_workspace(bead.workspace.clone());
+                // Update basename cell using workspace_label pattern
+                let workspace_basename = bead
+                    .workspace
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .filter(|name| !name.is_empty())
+                    .map(|name| name.to_string());
+                self.telemetry.set_workspace_basename(workspace_basename);
                 self.telemetry.emit(EventKind::ClaimSuccess {
                     bead_id: bead.id.clone(),
                     priority: bead.priority as i32,
@@ -1719,6 +1746,70 @@ mod tests {
             .to_string()
             .contains("InProgress"));
         assert_eq!(verify_failed.data["actual_assignee"], "attacker-worker");
+    }
+
+    #[tokio::test]
+    async fn verify_claim_at_dispatch_emits_telemetry_on_start() {
+        // Test that verify_claim_at_dispatch emits ClaimVerifyStarted telemetry
+        let bead = make_bead("needle-tel-start", "/tmp/ws");
+        let mut bead_claimed = bead.clone();
+        bead_claimed.status = BeadStatus::InProgress;
+        bead_claimed.assignee = Some("worker-1".to_string());
+
+        let store = Arc::new(MockBeadStore::new(vec![bead_claimed]));
+        let (sink, events) = crate::telemetry::test_utils::MemorySink::new();
+        let telemetry = Telemetry::with_sink("test-worker".to_string(), sink);
+        let claimer = Claimer::new(store, std::env::temp_dir(), 5, 10, telemetry);
+
+        let _ = claimer
+            .verify_claim_at_dispatch(&bead.id, "worker-1")
+            .await
+            .unwrap();
+
+        drop(claimer);
+        // Give telemetry writer time to flush
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let captured = events.lock().unwrap();
+        let verify_started = captured
+            .iter()
+            .find(|event| event.event_type == "bead.claim.verify_started")
+            .expect("ClaimVerifyStarted event must fire when verification starts");
+
+        assert_eq!(verify_started.bead_id, Some(bead.id.clone()));
+        assert_eq!(verify_started.data["expected_actor"], "worker-1");
+    }
+
+    #[tokio::test]
+    async fn verify_claim_at_dispatch_emits_telemetry_on_success() {
+        // Test that verify_claim_at_dispatch emits ClaimVerifySuccess telemetry when verification passes
+        let bead = make_bead("needle-tel-success", "/tmp/ws");
+        let mut bead_claimed = bead.clone();
+        bead_claimed.status = BeadStatus::InProgress;
+        bead_claimed.assignee = Some("worker-1".to_string());
+
+        let store = Arc::new(MockBeadStore::new(vec![bead_claimed]));
+        let (sink, events) = crate::telemetry::test_utils::MemorySink::new();
+        let telemetry = Telemetry::with_sink("test-worker".to_string(), sink);
+        let claimer = Claimer::new(store, std::env::temp_dir(), 5, 10, telemetry);
+
+        let _ = claimer
+            .verify_claim_at_dispatch(&bead.id, "worker-1")
+            .await
+            .unwrap();
+
+        drop(claimer);
+        // Give telemetry writer time to flush
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let captured = events.lock().unwrap();
+        let verify_success = captured
+            .iter()
+            .find(|event| event.event_type == "bead.claim.verify_success")
+            .expect("ClaimVerifySuccess event must fire when verification passes");
+
+        assert_eq!(verify_success.bead_id, Some(bead.id.clone()));
+        assert_eq!(verify_success.data["expected_actor"], "worker-1");
     }
 
     // ─── Telemetry-contract tests (needle-d91ca5e9) ────────────────────────────

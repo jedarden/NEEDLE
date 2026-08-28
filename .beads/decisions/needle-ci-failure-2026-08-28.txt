@@ -1,0 +1,746 @@
+time=2026-08-28T10:47:30.317Z level=INFO msg="waiting for signals" argo=true signalPath=/var/run/argo/ctr/main/signal
++ rm -rf /workspace/lost+found '/workspace/.[!.]*'
++ git clone --depth 1 --branch main https://git.ardenone.com/jedarden/NEEDLE.git /workspace
+Cloning into '/workspace'...
++ cd /workspace
++ rustc --version
+info: syncing channel updates for 1.95.0-x86_64-unknown-linux-gnu
+info: latest update on 2026-04-16 for version 1.95.0 (59807616e 2026-04-14)
+info: downloading 7 components
+rustc 1.95.0 (59807616e 2026-04-14)
++ '[' -n sccache ']'
++ '[' -n https://s3.ardenone.com ']'
++ command -v sccache
++ SCCACHE_VERSION=0.17.0
++ SCCACHE_ARCHIVE=sccache-v0.17.0-x86_64-unknown-linux-musl.tar.gz
++ SCCACHE_SHA256=67c4a96dd237c1f518f6b36083f270f9976d516f1e57fce891755ea782e50006
++ SCCACHE_TMP=/tmp/sccache-v0.17.0-x86_64-unknown-linux-musl.tar.gz
++ SCCACHE_ROOT=/tmp/sccache-0.17.0
++ mkdir -p /tmp/sccache-0.17.0
++ curl -fsSL --retry 3 https://github.com/mozilla/sccache/releases/download/v0.17.0/sccache-v0.17.0-x86_64-unknown-linux-musl.tar.gz -o /tmp/sccache-v0.17.0-x86_64-unknown-linux-musl.tar.gz
++ echo '67c4a96dd237c1f518f6b36083f270f9976d516f1e57fce891755ea782e50006  /tmp/sccache-v0.17.0-x86_64-unknown-linux-musl.tar.gz'
++ sha256sum -c -
+/tmp/sccache-v0.17.0-x86_64-unknown-linux-musl.tar.gz: OK
++ tar -xzf /tmp/sccache-v0.17.0-x86_64-unknown-linux-musl.tar.gz --strip-components=1 -C /tmp/sccache-0.17.0
++ chmod 0755 /tmp/sccache-0.17.0/sccache
++ export PATH=/tmp/sccache-0.17.0:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
++ PATH=/tmp/sccache-0.17.0:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
++ export RUSTC_WRAPPER=sccache SCCACHE_S3_USE_SSL=true SCCACHE_REGION=garage
++ RUSTC_WRAPPER=sccache
++ SCCACHE_S3_USE_SSL=true
++ SCCACHE_REGION=garage
++ echo 'sccache enabled (bucket=sccache)'
++ sccache --start-server
+sccache enabled (bucket=sccache)
+sccache: Starting the server...
+sccache: Listening on address 127.0.0.1:4226
++ command -v bead
++ echo '=== Installing pinned bead-rs CLI (v0.1.3) ==='
++ cargo install --locked --git https://git.ardenone.com/jedarden/bead-rs.git --rev 85f36acba864bf60f8f06b7fbe3de33c280f3d08 --bin bead
+=== Installing pinned bead-rs CLI (v0.1.3) ===
+    Updating git repository `https://git.ardenone.com/jedarden/bead-rs.git`
+From https://git.ardenone.com/jedarden/bead-rs
+ * [new branch]      main       -> origin/main
+ * [new branch]      recovery/marathon-f013-ce5a1df -> origin/recovery/marathon-f013-ce5a1df
+ * [new ref]                    -> origin/HEAD
+ * [new tag]         v0.1.0     -> v0.1.0
+ * [new tag]         v0.1.1     -> v0.1.1
+ * [new tag]         v0.1.2     -> v0.1.2
+ * [new tag]         v0.1.3     -> v0.1.3
+ * [new tag]         v0.2.0     -> v0.2.0
+ * [new tag]         v0.2.1     -> v0.2.1
+  Installing bead-rs v0.1.3 (https://git.ardenone.com/jedarden/bead-rs.git?rev=85f36acba864bf60f8f06b7fbe3de33c280f3d08#85f36acb)
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded num-conv v0.1.0
+  Downloaded serial_test v3.5.0
+  Downloaded powerfmt v0.2.0
+  Downloaded tempfile v3.12.0
+  Downloaded hashlink v0.9.1
+  Downloaded time-macros v0.2.18
+  Downloaded uuid v1.8.0
+  Downloaded roff v0.2.2
+  Downloaded clap v4.5.4
+  Downloaded clap_derive v4.5.4
+  Downloaded rusqlite v0.31.0
+  Downloaded vcpkg v0.2.15
+  Downloaded clap_builder v4.5.2
+  Downloaded hashbrown v0.14.5
+  Downloaded time-core v0.1.2
+  Downloaded anstream v0.6.21
+  Downloaded pkg-config v0.3.33
+  Downloaded deranged v0.3.11
+  Downloaded clap_mangen v0.2.20
+  Downloaded serial_test_derive v3.5.0
+  Downloaded md5 v0.7.0
+  Downloaded fallible-streaming-iterator v0.1.9
+  Downloaded ahash v0.8.12
+  Downloaded fallible-iterator v0.3.0
+  Downloaded clap_lex v0.7.7
+  Downloaded anstyle-parse v0.2.7
+  Downloaded time v0.3.36
+  Downloaded libsqlite3-sys v0.28.0
+   Compiling proc-macro2 v1.0.107
+   Compiling cfg-if v1.0.4
+   Compiling version_check v0.9.5
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.47
+   Compiling libc v0.2.189
+   Compiling zerocopy v0.8.56
+   Compiling syn v2.0.119
+   Compiling generic-array v0.14.7
+   Compiling once_cell v1.21.4
+   Compiling ahash v0.8.12
+   Compiling shlex v2.0.1
+   Compiling find-msvc-tools v0.1.10
+   Compiling typenum v1.20.1
+   Compiling utf8parse v0.2.2
+   Compiling cc v1.4.2
+   Compiling anstyle-parse v0.2.7
+   Compiling getrandom v0.2.17
+   Compiling anstyle-query v1.1.5
+   Compiling autocfg v1.5.1
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling pkg-config v0.3.33
+   Compiling anstyle v1.0.14
+   Compiling parking_lot_core v0.9.12
+   Compiling vcpkg v0.2.15
+   Compiling smallvec v1.15.2
+   Compiling colorchoice v1.0.5
+   Compiling serde_core v1.0.229
+   Compiling anstream v0.6.21
+   Compiling libsqlite3-sys v0.28.0
+   Compiling num-traits v0.2.19
+   Compiling heck v0.5.0
+   Compiling pin-project-lite v0.2.17
+   Compiling clap_lex v0.7.7
+   Compiling rustix v0.38.44
+   Compiling bitflags v2.13.1
+   Compiling futures-task v0.3.33
+   Compiling zmij v1.0.23
+   Compiling strsim v0.11.1
+   Compiling scopeguard v1.2.0
+   Compiling slab v0.4.12
+   Compiling futures-core v0.3.33
+   Compiling lock_api v0.4.14
+   Compiling clap_builder v4.5.2
+   Compiling futures-util v0.3.33
+   Compiling clap_derive v4.5.4
+   Compiling hashbrown v0.14.5
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling rand_core v0.6.4
+   Compiling ppv-lite86 v0.2.21
+   Compiling syn v3.0.3
+   Compiling anyhow v1.0.104
+   Compiling serde v1.0.229
+   Compiling powerfmt v0.2.0
+   Compiling itoa v1.0.18
+   Compiling linux-raw-sys v0.4.15
+   Compiling thiserror v1.0.69
+   Compiling serde_json v1.0.151
+   Compiling deranged v0.3.11
+   Compiling serde_derive v1.0.229
+   Compiling rand_chacha v0.3.1
+   Compiling digest v0.10.7
+   Compiling clap v4.5.4
+   Compiling parking_lot v0.12.5
+   Compiling futures-executor v0.3.33
+   Compiling hashlink v0.9.1
+   Compiling thiserror-impl v1.0.69
+   Compiling serial_test_derive v3.5.0
+   Compiling memchr v2.8.3
+   Compiling roff v0.2.2
+   Compiling iana-time-zone v0.1.65
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling fastrand v2.5.0
+   Compiling cpufeatures v0.2.17
+   Compiling log v0.4.33
+   Compiling time-core v0.1.2
+   Compiling fallible-iterator v0.3.0
+   Compiling num-conv v0.1.0
+   Compiling serial_test v3.5.0
+   Compiling rusqlite v0.31.0
+   Compiling time v0.3.36
+   Compiling sha2 v0.10.9
+   Compiling tempfile v3.12.0
+   Compiling chrono v0.4.45
+   Compiling clap_mangen v0.2.20
+   Compiling rand v0.8.7
+   Compiling uuid v1.8.0
+   Compiling md5 v0.7.0
+   Compiling hex v0.4.3
+   Compiling bead-rs v0.1.3 (/root/.cargo/git/checkouts/bead-rs-86514767cbfc7878/85f36ac)
+    Finished `release` profile [optimized] target(s) in 2m 38s
+  Installing /root/.cargo/bin/bead
+   Installed package `bead-rs v0.1.3 (https://git.ardenone.com/jedarden/bead-rs.git?rev=85f36acba864bf60f8f06b7fbe3de33c280f3d08#85f36acb)` (executable `bead`)
++ bead --version
+bead 0.1.3
+=== Running Definition of Done (all lanes) ===
++ echo '=== Running Definition of Done (all lanes) ==='
++ ./scripts/definition-of-done.sh --all
+NEEDLE_VERIFICATION_GATE: definition-of-done
+=== Fast Lane Checks ===
+Running: cargo fmt --check...
+✗ cargo fmt --check failed (exit code: 1)
+Failure details for cargo fmt --check (last 100 lines):
+Diff in /workspace/src/dispatch/mod.rs:5036:
+ 
+     let error_msg = provision_result.unwrap_err().to_string();
+     assert!(
+-        error_msg.contains("Tailscale API client not initialized") ||
+-        error_msg.contains("failed to initialize"),
++        error_msg.contains("Tailscale API client not initialized")
++            || error_msg.contains("failed to initialize"),
+         "error should indicate missing key source or initialization failure, got: {}",
+         error_msg
+     );
+Diff in /workspace/src/strand/pluck.rs:3520:
+ 
+     #[test]
+     fn extract_workspace_path_returns_first_valid_workspace() {
+-        let bead1 =
+-            make_bead_with_workspace_and_labels("bead1", 1, "/workspace/a", vec![]);
+-        let bead2 =
+-            make_bead_with_workspace_and_labels("bead2", 2, "", vec![]); // NULL workspace
++        let bead1 = make_bead_with_workspace_and_labels("bead1", 1, "/workspace/a", vec![]);
++        let bead2 = make_bead_with_workspace_and_labels("bead2", 2, "", vec![]); // NULL workspace
+ 
+         let workspace = extract_workspace_path(&[bead1, bead2]);
+         assert_eq!(
+Diff in /workspace/src/strand/pluck.rs:3581:
+         let workspace = tempfile::tempdir().unwrap();
+         let workspace_path = workspace.path().to_str().unwrap();
+ 
+-        let mut blocker =
+-            make_bead_with_workspace_and_labels("blocker", 1, workspace_path, vec![]);
++        let mut blocker = make_bead_with_workspace_and_labels("blocker", 1, workspace_path, vec![]);
+         blocker.status = BeadStatus::Closed; // Blocker is done
+ 
+-        let mut blocked =
+-            make_bead_with_workspace_and_labels("blocked", 1, workspace_path, vec![]);
++        let mut blocked = make_bead_with_workspace_and_labels("blocked", 1, workspace_path, vec![]);
+         blocked.status = BeadStatus::Blocked;
+         blocked.dependencies.push(BrDependency {
+             id: blocker.id.clone(),
+Diff in /workspace/src/strand/pluck.rs:3598:
+ 
+         // Even though there's an open bead, it's blocked by a closed dependency
+         // This should NOT trigger a starvation alert
+-        let store = UnfilteredStore { beads: vec![blocked] };
++        let store = UnfilteredStore {
++            beads: vec![blocked],
++        };
+ 
+         let strand = PluckStrand::with_persistent_records(
+             vec![],
+Diff in /workspace/src/strand/pluck.rs:3613:
+         // Should return NoWork
+         match result {
+             StrandResult::NoWork => {}
+-            other => panic!("expected NoWork when all beads are blocked, got: {:?}", other),
++            other => panic!(
++                "expected NoWork when all beads are blocked, got: {:?}",
++                other
++            ),
+         }
+ 
+         helper.sync().await;
+Diff in /workspace/src/strand/pluck.rs:3622:
+         helper.assert_event_emitted("strand.pluck.starvation_detected");
+ 
+         // Verify the event shows all beads are blocked
+-        let event = helper.find_event("strand.pluck.starvation_detected").unwrap();
++        let event = helper
++            .find_event("strand.pluck.starvation_detected")
++            .unwrap();
+         assert_eq!(
+             event.data.get("open_count").and_then(|v| v.as_u64()),
+             Some(1),
+Diff in /workspace/src/telemetry/otlp.rs:3572:
+         // The actual username may be returned on systems with a passwd entry,
+         // but we verify that the fallback format is valid when it occurs
+         if owner.starts_with("uid:") {
+-            let uid_str = owner.strip_prefix("uid:").expect("uid: prefix must be present");
++            let uid_str = owner
++                .strip_prefix("uid:")
++                .expect("uid: prefix must be present");
+             let uid = uid_str.parse::<u32>().expect("uid must be numeric");
+             assert!(uid < 1_000_000, "uids are typically less than 1M");
+         }
+Diff in /workspace/src/telemetry/otlp.rs:3599:
+             .expect("process.owner must be in resource attributes");
+ 
+         let owner_value = process_owner.1.as_str();
+-        assert!(
+-            !owner_value.is_empty(),
+-            "process.owner must never be empty"
+-        );
++        assert!(!owner_value.is_empty(), "process.owner must never be empty");
+     }
+ }
+ 
+Running: cargo clippy...
+✗ cargo clippy failed (exit code: 101)
+Failure details for cargo clippy (last 100 lines):
+   Compiling crossbeam-epoch v0.9.20
+    Checking winnow v0.7.15
+    Checking linux-raw-sys v0.4.15
+    Checking toml_write v0.1.2
+    Checking subtle v2.6.1
+   Compiling thiserror v1.0.69
+    Checking toml_edit v0.22.27
+    Checking clap v4.6.6
+    Checking tracing-subscriber v0.3.23
+    Checking rand_chacha v0.3.1
+    Checking opentelemetry-proto v0.31.0
+    Checking webpki-roots v0.26.11
+    Checking digest v0.10.7
+    Checking flate2 v1.1.9
+    Checking opentelemetry-http v0.31.0
+    Checking regex v1.13.1
+   Compiling thiserror-impl v1.0.69
+    Checking home v0.5.12
+    Checking cpufeatures v0.2.17
+    Checking unsafe-libyaml v0.2.11
+   Compiling needle v0.6.0 (/workspace)
+   Compiling crossbeam-deque v0.8.7
+    Checking iana-time-zone v0.1.65
+    Checking chrono v0.4.45
+    Checking serde_yaml v0.9.34+deprecated
+    Checking sha2 v0.10.9
+    Checking which v4.4.2
+    Checking opentelemetry-otlp v0.31.1
+    Checking ureq v2.12.1
+    Checking rand v0.8.7
+    Checking tracing-opentelemetry v0.32.1
+    Checking toml v0.8.23
+    Checking futures v0.3.33
+    Checking gethostname v0.4.3
+    Checking fs2 v0.4.3
+    Checking atty v0.2.14
+    Checking glob v0.3.4
+    Checking opentelemetry-semantic-conventions v0.31.0
+   Compiling rayon-core v1.13.0
+    Checking hex v0.4.3
+    Checking half v2.7.1
+    Checking ciborium-io v0.2.2
+    Checking plotters-backend v0.3.7
+    Checking ciborium-ll v0.2.2
+    Checking plotters-svg v0.3.7
+    Checking itertools v0.10.5
+    Checking wait-timeout v0.2.1
+    Checking bit-vec v0.8.0
+    Checking same-file v1.0.6
+    Checking cast v0.3.0
+    Checking quick-error v1.2.3
+    Checking criterion-plot v0.5.0
+    Checking rusty-fork v0.3.1
+    Checking walkdir v2.5.0
+    Checking bit-set v0.8.0
+    Checking rayon v1.12.0
+    Checking ciborium v0.2.2
+    Checking plotters v0.3.7
+    Checking tinytemplate v1.2.1
+    Checking rand_xorshift v0.4.0
+   Compiling serial_test_derive v3.5.0
+    Checking is-terminal v0.4.17
+    Checking unarray v0.1.4
+    Checking anes v0.1.6
+    Checking oorandom v11.1.5
+    Checking serial_test v3.5.0
+    Checking criterion v0.5.1
+    Checking proptest v1.11.0
+    Checking tokio-test v0.4.5
+    Checking filetime v0.2.29
+error[E0599]: no method named `with_bead_store` found for struct `dispatch::Dispatcher` in the current scope
+   --> src/worker/mod.rs:842:14
+    |
+841 |           let dispatcher = dispatcher
+    |  __________________________-
+842 | |             .with_bead_store(store.clone())
+    | |             -^^^^^^^^^^^^^^^ method not found in `dispatch::Dispatcher`
+    | |_____________|
+    |
+    |
+   ::: src/dispatch/mod.rs:881:1
+    |
+881 |   pub struct Dispatcher {
+    |   --------------------- method `with_bead_store` not found for this struct
+
+error[E0599]: no method named `with_bead_store` found for struct `dispatch::Dispatcher` in the current scope
+    --> src/worker/mod.rs:4155:19
+     |
+4155 |                 d.with_bead_store(self.home_store.clone())
+     |                   ^^^^^^^^^^^^^^^ method not found in `dispatch::Dispatcher`
+     |
+    ::: src/dispatch/mod.rs:881:1
+     |
+ 881 | pub struct Dispatcher {
+     | --------------------- method `with_bead_store` not found for this struct
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `needle` (lib) due to 2 previous errors
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `needle` (lib test) due to 2 previous errors
+Running: cargo check...
+✗ cargo check failed (exit code: 101)
+Failure details for cargo check (last 100 lines):
+   Compiling serde_core v1.0.229
+    Checking scopeguard v1.2.0
+   Compiling serde v1.0.229
+    Checking lock_api v0.4.14
+   Compiling zerocopy v0.8.56
+    Checking parking_lot v0.12.5
+    Checking tokio v1.53.1
+   Compiling num-traits v0.2.19
+    Checking serde_urlencoded v0.7.1
+    Checking serde_json v1.0.151
+    Checking ppv-lite86 v0.2.21
+    Checking tokio-util v0.7.19
+    Checking tokio-stream v0.1.19
+    Checking rand_chacha v0.9.0
+    Checking h2 v0.4.15
+    Checking tower v0.5.3
+    Checking rand v0.9.5
+    Checking axum v0.8.9
+    Checking tower-http v0.6.11
+    Checking opentelemetry_sdk v0.31.0
+    Checking hyper v1.11.0
+    Checking serde_spanned v0.6.9
+    Checking toml_datetime v0.6.11
+    Checking hyper-util v0.1.20
+    Checking tracing-serde v0.2.0
+    Checking toml_edit v0.22.27
+    Checking tracing-subscriber v0.3.23
+    Checking hyper-timeout v0.5.2
+    Checking reqwest v0.12.28
+    Checking tonic v0.14.6
+    Checking rand_chacha v0.3.1
+    Checking opentelemetry-http v0.31.0
+   Compiling needle v0.6.0 (/workspace)
+    Checking tonic-prost v0.14.6
+    Checking opentelemetry-proto v0.31.0
+    Checking either v1.17.0
+    Checking chrono v0.4.45
+    Checking which v4.4.2
+    Checking serde_yaml v0.9.34+deprecated
+    Checking opentelemetry-otlp v0.31.1
+    Checking rand v0.8.7
+    Checking tracing-opentelemetry v0.32.1
+    Checking toml v0.8.23
+error[E0599]: no method named `with_bead_store` found for struct `Dispatcher` in the current scope
+   --> src/worker/mod.rs:842:14
+    |
+841 |           let dispatcher = dispatcher
+    |  __________________________-
+842 | |             .with_bead_store(store.clone())
+    | |             -^^^^^^^^^^^^^^^ method not found in `Dispatcher`
+    | |_____________|
+    |
+    |
+   ::: src/dispatch/mod.rs:881:1
+    |
+881 |   pub struct Dispatcher {
+    |   --------------------- method `with_bead_store` not found for this struct
+
+error[E0599]: no method named `with_bead_store` found for struct `Dispatcher` in the current scope
+    --> src/worker/mod.rs:4155:19
+     |
+4155 |                 d.with_bead_store(self.home_store.clone())
+     |                   ^^^^^^^^^^^^^^^ method not found in `Dispatcher`
+     |
+    ::: src/dispatch/mod.rs:881:1
+     |
+ 881 | pub struct Dispatcher {
+     | --------------------- method `with_bead_store` not found for this struct
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `needle` (lib) due to 2 previous errors
+=== Slow Lane Checks ===
+Running: cargo test --no-run (build all test targets)...
+✗ cargo test --no-run (build all test targets) failed (exit code: 101)
+Failure details for cargo test --no-run (build all test targets) (last 100 lines):
+   Compiling chrono v0.4.45
+   Compiling serde_yaml v0.9.34+deprecated
+   Compiling ureq v2.12.1
+   Compiling opentelemetry-otlp v0.31.1
+   Compiling rand v0.8.7
+   Compiling toml v0.8.23
+   Compiling tracing-opentelemetry v0.32.1
+   Compiling futures v0.3.33
+   Compiling fs2 v0.4.3
+   Compiling atty v0.2.14
+   Compiling gethostname v0.4.3
+   Compiling opentelemetry-semantic-conventions v0.31.0
+   Compiling glob v0.3.4
+   Compiling hex v0.4.3
+   Compiling rayon-core v1.13.0
+   Compiling half v2.7.1
+   Compiling plotters-backend v0.3.7
+   Compiling ciborium-io v0.2.2
+   Compiling plotters-svg v0.3.7
+   Compiling ciborium-ll v0.2.2
+   Compiling itertools v0.10.5
+   Compiling wait-timeout v0.2.1
+   Compiling same-file v1.0.6
+   Compiling quick-error v1.2.3
+   Compiling bit-vec v0.8.0
+   Compiling cast v0.3.0
+   Compiling bit-set v0.8.0
+   Compiling criterion-plot v0.5.0
+   Compiling rusty-fork v0.3.1
+   Compiling walkdir v2.5.0
+   Compiling rayon v1.12.0
+   Compiling ciborium v0.2.2
+   Compiling plotters v0.3.7
+   Compiling tinytemplate v1.2.1
+   Compiling rand_xorshift v0.4.0
+   Compiling is-terminal v0.4.17
+   Compiling oorandom v11.1.5
+   Compiling unarray v0.1.4
+   Compiling anes v0.1.6
+   Compiling proptest v1.11.0
+   Compiling criterion v0.5.1
+   Compiling serial_test v3.5.0
+   Compiling tokio-test v0.4.5
+   Compiling filetime v0.2.29
+error[E0599]: no method named `with_bead_store` found for struct `Dispatcher` in the current scope
+   --> src/worker/mod.rs:842:14
+    |
+841 |           let dispatcher = dispatcher
+    |  __________________________-
+842 | |             .with_bead_store(store.clone())
+    | |             -^^^^^^^^^^^^^^^ method not found in `Dispatcher`
+    | |_____________|
+    |
+    |
+   ::: src/dispatch/mod.rs:881:1
+    |
+881 |   pub struct Dispatcher {
+    |   --------------------- method `with_bead_store` not found for this struct
+
+error[E0599]: no method named `with_bead_store` found for struct `Dispatcher` in the current scope
+    --> src/worker/mod.rs:4155:19
+     |
+4155 |                 d.with_bead_store(self.home_store.clone())
+     |                   ^^^^^^^^^^^^^^^ method not found in `Dispatcher`
+     |
+    ::: src/dispatch/mod.rs:881:1
+     |
+ 881 | pub struct Dispatcher {
+     | --------------------- method `with_bead_store` not found for this struct
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `needle` (lib) due to 2 previous errors
+warning: build failed, waiting for other jobs to finish...
+error[E0599]: no method named `with_bead_store` found for struct `dispatch::Dispatcher` in the current scope
+   --> src/worker/mod.rs:842:14
+    |
+841 |           let dispatcher = dispatcher
+    |  __________________________-
+842 | |             .with_bead_store(store.clone())
+    | |             -^^^^^^^^^^^^^^^ method not found in `dispatch::Dispatcher`
+    | |_____________|
+    |
+    |
+   ::: src/dispatch/mod.rs:881:1
+    |
+881 |   pub struct Dispatcher {
+    |   --------------------- method `with_bead_store` not found for this struct
+
+error[E0599]: no method named `with_bead_store` found for struct `dispatch::Dispatcher` in the current scope
+    --> src/worker/mod.rs:4155:19
+     |
+4155 |                 d.with_bead_store(self.home_store.clone())
+     |                   ^^^^^^^^^^^^^^^ method not found in `dispatch::Dispatcher`
+     |
+    ::: src/dispatch/mod.rs:881:1
+     |
+ 881 | pub struct Dispatcher {
+     | --------------------- method `with_bead_store` not found for this struct
+
+error: could not compile `needle` (lib test) due to 2 previous errors
+Running: cargo test --lib...
+✗ cargo test --lib failed (exit code: 101)
+Failure details for cargo test --lib (last 100 lines):
+   Compiling needle v0.6.0 (/workspace)
+error[E0599]: no method named `with_bead_store` found for struct `dispatch::Dispatcher` in the current scope
+   --> src/worker/mod.rs:842:14
+    |
+841 |           let dispatcher = dispatcher
+    |  __________________________-
+842 | |             .with_bead_store(store.clone())
+    | |             -^^^^^^^^^^^^^^^ method not found in `dispatch::Dispatcher`
+    | |_____________|
+    |
+    |
+   ::: src/dispatch/mod.rs:881:1
+    |
+881 |   pub struct Dispatcher {
+    |   --------------------- method `with_bead_store` not found for this struct
+
+error[E0599]: no method named `with_bead_store` found for struct `dispatch::Dispatcher` in the current scope
+    --> src/worker/mod.rs:4155:19
+     |
+4155 |                 d.with_bead_store(self.home_store.clone())
+     |                   ^^^^^^^^^^^^^^^ method not found in `dispatch::Dispatcher`
+     |
+    ::: src/dispatch/mod.rs:881:1
+     |
+ 881 | pub struct Dispatcher {
+     | --------------------- method `with_bead_store` not found for this struct
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `needle` (lib test) due to 2 previous errors
+Running: cargo test --test integration_tests...
+✗ cargo test --test integration_tests failed (exit code: 101)
+Failure details for cargo test --test integration_tests (last 100 lines):
+   Compiling needle v0.6.0 (/workspace)
+error[E0599]: no method named `with_bead_store` found for struct `Dispatcher` in the current scope
+   --> src/worker/mod.rs:842:14
+    |
+841 |           let dispatcher = dispatcher
+    |  __________________________-
+842 | |             .with_bead_store(store.clone())
+    | |             -^^^^^^^^^^^^^^^ method not found in `Dispatcher`
+    | |_____________|
+    |
+    |
+   ::: src/dispatch/mod.rs:881:1
+    |
+881 |   pub struct Dispatcher {
+    |   --------------------- method `with_bead_store` not found for this struct
+
+error[E0599]: no method named `with_bead_store` found for struct `Dispatcher` in the current scope
+    --> src/worker/mod.rs:4155:19
+     |
+4155 |                 d.with_bead_store(self.home_store.clone())
+     |                   ^^^^^^^^^^^^^^^ method not found in `Dispatcher`
+     |
+    ::: src/dispatch/mod.rs:881:1
+     |
+ 881 | pub struct Dispatcher {
+     | --------------------- method `with_bead_store` not found for this struct
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `needle` (lib) due to 2 previous errors
+Running: cargo test --test p2_integration_tests...
+✗ cargo test --test p2_integration_tests failed (exit code: 101)
+Failure details for cargo test --test p2_integration_tests (last 100 lines):
+   Compiling needle v0.6.0 (/workspace)
+error[E0599]: no method named `with_bead_store` found for struct `Dispatcher` in the current scope
+   --> src/worker/mod.rs:842:14
+    |
+841 |           let dispatcher = dispatcher
+    |  __________________________-
+842 | |             .with_bead_store(store.clone())
+    | |             -^^^^^^^^^^^^^^^ method not found in `Dispatcher`
+    | |_____________|
+    |
+    |
+   ::: src/dispatch/mod.rs:881:1
+    |
+881 |   pub struct Dispatcher {
+    |   --------------------- method `with_bead_store` not found for this struct
+
+error[E0599]: no method named `with_bead_store` found for struct `Dispatcher` in the current scope
+    --> src/worker/mod.rs:4155:19
+     |
+4155 |                 d.with_bead_store(self.home_store.clone())
+     |                   ^^^^^^^^^^^^^^^ method not found in `Dispatcher`
+     |
+    ::: src/dispatch/mod.rs:881:1
+     |
+ 881 | pub struct Dispatcher {
+     | --------------------- method `with_bead_store` not found for this struct
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `needle` (lib) due to 2 previous errors
+Running: cargo test --test p3_integration_tests...
+✗ cargo test --test p3_integration_tests failed (exit code: 101)
+Failure details for cargo test --test p3_integration_tests (last 100 lines):
+   Compiling needle v0.6.0 (/workspace)
+error[E0599]: no method named `with_bead_store` found for struct `Dispatcher` in the current scope
+   --> src/worker/mod.rs:842:14
+    |
+841 |           let dispatcher = dispatcher
+    |  __________________________-
+842 | |             .with_bead_store(store.clone())
+    | |             -^^^^^^^^^^^^^^^ method not found in `Dispatcher`
+    | |_____________|
+    |
+    |
+   ::: src/dispatch/mod.rs:881:1
+    |
+881 |   pub struct Dispatcher {
+    |   --------------------- method `with_bead_store` not found for this struct
+
+error[E0599]: no method named `with_bead_store` found for struct `Dispatcher` in the current scope
+    --> src/worker/mod.rs:4155:19
+     |
+4155 |                 d.with_bead_store(self.home_store.clone())
+     |                   ^^^^^^^^^^^^^^^ method not found in `Dispatcher`
+     |
+    ::: src/dispatch/mod.rs:881:1
+     |
+ 881 | pub struct Dispatcher {
+     | --------------------- method `with_bead_store` not found for this struct
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `needle` (lib) due to 2 previous errors
+Running: cargo test --test real_br_integration_tests...
+✗ cargo test --test real_br_integration_tests failed (exit code: 101)
+Failure details for cargo test --test real_br_integration_tests (last 100 lines):
+   Compiling needle v0.6.0 (/workspace)
+error[E0599]: no method named `with_bead_store` found for struct `Dispatcher` in the current scope
+   --> src/worker/mod.rs:842:14
+    |
+841 |           let dispatcher = dispatcher
+    |  __________________________-
+842 | |             .with_bead_store(store.clone())
+    | |             -^^^^^^^^^^^^^^^ method not found in `Dispatcher`
+    | |_____________|
+    |
+    |
+   ::: src/dispatch/mod.rs:881:1
+    |
+881 |   pub struct Dispatcher {
+    |   --------------------- method `with_bead_store` not found for this struct
+
+error[E0599]: no method named `with_bead_store` found for struct `Dispatcher` in the current scope
+    --> src/worker/mod.rs:4155:19
+     |
+4155 |                 d.with_bead_store(self.home_store.clone())
+     |                   ^^^^^^^^^^^^^^^ method not found in `Dispatcher`
+     |
+    ::: src/dispatch/mod.rs:881:1
+     |
+ 881 | pub struct Dispatcher {
+     | --------------------- method `with_bead_store` not found for this struct
+
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `needle` (lib) due to 2 previous errors
+Running: installer tests...
+✓ installer tests passed
+
+=== Definition of Done Summary ===
+Lane: all
+Checks run: 10
+Failures: 9
+
+Failed checks:
+  - cargo fmt --check: exit code 1
+  - cargo clippy: exit code 101
+  - cargo check: exit code 101
+  - cargo test --no-run (build all test targets): exit code 101
+  - cargo test --lib: exit code 101
+  - cargo test --test integration_tests: exit code 101
+  - cargo test --test p2_integration_tests: exit code 101
+  - cargo test --test p3_integration_tests: exit code 101
+  - cargo test --test real_br_integration_tests: exit code 101
+
+❌ Definition of NOT done
+time=2026-08-28T10:56:39.682Z level=INFO msg="file signal handler exiting due to context cancellation" argo=true
+time=2026-08-28T10:56:39.682Z level=INFO msg="sub-process exited" argo=true error="exit status 1"
+Error: exit status 1

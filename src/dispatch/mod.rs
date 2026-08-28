@@ -20,6 +20,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::sync::watch;
 
 use crate::bead_store::spawn_with_etxtbsy_retry_child;
+use crate::bead_store::BeadStore;
 use crate::config::Config;
 use crate::process_guard::{ProcessGroupKillGuard, ProcessGuard};
 use crate::prompt::BuiltPrompt;
@@ -890,6 +891,10 @@ pub struct Dispatcher {
     tsnet_registry: Option<IdentityRegistry>,
     /// Tsnet configuration (cached from config).
     tsnet_config: TsnetConfig,
+    /// Bead store for atomic claim verification.
+    bead_store: Option<Arc<dyn BeadStore>>,
+    /// Worker ID for atomic claim verification.
+    worker_id: Option<String>,
 }
 
 impl Dispatcher {
@@ -913,6 +918,8 @@ impl Dispatcher {
             sanitizer,
             tsnet_registry,
             tsnet_config,
+            bead_store: None,
+            worker_id: None,
         })
     }
 
@@ -929,6 +936,8 @@ impl Dispatcher {
             sanitizer: None,
             tsnet_registry: None,
             tsnet_config: TsnetConfig::default(),
+            bead_store: None,
+            worker_id: None,
         }
     }
 
@@ -940,6 +949,18 @@ impl Dispatcher {
     /// List all loaded adapter names.
     pub fn adapter_names(&self) -> Vec<&str> {
         self.adapters.keys().map(|s| s.as_str()).collect()
+    }
+
+    /// Set the bead store for atomic claim verification.
+    pub fn with_bead_store(mut self, bead_store: Arc<dyn BeadStore>) -> Self {
+        self.bead_store = Some(bead_store);
+        self
+    }
+
+    /// Set the worker ID for atomic claim verification.
+    pub fn with_worker_id(mut self, worker_id: String) -> Self {
+        self.worker_id = Some(worker_id);
+        self
     }
 
     /// Resolve an adapter name from a model name using routing rules.
@@ -5036,8 +5057,8 @@ async fn tsnet_enabled_with_no_key_source_does_not_inject_env_vars() {
 
     let error_msg = provision_result.unwrap_err().to_string();
     assert!(
-        error_msg.contains("Tailscale API client not initialized") ||
-        error_msg.contains("failed to initialize"),
+        error_msg.contains("Tailscale API client not initialized")
+            || error_msg.contains("failed to initialize"),
         "error should indicate missing key source or initialization failure, got: {}",
         error_msg
     );
