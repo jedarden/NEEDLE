@@ -16,7 +16,7 @@
 //!
 //! Depends on: `types`.
 
-mod backend;
+pub mod backend;
 mod cli_store;
 mod strategies;
 

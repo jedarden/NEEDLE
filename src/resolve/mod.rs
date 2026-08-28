@@ -37,9 +37,11 @@ use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::bead_store::backend::BeadBackend;
 use crate::prompt::PromptBuilder;
 use crate::telemetry::Telemetry;
 use crate::types::Bead;
+use std::path::PathBuf;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // ResolveDecision enum
@@ -420,6 +422,8 @@ pub struct Resolver {
     prompt_builder: PromptBuilder,
     /// Telemetry client for emitting events.
     telemetry: Option<Telemetry>,
+    /// Backend descriptor for binary identity verification (optional).
+    backend: Option<BeadBackend>,
 }
 
 impl Resolver {
@@ -429,6 +433,7 @@ impl Resolver {
             config: crate::config::ResolveConfig::default(),
             prompt_builder,
             telemetry: None,
+            backend: None,
         }
     }
 
@@ -441,6 +446,7 @@ impl Resolver {
             config,
             prompt_builder,
             telemetry: None,
+            backend: None,
         }
     }
 
@@ -453,6 +459,12 @@ impl Resolver {
     /// Set the telemetry client for event emission.
     pub fn with_telemetry(mut self, telemetry: Telemetry) -> Self {
         self.telemetry = Some(telemetry);
+        self
+    }
+
+    /// Set the backend descriptor for binary identity verification.
+    pub fn with_backend(mut self, backend: BeadBackend) -> Self {
+        self.backend = Some(backend);
         self
     }
 
@@ -714,25 +726,123 @@ impl Resolver {
 
     /// Verify binary identity after successful resolution.
     ///
-    /// This is a placeholder hook for binary identity verification.
-    /// Currently returns Ok(()) as a stub implementation.
+    /// This method runs the resolved binary with --version and verifies that it
+    /// claims to be the expected backend based on its version output.
     ///
-    /// # Future Implementation
+    /// # Verification Process
     ///
-    /// This method should:
-    /// - Verify the binary matches expected checksums
-    /// - Validate binary signatures
-    /// - Check binary integrity
-    /// - Ensure the binary is from a trusted source
+    /// 1. Locates the binary using the backend's detect_paths
+    /// 2. Runs the binary with the configured version_command (e.g., ["--version"])
+    /// 3. Parses the output to extract the actual backend name
+    /// 4. Compares against the expected backend name from the descriptor
     ///
     /// # Returns
     ///
-    /// - `Ok(())` - Verification passed
-    /// - `Err(VerificationError)` - Verification failed
+    /// - `Ok(())` - Verification passed or no backend configured
+    /// - `Err(VerificationError::VerificationFailed)` - Binary identity doesn't match
+    /// - `Err(VerificationError::NotSupported)` - Backend not configured or binary not found
     fn verify_binary_identity(&self, _decision: &ResolveDecision) -> Result<(), VerificationError> {
-        // Stub implementation - always passes for now
-        // TODO: Implement actual verification logic
+        let backend = match &self.backend {
+            Some(backend) => backend,
+            None => {
+                // No backend configured - skip verification
+                tracing::debug!("No backend configured for binary identity verification");
+                return Ok(());
+            }
+        };
+
+        // Try to find the binary using the backend's detect_paths
+        let binary_path = self.find_binary_path(backend)?;
+
+        tracing::debug!(
+            backend_name = %backend.name,
+            binary_path = %binary_path.display(),
+            "Verifying binary identity"
+        );
+
+        // Run the binary with --version to get actual identity
+        let actual_name =
+            BeadBackend::parse_backend_name_from_version(&binary_path, &backend.version_command)
+                .map_err(|e| {
+                    VerificationError::VerificationFailed(format!(
+                        "Failed to run binary --version: {}",
+                        e
+                    ))
+                })?;
+
+        // Compare actual vs expected backend name
+        let expected_name = &backend.name;
+
+        // Normalize backend names for comparison
+        // "bead-rs" should match "bead", "bead-forge" should match "bf", etc.
+        let normalized_actual = self.normalize_backend_name(&actual_name);
+        let normalized_expected = self.normalize_backend_name(expected_name);
+
+        if normalized_actual != normalized_expected {
+            return Err(VerificationError::VerificationFailed(
+                format!(
+                    "Binary identity mismatch: binary claims to be '{}' but expected backend '{}' (normalized: '{}' vs '{}')",
+                    actual_name, expected_name, normalized_actual, normalized_expected
+                )
+            ));
+        }
+
+        tracing::info!(
+            backend_name = %backend.name,
+            actual_name = %actual_name,
+            "Binary identity verified successfully"
+        );
+
         Ok(())
+    }
+
+    /// Find the binary path from the backend's detect_paths.
+    fn find_binary_path(&self, backend: &BeadBackend) -> Result<PathBuf, VerificationError> {
+        for detect_path in &backend.detect_paths {
+            // Expand tilde if present
+            let expanded_path = if detect_path.starts_with("~/") {
+                if let Some(home) = std::env::var("HOME").ok() {
+                    PathBuf::from(home).join(detect_path.strip_prefix("~/").unwrap_or(detect_path))
+                } else {
+                    detect_path.clone()
+                }
+            } else {
+                detect_path.clone()
+            };
+
+            if expanded_path.exists() && expanded_path.is_file() {
+                return Ok(expanded_path);
+            }
+        }
+
+        // If no detect_paths found, try the binary name directly (assuming it's in PATH)
+        if let Ok(which_output) = std::process::Command::new("which")
+            .arg(&backend.binary)
+            .output()
+        {
+            if which_output.status.success() {
+                let path_str = String::from_utf8_lossy(&which_output.stdout).to_string();
+                let path = path_str.trim();
+                if !path.is_empty() {
+                    return Ok(PathBuf::from(path));
+                }
+            }
+        }
+
+        Err(VerificationError::NotSupported(format!(
+            "Binary '{}' not found in detect_paths or PATH",
+            backend.binary
+        )))
+    }
+
+    /// Normalize backend name for comparison.
+    /// Maps short names to descriptor names: "bead" -> "bead-rs", "bf" -> "bead-forge"
+    fn normalize_backend_name(&self, name: &str) -> String {
+        match name {
+            "bead" => "bead-rs".to_string(),
+            "bf" => "bead-forge".to_string(),
+            other => other.to_string(),
+        }
     }
 }
 
@@ -1091,7 +1201,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_binary_identity_stub_always_succeeds() {
+    fn verify_binary_identity_returns_ok_when_no_backend_configured() {
         let prompt_builder =
             crate::prompt::PromptBuilder::new(&crate::config::PromptConfig::default());
         let resolver = Resolver::new(prompt_builder);
@@ -1103,6 +1213,57 @@ mod tests {
 
         let result = resolver.verify_binary_identity(&decision);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn verify_binary_identity_returns_error_when_binary_not_found() {
+        use std::path::PathBuf;
+        let prompt_builder =
+            crate::prompt::PromptBuilder::new(&crate::config::PromptConfig::default());
+
+        // Create a backend with non-existent detect_paths
+        let backend = BeadBackend {
+            name: "test-backend".to_string(),
+            binary: "nonexistent-binary".to_string(),
+            detect_paths: vec![PathBuf::from("/nonexistent/path/binary")],
+            identity_pattern: r"^test\s".to_string(),
+            version_command: vec!["--version".to_string()],
+            verified_against: "test 1.0.0".to_string(),
+            verified_on: "2026-08-28".to_string(),
+            operations: std::collections::HashMap::new(),
+            capabilities: Default::default(),
+            quirks: vec![],
+            error_markers: Default::default(),
+        };
+
+        let resolver = Resolver::new(prompt_builder).with_backend(backend);
+
+        let decision = ResolveDecision::Complete {
+            evidence: "Test evidence".to_string(),
+            commit_message: "Test summary".to_string(),
+        };
+
+        let result = resolver.verify_binary_identity(&decision);
+        assert!(result.is_err());
+        match result {
+            Err(VerificationError::NotSupported(msg)) => {
+                assert!(msg.contains("not found"));
+            }
+            _ => panic!("Expected NotSupported error"),
+        }
+    }
+
+    #[test]
+    fn normalize_backend_name_maps_short_to_descriptor_names() {
+        let prompt_builder =
+            crate::prompt::PromptBuilder::new(&crate::config::PromptConfig::default());
+        let resolver = Resolver::new(prompt_builder);
+
+        assert_eq!(resolver.normalize_backend_name("bead"), "bead-rs");
+        assert_eq!(resolver.normalize_backend_name("bf"), "bead-forge");
+        assert_eq!(resolver.normalize_backend_name("bead-rs"), "bead-rs");
+        assert_eq!(resolver.normalize_backend_name("bead-forge"), "bead-forge");
+        assert_eq!(resolver.normalize_backend_name("other"), "other");
     }
 
     #[test]
@@ -2262,5 +2423,295 @@ mod tests {
 
         // Should return a safe fallback (Retry)
         assert!(matches!(decision, ResolveDecision::Retry { .. }));
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // Fixture Shim Tests - Binary Identity Mismatch Detection
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_binary_identity_detects_shim_mismatch() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        // Create a "bead" shim script that execs a "bf" binary (different identity)
+        // This simulates the br->bf case where a binary claims to be one thing
+        // but actually execs a different binary
+        let shim_path = temp_dir.path().join("fake-bead-shim");
+        let shim_content = r#"#!/bin/sh
+# This shim claims to be "bead" but execs "bf" (different identity)
+# This simulates a misconfigured or malicious binary
+exec echo "bf 0.4.1"
+"#;
+        std::fs::write(&shim_path, shim_content).unwrap();
+        let mut permissions = std::fs::metadata(&shim_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&shim_path, permissions).unwrap();
+
+        // Create a backend descriptor expecting "bead-rs" identity
+        let backend = BeadBackend {
+            name: "bead-rs".to_string(),
+            binary: "fake-bead-shim".to_string(),
+            detect_paths: vec![shim_path.clone()],
+            identity_pattern: r"^bead\s".to_string(),
+            version_command: vec!["--version".to_string()],
+            verified_against: "bead 0.1.0".to_string(),
+            verified_on: "2026-08-28".to_string(),
+            operations: std::collections::HashMap::new(),
+            capabilities: Default::default(),
+            quirks: vec![],
+            error_markers: Default::default(),
+        };
+
+        let prompt_builder =
+            crate::prompt::PromptBuilder::new(&crate::config::PromptConfig::default());
+        let resolver = Resolver::new(prompt_builder).with_backend(backend);
+
+        let decision = ResolveDecision::Complete {
+            evidence: "Test evidence".to_string(),
+            commit_message: "Test summary".to_string(),
+        };
+
+        // The verification should detect the mismatch
+        let result = resolver.verify_binary_identity(&decision);
+
+        // Assert that the mismatch was detected (not silently accepted)
+        assert!(result.is_err(), "verify_binary_identity should return error for mismatch");
+
+        // Assert the error is actionable and names both path and identity
+        match result {
+            Err(VerificationError::VerificationFailed(msg)) => {
+                // Error message should mention the identity mismatch - specifically:
+                // - The actual detected identity ("bf" in this case)
+                // - The expected backend ("bead-rs" in this case)
+                // - The word "mismatch" or "normalized" to explain what's wrong
+                assert!(
+                    msg.contains("bf") && msg.contains("bead-rs") &&
+                    (msg.contains("mismatch") || msg.contains("normalized") || msg.contains("claims to be")),
+                    "Error message should detail the identity mismatch (got: {}), but it didn't contain expected identifiers", msg
+                );
+
+                // Error message should be descriptive and actionable
+                assert!(
+                    msg.len() > 30,
+                    "Error message should be descriptive and actionable: {}", msg
+                );
+
+                // Verify the specific error format includes both identities
+                assert!(
+                    msg.contains("claims to be") && msg.contains("expected backend"),
+                    "Error message should explain the mismatch clearly: {}", msg
+                );
+            }
+            Err(VerificationError::NotSupported(msg)) => {
+                panic!("Expected VerificationFailed, got NotSupported: {}", msg);
+            }
+            Ok(()) => {
+                panic!("Expected verification to fail for mismatched identity");
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_binary_identity_detects_reverse_shim_mismatch() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        // Create a "bf" shim script that execs a "bead" binary (reverse case)
+        let shim_path = temp_dir.path().join("fake-bf-shim");
+        let shim_content = r#"#!/bin/sh
+# This shim claims to be "bf" but execs "bead" (different identity)
+exec echo "bead 0.1.3"
+"#;
+        std::fs::write(&shim_path, shim_content).unwrap();
+        let mut permissions = std::fs::metadata(&shim_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&shim_path, permissions).unwrap();
+
+        // Create a backend descriptor expecting "bead-forge" identity
+        let backend = BeadBackend {
+            name: "bead-forge".to_string(),
+            binary: "fake-bf-shim".to_string(),
+            detect_paths: vec![shim_path.clone()],
+            identity_pattern: r"^bf\s".to_string(),
+            version_command: vec!["--version".to_string()],
+            verified_against: "bf 0.4.0".to_string(),
+            verified_on: "2026-08-28".to_string(),
+            operations: std::collections::HashMap::new(),
+            capabilities: Default::default(),
+            quirks: vec![],
+            error_markers: Default::default(),
+        };
+
+        let prompt_builder =
+            crate::prompt::PromptBuilder::new(&crate::config::PromptConfig::default());
+        let resolver = Resolver::new(prompt_builder).with_backend(backend);
+
+        let decision = ResolveDecision::Complete {
+            evidence: "Test evidence".to_string(),
+            commit_message: "Test summary".to_string(),
+        };
+
+        // The verification should detect the reverse mismatch
+        let result = resolver.verify_binary_identity(&decision);
+
+        // Assert that the mismatch was detected
+        assert!(result.is_err(), "verify_binary_identity should return error for reverse mismatch");
+
+        match result {
+            Err(VerificationError::VerificationFailed(msg)) => {
+                // Error message should mention both identities involved in the mismatch
+                assert!(
+                    msg.contains("bead") && msg.contains("bf") &&
+                    (msg.contains("mismatch") || msg.contains("normalized") || msg.contains("claims to be")),
+                    "Error message should detail the identity mismatch: {}", msg
+                );
+
+                // Error message should be descriptive
+                assert!(
+                    msg.len() > 30,
+                    "Error message should be descriptive and actionable: {}", msg
+                );
+            }
+            Err(VerificationError::NotSupported(msg)) => {
+                panic!("Expected VerificationFailed, got NotSupported: {}", msg);
+            }
+            Ok(()) => {
+                panic!("Expected verification to fail for reverse mismatched identity");
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_binary_identity_passes_for_matching_identity() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        // Create a "bead" binary that reports correct identity (no mismatch)
+        let binary_path = temp_dir.path().join("correct-bead");
+        let binary_content = r#"#!/bin/sh
+# This binary correctly reports its identity as "bead"
+echo "bead 0.1.3"
+"#;
+        std::fs::write(&binary_path, binary_content).unwrap();
+        let mut permissions = std::fs::metadata(&binary_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&binary_path, permissions).unwrap();
+
+        // Create a backend descriptor expecting "bead-rs" identity
+        let backend = BeadBackend {
+            name: "bead-rs".to_string(),
+            binary: "correct-bead".to_string(),
+            detect_paths: vec![binary_path.clone()],
+            identity_pattern: r"^bead\s".to_string(),
+            version_command: vec!["--version".to_string()],
+            verified_against: "bead 0.1.0".to_string(),
+            verified_on: "2026-08-28".to_string(),
+            operations: std::collections::HashMap::new(),
+            capabilities: Default::default(),
+            quirks: vec![],
+            error_markers: Default::default(),
+        };
+
+        let prompt_builder =
+            crate::prompt::PromptBuilder::new(&crate::config::PromptConfig::default());
+        let resolver = Resolver::new(prompt_builder).with_backend(backend);
+
+        let decision = ResolveDecision::Complete {
+            evidence: "Test evidence".to_string(),
+            commit_message: "Test summary".to_string(),
+        };
+
+        // The verification should pass for matching identity
+        let result = resolver.verify_binary_identity(&decision);
+
+        // Assert that verification passed
+        assert!(result.is_ok(), "verify_binary_identity should pass for matching identity, got: {:?}", result);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_binary_identity_error_message_is_actionable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        // Create a shim with a mismatch
+        let shim_path = temp_dir.path().join("actionable-test-shim");
+        std::fs::write(
+            &shim_path,
+            r#"#!/bin/sh
+echo "wrong-identity 1.0.0"
+"#
+        ).unwrap();
+        let mut permissions = std::fs::metadata(&shim_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&shim_path, permissions).unwrap();
+
+        let backend = BeadBackend {
+            name: "bead-rs".to_string(),
+            binary: "actionable-test-shim".to_string(),
+            detect_paths: vec![shim_path.clone()],
+            identity_pattern: r"^bead\s".to_string(),
+            version_command: vec!["--version".to_string()],
+            verified_against: "bead 0.1.0".to_string(),
+            verified_on: "2026-08-28".to_string(),
+            operations: std::collections::HashMap::new(),
+            capabilities: Default::default(),
+            quirks: vec![],
+            error_markers: Default::default(),
+        };
+
+        let prompt_builder =
+            crate::prompt::PromptBuilder::new(&crate::config::PromptConfig::default());
+        let resolver = Resolver::new(prompt_builder).with_backend(backend);
+
+        let decision = ResolveDecision::Complete {
+            evidence: "Test evidence".to_string(),
+            commit_message: "Test summary".to_string(),
+        };
+
+        let result = resolver.verify_binary_identity(&decision);
+
+        match result {
+            Err(VerificationError::VerificationFailed(msg)) => {
+                // Verify error message is actionable by checking it contains:
+                // 1. The actual identity found ("wrong-identity" in this case)
+                // 2. The expected identity ("bead" in this case)
+                // 3. Clear explanation of the mismatch
+                assert!(
+                    msg.contains("wrong-identity") && msg.contains("bead-rs") &&
+                    (msg.contains("mismatch") || msg.contains("claims to be") || msg.contains("expected backend")),
+                    "Error should detail the identity mismatch clearly: {}", msg
+                );
+
+                // Error message should be descriptive (not a generic "failed" message)
+                assert!(
+                    msg.len() > 40,
+                    "Error message should be descriptive and actionable: {}", msg
+                );
+
+                // Error message should not be empty or whitespace-only
+                assert!(msg.trim().len() > 0, "Error message should not be empty");
+
+                // Error message should use actionable language ("claims", "expected", "normalized")
+                assert!(
+                    msg.contains("claims") || msg.contains("expected") || msg.contains("normalized"),
+                    "Error message should use actionable, explanatory language: {}", msg
+                );
+            }
+            Err(VerificationError::NotSupported(msg)) => {
+                panic!("Expected VerificationFailed, got NotSupported: {}", msg);
+            }
+            Ok(()) => {
+                panic!("Expected verification to fail for mismatched identity");
+            }
+        }
     }
 }
