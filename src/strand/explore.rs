@@ -664,6 +664,11 @@ impl super::Strand for ExploreStrand {
 
         // Track scan summary information for telemetry
         let scan_start = Instant::now();
+        tracing::debug!(
+            worker = %self.qualified_id,
+            scan_start_ns = scan_start.elapsed().as_nanos(),
+            "captured scan start timestamp"
+        );
         let mut workspaces_visited: Vec<String> = Vec::new();
         let mut workspaces_with_candidates: Vec<String> = Vec::new();
         let mut total_candidates = 0usize;
