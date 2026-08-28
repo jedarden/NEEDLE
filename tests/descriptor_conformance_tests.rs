@@ -82,7 +82,13 @@ async fn claim_operation_includes_actor_in_rendered_command() {
     let store = mock_cli(root.path(), "bead-rs");
 
     let argv = store
-        .render_operation("claim", &HashMap::from([("id", "test-1".to_string()), ("actor", "worker-a".to_string())]))
+        .render_operation(
+            "claim",
+            &HashMap::from([
+                ("id", "test-1".to_string()),
+                ("actor", "worker-a".to_string()),
+            ]),
+        )
         .unwrap();
 
     assert!(
@@ -112,14 +118,14 @@ printf '%s\n' "$@" >> invocations.log
     );
     let store = CliBeadStore::new(backend, binary, root.to_path_buf(), None, None, None).unwrap();
 
-    let result = store
-        .claim(&BeadId::from("test-1"), "worker-a")
-        .await;
+    let result = store.claim(&BeadId::from("test-1"), "worker-a").await;
 
     // Should fail because mock doesn't return valid JSON, but we can check invocation
     let invocations = fs::read_to_string(root.path().join("invocations.log")).unwrap();
     assert!(
-        invocations.contains("update") && invocations.contains("--status") && invocations.contains("in_progress"),
+        invocations.contains("update")
+            && invocations.contains("--status")
+            && invocations.contains("in_progress"),
         "bead-rs claim should use update with status in_progress: {invocations}"
     );
     assert!(
@@ -149,9 +155,7 @@ printf '%s\n' "$@" >> invocations.log
     );
     let store = CliBeadStore::new(backend, binary, root.to_path_buf(), None, None, None).unwrap();
 
-    let _ = store
-        .claim(&BeadId::from("bf-1"), "worker-a")
-        .await;
+    let _ = store.claim(&BeadId::from("bf-1"), "worker-a").await;
 
     let invocations = fs::read_to_string(root.path().join("invocations.log")).unwrap();
     assert!(
@@ -235,7 +239,9 @@ printf '%s\n' "$@" >> invocations.log
 
     let invocations = fs::read_to_string(root.path().join("invocations.log")).unwrap();
     assert!(
-        invocations.contains("release") || invocations.contains("--clear-assignee") || invocations.contains("assignee"),
+        invocations.contains("release")
+            || invocations.contains("--clear-assignee")
+            || invocations.contains("assignee"),
         "release must clear assignee: {invocations}"
     );
 }
@@ -284,7 +290,10 @@ async fn ready_operation_filters_by_assignee() {
     let store = mock_cli(root.path(), "bead-rs");
 
     let argv = store
-        .render_operation("ready", &HashMap::from([("assignee", "worker-a".to_string())]))
+        .render_operation(
+            "ready",
+            &HashMap::from([("assignee", "worker-a".to_string())]),
+        )
         .unwrap();
 
     assert!(
@@ -306,7 +315,8 @@ async fn list_all_operation_returns_json_lines() {
 
     let list_all_op = backend.operations.get("list_all").unwrap();
     assert_eq!(
-        list_all_op.parse, Some(needle::bead_store::backend::ParseShape::JsonLines),
+        list_all_op.parse,
+        Some(needle::bead_store::backend::ParseShape::JsonLines),
         "list_all must return JsonLines format"
     );
 }
@@ -324,7 +334,8 @@ async fn show_operation_returns_json_object() {
 
     let show_op = backend.operations.get("show").unwrap();
     assert_eq!(
-        show_op.parse, Some(needle::bead_store::backend::ParseShape::JsonObject),
+        show_op.parse,
+        Some(needle::bead_store::backend::ParseShape::JsonObject),
         "show must return JsonObject format"
     );
 }
@@ -348,7 +359,9 @@ async fn dependency_operations_maintain_dialect_specific_order() {
     let bead_rs_store = mock_cli(root.path(), "bead-rs");
     let bead_rs_argv = bead_rs_store.render_operation("dep_add", &values).unwrap();
     assert!(
-        bead_rs_argv.windows(3).any(|w| w == ["blocked", "blocked-1", "blocker-1"]),
+        bead_rs_argv
+            .windows(3)
+            .any(|w| w == ["blocked", "blocked-1", "blocker-1"]),
         "bead-rs dep_add must have blocked before blocker: {bead_rs_argv:?}"
     );
 
@@ -358,10 +371,16 @@ async fn dependency_operations_maintain_dialect_specific_order() {
         .unwrap();
     let binary = root.path().join("mock-cli-forge");
     executable(&binary, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n");
-    let forge_store = CliBeadStore::new(backend, binary, root.to_path_buf(), None, None, None).unwrap();
+    let forge_store =
+        CliBeadStore::new(backend, binary, root.to_path_buf(), None, None, None).unwrap();
     let forge_argv = forge_store.render_operation("dep_add", &values).unwrap();
     assert!(
-        forge_argv.windows(3).any(|w| w == ["blocker", "blocker-1", "--blocks"]) || forge_argv.windows(2).any(|w| w == ["blocker-1", "--blocks"]),
+        forge_argv
+            .windows(3)
+            .any(|w| w == ["blocker", "blocker-1", "--blocks"])
+            || forge_argv
+                .windows(2)
+                .any(|w| w == ["blocker-1", "--blocks"]),
         "bead-forge dep_add must use --blocks flag: {forge_argv:?}"
     );
 }
@@ -378,12 +397,10 @@ async fn split_operation_uses_declared_strategy() {
         .unwrap();
 
     let split_op = backend.operations.get("split").unwrap();
+    assert!(split_op.strategy.is_some(), "split must declare a strategy");
     assert!(
-        split_op.strategy.is_some(),
-        "split must declare a strategy"
-    );
-    assert!(
-        split_op.strategy.as_ref().unwrap() == "sequential" || split_op.strategy.as_ref().unwrap() == "transactional_batch",
+        split_op.strategy.as_ref().unwrap() == "sequential"
+            || split_op.strategy.as_ref().unwrap() == "transactional_batch",
         "split must use a transactional strategy, got: {:?}",
         split_op.strategy
     );
@@ -401,15 +418,43 @@ async fn all_required_operations_are_declared() {
         .unwrap();
 
     let required_ops = vec![
-        "ready", "list_all", "show", "claim", "claim_auto", "release",
-        "block", "clear_assignee", "flush", "reopen",
-        "labels", "label_add", "label_remove",
-        "create", "create_id", "dep_add", "split", "dep_remove", "close",
-        "doctor_check", "doctor_repair", "import",
-        "ref_add", "ref_remove", "ref_list", "ref_find",
-        "data_set", "data_get", "data_list", "data_remove",
-        "query", "changes", "why", "compare",
-        "recurrence_add", "recurrence_remove", "recurrence_list",
+        "ready",
+        "list_all",
+        "show",
+        "claim",
+        "claim_auto",
+        "release",
+        "block",
+        "clear_assignee",
+        "flush",
+        "reopen",
+        "labels",
+        "label_add",
+        "label_remove",
+        "create",
+        "create_id",
+        "dep_add",
+        "split",
+        "dep_remove",
+        "close",
+        "doctor_check",
+        "doctor_repair",
+        "import",
+        "ref_add",
+        "ref_remove",
+        "ref_list",
+        "ref_find",
+        "data_set",
+        "data_get",
+        "data_list",
+        "data_remove",
+        "query",
+        "changes",
+        "why",
+        "compare",
+        "recurrence_add",
+        "recurrence_remove",
+        "recurrence_list",
         "policy_validate",
     ];
 
@@ -471,6 +516,12 @@ printf '{"id":"test-1","title":"Test","description":null,"priority":2,"status":"
     store.show(&BeadId::from("test-1")).await.unwrap();
 
     let invocations = fs::read_to_string(root.path().join("invocations.log")).unwrap();
-    assert!(!invocations.is_empty(), "operation should invoke the binary");
-    assert!(invocations.contains("show"), "invocation should include operation name");
+    assert!(
+        !invocations.is_empty(),
+        "operation should invoke the binary"
+    );
+    assert!(
+        invocations.contains("show"),
+        "invocation should include operation name"
+    );
 }
