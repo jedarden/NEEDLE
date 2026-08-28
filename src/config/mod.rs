@@ -3944,6 +3944,261 @@ path: /path/to/./bf
             "Should mention ~/.local/bin/bf"
         );
     }
+
+    #[test]
+    fn test_bead_cli_config_serde_roundtrip_auto_none_path() {
+        let config = BeadCliConfig {
+            backend: BeadBackend::Auto,
+            path: None,
+        };
+
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        let deserialized: BeadCliConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(
+            deserialized, config,
+            "Round-trip should preserve all fields"
+        );
+        assert_eq!(deserialized.backend, BeadBackend::Auto);
+        assert!(deserialized.path.is_none());
+
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized_json: BeadCliConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            deserialized_json, config,
+            "JSON round-trip should preserve all fields"
+        );
+        assert_eq!(deserialized_json.backend, BeadBackend::Auto);
+        assert!(deserialized_json.path.is_none());
+    }
+
+    #[test]
+    fn test_bead_cli_config_serde_roundtrip_auto_some_path() {
+        let custom_path = PathBuf::from("/custom/path/to/bead");
+        let config = BeadCliConfig {
+            backend: BeadBackend::Auto,
+            path: Some(custom_path.clone()),
+        };
+
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        let deserialized: BeadCliConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(
+            deserialized, config,
+            "Round-trip should preserve all fields"
+        );
+        assert_eq!(deserialized.backend, BeadBackend::Auto);
+        assert_eq!(deserialized.path, Some(custom_path.clone()));
+
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized_json: BeadCliConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            deserialized_json, config,
+            "JSON round-trip should preserve all fields"
+        );
+        assert_eq!(deserialized_json.backend, BeadBackend::Auto);
+        assert_eq!(deserialized_json.path, Some(custom_path));
+    }
+
+    #[test]
+    fn test_bead_cli_config_serde_roundtrip_bead_none_path() {
+        let config = BeadCliConfig {
+            backend: BeadBackend::Bead,
+            path: None,
+        };
+
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        let deserialized: BeadCliConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(
+            deserialized, config,
+            "Round-trip should preserve all fields"
+        );
+        assert_eq!(deserialized.backend, BeadBackend::Bead);
+        assert!(deserialized.path.is_none());
+
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized_json: BeadCliConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            deserialized_json, config,
+            "JSON round-trip should preserve all fields"
+        );
+        assert_eq!(deserialized_json.backend, BeadBackend::Bead);
+        assert!(deserialized_json.path.is_none());
+    }
+
+    #[test]
+    fn test_bead_cli_config_serde_roundtrip_bead_some_path() {
+        let custom_path = PathBuf::from("/usr/local/bin/bead");
+        let config = BeadCliConfig {
+            backend: BeadBackend::Bead,
+            path: Some(custom_path.clone()),
+        };
+
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        let deserialized: BeadCliConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(
+            deserialized, config,
+            "Round-trip should preserve all fields"
+        );
+        assert_eq!(deserialized.backend, BeadBackend::Bead);
+        assert_eq!(deserialized.path, Some(custom_path.clone()));
+
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized_json: BeadCliConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            deserialized_json, config,
+            "JSON round-trip should preserve all fields"
+        );
+        assert_eq!(deserialized_json.backend, BeadBackend::Bead);
+        assert_eq!(deserialized_json.path, Some(custom_path));
+    }
+
+    #[test]
+    fn test_bead_cli_config_serde_roundtrip_bf_none_path() {
+        let config = BeadCliConfig {
+            backend: BeadBackend::Bf,
+            path: None,
+        };
+
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        let deserialized: BeadCliConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(
+            deserialized, config,
+            "Round-trip should preserve all fields"
+        );
+        assert_eq!(deserialized.backend, BeadBackend::Bf);
+        assert!(deserialized.path.is_none());
+
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized_json: BeadCliConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            deserialized_json, config,
+            "JSON round-trip should preserve all fields"
+        );
+        assert_eq!(deserialized_json.backend, BeadBackend::Bf);
+        assert!(deserialized_json.path.is_none());
+    }
+
+    #[test]
+    fn test_bead_cli_config_serde_roundtrip_bf_some_path() {
+        let custom_path = PathBuf::from("/usr/local/bin/bf");
+        let config = BeadCliConfig {
+            backend: BeadBackend::Bf,
+            path: Some(custom_path.clone()),
+        };
+
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        let deserialized: BeadCliConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(
+            deserialized, config,
+            "Round-trip should preserve all fields"
+        );
+        assert_eq!(deserialized.backend, BeadBackend::Bf);
+        assert_eq!(deserialized.path, Some(custom_path.clone()));
+
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized_json: BeadCliConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            deserialized_json, config,
+            "JSON round-trip should preserve all fields"
+        );
+        assert_eq!(deserialized_json.backend, BeadBackend::Bf);
+        assert_eq!(deserialized_json.path, Some(custom_path));
+    }
+
+    #[test]
+    fn test_bead_cli_config_serde_roundtrip_br_none_path() {
+        let config = BeadCliConfig {
+            backend: BeadBackend::Br,
+            path: None,
+        };
+
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        let deserialized: BeadCliConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(
+            deserialized, config,
+            "Round-trip should preserve all fields"
+        );
+        assert_eq!(deserialized.backend, BeadBackend::Br);
+        assert!(deserialized.path.is_none());
+
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized_json: BeadCliConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            deserialized_json, config,
+            "JSON round-trip should preserve all fields"
+        );
+        assert_eq!(deserialized_json.backend, BeadBackend::Br);
+        assert!(deserialized_json.path.is_none());
+    }
+
+    #[test]
+    fn test_bead_cli_config_serde_roundtrip_br_some_path() {
+        let custom_path = PathBuf::from("/usr/local/bin/br");
+        let config = BeadCliConfig {
+            backend: BeadBackend::Br,
+            path: Some(custom_path.clone()),
+        };
+
+        let yaml = serde_yaml::to_string(&config).unwrap();
+        let deserialized: BeadCliConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(
+            deserialized, config,
+            "Round-trip should preserve all fields"
+        );
+        assert_eq!(deserialized.backend, BeadBackend::Br);
+        assert_eq!(deserialized.path, Some(custom_path.clone()));
+
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized_json: BeadCliConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            deserialized_json, config,
+            "JSON round-trip should preserve all fields"
+        );
+        assert_eq!(deserialized_json.backend, BeadBackend::Br);
+        assert_eq!(deserialized_json.path, Some(custom_path));
+    }
+
+    #[test]
+    fn test_bead_cli_config_serde_preserves_all_fields() {
+        let test_cases = vec![
+            (BeadBackend::Auto, None::<PathBuf>),
+            (BeadBackend::Auto, Some(PathBuf::from("/auto/path"))),
+            (BeadBackend::Bf, None::<PathBuf>),
+            (BeadBackend::Bf, Some(PathBuf::from("/bf/path"))),
+            (BeadBackend::Br, None::<PathBuf>),
+            (BeadBackend::Br, Some(PathBuf::from("/br/path"))),
+            (BeadBackend::Bead, None::<PathBuf>),
+            (BeadBackend::Bead, Some(PathBuf::from("/bead/path"))),
+        ];
+
+        for (backend, path) in test_cases {
+            let config = BeadCliConfig {
+                backend: backend.clone(),
+                path: path.clone(),
+            };
+
+            let yaml = serde_yaml::to_string(&config).unwrap();
+            let deserialized: BeadCliConfig = serde_yaml::from_str(&yaml).unwrap();
+            assert_eq!(
+                deserialized.backend, backend,
+                "Backend should be preserved through YAML serialization"
+            );
+            assert_eq!(
+                deserialized.path, path,
+                "Path should be preserved through YAML serialization"
+            );
+
+            let json = serde_json::to_string(&config).unwrap();
+            let deserialized_json: BeadCliConfig = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                deserialized_json.backend, backend,
+                "Backend should be preserved through JSON serialization"
+            );
+            assert_eq!(
+                deserialized_json.path, path,
+                "Path should be preserved through JSON serialization"
+            );
+        }
+    }
 }
 
 /// Pluck strand configuration (primary bead selection).
