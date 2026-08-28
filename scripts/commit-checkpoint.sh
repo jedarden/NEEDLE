@@ -49,7 +49,7 @@ git add "$BEAD_DIR/$CURRENT_ROOT" "$BEAD_DIR/$PREVIOUS_ROOT"
 # Check for superseded objects that are tracked but should be removed
 # These are objects listed in deleted_paths that are still in git
 TRACKED_OBJECTS=$(git ls-files "$BEAD_DIR/objects/")
-DELETED_PATHS=$(jq -r '.deleted_paths[]' "$CURRENT_JSON" "$PREVIOUS_JSON" 2>/dev/null | grep 'objects/gen-' || true)
+DELETED_PATHS=$(jq -r '.deleted_paths[]' "$CURRENT_JSON" "$PREVIOUS_JSON" 2>/dev/null | grep '^objects/' || true)
 
 # Remove tracked superseded objects (from git and disk)
 for object in $TRACKED_OBJECTS; do
