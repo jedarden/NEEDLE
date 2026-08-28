@@ -28,6 +28,7 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use thiserror::Error;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Backend name constants
@@ -41,6 +42,29 @@ pub const BACKEND_BEAD: &str = "bead";
 
 /// Backend name for bead-rs (alternative form).
 pub const BACKEND_BEADS_RUST: &str = "beads-rust";
+
+// ──────────────────────────────────────────────────────────────────────────────
+// VerifyError
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Error type for backend verification failures.
+///
+/// This error is returned when the detected backend from a binary's --version
+/// output does not match the expected backend derived from the binary filename.
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum VerifyError {
+    /// No backend could be detected from the binary.
+    #[error("no backend detected from binary '{binary}'")]
+    NoBackendDetected { binary: String },
+
+    /// Backend mismatch between expected and actual.
+    #[error("backend mismatch for binary '{binary}': expected '{expected}', got '{actual}'")]
+    BackendMismatch {
+        binary: String,
+        expected: String,
+        actual: String,
+    },
+}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // VersionProbe
@@ -230,6 +254,90 @@ impl VersionProbe {
     /// - `false` - Binary not found
     pub fn is_binary_available(&self, binary_name: &str) -> bool {
         which::which(binary_name).is_ok()
+    }
+
+    /// Derive the expected backend name from a binary filename.
+    ///
+    /// This method maps binary names to their expected backend identities:
+    ///
+    /// - `bf` → `bf` (bead-forge)
+    /// - `bead` → `bead` or `beads-rust` (bead-rs CLI)
+    ///
+    /// # Arguments
+    ///
+    /// * `binary_name` - Name of the binary (e.g., "bf", "bead")
+    ///
+    /// # Returns
+    ///
+    /// The expected backend name as a string slice.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use needle::version_probe::VersionProbe;
+    /// let probe = VersionProbe::new();
+    /// assert_eq!(probe.expected_backend_for_binary("bf"), "bf");
+    /// assert_eq!(probe.expected_backend_for_binary("bead"), "bead");
+    /// ```
+    pub fn expected_backend_for_binary<'a>(&self, binary_name: &'a str) -> &'a str {
+        match binary_name {
+            "bf" => BACKEND_BF,
+            "bead" => BACKEND_BEAD,
+            _ => binary_name, // For unknown binaries, expect the binary name itself
+        }
+    }
+
+    /// Verify that a binary's detected backend matches its expected backend.
+    ///
+    /// This method:
+    /// 1. Derives the expected backend from the binary filename
+    /// 2. Detects the actual backend from the binary's --version output
+    /// 3. Compares them, returning an error if they don't match
+    ///
+    /// # Arguments
+    ///
+    /// * `binary_name` - Name of the binary to verify
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())` - Backend matches or binary not found (no verification possible)
+    /// - `Err(VerifyError::NoBackendDetected)` - Binary exists but backend couldn't be parsed
+    /// - `Err(VerifyError::BackendMismatch)` - Detected backend doesn't match expected
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use needle::version_probe::VersionProbe;
+    /// let probe = VersionProbe::new();
+    /// match probe.verify_backend("bead") {
+    ///     Ok(()) => println!("Backend verification passed"),
+    ///     Err(e) => eprintln!("Verification failed: {}", e),
+    /// }
+    /// ```
+    pub fn verify_backend(&self, binary_name: &str) -> Result<(), VerifyError> {
+        // Derive expected backend from binary filename
+        let expected = self.expected_backend_for_binary(binary_name);
+
+        // Detect actual backend from --version output
+        let actual = self
+            .detect_backend(binary_name)
+            .map_err(|_| VerifyError::NoBackendDetected {
+                binary: binary_name.to_string(),
+            })?
+            .ok_or_else(|| VerifyError::NoBackendDetected {
+                binary: binary_name.to_string(),
+            })?;
+
+        // Compare case-sensitively
+        if expected != actual {
+            return Err(VerifyError::BackendMismatch {
+                binary: binary_name.to_string(),
+                expected: expected.to_string(),
+                actual: actual.to_string(),
+            });
+        }
+
+        Ok(())
     }
 }
 
@@ -455,5 +563,132 @@ mod tests {
         let output = "bf \t 0.3.0";
         let backend = probe.parse_version_output(output);
         assert_eq!(backend, Some("bf".to_string()));
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // Tests for expected_backend_for_binary
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn expected_backend_for_binary_bf() {
+        let probe = VersionProbe::new();
+        assert_eq!(probe.expected_backend_for_binary("bf"), "bf");
+    }
+
+    #[test]
+    fn expected_backend_for_binary_bead() {
+        let probe = VersionProbe::new();
+        assert_eq!(probe.expected_backend_for_binary("bead"), "bead");
+    }
+
+    #[test]
+    fn expected_backend_for_binary_unknown() {
+        let probe = VersionProbe::new();
+        // For unknown binaries, expect the binary name itself
+        assert_eq!(
+            probe.expected_backend_for_binary("unknown-cli"),
+            "unknown-cli"
+        );
+        assert_eq!(probe.expected_backend_for_binary("needle"), "needle");
+    }
+
+    #[test]
+    fn expected_backend_for_binary_case_sensitive() {
+        let probe = VersionProbe::new();
+        // Comparison should be case-sensitive
+        assert_eq!(probe.expected_backend_for_binary("BF"), "BF");
+        assert_eq!(probe.expected_backend_for_binary("BEAD"), "BEAD");
+        assert_eq!(probe.expected_backend_for_binary("Bead"), "Bead");
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // Tests for verify_backend (mock-based tests since we can't run real binaries)
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn verify_backend_no_backend_detected() {
+        let probe = VersionProbe::new();
+
+        // This test uses a binary that doesn't exist, so it should return NoBackendDetected
+        let result = probe.verify_backend("nonexistent-binary-xyz123");
+        assert!(matches!(result, Err(VerifyError::NoBackendDetected { .. })));
+    }
+
+    #[test]
+    fn verify_backend_error_formatting() {
+        let err = VerifyError::NoBackendDetected {
+            binary: "bf".to_string(),
+        };
+        assert_eq!(err.to_string(), "no backend detected from binary 'bf'");
+    }
+
+    #[test]
+    fn verify_backend_mismatch_error_formatting() {
+        let err = VerifyError::BackendMismatch {
+            binary: "bead".to_string(),
+            expected: "bead".to_string(),
+            actual: "bf".to_string(),
+        };
+        assert_eq!(
+            err.to_string(),
+            "backend mismatch for binary 'bead': expected 'bead', got 'bf'"
+        );
+    }
+
+    #[test]
+    fn verify_backend_mismatch_error_fields() {
+        let err = VerifyError::BackendMismatch {
+            binary: "bead".to_string(),
+            expected: "bead".to_string(),
+            actual: "bf".to_string(),
+        };
+        assert!(matches!(err, VerifyError::BackendMismatch { .. }));
+        if let VerifyError::BackendMismatch {
+            binary,
+            expected,
+            actual,
+        } = err
+        {
+            assert_eq!(binary, "bead");
+            assert_eq!(expected, "bead");
+            assert_eq!(actual, "bf");
+        }
+    }
+
+    #[test]
+    fn verify_backend_error_equality() {
+        let err1 = VerifyError::NoBackendDetected {
+            binary: "bf".to_string(),
+        };
+        let err2 = VerifyError::NoBackendDetected {
+            binary: "bf".to_string(),
+        };
+        assert_eq!(err1, err2);
+    }
+
+    #[test]
+    fn verify_backend_mismatch_error_equality() {
+        let err1 = VerifyError::BackendMismatch {
+            binary: "bead".to_string(),
+            expected: "bead".to_string(),
+            actual: "bf".to_string(),
+        };
+        let err2 = VerifyError::BackendMismatch {
+            binary: "bead".to_string(),
+            expected: "bead".to_string(),
+            actual: "bf".to_string(),
+        };
+        assert_eq!(err1, err2);
+    }
+
+    #[test]
+    fn verify_backend_error_inequality() {
+        let err1 = VerifyError::NoBackendDetected {
+            binary: "bf".to_string(),
+        };
+        let err2 = VerifyError::NoBackendDetected {
+            binary: "bead".to_string(),
+        };
+        assert_ne!(err1, err2);
     }
 }

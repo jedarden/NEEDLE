@@ -1,25 +1,24 @@
 # ExploreConfig Structure and Initialization
 
+This document describes the `ExploreConfig` struct, its fields, default values, and initialization behavior in the NEEDLE project.
+
 ## Overview
 
-`ExploreConfig` configures the **Explore strand**, which enables NEEDLE workers to discover and claim beads from multiple workspaces beyond their home workspace. When the home workspace has no work and maintenance is clean, Explore searches configured workspaces for claimable beads.
-
-**Source location:** `src/config/mod.rs:4390-4494`
+`ExploreConfig` is a configuration structure that controls the **Explore strand** behavior in NEEDLE workers. The Explore strand is responsible for discovering beads in multiple workspaces when the home workspace has no work available.
 
 ## Struct Definition
 
 ```rust
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExploreConfig {
     /// Whether the Explore strand is enabled.
     #[serde(default = "ExploreConfig::default_enabled")]
     pub enabled: bool,
 
-    /// Pin/exception list for restricting a worker to specific workspaces.
+    /// **Pin/exception list** for restricting a worker to specific workspaces.
     #[serde(default)]
     pub workspaces: Vec<PathBuf>,
 
-    /// Root path for workspace auto-discovery (when workspaces is empty).
+    /// Root path for workspace auto-discovery (when `workspaces` is empty).
     #[serde(default = "ExploreConfig::default_workspace_root")]
     pub workspace_root: PathBuf,
 
@@ -41,215 +40,210 @@ pub struct ExploreConfig {
 }
 ```
 
-## Field Documentation
+## Field Descriptions
 
 ### `enabled: bool`
+
 **Purpose:** Controls whether the Explore strand is active.
 
-**Default:** `true` (via `default_enabled()`)
+**Default Value:** `true` (via `ExploreConfig::default_enabled()`)
 
 **Behavior:**
-- When `false`, Explore immediately returns `StrandResult::NoWork` and emits a `StrandSkipped` telemetry event
-- When `true`, Explore proceeds with workspace scanning
+- When `true`: The Explore strand scans other workspaces for beads when the home workspace has no work
+- When `false`: The Explore strand is skipped, returning `NoWork` immediately
 
-**Example:**
+**Example Usage:**
 ```yaml
-# .needle.yaml
-explore:
-  enabled: false  # Disable multi-workspace discovery
+# In .needle.yaml
+strands:
+  explore:
+    enabled: true
 ```
 
 ---
 
 ### `workspaces: Vec<PathBuf>`
+
 **Purpose:** Pin/exception list for restricting a worker to specific workspaces.
 
-**Default:** `Vec::new()` (empty vector)
+**Default Value:** Empty vector `Vec::new()`
 
-**Behavior - Two Modes:**
+**Behavior:**
 
-#### **Auto-discovery Mode (default - empty list)**
-When `workspaces` is empty, Explore runs **recursive workspace discovery** under `workspace_root`:
+#### Empty (Default) - Auto-Discovery Mode
+When empty, Explore runs **recursive workspace discovery** under `workspace_root`:
 - All directories containing a `.beads/` subdirectory are automatically scanned
-- New workspaces are picked up without configuration changes
-- This is the **intended default for the fleet**
+- This is the **intended default for the fleet** — new workspaces are picked up automatically without configuration changes
+- Operators should leave this empty unless there's a specific reason to pin a worker
 
-#### **Pinned Mode (exception - non-empty list)**
-When `workspaces` contains paths, auto-discovery is **disabled**:
-- Only the explicitly listed paths are scanned
-- Use this to restrict a specific worker to a fixed repo set
-- Emits a **WARN log** at startup naming the pinned repos
+#### Non-Empty - Pinned Mode (Exception)
+When non-empty, auto-discovery is **disabled**:
+- Only the specified workspace paths are scanned
+- Use this to restrict a specific worker to a fixed repo set (e.g., a dedicated worker for a high-priority workspace)
 - This is an **exception mechanism** — most workers should leave this empty
 
-**WARNING:** The 2026-07-19 fleet incident occurred because `workspaces` was populated with 24 hardcoded paths, permanently disabling discovery fleet-wide. The list drifted stale, missing valid repos.
+**WARNING:** When non-empty, a WARN log is emitted at startup naming the pinned repos, so operators can immediately see when a worker is running in restricted mode.
 
-**Example:**
+**Example Usage:**
 ```yaml
-# Auto-discovery mode (recommended for fleet)
-explore:
-  workspaces: []  # Empty = discover all workspaces under workspace_root
+strands:
+  explore:
+    workspaces: []  # Auto-discovery (default)
 
-# Pinned mode (exception case)
-explore:
-  workspaces:
-    - /home/coding/NEEDLE
-    - /home/coding/commitgraph
+    # OR for pinned mode:
+    workspaces:
+      - /home/coding/SEAM
+      - /home/coding/ARMOR
 ```
 
 ---
 
 ### `workspace_root: PathBuf`
-**Purpose:** Root path for workspace auto-discovery when `workspaces` is empty.
 
-**Default:** `$HOME` (via `dirs_or_home("")`)
+**Purpose:** Root path for workspace auto-discovery (when `workspaces` is empty).
 
-**Resolution:**
+**Default Value:** User's home directory (via `dirs_or_home("")`)
+
+**Behavior:**
+- All directories under this path containing a `.beads/` subdirectory are treated as workspaces
+- Used only when `workspaces` is empty (auto-discovery mode)
+- Defaults to `$HOME` (or `/tmp` if `HOME` is not set)
+
+**Implementation Detail:**
 ```rust
+fn default_workspace_root() -> PathBuf {
+    dirs_or_home("")  // Returns $HOME if set, else /tmp
+}
+
 fn dirs_or_home(relative: &str) -> PathBuf {
     if let Some(home) = std::env::var_os("HOME") {
-        PathBuf::from(home).join(relative)  // e.g., $HOME/ for empty string
+        PathBuf::from(home).join(relative)
     } else {
-        PathBuf::from("/tmp").join(relative)  // Fallback to /tmp
+        PathBuf::from("/tmp").join(relative)
     }
 }
 ```
 
-**Default value:** `$HOME/` (user's home directory)
-
-**Behavior:**
-- Only immediate children of `workspace_root` are scanned (no upward traversal)
-- Each child is checked for a `.beads/` subdirectory
-- Directories with `.beads/` are added to the workspace list
-
-**Example:**
+**Example Usage:**
 ```yaml
-# Default: use home directory
-explore:
-  workspace_root: /home/coding  # Optional override
+strands:
+  explore:
+    workspace_root: /home/coding  # Override default (default: $HOME)
 ```
 
 ---
 
 ### `rediscovery_cycles: u32`
-**Purpose:** Controls how often to refresh the workspace list.
 
-**Default:** `60` (via `default_rediscovery_cycles()`)
+**Purpose:** Re-run workspace discovery every N cycles (0 = disabled).
 
-**Meaning:** Re-run workspace discovery every N selection cycles.
-
-**Calculation:** At typical worker cadence (~1 minute per cycle), 60 cycles ≈ 1 hour.
+**Default Value:** `60` (via `ExploreConfig::default_rediscovery_cycles()`)
 
 **Behavior:**
-- When `> 0`: Refresh workspace list periodically to pick up new stores
-- When `== 0`: Disable periodic re-discovery
+- When set (default: 60), the workspace list is refreshed periodically
+- New stores are picked up without requiring worker restarts
 - Re-discovery preserves constraints:
-  - Only scans immediate children of `workspace_root` (no upward traversal)
-  - Skipped when in pinned mode (non-empty `workspaces` list)
+  - **No upward traversal:** Only scans immediate children of `workspace_root`
+  - **Explicit workspaces override:** When `workspaces` is non-empty, re-discovery is skipped
 
-**Historical note:** As of bf-6anj4, re-discovery runs **every cycle** regardless of this setting. The `rediscovery_cycles` throttle is no longer applied but remains in config for backward compatibility with existing `.needle.yaml` files.
+**Context:** A modest default (60 cycles ≈ 1 hour at typical worker cadence) balances freshness with filesystem churn. Set to 0 to disable periodic re-discovery.
 
-**Example:**
+**Example Usage:**
 ```yaml
-explore:
-  rediscovery_cycles: 60   # Refresh every hour (default)
-  rediscovery_cycles: 0    # Disable periodic refresh
+strands:
+  explore:
+    rediscovery_cycles: 60  # Re-discover every 60 cycles (default)
 ```
 
 ---
 
 ### `starvation_threshold_minutes: u64`
-**Purpose:** Starvation alarm threshold for detecting worker stalls.
 
-**Default:** `15` (via `default_starvation_threshold_minutes()`)
+**Purpose:** Starvation alarm threshold in minutes (0 = disabled).
 
-**Meaning:** Emit a WARN telemetry event when ready beads exist but this worker hasn't successfully claimed any bead for the specified number of minutes.
+**Default Value:** `15` (via `ExploreConfig::default_starvation_threshold_minutes()`)
 
 **Behavior:**
-- When `> 0`: Enables starvation detection
-- When `== 0`: Disabled (no alarm emitted)
-- Helps detect exclusion loops or workers competing for the same beads without progress
+- When set (default: 15), emits a WARN telemetry event when:
+  - Ready beads exist in scanned workspaces
+  - But this worker has not successfully claimed any bead for the specified number of minutes
+- Helps detect cases where workers are stuck in exclusion loops or competing for the same beads without making progress
+- Set to 0 to disable starvation detection
 
-**Example:**
+**Example Usage:**
 ```yaml
-explore:
-  starvation_threshold_minutes: 15  # Alert after 15min without success (default)
-  starvation_threshold_minutes: 0   # Disable starvation alarm
+strands:
+  explore:
+    starvation_threshold_minutes: 15  # Alert after 15 min without claims (default)
 ```
 
 ---
 
 ### `scan_interval_cycles: u32`
+
 **Purpose:** Minimum number of selection cycles between Explore scans.
 
-**Default:** `1` (via `default_scan_interval_cycles()`)
+**Default Value:** `1` (via `ExploreConfig::default_scan_interval_cycles()`)
 
 **Behavior:**
-- Base interval for adaptive scan backoff
-- Empty scans increase the effective interval geometrically
-- A value of 1 preserves current behavior before adaptive backoff is applied
+- A value of 1 preserves the current behavior before adaptive backoff is applied
+- Empty scans increase the effective interval geometrically (see `max_scan_interval_cycles`)
+- Controls the base interval for the adaptive backoff mechanism
 
-**Adaptive cadence:**
-- Consecutive empty scans double the interval (exponential backoff)
-- Finding a candidate resets to base interval
-- Interval never exceeds `max_scan_interval_cycles`
-
-**Example:**
+**Example Usage:**
 ```yaml
-explore:
-  scan_interval_cycles: 1    # Scan every cycle (default)
-  scan_interval_cycles: 3    # Base interval of 3 cycles
+strands:
+  explore:
+    scan_interval_cycles: 1  # Scan every cycle (default)
 ```
 
 ---
 
 ### `max_scan_interval_cycles: u32`
+
 **Purpose:** Maximum number of selection cycles between Explore scans after adaptive backoff.
 
-**Default:** `8` (via `default_max_scan_interval_cycles()`)
+**Default Value:** `8` (via `ExploreConfig::default_max_scan_interval_cycles()`)
 
 **Behavior:**
-- Caps the exponential backoff growth
-- Effective interval never exceeds this value
-- Prevents Explore from becoming completely dormant
+- The effective interval never exceeds this value
+- Works with `scan_interval_cycles` to implement adaptive backoff:
+  - Empty scans double the interval: 1 → 2 → 4 → 8 → 8 (capped)
+  - Finding a candidate resets to base interval
+- Prevents indefinite backoff while reducing scan frequency when workspaces are empty
 
-**Backoff progression with defaults:**
-- Scan 1: interval = 1
-- Empty → interval = 2
-- Empty → interval = 4
-- Empty → interval = 8 (capped)
-- Further empties → interval stays at 8
-- Finding candidate → interval resets to 1
-
-**Example:**
+**Example Usage:**
 ```yaml
-explore:
-  max_scan_interval_cycles: 8   # Cap at 8 cycles (default)
-  max_scan_interval_cycles: 16 # Cap at 16 cycles
+strands:
+  explore:
+    max_scan_interval_cycles: 8  # Cap backoff at 8 cycles (default)
 ```
 
 ---
 
 ## Default Initialization
 
-### `Default` Trait Implementation
+### `ExploreConfig::default()`
+
+Creates a default `ExploreConfig` instance with all fields set to their default values:
 
 ```rust
 impl Default for ExploreConfig {
     fn default() -> Self {
         ExploreConfig {
-            enabled: Self::default_enabled(),
-            workspaces: Vec::new(),
-            workspace_root: Self::default_workspace_root(),
-            rediscovery_cycles: Self::default_rediscovery_cycles(),
-            starvation_threshold_minutes: Self::default_starvation_threshold_minutes(),
-            scan_interval_cycles: Self::default_scan_interval_cycles(),
-            max_scan_interval_cycles: Self::default_max_scan_interval_cycles(),
+            enabled: Self::default_enabled(),                    // true
+            workspaces: Vec::new(),                              // []
+            workspace_root: Self::default_workspace_root(),      // $HOME
+            rediscovery_cycles: Self::default_rediscovery_cycles(),           // 60
+            starvation_threshold_minutes: Self::default_starvation_threshold_minutes(),  // 15
+            scan_interval_cycles: Self::default_scan_interval_cycles(),        // 1
+            max_scan_interval_cycles: Self::default_max_scan_interval_cycles(), // 8
         }
     }
 }
 ```
 
-### Static Default Functions
+### Default Constructor Functions
 
 ```rust
 impl ExploreConfig {
@@ -257,16 +251,16 @@ impl ExploreConfig {
         true
     }
 
+    fn default_starvation_threshold_minutes() -> u64 {
+        15
+    }
+
     fn default_workspace_root() -> PathBuf {
-        dirs_or_home("")  // Returns $HOME/ or /tmp/ if HOME not set
+        dirs_or_home("")  // Returns $HOME or /tmp
     }
 
     fn default_rediscovery_cycles() -> u32 {
         60
-    }
-
-    fn default_starvation_threshold_minutes() -> u64 {
-        15
     }
 
     fn default_scan_interval_cycles() -> u32 {
@@ -279,86 +273,111 @@ impl ExploreConfig {
 }
 ```
 
-### Complete Default Values Summary
+---
 
-| Field | Default Value | Meaning |
-|-------|--------------|---------|
-| `enabled` | `true` | Explore strand is active by default |
-| `workspaces` | `Vec::new()` (empty) | Auto-discovery mode enabled |
-| `workspace_root` | `$HOME/` | Scan user's home directory for workspaces |
-| `rediscovery_cycles` | `60` | Refresh workspace list every hour |
-| `starvation_threshold_minutes` | `15` | Alert after 15 min without successful claim |
-| `scan_interval_cycles` | `1` | Base scan interval: 1 cycle |
-| `max_scan_interval_cycles` | `8` | Maximum scan interval: 8 cycles |
+## Configuration Modes
+
+### Auto-Discovery Mode (Default)
+
+When `workspaces` is empty (the default):
+
+```yaml
+strands:
+  explore:
+    enabled: true
+    workspaces: []                    # Empty = auto-discovery
+    workspace_root: /home/coding      # Scan under this path
+```
+
+**Behavior:**
+- Recursively discovers all directories with `.beads/` under `workspace_root`
+- Re-discovers every `rediscovery_cycles` (default: 60)
+- New workspaces are picked up automatically
+
+**Startup Logs:**
+```
+INFO Explore auto-discovery: workspaces re-discovered every cycle (rediscovery_cycles throttle no longer applied)
+```
+
+### Pinned Mode (Exception)
+
+When `workspaces` is non-empty:
+
+```yaml
+strands:
+  explore:
+    enabled: true
+    workspaces:                      # Non-empty = pinned
+      - /home/coding/SEAM
+      - /home/coding/ARMOR
+```
+
+**Behavior:**
+- Only scans the explicitly listed workspaces
+- Auto-discovery is disabled
+- Re-discovery is skipped even if `rediscovery_cycles` > 0
+
+**Startup Logs:**
+```
+WARN Explore running in PINNED mode (non-empty workspaces list). Auto-discovery is disabled;
+only the listed workspaces will be scanned. This is an exception mechanism — the fleet default
+is empty workspaces (recursive discovery under workspace_root). Verify this is intentional.
+```
 
 ---
 
-## Configuration Example
+## Usage in ExploreStrand
 
-### Full `.needle.yaml` with Explore Config
+The `ExploreConfig` is consumed by `ExploreStrand::new()`:
 
-```yaml
-explore:
-  enabled: true
-  workspaces: []  # Empty = auto-discover all workspaces
-  workspace_root: /home/coding
-  rediscovery_cycles: 60
-  starvation_threshold_minutes: 15
-  scan_interval_cycles: 1
-  max_scan_interval_cycles: 8
+```rust
+pub fn new(
+    config: ExploreConfig,
+    home_workspace: PathBuf,
+    registry: Registry,
+    telemetry: Telemetry,
+    qualified_id: String,
+) -> Self
 ```
 
-### Minimal `.needle.yaml` (all defaults)
+**Key initialization logic:**
 
-```yaml
-# No explore section needed — all fields have sensible defaults
-```
+1. **Determine auto-discovery mode:**
+   ```rust
+   let auto_discovery_mode = config.workspaces.is_empty();
+   ```
 
-### Exception Case: Pinned Worker
+2. **Discover or use explicit workspaces:**
+   ```rust
+   let workspaces = if auto_discovery_mode {
+       Self::discover_workspaces(&config.workspace_root)
+   } else {
+       config.workspaces
+   };
+   ```
 
-```yaml
-explore:
-  enabled: true
-  workspaces:
-    - /home/coding/NEEDLE
-    - /home/coding/commitgraph
-  # workspace_root ignored when workspaces is non-empty
-```
+3. **Warn if in pinned mode:**
+   ```rust
+   if !workspaces.is_empty() && !auto_discovery_mode {
+       tracing::warn!(...);  // Emits WARN log
+   }
+   ```
 
 ---
 
-## Related Documentation
+## Complete Default Configuration Example
 
-- **Explore strand implementation:** `src/strand/explore.rs`
-- **Workspace discovery logic:** `ExploreStrand::discover_workspaces()`
-- **Adaptive scan backoff:** `ExploreScanBackoff` struct
-- **Test isolation policy:** `docs/testing-isolation-patterns.md`
+```yaml
+# .needle.yaml
+strands:
+  explore:
+    enabled: true                          # Enable strand
+    workspaces: []                         # Auto-discovery mode
+    workspace_root: /home/coding           # Scan root
+    rediscovery_cycles: 60                # Re-discover every 60 cycles
+    starvation_threshold_minutes: 15       # Alert after 15 min starvation
+    scan_interval_cycles: 1              # Base scan interval
+    max_scan_interval_cycles: 8           # Max backoff interval
+```
 
----
-
-## Historical Context
-
-### 2026-07-19 Fleet Incident
-
-The fleet incident occurred because `explore.workspaces` was populated with 24 hardcoded paths. This:
-1. Permanently disabled recursive discovery fleet-wide
-2. Created a stale list that missed valid repos (commitgraph, twitterapi-proxy)
-3. Required manual intervention for each new workspace
-
-**Resolution:** Made `workspaces` default to empty (auto-discovery mode) and emit WARN logs when non-empty to alert operators to pinned mode.
-
-### bf-6anj4: Per-Cycle Workspace Re-discovery
-
-Prior to bf-6anj4, workspace re-discovery was throttled by `rediscovery_cycles`. This meant:
-- New workspaces were not detected until the throttle expired
-- Workers required restarts to see new stores
-
-**Resolution:** Re-discovery now runs every cycle unconditionally. The `rediscovery_cycles` field remains for config compatibility but no longer gates re-discovery.
-
-### bf-4df1e / bf-47bfm: Cross-Workspace Aggregation
-
-Prior to these fixes, Explore would return on the first workspace with candidates, even if all were filtered out. This caused fleet-wide starvation when:
-- First workspace had only excluded/assigned beads
-- Later workspaces had valid claimable beads (never scanned)
-
-**Resolution:** Explore now aggregates candidates across ALL workspaces, filters them globally, and returns the ranked list.
+This configuration represents the **intended default for the fleet** — workers automatically discover and scan all workspaces under `$HOME` with `.beads/` directories, re-discovering periodically to pick up new stores.

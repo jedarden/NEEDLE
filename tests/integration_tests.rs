@@ -4879,6 +4879,180 @@ workspace:
     println!("  Relative path preserved: relative/path/to/needle-home");
 }
 
+/// Test tilde expansion with multiple tildes in the same value.
+///
+/// This test validates that tilde expansion correctly handles paths with
+/// multiple tildes, confirming that only the first tilde at the start is expanded.
+#[tokio::test]
+#[serial]
+async fn worker_binary_path_tilde_expansion_multiple_tildes() {
+    use needle::util::expand_tilde;
+    use std::env;
+    use std::fs;
+
+    // Create a completely isolated temp directory for this test
+    let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let isolated_home = temp_dir.path().join("fake-home");
+    fs::create_dir_all(&isolated_home).expect("failed to create fake home");
+
+    // Save the original HOME and set our isolated home
+    let original_home = env::var("HOME").ok();
+
+    let _home_lock = lock_home();
+    env::set_var("HOME", &isolated_home);
+
+    // Test 1: Multiple tildes separated by space (only first tilde expands)
+    let multiple_tildes_space = "~ ~/another/path";
+    let expanded = expand_tilde(multiple_tildes_space);
+    let expected = format!("{}/ ~/another/path", isolated_home.to_str().unwrap());
+    assert_eq!(
+        expanded, expected,
+        "only first tilde should be expanded, second tilde preserved as-is"
+    );
+
+    // Test 2: Multiple tildes with no space
+    let multiple_tildes_no_space = "~/path~";
+    let expanded = expand_tilde(multiple_tildes_no_space);
+    let expected = format!("{}/path~", isolated_home.to_str().unwrap());
+    assert_eq!(
+        expanded, expected,
+        "only leading tilde should expand, trailing tilde should be preserved"
+    );
+
+    // Test 3: Multiple leading tildes (~/~/path)
+    let double_leading_tilde = "~/~/path";
+    let expanded = expand_tilde(double_leading_tilde);
+    let expected = format!("{}/~/path", isolated_home.to_str().unwrap());
+    assert_eq!(
+        expanded, expected,
+        "first tilde should expand, second tilde preserved"
+    );
+
+    // Test 4: Tilde followed by bare tilde (~ ~)
+    let tilde_space_tilde = "~ ~";
+    let expanded = expand_tilde(tilde_space_tilde);
+    let expected = format!("{} ~", isolated_home.to_str().unwrap());
+    assert_eq!(
+        expanded, expected,
+        "first tilde should expand to HOME, second tilde preserved"
+    );
+
+    // Test 5: Path with tilde in middle and start (~/path/~another)
+    let tilde_start_and_middle = "~/path/~another";
+    let expanded = expand_tilde(tilde_start_and_middle);
+    let expected = format!("{}/path/~another", isolated_home.to_str().unwrap());
+    assert_eq!(
+        expanded, expected,
+        "leading tilde should expand, middle tilde preserved"
+    );
+
+    // Restore original HOME
+    if let Some(home) = original_home {
+        env::set_var("HOME", home);
+    } else {
+        env::remove_var("HOME");
+    }
+
+    println!("✓ Tilde expansion multiple tildes test passed");
+    println!("  Isolated home: {}", isolated_home.display());
+    println!("  ~ ~/another/path -> {}", expected);
+}
+
+/// Test tilde expansion with tilde at different positions.
+///
+/// This test validates that tilde expansion only applies when tilde is at
+/// the start of the path (either bare `~` or with `~/`), and not when it
+/// appears in the middle or end of a path.
+#[tokio::test]
+#[serial]
+async fn worker_binary_path_tilde_expansion_position() {
+    use needle::util::expand_tilde;
+    use std::env;
+    use std::fs;
+
+    // Create a completely isolated temp directory for this test
+    let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let isolated_home = temp_dir.path().join("fake-home");
+    fs::create_dir_all(&isolated_home).expect("failed to create fake home");
+
+    // Save the original HOME and set our isolated home
+    let original_home = env::var("HOME").ok();
+
+    let _home_lock = lock_home();
+    env::set_var("HOME", &isolated_home);
+
+    // Test 1: Tilde at end of path (/path/~) - should NOT expand
+    let tilde_at_end = "/path/~";
+    let expanded = expand_tilde(tilde_at_end);
+    assert_eq!(
+        expanded, "/path/~",
+        "tilde at end of path should not be expanded"
+    );
+
+    // Test 2: Tilde in middle of path (/path/~/nested) - should NOT expand
+    let tilde_in_middle = "/path/~/nested";
+    let expanded = expand_tilde(tilde_in_middle);
+    assert_eq!(
+        expanded, "/path/~",
+        "tilde in middle of path should not be expanded, path should be truncated"
+    );
+
+    // Test 3: Tilde with path before it (before~/path) - should NOT expand
+    let tilde_after_prefix = "before~/path";
+    let expanded = expand_tilde(tilde_after_prefix);
+    assert_eq!(
+        expanded, "before~/path",
+        "tilde after text should not be expanded"
+    );
+
+    // Test 4: Bare tilde at end of path (path~) - should NOT expand
+    let bare_tilde_at_end = "path~";
+    let expanded = expand_tilde(bare_tilde_at_end);
+    assert_eq!(
+        expanded, "path~",
+        "tilde at end of non-path string should not be expanded"
+    );
+
+    // Test 5: Tilde in absolute path middle (/abs/~path) - should NOT expand
+    let tilde_in_abs_path = "/abs/~path";
+    let expanded = expand_tilde(tilde_in_abs_path);
+    assert_eq!(
+        expanded, "/abs/~path",
+        "tilde in middle of absolute path should not be expanded"
+    );
+
+    // Test 6: Tilde at start IS expanded (baseline test)
+    let tilde_at_start = "~/valid/path";
+    let expanded = expand_tilde(tilde_at_start);
+    let expected_start = format!("{}/valid/path", isolated_home.to_str().unwrap());
+    assert_eq!(
+        expanded, expected_start,
+        "tilde at start should be expanded (baseline)"
+    );
+
+    // Test 7: Bare tilde alone IS expanded (baseline test)
+    let bare_tilde = "~";
+    let expanded = expand_tilde(bare_tilde);
+    assert_eq!(
+        expanded,
+        isolated_home.to_str().unwrap(),
+        "bare tilde should be expanded to HOME (baseline)"
+    );
+
+    // Restore original HOME
+    if let Some(home) = original_home {
+        env::set_var("HOME", home);
+    } else {
+        env::remove_var("HOME");
+    }
+
+    println!("✓ Tilde expansion position test passed");
+    println!("  Isolated home: {}", isolated_home.display());
+    println!("  Tilde at start ~/valid/path -> {}", expected_start);
+    println!("  Tilde at end /path/~ -> /path/~ (no expansion)");
+    println!("  Tilde in middle /path/~/nested -> /path/~ (no expansion)");
+}
+
 /// Test tilde expansion in workspace.default configuration.
 ///
 /// This test validates that tilde-prefixed paths in workspace.default are
