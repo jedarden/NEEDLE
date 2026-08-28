@@ -72,5 +72,6 @@ pub mod types;
 pub mod upgrade;
 pub mod util;
 pub mod validation;
+pub mod version_probe;
 pub mod worker;
 pub mod workspace_equality;
