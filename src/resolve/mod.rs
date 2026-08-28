@@ -1442,7 +1442,7 @@ mod tests {
             resolver.config.custom_template_path,
             Some(PathBuf::from("/tmp/resolve-template.txt"))
         );
-        assert_eq!(resolver.config.use_default_template, false);
+        assert!(!resolver.config.use_default_template);
     }
 
     #[test]
@@ -1635,13 +1635,13 @@ mod tests {
 
         let resolver = Resolver::with_config(prompt_builder, config);
 
-        assert_eq!(resolver.config.enabled, true);
+        assert!(resolver.config.enabled);
         assert_eq!(resolver.config.timeout_secs, 180);
         assert_eq!(
             resolver.config.custom_template_path,
             Some(PathBuf::from("/custom/template.txt"))
         );
-        assert_eq!(resolver.config.use_default_template, false);
+        assert!(!resolver.config.use_default_template);
     }
 
     // ──────────────────────────────────────────────────────────────────────────────

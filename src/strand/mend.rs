@@ -23,7 +23,7 @@ use crate::peer::PeerMonitor;
 use crate::registry::Registry;
 use crate::telemetry::{EventKind, Telemetry};
 use crate::trace::cleanup_traces;
-use crate::types::{BeadId, BeadStatus, StrandError, StrandResult};
+use crate::types::{Bead, BeadId, BeadStatus, StrandError, StrandResult};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Store-scoped orphan cleanup (shared between Mend and Explore)
@@ -71,6 +71,67 @@ pub async fn cleanup_orphaned_in_progress_test_optimized(
     cleanup_in_progress(store, registry, telemetry, qualified_id, None).await
 }
 
+/// Identify beads that are stale due to assignee overlap.
+///
+/// For each assignee with multiple in_progress beads, only the bead with the
+/// most recent `updated_at` timestamp is considered valid. All older beads
+/// for that assignee are considered stale and should be reaped, regardless of
+/// the worker's liveness or claim age threshold.
+///
+/// This catches dispatch leaks where a worker ends up with multiple simultaneous
+/// claims on different beads, even if the worker is still alive.
+///
+/// # Arguments
+/// * `all_beads` - All beads from the store (will be filtered for InProgress status)
+///
+/// # Returns
+/// A `HashSet<BeadId>` containing the IDs of all beads that are stale due to
+/// assignee overlap (i.e., they are NOT the newest bead for their assignee).
+fn get_stale_by_assignee_overlap(all_beads: &[Bead]) -> std::collections::HashSet<BeadId> {
+    use std::collections::{HashMap, HashSet};
+
+    // Step 1: For each assignee, find the newest (most recently updated) bead
+    let mut newest_bead_by_assignee: HashMap<String, (DateTime<Utc>, BeadId)> = HashMap::new();
+    for bead in all_beads {
+        if bead.status != BeadStatus::InProgress {
+            continue;
+        }
+        let assignee = match &bead.assignee {
+            Some(a) if !a.is_empty() => a,
+            _ => continue,
+        };
+        let entry = newest_bead_by_assignee
+            .entry(assignee.clone())
+            .or_insert((bead.updated_at, bead.id.clone()));
+        // Update if this bead is newer than the current newest for this assignee
+        if bead.updated_at > entry.0 {
+            *entry = (bead.updated_at, bead.id.clone());
+        }
+    }
+
+    // Step 2: Mark all beads that are NOT the newest for their assignee as stale
+    let mut stale_by_overlap: HashSet<BeadId> = HashSet::new();
+    for bead in all_beads {
+        if bead.status != BeadStatus::InProgress {
+            continue;
+        }
+        let assignee = match &bead.assignee {
+            Some(a) if !a.is_empty() => a,
+            _ => continue,
+        };
+
+        // Check if this bead is the newest for its assignee
+        if let Some((newest_updated, newest_bead_id)) = newest_bead_by_assignee.get(assignee) {
+            // If this bead's updated_at is older than the newest, it's stale by overlap
+            if bead.updated_at < *newest_updated {
+                stale_by_overlap.insert(bead.id.clone());
+            }
+        }
+    }
+
+    stale_by_overlap
+}
+
 /// Scan all in-progress beads in a store and release any whose assignee is
 /// orphaned, whose claim is older than `claim_ttl`, or whose claim was
 /// superseded by a newer claim from the same assignee. Claim age and claim
@@ -109,28 +170,10 @@ async fn cleanup_in_progress(
         .map(|w| w.id.clone())
         .collect();
 
-    // For each assignee with multiple in_progress beads, identify which bead
-    // has the MAX updated_at (the only plausible active claim). Claims with an
-    // older updated_at for that assignee are stale by definition, regardless
-    // of whether the worker session is alive.
-    use std::collections::HashMap;
-    let mut newest_bead_by_assignee: HashMap<String, (DateTime<Utc>, BeadId)> = HashMap::new();
-    for bead in &all_beads {
-        if bead.status != BeadStatus::InProgress {
-            continue;
-        }
-        let assignee = match &bead.assignee {
-            Some(a) if !a.is_empty() => a,
-            _ => continue,
-        };
-        let entry = newest_bead_by_assignee
-            .entry(assignee.clone())
-            .or_insert((bead.updated_at, bead.id.clone()));
-        // Update if this bead is newer than the current newest for this assignee
-        if bead.updated_at > entry.0 {
-            *entry = (bead.updated_at, bead.id.clone());
-        }
-    }
+    // Pass 1: Identify claims stale by assignee overlap.
+    // For each assignee with multiple in_progress beads, only the newest is valid.
+    // Older beads are stale regardless of worker liveness or claim age.
+    let stale_by_overlap = get_stale_by_assignee_overlap(&all_beads);
 
     let mut released = 0u32;
     let now = Utc::now();
@@ -146,24 +189,34 @@ async fn cleanup_in_progress(
         };
 
         let claim_age = now.signed_duration_since(bead.updated_at).to_std().ok();
+
+        // Pass 2: Apply staleness threshold to claims not already marked in Pass 1.
+        // The threshold check only applies to beads that are NOT stale by overlap.
         let stale_by_age =
             claim_ttl.is_some_and(|ttl| claim_age.map(|age| age >= ttl).unwrap_or(false));
 
-        // If this assignee has multiple in_progress beads, only the most
-        // recently updated one is valid. This catches claims leaked by the
-        // dispatch layer even when the worker's session/process is still
-        // alive, including when this is the current worker's own identity.
-        let newest_claim = newest_bead_by_assignee.get(assignee);
-        let is_superseded = newest_claim
-            .map(|(newest_updated, _)| bead.updated_at < *newest_updated)
-            .unwrap_or(false);
+        // Union of Pass 1 (overlap) and Pass 2 (threshold) for reap eligibility.
+        // A bead is reap-eligible if it is stale by overlap OR stale by age.
+        let is_superseded = stale_by_overlap.contains(&bead.id);
+
         if is_superseded {
-            if let Some((_, newest_bead_id)) = newest_claim {
+            // For beads stale by overlap, we need to find the newest bead for this assignee
+            // to provide helpful diagnostic information.
+            // Re-compute the newest bead for this specific assignee.
+            let newest_for_assignee = all_beads
+                .iter()
+                .filter(|b| {
+                    b.status == BeadStatus::InProgress
+                        && b.assignee.as_ref() == Some(assignee)
+                })
+                .max_by_key(|b| b.updated_at);
+
+            if let Some(newest_bead) = newest_for_assignee {
                 tracing::info!(
                     bead_id = %bead.id,
                     assignee = %assignee,
                     age_secs = claim_age.map_or(0, |age| age.as_secs()),
-                    newest_bead_id = %newest_bead_id,
+                    newest_bead_id = %newest_bead.id,
                     "releasing in-progress bead superseded by newer claim from same assignee"
                 );
             }
@@ -184,9 +237,18 @@ async fn cleanup_in_progress(
             continue;
         }
 
+        // Determine the newest bead for this assignee for the reason message
+        let newest_claim = all_beads
+            .iter()
+            .filter(|b| {
+                b.status == BeadStatus::InProgress
+                    && b.assignee.as_ref() == Some(assignee)
+            })
+            .max_by_key(|b| b.updated_at);
+
         let reason = match (is_superseded, newest_claim) {
-            (true, Some((_, newest_bead_id))) => {
-                format!("superseded by newer in-progress claim {newest_bead_id} from same assignee")
+            (true, Some(newest_bead)) => {
+                format!("superseded by newer in-progress claim {} from same assignee", newest_bead.id)
             }
             (false, _) if stale_by_age => {
                 let age_secs = claim_age.map_or(0, |age| age.as_secs());

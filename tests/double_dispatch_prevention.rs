@@ -10,7 +10,6 @@
 //! 4. Worker B attempts to dispatch the same bead (should fail verification)
 //! 5. Verify Worker A succeeds, Worker B fails, and bead remains owned by Worker A
 
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
@@ -205,13 +204,15 @@ impl BeadStore for MockStore {
 
     async fn doctor_repair(&self) -> anyhow::Result<needle::bead_store::RepairReport> {
         Ok(needle::bead_store::RepairReport {
-            actions_performed: Vec::new(),
+            warnings: Vec::new(),
+            fixed: Vec::new(),
         })
     }
 
     async fn doctor_check(&self) -> anyhow::Result<needle::bead_store::RepairReport> {
         Ok(needle::bead_store::RepairReport {
-            actions_performed: Vec::new(),
+            warnings: Vec::new(),
+            fixed: Vec::new(),
         })
     }
 
@@ -354,7 +355,7 @@ async fn double_dispatch_prevention_with_concurrent_dispatch_attempts() {
     let barrier = Arc::new(Barrier::new(2));
     let barrier_clone = barrier.clone();
 
-    let store_clone = store.clone();
+    let _store_clone = store.clone();
     let bead_id_clone = bead_id.clone();
 
     // Worker A's dispatch attempt
@@ -379,7 +380,7 @@ async fn double_dispatch_prevention_with_concurrent_dispatch_attempts() {
         sleep(Duration::from_millis(5)).await;
 
         let verification = claimer_b
-            .verify_claim_at_dispatch(&bead_id, worker_b)
+            .verify_claim_at_dispatch(&bead_id_clone, worker_b)
             .await
             .expect("worker b verification completes");
 
@@ -406,7 +407,7 @@ async fn double_dispatch_prevention_with_concurrent_dispatch_attempts() {
 
     // Final bead state verification
     let claim_status_final = store
-        .claim_status(&bead_id)
+        .claim_status(&bead_id_clone)
         .await
         .expect("get final claim status");
     assert_eq!(claim_status_final.status, BeadStatus::InProgress);

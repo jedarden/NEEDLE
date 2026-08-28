@@ -1039,3 +1039,8 @@
 {"bead":"needle-58eebef5","duration_ms":581285,"event":"fail","exit_code":0,"outcome":"failure","strand":"auto","ts":"2026-08-28T13:40:43.737800030+00:00","worker":"glm-needle"}
 {"bead":"needle-58eebef5","event":"claim","strand":"auto","ts":"2026-08-28T13:41:11.505778425+00:00","worker":"glm-needle"}
 {"adapter":"claude-code-glm-4.7","bead":"needle-58eebef5","event":"dispatch","model":"glm-4.7","strand":"auto","ts":"2026-08-28T13:41:11.509546928+00:00","worker":"glm-needle"}
+{"bead":"needle-7ef79a8f","duration_ms":1591598,"event":"complete","exit_code":0,"outcome":"success","strand":"explore","ts":"2026-08-28T13:45:33.629229050+00:00","worker":"glm-hopt"}
+{"bead":"needle-1e6ce788","event":"claim","strand":"explore","ts":"2026-08-28T13:46:39.647872365+00:00","worker":"glm-armor"}
+{"adapter":"claude-code-glm-4.7","bead":"needle-1e6ce788","event":"dispatch","model":"glm-4.7","strand":"explore","ts":"2026-08-28T13:46:39.867556382+00:00","worker":"glm-armor"}
+{"bead":"needle-f18b451e","event":"claim","strand":"explore","ts":"2026-08-28T13:46:45.192061297+00:00","worker":"glm-hopt"}
+{"adapter":"claude-code-glm-4.7","bead":"needle-f18b451e","event":"dispatch","model":"glm-4.7","strand":"explore","ts":"2026-08-28T13:46:45.408234785+00:00","worker":"glm-hopt"}
