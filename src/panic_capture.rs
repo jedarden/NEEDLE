@@ -19,8 +19,10 @@
 //! install_panic_hook();
 //! ```
 
-use std::panic::{self, PanicHookInfo};
+#[allow(deprecated)]
+use std::panic::{self, PanicInfo};
 use std::sync::Once;
+use std::time::SystemTime;
 
 static HOOK_INSTALLED: Once = Once::new();
 
@@ -72,7 +74,8 @@ fn set_full_backtrace_env() {
 /// - Captures the full panic message and location
 /// - Ensures backtrace information is included
 /// - Formats the output consistently for parsing
-fn panic_hook(info: &PanicHookInfo) {
+#[allow(deprecated)]
+fn panic_hook(info: &PanicInfo) {
     // Get panic location
     let location = info.location().unwrap_or_else(|| {
         // Fallback for cases where location isn't available
@@ -110,12 +113,16 @@ fn panic_hook(info: &PanicHookInfo) {
 
     eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
 
+    // Capture timestamp for telemetry
+    let timestamp = SystemTime::now();
+
     // Emit telemetry event for panic
     tracing::error!(
         panic_message = msg,
         file = location.file(),
         line = location.line(),
         column = location.column(),
+        timestamp = ?timestamp,
         "test panic captured"
     );
 }
