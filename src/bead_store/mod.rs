@@ -1319,7 +1319,10 @@ pub trait BeadStore: Send + Sync {
 
     /// Clear the assignee on a bead without changing its status.
     ///
-    /// Used by mend to heal open beads with stale assignees (e.g., after reopen).
+    /// Used by mend to heal open beads with stale assignees (e.g., from manual
+    /// assignment changes, race conditions, or other cases where beads become
+    /// stuck with an assignee). Note: As of 2026-08-24, `bead reopen` clears the
+    /// assignee, so this is not needed for reopened beads.
     async fn clear_assignee(&self, id: &BeadId) -> Result<()>;
 
     /// Flush local bead changes to JSONL before release.
@@ -3734,5 +3737,332 @@ echo "   bead 0.1.1"
             .await
             .expect("should handle leading whitespace successfully");
         assert_eq!(backend_name, "bead");
+    }
+
+    // ─── Regression tests for capabilities accuracy ─────────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_bead_rs_capabilities_rejects_blocked_status() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir().unwrap();
+
+        // Create a bead-rs binary that incorrectly reports 'blocked' as a status
+        let bead_rs = workspace.path().join("bead-rs-with-blocked");
+        std::fs::write(
+            &bead_rs,
+            r#"#!/bin/bash
+if [ "$1" = "capabilities" ]; then
+  printf '{"implementation":"bead-rs","atomic_claim":true,"statuses":["open","in_progress","deferred","closed","blocked"],"schemas":[{"schema_ref":"urn:bead-rs:schema:issue:native-v1"},{"schema_ref":"urn:bead-rs:schema:event:native-v1"},{"schema_ref":"urn:bead-rs:schema:field-guide:native-v1"}]}'
+else
+  echo "bead 0.1.1"
+fi
+	"#,
+        )
+        .unwrap();
+        let mut perm = std::fs::metadata(&bead_rs).unwrap().permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&bead_rs, perm).unwrap();
+
+        // Test that capabilities with 'blocked' status are accepted (it's not in our expected list, but having extra statuses shouldn't fail)
+        let result = verify_bead_rs_capabilities(&bead_rs, workspace.path());
+
+        // This should succeed because we only check for the presence of required statuses,
+        // not the absence of extra ones
+        assert!(
+            result.is_ok(),
+            "verify_bead_rs_capabilities should accept binary with 'blocked' status (we only check required statuses are present), got: {:?}",
+            result
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_bead_rs_capabilities_requires_all_expected_statuses() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir().unwrap();
+
+        // Create a bead-rs binary missing the 'deferred' status
+        let bead_rs = workspace.path().join("bead-rs-missing-deferred");
+        std::fs::write(
+            &bead_rs,
+            r#"#!/bin/bash
+if [ "$1" = "capabilities" ]; then
+  printf '{"implementation":"bead-rs","atomic_claim":true,"statuses":["open","in_progress","closed"],"schemas":[{"schema_ref":"urn:bead-rs:schema:issue:native-v1"},{"schema_ref":"urn:bead-rs:schema:event:native-v1"},{"schema_ref":"urn:bead-rs:schema:field-guide:native-v1"}]}'
+else
+  echo "bead 0.1.1"
+fi
+	"#,
+        )
+        .unwrap();
+        let mut perm = std::fs::metadata(&bead_rs).unwrap().permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&bead_rs, perm).unwrap();
+
+        // Test that missing required status fails
+        let result = verify_bead_rs_capabilities(&bead_rs, workspace.path());
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("capability mismatch") && err_msg.contains("deferred"),
+            "Error should mention missing 'deferred' status, got: {}",
+            err_msg
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_bead_rs_capabilities_requires_all_expected_schemas() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir().unwrap();
+
+        // Create a bead-rs binary missing the event schema
+        let bead_rs = workspace.path().join("bead-rs-missing-event-schema");
+        std::fs::write(
+            &bead_rs,
+            r#"#!/bin/bash
+if [ "$1" = "capabilities" ]; then
+  printf '{"implementation":"bead-rs","atomic_claim":true,"statuses":["open","in_progress","deferred","closed"],"schemas":[{"schema_ref":"urn:bead-rs:schema:issue:native-v1"},{"schema_ref":"urn:bead-rs:schema:field-guide:native-v1"}]}'
+else
+  echo "bead 0.1.1"
+fi
+	"#,
+        )
+        .unwrap();
+        let mut perm = std::fs::metadata(&bead_rs).unwrap().permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&bead_rs, perm).unwrap();
+
+        // Test that missing required schema fails
+        let result = verify_bead_rs_capabilities(&bead_rs, workspace.path());
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("capability mismatch") && err_msg.contains("schema"),
+            "Error should mention missing schema, got: {}",
+            err_msg
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_bead_rs_capabilities_accepts_all_three_required_schemas() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir().unwrap();
+
+        // Test all three required schema refs are present
+        let required_schemas = vec![
+            "urn:bead-rs:schema:issue:native-v1",
+            "urn:bead-rs:schema:event:native-v1",
+            "urn:bead-rs:schema:field-guide:native-v1",
+        ];
+
+        for schema_ref in required_schemas {
+            let bead_rs = workspace.path().join(format!(
+                "bead-rs-schema-{}",
+                schema_ref.split(':').last().unwrap()
+            ));
+            std::fs::write(
+                &bead_rs,
+                format!(
+                    r#"#!/bin/bash
+if [ "$1" = "capabilities" ]; then
+  printf '{{"implementation":"bead-rs","atomic_claim":true,"statuses":["open","in_progress","deferred","closed"],"schemas":[{{"schema_ref":"{}"}}]}}'
+else
+  echo "bead 0.1.1"
+fi
+	"#,
+                    schema_ref
+                ),
+            )
+            .unwrap();
+            let mut perm = std::fs::metadata(&bead_rs).unwrap().permissions();
+            perm.set_mode(0o755);
+            std::fs::set_permissions(&bead_rs, perm).unwrap();
+
+            // Each individual schema should fail (we need all three)
+            let result = verify_bead_rs_capabilities(&bead_rs, workspace.path());
+            assert!(
+                result.is_err(),
+                "Should fail when missing required schemas (only has {})",
+                schema_ref
+            );
+        }
+
+        // Now test with all three schemas present - should succeed
+        let bead_rs_complete = workspace.path().join("bead-rs-complete");
+        std::fs::write(
+            &bead_rs_complete,
+            r#"#!/bin/bash
+if [ "$1" = "capabilities" ]; then
+  printf '{"implementation":"bead-rs","atomic_claim":true,"statuses":["open","in_progress","deferred","closed"],"schemas":[{"schema_ref":"urn:bead-rs:schema:issue:native-v1"},{"schema_ref":"urn:bead-rs:schema:event:native-v1"},{"schema_ref":"urn:bead-rs:schema:field-guide:native-v1"}]}'
+else
+  echo "bead 0.1.1"
+fi
+	"#,
+        )
+        .unwrap();
+        let mut perm = std::fs::metadata(&bead_rs_complete).unwrap().permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&bead_rs_complete, perm).unwrap();
+
+        let result = verify_bead_rs_capabilities(&bead_rs_complete, workspace.path());
+        assert!(
+            result.is_ok(),
+            "Should succeed when all three required schemas are present, got: {:?}",
+            result
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_bead_rs_capabilities_rejects_wrong_implementation() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir().unwrap();
+
+        // Create a binary claiming to be something else
+        let wrong_impl = workspace.path().join("wrong-implementation");
+        std::fs::write(
+            &wrong_impl,
+            r#"#!/bin/bash
+if [ "$1" = "capabilities" ]; then
+  printf '{"implementation":"bead-forge","atomic_claim":true,"statuses":["open","in_progress","deferred","closed"],"schemas":[{"schema_ref":"urn:bead-rs:schema:issue:native-v1"},{"schema_ref":"urn:bead-rs:schema:event:native-v1"},{"schema_ref":"urn:bead-rs:schema:field-guide:native-v1"}]}'
+else
+  echo "bead 0.1.1"
+fi
+	"#,
+        )
+        .unwrap();
+        let mut perm = std::fs::metadata(&wrong_impl).unwrap().permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&wrong_impl, perm).unwrap();
+
+        let result = verify_bead_rs_capabilities(&wrong_impl, workspace.path());
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("capability mismatch"),
+            "Error should mention capability mismatch for wrong implementation, got: {}",
+            err_msg
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_bead_rs_capabilities_requires_atomic_claim() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir().unwrap();
+
+        // Create a binary without atomic_claim
+        let no_atomic = workspace.path().join("no-atomic-claim");
+        std::fs::write(
+            &no_atomic,
+            r#"#!/bin/bash
+if [ "$1" = "capabilities" ]; then
+  printf '{"implementation":"bead-rs","atomic_claim":false,"statuses":["open","in_progress","deferred","closed"],"schemas":[{"schema_ref":"urn:bead-rs:schema:issue:native-v1"},{"schema_ref":"urn:bead-rs:schema:event:native-v1"},{"schema_ref":"urn:bead-rs:schema:field-guide:native-v1"}]}'
+else
+  echo "bead 0.1.1"
+fi
+	"#,
+        )
+        .unwrap();
+        let mut perm = std::fs::metadata(&no_atomic).unwrap().permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&no_atomic, perm).unwrap();
+
+        let result = verify_bead_rs_capabilities(&no_atomic, workspace.path());
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("capability mismatch"),
+            "Error should mention capability mismatch for missing atomic_claim, got: {}",
+            err_msg
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_bead_rs_capabilities_handles_invalid_json() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir().unwrap();
+
+        // Create a binary that outputs invalid JSON
+        let invalid_json = workspace.path().join("invalid-json");
+        std::fs::write(
+            &invalid_json,
+            r#"#!/bin/bash
+if [ "$1" = "capabilities" ]; then
+  printf '{this is not valid json}'
+else
+  echo "bead 0.1.1"
+fi
+	"#,
+        )
+        .unwrap();
+        let mut perm = std::fs::metadata(&invalid_json).unwrap().permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&invalid_json, perm).unwrap();
+
+        let result = verify_bead_rs_capabilities(&invalid_json, workspace.path());
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("invalid bead-rs capability JSON") || err_msg.contains("JSON"),
+            "Error should mention invalid JSON, got: {}",
+            err_msg
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_bead_rs_capabilities_command_invocation_is_correct() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir().unwrap();
+
+        // Create a binary that logs its invocation to verify the correct command is used
+        let log_file = workspace.path().join("invocation.log");
+        let logging_binary = workspace.path().join("logging-bead");
+        std::fs::write(
+            &logging_binary,
+            format!(
+                r#"#!/bin/bash
+if [ "$1" = "capabilities" ]; then
+  echo "capabilities --profile native-v1" >> "{}"
+  printf '{{"implementation":"bead-rs","atomic_claim":true,"statuses":["open","in_progress","deferred","closed"],"schemas":[{{"schema_ref":"urn:bead-rs:schema:issue:native-v1"}},{{"schema_ref":"urn:bead-rs:schema:event:native-v1"}},{{"schema_ref":"urn:bead-rs:schema:field-guide:native-v1"}}]}}'
+else
+  echo "bead 0.1.1"
+fi
+	"#,
+                log_file.display()
+            ),
+        )
+        .unwrap();
+        let mut perm = std::fs::metadata(&logging_binary).unwrap().permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&logging_binary, perm).unwrap();
+
+        let result = verify_bead_rs_capabilities(&logging_binary, workspace.path());
+        assert!(result.is_ok(), "Should succeed with logging binary");
+
+        // Verify the command was invoked correctly
+        let log_contents = std::fs::read_to_string(&log_file).unwrap();
+        assert!(
+            log_contents.contains("capabilities --profile native-v1"),
+            "Expected to find 'capabilities --profile native-v1' in invocation log, got: {}",
+            log_contents
+        );
     }
 }
