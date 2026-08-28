@@ -478,6 +478,11 @@ impl Claimer {
     /// before agent execution. If another worker has reassigned the bead or the
     /// bead has been released, the dispatch should be aborted.
     ///
+    /// This uses the `claim_status` method which queries the live database directly
+    /// and includes revision information for optimistic concurrency control. The verification
+    /// happens within the dispatch transaction window - immediately before the agent
+    /// process is spawned, providing atomic verification with no race window.
+    ///
     /// Returns:
     /// - `Ok(true)`: bead is still in_progress and assigned to expected actor
     /// - `Ok(false)`: bead is not assigned to expected actor (dispatch should abort)
@@ -487,27 +492,36 @@ impl Claimer {
         bead_id: &BeadId,
         expected_actor: &str,
     ) -> Result<bool> {
-        match self.store.show(bead_id).await {
-            Ok(bead) => {
-                let is_valid = bead.status == BeadStatus::InProgress
-                    && bead.assignee.as_deref() == Some(expected_actor);
+        // Use claim_status to query the live store with revision information
+        match self.store.claim_status(bead_id).await {
+            Ok(claim_status) => {
+                let is_valid = claim_status.status == BeadStatus::InProgress
+                    && claim_status.assignee.as_deref() == Some(expected_actor);
                 if !is_valid {
                     tracing::warn!(
                         bead_id = %bead_id,
                         expected_actor = %expected_actor,
-                        actual_status = ?bead.status,
-                        actual_assignee = ?bead.assignee,
-                        "dispatch-time claim verification failed"
+                        actual_status = ?claim_status.status,
+                        actual_assignee = ?claim_status.assignee,
+                        revision = ?claim_status.revision,
+                        "atomic claim verification at dispatch failed - aborting"
                     );
                     self.telemetry.emit(EventKind::ClaimVerifyFailed {
                         bead_id: bead_id.clone(),
                         expected_actor: expected_actor.to_string(),
-                        actual_status: format!("{:?}", bead.status),
-                        actual_assignee: bead
+                        actual_status: format!("{:?}", claim_status.status),
+                        actual_assignee: claim_status
                             .assignee
                             .clone()
                             .unwrap_or_else(|| "(none)".to_string()),
                     })?;
+                } else {
+                    tracing::debug!(
+                        bead_id = %bead_id,
+                        expected_actor = %expected_actor,
+                        revision = ?claim_status.revision,
+                        "atomic claim verification at dispatch passed"
+                    );
                 }
                 Ok(is_valid)
             }
@@ -515,7 +529,7 @@ impl Claimer {
                 tracing::warn!(
                     bead_id = %bead_id,
                     error = %e,
-                    "dispatch-time claim verification encountered store error"
+                    "atomic claim verification at dispatch encountered store error"
                 );
                 Err(e)
             }
@@ -1593,6 +1607,118 @@ mod tests {
             }
             other => panic!("expected Suspect result from claim_one, got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn verify_claim_at_dispatch_with_valid_claim() {
+        // Test that verify_claim_at_dispatch returns true for a valid claim
+        let bead = make_bead("needle-abc", "/tmp/ws");
+        let mut bead_claimed = bead.clone();
+        bead_claimed.status = BeadStatus::InProgress;
+        bead_claimed.assignee = Some("worker-1".to_string());
+
+        let store = Arc::new(MockBeadStore::new(vec![bead_claimed]));
+        let claimer = make_claimer(store);
+
+        let result = claimer
+            .verify_claim_at_dispatch(&bead.id, "worker-1")
+            .await
+            .unwrap();
+
+        assert!(result, "expected verification to pass for valid claim");
+    }
+
+    #[tokio::test]
+    async fn verify_claim_at_dispatch_with_wrong_worker() {
+        // Test that verify_claim_at_dispatch returns false when bead is assigned to different worker
+        let bead = make_bead("needle-abc", "/tmp/ws");
+        let mut bead_claimed = bead.clone();
+        bead_claimed.status = BeadStatus::InProgress;
+        bead_claimed.assignee = Some("worker-2".to_string());
+
+        let store = Arc::new(MockBeadStore::new(vec![bead_claimed]));
+        let claimer = make_claimer(store);
+
+        let result = claimer
+            .verify_claim_at_dispatch(&bead.id, "worker-1")
+            .await
+            .unwrap();
+
+        assert!(!result, "expected verification to fail for wrong worker");
+    }
+
+    #[tokio::test]
+    async fn verify_claim_at_dispatch_with_open_status() {
+        // Test that verify_claim_at_dispatch returns false when bead is not in_progress
+        let bead = make_bead("needle-abc", "/tmp/ws");
+        let mut bead_open = bead.clone();
+        bead_open.status = BeadStatus::Open;
+        bead_open.assignee = Some("worker-1".to_string());
+
+        let store = Arc::new(MockBeadStore::new(vec![bead_open]));
+        let claimer = make_claimer(store);
+
+        let result = claimer
+            .verify_claim_at_dispatch(&bead.id, "worker-1")
+            .await
+            .unwrap();
+
+        assert!(!result, "expected verification to fail for open status");
+    }
+
+    #[tokio::test]
+    async fn verify_claim_at_dispatch_with_no_assignee() {
+        // Test that verify_claim_at_dispatch returns false when bead has no assignee
+        let bead = make_bead("needle-abc", "/tmp/ws");
+        let mut bead_unassigned = bead.clone();
+        bead_unassigned.status = BeadStatus::InProgress;
+        bead_unassigned.assignee = None;
+
+        let store = Arc::new(MockBeadStore::new(vec![bead_unassigned]));
+        let claimer = make_claimer(store);
+
+        let result = claimer
+            .verify_claim_at_dispatch(&bead.id, "worker-1")
+            .await
+            .unwrap();
+
+        assert!(!result, "expected verification to fail for unassigned bead");
+    }
+
+    #[tokio::test]
+    async fn verify_claim_at_dispatch_emits_telemetry_on_failure() {
+        // Test that verify_claim_at_dispatch emits ClaimVerifyFailed telemetry when verification fails
+        let bead = make_bead("needle-tel-fail", "/tmp/ws");
+        let mut bead_wrong_worker = bead.clone();
+        bead_wrong_worker.status = BeadStatus::InProgress;
+        bead_wrong_worker.assignee = Some("attacker-worker".to_string());
+
+        let store = Arc::new(MockBeadStore::new(vec![bead_wrong_worker]));
+        let (sink, events) = crate::telemetry::test_utils::MemorySink::new();
+        let telemetry = Telemetry::with_sink("test-worker".to_string(), sink);
+        let claimer = Claimer::new(store, std::env::temp_dir(), 5, 10, telemetry);
+
+        let _ = claimer
+            .verify_claim_at_dispatch(&bead.id, "worker-1")
+            .await
+            .unwrap();
+
+        drop(claimer);
+        // Give telemetry writer time to flush
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let captured = events.lock().unwrap();
+        let verify_failed = captured
+            .iter()
+            .find(|event| event.event_type == "bead.claim.verify_failed")
+            .expect("ClaimVerifyFailed event must fire on verification failure");
+
+        assert_eq!(verify_failed.bead_id, Some(bead.id.clone()));
+        assert_eq!(verify_failed.data["expected_actor"], "worker-1");
+        assert!(verify_failed.data["actual_status"]
+            .to_string()
+            .contains("InProgress"));
+        assert_eq!(verify_failed.data["actual_assignee"], "attacker-worker");
     }
 
     // ─── Telemetry-contract tests (needle-d91ca5e9) ────────────────────────────
