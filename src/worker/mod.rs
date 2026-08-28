@@ -7255,6 +7255,7 @@ mod tests {
         let mut worker = Worker::new(config, "luna-needle".to_string(), store.clone());
         worker.boot().unwrap();
         worker.do_select().await.unwrap();
+        worker.do_claim().await.unwrap();
 
         let claimed = store.show(&incident.id).await.unwrap();
         assert_eq!(claimed.status, BeadStatus::InProgress);
@@ -7266,6 +7267,7 @@ mod tests {
         // Reproduce the agent process exiting 0 without closing the bead. The
         // failing definition-of-done gate must classify this as Failure and
         // produce a mandatory release action, never Success/BeadOrphaned.
+        // Skip directly to handling state since we're testing the outcome handler logic.
         worker.state = WorkerState::Handling;
         worker.exec_output = Some((
             AgentOutcome {
