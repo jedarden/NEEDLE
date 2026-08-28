@@ -20,20 +20,24 @@ PREVIOUS_JSON="$BEAD_DIR/previous.json"
 echo "Flushing checkpoint..."
 bead sync flush-only > /dev/null
 
-# Extract active root paths
-CURRENT_ROOT=$(jq -r '.active_root.path' "$CURRENT_JSON")
-PREVIOUS_ROOT=$(jq -r '.active_root.path' "$PREVIOUS_JSON")
+# Use the root resolver script to extract and verify active root paths
+echo "Resolving active root objects..."
+RESOLVER_OUTPUT="$(scripts/resolve-checkpoint-roots.sh "$CURRENT_JSON" "$PREVIOUS_JSON")"
+RESOLVER_EXIT=$?
 
-# Verify they exist
-if [[ ! -f "$BEAD_DIR/$CURRENT_ROOT" ]]; then
-    echo "Error: Current root not found: $BEAD_DIR/$CURRENT_ROOT" >&2
+if [[ $RESOLVER_EXIT -ne 0 ]]; then
+    echo "Error: Failed to resolve checkpoint roots" >&2
+    echo "$RESOLVER_OUTPUT" >&2
     exit 1
 fi
 
-if [[ ! -f "$BEAD_DIR/$PREVIOUS_ROOT" ]]; then
-    echo "Error: Previous root not found: $BEAD_DIR/$PREVIOUS_ROOT" >&2
-    exit 1
-fi
+# Extract just the path components (last two lines are the full paths)
+CURRENT_ROOT_FULL=$(echo "$RESOLVER_OUTPUT" | tail -2 | head -1)
+PREVIOUS_ROOT_FULL=$(echo "$RESOLVER_OUTPUT" | tail -1)
+
+# Extract relative paths from full paths
+CURRENT_ROOT="${CURRENT_ROOT_FULL#$BEAD_DIR/}"
+PREVIOUS_ROOT="${PREVIOUS_ROOT_FULL#$BEAD_DIR/}"
 
 echo "Current root: $CURRENT_ROOT"
 echo "Previous root: $PREVIOUS_ROOT"
