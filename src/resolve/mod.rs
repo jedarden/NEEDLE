@@ -1519,7 +1519,6 @@ mod tests {
     fn resolve_config_validation_passes_with_custom_template() {
         use std::fs::File;
         use std::io::Write;
-        use std::path::PathBuf;
 
         // Create a temporary template file
         let temp_dir = std::env::temp_dir();
@@ -1545,7 +1544,6 @@ mod tests {
     async fn resolver_build_custom_prompt_replaces_variables() {
         use std::fs::File;
         use std::io::Write;
-        use std::path::PathBuf;
 
         let bead = test_bead();
         let bead_ref = Box::leak(Box::new(bead));
