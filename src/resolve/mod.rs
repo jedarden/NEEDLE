@@ -445,8 +445,8 @@ impl std::error::Error for VerificationError {}
 
 /// The resolver analyzes Pluck outcomes and determines next actions.
 pub struct Resolver {
-    /// Timeout for resolve agent calls (default 120s).
-    timeout: Duration,
+    /// Resolve configuration.
+    config: crate::config::ResolveConfig,
     /// Prompt builder for constructing the resolve prompt.
     prompt_builder: PromptBuilder,
     /// Telemetry client for emitting events.
@@ -457,7 +457,19 @@ impl Resolver {
     /// Create a new resolver with default timeout.
     pub fn new(prompt_builder: PromptBuilder) -> Self {
         Self {
-            timeout: Duration::from_secs(120),
+            config: crate::config::ResolveConfig::default(),
+            prompt_builder,
+            telemetry: None,
+        }
+    }
+
+    /// Create a new resolver with custom configuration.
+    pub fn with_config(
+        prompt_builder: PromptBuilder,
+        config: crate::config::ResolveConfig,
+    ) -> Self {
+        Self {
+            config,
             prompt_builder,
             telemetry: None,
         }
@@ -465,7 +477,7 @@ impl Resolver {
 
     /// Set the timeout for resolve agent calls.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = timeout;
+        self.config.timeout_secs = timeout.as_secs();
         self
     }
 
@@ -571,7 +583,8 @@ impl Resolver {
         );
 
         // Use claude CLI for resolve analysis
-        let output = tokio::time::timeout(self.timeout, async {
+        let timeout = Duration::from_secs(self.config.timeout_secs);
+        let output = tokio::time::timeout(timeout, async {
             let child = AsyncCommand::new("claude")
                 .arg("--message")
                 .arg(prompt)
@@ -627,6 +640,18 @@ impl Resolver {
 
     /// Build the resolve prompt from context.
     fn build_prompt(&self, context: &ResolveContext<'_>) -> Result<String> {
+        // If a custom template path is configured, load and use it
+        if let Some(ref template_path) = self.config.custom_template_path {
+            return self.build_custom_prompt(context, template_path);
+        }
+
+        // Use default template unless explicitly disabled
+        if !self.config.use_default_template {
+            bail!(
+                "Resolve is configured to not use default template, but no custom template path was provided"
+            );
+        }
+
         let worker_id = "resolver"; // Resolver doesn't have a worker ID
 
         let exit_status = if context.exit_code == 0 {
@@ -654,6 +679,51 @@ impl Resolver {
         )?;
 
         Ok(built.content)
+    }
+
+    /// Build a prompt from a custom template file.
+    fn build_custom_prompt(
+        &self,
+        context: &ResolveContext<'_>,
+        template_path: &std::path::Path,
+    ) -> Result<String> {
+        let template = std::fs::read_to_string(template_path).with_context(|| {
+            format!(
+                "failed to read custom resolve template from {}",
+                template_path.display()
+            )
+        })?;
+
+        // Replace template variables with actual values
+        let prompt = template
+            .replace("{bead_title}", &context.bead.title)
+            .replace("{bead_id}", &context.bead.id.to_string())
+            .replace(
+                "{bead_body}",
+                &context.bead.body.as_deref().unwrap_or("(no description)"),
+            )
+            .replace("{exit_code}", &context.exit_code.to_string())
+            .replace("{duration}", &context.formatted_duration())
+            .replace("{stdout}", &context.truncated_stdout())
+            .replace("{stderr}", &context.truncated_stderr())
+            .replace(
+                "{exit_status}",
+                if context.exit_code == 0 {
+                    "success"
+                } else {
+                    "failure"
+                },
+            )
+            .replace(
+                "{was_interrupted}",
+                if context.was_interrupted {
+                    "true"
+                } else {
+                    "false"
+                },
+            );
+
+        Ok(prompt)
     }
 
     /// Return a safe fallback decision.
@@ -1080,7 +1150,7 @@ mod tests {
             crate::prompt::PromptBuilder::new(&crate::config::PromptConfig::default());
         let resolver = Resolver::new(prompt_builder).with_timeout(Duration::from_secs(300));
 
-        assert_eq!(resolver.timeout.as_secs(), 300);
+        assert_eq!(resolver.config.timeout_secs, 300);
     }
 
     #[test]
@@ -1336,5 +1406,243 @@ mod tests {
                 "without the claude CLI the call should fail at spawn; got: {err_msg}"
             );
         }
+    }
+
+    #[test]
+    fn resolver_with_config_uses_custom_timeout() {
+        let prompt_builder =
+            crate::prompt::PromptBuilder::new(&crate::config::PromptConfig::default());
+
+        let config = crate::config::ResolveConfig {
+            enabled: true,
+            timeout_secs: 300,
+            custom_template_path: None,
+            use_default_template: true,
+        };
+
+        let resolver = Resolver::with_config(prompt_builder, config);
+        assert_eq!(resolver.config.timeout_secs, 300);
+    }
+
+    #[test]
+    fn resolver_with_custom_template_path() {
+        use std::path::PathBuf;
+        let prompt_builder =
+            crate::prompt::PromptBuilder::new(&crate::config::PromptConfig::default());
+
+        let config = crate::config::ResolveConfig {
+            enabled: true,
+            timeout_secs: 60,
+            custom_template_path: Some(PathBuf::from("/tmp/resolve-template.txt")),
+            use_default_template: false,
+        };
+
+        let resolver = Resolver::with_config(prompt_builder, config);
+        assert_eq!(
+            resolver.config.custom_template_path,
+            Some(PathBuf::from("/tmp/resolve-template.txt"))
+        );
+        assert_eq!(resolver.config.use_default_template, false);
+    }
+
+    #[test]
+    fn resolve_config_validation_rejects_zero_timeout() {
+        let config = crate::config::ResolveConfig {
+            enabled: true,
+            timeout_secs: 0,
+            custom_template_path: None,
+            use_default_template: true,
+        };
+
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("must be greater than 0"));
+    }
+
+    #[test]
+    fn resolve_config_validation_requires_custom_template_when_disabled_default() {
+        let config = crate::config::ResolveConfig {
+            enabled: true,
+            timeout_secs: 60,
+            custom_template_path: None,
+            use_default_template: false,
+        };
+
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("no custom_template_path provided"));
+    }
+
+    #[test]
+    fn resolve_config_validation_fails_on_missing_template_file() {
+        let config = crate::config::ResolveConfig {
+            enabled: true,
+            timeout_secs: 60,
+            custom_template_path: Some(PathBuf::from("/nonexistent/template.txt")),
+            use_default_template: false,
+        };
+
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("does not exist"));
+    }
+
+    #[test]
+    fn resolve_config_validation_fails_on_directory_path() {
+        let config = crate::config::ResolveConfig {
+            enabled: true,
+            timeout_secs: 60,
+            custom_template_path: Some(PathBuf::from("/tmp")), // /tmp is a directory
+            use_default_template: false,
+        };
+
+        let result = config.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not a file"));
+    }
+
+    #[test]
+    fn resolve_config_validation_passes_with_valid_config() {
+        let config = crate::config::ResolveConfig {
+            enabled: true,
+            timeout_secs: 120,
+            custom_template_path: None,
+            use_default_template: true,
+        };
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn resolve_config_validation_passes_with_custom_template() {
+        use std::fs::File;
+        use std::io::Write;
+        use std::path::PathBuf;
+
+        // Create a temporary template file
+        let temp_dir = std::env::temp_dir();
+        let template_path = temp_dir.join("test-resolve-template.txt");
+        let mut file = File::create(&template_path).unwrap();
+        file.write_all(b"Test template with {bead_title}").unwrap();
+
+        let config = crate::config::ResolveConfig {
+            enabled: true,
+            timeout_secs: 120,
+            custom_template_path: Some(template_path.clone()),
+            use_default_template: false,
+        };
+
+        let result = config.validate();
+        assert!(result.is_ok());
+
+        // Clean up
+        std::fs::remove_file(template_path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn resolver_build_custom_prompt_replaces_variables() {
+        use std::fs::File;
+        use std::io::Write;
+        use std::path::PathBuf;
+
+        let bead = test_bead();
+        let bead_ref = Box::leak(Box::new(bead));
+
+        let context = ResolveContext::new(
+            bead_ref,
+            0,
+            "stdout content".to_string(),
+            "stderr content".to_string(),
+            Duration::from_secs(60),
+            Utc::now(),
+            false,
+        );
+
+        // Create a temporary template file
+        let temp_dir = std::env::temp_dir();
+        let template_path = temp_dir.join("test-resolve-template.txt");
+        let mut file = File::create(&template_path).unwrap();
+        file.write_all(
+            b"Bead: {bead_title}\nExit: {exit_code}\nStdout: {stdout}\nStderr: {stderr}",
+        )
+        .unwrap();
+
+        let prompt_builder =
+            crate::prompt::PromptBuilder::new(&crate::config::PromptConfig::default());
+
+        let config = crate::config::ResolveConfig {
+            enabled: true,
+            timeout_secs: 60,
+            custom_template_path: Some(template_path.clone()),
+            use_default_template: false,
+        };
+
+        let resolver = Resolver::with_config(prompt_builder, config);
+        let prompt = resolver
+            .build_custom_prompt(&context, &template_path)
+            .unwrap();
+
+        assert!(prompt.contains("Bead: Test bead"));
+        assert!(prompt.contains("Exit: 0"));
+        assert!(prompt.contains("Stdout: stdout content"));
+        assert!(prompt.contains("Stderr: stderr content"));
+
+        // Clean up
+        std::fs::remove_file(template_path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn resolver_build_custom_prompt_fails_on_missing_file() {
+        use std::path::PathBuf;
+
+        let bead = test_bead();
+        let bead_ref = Box::leak(Box::new(bead));
+
+        let context = ResolveContext::new(
+            bead_ref,
+            0,
+            "stdout".to_string(),
+            "stderr".to_string(),
+            Duration::from_secs(60),
+            Utc::now(),
+            false,
+        );
+
+        let nonexistent_path = PathBuf::from("/nonexistent/template.txt");
+
+        let prompt_builder =
+            crate::prompt::PromptBuilder::new(&crate::config::PromptConfig::default());
+
+        let resolver = Resolver::new(prompt_builder);
+        let result = resolver.build_custom_prompt(&context, &nonexistent_path);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("failed to read"));
+    }
+
+    #[test]
+    fn resolver_with_config_preserves_all_fields() {
+        use std::path::PathBuf;
+        let prompt_builder =
+            crate::prompt::PromptBuilder::new(&crate::config::PromptConfig::default());
+
+        let config = crate::config::ResolveConfig {
+            enabled: true,
+            timeout_secs: 180,
+            custom_template_path: Some(PathBuf::from("/custom/template.txt")),
+            use_default_template: false,
+        };
+
+        let resolver = Resolver::with_config(prompt_builder, config);
+
+        assert_eq!(resolver.config.enabled, true);
+        assert_eq!(resolver.config.timeout_secs, 180);
+        assert_eq!(
+            resolver.config.custom_template_path,
+            Some(PathBuf::from("/custom/template.txt"))
+        );
+        assert_eq!(resolver.config.use_default_template, false);
     }
 }

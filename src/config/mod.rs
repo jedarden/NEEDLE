@@ -5170,6 +5170,47 @@ impl ResolveConfig {
     fn default_use_default_template() -> bool {
         true
     }
+
+    /// Validate the resolve configuration.
+    ///
+    /// Returns an error if:
+    /// - timeout_secs is 0
+    /// - custom_template_path is provided but doesn't exist
+    /// - use_default_template is false but no custom_template_path is provided
+    pub fn validate(&self) -> Result<(), String> {
+        // Timeout must be positive
+        if self.timeout_secs == 0 {
+            return Err("resolve.timeout_secs must be greater than 0".to_string());
+        }
+
+        // If using default template is disabled, a custom path must be provided
+        if !self.use_default_template && self.custom_template_path.is_none() {
+            return Err(
+                "resolve.use_default_template is false but no custom_template_path provided"
+                    .to_string(),
+            );
+        }
+
+        // If custom template path is provided, it must exist
+        if let Some(ref path) = self.custom_template_path {
+            if !path.exists() {
+                return Err(format!(
+                    "resolve.custom_template_path '{}' does not exist",
+                    path.display()
+                ));
+            }
+
+            // Verify it's a file, not a directory
+            if !path.is_file() {
+                return Err(format!(
+                    "resolve.custom_template_path '{}' is not a file",
+                    path.display()
+                ));
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// A workspace-specific custom sanitization pattern.
