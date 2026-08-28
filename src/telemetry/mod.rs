@@ -3253,6 +3253,10 @@ pub struct Telemetry {
     sequence: Arc<AtomicU64>,
     /// Workspace of the most recently claimed bead, shared by all telemetry handles.
     current_workspace: Arc<std::sync::RwLock<Option<PathBuf>>>,
+    /// Basename of the current workspace, shared by all telemetry handles.
+    /// This is cached separately for efficient access in OTLP and other contexts
+    /// where only the workspace name (not the full path) is needed.
+    current_workspace_basename: Arc<std::sync::Mutex<Option<String>>>,
     /// Wrapped in Arc<Mutex<Option<...>>> so that `shutdown()` can drop the
     /// sender explicitly (closing the channel) even while clones still exist.
     sender: Arc<std::sync::Mutex<Option<mpsc::UnboundedSender<WriterMessage>>>>,
@@ -3340,6 +3344,10 @@ impl Telemetry {
         Arc::new(std::sync::RwLock::new(None))
     }
 
+    fn new_basename_cell() -> Arc<std::sync::Mutex<Option<String>>> {
+        Arc::new(std::sync::Mutex::new(None))
+    }
+
     /// Create a telemetry emitter that writes to a `FileSink`.
     ///
     /// Does not spawn any async tasks. Call [`start()`](Self::start) from
@@ -3387,6 +3395,7 @@ impl Telemetry {
             session_id,
             sequence,
             current_workspace: Self::new_workspace_cell(),
+            current_workspace_basename: Self::new_basename_cell(),
             sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
             writer_handle: Arc::new(std::sync::Mutex::new(None)),
@@ -3443,6 +3452,7 @@ impl Telemetry {
             session_id,
             sequence,
             current_workspace: Self::new_workspace_cell(),
+            current_workspace_basename: Self::new_basename_cell(),
             sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
             writer_handle: Arc::new(std::sync::Mutex::new(None)),
@@ -3506,6 +3516,7 @@ impl Telemetry {
             session_id,
             sequence,
             current_workspace: Self::new_workspace_cell(),
+            current_workspace_basename: Self::new_basename_cell(),
             sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
             writer_handle: Arc::new(std::sync::Mutex::new(None)),
@@ -3633,6 +3644,7 @@ impl Telemetry {
             session_id,
             sequence,
             current_workspace: Self::new_workspace_cell(),
+            current_workspace_basename: Self::new_basename_cell(),
             sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
             writer_handle: Arc::new(std::sync::Mutex::new(None)),
@@ -3668,6 +3680,7 @@ impl Telemetry {
                 session_id,
                 sequence,
                 current_workspace: Self::new_workspace_cell(),
+                current_workspace_basename: Self::new_basename_cell(),
                 sender: Arc::new(std::sync::Mutex::new(Some(sender))),
                 pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
                 writer_handle: Arc::new(std::sync::Mutex::new(None)),
@@ -3689,6 +3702,7 @@ impl Telemetry {
             session_id,
             sequence,
             current_workspace: Self::new_workspace_cell(),
+            current_workspace_basename: Self::new_basename_cell(),
             sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
             writer_handle: Arc::new(std::sync::Mutex::new(None)),
@@ -3739,6 +3753,7 @@ impl Telemetry {
             session_id,
             sequence,
             current_workspace: Self::new_workspace_cell(),
+            current_workspace_basename: Self::new_basename_cell(),
             sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(None)),
             writer_handle: Arc::new(std::sync::Mutex::new(None)),
@@ -3799,6 +3814,20 @@ impl Telemetry {
             Err(poisoned) => {
                 tracing::warn!("telemetry workspace lock poisoned; recovering workspace snapshot");
                 poisoned.into_inner().clone()
+            }
+        }
+    }
+
+    /// Update the cached workspace basename.
+    ///
+    /// This is a private setter that will be wired up by the next bead to keep
+    /// the basename in sync with the full workspace path.
+    fn set_workspace_basename(&self, basename: Option<String>) {
+        match self.current_workspace_basename.lock() {
+            Ok(mut current) => *current = basename,
+            Err(poisoned) => {
+                tracing::warn!("telemetry workspace basename lock poisoned; recovering basename");
+                *poisoned.into_inner() = basename;
             }
         }
     }
