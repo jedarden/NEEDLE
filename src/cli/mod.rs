@@ -5068,7 +5068,7 @@ fn occupied_worker_ids(agent: &str) -> Result<HashSet<String>> {
 
 /// A needle process discovered from the process table.
 #[derive(Debug, Clone)]
-struct DiscoveredProcess {
+pub struct DiscoveredProcess {
     pid: u32,
     workspace: Option<PathBuf>,
     agent: Option<String>,
@@ -5251,6 +5251,19 @@ fn scan_needle_processes() -> Result<Vec<DiscoveredProcess>> {
             }
         }
 
+        // Validate cmdline parsing succeeded before including this process.
+        // During concurrent startup, processes may be read while their cmdline
+        // is still being written, resulting in incomplete metadata (<unknown>).
+        // Require at least workspace to be parsed successfully; this filters
+        // out processes that are mid-startup or mid-shutdown.
+        //
+        // This fix addresses needle-c5967224: concurrent startup was causing
+        // 58 false positives when only 15 workers existed, with 44/58 entries
+        // showing "<unknown>" for all metadata fields.
+        if workspace.is_none() || agent.is_none() {
+            continue;
+        }
+
         discovered.push(DiscoveredProcess {
             pid,
             workspace,
@@ -5271,6 +5284,17 @@ fn scan_needle_processes() -> Result<Vec<DiscoveredProcess>> {
     let discovered = filter_descendant_processes_with_mapping(discovered, &ppid_to_children);
 
     Ok(discovered)
+}
+
+/// Test-only version of scan_needle_processes that validates cmdline completeness.
+///
+/// This function is used in regression tests for concurrent startup bugs (needle-c5967224).
+/// It's exposed for testing to verify that the scanner correctly filters out processes
+/// with incomplete metadata during concurrent worker startup.
+#[cfg(unix)]
+#[cfg(test)]
+pub fn scan_needle_processes_for_test() -> Result<Vec<DiscoveredProcess>> {
+    scan_needle_processes()
 }
 
 /// Filter out descendant processes using a pre-built parent->children mapping.
