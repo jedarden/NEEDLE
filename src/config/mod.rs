@@ -12786,6 +12786,65 @@ path: null
         }
     }
 
+    #[test]
+    fn bead_cli_config_construction_with_explicit_backend_only() {
+        // Test construction with explicit backend value, path defaults to None
+        let config = BeadCliConfig {
+            backend: BeadBackend::Bead,
+            path: None,
+        };
+
+        assert_eq!(
+            config.backend,
+            BeadBackend::Bead,
+            "backend should be set to Bead"
+        );
+        assert_eq!(config.path, None, "path should be None when not provided");
+    }
+
+    #[test]
+    fn bead_cli_config_construction_with_explicit_path_only() {
+        // Test construction with explicit path value, backend uses default
+        let test_path = PathBuf::from("/custom/path/to/bead");
+        let config = BeadCliConfig {
+            backend: BeadBackend::Auto,
+            path: Some(test_path.clone()),
+        };
+
+        assert_eq!(
+            config.backend,
+            BeadBackend::Auto,
+            "backend should be set to Auto"
+        );
+        assert_eq!(
+            config.path,
+            Some(test_path),
+            "path should be set to the provided value"
+        );
+    }
+
+    #[test]
+    fn bead_cli_config_construction_sets_all_fields_correctly() {
+        // Test that all struct fields are set correctly on construction
+        let backend = BeadBackend::Bf;
+        let path = PathBuf::from("/usr/local/bin/bf");
+
+        let config = BeadCliConfig {
+            backend: backend.clone(),
+            path: Some(path.clone()),
+        };
+
+        assert_eq!(
+            config.backend, backend,
+            "backend field should match the value provided during construction"
+        );
+        assert_eq!(
+            config.path,
+            Some(path),
+            "path field should match the value provided during construction"
+        );
+    }
+
     // ──────────────────────────────────────────────────────────────────────────────
     // Per-section hashing tests (§18.2, 18.4)
     // ──────────────────────────────────────────────────────────────────────────────
