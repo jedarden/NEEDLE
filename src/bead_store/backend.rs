@@ -400,9 +400,9 @@ pub fn load_bead_backends(
     Ok(backends)
 }
 
-/// Shipped descriptors. User files can replace either descriptor by name.
+/// Shipped descriptors. User files can replace this descriptor by name.
 pub fn builtin_bead_backends() -> Vec<BeadBackend> {
-    vec![builtin_bead_rs(), builtin_bead_forge()]
+    vec![builtin_bead_rs()]
 }
 
 fn operation(
@@ -780,96 +780,6 @@ fn builtin_bead_rs() -> BeadBackend {
     }
 }
 
-fn builtin_bead_forge() -> BeadBackend {
-    let mut backend = builtin_bead_rs();
-    backend.name = "bead-forge".to_string();
-    backend.binary = "bf".to_string();
-    backend.detect_paths = vec![PathBuf::from("~/.local/bin/bf")];
-    backend.identity_pattern = r"^bf\s".to_string();
-    backend.verified_against = "bf 0.4.1".to_string();
-    backend.capabilities = BeadBackendCapabilities {
-        atomic_claim: true,
-        transactional_batch: true,
-        velocity_metadata: true,
-    };
-    backend.error_markers.sync_conflict = vec![
-        "SYNC_CONFLICT".to_string(),
-        "JSONL is newer".to_string(),
-        "sync conflict".to_string(),
-    ];
-
-    // Quirks for known bugs in older versions
-    backend.quirks = vec![BeadBackendQuirk {
-        name: "limit_zero_returns_empty_set".to_string(),
-        version_requirement: Some("<= 0.2.0".to_string()),
-        description: "bead-forge 0.2.0 has a bug where --limit 0 returns an empty set instead of all beads. Workaround: use a large explicit limit.".to_string(),
-    }];
-
-    let operations = &mut backend.operations;
-    operations.insert(
-        "ready".into(),
-        operation(
-            &["ready", "--json", "--limit", "{limit}"],
-            None,
-            Some(ParseShape::JsonLines),
-        ),
-    );
-    operations.insert(
-        "list_all".into(),
-        operation(
-            &["list", "--json", "--limit", "{limit}"],
-            None,
-            Some(ParseShape::JsonLines),
-        ),
-    );
-    operations.insert(
-        "claim".into(),
-        operation(&[], Some("batch_op"), Some(ParseShape::JsonObject)),
-    );
-    operations.insert(
-        "claim_auto".into(),
-        operation(
-            &[
-                "claim",
-                "--model",
-                "{model}",
-                "--harness",
-                "{harness}",
-                "--harness-version",
-                "{harness_version}",
-                "--assignee",
-                "{actor}",
-                "--json",
-            ],
-            Some("atomic_subcommand"),
-            Some(ParseShape::JsonObject),
-        ),
-    );
-    operations.insert("release".into(), operation(&[], None, None));
-    operations.insert("clear_assignee".into(), operation(&[], None, None));
-    operations.insert(
-        "dep_add".into(),
-        operation(
-            &["dep", "add", "{blocker}", "--blocks", "{blocked}"],
-            None,
-            None,
-        ),
-    );
-    operations.insert(
-        "split".into(),
-        operation(&[], Some("transactional_batch"), None),
-    );
-    operations.insert(
-        "dep_remove".into(),
-        operation(&["dep", "remove", "{blocked}", "{blocker}"], None, None),
-    );
-    operations.insert(
-        "import".into(),
-        operation(&["sync", "--import-only"], Some("bare"), None),
-    );
-    backend
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -877,7 +787,6 @@ mod tests {
     #[test]
     fn builtins_classify_errors_per_descriptor() {
         let bead_rs = builtin_bead_rs();
-        let bead_forge = builtin_bead_forge();
 
         assert!(bead_rs.error_contains_any(
             "Error: database disk image is malformed",
@@ -887,16 +796,11 @@ mod tests {
             "SYNC_CONFLICT detected",
             &bead_rs.error_markers.sync_conflict
         ));
-        assert!(bead_forge.error_contains_any(
-            "SYNC_CONFLICT detected",
-            &bead_forge.error_markers.sync_conflict
-        ));
     }
 
     #[test]
     fn builtins_declare_quirks_for_known_bugs() {
         let bead_rs = builtin_bead_rs();
-        let bead_forge = builtin_bead_forge();
 
         // bead-rs SHOULD have the limit_zero_returns_empty_set quirk (verified against v0.1.3)
         let rs_quirk = bead_rs
@@ -908,18 +812,6 @@ mod tests {
             rs_quirk.version_requirement.is_none(),
             "bead-rs quirk should apply to all versions"
         );
-
-        // bead-forge SHOULD have the limit_zero_returns_empty_set quirk declared
-        // (but it only applies to versions <= 0.2.0)
-        let quirk = bead_forge
-            .quirks
-            .iter()
-            .find(|q| q.name == "limit_zero_returns_empty_set")
-            .expect("bead-forge should declare limit_zero_returns_empty_set quirk");
-
-        // Verify the quirk metadata
-        assert_eq!(quirk.version_requirement, Some("<= 0.2.0".to_string()));
-        assert!(quirk.description.contains("limit 0"));
     }
 
     #[test]
