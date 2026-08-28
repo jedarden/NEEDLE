@@ -1719,42 +1719,7 @@ struct RealProcessInspector;
 
 impl ProcessInspector for RealProcessInspector {
     fn is_needle_run_process(&self, pid: u32) -> bool {
-        use std::fs;
-
-        let cmdline_path = Path::new("/proc").join(pid.to_string()).join("cmdline");
-        let cmdline_bytes = match fs::read(&cmdline_path) {
-            Ok(b) => b,
-            Err(_) => return false, // Process may have exited or /proc not available
-        };
-
-        // cmdline is null-separated; convert to space-separated for checking.
-        let cmdline: String = cmdline_bytes
-            .split(|&b| b == 0)
-            .map(|args| String::from_utf8_lossy(args))
-            .collect::<Vec<_>>()
-            .join(" ");
-
-        // Check for "needle run" in cmdline first
-        if cmdline.contains("needle run") {
-            return true;
-        }
-
-        // Check for NEEDLE_INNER in the process environment
-        // This is critical for regression tests that use NEEDLE_INNER=1 sleep 3600
-        // The environment variable is set but not visible in cmdline
-        let environ_path = Path::new("/proc").join(pid.to_string()).join("environ");
-        if let Ok(environ_bytes) = fs::read(&environ_path) {
-            let environ: String = environ_bytes
-                .split(|&b| b == 0)
-                .map(|args| String::from_utf8_lossy(args))
-                .collect::<Vec<_>>()
-                .join(" ");
-            if environ.contains("NEEDLE_INNER") {
-                return true;
-            }
-        }
-
-        false
+        is_needle_run_process(pid)
     }
 
     fn find_needle_process_in_tree(&self, root_pid: u32) -> Option<u32> {
@@ -1773,7 +1738,11 @@ impl ProcessInspector for RealProcessInspector {
 
 /// Check if a process is a needle run process.
 ///
-/// Returns true if the process command line contains "needle run".
+/// Returns true if the process command line contains "needle run" (after
+/// handling NEEDLE_INNER=1 prefix).
+///
+/// This is stricter than checking for NEEDLE_INNER in the environment,
+/// which would incorrectly match child processes that inherited the variable.
 #[cfg(unix)]
 fn is_needle_run_process(pid: u32) -> bool {
     use std::fs;
@@ -1784,19 +1753,37 @@ fn is_needle_run_process(pid: u32) -> bool {
         Err(_) => return false, // Process may have exited or /proc not available
     };
 
-    // cmdline is null-separated; convert to space-separated for checking.
-    let cmdline: String = cmdline_bytes
+    // cmdline is null-separated; parse as argv array for strict matching.
+    let args: Vec<String> = cmdline_bytes
         .split(|&b| b == 0)
-        .map(|args| String::from_utf8_lossy(args))
-        .collect::<Vec<_>>()
-        .join(" ");
+        .map(|args| String::from_utf8_lossy(args).to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
 
-    // Check for needle worker processes.
-    // This includes both explicit "needle run" processes and processes marked with
-    // NEEDLE_INNER (used by tmux-wrapped sessions to indicate they are needle workers).
-    // This ensures that process tree walking correctly identifies live needle workers,
-    // preventing cleanup from killing live sessions (P7.1a regression fix).
-    cmdline.contains("needle run") || cmdline.contains("NEEDLE_INNER")
+    // Check for "needle run" in argv, handling NEEDLE_INNER=1 prefix
+    // (e.g., "NEEDLE_INNER=1 /path/to/needle run ...")
+    let needle_binary_idx = if args.len() >= 2 && args[0] == "NEEDLE_INNER=1" {
+        1
+    } else {
+        0
+    };
+
+    // Need at least: binary + "run" argument
+    if args.len() < needle_binary_idx + 2 {
+        return false;
+    }
+
+    let binary_path = &args[needle_binary_idx];
+    let run_arg_idx = needle_binary_idx + 1;
+
+    // Extract basename from binary path
+    let binary_name = match std::path::PathBuf::from(binary_path).file_name() {
+        Some(name) => name.to_string_lossy().to_string(),
+        None => binary_path.clone(),
+    };
+
+    // Strict match: basename must be exactly "needle" and next arg must be "run"
+    binary_name == "needle" && args[run_arg_idx] == "run"
 }
 
 /// Find the actual needle run process in a process tree.
@@ -1843,23 +1830,21 @@ fn verify_no_needle_processes_remaining() -> Vec<(u32, String)> {
                 Err(_) => continue,
             };
 
-            // Read /proc/[pid]/cmdline to check if this is a needle process
-            let cmdline_path = entry.path().join("cmdline");
-            let cmdline_bytes = match fs::read(&cmdline_path) {
-                Ok(b) => b,
-                Err(_) => continue, // Process may have exited
-            };
-
-            // cmdline is null-separated; convert to space-separated for checking.
-            let cmdline: String = cmdline_bytes
-                .split(|&b| b == 0)
-                .map(|args| String::from_utf8_lossy(args))
-                .collect::<Vec<_>>()
-                .join(" ");
-
-            // Check if this is a needle run process or a related subprocess
-            if cmdline.contains("needle run") || cmdline.contains("NEEDLE_INNER") {
-                remaining.push((pid, cmdline));
+            // Use strict matching to avoid false positives from child processes
+            // that inherited NEEDLE_INNER from their parent
+            if is_needle_run_process(pid) {
+                // Read cmdline for reporting
+                let cmdline_path = entry.path().join("cmdline");
+                if let Ok(cmdline_bytes) = fs::read(&cmdline_path) {
+                    let cmdline: String = cmdline_bytes
+                        .split(|&b| b == 0)
+                        .map(|args| String::from_utf8_lossy(args))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    remaining.push((pid, cmdline));
+                } else {
+                    remaining.push((pid, "<cmdline unreadable>".to_string()));
+                }
             }
         }
     }
@@ -5204,39 +5189,23 @@ fn scan_needle_processes() -> Result<Vec<DiscoveredProcess>> {
             }
         };
 
-        // Check for NEEDLE_INNER environment variable (test processes).
-        // This is critical for integration tests that use NEEDLE_INNER=1 sleep 3600,
-        // where the environment variable is set but not visible in cmdline.
-        let has_needle_inner = if let Ok(environ_bytes) = fs::read(entry.path().join("environ")) {
-            let environ: String = environ_bytes
-                .split(|&b| b == 0)
-                .map(|args| String::from_utf8_lossy(args))
-                .collect::<Vec<_>>()
-                .join(" ");
-            environ.contains("NEEDLE_INNER")
-        } else {
-            false
-        };
-
-        // Only include genuine needle run processes or NEEDLE_INNER test processes.
+        // Only include genuine needle run processes.
         // This strict matching prevents false positives from:
         // - Child processes with ".needle/" in their paths
         // - Random processes with "needle" in their binary name
         // - Orphaned processes that happen to match substring patterns
-        if !is_needle_run && !has_needle_inner {
+        // - Child processes that inherit NEEDLE_INNER from parent workers
+        if !is_needle_run {
             continue;
         }
 
         // Filter out shell wrapper processes (bash -c "NEEDLE_INNER=1 needle run ...").
         // These are created by tmux sessions and are not the actual needle worker processes.
         // We only want to discover processes that are directly executing needle, not shell wrappers.
-        // However, we make an exception for processes that have NEEDLE_INNER in their environment,
-        // which includes integration test processes (e.g., NEEDLE_INNER=1 sleep 3600).
-        if (cmdline.starts_with("bash -c")
+        if cmdline.starts_with("bash -c")
             || cmdline.starts_with("sh -c")
             || cmdline.starts_with("/bin/bash -c")
-            || cmdline.starts_with("/bin/sh -c"))
-            && !has_needle_inner
+            || cmdline.starts_with("/bin/sh -c")
         {
             continue;
         }

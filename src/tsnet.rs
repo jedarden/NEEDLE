@@ -171,7 +171,10 @@ impl IdentityRegistry {
         let api_client = if config.enabled {
             match TailscaleClient::new(config.api_config.clone()) {
                 Ok(client) => {
-                    tracing::info!("Tailscale API client initialized for SEAM endpoint: {}", config.api_config.seam_endpoint);
+                    tracing::info!(
+                        "Tailscale API client initialized for SEAM endpoint: {}",
+                        config.api_config.seam_endpoint
+                    );
                     Some(client)
                 }
                 Err(e) => {
@@ -241,7 +244,12 @@ impl IdentityRegistry {
     /// This calls SEAM's Tailscale API endpoint to provision a real ephemeral key.
     /// When the API client is unavailable or the call fails, this returns an error
     /// rather than fabricating a credential-shaped value.
-    fn generate_auth_key(&self, worker_id: &WorkerId, bead_id: &BeadId, hostname: &str) -> Result<String> {
+    fn generate_auth_key(
+        &self,
+        worker_id: &WorkerId,
+        bead_id: &BeadId,
+        hostname: &str,
+    ) -> Result<String> {
         // Check if API client is available
         let client = self.api_client.as_ref()
             .ok_or_else(|| anyhow::anyhow!("Tailscale API client not initialized - tsnet may be disabled or client failed to initialize"))?;
@@ -260,13 +268,15 @@ impl IdentityRegistry {
         );
 
         // Call SEAM's API to create ephemeral key
-        let auth_key = client.create_ephemeral_key(
-            worker_id,
-            bead_id.as_ref(),
-            hostname,
-            &tags,
-            self.config.auth_ttl_secs,
-        ).context("failed to create ephemeral Tailscale key via SEAM API")?;
+        let auth_key = client
+            .create_ephemeral_key(
+                worker_id,
+                bead_id.as_ref(),
+                hostname,
+                &tags,
+                self.config.auth_ttl_secs,
+            )
+            .context("failed to create ephemeral Tailscale key via SEAM API")?;
 
         tracing::info!(
             worker_id = %worker_id,

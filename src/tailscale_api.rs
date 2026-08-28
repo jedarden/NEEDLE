@@ -197,8 +197,8 @@ impl TailscaleClient {
         }
 
         // Serialize request body
-        let request_body = serde_json::to_string(&request)
-            .context("failed to serialize Tailscale key request")?;
+        let request_body =
+            serde_json::to_string(&request).context("failed to serialize Tailscale key request")?;
 
         // Send the request
         let response = req
@@ -241,10 +241,7 @@ impl TailscaleClient {
 
     /// Check if the SEAM endpoint is accessible.
     pub fn health_check(&self) -> Result<bool> {
-        let url = format!(
-            "{}/health",
-            self.config.seam_endpoint.trim_end_matches('/')
-        );
+        let url = format!("{}/health", self.config.seam_endpoint.trim_end_matches('/'));
 
         match self.client.get(&url).call() {
             Ok(response) if response.status() == 200 => Ok(true),

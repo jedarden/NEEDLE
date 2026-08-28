@@ -3558,4 +3558,50 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn process_owner_returns_non_empty_string() {
+        let owner = OtlpSink::process_owner();
+        assert!(!owner.is_empty(), "process owner must never be empty");
+    }
+
+    #[test]
+    fn process_owner_fallback_to_numeric_uid() {
+        let owner = OtlpSink::process_owner();
+        // In any environment, the fallback format is "uid:NNNN"
+        // The actual username may be returned on systems with a passwd entry,
+        // but we verify that the fallback format is valid when it occurs
+        if owner.starts_with("uid:") {
+            let uid_str = owner.strip_prefix("uid:").expect("uid: prefix must be present");
+            let uid = uid_str.parse::<u32>().expect("uid must be numeric");
+            assert!(uid < 1_000_000, "uids are typically less than 1M");
+        }
+        // If it doesn't start with "uid:", it's a username, which is also valid
+    }
+
+    #[test]
+    fn build_resource_includes_process_owner() {
+        let resource = OtlpSink::build_resource(
+            "test-worker",
+            "test-session",
+            &make_test_config(),
+            Some("test-agent"),
+            Some("test-model"),
+            Some("test-provider"),
+            Some("test-workspace"),
+        )
+        .expect("resource should build");
+
+        let attrs = resource.iter().collect::<Vec<_>>();
+        let process_owner = attrs
+            .iter()
+            .find(|(k, _)| k.as_str() == "process.owner")
+            .expect("process.owner must be in resource attributes");
+
+        let owner_value = process_owner.1.as_str();
+        assert!(
+            !owner_value.is_empty(),
+            "process.owner must never be empty"
+        );
+    }
 }

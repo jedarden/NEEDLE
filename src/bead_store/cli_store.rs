@@ -496,10 +496,9 @@ impl BeadStore for CliBeadStore {
                 .get("status")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow::anyhow!("bead-rs show response omitted status"))?;
-            let status = serde_json::from_str::<BeadStatus>(
-                &serde_json::to_string(status_str).unwrap()
-            )
-                .with_context(|| format!("failed to parse status: {}", status_str))?;
+            let status =
+                serde_json::from_str::<BeadStatus>(&serde_json::to_string(status_str).unwrap())
+                    .with_context(|| format!("failed to parse status: {}", status_str))?;
 
             let assignee = value
                 .get("assignee")
@@ -507,9 +506,7 @@ impl BeadStore for CliBeadStore {
                 .filter(|s| !s.is_empty())
                 .map(str::to_string);
 
-            let revision = value
-                .get("revision")
-                .and_then(|v| v.as_u64());
+            let revision = value.get("revision").and_then(|v| v.as_u64());
 
             Ok(crate::types::ClaimStatus {
                 status,
@@ -1716,9 +1713,9 @@ mod tests {
 
         let value: serde_json::Value = serde_json::from_str(json).unwrap();
         let status_str = value.get("status").and_then(|v| v.as_str()).unwrap();
-        let status = serde_json::from_str::<BeadStatus>(
-            &serde_json::to_string(status_str).unwrap()
-        ).unwrap();
+        let status =
+            serde_json::from_str::<BeadStatus>(&serde_json::to_string(status_str).unwrap())
+                .unwrap();
 
         let assignee = value
             .get("assignee")
@@ -1735,8 +1732,6 @@ mod tests {
 
     #[test]
     fn claim_status_parser_handles_unassigned_bead() {
-        use crate::types::BeadStatus;
-
         // Test parsing a bead with no assignee
         let json = r#"{
             "id": "bead-test",
