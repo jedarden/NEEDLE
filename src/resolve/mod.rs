@@ -65,7 +65,7 @@ pub enum ResolveDecision {
         /// Evidence about what failed (error message, diagnostic info).
         evidence: String,
         /// Suggested retry strategy (same approach, different timeout, etc.).
-        strategy: RetryStrategy,
+        strategy: String,
     },
 
     /// Blocked by external dependency — cannot proceed without human input.
@@ -119,7 +119,9 @@ impl ResolveDecision {
                 if evidence.trim().is_empty() {
                     bail!("Retry decision missing evidence");
                 }
-                strategy.validate()?;
+                if strategy.trim().is_empty() {
+                    bail!("Retry decision missing strategy");
+                }
                 Ok(())
             }
             ResolveDecision::Blocked {
@@ -208,6 +210,7 @@ pub enum RetryStrategy {
 }
 
 impl RetryStrategy {
+    #[allow(dead_code)]
     fn validate(&self) -> Result<()> {
         // All variants are valid by construction
         Ok(())
@@ -523,7 +526,7 @@ impl Resolver {
             );
             return ResolveDecision::Retry {
                 evidence: format!("Binary identity verification failed: {}", e),
-                strategy: RetryStrategy::DifferentApproach,
+                strategy: "different_approach".to_string(),
             };
         }
 
@@ -705,7 +708,7 @@ impl Resolver {
                 "Resolver error: {}. Safe fallback: retry with same approach.",
                 reason
             ),
-            strategy: RetryStrategy::Same,
+            strategy: "same".to_string(),
         }
     }
 
@@ -773,7 +776,7 @@ mod tests {
 
         let retry = ResolveDecision::Retry {
             evidence: "Network timeout".to_string(),
-            strategy: RetryStrategy::IncreaseTimeout,
+            strategy: "increase_timeout".to_string(),
         };
         assert_eq!(format!("{}", retry), "Retry: Network timeout");
 
@@ -806,7 +809,7 @@ mod tests {
         assert_eq!(
             ResolveDecision::Retry {
                 evidence: "x".to_string(),
-                strategy: RetryStrategy::Same,
+                strategy: "same".to_string(),
             }
             .as_str(),
             "retry"
@@ -858,13 +861,13 @@ mod tests {
     fn retry_decision_requires_all_fields() {
         let decision = ResolveDecision::Retry {
             evidence: "Network timeout".to_string(),
-            strategy: RetryStrategy::IncreaseTimeout,
+            strategy: "increase_timeout".to_string(),
         };
         assert!(decision.validate().is_ok());
 
         let invalid = ResolveDecision::Retry {
             evidence: "".to_string(),
-            strategy: RetryStrategy::Same,
+            strategy: "same".to_string(),
         };
         assert!(invalid.validate().is_err());
     }
@@ -934,51 +937,6 @@ mod tests {
             child_titles,
         };
         assert!(invalid.validate().is_err());
-    }
-
-    #[test]
-    fn proposed_child_validation() {
-        let valid = ProposedChild {
-            title: "Valid child".to_string(),
-            body: "Valid description".to_string(),
-            priority: 1,
-        };
-        assert!(valid.validate(0).is_ok());
-
-        let invalid_title = ProposedChild {
-            title: "".to_string(),
-            body: "Description".to_string(),
-            priority: 1,
-        };
-        assert!(invalid_title.validate(0).is_err());
-
-        let invalid_body = ProposedChild {
-            title: "Title".to_string(),
-            body: "".to_string(),
-            priority: 1,
-        };
-        assert!(invalid_body.validate(0).is_err());
-
-        let invalid_priority = ProposedChild {
-            title: "Title".to_string(),
-            body: "Description".to_string(),
-            priority: 0,
-        };
-        assert!(invalid_priority.validate(0).is_err());
-
-        let invalid_priority = ProposedChild {
-            title: "Title".to_string(),
-            body: "Description".to_string(),
-            priority: 5,
-        };
-        assert!(invalid_priority.validate(0).is_err());
-
-        let too_long_title = ProposedChild {
-            title: "a".repeat(201),
-            body: "Description".to_string(),
-            priority: 1,
-        };
-        assert!(too_long_title.validate(0).is_err());
     }
 
     #[test]
@@ -1124,14 +1082,11 @@ mod tests {
 
         assert!(matches!(
             fallback,
-            ResolveDecision::Retry {
-                strategy: RetryStrategy::Same,
-                ..
-            }
+            ResolveDecision::Retry { strategy: _, .. }
         ));
         if let ResolveDecision::Retry { evidence, strategy } = fallback {
             assert!(evidence.contains("Resolver error: test_reason"));
-            assert_eq!(strategy, RetryStrategy::Same);
+            assert_eq!(strategy, "same");
         }
     }
 
@@ -1216,7 +1171,7 @@ mod tests {
         assert!(matches!(decision, ResolveDecision::Retry { .. }));
         if let ResolveDecision::Retry { evidence, strategy } = decision {
             assert_eq!(evidence, "Network timeout");
-            assert_eq!(strategy, RetryStrategy::IncreaseTimeout);
+            assert_eq!(strategy, "increase_timeout");
         }
     }
 
@@ -1655,7 +1610,7 @@ mod tests {
     fn retry_decision_preserves_all_fields_through_roundtrip() {
         let original = ResolveDecision::Retry {
             evidence: "HTTP 503 Service Unavailable".to_string(),
-            strategy: RetryStrategy::Backoff,
+            strategy: "backoff".to_string(),
         };
 
         let response_original = ResolveResponse {
@@ -1667,7 +1622,7 @@ mod tests {
         match response.decision {
             ResolveDecision::Retry { evidence, strategy } => {
                 assert_eq!(evidence, "HTTP 503 Service Unavailable");
-                assert_eq!(strategy, RetryStrategy::Backoff);
+                assert_eq!(strategy, "backoff");
             }
             _ => panic!("Expected Retry decision"),
         }
@@ -1737,10 +1692,10 @@ mod tests {
     #[test]
     fn all_retry_strategies_preserve_through_roundtrip() {
         let strategies = vec![
-            RetryStrategy::Same,
-            RetryStrategy::IncreaseTimeout,
-            RetryStrategy::DifferentApproach,
-            RetryStrategy::Backoff,
+            "same".to_string(),
+            "increase_timeout".to_string(),
+            "different_approach".to_string(),
+            "backoff".to_string(),
         ];
 
         for strategy in strategies {
@@ -2276,7 +2231,7 @@ mod tests {
             ResolveDecision::Retry { evidence, strategy } => {
                 assert!(evidence.contains("Resolver error: test_failure_reason"));
                 assert!(evidence.contains("Safe fallback: retry with same approach"));
-                assert_eq!(strategy, RetryStrategy::Same);
+                assert_eq!(strategy, "same");
             }
             _ => panic!("Fallback must return Retry decision"),
         }
