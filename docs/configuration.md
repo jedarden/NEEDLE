@@ -14,7 +14,7 @@ This guide covers the most commonly used configuration options.
 
 ## Configuration Reload Tiers
 
-**Every configuration key has a reload tier** that determines how changes take effect:
+**Every configuration key has a reload tier** that determines how changes take effect. The authoritative tier table is implemented in [`src/config/tiers.rs`](../src/config/tiers.rs) — this is the single source of truth for which keys are in which tier.
 
 | Tier | Behavior | Applies When |
 |------|----------|--------------|
@@ -132,6 +132,18 @@ This guide covers the most commonly used configuration options.
 - `self_modification` — Hot-reload and upgrade settings
 - `supervisor` — Supervisor configuration
 
+**⚠️ Restart-Required Summary:** The following configuration categories **always require a full process restart** to take effect:
+
+| Category | Why Restart Required | Key Examples |
+|----------|---------------------|--------------|
+| **Worker identity** | Process name and PID registry | `worker.identifier_scheme`, `worker.max_workers` |
+| **Workspace paths** | Bead store and heartbeat file locations | `workspace.home`, `workspace.default` |
+| **Bead CLI backend** | Store-level decision made at process start | `bead_cli.backend`, `bead_cli.path` |
+| **Runtime shape** | Tokio runtime and tracing stack | Embedded in process startup (no config key) |
+| **Process supervision** | Daemon lifecycle and heartbeat protocol | `supervisor.*`, `health.*` |
+
+**Note:** The tokio runtime and tracing stack are process-level infrastructure with no configuration keys — they are initialized once at process startup and cannot be reconfigured without restarting the process. This is why `telemetry.otlp.*` is Tier B (rebuilds the OTLP layer) but the underlying tracing stack itself is Tier C.
+
 ### Common Operations and Their Tiers
 
 | Operation | Tier | How to Apply |
@@ -167,6 +179,20 @@ worker:
 ```
 
 **This setting is Tier-C (restart required)** — a worker started with the default `0` cannot discover a file change that enables polling. Restart the worker after changing this value.
+
+### Querying the Tier of Any Key
+
+To find out which tier a specific configuration key belongs to, you can:
+
+```bash
+# Check the implementation directly
+grep '"<key.path>"' src/config/tiers.rs
+
+# Example: check worker.max_workers
+# Output: ("worker.max_workers", ReloadTier::RestartRequired)
+```
+
+The authoritative tier table is in [`src/config/tiers.rs`](../src/config/tiers.rs) at the `TIER_TABLE` constant. Every configuration key must have an entry in this table — adding a new config key without a tier assignment is a compile-time failure.
 
 ### Verification
 
