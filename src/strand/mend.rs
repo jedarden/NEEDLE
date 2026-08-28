@@ -87,7 +87,7 @@ pub async fn cleanup_orphaned_in_progress_test_optimized(
 /// # Returns
 /// A `HashSet<BeadId>` containing the IDs of all beads that are stale due to
 /// assignee overlap (i.e., they are NOT the newest bead for their assignee).
-fn get_stale_by_assignee_overlap(all_beads: &[Bead]) -> std::collections::HashSet<BeadId> {
+fn get_stale_by_assignee_overlap(all_beads: &[Bead]) -> HashSet<BeadId> {
     use std::collections::{HashMap, HashSet};
 
     // Step 1: For each assignee, find the newest (most recently updated) bead
@@ -121,7 +121,7 @@ fn get_stale_by_assignee_overlap(all_beads: &[Bead]) -> std::collections::HashSe
         };
 
         // Check if this bead is the newest for its assignee
-        if let Some((newest_updated, newest_bead_id)) = newest_bead_by_assignee.get(assignee) {
+        if let Some((newest_updated, _newest_bead_id)) = newest_bead_by_assignee.get(assignee) {
             // If this bead's updated_at is older than the newest, it's stale by overlap
             if bead.updated_at < *newest_updated {
                 stale_by_overlap.insert(bead.id.clone());
@@ -206,8 +206,7 @@ async fn cleanup_in_progress(
             let newest_for_assignee = all_beads
                 .iter()
                 .filter(|b| {
-                    b.status == BeadStatus::InProgress
-                        && b.assignee.as_ref() == Some(assignee)
+                    b.status == BeadStatus::InProgress && b.assignee.as_ref() == Some(assignee)
                 })
                 .max_by_key(|b| b.updated_at);
 
@@ -240,15 +239,15 @@ async fn cleanup_in_progress(
         // Determine the newest bead for this assignee for the reason message
         let newest_claim = all_beads
             .iter()
-            .filter(|b| {
-                b.status == BeadStatus::InProgress
-                    && b.assignee.as_ref() == Some(assignee)
-            })
+            .filter(|b| b.status == BeadStatus::InProgress && b.assignee.as_ref() == Some(assignee))
             .max_by_key(|b| b.updated_at);
 
         let reason = match (is_superseded, newest_claim) {
             (true, Some(newest_bead)) => {
-                format!("superseded by newer in-progress claim {} from same assignee", newest_bead.id)
+                format!(
+                    "superseded by newer in-progress claim {} from same assignee",
+                    newest_bead.id
+                )
             }
             (false, _) if stale_by_age => {
                 let age_secs = claim_age.map_or(0, |age| age.as_secs());

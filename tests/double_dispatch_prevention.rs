@@ -356,13 +356,14 @@ async fn double_dispatch_prevention_with_concurrent_dispatch_attempts() {
     let barrier_clone = barrier.clone();
 
     let _store_clone = store.clone();
-    let bead_id_clone = bead_id.clone();
+    let bead_id_clone_a = bead_id.clone();
+    let bead_id_clone_b = bead_id.clone();
 
     // Worker A's dispatch attempt
     let handle_a = tokio::spawn(async move {
         barrier_clone.wait().await; // Wait for both workers to be ready
         let verification = claimer_a
-            .verify_claim_at_dispatch(&bead_id_clone, worker_a)
+            .verify_claim_at_dispatch(&bead_id_clone_a, worker_a)
             .await
             .expect("worker a verification completes");
 
@@ -380,7 +381,7 @@ async fn double_dispatch_prevention_with_concurrent_dispatch_attempts() {
         sleep(Duration::from_millis(5)).await;
 
         let verification = claimer_b
-            .verify_claim_at_dispatch(&bead_id_clone, worker_b)
+            .verify_claim_at_dispatch(&bead_id_clone_b, worker_b)
             .await
             .expect("worker b verification completes");
 
@@ -407,7 +408,7 @@ async fn double_dispatch_prevention_with_concurrent_dispatch_attempts() {
 
     // Final bead state verification
     let claim_status_final = store
-        .claim_status(&bead_id_clone)
+        .claim_status(&bead_id)
         .await
         .expect("get final claim status");
     assert_eq!(claim_status_final.status, BeadStatus::InProgress);
