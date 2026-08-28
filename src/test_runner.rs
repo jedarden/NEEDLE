@@ -32,6 +32,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::panic_capture;
 use crate::process_guard::ProcessGuardSync;
 use crate::util::capture_timestamp;
 
@@ -436,6 +437,9 @@ impl TestRunner {
     /// - The cargo binary cannot be found
     /// - The process fails to spawn
     pub fn run_tests(&self, args: &[&str]) -> Result<TestResult> {
+        // Install panic hook to capture full stack traces
+        panic_capture::install_panic_hook();
+
         let start = Instant::now();
 
         // Capture the launch timestamp before constructing the command. The
@@ -449,6 +453,9 @@ impl TestRunner {
         cmd.current_dir(&self.workspace);
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
+
+        // Ensure full backtraces are captured for panics
+        cmd.env("RUST_BACKTRACE", "full");
 
         // Add extra arguments
         for arg in &self.extra_args {
@@ -465,7 +472,7 @@ impl TestRunner {
             workspace = %self.workspace.display(),
             args = ?args,
             launch_timestamp = %launch_timestamp,
-            "spawning cargo test process"
+            "spawning cargo test process with panic capture enabled"
         );
 
         let result = self.execute_with_timeout(cmd)?;

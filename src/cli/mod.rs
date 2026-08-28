@@ -2694,7 +2694,7 @@ fn cmd_bead_backend(name: &str, workspace: &Path) -> Result<()> {
         .with_context(|| format!("workspace does not exist: {}", workspace.display()))?;
     let backend = match name {
         "bead-rs" => crate::config::BeadBackend::Bead,
-        "bead-forge" => crate::config::BeadBackend::Bf,
+        "bead-forge" => bail!("bead-forge backend is no longer supported; use 'bead-rs' instead"),
         _ => bail!("unknown builtin bead backend '{name}'"),
     };
     let config = crate::config::BeadCliConfig {
@@ -4055,7 +4055,6 @@ fn doctor_check_bead_backend(config: &Config) -> CheckResult {
     };
     let name = match backend {
         crate::config::Backend::Bead => "bead-rs",
-        crate::config::Backend::Bf => "bead-forge",
     };
     let Some(descriptor) = crate::bead_store::builtin_bead_backends()
         .into_iter()

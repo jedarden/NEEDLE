@@ -69,20 +69,6 @@ pub fn open_configured(
     }
 
     match backend {
-        crate::config::Backend::Bf => {
-            let descriptor = builtin_bead_backends()
-                .into_iter()
-                .find(|candidate| candidate.name == "bead-forge")
-                .ok_or_else(|| anyhow::anyhow!("built-in bead-forge descriptor is missing"))?;
-            Ok(Arc::new(CliBeadStore::new(
-                descriptor,
-                binary,
-                workspace,
-                model,
-                harness,
-                harness_version,
-            )?))
-        }
         crate::config::Backend::Bead => {
             let descriptor = builtin_bead_backends()
                 .into_iter()
@@ -111,7 +97,6 @@ fn verify_backend_identity(
 
     // Get the backend descriptor for this backend type
     let descriptor_name = match backend {
-        crate::config::Backend::Bf => "bead-forge",
         crate::config::Backend::Bead => "bead-rs",
     };
 
