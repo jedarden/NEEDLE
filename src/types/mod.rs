@@ -768,6 +768,27 @@ pub enum StrandResult {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// ClaimStatus
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Current claim state of a bead from the live store.
+///
+/// Returned by `BeadStore::claim_status` for atomic verification operations.
+/// The revision field is used for optimistic concurrency control (compare-and-set).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaimStatus {
+    /// Current lifecycle status of the bead.
+    pub status: BeadStatus,
+    /// Current assignee, if any.
+    pub assignee: Option<String>,
+    /// Monotonic revision number for optimistic concurrency control.
+    ///
+    /// This value increments on every state change. Use it with `--if-revision`
+    /// for atomic compare-and-set operations (bead-rs only).
+    pub revision: Option<u64>,
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // ClaimResult / ClaimOutcome
 // ──────────────────────────────────────────────────────────────────────────────
 

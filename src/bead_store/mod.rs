@@ -1267,6 +1267,25 @@ pub trait BeadStore: Send + Sync {
         Ok(None)
     }
 
+    /// Query the current claim state of a bead from the live store.
+    ///
+    /// This method reads directly from the live database (not from any cached
+    /// snapshot) and returns the bead's current status, assignee, and revision.
+    /// The revision field is used for optimistic concurrency control in atomic
+    /// compare-and-set operations.
+    ///
+    /// Returns `Err` if the bead cannot be fetched or parsed. Returns a
+    /// `ClaimStatus` with `revision: None` for backends that don't support
+    /// revisions (bead-forge).
+    async fn claim_status(&self, id: &BeadId) -> Result<crate::types::ClaimStatus> {
+        let bead = self.show(id).await?;
+        Ok(crate::types::ClaimStatus {
+            status: bead.status,
+            assignee: bead.assignee,
+            revision: None,
+        })
+    }
+
     /// Attempt to atomically claim a bead (set status=in_progress, assignee=actor).
     ///
     /// Returns a `ClaimResult` describing the outcome:

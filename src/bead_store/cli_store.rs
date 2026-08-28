@@ -481,6 +481,52 @@ impl BeadStore for CliBeadStore {
             .map(str::to_string))
     }
 
+    async fn claim_status(&self, id: &BeadId) -> Result<crate::types::ClaimStatus> {
+        // For bead-rs, read the raw JSON to get the revision field
+        if self.backend.name == "bead-rs" {
+            let values = HashMap::from([("id", id.to_string())]);
+            let raw = self.run_operation("show", &values).await?;
+            let value: serde_json::Value = serde_json::from_str(raw.trim())?;
+            let value = value
+                .as_array()
+                .and_then(|items| items.first())
+                .unwrap_or(&value);
+
+            let status_str = value
+                .get("status")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("bead-rs show response omitted status"))?;
+            let status = serde_json::from_str::<BeadStatus>(
+                &serde_json::to_string(status_str).unwrap()
+            )
+                .with_context(|| format!("failed to parse status: {}", status_str))?;
+
+            let assignee = value
+                .get("assignee")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+
+            let revision = value
+                .get("revision")
+                .and_then(|v| v.as_u64());
+
+            Ok(crate::types::ClaimStatus {
+                status,
+                assignee,
+                revision,
+            })
+        } else {
+            // For backends without revision support (bead-forge), use the default implementation
+            let bead = self.show(id).await?;
+            Ok(crate::types::ClaimStatus {
+                status: bead.status,
+                assignee: bead.assignee,
+                revision: None,
+            })
+        }
+    }
+
     async fn claim(&self, id: &BeadId, actor: &str) -> Result<ClaimResult> {
         if matches!(
             self.strategy("claim")?,
@@ -1652,5 +1698,78 @@ mod tests {
         let result = store.render_operation("show", &values).unwrap();
         assert!(result.contains(&"--json".to_string()));
         assert!(result.contains(&"show".to_string()));
+    }
+
+    #[test]
+    fn claim_status_parser_handles_bead_rs_response() {
+        use crate::types::BeadStatus;
+
+        // Test parsing a bead-rs response with revision
+        let json = r#"{
+            "id": "bead-test",
+            "title": "Test Bead",
+            "status": "open",
+            "assignee": "worker-01",
+            "revision": 42,
+            "created_at": "2026-08-28T00:00:00Z"
+        }"#;
+
+        let value: serde_json::Value = serde_json::from_str(json).unwrap();
+        let status_str = value.get("status").and_then(|v| v.as_str()).unwrap();
+        let status = serde_json::from_str::<BeadStatus>(
+            &serde_json::to_string(status_str).unwrap()
+        ).unwrap();
+
+        let assignee = value
+            .get("assignee")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+
+        let revision = value.get("revision").and_then(|v| v.as_u64());
+
+        assert_eq!(status, BeadStatus::Open);
+        assert_eq!(assignee, Some("worker-01".to_string()));
+        assert_eq!(revision, Some(42));
+    }
+
+    #[test]
+    fn claim_status_parser_handles_unassigned_bead() {
+        use crate::types::BeadStatus;
+
+        // Test parsing a bead with no assignee
+        let json = r#"{
+            "id": "bead-test",
+            "title": "Test Bead",
+            "status": "in_progress",
+            "assignee": "",
+            "revision": 15,
+            "created_at": "2026-08-28T00:00:00Z"
+        }"#;
+
+        let value: serde_json::Value = serde_json::from_str(json).unwrap();
+        let assignee = value
+            .get("assignee")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+
+        assert_eq!(assignee, None);
+    }
+
+    #[test]
+    fn claim_status_parser_handles_missing_revision() {
+        // Test that backends without revision support (bead-forge) are handled
+        let json = r#"{
+            "id": "bf-test",
+            "title": "Test Bead",
+            "status": "open",
+            "created_at": "2026-08-28T00:00:00Z"
+        }"#;
+
+        let value: serde_json::Value = serde_json::from_str(json).unwrap();
+        let revision = value.get("revision").and_then(|v| v.as_u64());
+
+        assert_eq!(revision, None);
     }
 }

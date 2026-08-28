@@ -20,6 +20,7 @@ use opentelemetry_sdk::trace::{
     BatchSpanProcessor, SdkTracerProvider, SpanData, SpanExporter as SdkSpanExporter,
 };
 use std::collections::HashMap;
+use std::ffi::CStr;
 use std::panic::catch_unwind;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -749,6 +750,58 @@ impl OtlpSink {
         }
     }
 
+    /// Get the username of the process owner via libc.
+    ///
+    /// Uses `getuid()` + `getpwuid_r()` to resolve the current uid to a username.
+    /// Falls back to the numeric uid (e.g., "uid:1000") when the passwd lookup
+    /// returns nothing (common in distroless/minimal containers).
+    ///
+    /// This is deliberately not derived from `$USER` or `$LOGNAME` environment
+    /// variables, which are frequently unset in containers and are trivially
+    /// overridden. The libc lookup is the authoritative source.
+    fn process_owner() -> String {
+        // SAFETY: getuid is always safe and returns a valid uid
+        let uid = unsafe { libc::getuid() };
+
+        // Buffer for passwd struct. POSIX requires sysconf(_SC_GETPW_R_SIZE_MAX)
+        // but Linux provides a PATH_MAX upper bound. Use 1024 as a conservative
+        // minimum (POSIX) and 16384 as a safe maximum.
+        let mut buf = vec![0u8; 16384];
+        let mut pwd = libc::passwd {
+            pw_name: std::ptr::null_mut(),
+            pw_passwd: std::ptr::null_mut(),
+            pw_uid: 0,
+            pw_gid: 0,
+            pw_gecos: std::ptr::null_mut(),
+            pw_dir: std::ptr::null_mut(),
+            pw_shell: std::ptr::null_mut(),
+        };
+        let mut result = std::ptr::null_mut();
+
+        // SAFETY: getpwuid_r writes into buffers we own and checks bounds.
+        // On error, we fall back to the numeric uid.
+        let ret = unsafe {
+            libc::getpwuid_r(
+                uid,
+                &mut pwd,
+                buf.as_mut_ptr() as *mut libc::c_char,
+                buf.len(),
+                &mut result,
+            )
+        };
+
+        // getpwuid_r returns 0 on success, non-zero on error.
+        // result is null if the entry was not found (ENOENT).
+        if ret == 0 && !result.is_null() {
+            // SAFETY: pwd.pw_name is a valid C string if result is non-null
+            let name = unsafe { CStr::from_ptr(pwd.pw_name) };
+            name.to_string_lossy().into_owned()
+        } else {
+            // Fallback to numeric uid - common in distroless containers
+            format!("uid:{}", uid)
+        }
+    }
+
     /// Build the OTel Resource with config and computed attributes.
     ///
     /// Merges three layers (lowest → highest precedence):
@@ -786,6 +839,9 @@ impl OtlpSink {
         // Add process PID
         builder =
             builder.with_attributes([KeyValue::new("process.pid", std::process::id().to_string())]);
+
+        // Add process owner (username from libc, falls back to uid:NNNN)
+        builder = builder.with_attributes([KeyValue::new("process.owner", Self::process_owner())]);
 
         // Add computed needle.* attributes if provided
         if let Some(agent_value) = agent {
