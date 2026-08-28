@@ -2527,7 +2527,10 @@ echo "bead 0.26.0"
 
         let result = probe_bead_cli();
 
-        assert!(result.is_some(), "should find CLI when verification succeeds");
+        assert!(
+            result.is_some(),
+            "should find CLI when verification succeeds"
+        );
         let cli = result.unwrap();
         assert_eq!(cli.name, "bead");
         assert_eq!(cli.backend_name(), "bead-rs");
@@ -2575,9 +2578,15 @@ echo "bf 0.4.1"
         let result = probe_bead_cli();
 
         // Should reject the mismatched "bead" and fall back to the correct "bf"
-        assert!(result.is_some(), "should find fallback CLI when primary fails verification");
+        assert!(
+            result.is_some(),
+            "should find fallback CLI when primary fails verification"
+        );
         let cli = result.unwrap();
-        assert_eq!(cli.name, "bf", "should fall back to bf when bead verification fails");
+        assert_eq!(
+            cli.name, "bf",
+            "should fall back to bf when bead verification fails"
+        );
         assert_eq!(cli.backend_name(), "bf");
     }
 
@@ -2655,9 +2664,15 @@ echo "bf 0.4.1"
         let result = probe_bead_cli();
 
         // Should skip mismatched bead and accept the correct bf
-        assert!(result.is_some(), "should find a valid CLI after verification");
+        assert!(
+            result.is_some(),
+            "should find a valid CLI after verification"
+        );
         let cli = result.unwrap();
-        assert_eq!(cli.name, "bf", "should find bf after bead fails verification");
+        assert_eq!(
+            cli.name, "bf",
+            "should find bf after bead fails verification"
+        );
     }
 
     #[serial]

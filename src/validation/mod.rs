@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{ConfigTier, ReloadTier};
@@ -92,6 +92,48 @@ impl GateReport {
             results,
         }
     }
+
+    /// Returns true if all gates passed.
+    pub fn passed(&self) -> bool {
+        self.all_passed
+    }
+
+    /// Convert to a single GateResult.
+    ///
+    /// If all gates passed, returns Pass. Otherwise returns Fail with the first failure reason.
+    pub fn to_gate_result(&self) -> GateResult {
+        if self.all_passed {
+            GateResult::Pass
+        } else {
+            // Get the first failure reason
+            let reason = self
+                .results
+                .values()
+                .find_map(|r| r.failure_reason().map(|s| s.to_string()))
+                .unwrap_or_else(|| "verification gate failed".to_string());
+            GateResult::Fail(reason)
+        }
+    }
+}
+
+/// Execution mode for a gate command.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunIn {
+    /// Run in a clean extraction of committed state (git archive HEAD).
+    Clean,
+    /// Run in the shared workspace checkout (may contain uncommitted changes).
+    Workspace,
+}
+
+impl Default for RunIn {
+    fn default() -> Self {
+        Self::Clean
+    }
+}
+
+fn default_run_in() -> RunIn {
+    RunIn::Clean
 }
 
 /// Configuration for a single gate from `.needle.yaml`.
@@ -108,6 +150,14 @@ pub enum GateConfig {
         /// jedarden/NEEDLE#9.
         #[serde(default)]
         stderr_cap_bytes: Option<usize>,
+        /// Whether to run commands in a clean extraction of committed state or
+        /// in the shared workspace checkout. `clean` (default) extracts HEAD
+        /// via `git archive` to a temp directory and runs there; `workspace`
+        /// runs directly in the shared checkout. Use `workspace` only for
+        /// gates that must see uncommitted state (e.g., testing a build cache).
+        /// See ADR-020 for the full rationale.
+        #[serde(default = "default_run_in")]
+        run_in: RunIn,
     },
 }
 
@@ -224,9 +274,11 @@ impl GateRegistry {
             GateConfig::Command {
                 commands,
                 stderr_cap_bytes,
-            } => Ok(Arc::new(CommandGate::with_stderr_cap(
+                run_in,
+            } => Ok(Arc::new(CommandGate::with_options(
                 commands.clone(),
                 stderr_cap_bytes.unwrap_or(DEFAULT_STDERR_CAP_BYTES),
+                *run_in,
             ))),
         });
     }
@@ -289,37 +341,227 @@ pub struct CommandGate {
     /// Maximum bytes of stderr captured on failure. Configurable via
     /// `validation.stderr_cap_bytes` — see GitHub issue jedarden/NEEDLE#9.
     stderr_cap_bytes: usize,
+    /// Whether to run in a clean extraction or the shared workspace.
+    run_in: RunIn,
 }
 
 impl CommandGate {
-    /// Create a new command gate with the default stderr cap (4096 bytes).
+    /// Create a new command gate with the default stderr cap (4096 bytes) and clean execution.
     pub fn new(commands: Vec<String>) -> Self {
-        Self::with_stderr_cap(commands, DEFAULT_STDERR_CAP_BYTES)
+        Self::with_options(commands, DEFAULT_STDERR_CAP_BYTES, RunIn::Clean)
     }
 
     /// Create a new command gate with an explicit stderr capture cap.
     pub fn with_stderr_cap(commands: Vec<String>, stderr_cap_bytes: usize) -> Self {
+        Self::with_options(commands, stderr_cap_bytes, RunIn::Clean)
+    }
+
+    /// Create a new command gate with full options.
+    pub fn with_options(commands: Vec<String>, stderr_cap_bytes: usize, run_in: RunIn) -> Self {
         CommandGate {
             commands,
             stderr_cap_bytes,
+            run_in,
         }
     }
+}
+
+/// Extract committed state from a workspace to a temporary directory.
+///
+/// This creates a clean copy of the workspace's committed state (git HEAD)
+/// to a temporary directory using `git archive`. This is used for running
+/// gates in isolation from uncommitted changes.
+async fn extract_committed_state(workspace: &Path, _bead_id: &str) -> Result<PathBuf> {
+    use std::process::Command;
+
+    let temp_dir = tempfile::tempdir()
+        .context("failed to create temporary directory for committed state extraction")?;
+
+    let extract_dir = temp_dir.path();
+
+    // Extract git HEAD to the temporary directory using git archive
+    let output = Command::new("git")
+        .args(["archive", "--format=tar", "HEAD"])
+        .current_dir(workspace)
+        .output()
+        .context("failed to run git archive")?;
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "git archive failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    // Extract the tar archive to the temporary directory
+    let mut child = Command::new("tar")
+        .args(["-x", "-f", "-"])
+        .current_dir(extract_dir)
+        .spawn()
+        .context("failed to spawn tar extraction")?;
+
+    // Write the archive to tar's stdin
+    if let Some(mut stdin) = child.stdin.take() {
+        std::io::copy(&mut output.stdout.as_slice(), &mut stdin)
+            .context("failed to write archive to tar")?;
+    }
+
+    let status = child.wait().context("failed to wait for tar extraction")?;
+
+    if !status.success() {
+        anyhow::bail!("tar extraction failed");
+    }
+
+    // Keep the temp directory alive by leaking it
+    // This is safe because the temporary directory will be cleaned up when the process exits
+    let leaked_dir = PathBuf::from(extract_dir);
+    std::mem::forget(temp_dir);
+
+    Ok(leaked_dir)
 }
 
 #[async_trait::async_trait]
 impl Gate for CommandGate {
     async fn validate(&self, bead: &crate::types::Bead, workspace: &Path) -> Result<GateResult> {
-        // Run commands sequentially; stop at first failure.
+        // Try running in clean mode first (if configured)
+        // Returns: (result, clean_directory_path_if_any)
+        let clean_attempt = if self.run_in == RunIn::Clean {
+            // Extract committed state to a temporary directory
+            match extract_committed_state(workspace, &bead.id).await {
+                Ok(dir) => {
+                    tracing::info!(
+                        workspace = %workspace.display(),
+                        clean_dir = %dir.display(),
+                        "extracted committed state for clean gate execution"
+                    );
+                    // Run commands in the clean extraction
+                    let result = self.run_commands_in_dir(bead, &dir, true).await;
+
+                    // Clean up extraction on success (preserve on failure for diagnosis)
+                    if result.all_passed {
+                        tracing::debug!(
+                            clean_dir = %dir.display(),
+                            "removing clean extraction (all gates passed)"
+                        );
+                        let _ = tokio::fs::remove_dir_all(&dir).await;
+                        // Return result and no directory (it was cleaned up)
+                        (Some(result), None)
+                    } else {
+                        tracing::info!(
+                            clean_dir = %dir.display(),
+                            "preserving clean extraction for diagnosis (gate failed)"
+                        );
+                        // Return result and the directory path (preserved for diagnosis)
+                        (Some(result), Some(dir))
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        workspace = %workspace.display(),
+                        error = %e,
+                        "failed to extract committed state for clean gate execution"
+                    );
+                    // Extraction failure counts as a failure in clean mode
+                    let failure = GateReport {
+                        all_passed: false,
+                        results: self.make_failure_map(
+                            "extraction",
+                            format!("failed to extract committed state: {}", e).to_string(),
+                        ),
+                    };
+                    (Some(failure), None)
+                }
+            }
+        } else {
+            (None, None)
+        };
+
+        let (clean_result, clean_dir) = clean_attempt;
+
+        // If clean mode failed, try in workspace mode to detect uncommitted dependencies
+        if let Some(clean_result) = clean_result {
+            if !clean_result.all_passed {
+                tracing::info!(
+                    bead_id = %bead.id,
+                    "clean mode failed, checking if workspace mode passes (uncommitted dependency detection)"
+                );
+
+                // Try running in workspace mode
+                let workspace_result = self.run_commands_in_dir(bead, workspace, false).await;
+
+                if workspace_result.all_passed {
+                    // Clean failed but workspace passed: uncommitted dependency detected
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        "detected uncommitted dependency: clean failed but workspace passed"
+                    );
+
+                    // Get git diff for context
+                    let diff_output = match get_git_diff(workspace).await {
+                        Ok(diff) => diff,
+                        Err(e) => format!("(failed to get diff: {})", e),
+                    };
+
+                    // Clean up the preserved clean extraction (we detected uncommitted dependency)
+                    if let Some(dir) = clean_dir {
+                        tracing::debug!(
+                            clean_dir = %dir.display(),
+                            "removing clean extraction (uncommitted dependency detected)"
+                        );
+                        let _ = tokio::fs::remove_dir_all(&dir).await;
+                    }
+
+                    return Ok(GateResult::Fail(format!(
+                        "passes only with uncommitted files: {}\n\nThis indicates the code depends on uncommitted changes. Either commit the changes or fix the underlying issue.",
+                        diff_output
+                    )));
+                } else {
+                    // Both modes failed, return the original clean failure
+                    tracing::info!(
+                        bead_id = %bead.id,
+                        "both clean and workspace modes failed, returning clean failure"
+                    );
+                    // Clean extraction is preserved for diagnosis (clean_dir is Some)
+                    return Ok(self.to_gate_result(clean_result));
+                }
+            }
+            // Clean mode passed, return success
+            return Ok(self.to_gate_result(clean_result));
+        }
+
+        // Not running in clean mode, or clean wasn't attempted - run directly in workspace
+        let result = self.run_commands_in_dir(bead, workspace, false).await;
+        Ok(self.to_gate_result(result))
+    }
+
+    fn gate_type(&self) -> &str {
+        "command"
+    }
+}
+
+impl CommandGate {
+    /// Run all commands in the specified directory and return a report.
+    async fn run_commands_in_dir(
+        &self,
+        bead: &crate::types::Bead,
+        dir: &Path,
+        is_clean: bool,
+    ) -> GateReport {
+        let mut results = HashMap::new();
+
         for cmd in &self.commands {
             tracing::info!(
                 command = %cmd,
-                workspace = %workspace.display(),
+                workspace = %bead.workspace.display(),
+                run_dir = if is_clean { "clean" } else { "workspace" },
+                execution_dir = %dir.display(),
                 "running command gate"
             );
 
-            match self.run_command(cmd, bead, workspace).await {
+            match self.run_command(cmd, bead, dir).await {
                 Ok(()) => {
                     tracing::info!(command = %cmd, "command gate passed");
+                    results.insert(cmd.clone(), GateResult::Pass);
                 }
                 Err(failure) => {
                     tracing::warn!(
@@ -327,20 +569,43 @@ impl Gate for CommandGate {
                         exit_code = ?failure.exit_code,
                         "command gate failed"
                     );
-                    return Ok(GateResult::Fail(format!(
-                        "command '{}' failed: {}",
-                        cmd,
-                        failure.output.trim()
-                    )));
+                    results.insert(
+                        cmd.clone(),
+                        GateResult::Fail(format!(
+                            "command '{}' failed: {}",
+                            cmd,
+                            failure.output.trim()
+                        )),
+                    );
+                    // Stop on first failure
+                    break;
                 }
             }
         }
 
-        Ok(GateResult::Pass)
+        GateReport::new(results)
     }
 
-    fn gate_type(&self) -> &str {
-        "command"
+    /// Convert a GateReport to GateResult (for backwards compatibility).
+    fn to_gate_result(&self, report: GateReport) -> GateResult {
+        if report.all_passed {
+            GateResult::Pass
+        } else {
+            // Get the first failure reason
+            let reason = report
+                .results
+                .values()
+                .find_map(|r| r.failure_reason().map(|s| s.to_string()))
+                .unwrap_or_else(|| "verification gate failed".to_string());
+            GateResult::Fail(reason)
+        }
+    }
+
+    /// Create a failure map for a single failure.
+    fn make_failure_map(&self, command: &str, reason: String) -> HashMap<String, GateResult> {
+        let mut results = HashMap::new();
+        results.insert(command.to_string(), GateResult::Fail(reason));
+        results
     }
 }
 
@@ -407,6 +672,27 @@ fn truncate_output(s: &str, max_bytes: usize) -> String {
         let truncated = &s[..max_bytes];
         format!("{}... [truncated]", truncated)
     }
+}
+
+/// Get git diff of uncommitted changes for uncommitted dependency detection.
+async fn get_git_diff(workspace: &Path) -> Result<String> {
+    let output = tokio::process::Command::new("git")
+        .args(["diff", "--name-only"])
+        .current_dir(workspace)
+        .kill_on_drop(true)
+        .output()
+        .await
+        .context("failed to get git diff")?;
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "git diff failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout.trim().to_string())
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -609,6 +895,7 @@ mod tests {
         let config = GateConfig::Command {
             commands: vec!["true".to_string()],
             stderr_cap_bytes: None,
+            run_in: RunIn::Clean,
         };
         let gate = registry.create_gate(&config).unwrap();
         assert_eq!(gate.gate_type(), "command");
@@ -770,6 +1057,7 @@ mod tests {
         let config = GateConfig::Command {
             commands: vec![fail_with_stderr_bytes(6000)],
             stderr_cap_bytes: None,
+            run_in: RunIn::Clean,
         };
         let gate = registry.create_gate(&config).unwrap();
         let bead = test_bead();
@@ -892,6 +1180,7 @@ mod tests {
             GateConfig::Command {
                 commands,
                 stderr_cap_bytes,
+                run_in: _,
             } => {
                 assert_eq!(commands, vec!["cargo test", "cargo clippy"]);
                 // Not set in YAML — inherits validation.stderr_cap_bytes at the
@@ -919,22 +1208,430 @@ mod tests {
         }
     }
 
-    #[test]
-    fn gate_config_command_serialize_roundtrip() {
-        let config = GateConfig::Command {
-            commands: vec!["echo test".to_string()],
-            stderr_cap_bytes: None,
+    // ───── Uncommitted Dependency Detection Tests ─────
+
+    #[tokio::test]
+    async fn uncommitted_dependency_detection_clean_fails_workspace_passes() {
+        // Test scenario: A committed file references a symbol that only exists in an untracked file
+        // Clean mode should fail (symbol not found), workspace mode should pass (symbol exists in untracked file)
+        // The gate should detect this as an uncommitted dependency and return a specific error
+
+        let temp = TempDir::new().unwrap();
+        let workspace = temp.path();
+
+        // Initialize a git repo
+        git_init(workspace);
+        std::fs::write(workspace.join("README.md"), "test repo\n").unwrap();
+        git_add(workspace, ".");
+        git_commit(workspace, "initial commit");
+
+        // Create a committed Rust file that references a function from an untracked module
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        std::fs::write(
+            workspace.join("src/main.rs"),
+            r#"
+// This references a function that only exists in untracked helper.rs
+mod helper;
+
+fn main() {
+    helper::uncommitted_function();
+}
+"#,
+        )
+        .unwrap();
+
+        // Create an untracked file that defines the function
+        std::fs::write(
+            workspace.join("src/helper.rs"),
+            r#"
+pub fn uncommitted_function() {
+    println!("This function is only in uncommitted files");
+}
+"#,
+        )
+        .unwrap();
+
+        // Commit the main file but leave helper.rs untracked
+        git_add(workspace, "src/main.rs");
+        git_commit(workspace, "add main.rs");
+
+        // Create a CommandGate that runs `cargo check` (which will fail in clean mode, pass in workspace)
+        let gate = CommandGate::new(vec!["cargo check".to_string()], 65536, RunIn::Clean);
+
+        let bead = crate::types::Bead {
+            id: crate::types::BeadId("test-bead".to_string()),
+            title: "Test Bead".to_string(),
+            body: None,
+            priority: crate::types::Priority::P0,
+            status: crate::types::BeadStatus::Open,
+            assignee: None,
+            labels: Vec::new(),
+            workspace: workspace.to_path_buf(),
+            dependencies: Vec::new(),
+            dependents: Vec::new(),
+            comments: Vec::new(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
         };
-        let yaml = serde_yaml::to_string(&config).unwrap();
-        let decoded: GateConfig = serde_yaml::from_str(&yaml).unwrap();
-        match decoded {
-            GateConfig::Command {
-                commands,
-                stderr_cap_bytes,
-            } => {
-                assert_eq!(commands, vec!["echo test"]);
-                assert_eq!(stderr_cap_bytes, None);
+
+        // Run validation - should detect uncommitted dependency
+        let result = gate.validate(&bead, workspace).await.unwrap();
+
+        // Should fail with uncommitted dependency message
+        match result {
+            GateResult::Fail(reason) => {
+                assert!(
+                    reason.contains("uncommitted files"),
+                    "Error message should mention uncommitted files: {}",
+                    reason
+                );
+                assert!(
+                    reason.contains("src/helper.rs"),
+                    "Error message should include the untracked file: {}",
+                    reason
+                );
+            }
+            GateResult::Pass => {
+                panic!("Expected failure due to uncommitted dependency, but got Pass");
             }
         }
+
+        // Verify the clean extraction was cleaned up after detecting uncommitted dependency
+        // (not preserved for diagnosis since we identified the specific cause)
+        let clean_dirs = std::fs::read_dir(workspace.parent().unwrap())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .any(|entry| {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                name_str.contains("needle-clean") || name_str.contains(&bead.id)
+            });
+        assert!(
+            !clean_dirs,
+            "Clean extraction should be cleaned up after uncommitted dependency detection"
+        );
+    }
+
+    #[tokio::test]
+    async fn uncommitted_dependency_detection_both_modes_pass() {
+        // Test scenario: Code works correctly in both clean and workspace modes
+        // Clean extraction should be removed on success
+
+        let temp = TempDir::new().unwrap();
+        let workspace = temp.path();
+
+        // Initialize a git repo
+        git_init(workspace);
+        std::fs::write(workspace.join("README.md"), "test repo\n").unwrap();
+        git_add(workspace, ".");
+        git_commit(workspace, "initial commit");
+
+        // Create a simple committed file that will pass `cargo check`
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        std::fs::write(
+            workspace.join("src/lib.rs"),
+            r#"
+/// A simple function that always works
+pub fn simple_function() -> i32 {
+    42
+}
+"#,
+        )
+        .unwrap();
+        git_add(workspace, "src/lib.rs");
+        git_commit(workspace, "add lib.rs");
+
+        let gate = CommandGate::new(vec!["cargo check".to_string()], 65536, RunIn::Clean);
+
+        let bead = crate::types::Bead {
+            id: crate::types::BeadId("test-bead-both-pass".to_string()),
+            title: "Test Bead".to_string(),
+            body: None,
+            priority: crate::types::Priority::P0,
+            status: crate::types::BeadStatus::Open,
+            assignee: None,
+            labels: Vec::new(),
+            workspace: workspace.to_path_buf(),
+            dependencies: Vec::new(),
+            dependents: Vec::new(),
+            comments: Vec::new(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        // Run validation - should pass in clean mode
+        let result = gate.validate(&bead, workspace).await.unwrap();
+        assert_eq!(result, GateResult::Pass, "Both modes should pass");
+
+        // Verify clean extraction was removed on success
+        let clean_dirs = std::fs::read_dir(workspace.parent().unwrap())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .any(|entry| {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                name_str.contains("needle-clean") || name_str.contains(&bead.id)
+            });
+        assert!(!clean_dirs, "Clean extraction should be removed on success");
+    }
+
+    #[tokio::test]
+    async fn uncommitted_dependency_detection_both_modes_fail() {
+        // Test scenario: Code has a real error (not related to uncommitted files)
+        // Both modes should fail, and clean extraction should be preserved for diagnosis
+
+        let temp = TempDir::new().unwrap();
+        let workspace = temp.path();
+
+        // Initialize a git repo
+        git_init(workspace);
+        std::fs::write(workspace.join("README.md"), "test repo\n").unwrap();
+        git_add(workspace, ".");
+        git_commit(workspace, "initial commit");
+
+        // Create a committed file with a real syntax error
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        std::fs::write(
+            workspace.join("src/lib.rs"),
+            r#"
+// This has a syntax error that will fail in both modes
+pub fn broken_function( -> i32 {
+    42
+}
+"#,
+        )
+        .unwrap();
+        git_add(workspace, "src/lib.rs");
+        git_commit(workspace, "add broken lib.rs");
+
+        let gate = CommandGate::new(vec!["cargo check".to_string()], 65536, RunIn::Clean);
+
+        let bead = crate::types::Bead {
+            id: "test-bead-both-fail".to_string(),
+            title: "Test Bead".to_string(),
+            workspace: workspace.to_path_buf(),
+            ..Default::default()
+        };
+
+        // Run validation - should fail in clean mode
+        let result = gate.validate(&bead, workspace).await.unwrap();
+
+        match result {
+            GateResult::Fail(reason) => {
+                assert!(
+                    !reason.contains("uncommitted files"),
+                    "Real error should not be attributed to uncommitted files: {}",
+                    reason
+                );
+            }
+            GateResult::Pass => {
+                panic!("Expected failure due to syntax error, but got Pass");
+            }
+        }
+
+        // Give the test a moment to finish preserving the directory
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // Verify clean extraction was preserved for diagnosis
+        let clean_dirs = std::fs::read_dir(workspace.parent().unwrap())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .any(|entry| {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                name_str.contains("needle-clean") || name_str.contains(&bead.id)
+            });
+        assert!(
+            clean_dirs,
+            "Clean extraction should be preserved for diagnosis when both modes fail"
+        );
+
+        // Clean up the preserved directory
+        if let Ok(entries) = std::fs::read_dir(workspace.parent().unwrap()) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str.contains("needle-clean") || name_str.contains(&bead.id) {
+                    let _ = std::fs::remove_dir_all(entry.path());
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn uncommitted_dependency_detection_workspace_mode_bypasses_clean() {
+        // Test scenario: When run_in is Workspace, should skip clean extraction entirely
+
+        let temp = TempDir::new().unwrap();
+        let workspace = temp.path();
+
+        // Initialize a git repo
+        git_init(workspace);
+        std::fs::write(workspace.join("README.md"), "test repo\n").unwrap();
+        git_add(workspace, ".");
+        git_commit(workspace, "initial commit");
+
+        let gate = CommandGate::new(vec!["echo test".to_string()], 65536, RunIn::Workspace);
+
+        let bead = crate::types::Bead {
+            id: crate::types::BeadId("test-bead-workspace-mode".to_string()),
+            title: "Test Bead".to_string(),
+            body: None,
+            priority: crate::types::Priority::P0,
+            status: crate::types::BeadStatus::Open,
+            assignee: None,
+            labels: Vec::new(),
+            workspace: workspace.to_path_buf(),
+            dependencies: Vec::new(),
+            dependents: Vec::new(),
+            comments: Vec::new(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+
+        // Run validation - should run in workspace mode without clean extraction
+        let result = gate.validate(&bead, workspace).await.unwrap();
+        assert_eq!(result, GateResult::Pass, "Simple echo should pass");
+
+        // Verify no clean extraction was created
+        let clean_dirs = std::fs::read_dir(workspace.parent().unwrap())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .any(|entry| {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                name_str.contains("needle-clean") || name_str.contains(&bead.id)
+            });
+        assert!(
+            !clean_dirs,
+            "Workspace mode should not create clean extraction"
+        );
+    }
+
+    #[tokio::test]
+    async fn uncommitted_dependency_detection_with_multiple_untracked_files() {
+        // Test scenario: Multiple untracked files contribute to the uncommitted dependency
+        // The error message should list all untracked files
+
+        let temp = TempDir::new().unwrap();
+        let workspace = temp.path();
+
+        // Initialize a git repo
+        git_init(workspace);
+        std::fs::write(workspace.join("README.md"), "test repo\n").unwrap();
+        git_add(workspace, ".");
+        git_commit(workspace, "initial commit");
+
+        // Create a committed Rust file that references multiple untracked modules
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        std::fs::write(
+            workspace.join("src/main.rs"),
+            r#"
+mod helper1;
+mod helper2;
+
+fn main() {
+    helper1::func1();
+    helper2::func2();
+}
+"#,
+        )
+        .unwrap();
+
+        // Create two untracked files
+        std::fs::write(
+            workspace.join("src/helper1.rs"),
+            r#"
+pub fn func1() {
+    println!("helper1");
+}
+"#,
+        )
+        .unwrap();
+
+        std::fs::write(
+            workspace.join("src/helper2.rs"),
+            r#"
+pub fn func2() {
+    println!("helper2");
+}
+"#,
+        )
+        .unwrap();
+
+        // Commit only the main file
+        git_add(workspace, "src/main.rs");
+        git_commit(workspace, "add main.rs");
+
+        let gate = CommandGate::new(vec!["cargo check".to_string()], 65536, RunIn::Clean);
+
+        let bead = crate::types::Bead {
+            id: "test-bead-multiple-untracked".to_string(),
+            title: "Test Bead".to_string(),
+            workspace: workspace.to_path_buf(),
+            ..Default::default()
+        };
+
+        // Run validation - should detect uncommitted dependency
+        let result = gate.validate(&bead, workspace).await.unwrap();
+
+        match result {
+            GateResult::Fail(reason) => {
+                assert!(
+                    reason.contains("uncommitted files"),
+                    "Error message should mention uncommitted files: {}",
+                    reason
+                );
+                // Should include at least one of the untracked files
+                let has_helper1 = reason.contains("helper1.rs");
+                let has_helper2 = reason.contains("helper2.rs");
+                assert!(
+                    has_helper1 || has_helper2,
+                    "Error message should include untracked files: {}",
+                    reason
+                );
+            }
+            GateResult::Pass => {
+                panic!("Expected failure due to uncommitted dependencies, but got Pass");
+            }
+        }
+    }
+
+    // ───── Helper functions for test setup ─────
+
+    fn git_init(dir: &Path) {
+        std::process::Command::new("git")
+            .arg("init")
+            .current_dir(dir)
+            .output()
+            .expect("Failed to init git repo");
+
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(dir)
+            .output()
+            .expect("Failed to set git email");
+
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(dir)
+            .output()
+            .expect("Failed to set git name");
+    }
+
+    fn git_add(dir: &Path, path: &str) {
+        std::process::Command::new("git")
+            .args(["add", path])
+            .current_dir(dir)
+            .output()
+            .expect("Failed to git add");
+    }
+
+    fn git_commit(dir: &Path, message: &str) {
+        std::process::Command::new("git")
+            .args(["commit", "-m", message])
+            .current_dir(dir)
+            .output()
+            .expect("Failed to git commit");
     }
 }

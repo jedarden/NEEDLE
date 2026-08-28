@@ -954,7 +954,6 @@ fn is_executable(path: &Path) -> bool {
 /// Infers the backend from the filename: "bf" selects bead-forge; every other
 /// name selects bead-rs.
 fn detect_backend_from_path(path: &Path) -> Result<Backend> {
-    use std::io::Read;
     use std::process::Stdio;
 
     // Determine expected backend from filename

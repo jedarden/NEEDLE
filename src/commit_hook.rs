@@ -1,8 +1,11 @@
-//! Bead-Id commit trailer injection.
+//! Bead-Id commit trailer injection and validation.
 //!
 //! When a bead closes with a commit artifact (i.e. the agent made commits),
 //! NEEDLE amends the latest commit to include a `Bead-Id: <id>` trailer.
 //! HOOP's bead_commit_index then picks this up via `git log`.
+//!
+//! The commit hook also validates that agents don't sweep in other workers'
+//! in-flight edits by checking against the predispatch snapshot.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -13,9 +16,178 @@ use fs2::FileExt;
 use tokio::process::Command;
 
 use crate::types::BeadId;
+use crate::validation::predispatch::load;
 
 // ---------------------------------------------------------------------------
 // Public entry point
+// ---------------------------------------------------------------------------
+
+/// Validate that a commit doesn't sweep in other workers' in-flight edits.
+///
+/// Checks the staged files against the predispatch snapshot. Rejects commits
+/// that include paths whose content matches the predispatch blob hash (meaning
+/// the agent didn't modify them after dispatch). Returns `Ok(())` if validation
+/// passes or if there's no snapshot to check against.
+///
+/// # Arguments
+///
+/// * `workspace` - Path to the git workspace
+/// * `bead_id` - The bead ID being worked on
+///
+/// # Returns
+///
+/// * `Ok(())` if validation passes or no snapshot exists
+/// * `Err(String)` with a human-readable rejection message listing the foreign paths
+pub async fn validate_commit(workspace: &Path, bead_id: &BeadId) -> Result<()> {
+    let ws = workspace.to_str().unwrap_or(".").to_string();
+
+    // Load the predispatch snapshot
+    let snapshot = match load(workspace, bead_id).await {
+        Some(s) => s,
+        None => {
+            // No snapshot means we can't validate — this is the conservative
+            // fallback path for workspaces without snapshots
+            tracing::warn!(
+                bead_id = %bead_id,
+                workspace = %ws,
+                "no predispatch snapshot found, skipping dirty file validation"
+            );
+            return Ok(());
+        }
+    };
+
+    // Get the list of paths about to be committed
+    let committed_paths = match get_staged_paths(&ws).await {
+        Ok(paths) => paths,
+        Err(e) => {
+            tracing::warn!(
+                bead_id = %bead_id,
+                workspace = %ws,
+                error = %e,
+                "failed to get staged paths, skipping dirty file validation"
+            );
+            return Ok(());
+        }
+    };
+
+    // Check each committed path against the predispatch dirty files
+    let mut foreign_paths = Vec::new();
+
+    for committed_path in &committed_paths {
+        // Skip .beads/ and .needle-predispatch-sha — they have their own handling
+        if committed_path.starts_with(".beads/") || committed_path == ".needle-predispatch-sha" {
+            continue;
+        }
+
+        // Check if this path was dirty at predispatch
+        if let Some(dirty_file) = snapshot
+            .dirty_files
+            .iter()
+            .find(|df| df.path == *committed_path)
+        {
+            // Get the current blob hash of the staged version
+            let current_hash = match get_staged_blob_hash(&ws, committed_path).await {
+                Ok(hash) => hash,
+                Err(e) => {
+                    tracing::warn!(
+                        bead_id = %bead_id,
+                        workspace = %ws,
+                        path = %committed_path,
+                        error = %e,
+                        "failed to get staged blob hash, assuming path was modified"
+                    );
+                    // If we can't check, assume the agent modified it — be permissive
+                    continue;
+                }
+            };
+
+            // If the hash matches, the agent didn't modify it — foreign dirty file!
+            if current_hash == dirty_file.blob_hash {
+                foreign_paths.push(committed_path.clone());
+            }
+        }
+    }
+
+    if !foreign_paths.is_empty() {
+        let paths = foreign_paths.join(", ");
+        let error_msg = format!(
+            "commit rejected: sweeping in other workers' edits without modification. \
+            These paths were dirty before dispatch and you haven't modified them: {}",
+            paths
+        );
+        tracing::warn!(
+            bead_id = %bead_id,
+            workspace = %ws,
+            foreign_paths = %paths,
+            "commit rejected: sweeping in foreign dirty files"
+        );
+        return Err(anyhow!(error_msg));
+    }
+
+    Ok(())
+}
+
+/// Get the list of paths that are staged for commit.
+///
+/// Returns the relative paths of all files in the index.
+async fn get_staged_paths(workspace: &str) -> Result<Vec<String>> {
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        Command::new("git")
+            .args(["-C", workspace, "diff", "--name-only", "--cached"])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| anyhow!("git diff timed out after 10s in {}", workspace))??;
+
+    if !output.status.success() {
+        anyhow::bail!("git diff failed in {}", workspace);
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect())
+}
+
+/// Get the blob hash of a file's staged version.
+///
+/// Returns the git object hash of the file as it appears in the index.
+async fn get_staged_blob_hash(workspace: &str, path: &str) -> Result<String> {
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        Command::new("git")
+            .args(["-C", workspace, "ls-files", "-s", path])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| anyhow!("git ls-files timed out after 10s in {}", workspace))??;
+
+    if !output.status.success() {
+        anyhow::bail!("git ls-files failed for {} in {}", path, workspace);
+    }
+
+    // Output format: "<mode> <blob_hash> <stage>\t<path>"
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let parts: Vec<&str> = stdout.split_whitespace().collect();
+
+    if parts.len() < 2 {
+        anyhow::bail!(
+            "unexpected git ls-files output for {} in {}",
+            path,
+            workspace
+        );
+    }
+
+    Ok(parts[1].to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Bead-Id trailer injection (existing functionality)
 // ---------------------------------------------------------------------------
 
 /// Inject a `Bead-Id: <id>` trailer into the latest commit in `workspace`.
@@ -742,5 +914,287 @@ mod tests {
             args
         );
         String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    // -------------------------------------------------------------------------
+    // Commit hook validation tests
+    // -------------------------------------------------------------------------
+
+    #[serial]
+    #[tokio::test]
+    async fn validate_commit_rejects_foreign_dirty_file() {
+        use super::validate_commit;
+        use crate::validation::predispatch::{self, DirtyFile, PreDispatch};
+
+        let (setup_env_lock, setup_env_guard) = crate::util::test_env::isolate_env();
+
+        // Test that validate_commit rejects commits that include a foreign dirty file
+        // (file was dirty before dispatch and agent hasn't modified it)
+        //
+        // Setup:
+        // 1. Create a git repo with a dirty file (modified by "another worker")
+        // 2. Record predispatch snapshot with the dirty file's blob hash
+        // 3. Agent stages the same file without modifying it (same blob hash)
+        // Expected: validate_commit returns Err with path name
+
+        let (repo_path, _temp_dir) = create_git_repo();
+        let bead_id = crate::types::BeadId::from("needle-test-1");
+
+        // Create a file and commit it
+        let file = repo_path.join("foreign.txt");
+        fs::write(&file, "original content").unwrap();
+        run_git(&repo_path, &["add", "foreign.txt"]);
+        run_git(&repo_path, &["commit", "-m", "initial commit"]);
+
+        // Modify the file (simulating another worker's in-flight edit)
+        fs::write(&file, "another worker's change").unwrap();
+
+        // Get the blob hash of the dirty file
+        let dirty_hash = run_git(&repo_path, &["hash-object", "foreign.txt"]);
+
+        // Record a predispatch snapshot with this dirty file
+        let snapshot = PreDispatch {
+            head_sha: Some(run_git(&repo_path, &["rev-parse", "HEAD"])),
+            notes_hash: None,
+            dirty_files: vec![DirtyFile {
+                path: "foreign.txt".to_string(),
+                blob_hash: dirty_hash.clone(),
+            }],
+        };
+
+        // Write the snapshot manually (since we're not actually dispatching)
+        let snapshot_path = predispatch::snapshot_path(&repo_path, &bead_id);
+        if let Some(parent) = snapshot_path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(snapshot_path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+
+        // Stage the same dirty content (agent hasn't modified it)
+        run_git(&repo_path, &["add", "foreign.txt"]);
+
+        // Validate the commit - should reject
+        let result = validate_commit(&repo_path, &bead_id).await;
+
+        assert!(
+            result.is_err(),
+            "commit should be rejected when sweeping in foreign dirty file"
+        );
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("foreign.txt"),
+            "error message should name the problematic path: {}",
+            error_msg
+        );
+        assert!(
+            error_msg.contains("sweeping in other workers' edits"),
+            "error message should explain the problem: {}",
+            error_msg
+        );
+
+        drop(setup_env_guard);
+        drop(setup_env_lock);
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn validate_commit_allows_foreign_dirty_file_agent_modified() {
+        use super::validate_commit;
+        use crate::validation::predispatch::{self, DirtyFile, PreDispatch};
+
+        let (setup_env_lock, setup_env_guard) = crate::util::test_env::isolate_env();
+
+        // Test that validate_commit allows commits where the agent modified
+        // a file that was dirty at dispatch
+        //
+        // Setup:
+        // 1. Create a git repo with a dirty file
+        // 2. Record predispatch snapshot with the dirty file's original blob hash
+        // 3. Agent modifies the file (different content, different blob hash)
+        // Expected: validate_commit returns Ok
+
+        let (repo_path, _temp_dir) = create_git_repo();
+        let bead_id = crate::types::BeadId::from("needle-test-2");
+
+        // Create and commit a file
+        let file = repo_path.join("shared.txt");
+        fs::write(&file, "original content").unwrap();
+        run_git(&repo_path, &["add", "shared.txt"]);
+        run_git(&repo_path, &["commit", "-m", "initial commit"]);
+
+        // Get the original blob hash (what predispatch would record)
+        let original_hash = run_git(&repo_path, &["hash-object", "shared.txt"]);
+
+        // Record a predispatch snapshot
+        let snapshot = PreDispatch {
+            head_sha: Some(run_git(&repo_path, &["rev-parse", "HEAD"])),
+            notes_hash: None,
+            dirty_files: vec![DirtyFile {
+                path: "shared.txt".to_string(),
+                blob_hash: original_hash,
+            }],
+        };
+
+        let snapshot_path = predispatch::snapshot_path(&repo_path, &bead_id);
+        if let Some(parent) = snapshot_path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(snapshot_path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+
+        // Agent modifies the file (different content)
+        fs::write(&file, "agent's modification").unwrap();
+        run_git(&repo_path, &["add", "shared.txt"]);
+
+        // Validate the commit - should allow (agent modified it)
+        let result = validate_commit(&repo_path, &bead_id).await;
+
+        assert!(
+            result.is_ok(),
+            "commit should be allowed when agent modified the dirty file: {:?}",
+            result
+        );
+
+        drop(setup_env_guard);
+        drop(setup_env_lock);
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn validate_commit_allows_clean_file() {
+        use super::validate_commit;
+        use crate::validation::predispatch::{self, PreDispatch};
+
+        let (setup_env_lock, setup_env_guard) = crate::util::test_env::isolate_env();
+
+        // Test that validate_commit allows commits of files that were clean
+        // (not dirty) at dispatch time
+        //
+        // Setup:
+        // 1. Create a git repo with no dirty files
+        // 2. Record predispatch snapshot with empty dirty_files
+        // 3. Agent creates and stages a new file
+        // Expected: validate_commit returns Ok
+
+        let (repo_path, _temp_dir) = create_git_repo();
+        let bead_id = crate::types::BeadId::from("needle-test-3");
+
+        // Record a predispatch snapshot with no dirty files
+        let snapshot = PreDispatch {
+            head_sha: Some(run_git(&repo_path, &["rev-parse", "HEAD"])),
+            notes_hash: None,
+            dirty_files: vec![],
+        };
+
+        let snapshot_path = predispatch::snapshot_path(&repo_path, &bead_id);
+        if let Some(parent) = snapshot_path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(snapshot_path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+
+        // Agent creates a new clean file
+        let file = repo_path.join("new_file.txt");
+        fs::write(&file, "new content").unwrap();
+        run_git(&repo_path, &["add", "new_file.txt"]);
+
+        // Validate the commit - should allow (file was clean at dispatch)
+        let result = validate_commit(&repo_path, &bead_id).await;
+
+        assert!(
+            result.is_ok(),
+            "commit should be allowed for clean files: {:?}",
+            result
+        );
+
+        drop(setup_env_guard);
+        drop(setup_env_lock);
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn validate_commit_skips_beads_and_predispatch_sha() {
+        use super::validate_commit;
+        use crate::validation::predispatch::{self, PreDispatch};
+
+        let (setup_env_lock, setup_env_guard) = crate::util::test_env::isolate_env();
+
+        // Test that .beads/ and .needle-predispatch-sha are always allowed
+        // regardless of predispatch state
+        //
+        // Setup:
+        // 1. Create a git repo with .beads/ and .needle-predispatch-sha files
+        // 2. Record predispatch snapshot (these paths should be skipped)
+        // 3. Stage changes to .beads/ file
+        // Expected: validate_commit returns Ok (special-cased paths)
+
+        let (repo_path, _temp_dir) = create_git_repo();
+        let bead_id = crate::types::BeadId::from("needle-test-4");
+
+        // Create .beads/ directory and a file in it
+        let beads_dir = repo_path.join(".beads");
+        fs::create_dir_all(&beads_dir).unwrap();
+        let beads_file = beads_dir.join("test.json");
+        fs::write(&beads_file, "{}").unwrap();
+
+        let snapshot = PreDispatch {
+            head_sha: Some(run_git(&repo_path, &["rev-parse", "HEAD"])),
+            notes_hash: None,
+            dirty_files: vec![], // Not relevant for this test
+        };
+
+        let snapshot_path = predispatch::snapshot_path(&repo_path, &bead_id);
+        if let Some(parent) = snapshot_path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(snapshot_path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+
+        // Stage .beads/test.json (should be allowed)
+        run_git(&repo_path, &["add", ".beads/test.json"]);
+
+        let result = validate_commit(&repo_path, &bead_id).await;
+
+        assert!(
+            result.is_ok(),
+            ".beads/ paths should always be allowed: {:?}",
+            result
+        );
+
+        drop(setup_env_guard);
+        drop(setup_env_lock);
+    }
+
+    #[serial]
+    #[tokio::test]
+    async fn validate_commit_returns_ok_when_no_snapshot() {
+        use super::validate_commit;
+
+        let (setup_env_lock, setup_env_guard) = crate::util::test_env::isolate_env();
+
+        // Test that validate_commit returns Ok when there's no predispatch snapshot
+        // (conservative fallback path)
+        //
+        // Setup:
+        // 1. Create a git repo
+        // 2. Do NOT create a predispatch snapshot
+        // 3. Stage any file
+        // Expected: validate_commit returns Ok (fallback behavior)
+
+        let (repo_path, _temp_dir) = create_git_repo();
+        let bead_id = crate::types::BeadId::from("needle-test-5");
+
+        // Create and stage a file
+        let file = repo_path.join("test.txt");
+        fs::write(&file, "content").unwrap();
+        run_git(&repo_path, &["add", "test.txt"]);
+
+        // No snapshot exists - should fall back to allowing the commit
+        let result = validate_commit(&repo_path, &bead_id).await;
+
+        assert!(
+            result.is_ok(),
+            "should return Ok when no snapshot exists (fallback): {:?}",
+            result
+        );
+
+        drop(setup_env_guard);
+        drop(setup_env_lock);
     }
 }

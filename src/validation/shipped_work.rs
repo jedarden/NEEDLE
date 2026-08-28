@@ -59,6 +59,11 @@ const TRIVIAL_PATH_PREFIXES: &[&str] = &["notes/", ".beads/", ".needle-predispat
 /// bead's workspace directory (`bead.workspace` / `source_repo`). The
 /// pre-dispatch baseline comes from the `predispatch` snapshot recorded by the
 /// worker before the agent ran.
+///
+/// This function always runs against the git repository's committed state, not
+/// uncommitted working tree changes. The git commands it uses (`git rev-parse`,
+/// `git diff`, `git merge-base`) operate on commits only and ignore the
+/// working tree.
 pub async fn verify_shipped_work(
     post: &Bead,
     workspace: &Path,
@@ -193,6 +198,7 @@ mod tests {
         PreDispatch {
             head_sha: head.map(|s| s.to_string()),
             notes_hash: notes.map(hash_notes),
+            dirty_files: Vec::new(),
         }
     }
 

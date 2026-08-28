@@ -733,8 +733,9 @@ impl Resolver {
     ///
     /// 1. Locates the binary using the backend's detect_paths
     /// 2. Runs the binary with the configured version_command (e.g., ["--version"])
-    /// 3. Parses the output to extract the actual backend name
-    /// 4. Compares against the expected backend name from the descriptor
+    /// 3. Matches the full output against the backend's identity_pattern regex
+    /// 4. Extracts the backend name from the pattern match
+    /// 5. Verifies the name matches expected values for the backend
     ///
     /// # Returns
     ///
@@ -760,40 +761,109 @@ impl Resolver {
             "Verifying binary identity"
         );
 
-        // Run the binary with --version to get actual identity
-        let actual_name =
-            BeadBackend::parse_backend_name_from_version(&binary_path, &backend.version_command)
-                .map_err(|e| {
-                    VerificationError::VerificationFailed(format!(
-                        "Failed to run binary --version: {}",
-                        e
-                    ))
-                })?;
+        // Run the binary with version command to get actual identity output
+        let version_output = Self::run_binary_for_version(&binary_path, &backend.version_command)
+            .map_err(|e| {
+            VerificationError::VerificationFailed(format!(
+                "Failed to run binary {:?} with command {:?}: {}",
+                binary_path, backend.version_command, e
+            ))
+        })?;
 
-        // Compare actual vs expected backend name
-        let expected_name = &backend.name;
+        // Use the backend's identity_pattern regex to verify the output
+        let identity_pattern = regex::Regex::new(&backend.identity_pattern).map_err(|e| {
+            VerificationError::VerificationFailed(format!(
+                "Invalid identity_pattern regex for backend '{}': {:?} - {}",
+                backend.name, backend.identity_pattern, e
+            ))
+        })?;
 
-        // Normalize backend names for comparison
-        // "bead-rs" should match "bead", "bead-forge" should match "bf", etc.
-        let normalized_actual = self.normalize_backend_name(&actual_name);
-        let normalized_expected = self.normalize_backend_name(expected_name);
-
-        if normalized_actual != normalized_expected {
+        let trimmed_output = version_output.trim_start();
+        if !identity_pattern.is_match(trimmed_output) {
             return Err(VerificationError::VerificationFailed(
                 format!(
-                    "Binary identity mismatch: binary claims to be '{}' but expected backend '{}' (normalized: '{}' vs '{}')",
-                    actual_name, expected_name, normalized_actual, normalized_expected
+                    "Binary identity mismatch: binary at '{}' reported version {:?}, which does not match expected pattern {:?} for backend '{}'",
+                    binary_path.display(),
+                    trimmed_output,
+                    backend.identity_pattern,
+                    backend.name
+                )
+            ));
+        }
+
+        // Extract the backend name from the version output
+        // The pattern captures the name at the start (e.g., "bf " or "bead ")
+        let captured_name = trimmed_output
+            .split_whitespace()
+            .next()
+            .ok_or_else(|| {
+                VerificationError::VerificationFailed(
+                    format!(
+                        "Failed to extract backend name from version output: binary at '{}' reported empty version output",
+                        binary_path.display()
+                    )
+                )
+            })?;
+
+        // Map the captured name to the expected backend name
+        // Both "bf" and "bead-forge" should map to bead-forge, "bead" and "bead-rs" to bead-rs
+        let expected_names = match backend.name.as_str() {
+            "bead-forge" => vec!["bf", "bead-forge"],
+            "bead-rs" => vec!["bead", "bead-rs"],
+            _ => vec![backend.name.as_str()],
+        };
+
+        if !expected_names.contains(&captured_name) {
+            return Err(VerificationError::VerificationFailed(
+                format!(
+                    "Binary identity mismatch: binary at '{}' reported name {:?}, but expected one of {:?} for backend '{}'",
+                    binary_path.display(),
+                    captured_name,
+                    expected_names,
+                    backend.name
                 )
             ));
         }
 
         tracing::info!(
             backend_name = %backend.name,
-            actual_name = %actual_name,
+            binary_path = %binary_path.display(),
+            captured_name = %captured_name,
             "Binary identity verified successfully"
         );
 
         Ok(())
+    }
+
+    /// Run a binary with the given version command and return its stdout+stderr output.
+    fn run_binary_for_version(binary_path: &PathBuf, version_command: &[String]) -> Result<String> {
+        use std::process::Stdio;
+
+        let output = std::process::Command::new(binary_path)
+            .args(version_command)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .with_context(|| {
+                format!(
+                    "failed to spawn binary '{}' for version check",
+                    binary_path.display()
+                )
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!(
+                "binary '{}' exited with status {}: {}",
+                binary_path.display(),
+                output.status,
+                stderr.trim()
+            );
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Ok(format!("{}{}", stdout, stderr))
     }
 
     /// Find the binary path from the backend's detect_paths.
@@ -801,7 +871,7 @@ impl Resolver {
         for detect_path in &backend.detect_paths {
             // Expand tilde if present
             let expanded_path = if detect_path.starts_with("~/") {
-                if let Some(home) = std::env::var("HOME").ok() {
+                if let Ok(home) = std::env::var("HOME") {
                     PathBuf::from(home).join(detect_path.strip_prefix("~/").unwrap_or(detect_path))
                 } else {
                     detect_path.clone()
@@ -2478,7 +2548,10 @@ exec echo "bf 0.4.1"
         let result = resolver.verify_binary_identity(&decision);
 
         // Assert that the mismatch was detected (not silently accepted)
-        assert!(result.is_err(), "verify_binary_identity should return error for mismatch");
+        assert!(
+            result.is_err(),
+            "verify_binary_identity should return error for mismatch"
+        );
 
         // Assert the error is actionable and names both path and identity
         match result {
@@ -2496,13 +2569,15 @@ exec echo "bf 0.4.1"
                 // Error message should be descriptive and actionable
                 assert!(
                     msg.len() > 30,
-                    "Error message should be descriptive and actionable: {}", msg
+                    "Error message should be descriptive and actionable: {}",
+                    msg
                 );
 
                 // Verify the specific error format includes both identities
                 assert!(
                     msg.contains("claims to be") && msg.contains("expected backend"),
-                    "Error message should explain the mismatch clearly: {}", msg
+                    "Error message should explain the mismatch clearly: {}",
+                    msg
                 );
             }
             Err(VerificationError::NotSupported(msg)) => {
@@ -2560,21 +2635,29 @@ exec echo "bead 0.1.3"
         let result = resolver.verify_binary_identity(&decision);
 
         // Assert that the mismatch was detected
-        assert!(result.is_err(), "verify_binary_identity should return error for reverse mismatch");
+        assert!(
+            result.is_err(),
+            "verify_binary_identity should return error for reverse mismatch"
+        );
 
         match result {
             Err(VerificationError::VerificationFailed(msg)) => {
                 // Error message should mention both identities involved in the mismatch
                 assert!(
-                    msg.contains("bead") && msg.contains("bf") &&
-                    (msg.contains("mismatch") || msg.contains("normalized") || msg.contains("claims to be")),
-                    "Error message should detail the identity mismatch: {}", msg
+                    msg.contains("bead")
+                        && msg.contains("bf")
+                        && (msg.contains("mismatch")
+                            || msg.contains("normalized")
+                            || msg.contains("claims to be")),
+                    "Error message should detail the identity mismatch: {}",
+                    msg
                 );
 
                 // Error message should be descriptive
                 assert!(
                     msg.len() > 30,
-                    "Error message should be descriptive and actionable: {}", msg
+                    "Error message should be descriptive and actionable: {}",
+                    msg
                 );
             }
             Err(VerificationError::NotSupported(msg)) => {
@@ -2632,7 +2715,11 @@ echo "bead 0.1.3"
         let result = resolver.verify_binary_identity(&decision);
 
         // Assert that verification passed
-        assert!(result.is_ok(), "verify_binary_identity should pass for matching identity, got: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "verify_binary_identity should pass for matching identity, got: {:?}",
+            result
+        );
     }
 
     #[cfg(unix)]
@@ -2648,8 +2735,9 @@ echo "bead 0.1.3"
             &shim_path,
             r#"#!/bin/sh
 echo "wrong-identity 1.0.0"
-"#
-        ).unwrap();
+"#,
+        )
+        .unwrap();
         let mut permissions = std::fs::metadata(&shim_path).unwrap().permissions();
         permissions.set_mode(0o755);
         std::fs::set_permissions(&shim_path, permissions).unwrap();
@@ -2686,15 +2774,20 @@ echo "wrong-identity 1.0.0"
                 // 2. The expected identity ("bead" in this case)
                 // 3. Clear explanation of the mismatch
                 assert!(
-                    msg.contains("wrong-identity") && msg.contains("bead-rs") &&
-                    (msg.contains("mismatch") || msg.contains("claims to be") || msg.contains("expected backend")),
-                    "Error should detail the identity mismatch clearly: {}", msg
+                    msg.contains("wrong-identity")
+                        && msg.contains("bead-rs")
+                        && (msg.contains("mismatch")
+                            || msg.contains("claims to be")
+                            || msg.contains("expected backend")),
+                    "Error should detail the identity mismatch clearly: {}",
+                    msg
                 );
 
                 // Error message should be descriptive (not a generic "failed" message)
                 assert!(
                     msg.len() > 40,
-                    "Error message should be descriptive and actionable: {}", msg
+                    "Error message should be descriptive and actionable: {}",
+                    msg
                 );
 
                 // Error message should not be empty or whitespace-only
@@ -2702,8 +2795,11 @@ echo "wrong-identity 1.0.0"
 
                 // Error message should use actionable language ("claims", "expected", "normalized")
                 assert!(
-                    msg.contains("claims") || msg.contains("expected") || msg.contains("normalized"),
-                    "Error message should use actionable, explanatory language: {}", msg
+                    msg.contains("claims")
+                        || msg.contains("expected")
+                        || msg.contains("normalized"),
+                    "Error message should use actionable, explanatory language: {}",
+                    msg
                 );
             }
             Err(VerificationError::NotSupported(msg)) => {

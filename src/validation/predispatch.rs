@@ -25,6 +25,15 @@ use sha2::{Digest, Sha256};
 use crate::bead_store::{spawn_with_etxtbsy_retry, BeadStore};
 use crate::types::BeadId;
 
+/// A dirty file with its blob hash at predispatch time.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DirtyFile {
+    /// Path relative to workspace root.
+    pub path: String,
+    /// Git blob hash of the file's contents at predispatch time.
+    pub blob_hash: String,
+}
+
 /// Workspace + bead state captured immediately before an agent is dispatched.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PreDispatch {
@@ -35,6 +44,11 @@ pub struct PreDispatch {
     /// Hashed rather than stored verbatim so snapshots stay small and never
     /// carry bead content onto disk.
     pub notes_hash: Option<String>,
+    /// Files that were dirty at predispatch time with their blob hashes.
+    ///
+    /// Used by the commit hook to detect when an agent sweeps in another
+    /// worker's in-flight edit without modifying it.
+    pub dirty_files: Vec<DirtyFile>,
 }
 
 /// Hash a bead's `notes` field for comparison across a dispatch.
@@ -56,7 +70,7 @@ fn state_root() -> PathBuf {
 ///
 /// The workspace path is hashed so that snapshots for same-named beads in
 /// different checkouts never collide.
-fn snapshot_path_in(root: &Path, workspace: &Path, bead_id: &BeadId) -> PathBuf {
+pub fn snapshot_path_in(root: &Path, workspace: &Path, bead_id: &BeadId) -> PathBuf {
     let mut hasher = Sha256::new();
     hasher.update(workspace.as_os_str().as_encoded_bytes());
     let ws = format!("{:x}", hasher.finalize());
@@ -69,7 +83,7 @@ fn snapshot_path_in(root: &Path, workspace: &Path, bead_id: &BeadId) -> PathBuf 
     root.join(format!("{}-{}.json", &ws[..16], bead))
 }
 
-fn snapshot_path(workspace: &Path, bead_id: &BeadId) -> PathBuf {
+pub fn snapshot_path(workspace: &Path, bead_id: &BeadId) -> PathBuf {
     snapshot_path_in(&state_root(), workspace, bead_id)
 }
 
@@ -81,6 +95,7 @@ pub async fn record(workspace: &Path, bead_id: &BeadId, store: &dyn BeadStore) -
     let snapshot = PreDispatch {
         head_sha: git_head(workspace).await,
         notes_hash: read_notes(store, bead_id).await.map(|n| hash_notes(&n)),
+        dirty_files: capture_dirty_files(workspace).await.unwrap_or_default(),
     };
 
     let path = snapshot_path(workspace, bead_id);
@@ -106,6 +121,108 @@ pub async fn load(workspace: &Path, bead_id: &BeadId) -> Option<PreDispatch> {
 /// Remove a snapshot once its dispatch has been fully accounted for.
 pub async fn clear(workspace: &Path, bead_id: &BeadId) {
     let _ = tokio::fs::remove_file(snapshot_path(workspace, bead_id)).await;
+}
+
+/// Capture all dirty files in the workspace with their blob hashes.
+///
+/// Returns `None` if not a git repo or if git commands fail. Returns an empty
+/// vec if there are no dirty files.
+async fn capture_dirty_files(workspace: &Path) -> Option<Vec<DirtyFile>> {
+    let workspace = workspace.to_path_buf();
+
+    // Run git status --porcelain to get all dirty files (tracked and untracked)
+    let output = spawn_with_etxtbsy_retry(
+        || {
+            let workspace = workspace.clone();
+            async move {
+                tokio::process::Command::new("git")
+                    .args(["status", "--porcelain"])
+                    .current_dir(&workspace)
+                    .kill_on_drop(true)
+                    .output()
+                    .await
+            }
+        },
+        5,
+        20,
+    )
+    .await
+    .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut dirty_files = Vec::new();
+
+    for line in stdout.lines() {
+        if line.len() < 4 {
+            continue; // Skip malformed lines
+        }
+
+        let status = &line[..2];
+        let path = line[3..].trim();
+
+        // Skip .beads/ and .needle-predispatch-sha - they have their own handling
+        if path.starts_with(".beads/") || path == ".needle-predispatch-sha" {
+            continue;
+        }
+
+        // Only capture files that are actually modified (M), added (A), or untracked (??)
+        // Ignore deleted files since they won't be in the index
+        if !matches!(status, " M" | "M " | "MM" | "A " | "??") {
+            continue;
+        }
+
+        // Get the blob hash of the file's current content
+        let blob_hash = match git_hash_object(&workspace, path).await {
+            Some(hash) => hash,
+            None => continue, // Skip files we can't hash
+        };
+
+        dirty_files.push(DirtyFile {
+            path: path.to_string(),
+            blob_hash,
+        });
+    }
+
+    if dirty_files.is_empty() {
+        Some(Vec::new())
+    } else {
+        Some(dirty_files)
+    }
+}
+
+/// Get the git blob hash of a file's current content.
+///
+/// Returns `None` if the file doesn't exist or git hash-object fails.
+async fn git_hash_object(workspace: &Path, path: &str) -> Option<String> {
+    let output = spawn_with_etxtbsy_retry(
+        || {
+            let workspace = workspace.clone();
+            let path = path.to_string();
+            async move {
+                // Use git hash-object with the file path directly
+                tokio::process::Command::new("git")
+                    .args(["hash-object", &path])
+                    .current_dir(&workspace)
+                    .kill_on_drop(true)
+                    .output()
+                    .await
+            }
+        },
+        5,
+        20,
+    )
+    .await
+    .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 async fn git_head(workspace: &Path) -> Option<String> {
@@ -187,6 +304,7 @@ mod tests {
         let snapshot = PreDispatch {
             head_sha: Some("deadbeef".to_string()),
             notes_hash: Some(hash_notes("investigated, nothing to change")),
+            dirty_files: vec![],
         };
         write_at(root.path(), ws.path(), &bead, &snapshot).await;
 
@@ -244,6 +362,7 @@ mod tests {
             &PreDispatch {
                 head_sha: None,
                 notes_hash: None,
+                dirty_files: vec![],
             },
         )
         .await;

@@ -51,6 +51,12 @@ const DEFAULT_PLUCK_TEMPLATE: &str = "\
 Complete the task described above. When finished:
 - **If you changed files, commit and push them.** `git commit`, then `git push`. Real
   changes are source, tests, config, or documentation the task actually asked for.
+
+  **Important:** The commit hook will reject commits that include files that were already
+  dirty before you started and you haven't modified. This prevents accidentally sweeping
+  in other workers' in-flight edits. If you need to commit a file that was dirty before
+  dispatch, make an actual change to it first (even a trivial edit is enough to prove
+  you touched it).
 - **If the task needed no file changes, do NOT manufacture a commit.** Verification-only
   work, work that turned out to be already done, and work you found blocked are all
   legitimate outcomes with nothing to commit. Record the finding on the bead instead:

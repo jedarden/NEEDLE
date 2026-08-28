@@ -1653,7 +1653,6 @@ impl Dispatcher {
                                 libc::killpg(pid as libc::pid_t, libc::SIGKILL);
                             }
                         }
-                        let _ = guard.get_mut().and_then(|c| c.start_kill().ok());
                         let _ = guard.wait().await;
                         kill_guard.disarm();
 
@@ -1686,7 +1685,6 @@ impl Dispatcher {
                                 libc::killpg(pid as libc::pid_t, libc::SIGKILL);
                             }
                         }
-                        let _ = guard.get_mut().and_then(|c| c.start_kill().ok());
                         let _ = guard.wait().await;
                         kill_guard.disarm();
 
