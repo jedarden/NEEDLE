@@ -1081,6 +1081,7 @@ mod tests {
             self.events.lock().unwrap().clone()
         }
 
+        #[allow(dead_code)]
         fn clear(&self) {
             self.events.lock().unwrap().clear();
         }
@@ -1144,7 +1145,7 @@ mod tests {
 
     #[test]
     fn verify_backend_error_messages_include_mismatch_details() {
-        let probe = VersionProbe::new();
+        let _probe = VersionProbe::new();
 
         // Create a BackendMismatch error manually
         let err = VerifyError::BackendMismatch {
@@ -1162,7 +1163,7 @@ mod tests {
 
     #[test]
     fn verify_backend_error_messages_include_no_backend_details() {
-        let probe = VersionProbe::new();
+        let _probe = VersionProbe::new();
 
         // Create a NoBackendDetected error manually
         let err = VerifyError::NoBackendDetected {
@@ -1177,7 +1178,7 @@ mod tests {
     #[test]
     fn verify_backend_telemetry_includes_all_fields_on_success() {
         let mock = std::sync::Arc::new(MockTelemetryEmitter::new());
-        let probe = VersionProbe::new().with_telemetry(mock.clone());
+        let _probe = VersionProbe::new().with_telemetry(mock.clone());
 
         // This test documents the expected structure
         // Real verification requires actual binaries to exist

@@ -481,10 +481,14 @@ impl MendStrand {
     /// Scan all open beads and clear assignees whose workers have no live heartbeat
     /// or are not actively working on this specific bead.
     ///
-    /// This heals beads that became permanently unclaimable after a reopen
-    /// (bead-forge's reopen does not clear assignee). An open bead with a stale
-    /// assignee is invisible to all workers because ready() filters out assigned
-    /// beads. Clearing the assignee makes it claimable again.
+    /// This heals beads that became permanently unclaimable with a stale assignee.
+    /// An open bead with an assignee is invisible to all workers because ready()
+    /// filters out assigned beads. Clearing the assignee makes it claimable again.
+    ///
+    /// Note: As of 2026-08-24 (ADR-018), `bead reopen` clears the assignee, so
+    /// this cleanup primarily addresses other cases where beads become stuck
+    /// (e.g., manual assignment changes, race conditions, or the
+    /// assigned-but-open state that `bead release` cannot fix).
     ///
     /// Staleness detection strategy:
     /// - An assignee is stale if the worker has no heartbeat or is dead

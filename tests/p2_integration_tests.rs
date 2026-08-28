@@ -1698,11 +1698,21 @@ async fn mitosis_concurrent_workers_flock_serializes() {
 
     let mut split_count = 0u32;
     let mut skipped_count = 0u32;
+
+    // Add timeout protection to prevent indefinite hanging
     for handle in handles {
-        match handle.await.unwrap() {
-            MitosisResult::Split { .. } => split_count += 1,
-            MitosisResult::Skipped { .. } => skipped_count += 1,
-            other => panic!("unexpected mitosis result: {:?}", other),
+        let result = tokio::time::timeout(Duration::from_secs(10), handle).await;
+
+        match result {
+            Ok(Ok(mitosis_result)) => match mitosis_result {
+                MitosisResult::Split { .. } => split_count += 1,
+                MitosisResult::Skipped { .. } => skipped_count += 1,
+                other => panic!("unexpected mitosis result: {:?}", other),
+            },
+            Ok(Err(e)) => panic!("worker task failed: {:?}", e),
+            Err(_) => panic!(
+                "timeout waiting for worker to complete - possible deadlock in flock serialization"
+            ),
         }
     }
 

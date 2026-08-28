@@ -13,7 +13,7 @@ Root causes, verified in code and worker logs:
 1. **Return-on-first-candidates deadlock.** `ExploreStrand::evaluate` (src/strand/explore.rs) iterates a static workspace list in filesystem-discovery order and returns at the first workspace with ready candidates. Worker-level exclusions (race-lost TTL 30s) and unclaimable assignees are applied *after* the strand returns. A workspace whose candidates are all unclaimable therefore satisfies "has candidates" every cycle, the worker nets zero, sleeps the idle backoff (900s observed), and never advances to workspace #2. One poisoned store starves the entire estate.
 2. **Thundering herd.** Every worker walks the same list in the same order — all roamers converge on the same hot store, race for the same bead, and the losers idle.
 3. **Store-layer limit bugs.** The `br ready --json` invocation passes no `--limit` (bead-forge's default limit truncates priority-sorted output — low-priority beads become invisible in busy stores) and another path passes `--limit 0`, which returns an empty set on deployed bead-forge 0.2.0. This produced both "P3 beads invisible" and the persistent `bf list failed` log noise.
-4. **Stale assignees are permanent.** `candidates.retain(|b| b.assignee.is_none())` is correct as a claim guard, but nothing ever *releases* a stale assignee on an **open** bead (bead-forge `reopen` does not clear assignee; cross-workspace mend only handles orphaned in-progress beads). A reopened bead became permanently unclaimable by every worker.
+4. **Stale assignees are permanent.** `candidates.retain(|b| b.assignee.is_none())` is correct as a claim guard, but nothing ever *releases* a stale assignee on an **open** bead (cross-workspace mend only handles orphaned in-progress beads). A reopened bead became permanently unclaimable by every worker. **Note:** As of 2026-08-24 (ADR-018), `bead reopen` clears the assignee, fixing this specific failure mode. Mend's assignee healing remains valuable for other cases where beads become stuck with stale assignees.
 5. **Claim errors masquerade as races.** CLI claim failures collapse into `claimed_by=(race)`, so version-skew or store corruption presents as endless quiet race losses instead of a loud error.
 6. **Boot-only discovery.** The workspace list is captured at construction and never refreshed (a deliberate v1 constraint), so newly created stores require worker restarts.
 
@@ -36,7 +36,7 @@ Kept from v1 by design: no upward traversal; workers return home after one remot
 - Slightly more store traffic (shorter polling floor, re-discovery) — bounded by jitter and mtime pre-checks, and far cheaper than the operator interventions it replaces.
 - New telemetry events extend the existing schema (additive; JSONL/OTLP consumers unaffected).
 - The starvation alarm gives FABRIC/HOOP a signal for the fleet-immune-system layer identified in the 2026-07 corpus audit.
-- Until bead-forge ships the `reopen`-clears-assignee and `--limit 0` fixes, NEEDLE carries defensive workarounds (assignee healing, explicit limits) that can later be simplified.
+- As of 2026-08-24 (ADR-018), `bead reopen` clears the assignee, fixing the core failure mode that motivated defensive assignee healing. The `--limit 0` fix remains pending in bead-forge. NEEDLE's defensive workarounds (assignee healing, explicit limits) stay in place for robustness and to handle other cases where beads become stuck with stale assignees.
 
 ## Evidence
 

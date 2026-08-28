@@ -109,7 +109,29 @@ pub async fn clear(workspace: &Path, bead_id: &BeadId) {
 }
 
 async fn git_head(workspace: &Path) -> Option<String> {
-    run(workspace, "git", &["rev-parse", "HEAD"]).await
+    let workspace = workspace.to_path_buf();
+
+    let output = spawn_with_etxtbsy_retry(
+        || {
+            let workspace = workspace.clone();
+            async move {
+                tokio::process::Command::new("git")
+                    .args(["rev-parse", "HEAD"])
+                    .current_dir(&workspace)
+                    .kill_on_drop(true)
+                    .output()
+                    .await
+            }
+        },
+        5,
+        20,
+    )
+    .await
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 /// Read a bead's current `notes` field, for comparison against a snapshot.
@@ -130,36 +152,6 @@ pub async fn current_notes(store: &dyn BeadStore, bead_id: &BeadId) -> Option<St
 /// subprocess produced when it failed.
 async fn read_notes(store: &dyn BeadStore, bead_id: &BeadId) -> Option<String> {
     store.notes(bead_id).await.ok().flatten()
-}
-
-async fn run(workspace: &Path, bin: &str, args: &[&str]) -> Option<String> {
-    let bin = bin.to_string();
-    let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
-    let workspace = workspace.to_path_buf();
-
-    let output = spawn_with_etxtbsy_retry(
-        || {
-            let bin = bin.clone();
-            let args = args.clone();
-            let workspace = workspace.clone();
-            async move {
-                tokio::process::Command::new(&bin)
-                    .args(args.iter().map(String::as_str).collect::<Vec<_>>())
-                    .current_dir(&workspace)
-                    .kill_on_drop(true)
-                    .output()
-                    .await
-            }
-        },
-        5,
-        20,
-    )
-    .await
-    .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 #[cfg(test)]

@@ -1878,7 +1878,10 @@ fi
         let bead_id = crate::types::BeadId::from("bf-nonexistent");
         let result = store.show(&bead_id).await;
 
-        assert!(result.is_err(), "show() should return error for non-existent bead");
+        assert!(
+            result.is_err(),
+            "show() should return error for non-existent bead"
+        );
         let error_msg = result.unwrap_err().to_string();
         assert!(
             error_msg.contains("returned no bead") || error_msg.contains("bf-nonexistent"),

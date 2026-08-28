@@ -155,14 +155,12 @@ pub struct HealthMonitor {
 /// # Behavior
 ///
 /// - If `heartbeat_dir` is absolute, use it directly
-/// - If `heartbeat_dir` is relative:
-///   - In production, config.home is $HOME/.needle, so use it directly
-///   - In tests with HomeGuard: HOME changes, so config.home != current HOME/.needle
-///     - If config.home looks like a valid test path (exists), use it
-///     - Otherwise, fall back to current HOME/.needle (test isolation)
+/// - If `heartbeat_dir` is relative, resolve it relative to the current HOME:
+///   - In tests with HomeGuard: HOME is the test temp directory, so we use that
+///   - In production: HOME is the real user home, so we use $HOME/.needle/...
 ///
-/// This preserves the production behavior (using config.workspace.home) while
-/// respecting test isolation (HomeGuard sets HOME to a temp directory).
+/// This respects test isolation by reading the current HOME environment variable
+/// at runtime, rather than using a hardcoded path from config.
 fn resolve_heartbeat_dir(config_home: &Path, heartbeat_dir: Option<PathBuf>) -> PathBuf {
     let dir = heartbeat_dir.unwrap_or_else(|| PathBuf::from("state").join("heartbeats"));
 
@@ -171,26 +169,15 @@ fn resolve_heartbeat_dir(config_home: &Path, heartbeat_dir: Option<PathBuf>) -> 
         return dir;
     }
 
-    // Check if HOME has been changed (e.g., by HomeGuard in tests)
-    // Config's default_home() creates paths like $HOME/.needle
+    // For relative paths, resolve relative to the current HOME directory.
+    // This ensures that when tests use HomeGuard to change HOME, we respect
+    // the isolated HOME and write heartbeats to the test's temp directory.
     if let Ok(current_home) = std::env::var("HOME") {
-        let current_home = PathBuf::from(current_home);
-        let expected_config_home = current_home.join(".needle");
-
-        // If config.home doesn't start with current HOME/.needle, HOME was changed
-        if !config_home.starts_with(&expected_config_home) {
-            // Check if config.home looks like a manually set test path
-            // (exists and is not the default ~/.needle location)
-            if config_home.exists() && !config_home.ends_with(".needle") {
-                // Tests manually set config.home - use it
-                return config_home.join(dir);
-            }
-            // Otherwise, HOME was changed by HomeGuard - use current HOME
-            return expected_config_home.join(dir);
-        }
+        let home = PathBuf::from(current_home);
+        return home.join(".needle").join(dir);
     }
 
-    // Default: use config's workspace.home
+    // Fallback: use the config home (should rarely happen)
     config_home.join(dir)
 }
 
@@ -1490,6 +1477,7 @@ mod tests {
             .parent()
             .unwrap()
             .to_path_buf();
+        config.health.heartbeat_dir = Some(heartbeat_dir.to_path_buf());
         config.health.heartbeat_interval_secs = 1;
         config.health.heartbeat_ttl_secs = 5;
         config

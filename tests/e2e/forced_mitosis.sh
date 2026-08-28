@@ -48,7 +48,14 @@ info() { echo -e "  ${YELLOW}INFO${NC}: $1"; }
 echo "=== E2E: Failure Counter Persists — Forced Mitosis Triggers ==="
 echo ""
 
-NEEDLE_BIN="$PROJECT_ROOT/target/debug/needle"
+# Use shared target directory (CARGO_TARGET_DIR or default /home/coding/target)
+if [ -n "${CARGO_TARGET_DIR:-}" ]; then
+    NEEDLE_BIN="$CARGO_TARGET_DIR/debug/needle"
+elif [ -x "/home/coding/target/debug/needle" ]; then
+    NEEDLE_BIN="/home/coding/target/debug/needle"
+else
+    NEEDLE_BIN="$PROJECT_ROOT/target/debug/needle"
+fi
 
 if [ ! -x "$NEEDLE_BIN" ]; then
     echo "Building needle (debug)..."
@@ -69,7 +76,8 @@ fi
 
 # ── Create isolated environment ────────────────────────────────────────────────
 
-TMPBASE="$(mktemp -d)"
+# Use /var/tmp for more isolated temp directory (avoids /tmp/.beads conflict)
+TMPBASE="$(mktemp -d -p /var/tmp -t needle-e2e-mitosis-XXXXXX)"
 WORKSPACE="$TMPBASE/workspace"
 FAKE_HOME="$TMPBASE/home"
 MITOSIS_MARKER="$TMPBASE/mitosis_invocations"
@@ -96,6 +104,13 @@ mkdir -p "$WORKSPACE"
     echo "FATAL: br init failed"
     exit 1
 }
+
+# Configure needle to use bead-rs backend
+cat > "$WORKSPACE/.needle.yaml" <<YAML
+bead_cli:
+  backend: bead-rs
+YAML
+
 echo "  Workspace: $WORKSPACE"
 
 # ── Step 2: Create test bead with 3 subtasks ──────────────────────────────────
@@ -110,8 +125,7 @@ BEAD_ID="$(cd "$WORKSPACE" && "$BR_BIN" create \
 
 - [ ] Subtask A: Implement feature X
 - [ ] Subtask B: Add unit tests
-- [ ] Subtask C: Update documentation" \
-    --silent 2>/dev/null)" || {
+- [ ] Subtask C: Update documentation" 2>/dev/null)" || {
     # Retry once after sync (FrankenSQLite WAL race).
     (cd "$WORKSPACE" && "$BR_BIN" sync --flush-only 2>/dev/null) || true
     BEAD_ID="$(cd "$WORKSPACE" && "$BR_BIN" create \
@@ -122,8 +136,7 @@ BEAD_ID="$(cd "$WORKSPACE" && "$BR_BIN" create \
 
 - [ ] Subtask A: Implement feature X
 - [ ] Subtask B: Add unit tests
-- [ ] Subtask C: Update documentation" \
-        --silent)"
+- [ ] Subtask C: Update documentation" 2>/dev/null)"
 }
 echo "  Bead: $BEAD_ID"
 

@@ -154,6 +154,29 @@ bf close BEAD_ID --reason "Summary of what was done"
 Note `--reason`, not `--body`: `--body` is not a valid flag and the close will
 fail.
 
+### Reopening Beads
+
+When a closed bead needs to be revisited, use `bead reopen`:
+
+```bash
+bead reopen BEAD_ID
+```
+
+**Critical behavior:** `bead reopen` **clears the assignee**, making the bead
+immediately claimable by any worker. This is intentional design (see ADR-018)
+to prevent silent starvation where a reopened bead with a stale assignee would
+become permanently unclaimable.
+
+The reopen contract:
+- Transitions status from `closed` to `open`
+- Clears `assignee` (making the bead claimable)
+- Clears `closed_at` and `close_reason`
+- Clears `manual_blocked` flag
+- Preserves full audit trail (previous assignee remains visible in history)
+
+If you need a specific worker to continue a reopened bead, manually reassign
+it after reopening with `bead update <id> --assignee <worker>`.
+
 ## Checkpoint Commits
 
 When committing checkpoint changes (anything under `.beads/checkpoint/`), you

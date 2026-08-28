@@ -215,7 +215,6 @@ mod general_panic_safety_tests {
         // Documents the fundamental panic safety guarantee:
         // "All functions that return Result<T, E> must never panic.
         //  Errors must be propagated via the Result type, not by unwinding."
-        assert!(true, "Test documents panic safety guarantee");
     }
 
     /// Test idempotency guarantees for cleanup operations.
@@ -225,7 +224,6 @@ mod general_panic_safety_tests {
         // "All cleanup operations must be idempotent.
         //  Calling cleanup() twice on the same resource must not panic
         //  and must not cause errors (second call is a no-op)."
-        assert!(true, "Test documents idempotency guarantee");
     }
 
     /// Test that cleanup operations are best-effort during shutdown.
@@ -235,6 +233,5 @@ mod general_panic_safety_tests {
         // "Cleanup operations during shutdown must be best-effort.
         //  If cleanup fails, log the error but return Ok(()) to allow
         //  shutdown to proceed."
-        assert!(true, "Test documents best-effort cleanup guarantee");
     }
 }

@@ -45,6 +45,7 @@ pub mod learning;
 pub mod log_writer;
 pub mod mitosis;
 pub mod outcome;
+pub mod panic_safety_tests;
 pub mod peer;
 pub mod process_guard;
 pub mod prompt;

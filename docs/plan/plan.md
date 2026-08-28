@@ -4102,7 +4102,7 @@ stats       ──► telemetry, config, types
 - **Store-layer limit correctness.** The `br ready --json` path passes no `--limit` (default truncation hides low-priority beads); another path passes `--limit 0` (returns nothing on deployed bead-forge 0.2.0). Always pass an explicit large limit; add a boot-time `bf --version` handshake that WARNs on known-bad versions.
 
 ### 5.2 Stale-state healing
-- **Mend releases stale assignees on open beads.** Cross-workspace mend only handles orphaned in-progress beads today; an open bead with a dead assignee (e.g. after reopen, which does not clear assignee) is permanently invisible to all workers. Clear assignees with no live heartbeat.
+- **Mend releases stale assignees on open beads.** Cross-workspace mend only handles orphaned in-progress beads today; an open bead with a dead assignee is permanently invisible to all workers. Clear assignees with no live heartbeat. **Note:** As of 2026-08-24 (ADR-018), `bead reopen` clears the assignee, fixing the reopen-specific case. Mend's assignee healing remains valuable for other cases where beads become stuck with stale assignees.
 - **Claim-error ≠ race-lost.** Claim CLI errors currently collapse into `claimed_by=(race)`. Distinguish them; after N consecutive claim errors on one bead, emit an ERROR telemetry event and mark the bead/store suspect instead of silently cycling.
 
 ### 5.3 Cadence and liveness

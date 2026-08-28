@@ -3866,7 +3866,7 @@ fi
         for schema_ref in required_schemas {
             let bead_rs = workspace.path().join(format!(
                 "bead-rs-schema-{}",
-                schema_ref.split(':').last().unwrap()
+                schema_ref.split(':').next_back().unwrap()
             ));
             std::fs::write(
                 &bead_rs,

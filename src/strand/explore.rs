@@ -46,7 +46,6 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
-use std::time::Instant;
 
 use crate::bead_store::{discover_default, BeadStore, Filters};
 use crate::config::ExploreConfig;
