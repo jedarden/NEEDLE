@@ -3520,10 +3520,8 @@ mod tests {
 
     #[test]
     fn extract_workspace_path_returns_first_valid_workspace() {
-        let bead1 =
-            make_bead_with_workspace_and_labels("bead1", 1, "/workspace/a", vec![]);
-        let bead2 =
-            make_bead_with_workspace_and_labels("bead2", 2, "", vec![]); // NULL workspace
+        let bead1 = make_bead_with_workspace_and_labels("bead1", 1, "/workspace/a", vec![]);
+        let bead2 = make_bead_with_workspace_and_labels("bead2", 2, "", vec![]); // NULL workspace
 
         let workspace = extract_workspace_path(&[bead1, bead2]);
         assert_eq!(
@@ -3567,7 +3565,7 @@ mod tests {
         // Since the store is a mock, we can't check actual bead creation,
         // but we can verify the logic didn't attempt to create one by checking
         // that the code path was skipped (no panic/error occurred)
-        assert!(true, "test passed - no alert created when open_count == 0");
+        // Test reaches this point = success
     }
 
     #[tokio::test]
@@ -3581,12 +3579,10 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         let workspace_path = workspace.path().to_str().unwrap();
 
-        let mut blocker =
-            make_bead_with_workspace_and_labels("blocker", 1, workspace_path, vec![]);
+        let mut blocker = make_bead_with_workspace_and_labels("blocker", 1, workspace_path, vec![]);
         blocker.status = BeadStatus::Closed; // Blocker is done
 
-        let mut blocked =
-            make_bead_with_workspace_and_labels("blocked", 1, workspace_path, vec![]);
+        let mut blocked = make_bead_with_workspace_and_labels("blocked", 1, workspace_path, vec![]);
         blocked.status = BeadStatus::Blocked;
         blocked.dependencies.push(BrDependency {
             id: blocker.id.clone(),
@@ -3598,7 +3594,9 @@ mod tests {
 
         // Even though there's an open bead, it's blocked by a closed dependency
         // This should NOT trigger a starvation alert
-        let store = UnfilteredStore { beads: vec![blocked] };
+        let store = UnfilteredStore {
+            beads: vec![blocked],
+        };
 
         let strand = PluckStrand::with_persistent_records(
             vec![],
@@ -3613,7 +3611,10 @@ mod tests {
         // Should return NoWork
         match result {
             StrandResult::NoWork => {}
-            other => panic!("expected NoWork when all beads are blocked, got: {:?}", other),
+            other => panic!(
+                "expected NoWork when all beads are blocked, got: {:?}",
+                other
+            ),
         }
 
         helper.sync().await;
@@ -3622,7 +3623,9 @@ mod tests {
         helper.assert_event_emitted("strand.pluck.starvation_detected");
 
         // Verify the event shows all beads are blocked
-        let event = helper.find_event("strand.pluck.starvation_detected").unwrap();
+        let event = helper
+            .find_event("strand.pluck.starvation_detected")
+            .unwrap();
         assert_eq!(
             event.data.get("open_count").and_then(|v| v.as_u64()),
             Some(1),
