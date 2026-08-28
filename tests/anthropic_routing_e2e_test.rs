@@ -9,11 +9,13 @@
 //!
 //! Run with: cargo test --test anthropic_routing_e2e_test
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use needle::config::{AgentConfig, Config, RoutingConfig, RoutingRule};
-use needle::dispatch::Dispatcher;
+use needle::dispatch::{AgentAdapter, Dispatcher};
 use needle::telemetry::Telemetry;
+use needle::types::InputMethod;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Test Helper Functions
@@ -53,6 +55,59 @@ fn make_test_config_with_routing(agent_default: &str, routing: Option<RoutingCon
     }
 }
 
+/// Create mock adapters for testing.
+fn make_mock_adapters() -> HashMap<String, AgentAdapter> {
+    let mut adapters = HashMap::new();
+
+    // Mock claude-print adapter (what Anthropic models should route to)
+    adapters.insert(
+        "claude-print".to_string(),
+        AgentAdapter {
+            name: "claude-print".to_string(),
+            description: Some("claude-print adapter for Anthropic subscription models".to_string()),
+            agent_cli: "claude-print".to_string(),
+            version_command: Some("claude-print --version".to_string()),
+            input_method: InputMethod::Stdin,
+            invoke_template: "cd {workspace} && claude-print --model {model} --max-turns 30 --output-format stream-json --dangerously-skip-permissions --no-inherit-hooks < {prompt_file}".to_string(),
+            environment: HashMap::new(),
+            timeout_secs: 3600,
+            idle_timeout_secs: 0,
+            hard_timeout_secs: 0,
+            provider: Some("anthropic".to_string()),
+            model: Some("claude-sonnet-4-6".to_string()),
+            token_extraction: needle::dispatch::TokenExtraction::None,
+            output_transform: Some("needle-transform-claude".to_string()),
+            harness: Some("needle".to_string()),
+            harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        },
+    );
+
+    // Mock claude-code-glm-4.7 adapter (default for non-Anthropic models)
+    adapters.insert(
+        "claude-code-glm-4.7".to_string(),
+        AgentAdapter {
+            name: "claude-code-glm-4.7".to_string(),
+            description: Some("GLM adapter for non-Anthropic models".to_string()),
+            agent_cli: "claude".to_string(),
+            version_command: Some("claude --version".to_string()),
+            input_method: InputMethod::Stdin,
+            invoke_template: "claude --model {model} --max-turns 30".to_string(),
+            environment: HashMap::new(),
+            timeout_secs: 3600,
+            idle_timeout_secs: 0,
+            hard_timeout_secs: 0,
+            provider: Some("anthropic".to_string()),
+            model: None,
+            token_extraction: needle::dispatch::TokenExtraction::None,
+            output_transform: None,
+            harness: Some("needle".to_string()),
+            harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        },
+    );
+
+    adapters
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Main Integration Test
 // ──────────────────────────────────────────────────────────────────────────────
@@ -66,10 +121,10 @@ fn anthropic_routing_e2e_sonnet_to_claude_print() {
     let routing = make_anthropic_subscription_routing();
     let config = make_test_config_with_routing("claude", Some(routing));
 
-    // 2. Create dispatcher with telemetry
+    // 2. Create dispatcher with mock adapters and telemetry
+    let adapters = make_mock_adapters();
     let telemetry = Telemetry::new("test-worker-anthropic-routing".to_string());
-    let dispatcher = Dispatcher::new(&config, telemetry)
-        .expect("Failed to create dispatcher");
+    let dispatcher = Dispatcher::with_adapters(adapters, telemetry, 3600);
 
     // 3. Verify routing configuration is loaded
     assert!(
@@ -84,13 +139,11 @@ fn anthropic_routing_e2e_sonnet_to_claude_print() {
         "Should have 1 routing rule for Anthropic models"
     );
     assert_eq!(
-        routing_config.rules[0].match_model,
-        "(claude-)?(sonnet|opus|fable|haiku).*",
+        routing_config.rules[0].match_model, "(claude-)?(sonnet|opus|fable|haiku).*",
         "Routing rule should match Anthropic subscription models"
     );
     assert_eq!(
-        routing_config.rules[0].adapter,
-        "claude-print",
+        routing_config.rules[0].adapter, "claude-print",
         "Routing rule should route to claude-print adapter"
     );
     assert_eq!(
@@ -114,29 +167,21 @@ fn anthropic_routing_e2e_sonnet_to_claude_print() {
     for model in &anthropic_models {
         let resolved_adapter = dispatcher.resolve_adapter_name(model, &config);
         assert_eq!(
-            resolved_adapter,
-            "claude-print",
+            resolved_adapter, "claude-print",
             "Anthropic model '{}' should resolve to claude-print adapter, got '{}'",
-            model,
-            resolved_adapter
+            model, resolved_adapter
         );
     }
 
     // 5. Test adapter resolution for non-Anthropic models
-    let non_anthropic_models = vec![
-        "gpt-4",
-        "gemini-pro",
-        "glm-4.7",
-    ];
+    let non_anthropic_models = vec!["gpt-4", "gemini-pro", "glm-4.7"];
 
     for model in &non_anthropic_models {
         let resolved_adapter = dispatcher.resolve_adapter_name(model, &config);
         assert_eq!(
-            resolved_adapter,
-            "claude-code-glm-4.7",
+            resolved_adapter, "claude-code-glm-4.7",
             "Non-Anthropic model '{}' should resolve to default adapter, got '{}'",
-            model,
-            resolved_adapter
+            model, resolved_adapter
         );
     }
 
@@ -149,8 +194,7 @@ fn anthropic_routing_e2e_sonnet_to_claude_print() {
 
     let adapter = claude_print_adapter.unwrap();
     assert_eq!(
-        adapter.name,
-        "claude-print",
+        adapter.name, "claude-print",
         "Adapter name should be claude-print"
     );
     assert_eq!(
@@ -183,8 +227,14 @@ fn anthropic_routing_e2e_sonnet_to_claude_print() {
 
     // 9. Log test results for documentation
     println!("✅ Anthropic routing E2E test passed:");
-    println!("   - {} Anthropic models correctly route to claude-print", anthropic_models.len());
-    println!("   - {} non-Anthropic models correctly route to default", non_anthropic_models.len());
+    println!(
+        "   - {} Anthropic models correctly route to claude-print",
+        anthropic_models.len()
+    );
+    println!(
+        "   - {} non-Anthropic models correctly route to default",
+        non_anthropic_models.len()
+    );
     println!("   - claude-print adapter has correct configuration");
     println!("   - stream-json output format is requested");
     println!("   - needle-transform-claude is configured");
@@ -200,17 +250,83 @@ fn anthropic_routing_verify_adapter_resolution_order() {
             make_rule("claude-sonnet.*", "claude-print-sonnet-specific"),
             // General claude rule second
             make_rule("claude.*", "claude-general"),
-            // Catchall last
+            // Catchall last - this should match the default_adapter
             make_rule("*", "catchall"),
         ],
-        default_adapter: Some("default".to_string()),
+        default_adapter: Some("catchall".to_string()),
         strict: false,
     };
 
     let config = make_test_config_with_routing("default", Some(routing));
     let telemetry = Telemetry::new("test-worker-order".to_string());
-    let dispatcher = Dispatcher::new(&config, telemetry)
-        .expect("Failed to create dispatcher");
+
+    // Create mock adapters including the test-specific ones
+    let mut adapters = make_mock_adapters();
+    adapters.insert(
+        "claude-print-sonnet-specific".to_string(),
+        AgentAdapter {
+            name: "claude-print-sonnet-specific".to_string(),
+            description: Some("Specific claude-print for sonnet".to_string()),
+            agent_cli: "claude-print".to_string(),
+            version_command: Some("claude-print --version".to_string()),
+            input_method: InputMethod::Stdin,
+            invoke_template: "claude-print --model {model}".to_string(),
+            environment: HashMap::new(),
+            timeout_secs: 3600,
+            idle_timeout_secs: 0,
+            hard_timeout_secs: 0,
+            provider: Some("anthropic".to_string()),
+            model: None,
+            token_extraction: needle::dispatch::TokenExtraction::None,
+            output_transform: Some("needle-transform-claude".to_string()),
+            harness: Some("needle".to_string()),
+            harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        },
+    );
+    adapters.insert(
+        "claude-general".to_string(),
+        AgentAdapter {
+            name: "claude-general".to_string(),
+            description: Some("General claude adapter".to_string()),
+            agent_cli: "claude".to_string(),
+            version_command: Some("claude --version".to_string()),
+            input_method: InputMethod::Stdin,
+            invoke_template: "claude --model {model}".to_string(),
+            environment: HashMap::new(),
+            timeout_secs: 3600,
+            idle_timeout_secs: 0,
+            hard_timeout_secs: 0,
+            provider: Some("anthropic".to_string()),
+            model: None,
+            token_extraction: needle::dispatch::TokenExtraction::None,
+            output_transform: None,
+            harness: Some("needle".to_string()),
+            harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        },
+    );
+    adapters.insert(
+        "catchall".to_string(),
+        AgentAdapter {
+            name: "catchall".to_string(),
+            description: Some("Catchall adapter".to_string()),
+            agent_cli: "catchall".to_string(),
+            version_command: Some("catchall --version".to_string()),
+            input_method: InputMethod::Stdin,
+            invoke_template: "catchall --model {model}".to_string(),
+            environment: HashMap::new(),
+            timeout_secs: 3600,
+            idle_timeout_secs: 0,
+            hard_timeout_secs: 0,
+            provider: Some("anthropic".to_string()),
+            model: None,
+            token_extraction: needle::dispatch::TokenExtraction::None,
+            output_transform: None,
+            harness: Some("needle".to_string()),
+            harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        },
+    );
+
+    let dispatcher = Dispatcher::with_adapters(adapters, telemetry, 3600);
 
     // Test that first match wins
     assert_eq!(
@@ -247,8 +363,8 @@ fn anthropic_routing_verify_default_adapter_fallback() {
 
     let config = make_test_config_with_routing("default", Some(routing));
     let telemetry = Telemetry::new("test-worker-fallback".to_string());
-    let dispatcher = Dispatcher::new(&config, telemetry)
-        .expect("Failed to create dispatcher");
+    let adapters = make_mock_adapters();
+    let dispatcher = Dispatcher::with_adapters(adapters, telemetry, 3600);
 
     // Models that match the rule
     assert_eq!(
@@ -276,12 +392,13 @@ fn anthropic_routing_verify_claude_print_adapter_fields() {
     // Test that claude-print adapter has all required fields
 
     let routing = make_anthropic_subscription_routing();
-    let config = make_test_config_with_routing("claude", Some(routing));
+    let _config = make_test_config_with_routing("claude", Some(routing));
     let telemetry = Telemetry::new("test-worker-fields".to_string());
-    let dispatcher = Dispatcher::new(&config, telemetry)
-        .expect("Failed to create dispatcher");
+    let adapters = make_mock_adapters();
+    let dispatcher = Dispatcher::with_adapters(adapters, telemetry, 3600);
 
-    let adapter = dispatcher.adapter("claude-print")
+    let adapter = dispatcher
+        .adapter("claude-print")
         .expect("claude-print adapter should exist");
 
     // Verify all required fields for correct routing
