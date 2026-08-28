@@ -1512,7 +1512,10 @@ impl Worker {
                     // Default to Wait instead of Exit when no supervisor is present
                     tracing::warn!(
                         idle_action = "exit",
-                        "no supervisor detected: automatically defaulting to Wait (set allow_exit_without_supervisor=true to opt-in to Exit without supervisor)"
+                        "⚠️  CONFIGURATION SAFETY WARNING: idle_action=exit without supervisor detected - \
+                        this configuration can orphan in-progress beads (2026-06-21 incident). \
+                        Automatically defaulting to IdleAction::Wait (safer: keeps worker alive to retry). \
+                        To override this safety check, set allow_exit_without_supervisor=true"
                     );
                     let _ = self.telemetry.emit(EventKind::ConfigWarning {
                         warning_type: "idle_action_default_to_wait".to_string(),

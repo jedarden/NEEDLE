@@ -90,7 +90,7 @@ pub fn validate_idle_action_config(
     // Only Exit without supervisor is unsafe
     if *idle_action == IdleAction::Exit && !supervisor_present {
         return WorkerConfigValidationResult::Invalid {
-            reason: "idle_action=exit configured without supervisor supervision: when the queue is empty, the worker will exit and leave any in-progress beads orphaned with no reclaim mechanism. Either run workers under a supervisor (needle supervise) or set idle_action=wait in config".to_string(),
+            reason: "idle_action=exit configured without supervisor supervision: when the queue is empty, the worker will exit and leave any in-progress beads orphaned with no reclaim mechanism. This is the exact failure mode from the 2026-06-21 incident. Set idle_action=wait (safer: keeps worker alive to retry) or run workers under a supervisor (needle supervise) which can spawn replacements to reclaim orphaned beads.".to_string(),
         };
     }
 
