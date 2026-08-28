@@ -482,46 +482,35 @@ impl BeadStore for CliBeadStore {
     }
 
     async fn claim_status(&self, id: &BeadId) -> Result<crate::types::ClaimStatus> {
-        // For bead-rs, read the raw JSON to get the revision field
-        if self.backend.name == "bead-rs" {
-            let values = HashMap::from([("id", id.to_string())]);
-            let raw = self.run_operation("show", &values).await?;
-            let value: serde_json::Value = serde_json::from_str(raw.trim())?;
-            let value = value
-                .as_array()
-                .and_then(|items| items.first())
-                .unwrap_or(&value);
+        let values = HashMap::from([("id", id.to_string())]);
+        let raw = self.run_operation("show", &values).await?;
+        let value: serde_json::Value = serde_json::from_str(raw.trim())?;
+        let value = value
+            .as_array()
+            .and_then(|items| items.first())
+            .unwrap_or(&value);
 
-            let status_str = value
-                .get("status")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow::anyhow!("bead-rs show response omitted status"))?;
-            let status =
-                serde_json::from_str::<BeadStatus>(&serde_json::to_string(status_str).unwrap())
-                    .with_context(|| format!("failed to parse status: {}", status_str))?;
+        let status_str = value
+            .get("status")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("backend show response omitted status"))?;
+        let status =
+            serde_json::from_str::<BeadStatus>(&serde_json::to_string(status_str).unwrap())
+                .with_context(|| format!("failed to parse status: {}", status_str))?;
 
-            let assignee = value
-                .get("assignee")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(str::to_string);
+        let assignee = value
+            .get("assignee")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
 
-            let revision = value.get("revision").and_then(|v| v.as_u64());
+        let revision = value.get("revision").and_then(|v| v.as_u64());
 
-            Ok(crate::types::ClaimStatus {
-                status,
-                assignee,
-                revision,
-            })
-        } else {
-            // For backends without revision support (bead-forge), use the default implementation
-            let bead = self.show(id).await?;
-            Ok(crate::types::ClaimStatus {
-                status: bead.status,
-                assignee: bead.assignee,
-                revision: None,
-            })
-        }
+        Ok(crate::types::ClaimStatus {
+            status,
+            assignee,
+            revision,
+        })
     }
 
     async fn claim(&self, id: &BeadId, actor: &str) -> Result<ClaimResult> {
@@ -596,18 +585,12 @@ impl BeadStore for CliBeadStore {
     }
 
     async fn release(&self, id: &BeadId) -> Result<()> {
-        if self.backend.name == "bead-forge" {
-            return self.run_bf_update_batch(id, Some("open"), Some("")).await;
-        }
         self.mutate("release", &[("id", id.to_string())]).await
     }
     async fn block(&self, id: &BeadId) -> Result<()> {
         self.mutate("block", &[("id", id.to_string())]).await
     }
     async fn clear_assignee(&self, id: &BeadId) -> Result<()> {
-        if self.backend.name == "bead-forge" {
-            return self.run_bf_update_batch(id, None, Some("")).await;
-        }
         self.mutate("clear_assignee", &[("id", id.to_string())])
             .await
     }
@@ -751,18 +734,14 @@ impl BeadStore for CliBeadStore {
         Ok(parse_doctor_output(&stdout))
     }
     async fn full_rebuild(&self) -> Result<()> {
-        if !matches!(self.backend.name.as_str(), "bead-rs" | "bead-forge") {
+        if !matches!(self.backend.name.as_str(), "bead-rs") {
             bail!(
                 "descriptor-driven full rebuild is not enabled for backend '{}'",
                 self.backend.name
             );
         }
 
-        let checkpoint = if self.backend.name == "bead-forge" {
-            self.workspace.join(".beads/issues.jsonl")
-        } else {
-            self.workspace.join(".beads/checkpoint")
-        };
+        let checkpoint = self.workspace.join(".beads/checkpoint");
         if !checkpoint.exists() {
             bail!(
                 "refusing to rebuild backend '{}' without checkpoint {}",
@@ -819,35 +798,26 @@ impl BeadStore for CliBeadStore {
         }
 
         let rebuild = async {
-            if self.backend.name == "bead-forge" {
-                self.run_argv(
-                    "full_rebuild.import",
-                    &["sync".to_string(), "--import-only".to_string()],
-                    DEFAULT_TIMEOUT_SECS,
-                )
+            self.run_argv(
+                "full_rebuild.init",
+                &["init".to_string()],
+                DEFAULT_TIMEOUT_SECS,
+            )
+            .await?;
+            let checkpoint = checkpoint
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("checkpoint path is not valid UTF-8"))?;
+            let args = vec![
+                "sync".to_string(),
+                "import-only".to_string(),
+                "--input".to_string(),
+                checkpoint.to_string(),
+                "--restore-into-empty".to_string(),
+                "--actor".to_string(),
+                "needle".to_string(),
+            ];
+            self.run_argv("full_rebuild.import", &args, DEFAULT_TIMEOUT_SECS)
                 .await?;
-            } else {
-                self.run_argv(
-                    "full_rebuild.init",
-                    &["init".to_string()],
-                    DEFAULT_TIMEOUT_SECS,
-                )
-                .await?;
-                let checkpoint = checkpoint
-                    .to_str()
-                    .ok_or_else(|| anyhow::anyhow!("checkpoint path is not valid UTF-8"))?;
-                let args = vec![
-                    "sync".to_string(),
-                    "import-only".to_string(),
-                    "--input".to_string(),
-                    checkpoint.to_string(),
-                    "--restore-into-empty".to_string(),
-                    "--actor".to_string(),
-                    "needle".to_string(),
-                ];
-                self.run_argv("full_rebuild.import", &args, DEFAULT_TIMEOUT_SECS)
-                    .await?;
-            }
             let report = self.doctor_check().await?;
             if !report.warnings.is_empty() {
                 bail!(
@@ -1311,15 +1281,9 @@ mod tests {
     fn cli_store_ready_limit_is_rendered_as_flag_and_value() {
         use crate::bead_store::backend::builtin_bead_backends;
 
-        // Test with bead-forge (verified against 0.4.1, quirk does NOT apply)
-        let bead_forge = builtin_bead_backends()
-            .into_iter()
-            .find(|backend| backend.name == "bead-forge")
-            .unwrap();
-
         let temp_dir = tempfile::tempdir().unwrap();
-        let fake_binary = temp_dir.path().join("fake-bf");
-        std::fs::write(&fake_binary, "#!/bin/sh\necho bf 0.4.1\n").unwrap();
+        let fake_binary = temp_dir.path().join("fake-bead");
+        std::fs::write(&fake_binary, "#!/bin/sh\necho bead 0.1.3\n").unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1328,32 +1292,13 @@ mod tests {
             std::fs::set_permissions(&fake_binary, perms).unwrap();
         }
 
-        let store_with_quirk = CliBeadStore::new(
-            bead_forge,
-            fake_binary.clone(),
-            temp_dir.path().to_path_buf(),
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-
-        // bead-forge 0.4.1 does NOT have the quirk applied (only applied to <= 0.2.0)
-        assert!(!store_with_quirk.has_quirk("limit_zero_returns_empty_set"));
-        // When the quirk doesn't apply, use "0" (backend handles --limit correctly)
-        let values = HashMap::from([("limit", "0".to_string())]);
-        assert_eq!(
-            store_with_quirk.render_operation("ready", &values).unwrap(),
-            ["ready", "--json", "--limit", "0"]
-        );
-
-        // Test with bead-rs (does NOT have the quirk at all)
+        // Test with bead-rs
         let bead_rs = builtin_bead_backends()
             .into_iter()
             .find(|backend| backend.name == "bead-rs")
             .unwrap();
 
-        let store_without_quirk = CliBeadStore::new(
+        let store = CliBeadStore::new(
             bead_rs,
             fake_binary,
             temp_dir.path().to_path_buf(),
@@ -1363,14 +1308,13 @@ mod tests {
         )
         .unwrap();
 
-        // bead-rs DOES have the quirk (declared without version requirement in builtin_bead_rs)
-        assert!(store_without_quirk.has_quirk("limit_zero_returns_empty_set"));
+        // bead-rs has the quirk (declared without version requirement in builtin_bead_rs)
+        assert!(store.has_quirk("limit_zero_returns_empty_set"));
         // When the quirk applies, "0" is still passed - the workaround is applied by the caller
         // by using a large explicit limit instead of 0
+        let values = HashMap::from([("limit", "0".to_string())]);
         assert_eq!(
-            store_without_quirk
-                .render_operation("ready", &values)
-                .unwrap(),
+            store.render_operation("ready", &values).unwrap(),
             ["list", "--ready", "--json", "--limit", "0"]
         );
     }
@@ -1535,15 +1479,14 @@ mod tests {
     fn render_operation_substitutes_implicit_values() {
         use crate::bead_store::backend::builtin_bead_backends;
 
-        // Use bead-forge since it uses model/harness placeholders in claim_auto
-        let bead_forge = builtin_bead_backends()
+        let bead_rs = builtin_bead_backends()
             .into_iter()
-            .find(|backend| backend.name == "bead-forge")
+            .find(|backend| backend.name == "bead-rs")
             .unwrap();
 
         let temp_dir = tempfile::tempdir().unwrap();
-        let fake_binary = temp_dir.path().join("fake-bf");
-        std::fs::write(&fake_binary, "#!/bin/sh\necho bf 0.4.1\n").unwrap();
+        let fake_binary = temp_dir.path().join("fake-bead");
+        std::fs::write(&fake_binary, "#!/bin/sh\necho bead 0.1.3\n").unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1553,7 +1496,7 @@ mod tests {
         }
 
         let store = CliBeadStore::new(
-            bead_forge,
+            bead_rs,
             fake_binary,
             temp_dir.path().to_path_buf(),
             Some("gpt-4".to_string()),
@@ -1562,13 +1505,13 @@ mod tests {
         )
         .unwrap();
 
-        // Test that implicit values (model, harness, harness_version) are substituted
+        // Test that implicit values are substituted when placeholders exist
         let values = HashMap::from([("actor", "worker-1".to_string())]);
         let result = store.render_operation("claim_auto", &values).unwrap();
-        assert!(result.contains(&"gpt-4".to_string()));
-        assert!(result.contains(&"claude-code".to_string()));
-        assert!(result.contains(&"1.0.0".to_string()));
         assert!(result.contains(&"worker-1".to_string()));
+        // model/harness placeholders are not used in bead-rs claim_auto, so these should not appear
+        assert!(!result.contains(&"gpt-4".to_string()));
+        assert!(!result.contains(&"claude-code".to_string()));
     }
 
     #[test]
@@ -1617,15 +1560,14 @@ mod tests {
     fn render_operation_handles_empty_string_values() {
         use crate::bead_store::backend::builtin_bead_backends;
 
-        // Use bead-forge since it uses model/harness placeholders in claim_auto
-        let bead_forge = builtin_bead_backends()
+        let bead_rs = builtin_bead_backends()
             .into_iter()
-            .find(|backend| backend.name == "bead-forge")
+            .find(|backend| backend.name == "bead-rs")
             .unwrap();
 
         let temp_dir = tempfile::tempdir().unwrap();
-        let fake_binary = temp_dir.path().join("fake-bf");
-        std::fs::write(&fake_binary, "#!/bin/sh\necho bf 0.4.1\n").unwrap();
+        let fake_binary = temp_dir.path().join("fake-bead");
+        std::fs::write(&fake_binary, "#!/bin/sh\necho bead 0.1.3\n").unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1635,29 +1577,21 @@ mod tests {
         }
 
         let store = CliBeadStore::new(
-            bead_forge,
+            bead_rs,
             fake_binary,
             temp_dir.path().to_path_buf(),
-            None,
-            None,
-            None,
+            Some("gpt-4".to_string()),
+            Some("claude-code".to_string()),
+            Some("1.0.0".to_string()),
         )
         .unwrap();
 
         // Test empty string values for optional placeholders
-        let values = HashMap::from([
-            ("actor", "worker-1".to_string()),
-            ("model", "".to_string()),
-            ("harness", "".to_string()),
-            ("harness_version", "".to_string()),
-        ]);
-        let result = store.render_operation("claim_auto", &values).unwrap();
-        // Empty model/harness values should omit the flags entirely
-        assert!(!result.iter().any(|arg| arg == "--model"));
-        assert!(!result.iter().any(|arg| arg == "--harness"));
-        assert!(!result.iter().any(|arg| arg == "--harness-version"));
-        // But actor should still be present
-        assert!(result.iter().any(|arg| arg == "worker-1"));
+        let values = HashMap::from([("actor", "worker-1".to_string()), ("limit", "".to_string())]);
+        let result = store.render_operation("ready", &values).unwrap();
+        // Empty limit should omit the --limit flag entirely
+        assert!(!result.iter().any(|arg| arg == "--limit"));
+        // But actor placeholder doesn't exist in ready operation
     }
 
     #[test]
@@ -1754,9 +1688,9 @@ mod tests {
 
     #[test]
     fn claim_status_parser_handles_missing_revision() {
-        // Test that backends without revision support (bead-forge) are handled
+        // Test that JSON responses without a revision field are handled correctly
         let json = r#"{
-            "id": "bf-test",
+            "id": "test",
             "title": "Test Bead",
             "status": "open",
             "created_at": "2026-08-28T00:00:00Z"
