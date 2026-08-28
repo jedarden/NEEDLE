@@ -423,29 +423,17 @@ impl CanaryRunner {
         Ok(outcome)
     }
 
-    /// Validate that expected final_status values are valid bead-forge statuses.
+    /// Validate that expected final_status values are valid bead-rs statuses.
     ///
-    /// bead-forge (bf) uses: open, in_progress, blocked, closed, completed, pending, ready
     /// bead-rs uses: open, in_progress, blocked, closed, deferred
-    ///
-    /// Both treat "closed" as equivalent to "done" — a successfully completed bead.
     fn validate_expected_status(
         &self,
         expected: &ExpectedOutcome,
         _bead_id: &str,
         path: &Path,
     ) -> Result<()> {
-        // Valid statuses across both backends (union of both sets)
-        let valid_statuses = [
-            "open",
-            "in_progress",
-            "blocked",
-            "closed",
-            "completed",
-            "pending",
-            "ready",
-            "deferred",
-        ];
+        // Valid statuses for bead-rs backend
+        let valid_statuses = ["open", "in_progress", "blocked", "closed", "deferred"];
 
         let status_to_check = match expected {
             ExpectedOutcome::Success { final_status, .. } => Some(final_status.as_str()),
@@ -463,16 +451,6 @@ impl CanaryRunner {
                      actual statuses in use.",
                     path.display(),
                     valid_statuses
-                );
-            }
-
-            // Additional check: "done" is not a valid bead-forge status (it's "closed")
-            if status == "done" {
-                bail!(
-                    "invalid expected final_status 'done' in {}: bead-forge uses 'closed' \
-                     for completed beads, not 'done'. Update the expectation to use 'closed'. \
-                     See ADR for needle-a55a9e18 for details.",
-                    path.display()
                 );
             }
         }
@@ -957,42 +935,35 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn actual_outcome_uses_workspace_backend_and_accepts_both_show_shapes() {
+    fn actual_outcome_uses_bead_rs_backend_and_show_shape() {
         use std::os::unix::fs::PermissionsExt;
 
-        for (backend, projection) in [
-            ("bead-rs", r#"[{"status":"closed","labels":["native"]}]"#),
-            ("bead-forge", r#"{"status":"open","labels":["forge"]}"#),
-        ] {
-            let root = tempfile::tempdir().unwrap();
-            let binary = root.path().join("bound-backend");
-            std::fs::write(
-                &binary,
-                format!("#!/bin/sh\nprintf '%s\\n' '{projection}'\n"),
-            )
-            .unwrap();
-            let mut permissions = std::fs::metadata(&binary).unwrap().permissions();
-            permissions.set_mode(0o755);
-            std::fs::set_permissions(&binary, permissions).unwrap();
-            std::fs::write(
-                root.path().join(".needle.yaml"),
-                format!(
-                    "bead_cli:\n  backend: {backend}\n  path: {}\n",
-                    binary.display()
-                ),
-            )
-            .unwrap();
+        let backend = "bead-rs";
+        let projection = r#"[{"status":"closed","labels":["native"]}]"#;
 
-            let runner = CanaryRunner::new(root.path().join("needle"), root.path().into(), 30);
-            let actual = runner.get_actual_outcome("example-1", Some(0)).unwrap();
-            if backend == "bead-rs" {
-                assert_eq!(actual.final_status, "closed");
-                assert_eq!(actual.labels, vec!["native"]);
-            } else {
-                assert_eq!(actual.final_status, "open");
-                assert_eq!(actual.labels, vec!["forge"]);
-            }
-        }
+        let root = tempfile::tempdir().unwrap();
+        let binary = root.path().join("bound-backend");
+        std::fs::write(
+            &binary,
+            format!("#!/bin/sh\nprintf '%s\\n' '{projection}'\n"),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&binary).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&binary, permissions).unwrap();
+        std::fs::write(
+            root.path().join(".needle.yaml"),
+            format!(
+                "bead_cli:\n  backend: {backend}\n  path: {}\n",
+                binary.display()
+            ),
+        )
+        .unwrap();
+
+        let runner = CanaryRunner::new(root.path().join("needle"), root.path().into(), 30);
+        let actual = runner.get_actual_outcome("example-1", Some(0)).unwrap();
+        assert_eq!(actual.final_status, "closed");
+        assert_eq!(actual.labels, vec!["native"]);
     }
 
     #[test]
@@ -1859,49 +1830,6 @@ mod tests {
                 Err(err) => err.to_string().contains("binary not found"),
             },
             "should accept bead-rs backend or fail only with binary not found: {:?}",
-            result
-        );
-    }
-
-    #[test]
-    fn validate_bead_backend_binding_accepts_bead_forge() {
-        let tmp = tempfile::tempdir().unwrap();
-        let workspace = tmp.path();
-
-        // Mock a bf binary
-        let bf_path = tmp.path().join("bf");
-        std::fs::write(&bf_path, "#!/bin/sh\nexit 0").unwrap();
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&bf_path).unwrap().permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&bf_path, perms).unwrap();
-        }
-
-        // Bind the workspace to the mock binary explicitly.
-        std::fs::write(
-            workspace.join(".needle.yaml"),
-            format!(
-                "bead_cli:\n  backend: bead-forge\n  path: {}\n",
-                bf_path.display()
-            ),
-        )
-        .unwrap();
-
-        let runner = CanaryRunner::new(PathBuf::from("/tmp/.needle"), workspace.to_path_buf(), 300);
-
-        // Should succeed when bead-forge backend is explicitly set
-        let result = runner.validate_bead_backend_binding();
-        // This will fail because bf is not on PATH, but we're testing that
-        // it passes the auto check at least
-        assert!(
-            match &result {
-                Ok(()) => true,
-                Err(err) => err.to_string().contains("binary not found"),
-            },
-            "should accept bead-forge backend or fail only with binary not found: {:?}",
             result
         );
     }

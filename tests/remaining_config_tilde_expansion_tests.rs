@@ -778,11 +778,17 @@ async fn prompt_variants_content_file_tilde_expansion() {
 prompt:
   variants:
     default:
-      - content_file: ~/prompts/default.txt
+      - name: control
+        weight: 100
+        content_file: ~/prompts/default.txt
     detailed:
-      - content_file: ~/prompts/detailed.md
+      - name: detailed
+        weight: 100
+        content_file: ~/prompts/detailed.md
     concise:
-      - content_file: ~/prompts/concise.txt
+      - name: concise
+        weight: 100
+        content_file: ~/prompts/concise.txt
 "#;
 
     let mut config: Config = serde_yaml::from_str(yaml).expect("failed to parse config");
@@ -824,9 +830,13 @@ async fn prompt_variants_content_file_non_tilde_paths_unchanged() {
 prompt:
   variants:
     default:
-      - content_file: /etc/needle/prompts/default.txt
+      - name: default
+        weight: 100
+        content_file: /etc/needle/prompts/default.txt
     detailed:
-      - content_file: relative/prompts/detailed.md
+      - name: detailed
+        weight: 100
+        content_file: relative/prompts/detailed.md
 "#;
 
     let mut config: Config = serde_yaml::from_str(yaml).expect("failed to parse config");
@@ -862,9 +872,15 @@ async fn prompt_variants_content_file_mixed_tilde_non_tilde_paths() {
 prompt:
   variants:
     default:
-      - content_file: ~/prompts/default.txt
-      - content_file: /etc/needle/system.txt
-      - content_file: relative/local.md
+      - name: tilde_variant
+        weight: 50
+        content_file: ~/prompts/default.txt
+      - name: absolute_variant
+        weight: 25
+        content_file: /etc/needle/system.txt
+      - name: relative_variant
+        weight: 25
+        content_file: relative/local.md
 "#;
 
     let mut config: Config = serde_yaml::from_str(yaml).expect("failed to parse config");

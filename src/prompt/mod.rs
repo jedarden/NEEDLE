@@ -561,13 +561,19 @@ fn bead_commands_for_workspace(workspace: &Path) -> (&'static str, &'static str)
                 .as_str()
                 .map(str::to_string)
         });
-    if matches!(backend.as_deref(), Some("bead" | "bead-rs")) {
+    // Default to bead-rs commands since bf is retired
+    if matches!(backend.as_deref(), Some("bf")) {
+        // Explicit bf request (now unsupported) still defaults to bead-rs
         (
             "bead",
             "bead dep add <blocked-id> <blocker-id> --kind blocks",
         )
     } else {
-        ("bf", "bf dep add <blocker-id> --blocks <blocked-id>")
+        // bead, bead-rs, or undeclared all default to bead-rs
+        (
+            "bead",
+            "bead dep add <blocked-id> <blocker-id> --kind blocks",
+        )
     }
 }
 
@@ -1367,8 +1373,8 @@ mod tests {
             .unwrap();
 
         assert!(
-            result.content.contains("bf close needle-abc"),
-            "prompt must contain bf close instruction (bead-forge, not the deprecated br alias)"
+            result.content.contains("bead close needle-abc"),
+            "prompt must contain bead close instruction (bead-rs, not the retired bf)"
         );
         assert!(
             result.content.contains("notes/needle-abc.md"),

@@ -4250,7 +4250,11 @@ pub struct PluckConfig {
 impl Default for PluckConfig {
     fn default() -> Self {
         Self {
-            exclude_labels: Vec::new(),
+            exclude_labels: vec![
+                "deferred".to_string(),
+                "human".to_string(),
+                "blocked".to_string(),
+            ],
             split_after_failures: Self::default_split_after_failures(),
             persistent_starvation_records: Self::default_persistent_starvation_records(),
         }

@@ -337,14 +337,14 @@ pub struct CommandGate {
 }
 
 impl CommandGate {
-    /// Create a new command gate with the default stderr cap (4096 bytes) and clean execution.
+    /// Create a new command gate with the default stderr cap (4096 bytes) and workspace execution.
     pub fn new(commands: Vec<String>) -> Self {
-        Self::with_options(commands, DEFAULT_STDERR_CAP_BYTES, RunIn::Clean)
+        Self::with_options(commands, DEFAULT_STDERR_CAP_BYTES, RunIn::Workspace)
     }
 
-    /// Create a new command gate with an explicit stderr capture cap.
+    /// Create a new command gate with an explicit stderr capture cap and workspace execution.
     pub fn with_stderr_cap(commands: Vec<String>, stderr_cap_bytes: usize) -> Self {
-        Self::with_options(commands, stderr_cap_bytes, RunIn::Clean)
+        Self::with_options(commands, stderr_cap_bytes, RunIn::Workspace)
     }
 
     /// Create a new command gate with full options.
