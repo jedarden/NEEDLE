@@ -374,9 +374,139 @@ pub fn assert_log_matches(logs: &CapturedLogs, pattern: &str) {
 /// tracing::error!("critical failure");
 /// assert_log_level(&logs, "ERROR");
 /// ```
-#[allow(dead_code)]
 pub fn assert_log_level(logs: &CapturedLogs, level: &str) {
     assert_log_contains(logs, level);
+}
+
+/// Assert that a specific log level appears with a specific message.
+///
+/// This verifies that a log entry exists with both the correct level marker
+/// and the expected message content. More precise than `assert_log_level()`.
+///
+/// # Arguments
+///
+/// * `logs` - The captured log buffer
+/// * `level` - The log level to expect (e.g., "ERROR", "WARN", "DEBUG")
+/// * `message` - The message content that should appear with this level
+///
+/// # Panics
+///
+/// Panics if the level + message combination is not found.
+///
+/// # Example
+///
+/// ```rust
+/// let (logs, _guard) = setup_log_capture();
+/// tracing::error!("heartbeat cleanup failed: {}", err);
+/// assert_log_level_with_message(&logs, "ERROR", "heartbeat cleanup failed");
+/// ```
+pub fn assert_log_level_with_message(logs: &CapturedLogs, level: &str, message: &str) {
+    let log_content = get_captured_logs(logs);
+
+    // Check if both level and message appear in the same log line
+    let has_level_and_message = log_content
+        .lines()
+        .any(|line| line.contains(level) && line.contains(message));
+
+    assert!(
+        has_level_and_message,
+        "Expected to find log entry with level '{}' and message '{}', but it was not present.\n\
+         Captured logs:\n{}",
+        level, message, log_content
+    );
+}
+
+/// Assert that no ERROR level logs appear in the captured output.
+///
+/// Use this to verify that an operation completed without emitting any
+/// error-level logs. Equivalent to `assert_log_not_contains(logs, "ERROR")`.
+///
+/// # Arguments
+///
+/// * `logs` - The captured log buffer
+///
+/// # Panics
+///
+/// Panics if any ERROR log is found.
+///
+/// # Example
+///
+/// ```rust
+/// let (logs, _guard) = setup_log_capture();
+/// // ... run operation that should succeed ...
+/// assert_no_error_logs(&logs);
+/// ```
+pub fn assert_no_error_logs(logs: &CapturedLogs) {
+    assert_log_not_contains(logs, "ERROR");
+}
+
+/// Assert that no WARN level logs appear in the captured output.
+///
+/// Use this to verify that an operation completed without any warnings.
+///
+/// # Arguments
+///
+/// * `logs` - The captured log buffer
+///
+/// # Panics
+///
+/// Panics if any WARN log is found.
+pub fn assert_no_warn_logs(logs: &CapturedLogs) {
+    assert_log_not_contains(logs, "WARN");
+}
+
+/// Count how many times a specific log level appears in the captured output.
+///
+/// Use this to verify that a specific number of errors/warnings/info messages
+/// were emitted during an operation.
+///
+/// # Arguments
+///
+/// * `logs` - The captured log buffer
+/// * `level` - The log level to count (e.g., "ERROR", "WARN", "INFO")
+///
+/// # Returns
+///
+/// The number of times the log level marker appears.
+///
+/// # Example
+///
+/// ```rust
+/// let (logs, _guard) = setup_log_capture();
+/// tracing::error!("first error");
+/// tracing::error!("second error");
+/// assert_eq!(count_log_level(&logs, "ERROR"), 2);
+/// ```
+pub fn count_log_level(logs: &CapturedLogs, level: &str) -> usize {
+    let log_content = get_captured_logs(logs);
+    log_content.matches(level).count()
+}
+
+/// Assert that a specific log level appears exactly N times.
+///
+/// Use this for precise count verification of log levels.
+///
+/// # Arguments
+///
+/// * `logs` - The captured log buffer
+/// * `level` - The log level to count (e.g., "ERROR", "WARN", "INFO")
+/// * `expected_count` - The exact number of times the level should appear
+///
+/// # Panics
+///
+/// Panics if the count doesn't match.
+pub fn assert_log_level_count(logs: &CapturedLogs, level: &str, expected_count: usize) {
+    let actual_count = count_log_level(logs, level);
+    assert_eq!(
+        actual_count,
+        expected_count,
+        "Expected log level '{}' to appear {} times in logs, but it appeared {} times.\n\
+         Captured logs:\n{}",
+        level,
+        expected_count,
+        actual_count,
+        get_captured_logs(logs)
+    );
 }
 
 /// Count occurrences of a substring in captured logs.
@@ -488,5 +618,55 @@ mod tests {
         tracing::debug!("debug message");
 
         assert_log_contains(&logs, "debug message");
+    }
+
+    #[tokio::test]
+    async fn test_log_level_assertion() {
+        let (logs, _guard) = setup_log_capture();
+
+        tracing::error!("critical failure");
+
+        assert_log_level(&logs, "ERROR");
+    }
+
+    #[tokio::test]
+    async fn test_log_level_with_message() {
+        let (logs, _guard) = setup_log_capture();
+
+        tracing::error!("heartbeat cleanup failed: permission denied");
+
+        assert_log_level_with_message(&logs, "ERROR", "heartbeat cleanup failed");
+    }
+
+    #[tokio::test]
+    async fn test_no_error_logs() {
+        let (logs, _guard) = setup_log_capture();
+
+        tracing::info!("successful operation");
+
+        assert_no_error_logs(&logs);
+    }
+
+    #[tokio::test]
+    async fn test_count_log_level() {
+        let (logs, _guard) = setup_log_capture();
+
+        tracing::error!("first error");
+        tracing::error!("second error");
+        tracing::info!("info message");
+
+        assert_eq!(count_log_level(&logs, "ERROR"), 2);
+        assert_eq!(count_log_level(&logs, "INFO"), 1);
+    }
+
+    #[tokio::test]
+    async fn test_assert_log_level_count() {
+        let (logs, _guard) = setup_log_capture();
+
+        tracing::warn!("warning 1");
+        tracing::warn!("warning 2");
+        tracing::warn!("warning 3");
+
+        assert_log_level_count(&logs, "WARN", 3);
     }
 }

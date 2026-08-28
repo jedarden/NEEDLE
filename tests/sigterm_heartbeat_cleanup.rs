@@ -19,10 +19,28 @@
 //! - Normal exit leaves no stale file
 //! - Cleanup works in all worker states
 //! - Multiple shutdown cycles leave no stale files
+//!
+//! # Log Capture Infrastructure
+//!
+//! These tests use the `log_capture_helper` module to verify that appropriate
+//! log messages are emitted during cleanup operations. This ensures that:
+//! - Debug logs provide visibility into cleanup operations
+//! - Error logs are emitted when cleanup fails
+//! - Info logs confirm successful cleanup
+//!
+//! Usage pattern:
+//! ```rust
+//! let (logs, _guard) = log_capture_helper::setup_log_capture();
+//! // ... run test code ...
+//! log_capture_helper::assert_log_contains(&logs, "expected message");
+//! ```
 
 use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
+
+// Import log capture helper for verifying log messages
+mod log_capture_helper;
 
 /// Helper to get a test heartbeat directory.
 fn test_heartbeat_dir() -> PathBuf {
@@ -35,8 +53,14 @@ fn test_heartbeat_dir() -> PathBuf {
 /// This test launches a worker process in a controlled environment,
 /// verifies it creates a heartbeat file, sends SIGTERM, and confirms
 /// the heartbeat file is cleaned up.
+///
+/// Log capture verifies that appropriate messages are emitted during
+/// the cleanup process, providing visibility into the signal handling flow.
 #[tokio::test]
 async fn sigterm_removes_heartbeat_file() {
+    // Setup log capture to verify cleanup logging
+    let (logs, _guard) = log_capture_helper::setup_log_capture();
+
     let heartbeat_dir = test_heartbeat_dir();
     let worker_id = "sigterm-test-worker";
 
@@ -83,14 +107,31 @@ async fn sigterm_removes_heartbeat_file() {
         !heartbeat_path.exists(),
         "heartbeat file must be removed on graceful shutdown (SIGTERM)"
     );
+
+    // Verify cleanup was logged
+    log_capture_helper::assert_log_contains(&logs, "cleanup");
+
+    // Expected severity: INFO or DEBUG
+    // Rationale: Successful cleanup is a normal operational event, not a failure.
+    // It should be logged at INFO level (for operational visibility) or DEBUG level
+    // (for detailed troubleshooting). ERROR level would be inappropriate because
+    // the cleanup succeeded.
+    log_capture_helper::assert_no_error_logs(&logs);
+
+    tracing::info!("✓ SIGTERM removes heartbeat file test passed with log verification");
 }
 
 /// Test that verifies the Drop trait cleanup as a fallback.
 ///
 /// This validates that even if stop() is not called explicitly (e.g., process
 /// crash or abrupt termination), the Drop trait still cleans up the heartbeat.
+///
+/// Log capture verifies that the Drop trait emits appropriate cleanup logging.
 #[tokio::test]
 async fn drop_trait_cleans_up_heartbeat() {
+    // Setup log capture to verify Drop cleanup logging
+    let (logs, _guard) = log_capture_helper::setup_log_capture();
+
     let heartbeat_dir = test_heartbeat_dir();
     let config_dir = heartbeat_dir.parent().unwrap().parent().unwrap();
 
@@ -126,14 +167,31 @@ async fn drop_trait_cleans_up_heartbeat() {
         !heartbeat_path.exists(),
         "heartbeat file must be removed when monitor is dropped without calling stop()"
     );
+
+    // Verify Drop cleanup was logged
+    log_capture_helper::assert_log_contains(&logs, "drop");
+
+    // Expected severity: INFO or DEBUG
+    // Rationale: Drop trait cleanup is a fallback mechanism that executes normally
+    // when the monitor goes out of scope. This is expected behavior, not a failure,
+    // so it should be logged at INFO or DEBUG level, not ERROR or WARN.
+    log_capture_helper::assert_no_error_logs(&logs);
+    log_capture_helper::assert_no_warn_logs(&logs);
+
+    tracing::info!("✓ Drop trait cleanup test passed with log verification");
 }
 
 /// Test that validates multiple shutdown calls are safe (idempotent).
 ///
 /// This ensures that calling stop() multiple times doesn't cause issues,
 /// which could happen if both the signal handler and main loop try to shutdown.
+///
+/// Log capture verifies that repeated stop() calls don't produce error logs.
 #[tokio::test]
 async fn stop_is_idempotent() {
+    // Setup log capture to verify idempotent behavior
+    let (logs, _guard) = log_capture_helper::setup_log_capture();
+
     let heartbeat_dir = test_heartbeat_dir();
     let config_dir = heartbeat_dir.parent().unwrap().parent().unwrap();
 
@@ -160,6 +218,18 @@ async fn stop_is_idempotent() {
     monitor.stop();
 
     assert!(!heartbeat_path.exists());
+
+    // Verify no error logs from repeated stop() calls
+    log_capture_helper::assert_log_not_contains(&logs, "ERROR");
+    log_capture_helper::assert_log_not_contains(&logs, "panic");
+
+    // Expected severity: No ERROR or WARN
+    // Rationale: Idempotent stop() calls are a design feature, not an error condition.
+    // Calling stop() multiple times should silently succeed without emitting ERROR or
+    // WARN logs. This is correct behavior being tested, not a problem to report.
+    log_capture_helper::assert_log_not_contains(&logs, "WARN");
+
+    tracing::info!("✓ Idempotent stop() test passed with log verification");
 }
 
 /// Test that verifies cleanup integration across all shutdown signal types.
@@ -171,6 +241,8 @@ async fn stop_is_idempotent() {
 /// - File is removed when shutdown signal is received
 ///
 /// The test simulates the signal handling flow: signal → shutdown flag → stop() → cleanup.
+///
+/// Log capture verifies that each signal type is properly logged during cleanup.
 #[tokio::test]
 async fn cleanup_integration_on_all_shutdown_signals() {
     let heartbeat_dir = test_heartbeat_dir();
@@ -183,6 +255,9 @@ async fn cleanup_integration_on_all_shutdown_signals() {
 
     // Test all shutdown signal types: SIGTERM, SIGINT, SIGHUP
     for signal_name in &["SIGTERM", "SIGINT", "SIGHUP"] {
+        // Setup log capture for each signal type test
+        let (logs, _guard) = log_capture_helper::setup_log_capture();
+
         let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let worker_id = format!("signal-test-{}", signal_name);
         let mut monitor = needle::health::HealthMonitor::new(
@@ -217,8 +292,10 @@ async fn cleanup_integration_on_all_shutdown_signals() {
             signal_name
         );
 
+        // Verify signal-specific logging
+        log_capture_helper::assert_log_contains(&logs, signal_name);
         tracing::info!(
-            "✓ {} signal path validated: cleanup called, file removed",
+            "✓ {} signal path validated: cleanup called, file removed, logs verified",
             signal_name
         );
     }
@@ -228,8 +305,13 @@ async fn cleanup_integration_on_all_shutdown_signals() {
 ///
 /// This validates edge cases where stop() is called after the emitter
 /// has already exited (e.g., circuit breaker triggered).
+///
+/// Log capture verifies that cleanup succeeds even when the emitter is already stopped.
 #[tokio::test]
 async fn stop_works_when_emitter_already_exited() {
+    // Setup log capture to verify edge case handling
+    let (logs, _guard) = log_capture_helper::setup_log_capture();
+
     let heartbeat_dir = test_heartbeat_dir();
     let config_dir = heartbeat_dir.parent().unwrap().parent().unwrap();
 
@@ -263,6 +345,10 @@ async fn stop_works_when_emitter_already_exited() {
     monitor.stop();
 
     assert!(!heartbeat_path.exists());
+
+    // Verify cleanup succeeded without errors
+    log_capture_helper::assert_log_not_contains(&logs, "ERROR");
+    tracing::info!("✓ Emitter already exited test passed with log verification");
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -277,10 +363,15 @@ async fn stop_works_when_emitter_already_exited() {
 /// 3. Worker catches signal and sets shutdown flag
 /// 4. Worker main loop detects shutdown flag
 /// 5. Worker calls stop() which removes heartbeat file
+///
+/// Log capture verifies the complete signal flow is properly logged.
 #[tokio::test]
 #[cfg(unix)]
 async fn e2e_signal_handler_cleanup_flow() {
     use std::time::Instant;
+
+    // Setup log capture for end-to-end signal flow verification
+    let (logs, _guard) = log_capture_helper::setup_log_capture();
 
     let heartbeat_dir = test_heartbeat_dir();
     let config_dir = heartbeat_dir.parent().unwrap().parent().unwrap();
@@ -355,8 +446,12 @@ heartbeat_ttl_secs = 5
         "heartbeat file must be removed after signal handler flow completes"
     );
 
+    // Verify signal flow logging
+    log_capture_helper::assert_log_contains(&logs, "signal");
+    log_capture_helper::assert_log_contains(&logs, "cleanup");
+
     tracing::info!(
-        "✓ End-to-end signal handler cleanup flow validated in {:?}",
+        "✓ End-to-end signal handler cleanup flow validated in {:?} with log verification",
         elapsed
     );
 }
@@ -365,10 +460,15 @@ heartbeat_ttl_secs = 5
 ///
 /// This end-to-end test validates that heartbeat cleanup works correctly
 /// regardless of what state the worker is in when the signal arrives.
+///
+/// Log capture verifies that cleanup succeeds in all worker states.
 #[tokio::test]
 async fn e2e_cleanup_in_all_worker_states() {
     // Test cleanup when worker is in different states
     for (state_name, simulate_work) in [("idle", false), ("processing", true)] {
+        // Setup log capture for each worker state test
+        let (logs, _guard) = log_capture_helper::setup_log_capture();
+
         let heartbeat_dir = test_heartbeat_dir();
         let config_dir = heartbeat_dir.parent().unwrap().parent().unwrap();
 
@@ -419,7 +519,14 @@ async fn e2e_cleanup_in_all_worker_states() {
             state_name
         );
 
-        tracing::info!("✓ Cleanup validated for worker state: {}", state_name);
+        // Verify cleanup succeeded in this state
+        log_capture_helper::assert_log_contains(&logs, "cleanup");
+        log_capture_helper::assert_log_not_contains(&logs, "ERROR");
+
+        tracing::info!(
+            "✓ Cleanup validated for worker state: {} with log verification",
+            state_name
+        );
     }
 }
 
@@ -427,8 +534,13 @@ async fn e2e_cleanup_in_all_worker_states() {
 ///
 /// This end-to-end test validates that even with multiple start/stop cycles,
 /// no stale heartbeat files remain behind.
+///
+/// Log capture verifies that each cycle cleanup is logged properly.
 #[tokio::test]
 async fn e2e_no_stale_heartbeats_after_multiple_cycles() {
+    // Setup log capture to verify multiple cycles
+    let (logs, _guard) = log_capture_helper::setup_log_capture();
+
     let heartbeat_dir = test_heartbeat_dir();
     let config_dir = heartbeat_dir.parent().unwrap().parent().unwrap();
 
@@ -480,15 +592,28 @@ async fn e2e_no_stale_heartbeats_after_multiple_cycles() {
         5
     );
 
-    tracing::info!("✓ No stale heartbeats after 5 shutdown cycles");
+    // Verify cleanup was logged for all cycles
+    let cleanup_count = log_capture_helper::count_log_occurrences(&logs, "cleanup");
+    assert!(
+        cleanup_count >= 5,
+        "expected at least 5 cleanup log entries, got {}",
+        cleanup_count
+    );
+
+    tracing::info!("✓ No stale heartbeats after 5 shutdown cycles with log verification");
 }
 
 /// Test that verifies the atexit handler cleanup path.
 ///
 /// This end-to-end test validates that the atexit handler properly
 /// cleans up the heartbeat file if the process terminates unexpectedly.
+///
+/// Log capture verifies that the atexit cleanup path is properly logged.
 #[tokio::test]
 async fn e2e_atexit_handler_cleans_up_heartbeat() {
+    // Setup log capture for atexit handler verification
+    let (logs, _guard) = log_capture_helper::setup_log_capture();
+
     let heartbeat_dir = test_heartbeat_dir();
     let config_dir = heartbeat_dir.parent().unwrap().parent().unwrap();
 
@@ -517,16 +642,25 @@ async fn e2e_atexit_handler_cleans_up_heartbeat() {
     // Verify cleanup happened
     assert!(!heartbeat_path.exists());
 
-    tracing::info!("✓ Atexit handler cleanup path validated");
+    // Verify atexit cleanup was logged
+    log_capture_helper::assert_log_contains(&logs, "cleanup");
+    log_capture_helper::assert_log_not_contains(&logs, "ERROR");
+
+    tracing::info!("✓ Atexit handler cleanup path validated with log verification");
 }
 
 /// Comprehensive end-to-end test for all signal types with worker state validation.
 ///
 /// This test validates the complete signal handling flow for all three signal types
 /// (SIGTERM, SIGINT, SIGHUP) ensuring proper heartbeat cleanup in all cases.
+///
+/// Log capture verifies that all signal types are properly logged throughout the lifecycle.
 #[tokio::test]
 #[cfg(unix)]
 async fn e2e_all_signals_with_full_worker_lifecycle() {
+    // Setup log capture for comprehensive lifecycle verification
+    let (logs, _guard) = log_capture_helper::setup_log_capture();
+
     let heartbeat_dir = test_heartbeat_dir();
     let config_dir = heartbeat_dir.parent().unwrap().parent().unwrap();
 
@@ -594,5 +728,11 @@ async fn e2e_all_signals_with_full_worker_lifecycle() {
         );
     }
 
-    tracing::info!("✓ All signal types validated with full worker lifecycle");
+    // Verify all signal types were logged
+    for signal_name in &["SIGTERM", "SIGINT", "SIGHUP"] {
+        log_capture_helper::assert_log_contains(&logs, signal_name);
+    }
+    log_capture_helper::assert_log_not_contains(&logs, "ERROR");
+
+    tracing::info!("✓ All signal types validated with full worker lifecycle and log verification");
 }

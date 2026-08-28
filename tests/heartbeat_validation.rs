@@ -4,12 +4,24 @@
 //! 1. Workers create heartbeat file on startup
 //! 2. File contains worker ID and last refresh timestamp
 //! 3. File updates every ~heartbeat_interval_secs (30s by default)
+//!
+//! # Log Capture Infrastructure
+//!
+//! These tests use the `log_capture_helper` module to verify that appropriate
+//! log messages are emitted during heartbeat operations, ensuring visibility
+//! into heartbeat file creation, updates, and validation.
 
 use std::path::Path;
 use std::time::Duration;
 
+// Import log capture helper for verifying log messages
+mod log_capture_helper;
+
 #[tokio::test]
 async fn heartbeat_file_created_on_startup() {
+    // Setup log capture to verify heartbeat creation logging
+    let (logs, _guard) = log_capture_helper::setup_log_capture();
+
     let dir = tempfile::tempdir().unwrap();
     let hb_dir = dir.path().join("state").join("heartbeats");
     let config = test_config(&hb_dir);
@@ -62,11 +74,24 @@ async fn heartbeat_file_created_on_startup() {
         "last_heartbeat timestamp should be recent (within 5 seconds)"
     );
 
+    // Verify heartbeat creation was logged
+    log_capture_helper::assert_log_contains(&logs, "heartbeat");
+    log_capture_helper::assert_log_not_contains(&logs, "ERROR");
+
+    // Expected severity: INFO
+    // Rationale: Heartbeat file creation is a normal operational event that occurs
+    // every time a worker starts. This should be logged at INFO level to confirm
+    // successful initialization without indicating any problems.
+    log_capture_helper::assert_log_level_with_message(&logs, "INFO", "heartbeat");
+
     monitor.stop();
 }
 
 #[tokio::test]
 async fn heartbeat_refreshes_every_30_seconds() {
+    // Setup log capture to verify heartbeat refresh logging
+    let (logs, _guard) = log_capture_helper::setup_log_capture();
+
     let dir = tempfile::tempdir().unwrap();
 
     let mut config = needle::config::Config::default();
@@ -115,11 +140,24 @@ async fn heartbeat_refreshes_every_30_seconds() {
         update_interval
     );
 
+    // Verify heartbeat refresh was logged
+    log_capture_helper::assert_log_contains(&logs, "refresh");
+    log_capture_helper::assert_log_not_contains(&logs, "ERROR");
+
+    // Expected severity: INFO or DEBUG
+    // Rationale: Periodic heartbeat refresh is expected behavior for a healthy worker.
+    // This should be logged at INFO level (for operational monitoring) or DEBUG level
+    // (to avoid log spam in production with frequent refreshes). Not an error condition.
+    log_capture_helper::assert_no_warn_logs(&logs);
+
     monitor.stop();
 }
 
 #[tokio::test]
 async fn heartbeat_contains_required_fields() {
+    // Setup log capture to verify field validation logging
+    let (logs, _guard) = log_capture_helper::setup_log_capture();
+
     let dir = tempfile::tempdir().unwrap();
     let hb_dir = dir.path().join("state").join("heartbeats");
     let config = test_config(&hb_dir);
@@ -149,6 +187,16 @@ async fn heartbeat_contains_required_fields() {
         .signed_duration_since(data.last_heartbeat)
         .num_seconds();
     assert!((0..5).contains(&age), "last_heartbeat should be recent");
+
+    // Verify heartbeat field validation was logged
+    log_capture_helper::assert_log_contains(&logs, "heartbeat");
+    log_capture_helper::assert_log_not_contains(&logs, "ERROR");
+
+    // Expected severity: INFO
+    // Rationale: Successful field validation confirms the heartbeat file contains
+    // all required data in the correct format. This is a successful validation result,
+    // not an error, so it should be logged at INFO level.
+    log_capture_helper::assert_log_level_with_message(&logs, "INFO", "heartbeat");
 
     monitor.stop();
 }
