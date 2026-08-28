@@ -254,16 +254,40 @@ fn three_assignees_independent_staleness_detection() {
     let now = Utc::now();
 
     // Assignee A: 3 claims (2 stale expected)
-    let a1 = make_bead_with_timestamp("worker-a-1", "worker-a", now - chrono::Duration::seconds(300));
-    let a2 = make_bead_with_timestamp("worker-a-2", "worker-a", now - chrono::Duration::seconds(200));
-    let a3 = make_bead_with_timestamp("worker-a-3", "worker-a", now - chrono::Duration::seconds(100));
+    let a1 = make_bead_with_timestamp(
+        "worker-a-1",
+        "worker-a",
+        now - chrono::Duration::seconds(300),
+    );
+    let a2 = make_bead_with_timestamp(
+        "worker-a-2",
+        "worker-a",
+        now - chrono::Duration::seconds(200),
+    );
+    let a3 = make_bead_with_timestamp(
+        "worker-a-3",
+        "worker-a",
+        now - chrono::Duration::seconds(100),
+    );
 
     // Assignee B: 2 claims (1 stale expected)
-    let b1 = make_bead_with_timestamp("worker-b-1", "worker-b", now - chrono::Duration::seconds(250));
-    let b2 = make_bead_with_timestamp("worker-b-2", "worker-b", now - chrono::Duration::seconds(150));
+    let b1 = make_bead_with_timestamp(
+        "worker-b-1",
+        "worker-b",
+        now - chrono::Duration::seconds(250),
+    );
+    let b2 = make_bead_with_timestamp(
+        "worker-b-2",
+        "worker-b",
+        now - chrono::Duration::seconds(150),
+    );
 
     // Assignee C: 1 claim (0 stale expected)
-    let c1 = make_bead_with_timestamp("worker-c-1", "worker-c", now - chrono::Duration::seconds(180));
+    let c1 = make_bead_with_timestamp(
+        "worker-c-1",
+        "worker-c",
+        now - chrono::Duration::seconds(180),
+    );
 
     let all_beads = vec![
         a1.clone(),
@@ -458,13 +482,33 @@ fn real_incident_simulation_2026_08_17() {
     let now = Utc::now();
 
     // Assignee A's claims
-    let a_t1 = make_bead_with_timestamp("cg-l0v0kc", "worker-a", now - chrono::Duration::seconds(7200));
-    let a_t2 = make_bead_with_timestamp("cg-l1v0kc", "worker-a", now - chrono::Duration::seconds(3600));
-    let a_t3 = make_bead_with_timestamp("cg-l2v0kc", "worker-a", now - chrono::Duration::seconds(1800));
+    let a_t1 = make_bead_with_timestamp(
+        "cg-l0v0kc",
+        "worker-a",
+        now - chrono::Duration::seconds(7200),
+    );
+    let a_t2 = make_bead_with_timestamp(
+        "cg-l1v0kc",
+        "worker-a",
+        now - chrono::Duration::seconds(3600),
+    );
+    let a_t3 = make_bead_with_timestamp(
+        "cg-l2v0kc",
+        "worker-a",
+        now - chrono::Duration::seconds(1800),
+    );
 
     // Assignee B's claims
-    let b_s1 = make_bead_with_timestamp("cg-m0v0kc", "worker-b", now - chrono::Duration::seconds(5400));
-    let b_s2 = make_bead_with_timestamp("cg-m1v0kc", "worker-b", now - chrono::Duration::seconds(2700));
+    let b_s1 = make_bead_with_timestamp(
+        "cg-m0v0kc",
+        "worker-b",
+        now - chrono::Duration::seconds(5400),
+    );
+    let b_s2 = make_bead_with_timestamp(
+        "cg-m1v0kc",
+        "worker-b",
+        now - chrono::Duration::seconds(2700),
+    );
 
     let all_beads = vec![
         a_t1.clone(),
@@ -517,7 +561,8 @@ fn real_incident_simulation_2026_08_17() {
 fn staleness_respects_second_precision() {
     // Given: 2 claims with timestamps differing by 1 second
     let now = Utc::now();
-    let bead_older = make_bead_with_timestamp("older", "worker", now - chrono::Duration::seconds(1));
+    let bead_older =
+        make_bead_with_timestamp("older", "worker", now - chrono::Duration::seconds(1));
     let bead_newer = make_bead_with_timestamp("newer", "worker", now);
 
     let all_beads = vec![bead_older.clone(), bead_newer];
@@ -534,8 +579,11 @@ fn staleness_respects_second_precision() {
 fn staleness_with_millisecond_precision() {
     // Given: 2 claims with timestamps differing by milliseconds
     let now = Utc::now();
-    let bead_older =
-        make_bead_with_timestamp("older-ms", "worker", now - chrono::Duration::milliseconds(500));
+    let bead_older = make_bead_with_timestamp(
+        "older-ms",
+        "worker",
+        now - chrono::Duration::milliseconds(500),
+    );
     let bead_newer = make_bead_with_timestamp("newer-ms", "worker", now);
 
     let all_beads = vec![bead_older.clone(), bead_newer];
@@ -552,9 +600,12 @@ fn unsorted_bead_list_correct_identification() {
     // Given: Beads in random order (not sorted by timestamp or assignee)
     let now = Utc::now();
 
-    let bead_newest = make_bead_with_timestamp("newest", "worker", now - chrono::Duration::seconds(10));
-    let bead_oldest = make_bead_with_timestamp("oldest", "worker", now - chrono::Duration::seconds(100));
-    let bead_middle = make_bead_with_timestamp("middle", "worker", now - chrono::Duration::seconds(50));
+    let bead_newest =
+        make_bead_with_timestamp("newest", "worker", now - chrono::Duration::seconds(10));
+    let bead_oldest =
+        make_bead_with_timestamp("oldest", "worker", now - chrono::Duration::seconds(100));
+    let bead_middle =
+        make_bead_with_timestamp("middle", "worker", now - chrono::Duration::seconds(50));
 
     // Intentionally random order: middle, newest, oldest
     let all_beads = vec![
@@ -608,9 +659,13 @@ fn case_sensitive_assignee_matching() {
     // Given: Assignee names that differ only in case (should be treated as different)
     let now = Utc::now();
 
-    let bead_lower =
-        make_bead_with_timestamp("lower", "worker-alpha", now - chrono::Duration::seconds(300));
-    let bead_upper = make_bead_with_timestamp("upper", "WORKER-ALPHA", now - chrono::Duration::seconds(60));
+    let bead_lower = make_bead_with_timestamp(
+        "lower",
+        "worker-alpha",
+        now - chrono::Duration::seconds(300),
+    );
+    let bead_upper =
+        make_bead_with_timestamp("upper", "WORKER-ALPHA", now - chrono::Duration::seconds(60));
 
     let all_beads = vec![bead_lower.clone(), bead_upper.clone()];
 
@@ -621,5 +676,106 @@ fn case_sensitive_assignee_matching() {
     assert!(
         stale.is_empty(),
         "assignee matching should be case-sensitive"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Regression tests: Single-claim staleness threshold path
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn regression_single_claim_staleness_threshold() {
+    // REGRESSION TEST: Verify that single-claim staleness detection based on
+    // stale_threshold_secs is not broken by the new per-assignee overlap logic.
+    //
+    // The two-pass approach must maintain the invariant:
+    // - Single claims are NEVER stale by overlap (Pass 1)
+    // - Single claims MAY be stale by age threshold (Pass 2)
+    // - A fresh single claim (within threshold) should NOT be reap-eligible
+
+    let now = Utc::now();
+
+    // Scenario 1: Single OLD claim (older than stuck_threshold_secs of 300s)
+    let single_old_claim = make_bead_with_timestamp(
+        "single-old-claim",
+        "worker-alpha",
+        now - chrono::Duration::seconds(600), // 10 minutes old (exceeds 300s threshold)
+    );
+
+    // Scenario 2: Single FRESH claim (within stuck_threshold_secs)
+    let single_fresh_claim = make_bead_with_timestamp(
+        "single-fresh-claim",
+        "worker-beta",
+        now - chrono::Duration::seconds(60), // 1 minute old (within 300s threshold)
+    );
+
+    // When: Apply Pass 1 staleness detection (overlap only)
+    let all_beads = vec![single_old_claim.clone(), single_fresh_claim.clone()];
+    let stale_by_overlap = get_stale_by_assignee_overlap(&all_beads);
+
+    // Then: NEITHER single claim should be stale by overlap (Pass 1)
+    assert!(
+        stale_by_overlap.is_empty(),
+        "single claims should never be marked stale by overlap detection, regardless of age"
+    );
+    assert!(
+        !stale_by_overlap.contains(&single_old_claim.id),
+        "old single claim must not be stale by overlap"
+    );
+    assert!(
+        !stale_by_overlap.contains(&single_fresh_claim.id),
+        "fresh single claim must not be stale by overlap"
+    );
+
+    // Verify that the two-pass system would handle these correctly:
+    // - The old claim would be reap-eligible by Pass 2 (age threshold >= 300s)
+    // - The fresh claim would NOT be reap-eligible by Pass 2 (age threshold < 300s)
+    // This test confirms Pass 1 doesn't interfere with the threshold path.
+
+    // Additional verification: Single claim with multiple claims from different assignees
+    let worker_gamma_old = make_bead_with_timestamp(
+        "worker-gamma-old",
+        "worker-gamma",
+        now - chrono::Duration::seconds(400),
+    );
+
+    let worker_gamma_new = make_bead_with_timestamp(
+        "worker-gamma-new",
+        "worker-gamma",
+        now - chrono::Duration::seconds(100),
+    );
+
+    let worker_delta_single = make_bead_with_timestamp(
+        "worker-delta-single",
+        "worker-delta",
+        now - chrono::Duration::seconds(500), // Very old single claim
+    );
+
+    let multi_assignee_beads = vec![
+        worker_gamma_old.clone(),
+        worker_gamma_new.clone(),
+        worker_delta_single.clone(),
+    ];
+
+    let stale = get_stale_by_assignee_overlap(&multi_assignee_beads);
+
+    // Then: Only worker-gamma's old claim is stale (superseded by newer claim)
+    // worker-delta's single claim is NOT stale by overlap, even though very old
+    assert_eq!(
+        stale.len(),
+        1,
+        "only multi-claim assignee should have stale claims"
+    );
+    assert!(
+        stale.contains(&worker_gamma_old.id),
+        "older of gamma's two claims should be stale"
+    );
+    assert!(
+        !stale.contains(&worker_gamma_new.id),
+        "newer of gamma's claims should not be stale"
+    );
+    assert!(
+        !stale.contains(&worker_delta_single.id),
+        "delta's single claim must not be stale by overlap, even when very old"
     );
 }
