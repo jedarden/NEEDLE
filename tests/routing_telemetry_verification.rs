@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 
 use needle::config::{AgentConfig, Config, RoutingConfig, RoutingRule};
 use needle::dispatch::{AgentAdapter, Dispatcher, TokenExtraction};
-use needle::telemetry::{Event, EventKind, Telemetry};
+use needle::telemetry::{Telemetry, TelemetryEvent};
 use needle::types::InputMethod;
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -110,10 +110,12 @@ fn make_mock_adapters() -> HashMap<String, AgentAdapter> {
 }
 
 /// A telemetry collector that captures events for test verification.
+#[allow(dead_code)]
 struct TestTelemetryCollector {
-    events: Arc<Mutex<Vec<Event>>>,
+    events: Arc<Mutex<Vec<TelemetryEvent>>>,
 }
 
+#[allow(dead_code)]
 impl TestTelemetryCollector {
     fn new() -> Self {
         Self {
@@ -121,14 +123,14 @@ impl TestTelemetryCollector {
         }
     }
 
-    fn get_events(&self) -> Vec<Event> {
+    fn get_events(&self) -> Vec<TelemetryEvent> {
         self.events.lock().unwrap().clone()
     }
 
-    fn get_routing_events(&self) -> Vec<Event> {
+    fn get_routing_events(&self) -> Vec<TelemetryEvent> {
         self.get_events()
             .into_iter()
-            .filter(|e| matches!(e.kind, EventKind::RoutingDecision { .. }))
+            .filter(|e| e.event_type == "routing_decision")
             .collect()
     }
 }
@@ -175,8 +177,8 @@ fn routing_telemetry_document_event_structure() {
     //   "chosen_adapter": "claude-code-glm-4.7"
     // }
 
-    // This test always passes - it serves as living documentation
-    assert!(true, "Event structure documentation");
+    // This test serves as living documentation of event structure
+    // No assertion needed - documentation is in the comments above
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -393,7 +395,7 @@ fn routing_telemetry_all_anthropic_models_emit_correct_events() {
         "haiku-4-5",
     ];
 
-    for model in anthropic_models {
+    for model in &anthropic_models {
         let resolved_adapter = dispatcher.resolve_adapter_name(model, &config);
 
         assert_eq!(
@@ -426,7 +428,7 @@ fn routing_telemetry_all_glm_models_emit_correct_events() {
     // Test GLM models (should all use default adapter)
     let glm_models = vec!["glm-4.7", "glm-4-flash", "glm-4-plus", "glm-4-turbo"];
 
-    for model in glm_models {
+    for model in &glm_models {
         let resolved_adapter = dispatcher.resolve_adapter_name(model, &config);
 
         assert_eq!(
@@ -466,8 +468,7 @@ fn routing_telemetry_verify_event_metadata_completeness() {
     let anthropic_model = "claude-sonnet-4-6";
     let anthropic_adapter = dispatcher.resolve_adapter_name(anthropic_model, &config);
 
-    // Verify metadata completeness
-    assert!(!anthropic_model.is_empty(), "Model name must be non-empty");
+    // Verify routing behavior
     assert_eq!(anthropic_adapter, "claude-print");
     assert!(
         dispatcher.adapter(&anthropic_adapter).is_some(),
@@ -478,7 +479,6 @@ fn routing_telemetry_verify_event_metadata_completeness() {
     let glm_model = "glm-4.7";
     let glm_adapter = dispatcher.resolve_adapter_name(glm_model, &config);
 
-    assert!(!glm_model.is_empty(), "Model name must be non-empty");
     assert_eq!(glm_adapter, "claude-code-glm-4.7");
     assert!(
         dispatcher.adapter(&glm_adapter).is_some(),
@@ -590,5 +590,5 @@ fn routing_telemetry_test_summary() {
     println!("   - Event metadata: VERIFIED");
     println!("   - Event structure: DOCUMENTED");
 
-    assert!(true, "All routing telemetry tests documented");
+    // All routing telemetry tests are documented above
 }

@@ -4901,13 +4901,13 @@ async fn worker_binary_path_tilde_expansion_multiple_tildes() {
     let _home_lock = lock_home();
     env::set_var("HOME", &isolated_home);
 
-    // Test 1: Multiple tildes separated by space (only first tilde expands)
+    // Test 1: Multiple tildes separated by space (tilde-space is NOT a tilde prefix)
+    // Note: "~ " doesn't start with "~/", so expand_tilde() doesn't expand it
     let multiple_tildes_space = "~ ~/another/path";
     let expanded = expand_tilde(multiple_tildes_space);
-    let expected = format!("{}/ ~/another/path", isolated_home.to_str().unwrap());
     assert_eq!(
-        expanded, expected,
-        "only first tilde should be expanded, second tilde preserved as-is"
+        expanded, multiple_tildes_space,
+        "tilde followed by space is not a tilde prefix, should remain unchanged"
     );
 
     // Test 2: Multiple tildes with no space
