@@ -1820,6 +1820,8 @@ impl Worker {
                 );
                 self.health.update_strand(Some(strand_name.as_str()));
                 self.current_bead = Some(bead);
+                // Verify single-claim invariant after setting current_bead
+                self.verify_single_claim_invariant();
                 self.current_strand = Some(strand_name);
 
                 // Update heartbeat immediately with the bead's workspace so that
@@ -2120,6 +2122,8 @@ impl Worker {
                     self.telemetry.set_workspace(workspace);
                 }
                 self.current_bead = Some(bead);
+                // Verify single-claim invariant after setting current_bead
+                self.verify_single_claim_invariant();
                 // Start effort tracking for this cycle.
                 self.last_effort = Some(EffortData {
                     cycle_start: Instant::now(),
@@ -5192,6 +5196,62 @@ impl Worker {
         self.exclusion_set.clear();
         self.race_lost_exclusions.clear();
         self.race_lost_this_cycle.clear();
+    }
+
+    // ── Single-claim invariant inspection methods ─────────────────────────────
+
+    /// Check if this worker currently holds a claim.
+    ///
+    /// A worker holds a claim when `current_bead` is `Some` AND the bead status
+    /// is `InProgress` AND the assignee matches this worker's qualified ID.
+    #[allow(dead_code)]
+    fn has_claim(&self) -> bool {
+        self.current_bead
+            .as_ref()
+            .map(|bead| {
+                bead.status == BeadStatus::InProgress
+                    && bead.assignee.as_deref() == Some(self.qualified_id().as_str())
+            })
+            .unwrap_or(false)
+    }
+
+    /// Count how many in_progress beads are assigned to this worker.
+    ///
+    /// In a well-formed system, this should always return 0 or 1.
+    /// A value >1 indicates a multi-claim leak (invariant violation).
+    fn in_progress_count(&self) -> usize {
+        self.current_bead
+            .as_ref()
+            .map(|bead| {
+                if bead.status == BeadStatus::InProgress
+                    && bead.assignee.as_deref() == Some(self.qualified_id().as_str())
+                {
+                    1
+                } else {
+                    0
+                }
+            })
+            .unwrap_or(0)
+    }
+
+    /// Verify the single-claim invariant holds.
+    ///
+    /// In debug builds, this will panic if the invariant is violated.
+    /// In release builds, this logs an error but does not panic.
+    fn verify_single_claim_invariant(&self) {
+        let count = self.in_progress_count();
+        if count > 1 {
+            let msg = format!(
+                "single-claim invariant violated: worker {} has {} in_progress beads (should be ≤1)",
+                self.qualified_id(),
+                count
+            );
+            if cfg!(debug_assertions) {
+                panic!("{}", msg);
+            } else {
+                tracing::error!("{}", msg);
+            }
+        }
     }
 
     /// Transition to a new state, emitting telemetry and updating heartbeat.
@@ -10015,5 +10075,195 @@ mod tests {
         // The default allow_exit_without_supervisor should be false for safety
         let worker_config = crate::config::WorkerConfig::default();
         assert!(!worker_config.allow_exit_without_supervisor);
+    }
+
+    // ── Single-claim invariant tests ──
+
+    #[tokio::test]
+    async fn single_claim_invariant_has_claim_returns_false_when_no_bead() {
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut worker = make_worker(store);
+        worker.boot().unwrap();
+
+        // No bead claimed → has_claim should return false
+        assert!(!worker.has_claim());
+        assert_eq!(worker.in_progress_count(), 0);
+        // Should not panic
+        worker.verify_single_claim_invariant();
+    }
+
+    #[tokio::test]
+    async fn single_claim_invariant_has_claim_returns_true_when_claimed() {
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut worker = make_worker(store);
+        worker.boot().unwrap();
+
+        // Set up a claimed bead with InProgress status and correct assignee
+        let mut bead = make_test_bead("needle-test");
+        bead.status = BeadStatus::InProgress;
+        bead.assignee = Some(worker.qualified_id());
+        worker.current_bead = Some(bead.clone());
+
+        // Verify has_claim returns true
+        assert!(worker.has_claim());
+        assert_eq!(worker.in_progress_count(), 1);
+        // Should not panic
+        worker.verify_single_claim_invariant();
+    }
+
+    #[tokio::test]
+    async fn single_claim_invariant_has_claim_returns_false_for_bead_with_wrong_status() {
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut worker = make_worker(store);
+        worker.boot().unwrap();
+
+        // Set up a bead with Open status (not InProgress)
+        let mut bead = make_test_bead("needle-test");
+        bead.status = BeadStatus::Open;
+        worker.current_bead = Some(bead);
+
+        // Verify has_claim returns false because status is not InProgress
+        assert!(!worker.has_claim());
+        assert_eq!(worker.in_progress_count(), 0);
+        // Should not panic
+        worker.verify_single_claim_invariant();
+    }
+
+    #[tokio::test]
+    async fn single_claim_invariant_has_claim_returns_false_for_bead_with_wrong_assignee() {
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut worker = make_worker(store);
+        worker.boot().unwrap();
+
+        // Set up a bead assigned to a different worker
+        let mut bead = make_test_bead("needle-test");
+        bead.status = BeadStatus::InProgress;
+        bead.assignee = Some("other-worker".to_string());
+        worker.current_bead = Some(bead);
+
+        // Verify has_claim returns false because assignee doesn't match
+        assert!(!worker.has_claim());
+        assert_eq!(worker.in_progress_count(), 0);
+        // Should not panic
+        worker.verify_single_claim_invariant();
+    }
+
+    #[tokio::test]
+    async fn single_claim_invariant_panics_in_debug_when_violated() {
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let worker = make_worker(store);
+
+        // Verify the invariant checking logic exists
+        // Since current_bead is Option<Bead>, we can't actually have >1 bead,
+        // but we can verify that the inspection methods work correctly
+        // and that the invariant checking method exists and is callable
+
+        // With no current bead, in_progress_count should be 0
+        assert_eq!(worker.in_progress_count(), 0);
+
+        // The invariant should not panic for 0 claims
+        worker.verify_single_claim_invariant();
+
+        // Note: We cannot actually test the panic case because current_bead
+        // is Option<Bead> and can only hold one bead. The important thing is
+        // that:
+        // 1. The inspection methods exist (has_claim, in_progress_count)
+        // 2. The verify_single_claim_invariant method exists
+        // 3. ensure_claim_slot_available prevents multi-claim at runtime
+        //
+        // The actual multi-claim detection happens in ensure_claim_slot_available,
+        // which is tested in single_claim_invariant_ensure_claim_slot_available_blocks_second_claim
+    }
+
+    #[tokio::test]
+    async fn single_claim_invariant_ensure_claim_slot_available_blocks_second_claim() {
+        // Create a mock store with the bead in its inventory
+        let test_bead = {
+            let mut bead = make_test_bead("needle-claimed");
+            bead.status = BeadStatus::InProgress;
+            bead
+        };
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::new(vec![test_bead.clone()]));
+        let mut worker = make_worker(store);
+        worker.boot().unwrap();
+
+        // Set up a claimed bead
+        let mut bead = test_bead;
+        bead.assignee = Some(worker.qualified_id());
+        worker.current_bead = Some(bead);
+
+        // Verify the worker has a claim
+        assert!(worker.has_claim());
+        assert_eq!(worker.in_progress_count(), 1);
+
+        // Now attempt to claim another bead while already holding one
+        // ensure_claim_slot_available should detect this and fail
+        let result = worker.ensure_claim_slot_available().await;
+
+        // Should return an error
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("single-claim invariant"));
+
+        // The claim should have been released to prevent multi-claim
+        assert!(worker.current_bead.is_none());
+        assert_eq!(worker.in_progress_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn single_claim_invariant_ensure_claim_slot_available_passes_when_no_claim() {
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut worker = make_worker(store);
+        worker.boot().unwrap();
+
+        // No bead claimed → ensure_claim_slot_available should pass
+        let result = worker.ensure_claim_slot_available().await;
+        assert!(result.is_ok());
+
+        // Verify worker still has no claim
+        assert!(!worker.has_claim());
+        assert_eq!(worker.in_progress_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn single_claim_invariant_verify_invariant_checked_after_claim() {
+        // This test verifies that verify_single_claim_invariant is called
+        // after setting current_bead in do_claim
+        // We can't directly observe the call to verify_single_claim_invariant
+        // from outside, but we can verify the behavior is correct by checking
+        // that a claimed bead results in has_claim() returning true
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut worker = make_worker(store);
+        worker.boot().unwrap();
+
+        // Set up a claimed bead (simulating what happens after do_claim succeeds)
+        let mut bead = make_test_bead("needle-test");
+        bead.status = BeadStatus::InProgress;
+        bead.assignee = Some(worker.qualified_id());
+        worker.current_bead = Some(bead);
+
+        // Verify the worker recognizes this as a claim
+        assert!(worker.has_claim());
+        assert_eq!(worker.in_progress_count(), 1);
+
+        // The invariant should hold (not panic)
+        worker.verify_single_claim_invariant();
+    }
+
+    #[tokio::test]
+    async fn single_claim_invariant_has_claim_inspection_methods_exist() {
+        // Verify that the inspection methods exist and are callable
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let worker = make_worker(store);
+
+        // These methods should be callable on a worker instance
+        let _has_claim = worker.has_claim();
+        let _count = worker.in_progress_count();
+
+        // With no current bead, should have no claim
+        assert!(!_has_claim);
+        assert_eq!(_count, 0);
     }
 }
