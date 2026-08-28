@@ -1767,4 +1767,175 @@ mod tests {
 
         assert_eq!(revision, None);
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn show_returns_bead_on_successful_lookup() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let binary = workspace.path().join("fake-bead");
+
+        // Create a fake binary that returns a valid bead JSON
+        std::fs::write(
+            &binary,
+            r#"#!/bin/sh
+if [ "$1" = "show" ]; then
+  echo '{
+    "id": "bf-test-123",
+    "title": "Test Bead",
+    "description": "Test body",
+    "priority": 1,
+    "status": "open",
+    "assignee": null,
+    "labels": ["test", "example"],
+    "source_repo": "/test/workspace",
+    "dependencies": [],
+    "dependents": [],
+    "comments": [],
+    "created_at": "2026-08-28T00:00:00Z",
+    "updated_at": "2026-08-28T01:00:00Z"
+  }'
+else
+  echo 'bead 0.1.3'
+fi
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&binary).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&binary, permissions).unwrap();
+
+        let backend = builtin_bead_backends()
+            .into_iter()
+            .find(|backend| backend.name == "bead-rs")
+            .unwrap();
+        let store = CliBeadStore::new(
+            backend,
+            binary,
+            workspace.path().to_path_buf(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Test successful lookup
+        let bead_id = crate::types::BeadId::from("bf-test-123");
+        let result = store.show(&bead_id).await;
+
+        assert!(result.is_ok(), "show() should succeed for valid bead ID");
+        let bead = result.unwrap();
+        assert_eq!(bead.id.as_ref(), "bf-test-123");
+        assert_eq!(bead.title, "Test Bead");
+        assert_eq!(bead.body, Some("Test body".to_string()));
+        assert_eq!(bead.priority, 1);
+        assert_eq!(bead.status, crate::types::BeadStatus::Open);
+        assert!(bead.assignee.is_none());
+        assert_eq!(bead.labels, vec!["test".to_string(), "example".to_string()]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn show_returns_error_on_not_found() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let binary = workspace.path().join("fake-bead");
+
+        // Create a fake binary that returns empty output (bead not found)
+        std::fs::write(
+            &binary,
+            r#"#!/bin/sh
+if [ "$1" = "show" ]; then
+  # Return empty JSON array to simulate "not found"
+  echo '[]'
+else
+  echo 'bead 0.1.3'
+fi
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&binary).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&binary, permissions).unwrap();
+
+        let backend = builtin_bead_backends()
+            .into_iter()
+            .find(|backend| backend.name == "bead-rs")
+            .unwrap();
+        let store = CliBeadStore::new(
+            backend,
+            binary,
+            workspace.path().to_path_buf(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Test not-found case
+        let bead_id = crate::types::BeadId::from("bf-nonexistent");
+        let result = store.show(&bead_id).await;
+
+        assert!(result.is_err(), "show() should return error for non-existent bead");
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("returned no bead") || error_msg.contains("bf-nonexistent"),
+            "Error message should indicate bead was not found: {}",
+            error_msg
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn show_handles_backend_command_failure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let binary = workspace.path().join("fake-bead");
+
+        // Create a fake binary that exits with error for unknown beads
+        std::fs::write(
+            &binary,
+            r#"#!/bin/sh
+if [ "$1" = "show" ]; then
+  echo "Error: bead not found" >&2
+  exit 1
+else
+  echo 'bead 0.1.3'
+fi
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&binary).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&binary, permissions).unwrap();
+
+        let backend = builtin_bead_backends()
+            .into_iter()
+            .find(|backend| backend.name == "bead-rs")
+            .unwrap();
+        let store = CliBeadStore::new(
+            backend,
+            binary,
+            workspace.path().to_path_buf(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Test backend command failure
+        let bead_id = crate::types::BeadId::from("bf-error-case");
+        let result = store.show(&bead_id).await;
+
+        assert!(result.is_err(), "show() should propagate backend errors");
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("exited with code") || error_msg.contains("not found"),
+            "Error message should indicate backend failure: {}",
+            error_msg
+        );
+    }
 }
