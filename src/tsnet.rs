@@ -24,11 +24,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use crate::config::{ConfigTier, ReloadTier};
+use crate::tailscale_api::{ApiConfig, TailscaleClient};
 use crate::types::{BeadId, WorkerId};
 
 /// Configuration for tsnet identity provisioning.
@@ -57,6 +58,14 @@ pub struct TsnetConfig {
     /// Whether tsnet identity provisioning is enabled (default: false).
     #[serde(default)]
     pub enabled: bool,
+
+    /// SEAM API endpoint configuration for Tailscale key provisioning.
+    #[serde(default)]
+    pub api_config: ApiConfig,
+
+    /// Tailnet name for key creation (default: ardenone).
+    #[serde(default = "TsnetConfig::default_tailnet")]
+    pub tailnet: String,
 }
 
 impl Default for TsnetConfig {
@@ -68,6 +77,8 @@ impl Default for TsnetConfig {
             auth_ttl_secs: Self::default_auth_ttl(),
             worker_tag: Self::default_tag(),
             enabled: false,
+            api_config: ApiConfig::default(),
+            tailnet: Self::default_tailnet(),
         }
     }
 }
@@ -94,6 +105,10 @@ impl TsnetConfig {
 
     fn default_tag() -> String {
         "tag:needle-worker".to_string()
+    }
+
+    fn default_tailnet() -> String {
+        "ardenone".to_string()
     }
 }
 
@@ -146,14 +161,32 @@ impl WorkerIdentity {
 pub struct IdentityRegistry {
     config: TsnetConfig,
     identities: Arc<RwLock<HashMap<String, WorkerIdentity>>>,
+    api_client: Option<TailscaleClient>,
 }
 
 impl IdentityRegistry {
     /// Create a new identity registry with the given config.
     pub fn new(config: TsnetConfig) -> Self {
+        // Initialize API client if tsnet is enabled
+        let api_client = if config.enabled {
+            match TailscaleClient::new(config.api_config.clone()) {
+                Ok(client) => {
+                    tracing::info!("Tailscale API client initialized for SEAM endpoint: {}", config.api_config.seam_endpoint);
+                    Some(client)
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to initialize Tailscale API client: {}. Identity provisioning will fail closed.", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         IdentityRegistry {
             config,
             identities: Arc::new(RwLock::new(HashMap::new())),
+            api_client,
         }
     }
 
@@ -170,7 +203,10 @@ impl IdentityRegistry {
         }
 
         let hostname = WorkerIdentity::hostname(worker_id, bead_id);
-        let auth_key = self.generate_auth_key(&hostname)?;
+
+        // Generate real ephemeral auth key via SEAM API
+        let auth_key = self.generate_auth_key(worker_id, bead_id, &hostname)?;
+
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -202,20 +238,44 @@ impl IdentityRegistry {
 
     /// Generate an ephemeral auth key for a hostname.
     ///
-    /// This requires a real Tailscale API key source to be configured.
-    /// When no key source is available, this fails closed rather than
-    /// fabricating a credential-shaped value.
-    fn generate_auth_key(&self, hostname: &str) -> Result<String> {
-        // In production, this would:
-        // 1. Call Tailscale API POST /api/v2/tailnet/{tailnet}/keys
-        // 2. Request ephemeral key with tags and expiration
-        // 3. Return the actual key
-        //
-        // For now, fail closed since no real key provisioning mechanism is configured.
-        anyhow::bail!(
-            "tsnet auth key generation failed: no Tailscale API key source configured for hostname {}",
-            hostname
+    /// This calls SEAM's Tailscale API endpoint to provision a real ephemeral key.
+    /// When the API client is unavailable or the call fails, this returns an error
+    /// rather than fabricating a credential-shaped value.
+    fn generate_auth_key(&self, worker_id: &WorkerId, bead_id: &BeadId, hostname: &str) -> Result<String> {
+        // Check if API client is available
+        let client = self.api_client.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Tailscale API client not initialized - tsnet may be disabled or client failed to initialize"))?;
+
+        // Prepare tags for the worker node
+        let tags = vec![self.config.worker_tag.clone()];
+
+        tracing::info!(
+            worker_id = %worker_id,
+            bead_id = %bead_id.as_ref(),
+            hostname = %hostname,
+            tailnet = %self.config.tailnet,
+            tags = ?tags,
+            ttl_secs = self.config.auth_ttl_secs,
+            "requesting ephemeral Tailscale key from SEAM API"
         );
+
+        // Call SEAM's API to create ephemeral key
+        let auth_key = client.create_ephemeral_key(
+            worker_id,
+            bead_id.as_ref(),
+            hostname,
+            &tags,
+            self.config.auth_ttl_secs,
+        ).context("failed to create ephemeral Tailscale key via SEAM API")?;
+
+        tracing::info!(
+            worker_id = %worker_id,
+            bead_id = %bead_id.as_ref(),
+            hostname = %hostname,
+            "successfully provisioned ephemeral Tailscale key"
+        );
+
+        Ok(auth_key)
     }
 
     /// Mark an identity as used (remove from registry).
@@ -350,24 +410,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_identity_registry_provision_fails_without_key_source() {
+    async fn test_identity_registry_provision_with_mock_api() {
         let config = TsnetConfig {
             enabled: true,
             ..Default::default()
         };
-        let registry = IdentityRegistry::new(config);
+        let mut registry = IdentityRegistry::new(config);
+
+        // Inject a mock API client for testing
+        registry.api_client = Some(TailscaleClient::new_mock(
+            "tskey-auth-mock-test-key-12345".to_string(),
+        ));
 
         let worker_id = "worker-1".to_string();
         let bead_id = BeadId::from("bf-test");
 
         let result = registry.provision_identity(&worker_id, &bead_id).await;
 
-        // Should fail because no real key source is configured
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("no Tailscale API key source configured"));
+        // Should succeed with mock client
+        assert!(result.is_ok());
+        let identity = result.unwrap();
+        assert_eq!(identity.auth_key, "tskey-auth-mock-test-key-12345");
+        assert!(identity.hostname.contains("worker-1"));
+        assert!(identity.hostname.contains("bf-test"));
+        assert_eq!(identity.tag, "tag:needle-worker");
     }
 
     #[tokio::test]
@@ -376,20 +442,30 @@ mod tests {
             enabled: true,
             ..Default::default()
         };
-        let registry = IdentityRegistry::new(config);
+        let mut registry = IdentityRegistry::new(config);
+
+        // Inject a mock API client for testing
+        registry.api_client = Some(TailscaleClient::new_mock(
+            "tskey-auth-mock-test-key-12345".to_string(),
+        ));
 
         let worker_id = "worker-1".to_string();
         let bead_id = BeadId::from("bf-test");
 
-        // Provisioning should fail without a real key source
+        // Provisioning should succeed with mock client
         let result = registry.provision_identity(&worker_id, &bead_id).await;
-        assert!(result.is_err());
+        assert!(result.is_ok());
 
-        // No identities should be registered since provisioning failed
-        assert_eq!(registry.active_count().await, 0);
+        // One identity should be registered
+        assert_eq!(registry.active_count().await, 1);
 
-        // Release on a non-existent identity should be safe (no-op)
-        registry.release_identity("needle-worker-1-bf-test").await;
+        // Get the hostname for cleanup
+        let hostname = WorkerIdentity::hostname(&worker_id, &bead_id);
+
+        // Release the identity
+        registry.release_identity(&hostname).await;
+
+        // No identities should remain
         assert_eq!(registry.active_count().await, 0);
     }
 

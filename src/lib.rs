@@ -67,6 +67,7 @@ pub mod tmux_socket;
 pub mod trace;
 pub mod transcript;
 pub mod tsnet;
+pub mod tailscale_api;
 pub mod types;
 pub mod upgrade;
 pub mod util;
