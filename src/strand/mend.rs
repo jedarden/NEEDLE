@@ -87,7 +87,7 @@ pub async fn cleanup_orphaned_in_progress_test_optimized(
 /// # Returns
 /// A `HashSet<BeadId>` containing the IDs of all beads that are stale due to
 /// assignee overlap (i.e., they are NOT the newest bead for their assignee).
-fn get_stale_by_assignee_overlap(all_beads: &[Bead]) -> HashSet<BeadId> {
+pub fn get_stale_by_assignee_overlap(all_beads: &[Bead]) -> HashSet<BeadId> {
     use std::collections::{HashMap, HashSet};
 
     // Step 1: For each assignee, find the newest (most recently updated) bead

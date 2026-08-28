@@ -56,34 +56,36 @@ pub enum ResolveDecision {
     Complete {
         /// Evidence that the task succeeded (git commits, tests passed, etc.)
         evidence: String,
-        /// Human-readable summary of what was accomplished.
-        summary: String,
+        /// Commit message for the changes made.
+        commit_message: String,
     },
 
     /// Temporary failure — release bead for immediate retry.
     Retry {
-        /// Why the attempt failed (error message, diagnostic info).
-        reason: String,
+        /// Evidence about what failed (error message, diagnostic info).
+        evidence: String,
         /// Suggested retry strategy (same approach, different timeout, etc.).
         strategy: RetryStrategy,
     },
 
     /// Blocked by external dependency — cannot proceed without human input.
     Blocked {
-        /// What external resource is blocking progress (API, human decision, etc).
-        blocker: String,
-        /// What action is needed from a human (approve plan, provide credentials, etc).
-        required_action: String,
-        /// How critical this block is to project progress.
-        severity: BlockSeverity,
+        /// Evidence about the blocker (logs, error messages, etc).
+        evidence: String,
+        /// Type of blocker (API, human decision, resource, etc).
+        blocker_type: String,
+        /// Description of what is blocking progress.
+        description: String,
     },
 
     /// Task decomposes into multiple independent subtasks.
     Split {
-        /// Proposed child beads (independent, sequentially completable).
-        children: Vec<ProposedChild>,
-        /// Rationale for why this decomposition is appropriate.
-        rationale: String,
+        /// Evidence supporting the split decision (analysis, complexity assessment, etc).
+        evidence: String,
+        /// Parent bead ID that this split originates from.
+        parent_bead_id: String,
+        /// Titles of the proposed child beads.
+        child_titles: Vec<String>,
     },
 }
 
@@ -101,51 +103,62 @@ impl ResolveDecision {
     /// Validate the decision has all required fields populated.
     pub fn validate(&self) -> Result<()> {
         match self {
-            ResolveDecision::Complete { evidence, summary } => {
+            ResolveDecision::Complete {
+                evidence,
+                commit_message,
+            } => {
                 if evidence.trim().is_empty() {
                     bail!("Complete decision missing evidence");
                 }
-                if summary.trim().is_empty() {
-                    bail!("Complete decision missing summary");
+                if commit_message.trim().is_empty() {
+                    bail!("Complete decision missing commit_message");
                 }
                 Ok(())
             }
-            ResolveDecision::Retry { reason, strategy } => {
-                if reason.trim().is_empty() {
-                    bail!("Retry decision missing reason");
+            ResolveDecision::Retry { evidence, strategy } => {
+                if evidence.trim().is_empty() {
+                    bail!("Retry decision missing evidence");
                 }
                 strategy.validate()?;
                 Ok(())
             }
             ResolveDecision::Blocked {
-                blocker,
-                required_action,
-                severity,
+                evidence,
+                blocker_type,
+                description,
             } => {
-                if blocker.trim().is_empty() {
-                    bail!("Blocked decision missing blocker");
+                if evidence.trim().is_empty() {
+                    bail!("Blocked decision missing evidence");
                 }
-                if required_action.trim().is_empty() {
-                    bail!("Blocked decision missing required_action");
+                if blocker_type.trim().is_empty() {
+                    bail!("Blocked decision missing blocker_type");
                 }
-                severity.validate()?;
+                if description.trim().is_empty() {
+                    bail!("Blocked decision missing description");
+                }
                 Ok(())
             }
             ResolveDecision::Split {
-                children,
-                rationale,
+                evidence,
+                parent_bead_id,
+                child_titles,
             } => {
-                if children.is_empty() {
-                    bail!("Split decision must have at least one child");
+                if evidence.trim().is_empty() {
+                    bail!("Split decision missing evidence");
                 }
-                if children.len() > 10 {
-                    bail!("Split decision cannot have more than 10 children");
+                if parent_bead_id.trim().is_empty() {
+                    bail!("Split decision missing parent_bead_id");
                 }
-                for (idx, child) in children.iter().enumerate() {
-                    child.validate(idx)?;
+                if child_titles.is_empty() {
+                    bail!("Split decision must have at least one child title");
                 }
-                if rationale.trim().is_empty() {
-                    bail!("Split decision missing rationale");
+                if child_titles.len() > 10 {
+                    bail!("Split decision cannot have more than 10 child titles");
+                }
+                for (idx, title) in child_titles.iter().enumerate() {
+                    if title.trim().is_empty() {
+                        bail!("Child {} has empty title", idx);
+                    }
                 }
                 Ok(())
             }
@@ -156,21 +169,21 @@ impl ResolveDecision {
 impl fmt::Display for ResolveDecision {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ResolveDecision::Complete { summary, .. } => {
-                write!(f, "Complete: {}", summary)
+            ResolveDecision::Complete { commit_message, .. } => {
+                write!(f, "Complete: {}", commit_message)
             }
-            ResolveDecision::Retry { reason, .. } => {
-                write!(f, "Retry: {}", reason)
+            ResolveDecision::Retry { evidence, .. } => {
+                write!(f, "Retry: {}", evidence)
             }
             ResolveDecision::Blocked {
-                blocker,
-                required_action,
+                blocker_type,
+                description,
                 ..
             } => {
-                write!(f, "Blocked on {}: {}", blocker, required_action)
+                write!(f, "Blocked on {}: {}", blocker_type, description)
             }
-            ResolveDecision::Split { children, .. } => {
-                write!(f, "Split into {} child tasks", children.len())
+            ResolveDecision::Split { child_titles, .. } => {
+                write!(f, "Split into {} child tasks", child_titles.len())
             }
         }
     }
@@ -227,59 +240,12 @@ pub enum BlockSeverity {
 }
 
 impl BlockSeverity {
-    fn validate(&self) -> Result<()> {
-        // All variants are valid by construction
-        Ok(())
-    }
-
     pub fn as_str(&self) -> &'static str {
         match self {
             BlockSeverity::Low => "low",
             BlockSeverity::Medium => "medium",
             BlockSeverity::High => "high",
         }
-    }
-}
-
-// ──────────────────────────────────────────────────────────────────────────────
-// ProposedChild
-// ──────────────────────────────────────────────────────────────────────────────
-
-/// A proposed child bead from a Split decision.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ProposedChild {
-    /// Short title for the child task.
-    pub title: String,
-    /// Detailed description and acceptance criteria.
-    pub body: String,
-    /// Recommended priority (1-4, lower is higher priority).
-    pub priority: u8,
-}
-
-impl ProposedChild {
-    fn validate(&self, idx: usize) -> Result<()> {
-        if self.title.trim().is_empty() {
-            bail!("Child {} has empty title", idx);
-        }
-        if self.body.trim().is_empty() {
-            bail!("Child {} ({}) has empty body", idx, self.title);
-        }
-        if !(1..=4).contains(&self.priority) {
-            bail!(
-                "Child {} ({}) has invalid priority {}, must be 1-4",
-                idx,
-                self.title,
-                self.priority
-            );
-        }
-        if self.title.len() > 200 {
-            bail!(
-                "Child {} title too long ({} chars, max 200)",
-                idx,
-                self.title.len()
-            );
-        }
-        Ok(())
     }
 }
 
@@ -556,7 +522,7 @@ impl Resolver {
                 "resolver: binary identity verification failed, using fallback"
             );
             return ResolveDecision::Retry {
-                reason: format!("Binary identity verification failed: {}", e),
+                evidence: format!("Binary identity verification failed: {}", e),
                 strategy: RetryStrategy::DifferentApproach,
             };
         }
@@ -735,7 +701,7 @@ impl Resolver {
     /// - Decision validation fails
     fn fallback_decision(&self, reason: &str) -> ResolveDecision {
         ResolveDecision::Retry {
-            reason: format!(
+            evidence: format!(
                 "Resolver error: {}. Safe fallback: retry with same approach.",
                 reason
             ),
@@ -801,30 +767,27 @@ mod tests {
     fn resolve_decision_display_formats_correctly() {
         let complete = ResolveDecision::Complete {
             evidence: "Commit abc123".to_string(),
-            summary: "Implemented feature".to_string(),
+            commit_message: "Implemented feature".to_string(),
         };
         assert_eq!(format!("{}", complete), "Complete: Implemented feature");
 
         let retry = ResolveDecision::Retry {
-            reason: "Network timeout".to_string(),
+            evidence: "Network timeout".to_string(),
             strategy: RetryStrategy::IncreaseTimeout,
         };
         assert_eq!(format!("{}", retry), "Retry: Network timeout");
 
         let blocked = ResolveDecision::Blocked {
-            blocker: "API key".to_string(),
-            required_action: "Provide credentials".to_string(),
-            severity: BlockSeverity::High,
+            evidence: "Log shows missing key".to_string(),
+            blocker_type: "API key".to_string(),
+            description: "Provide credentials".to_string(),
         };
         assert!(format!("{}", blocked).contains("Blocked on API key"));
 
         let split = ResolveDecision::Split {
-            children: vec![ProposedChild {
-                title: "Child 1".to_string(),
-                body: "Description".to_string(),
-                priority: 1,
-            }],
-            rationale: "Two independent tasks".to_string(),
+            evidence: "Complex task analysis".to_string(),
+            parent_bead_id: "needle-parent".to_string(),
+            child_titles: vec!["Child 1".to_string()],
         };
         assert_eq!(format!("{}", split), "Split into 1 child tasks");
     }
@@ -834,7 +797,7 @@ mod tests {
         assert_eq!(
             ResolveDecision::Complete {
                 evidence: "x".to_string(),
-                summary: "y".to_string(),
+                commit_message: "y".to_string(),
             }
             .as_str(),
             "complete"
@@ -842,7 +805,7 @@ mod tests {
 
         assert_eq!(
             ResolveDecision::Retry {
-                reason: "x".to_string(),
+                evidence: "x".to_string(),
                 strategy: RetryStrategy::Same,
             }
             .as_str(),
@@ -851,9 +814,9 @@ mod tests {
 
         assert_eq!(
             ResolveDecision::Blocked {
-                blocker: "x".to_string(),
-                required_action: "y".to_string(),
-                severity: BlockSeverity::Medium,
+                evidence: "x".to_string(),
+                blocker_type: "y".to_string(),
+                description: "z".to_string(),
             }
             .as_str(),
             "blocked"
@@ -861,8 +824,9 @@ mod tests {
 
         assert_eq!(
             ResolveDecision::Split {
-                children: vec![],
-                rationale: "x".to_string(),
+                evidence: "x".to_string(),
+                parent_bead_id: "y".to_string(),
+                child_titles: vec![],
             }
             .as_str(),
             "split"
@@ -873,19 +837,19 @@ mod tests {
     fn complete_decision_requires_all_fields() {
         let decision = ResolveDecision::Complete {
             evidence: "Commit abc123".to_string(),
-            summary: "Implemented feature".to_string(),
+            commit_message: "Implemented feature".to_string(),
         };
         assert!(decision.validate().is_ok());
 
         let invalid = ResolveDecision::Complete {
             evidence: "".to_string(),
-            summary: "Implemented feature".to_string(),
+            commit_message: "Implemented feature".to_string(),
         };
         assert!(invalid.validate().is_err());
 
         let invalid = ResolveDecision::Complete {
             evidence: "Commit abc123".to_string(),
-            summary: "".to_string(),
+            commit_message: "".to_string(),
         };
         assert!(invalid.validate().is_err());
     }
@@ -893,13 +857,13 @@ mod tests {
     #[test]
     fn retry_decision_requires_all_fields() {
         let decision = ResolveDecision::Retry {
-            reason: "Network timeout".to_string(),
+            evidence: "Network timeout".to_string(),
             strategy: RetryStrategy::IncreaseTimeout,
         };
         assert!(decision.validate().is_ok());
 
         let invalid = ResolveDecision::Retry {
-            reason: "".to_string(),
+            evidence: "".to_string(),
             strategy: RetryStrategy::Same,
         };
         assert!(invalid.validate().is_err());
@@ -908,23 +872,30 @@ mod tests {
     #[test]
     fn blocked_decision_requires_all_fields() {
         let decision = ResolveDecision::Blocked {
-            blocker: "API key".to_string(),
-            required_action: "Provide credentials".to_string(),
-            severity: BlockSeverity::High,
+            evidence: "Log shows missing key".to_string(),
+            blocker_type: "API key".to_string(),
+            description: "Provide credentials".to_string(),
         };
         assert!(decision.validate().is_ok());
 
         let invalid = ResolveDecision::Blocked {
-            blocker: "".to_string(),
-            required_action: "Provide credentials".to_string(),
-            severity: BlockSeverity::Medium,
+            evidence: "".to_string(),
+            blocker_type: "API key".to_string(),
+            description: "Provide credentials".to_string(),
         };
         assert!(invalid.validate().is_err());
 
         let invalid = ResolveDecision::Blocked {
-            blocker: "API key".to_string(),
-            required_action: "".to_string(),
-            severity: BlockSeverity::Low,
+            evidence: "Log shows missing key".to_string(),
+            blocker_type: "".to_string(),
+            description: "Provide credentials".to_string(),
+        };
+        assert!(invalid.validate().is_err());
+
+        let invalid = ResolveDecision::Blocked {
+            evidence: "Log shows missing key".to_string(),
+            blocker_type: "API key".to_string(),
+            description: "".to_string(),
         };
         assert!(invalid.validate().is_err());
     }
@@ -932,45 +903,35 @@ mod tests {
     #[test]
     fn split_decision_requires_children_and_rationale() {
         let decision = ResolveDecision::Split {
-            children: vec![ProposedChild {
-                title: "Child 1".to_string(),
-                body: "Description".to_string(),
-                priority: 1,
-            }],
-            rationale: "Two independent tasks".to_string(),
+            evidence: "Complex task analysis".to_string(),
+            parent_bead_id: "needle-parent".to_string(),
+            child_titles: vec!["Child 1".to_string()],
         };
         assert!(decision.validate().is_ok());
 
         let invalid = ResolveDecision::Split {
-            children: vec![],
-            rationale: "No children".to_string(),
+            evidence: "Complex task analysis".to_string(),
+            parent_bead_id: "needle-parent".to_string(),
+            child_titles: vec![],
         };
         assert!(invalid.validate().is_err());
 
         let invalid = ResolveDecision::Split {
-            children: vec![ProposedChild {
-                title: "Child 1".to_string(),
-                body: "Description".to_string(),
-                priority: 1,
-            }],
-            rationale: "".to_string(),
+            evidence: "".to_string(),
+            parent_bead_id: "needle-parent".to_string(),
+            child_titles: vec!["Child 1".to_string()],
         };
         assert!(invalid.validate().is_err());
     }
 
     #[test]
     fn split_decision_limits_child_count() {
-        let children: Vec<_> = (0..11)
-            .map(|i| ProposedChild {
-                title: format!("Child {}", i),
-                body: format!("Description {}", i),
-                priority: 1,
-            })
-            .collect();
+        let child_titles: Vec<_> = (0..11).map(|i| format!("Child {}", i)).collect();
 
         let invalid = ResolveDecision::Split {
-            children,
-            rationale: "Too many children".to_string(),
+            evidence: "Too many children".to_string(),
+            parent_bead_id: "needle-parent".to_string(),
+            child_titles,
         };
         assert!(invalid.validate().is_err());
     }
@@ -1168,8 +1129,8 @@ mod tests {
                 ..
             }
         ));
-        if let ResolveDecision::Retry { reason, strategy } = fallback {
-            assert!(reason.contains("Resolver error: test_reason"));
+        if let ResolveDecision::Retry { evidence, strategy } = fallback {
+            assert!(evidence.contains("Resolver error: test_reason"));
             assert_eq!(strategy, RetryStrategy::Same);
         }
     }
@@ -1182,7 +1143,7 @@ mod tests {
 
         let decision = ResolveDecision::Complete {
             evidence: "Test evidence".to_string(),
-            summary: "Test summary".to_string(),
+            commit_message: "Test summary".to_string(),
         };
 
         let result = resolver.verify_binary_identity(&decision);
@@ -1228,13 +1189,18 @@ mod tests {
             &crate::config::PromptConfig::default(),
         ));
 
-        let json = r#"{"decision":{"complete":{"evidence":"Commit abc123","summary":"Done"}}}"#;
+        let json =
+            r#"{"decision":{"complete":{"evidence":"Commit abc123","commit_message":"Done"}}}"#;
         let decision = resolver.parse_and_validate_response(json).unwrap();
 
         assert!(matches!(decision, ResolveDecision::Complete { .. }));
-        if let ResolveDecision::Complete { evidence, summary } = decision {
+        if let ResolveDecision::Complete {
+            evidence,
+            commit_message,
+        } = decision
+        {
             assert_eq!(evidence, "Commit abc123");
-            assert_eq!(summary, "Done");
+            assert_eq!(commit_message, "Done");
         }
     }
 
@@ -1244,13 +1210,12 @@ mod tests {
             &crate::config::PromptConfig::default(),
         ));
 
-        let json =
-            r#"{"decision":{"retry":{"reason":"Network timeout","strategy":"increase_timeout"}}}"#;
+        let json = r#"{"decision":{"retry":{"evidence":"Network timeout","strategy":"increase_timeout"}}}"#;
         let decision = resolver.parse_and_validate_response(json).unwrap();
 
         assert!(matches!(decision, ResolveDecision::Retry { .. }));
-        if let ResolveDecision::Retry { reason, strategy } = decision {
-            assert_eq!(reason, "Network timeout");
+        if let ResolveDecision::Retry { evidence, strategy } = decision {
+            assert_eq!(evidence, "Network timeout");
             assert_eq!(strategy, RetryStrategy::IncreaseTimeout);
         }
     }
@@ -1261,19 +1226,19 @@ mod tests {
             &crate::config::PromptConfig::default(),
         ));
 
-        let json = r#"{"decision":{"blocked":{"blocker":"API key","required_action":"Provide credentials","severity":"high"}}}"#;
+        let json = r#"{"decision":{"blocked":{"evidence":"Log shows missing key","blocker_type":"API key","description":"Provide credentials"}}}"#;
         let decision = resolver.parse_and_validate_response(json).unwrap();
 
         assert!(matches!(decision, ResolveDecision::Blocked { .. }));
         if let ResolveDecision::Blocked {
-            blocker,
-            required_action,
-            severity,
+            evidence,
+            blocker_type,
+            description,
         } = decision
         {
-            assert_eq!(blocker, "API key");
-            assert_eq!(required_action, "Provide credentials");
-            assert_eq!(severity, BlockSeverity::High);
+            assert_eq!(blocker_type, "API key");
+            assert_eq!(description, "Provide credentials");
+            assert!(evidence.contains("missing key"));
         }
     }
 
@@ -1283,18 +1248,20 @@ mod tests {
             &crate::config::PromptConfig::default(),
         ));
 
-        let json = r#"{"decision":{"split":{"children":[{"title":"Child 1","body":"Description","priority":1}],"rationale":"Two tasks"}}}"#;
+        let json = r#"{"decision":{"split":{"evidence":"Complex task analysis","parent_bead_id":"needle-parent","child_titles":["Child 1"]}}}"#;
         let decision = resolver.parse_and_validate_response(json).unwrap();
 
         assert!(matches!(decision, ResolveDecision::Split { .. }));
         if let ResolveDecision::Split {
-            children,
-            rationale,
+            evidence,
+            parent_bead_id,
+            child_titles,
         } = decision
         {
-            assert_eq!(children.len(), 1);
-            assert_eq!(children[0].title, "Child 1");
-            assert_eq!(rationale, "Two tasks");
+            assert_eq!(parent_bead_id, "needle-parent");
+            assert_eq!(child_titles.len(), 1);
+            assert_eq!(child_titles[0], "Child 1");
+            assert!(evidence.contains("analysis"));
         }
     }
 
@@ -1305,7 +1272,7 @@ mod tests {
         ));
 
         let json = r#"```json
-{"decision":{"complete":{"evidence":"Commit abc123","summary":"Done"}}}
+{"decision":{"complete":{"evidence":"Commit abc123","commit_message":"Done"}}}
 ```"#;
         let decision = resolver.parse_and_validate_response(json).unwrap();
 
@@ -1652,7 +1619,8 @@ mod tests {
     fn complete_decision_preserves_evidence_field_through_roundtrip() {
         let original = ResolveDecision::Complete {
             evidence: "Commit abc123: Added feature X\nTests passed: 42/42".to_string(),
-            summary: "Successfully implemented feature X with full test coverage".to_string(),
+            commit_message: "Successfully implemented feature X with full test coverage"
+                .to_string(),
         };
 
         // Serialize to JSON through ResolveResponse
@@ -1666,13 +1634,16 @@ mod tests {
 
         // Verify evidence is preserved exactly
         match response.decision {
-            ResolveDecision::Complete { evidence, summary } => {
+            ResolveDecision::Complete {
+                evidence,
+                commit_message,
+            } => {
                 assert_eq!(
                     evidence,
                     "Commit abc123: Added feature X\nTests passed: 42/42"
                 );
                 assert_eq!(
-                    summary,
+                    commit_message,
                     "Successfully implemented feature X with full test coverage"
                 );
             }
@@ -1683,7 +1654,7 @@ mod tests {
     #[test]
     fn retry_decision_preserves_all_fields_through_roundtrip() {
         let original = ResolveDecision::Retry {
-            reason: "HTTP 503 Service Unavailable".to_string(),
+            evidence: "HTTP 503 Service Unavailable".to_string(),
             strategy: RetryStrategy::Backoff,
         };
 
@@ -1694,8 +1665,8 @@ mod tests {
         let response: ResolveResponse = serde_json::from_str(&json).unwrap();
 
         match response.decision {
-            ResolveDecision::Retry { reason, strategy } => {
-                assert_eq!(reason, "HTTP 503 Service Unavailable");
+            ResolveDecision::Retry { evidence, strategy } => {
+                assert_eq!(evidence, "HTTP 503 Service Unavailable");
                 assert_eq!(strategy, RetryStrategy::Backoff);
             }
             _ => panic!("Expected Retry decision"),
@@ -1705,9 +1676,9 @@ mod tests {
     #[test]
     fn blocked_decision_preserves_all_fields_through_roundtrip() {
         let original = ResolveDecision::Blocked {
-            blocker: "Missing OpenBao credentials".to_string(),
-            required_action: "Run bao write secret/app credentials".to_string(),
-            severity: BlockSeverity::High,
+            evidence: "Log shows missing OpenBao credentials".to_string(),
+            blocker_type: "OpenBao credentials".to_string(),
+            description: "Run bao write secret/app credentials".to_string(),
         };
 
         let response_original = ResolveResponse {
@@ -1718,13 +1689,13 @@ mod tests {
 
         match response.decision {
             ResolveDecision::Blocked {
-                blocker,
-                required_action,
-                severity,
+                evidence,
+                blocker_type,
+                description,
             } => {
-                assert_eq!(blocker, "Missing OpenBao credentials");
-                assert_eq!(required_action, "Run bao write secret/app credentials");
-                assert_eq!(severity, BlockSeverity::High);
+                assert_eq!(blocker_type, "OpenBao credentials");
+                assert_eq!(description, "Run bao write secret/app credentials");
+                assert!(evidence.contains("missing"));
             }
             _ => panic!("Expected Blocked decision"),
         }
@@ -1733,19 +1704,12 @@ mod tests {
     #[test]
     fn split_decision_preserves_all_fields_through_roundtrip() {
         let original = ResolveDecision::Split {
-            children: vec![
-                ProposedChild {
-                    title: "Implement authentication".to_string(),
-                    body: "Add login and logout functionality".to_string(),
-                    priority: 1,
-                },
-                ProposedChild {
-                    title: "Write tests".to_string(),
-                    body: "Add comprehensive test suite".to_string(),
-                    priority: 2,
-                },
+            evidence: "Task can be parallelized across two developers".to_string(),
+            parent_bead_id: "needle-parent".to_string(),
+            child_titles: vec![
+                "Implement authentication".to_string(),
+                "Implement data storage".to_string(),
             ],
-            rationale: "Task can be parallelized across two developers".to_string(),
         };
 
         let response_original = ResolveResponse {
@@ -1756,17 +1720,15 @@ mod tests {
 
         match response.decision {
             ResolveDecision::Split {
-                children,
-                rationale,
+                evidence,
+                parent_bead_id,
+                child_titles,
             } => {
-                assert_eq!(children.len(), 2);
-                assert_eq!(children[0].title, "Implement authentication");
-                assert_eq!(children[0].body, "Add login and logout functionality");
-                assert_eq!(children[0].priority, 1);
-                assert_eq!(children[1].title, "Write tests");
-                assert_eq!(children[1].body, "Add comprehensive test suite");
-                assert_eq!(children[1].priority, 2);
-                assert_eq!(rationale, "Task can be parallelized across two developers");
+                assert_eq!(parent_bead_id, "needle-parent");
+                assert_eq!(child_titles.len(), 2);
+                assert_eq!(child_titles[0], "Implement authentication");
+                assert_eq!(child_titles[1], "Implement data storage");
+                assert!(evidence.contains("parallelized"));
             }
             _ => panic!("Expected Split decision"),
         }
@@ -1783,7 +1745,7 @@ mod tests {
 
         for strategy in strategies {
             let original = ResolveDecision::Retry {
-                reason: "Test".to_string(),
+                evidence: "Test".to_string(),
                 strategy: strategy.clone(),
             };
 
@@ -1803,18 +1765,18 @@ mod tests {
     }
 
     #[test]
-    fn all_block_severities_preserve_through_roundtrip() {
-        let severities = vec![
-            BlockSeverity::Low,
-            BlockSeverity::Medium,
-            BlockSeverity::High,
+    fn all_block_types_preserve_through_roundtrip() {
+        let blocker_types = vec![
+            "API key".to_string(),
+            "Human decision".to_string(),
+            "Resource".to_string(),
         ];
 
-        for severity in severities {
+        for blocker_type in blocker_types {
             let original = ResolveDecision::Blocked {
-                blocker: "Test".to_string(),
-                required_action: "Test".to_string(),
-                severity: severity.clone(),
+                evidence: "Test".to_string(),
+                blocker_type: blocker_type.clone(),
+                description: "Test".to_string(),
             };
 
             let response_original = ResolveResponse {
@@ -1824,10 +1786,15 @@ mod tests {
             let response: ResolveResponse = serde_json::from_str(&json).unwrap();
 
             match response.decision {
-                ResolveDecision::Blocked { severity: s, .. } => {
-                    assert_eq!(s, severity);
+                ResolveDecision::Blocked {
+                    blocker_type: bt, ..
+                } => {
+                    assert_eq!(bt, blocker_type);
                 }
-                _ => panic!("Expected Blocked decision with severity {:?}", severity),
+                _ => panic!(
+                    "Expected Blocked decision with blocker_type {:?}",
+                    blocker_type
+                ),
             }
         }
     }
@@ -2306,9 +2273,9 @@ mod tests {
         let fallback = resolver.fallback_decision("test_failure_reason");
 
         match fallback {
-            ResolveDecision::Retry { reason, strategy } => {
-                assert!(reason.contains("Resolver error: test_failure_reason"));
-                assert!(reason.contains("Safe fallback: retry with same approach"));
+            ResolveDecision::Retry { evidence, strategy } => {
+                assert!(evidence.contains("Resolver error: test_failure_reason"));
+                assert!(evidence.contains("Safe fallback: retry with same approach"));
                 assert_eq!(strategy, RetryStrategy::Same);
             }
             _ => panic!("Fallback must return Retry decision"),
