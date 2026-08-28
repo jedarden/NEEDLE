@@ -1969,3 +1969,277 @@ fn routing_whitespace_in_adapter_names() {
     assert!(dispatcher.adapter("valid-adapter ").is_none());
     assert!(dispatcher.adapter(" valid-adapter ").is_none());
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Dispatch + Routing Integration Tests
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn dispatch_with_routing_anthropic_models() {
+    // Test that dispatch correctly uses routing to resolve Anthropic models.
+    //
+    // This test validates the full dispatch flow: when a model name is provided,
+    // the routing rules are consulted to determine which adapter to use, and
+    // the correct adapter is selected for dispatch.
+
+    let routing = make_anthropic_subscription_routing();
+    let config = make_test_config("claude", Some(routing));
+
+    let dispatcher = make_test_dispatcher(vec![
+        make_test_adapter("claude-print", "claude", "claude --print < {prompt_file}"),
+        make_test_adapter(
+            "claude-code-glm-4.7",
+            "claude-code-glm",
+            "claude-code-glm < {prompt_file}",
+        ),
+    ]);
+
+    // Test various Anthropic models
+    let anthropic_models = vec![
+        ("claude-sonnet-4-6", "claude-print"),
+        ("claude-opus-4-6", "claude-print"),
+        ("claude-fable-5", "claude-print"),
+        ("claude-haiku-4-5", "claude-print"),
+        ("sonnet-4-6", "claude-print"),
+        ("opus-4-7", "claude-print"),
+    ];
+
+    for (model, expected_adapter) in anthropic_models {
+        let resolved = dispatcher.resolve_adapter_name(model, &config);
+        assert_eq!(
+            resolved, expected_adapter,
+            "Model '{}' should resolve to adapter '{}'",
+            model, expected_adapter
+        );
+
+        // Verify the resolved adapter exists in dispatcher
+        let adapter = dispatcher.adapter(&resolved);
+        assert!(
+            adapter.is_some(),
+            "Resolved adapter '{}' should exist in dispatcher for model '{}'",
+            resolved,
+            model
+        );
+    }
+}
+
+#[test]
+fn dispatch_with_routing_glm_fallback() {
+    // Test that dispatch correctly falls back to default adapter for GLM models.
+    //
+    // GLM models don't match the Anthropic routing rules, so they should
+    // fall back to the default adapter.
+
+    let routing = make_anthropic_subscription_routing();
+    let config = make_test_config("claude", Some(routing));
+
+    let dispatcher = make_test_dispatcher(vec![
+        make_test_adapter("claude-print", "claude", "claude --print < {prompt_file}"),
+        make_test_adapter(
+            "claude-code-glm-4.7",
+            "claude-code-glm",
+            "claude-code-glm < {prompt_file}",
+        ),
+    ]);
+
+    // Test GLM and other non-Anthropic models
+    let fallback_models = vec![
+        "glm-4.7",
+        "glm-4-flash",
+        "gpt-4",
+        "gemini-pro",
+        "llama-3-70b",
+        "random-model",
+    ];
+
+    for model in fallback_models {
+        let resolved = dispatcher.resolve_adapter_name(model, &config);
+        assert_eq!(
+            resolved, "claude-code-glm-4.7",
+            "Model '{}' should fall back to default adapter",
+            model
+        );
+
+        // Verify the default adapter exists
+        let adapter = dispatcher.adapter(&resolved);
+        assert!(
+            adapter.is_some(),
+            "Default adapter should exist for model '{}'",
+            model
+        );
+    }
+}
+
+#[test]
+fn dispatch_with_routing_no_routing_config() {
+    // Test that dispatch works correctly when no routing is configured.
+    //
+    // Without routing configuration, all models should resolve to the
+    // default adapter from agent.default.
+
+    let config = make_test_config("claude", None);
+
+    let dispatcher = make_test_dispatcher(vec![
+        make_test_adapter("claude", "claude", "claude < {prompt_file}"),
+        make_test_adapter(
+            "claude-code-glm-4.7",
+            "claude-code-glm",
+            "claude-code-glm < {prompt_file}",
+        ),
+    ]);
+
+    // All models should resolve to the default adapter
+    let models = vec!["claude-sonnet-4-6", "glm-4.7", "gpt-4", "any-model"];
+
+    for model in models {
+        let resolved = dispatcher.resolve_adapter_name(model, &config);
+        assert_eq!(
+            resolved, "claude",
+            "Without routing, all models should resolve to default adapter 'claude'"
+        );
+    }
+}
+
+#[test]
+fn dispatch_with_routing_empty_rules() {
+    // Test that dispatch works when routing config has empty rules list.
+    //
+    // Empty rules should still use the default_adapter from routing config,
+    // falling back to agent.default if default_adapter is not set.
+
+    let routing = RoutingConfig {
+        rules: vec![],
+        default_adapter: Some("claude-code-glm-4.7".to_string()),
+        strict: false,
+    };
+    let config = make_test_config("claude", Some(routing));
+
+    let dispatcher = make_test_dispatcher(vec![
+        make_test_adapter("claude", "claude", "claude < {prompt_file}"),
+        make_test_adapter(
+            "claude-code-glm-4.7",
+            "claude-code-glm",
+            "claude-code-glm < {prompt_file}",
+        ),
+    ]);
+
+    // With empty rules, should use default_adapter from routing config
+    let resolved = dispatcher.resolve_adapter_name("any-model", &config);
+    assert_eq!(
+        resolved, "claude-code-glm-4.7",
+        "Empty routing rules should use default_adapter"
+    );
+}
+
+#[test]
+fn dispatch_with_routing_specific_pattern_matching() {
+    // Test that dispatch correctly uses specific routing patterns.
+    //
+    // This test validates that more specific patterns match correctly
+    // and that the first matching rule wins (first-match-wins semantics).
+
+    let routing = RoutingConfig {
+        rules: vec![
+            make_rule("claude-sonnet-5", "sonnet-5-exact"),
+            make_rule("claude-sonnet.*", "sonnet-family"),
+            make_rule("claude-opus.*", "opus-family"),
+            make_rule("claude-.*", "all-claude"),
+        ],
+        default_adapter: Some("fallback".to_string()),
+        strict: false,
+    };
+    let config = make_test_config("claude", Some(routing));
+
+    let dispatcher = make_test_dispatcher(vec![
+        make_test_adapter("sonnet-5-exact", "claude", "claude --model sonnet-5"),
+        make_test_adapter("sonnet-family", "claude", "claude --model sonnet"),
+        make_test_adapter("opus-family", "claude", "claude --model opus"),
+        make_test_adapter("all-claude", "claude", "claude --model claude"),
+        make_test_adapter("fallback", "claude", "claude --model fallback"),
+    ]);
+
+    // Exact match for claude-sonnet-5
+    let resolved = dispatcher.resolve_adapter_name("claude-sonnet-5", &config);
+    assert_eq!(resolved, "sonnet-5-exact");
+
+    // Other Sonnet models match the second rule
+    let resolved = dispatcher.resolve_adapter_name("claude-sonnet-4-6", &config);
+    assert_eq!(resolved, "sonnet-family");
+
+    // Opus models match the third rule
+    let resolved = dispatcher.resolve_adapter_name("claude-opus-4-8", &config);
+    assert_eq!(resolved, "opus-family");
+
+    // Fable models match the fourth rule
+    let resolved = dispatcher.resolve_adapter_name("claude-fable-5", &config);
+    assert_eq!(resolved, "all-claude");
+
+    // Non-Claude models fall back to default
+    let resolved = dispatcher.resolve_adapter_name("glm-4.7", &config);
+    assert_eq!(resolved, "fallback");
+}
+
+#[test]
+fn dispatch_with_routing_first_match_wins() {
+    // Test that dispatch correctly implements first-match-wins semantics.
+    //
+    // When multiple patterns match a model, the FIRST matching rule wins.
+    // This is critical for predictable routing behavior.
+
+    let routing = RoutingConfig {
+        // Order matters! First matching rule wins.
+        rules: vec![
+            make_rule("claude-.*", "first-adapter"),
+            make_rule("claude-sonnet.*", "second-adapter"),
+            make_rule("sonnet-.*", "third-adapter"),
+        ],
+        default_adapter: Some("fallback".to_string()),
+        strict: false,
+    };
+    let config = make_test_config("claude", Some(routing));
+
+    let dispatcher = make_test_dispatcher(vec![
+        make_test_adapter("first-adapter", "claude", "claude --first"),
+        make_test_adapter("second-adapter", "claude", "claude --second"),
+        make_test_adapter("third-adapter", "claude", "claude --third"),
+        make_test_adapter("fallback", "claude", "claude --fallback"),
+    ]);
+
+    // claude-sonnet-4-6 matches all three patterns, but first wins
+    let resolved = dispatcher.resolve_adapter_name("claude-sonnet-4-6", &config);
+    assert_eq!(
+        resolved, "first-adapter",
+        "First matching pattern should win"
+    );
+}
+
+#[test]
+fn dispatch_with_routing_case_sensitivity() {
+    // Test that routing patterns are case-sensitive.
+    //
+    // Model names should match patterns with exact casing, not
+    // case-insensitive matching.
+
+    let routing = RoutingConfig {
+        rules: vec![make_rule("Claude-Sonnet.*", "exact-case")],
+        default_adapter: Some("fallback".to_string()),
+        strict: false,
+    };
+    let config = make_test_config("claude", Some(routing));
+
+    let dispatcher = make_test_dispatcher(vec![
+        make_test_adapter("exact-case", "claude", "claude --exact"),
+        make_test_adapter("fallback", "claude", "claude --fallback"),
+    ]);
+
+    // Exact case match
+    let resolved = dispatcher.resolve_adapter_name("Claude-Sonnet-4-6", &config);
+    assert_eq!(resolved, "exact-case");
+
+    // Different case doesn't match (falls back to default)
+    let resolved = dispatcher.resolve_adapter_name("claude-sonnet-4-6", &config);
+    assert_eq!(resolved, "fallback");
+
+    let resolved = dispatcher.resolve_adapter_name("CLAUDE-SONNET-4-6", &config);
+    assert_eq!(resolved, "fallback");
+}

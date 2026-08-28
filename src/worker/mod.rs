@@ -836,6 +836,12 @@ impl Worker {
                 Dispatcher::with_adapters(builtins, telemetry.clone(), config.agent.timeout)
             }
         };
+
+        // Configure dispatcher with bead store and worker ID for atomic claim verification
+        let dispatcher = dispatcher
+            .with_bead_store(store.clone())
+            .with_worker_id(worker_name.clone());
+
         let _ = telemetry.emit(EventKind::InitStepCompleted {
             step: "dispatcher_setup".to_string(),
             duration_ms: dispatcher_start.elapsed().as_millis() as u64,
@@ -4144,6 +4150,12 @@ impl Worker {
             component_config.agent.adapters_dir = candidate.agent.adapters_dir.clone();
             let rebuilt = Dispatcher::new(&component_config, self.telemetry.clone());
 
+            // Configure the rebuilt dispatcher with bead store and worker ID
+            let rebuilt = rebuilt.map(|d| {
+                d.with_bead_store(self.home_store.clone())
+                    .with_worker_id(self.worker_name.clone())
+            });
+
             if install_rebuilt_component(&mut self.dispatcher, "Dispatcher", rebuilt, &mut report) {
                 self.config.agent.adapters_dir = candidate.agent.adapters_dir.clone();
                 report.applied_keys.push("agent.adapters_dir".to_string());
@@ -6952,7 +6964,7 @@ mod tests {
             status: BeadStatus::Open,
             assignee: None,
             labels: vec![],
-            workspace: std::path::PathBuf::from("/tmp/test-workspace"),
+            workspace: std::path::PathBuf::from("."),
             dependencies: vec![],
             dependents: vec![],
             comments: vec![],
@@ -8553,7 +8565,7 @@ mod tests {
         config.agent.timeout = 5;
         // Set workspace.default to match the bead's workspace so the remote
         // store switch logic doesn't fire.
-        config.workspace.default = std::path::PathBuf::from("/tmp/test-workspace");
+        config.workspace.default = std::path::PathBuf::from(".");
         // Isolate workspace.home. It otherwise defaults to the REAL ~/.needle, and
         // two things follow from that: the heartbeat emitter writes into the live
         // fleet's ~/.needle/state/heartbeats/, and check_hot_reload() compares this
