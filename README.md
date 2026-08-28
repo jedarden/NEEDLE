@@ -23,12 +23,24 @@ curl -fsSL https://github.com/jedarden/NEEDLE/releases/latest/download/install.s
 # Or build from source (needs Rust 1.75+, see rust-toolchain.toml)
 cargo install --git https://github.com/jedarden/NEEDLE
 
+# Install a bead backend (required)
+# The bead-rs backend manages your workspace's bead store (SQLite + checkpoint)
+cargo install --git https://github.com/jedarden/bead-rs --bin bead
+# See https://github.com/jedarden/bead-rs for backend details and prebuilt installers (coming soon)
+
 # Configure your bead workspace backend (required)
 cd /path/to/your/workspace
 cat > .needle.yaml << 'EOF'
 bead_cli:
   backend: bead-rs  # or 'bead-forge' for legacy bf/br workspaces
 EOF
+# This file tells needle which bead CLI backend to use
+
+# Initialise the workspace's bead store
+bead init --prefix <short-name>
+
+# Verify everything resolves
+needle doctor
 
 # Run a worker
 needle run --agent claude --identity alpha
