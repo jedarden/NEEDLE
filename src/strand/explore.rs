@@ -46,12 +46,14 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::bead_store::{discover_default, BeadStore, Filters};
 use crate::config::ExploreConfig;
 use crate::registry::Registry;
 use crate::telemetry::Telemetry;
 use crate::types::{BeadId, StrandResult};
+use crate::util::capture_timestamp;
 
 /// Factory for creating bead stores for workspaces.
 ///
@@ -664,9 +666,11 @@ impl super::Strand for ExploreStrand {
 
         // Track scan summary information for telemetry
         let scan_start = Instant::now();
+        let scan_start_at = capture_timestamp();
         tracing::debug!(
             worker = %self.qualified_id,
             scan_start_ns = scan_start.elapsed().as_nanos(),
+            scan_start_at = %scan_start_at,
             "captured scan start timestamp"
         );
         let mut workspaces_visited: Vec<String> = Vec::new();
@@ -921,6 +925,7 @@ impl super::Strand for ExploreStrand {
                 total_candidates,
                 exclusion_reasons: exclusion_reasons.into_iter().collect(),
                 duration_ms,
+                scan_start_at,
             });
 
         if all_candidates.is_empty() {

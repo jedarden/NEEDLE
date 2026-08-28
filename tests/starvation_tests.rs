@@ -806,6 +806,7 @@ async fn explore_no_starvation_when_within_threshold() {
             total_candidates: 5,
             exclusion_reasons: vec![],
             duration_ms: 100,
+            scan_start_at: "2026-08-28T12:00:00Z".to_string(),
         })
         .unwrap();
 

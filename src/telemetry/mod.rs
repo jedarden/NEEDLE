@@ -303,6 +303,24 @@ pub enum EventKind {
         actual_assignee: String,
     },
 
+    // ── Version verification ──
+    VersionVerifyStarted {
+        binary: String,
+        expected_backend: String,
+    },
+    VersionVerifySuccess {
+        binary: String,
+        expected_backend: String,
+        actual_backend: String,
+    },
+    VersionVerifyFailed {
+        binary: String,
+        expected_backend: String,
+        actual_backend: Option<String>,
+        error_type: String,
+        error_message: String,
+    },
+
     // ── Bead lifecycle ──
     BeadReleased {
         bead_id: BeadId,
@@ -941,6 +959,8 @@ pub enum EventKind {
         total_candidates: usize,
         exclusion_reasons: Vec<String>,
         duration_ms: u64,
+        /// Timestamp when scan started (ISO 8601)
+        scan_start_at: String,
     },
     ExploreStarvationAlarm {
         minutes_without_claim: u64,
@@ -1011,6 +1031,9 @@ impl EventKind {
             EventKind::ClaimVerifyStarted { .. } => "bead.claim.verify_started",
             EventKind::ClaimVerifySuccess { .. } => "bead.claim.verify_success",
             EventKind::ClaimVerifyFailed { .. } => "bead.claim.verify_failed",
+            EventKind::VersionVerifyStarted { .. } => "version.verify.started",
+            EventKind::VersionVerifySuccess { .. } => "version.verify.success",
+            EventKind::VersionVerifyFailed { .. } => "version.verify.failed",
             EventKind::BeadReleased { .. } => "bead.released",
             EventKind::BeadReleaseFailed { .. } => "bead.release.failed",
             EventKind::BeadCompleted { .. } => "bead.completed",
@@ -1291,6 +1314,9 @@ impl EventKind {
             EventKind::ExploreScanSummary { .. } => None,
             EventKind::ExploreStarvationAlarm { .. } => None,
             EventKind::SpawnPathModifiedInPlace { .. } => None,
+            EventKind::VersionVerifyStarted { .. } => None,
+            EventKind::VersionVerifySuccess { .. } => None,
+            EventKind::VersionVerifyFailed { .. } => None,
             EventKind::PulseBeadCreated { bead_id, .. } => Some(bead_id.clone()),
             EventKind::Log { bead_id, .. } => bead_id.clone(),
             EventKind::UpgradeCheckStarted { .. } => None,
@@ -1958,6 +1984,35 @@ impl EventKind {
                     "error_type": error_type,
                 })
             }
+            EventKind::VersionVerifyStarted {
+                binary,
+                expected_backend,
+            } => serde_json::json!({
+                "binary": binary,
+                "expected_backend": expected_backend,
+            }),
+            EventKind::VersionVerifySuccess {
+                binary,
+                expected_backend,
+                actual_backend,
+            } => serde_json::json!({
+                "binary": binary,
+                "expected_backend": expected_backend,
+                "actual_backend": actual_backend,
+            }),
+            EventKind::VersionVerifyFailed {
+                binary,
+                expected_backend,
+                actual_backend,
+                error_type,
+                error_message,
+            } => serde_json::json!({
+                "binary": binary,
+                "expected_backend": expected_backend,
+                "actual_backend": actual_backend,
+                "error_type": error_type,
+                "error_message": error_message,
+            }),
             EventKind::OutputTransformSpawned {
                 bead_id,
                 transform_cmd,
@@ -2383,12 +2438,14 @@ impl EventKind {
                 total_candidates,
                 exclusion_reasons,
                 duration_ms,
+                scan_start_at,
             } => serde_json::json!({
                 "workspaces_visited": workspaces_visited,
                 "workspaces_with_candidates": workspaces_with_candidates,
                 "total_candidates": total_candidates,
                 "exclusion_reasons": exclusion_reasons,
                 "duration_ms": duration_ms,
+                "scan_start_at": scan_start_at,
             }),
             EventKind::ExploreStarvationAlarm {
                 minutes_without_claim,
@@ -2712,6 +2769,9 @@ impl EventKind {
             | EventKind::ClaimVerifyStarted { .. }
             | EventKind::ClaimVerifySuccess { .. }
             | EventKind::ClaimVerifyFailed { .. }
+            | EventKind::VersionVerifyStarted { .. }
+            | EventKind::VersionVerifySuccess { .. }
+            | EventKind::VersionVerifyFailed { .. }
             | EventKind::MendStaleAssigneeCleared { .. }
             | EventKind::MendAssigneeClearFailed { .. }
             | EventKind::WorkerLaunchDeferred { .. }
