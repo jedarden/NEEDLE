@@ -309,6 +309,9 @@ main() {
             elif command -v shasum &>/dev/null; then
                 actual_hash=$(shasum -a 256 "$temp_binary" | awk '{print $1}')
                 found_hash_tool=true
+            elif command -v openssl &>/dev/null; then
+                actual_hash=$(openssl dgst -sha256 "$temp_binary" | awk '{print $2}')
+                found_hash_tool=true
             fi
 
             if [[ "$found_hash_tool" == "false" ]]; then
@@ -316,8 +319,7 @@ main() {
                     warn_checksum_skipped
                     warn "Skipping checksum verification (no hash tool available)"
                 else
-                    error "Neither sha256sum nor shasum available. Cannot verify checksum.
-Install coreutils (sha256sum) or check the system for shasum.
+                    error "No SHA-256 tool found. Need sha256sum, shasum, or openssl.
 Installation aborted for security reasons."
                 fi
             elif [[ -z "$actual_hash" ]]; then
