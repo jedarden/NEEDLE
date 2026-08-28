@@ -13174,10 +13174,7 @@ agent:
             match path {
                 Some(p) => {
                     let path_str = path_value.as_str().unwrap();
-                    assert_eq!(
-                        path_str, p.to_str().unwrap(),
-                        "Path serialization failed"
-                    );
+                    assert_eq!(path_str, p.to_str().unwrap(), "Path serialization failed");
                 }
                 None => {
                     assert!(path_value.is_null(), "Null path should serialize to null");
@@ -13352,7 +13349,8 @@ agent:
                 backend
             );
             assert_eq!(
-                deserialized.path, Some(PathBuf::from("/usr/local/bin/cli")),
+                deserialized.path,
+                Some(PathBuf::from("/usr/local/bin/cli")),
                 "Path not preserved for backend {:?}",
                 backend
             );
@@ -13386,7 +13384,8 @@ agent:
                 backend
             );
             assert_eq!(
-                deserialized.path, Some(PathBuf::from("/usr/local/bin/cli")),
+                deserialized.path,
+                Some(PathBuf::from("/usr/local/bin/cli")),
                 "Path not preserved for backend {:?}",
                 backend
             );
