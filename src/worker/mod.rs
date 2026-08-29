@@ -12,6 +12,7 @@
 
 #![deny(unused_must_use)]
 
+use chrono::Utc;
 use std::collections::HashSet;
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -768,22 +769,31 @@ impl Worker {
         }
 
         // Phase: Strand setup
-        let _ = telemetry.emit(EventKind::InitStepStarted {
-            step: "strand_setup".to_string(),
-        });
+        let _ = telemetry.emit(
+            EventKind::InitStepStarted {
+                step: "strand_setup".to_string(),
+            },
+            Utc::now(),
+        );
         let strand_start = Instant::now();
         let strand_registry = Registry::default_location(&config.workspace.home);
         let strands =
             StrandRunner::from_config(&config, &qualified_id, strand_registry, telemetry.clone());
-        let _ = telemetry.emit(EventKind::InitStepCompleted {
-            step: "strand_setup".to_string(),
-            duration_ms: strand_start.elapsed().as_millis() as u64,
-        });
+        let _ = telemetry.emit(
+            EventKind::InitStepCompleted {
+                step: "strand_setup".to_string(),
+                duration_ms: strand_start.elapsed().as_millis() as u64,
+            },
+            Utc::now(),
+        );
 
         // Phase: Claimer creation
-        let _ = telemetry.emit(EventKind::InitStepStarted {
-            step: "claimer_creation".to_string(),
-        });
+        let _ = telemetry.emit(
+            EventKind::InitStepStarted {
+                step: "claimer_creation".to_string(),
+            },
+            chrono::Utc::now(),
+        );
         let claimer_start = Instant::now();
         let claimer = Claimer::new(
             store.clone(),
@@ -792,15 +802,21 @@ impl Worker {
             100,
             telemetry.clone(),
         );
-        let _ = telemetry.emit(EventKind::InitStepCompleted {
-            step: "claimer_creation".to_string(),
-            duration_ms: claimer_start.elapsed().as_millis() as u64,
-        });
+        let _ = telemetry.emit(
+            EventKind::InitStepCompleted {
+                step: "claimer_creation".to_string(),
+                duration_ms: claimer_start.elapsed().as_millis() as u64,
+            },
+            chrono::Utc::now(),
+        );
 
         // Phase: PromptBuilder setup
-        let _ = telemetry.emit(EventKind::InitStepStarted {
-            step: "prompt_builder_setup".to_string(),
-        });
+        let _ = telemetry.emit(
+            EventKind::InitStepStarted {
+                step: "prompt_builder_setup".to_string(),
+            },
+            chrono::Utc::now(),
+        );
         let prompt_start = Instant::now();
         let prompt_builder = PromptBuilder::with_workspace(
             &config.prompt,
@@ -815,15 +831,21 @@ impl Worker {
             &config.workspace.labels,
         )
         .with_global_learnings(&config.strands.learning.global_learnings_file);
-        let _ = telemetry.emit(EventKind::InitStepCompleted {
-            step: "prompt_builder_setup".to_string(),
-            duration_ms: prompt_start.elapsed().as_millis() as u64,
-        });
+        let _ = telemetry.emit(
+            EventKind::InitStepCompleted {
+                step: "prompt_builder_setup".to_string(),
+                duration_ms: prompt_start.elapsed().as_millis() as u64,
+            },
+            chrono::Utc::now(),
+        );
 
         // Phase: Dispatcher setup (adapter loading)
-        let _ = telemetry.emit(EventKind::InitStepStarted {
-            step: "dispatcher_setup".to_string(),
-        });
+        let _ = telemetry.emit(
+            EventKind::InitStepStarted {
+                step: "dispatcher_setup".to_string(),
+            },
+            chrono::Utc::now(),
+        );
         let dispatcher_start = Instant::now();
         let dispatcher = match Dispatcher::new(&config, telemetry.clone()) {
             Ok(d) => d,
@@ -842,21 +864,30 @@ impl Worker {
             .with_bead_store(store.clone())
             .with_worker_id(worker_name.clone());
 
-        let _ = telemetry.emit(EventKind::InitStepCompleted {
-            step: "dispatcher_setup".to_string(),
-            duration_ms: dispatcher_start.elapsed().as_millis() as u64,
-        });
+        let _ = telemetry.emit(
+            EventKind::InitStepCompleted {
+                step: "dispatcher_setup".to_string(),
+                duration_ms: dispatcher_start.elapsed().as_millis() as u64,
+            },
+            chrono::Utc::now(),
+        );
 
         // Phase: OutcomeHandler creation
-        let _ = telemetry.emit(EventKind::InitStepStarted {
-            step: "outcome_handler_creation".to_string(),
-        });
+        let _ = telemetry.emit(
+            EventKind::InitStepStarted {
+                step: "outcome_handler_creation".to_string(),
+            },
+            chrono::Utc::now(),
+        );
         let outcome_start = Instant::now();
         let outcome_handler = OutcomeHandler::new(config.clone(), telemetry.clone());
-        let _ = telemetry.emit(EventKind::InitStepCompleted {
-            step: "outcome_handler_creation".to_string(),
-            duration_ms: outcome_start.elapsed().as_millis() as u64,
-        });
+        let _ = telemetry.emit(
+            EventKind::InitStepCompleted {
+                step: "outcome_handler_creation".to_string(),
+                duration_ms: outcome_start.elapsed().as_millis() as u64,
+            },
+            chrono::Utc::now(),
+        );
 
         // Create the shutdown flag BEFORE creating HealthMonitor so we can share it.
         // This ensures that when the heartbeat emitter's circuit breaker fires,
@@ -865,9 +896,12 @@ impl Worker {
         let shutdown = Arc::new(AtomicBool::new(false));
 
         // Phase: HealthMonitor setup
-        let _ = telemetry.emit(EventKind::InitStepStarted {
-            step: "health_monitor_setup".to_string(),
-        });
+        let _ = telemetry.emit(
+            EventKind::InitStepStarted {
+                step: "health_monitor_setup".to_string(),
+            },
+            chrono::Utc::now(),
+        );
         let health_start = Instant::now();
         let health = HealthMonitor::new(
             config.clone(),
@@ -875,43 +909,61 @@ impl Worker {
             telemetry.clone(),
             Some(shutdown.clone()),
         );
-        let _ = telemetry.emit(EventKind::InitStepCompleted {
-            step: "health_monitor_setup".to_string(),
-            duration_ms: health_start.elapsed().as_millis() as u64,
-        });
+        let _ = telemetry.emit(
+            EventKind::InitStepCompleted {
+                step: "health_monitor_setup".to_string(),
+                duration_ms: health_start.elapsed().as_millis() as u64,
+            },
+            chrono::Utc::now(),
+        );
 
         // Phase: RateLimiter setup
-        let _ = telemetry.emit(EventKind::InitStepStarted {
-            step: "rate_limiter_setup".to_string(),
-        });
+        let _ = telemetry.emit(
+            EventKind::InitStepStarted {
+                step: "rate_limiter_setup".to_string(),
+            },
+            chrono::Utc::now(),
+        );
         let rate_limiter_start = Instant::now();
         let registry = Registry::default_location(&config.workspace.home);
         let rate_limiter =
             RateLimiter::new(config.limits.clone(), &config.workspace.home.join("state"));
-        let _ = telemetry.emit(EventKind::InitStepCompleted {
-            step: "rate_limiter_setup".to_string(),
-            duration_ms: rate_limiter_start.elapsed().as_millis() as u64,
-        });
+        let _ = telemetry.emit(
+            EventKind::InitStepCompleted {
+                step: "rate_limiter_setup".to_string(),
+                duration_ms: rate_limiter_start.elapsed().as_millis() as u64,
+            },
+            chrono::Utc::now(),
+        );
 
         // Phase: MitosisEvaluator setup
-        let _ = telemetry.emit(EventKind::InitStepStarted {
-            step: "mitosis_evaluator_setup".to_string(),
-        });
+        let _ = telemetry.emit(
+            EventKind::InitStepStarted {
+                step: "mitosis_evaluator_setup".to_string(),
+            },
+            chrono::Utc::now(),
+        );
         let mitosis_start = Instant::now();
         let mitosis_evaluator = MitosisEvaluator::new(
             config.strands.mitosis.clone(),
             telemetry.clone(),
             std::path::PathBuf::from("/tmp"),
         );
-        let _ = telemetry.emit(EventKind::InitStepCompleted {
-            step: "mitosis_evaluator_setup".to_string(),
-            duration_ms: mitosis_start.elapsed().as_millis() as u64,
-        });
+        let _ = telemetry.emit(
+            EventKind::InitStepCompleted {
+                step: "mitosis_evaluator_setup".to_string(),
+                duration_ms: mitosis_start.elapsed().as_millis() as u64,
+            },
+            chrono::Utc::now(),
+        );
 
         // Phase: Registry state restoration
-        let _ = telemetry.emit(EventKind::InitStepStarted {
-            step: "registry_state_restoration".to_string(),
-        });
+        let _ = telemetry.emit(
+            EventKind::InitStepStarted {
+                step: "registry_state_restoration".to_string(),
+            },
+            chrono::Utc::now(),
+        );
         let registry_start = Instant::now();
         // Restore beads_processed from registry if this worker was previously registered
         // (e.g., hot-reload resume). New workers start at 0.
@@ -923,10 +975,13 @@ impl Worker {
             .and_then(|workers| workers.into_iter().find(|w| w.id == qualified_id))
             .map(|entry| entry.beads_processed)
             .unwrap_or(0);
-        let _ = telemetry.emit(EventKind::InitStepCompleted {
-            step: "registry_state_restoration".to_string(),
-            duration_ms: registry_start.elapsed().as_millis() as u64,
-        });
+        let _ = telemetry.emit(
+            EventKind::InitStepCompleted {
+                step: "registry_state_restoration".to_string(),
+                duration_ms: registry_start.elapsed().as_millis() as u64,
+            },
+            chrono::Utc::now(),
+        );
 
         let default_workspace = config.workspace.default.clone();
 
@@ -1081,10 +1136,13 @@ impl Worker {
         // This ensures we get a trace even if subsequent init steps block indefinitely.
         // Skip if already emitted externally (e.g., from CLI layer for early boot diagnostics).
         if !self.booting_emitted {
-            self.telemetry.emit(EventKind::WorkerBooting {
-                worker_name: self.worker_name.clone(),
-                version: env!("CARGO_PKG_VERSION").to_string(),
-            })?;
+            self.telemetry.emit(
+                EventKind::WorkerBooting {
+                    worker_name: self.worker_name.clone(),
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                },
+                chrono::Utc::now(),
+            )?;
             // Force-flush to disk before boot() — if init blocks, we still have a trace.
             self.telemetry
                 .force_flush_async(std::time::Duration::from_secs(5))
@@ -1111,9 +1169,12 @@ impl Worker {
         self.boot()?;
 
         // Step: Spawn-path binary metadata recording
-        self.telemetry.emit(EventKind::InitStepStarted {
-            step: "spawn_path_metadata".to_string(),
-        })?;
+        self.telemetry.emit(
+            EventKind::InitStepStarted {
+                step: "spawn_path_metadata".to_string(),
+            },
+            chrono::Utc::now(),
+        )?;
         let step_start = Instant::now();
 
         // Record spawn-path binary metadata at boot time
@@ -1124,13 +1185,16 @@ impl Worker {
             let new_metadata_json =
                 serde_json::to_value(&event.new_metadata).unwrap_or(serde_json::Value::Null);
 
-            let _ = self.telemetry.emit(EventKind::SpawnPathModifiedInPlace {
-                path: event.path,
-                old_metadata: old_metadata_json,
-                new_metadata: new_metadata_json,
-                modification_type: event.modification_type,
-                description: event.description,
-            });
+            let _ = self.telemetry.emit(
+                EventKind::SpawnPathModifiedInPlace {
+                    path: event.path,
+                    old_metadata: old_metadata_json,
+                    new_metadata: new_metadata_json,
+                    modification_type: event.modification_type,
+                    description: event.description,
+                },
+                chrono::Utc::now(),
+            );
         }) {
             Ok(metadata) => {
                 let path = metadata.path.clone();
@@ -1158,10 +1222,13 @@ impl Worker {
             }
         }
 
-        self.telemetry.emit(EventKind::InitStepCompleted {
-            step: "spawn_path_metadata".to_string(),
-            duration_ms: step_start.elapsed().as_millis() as u64,
-        })?;
+        self.telemetry.emit(
+            EventKind::InitStepCompleted {
+                step: "spawn_path_metadata".to_string(),
+                duration_ms: step_start.elapsed().as_millis() as u64,
+            },
+            chrono::Utc::now(),
+        )?;
 
         // Start the watchdog thread that monitors HANDLING state duration.
         // This must be started after boot() so the Worker struct is fully initialized.
@@ -1262,9 +1329,8 @@ impl Worker {
                 tracing::error!("watchdog detected HANDLING state hang, forcing recovery");
                 // Emit critical timeout event.
                 let bead_id = self.current_bead.as_ref().map(|b| b.id.clone());
-                let _ = self
-                    .telemetry
-                    .emit_try_lock(EventKind::WorkerHandlingTimeout {
+                let _ = self.telemetry.emit_try_lock(
+                    EventKind::WorkerHandlingTimeout {
                         bead_id: bead_id.clone().unwrap_or_else(|| BeadId::from("unknown")),
                         outcome: "unknown".to_string(),
                         operation: "watchdog".to_string(),
@@ -1272,7 +1338,9 @@ impl Worker {
                             "HANDLING state exceeded {}s timeout",
                             HANDLING_WATCHDOG_TIMEOUT_SECS
                         ),
-                    });
+                    },
+                    Utc::now(),
+                );
                 // Attempt best-effort release if we have a bead.
                 if let Some(ref bead) = self.current_bead {
                     let bead_id = bead.id.clone();
@@ -1370,21 +1438,27 @@ impl Worker {
                         .take()
                         .unwrap_or_else(|| anyhow::anyhow!("unknown error"));
                     let msg = format!("{err}");
-                    self.telemetry.emit(EventKind::WorkerErrored {
-                        error_type: "worker_scoped".to_string(),
-                        error_message: msg.clone(),
-                        beads_processed: self.beads_processed,
-                    })?;
+                    self.telemetry.emit(
+                        EventKind::WorkerErrored {
+                            error_type: "worker_scoped".to_string(),
+                            error_message: msg.clone(),
+                            beads_processed: self.beads_processed,
+                        },
+                        chrono::Utc::now(),
+                    )?;
 
                     // Emit WorkerStopped before exiting so telemetry shows a clean shutdown.
                     // This ensures operators can distinguish "exited with error" from
                     // "killed by external agent" (e.g., SIGKILL, OOM).
                     let uptime = self.boot_time.map(|t| t.elapsed().as_secs()).unwrap_or(0);
-                    let _ = self.telemetry.emit(EventKind::WorkerStopped {
-                        reason: format!("error: {msg}"),
-                        beads_processed: self.beads_processed,
-                        uptime_secs: uptime,
-                    });
+                    let _ = self.telemetry.emit(
+                        EventKind::WorkerStopped {
+                            reason: format!("error: {msg}"),
+                            beads_processed: self.beads_processed,
+                            uptime_secs: uptime,
+                        },
+                        chrono::Utc::now(),
+                    );
 
                     // Best-effort stop heartbeat on error.
                     self.health.stop();
@@ -1415,9 +1489,12 @@ impl Worker {
         const BOOT_TIMEOUT_SECS: u64 = 60;
 
         // Step: Config validation
-        self.telemetry.emit(EventKind::InitStepStarted {
-            step: "config_validation".to_string(),
-        })?;
+        self.telemetry.emit(
+            EventKind::InitStepStarted {
+                step: "config_validation".to_string(),
+            },
+            chrono::Utc::now(),
+        )?;
         let step_start = Instant::now();
         let errors = ConfigLoader::validate(&self.config);
         if !errors.is_empty() {
@@ -1428,18 +1505,24 @@ impl Worker {
                 .join("; ");
             bail!("config validation failed: {msg}");
         }
-        self.telemetry.emit(EventKind::InitStepCompleted {
-            step: "config_validation".to_string(),
-            duration_ms: step_start.elapsed().as_millis() as u64,
-        })?;
+        self.telemetry.emit(
+            EventKind::InitStepCompleted {
+                step: "config_validation".to_string(),
+                duration_ms: step_start.elapsed().as_millis() as u64,
+            },
+            chrono::Utc::now(),
+        )?;
 
         // Check boot timeout before each step
         self.check_boot_timeout(BOOT_TIMEOUT_SECS)?;
 
         // Step: Registry registration
-        self.telemetry.emit(EventKind::InitStepStarted {
-            step: "registry_registration".to_string(),
-        })?;
+        self.telemetry.emit(
+            EventKind::InitStepStarted {
+                step: "registry_registration".to_string(),
+            },
+            chrono::Utc::now(),
+        )?;
         let step_start = Instant::now();
         let qualified_id = format!("{}-{}", self.config.agent.default, self.worker_name);
         let entry = WorkerEntry {
@@ -1468,18 +1551,24 @@ impl Worker {
         if let Err(e) = self.publish_live_config_snapshot() {
             tracing::warn!(error = %e, "failed to publish live config snapshot");
         }
-        self.telemetry.emit(EventKind::InitStepCompleted {
-            step: "registry_registration".to_string(),
-            duration_ms: step_start.elapsed().as_millis() as u64,
-        })?;
+        self.telemetry.emit(
+            EventKind::InitStepCompleted {
+                step: "registry_registration".to_string(),
+                duration_ms: step_start.elapsed().as_millis() as u64,
+            },
+            chrono::Utc::now(),
+        )?;
 
         // Check boot timeout before each step
         self.check_boot_timeout(BOOT_TIMEOUT_SECS)?;
 
         // Step: Idle action validation
-        self.telemetry.emit(EventKind::InitStepStarted {
-            step: "idle_action_validation".to_string(),
-        })?;
+        self.telemetry.emit(
+            EventKind::InitStepStarted {
+                step: "idle_action_validation".to_string(),
+            },
+            chrono::Utc::now(),
+        )?;
         let step_start = Instant::now();
 
         // Validate idle_action configuration
@@ -1507,7 +1596,7 @@ impl Worker {
                     let _ = self.telemetry.emit(EventKind::ConfigWarning {
                         warning_type: "idle_action_explicit_override".to_string(),
                         message: "idle_action=exit configured without supervisor supervision, but allow_exit_without_supervisor is enabled. Worker will exit on empty queue - ensure external recovery mechanism exists.".to_string(),
-                    });
+                    }, chrono::Utc::now());
                 } else {
                     // Default to Wait instead of Exit when no supervisor is present
                     tracing::warn!(
@@ -1520,25 +1609,31 @@ impl Worker {
                     let _ = self.telemetry.emit(EventKind::ConfigWarning {
                         warning_type: "idle_action_default_to_wait".to_string(),
                         message: format!("{} - automatically defaulting to Wait. Set allow_exit_without_supervisor=true to explicitly opt-in to Exit without supervisor.", reason),
-                    });
+                    }, chrono::Utc::now());
                     // Mutate the config to use Wait instead of Exit
                     self.config.worker.idle_action = IdleAction::Wait;
                 }
             }
         }
 
-        self.telemetry.emit(EventKind::InitStepCompleted {
-            step: "idle_action_validation".to_string(),
-            duration_ms: step_start.elapsed().as_millis() as u64,
-        })?;
+        self.telemetry.emit(
+            EventKind::InitStepCompleted {
+                step: "idle_action_validation".to_string(),
+                duration_ms: step_start.elapsed().as_millis() as u64,
+            },
+            chrono::Utc::now(),
+        )?;
 
         // Check boot timeout before each step
         self.check_boot_timeout(BOOT_TIMEOUT_SECS)?;
 
         // Step: Adapter preflight
-        self.telemetry.emit(EventKind::InitStepStarted {
-            step: "adapter_preflight".to_string(),
-        })?;
+        self.telemetry.emit(
+            EventKind::InitStepStarted {
+                step: "adapter_preflight".to_string(),
+            },
+            chrono::Utc::now(),
+        )?;
         let step_start = Instant::now();
         // Validate that the configured adapter exists before entering the main claim loop.
         // This ensures adapter configuration errors are caught early during startup rather
@@ -1564,32 +1659,44 @@ impl Worker {
             eprintln!("Underlying error: {e}");
             bail!("adapter '{adapter_name}' preflight failed — startup aborted: {e}");
         }
-        self.telemetry.emit(EventKind::InitStepCompleted {
-            step: "adapter_preflight".to_string(),
-            duration_ms: step_start.elapsed().as_millis() as u64,
-        })?;
+        self.telemetry.emit(
+            EventKind::InitStepCompleted {
+                step: "adapter_preflight".to_string(),
+                duration_ms: step_start.elapsed().as_millis() as u64,
+            },
+            chrono::Utc::now(),
+        )?;
 
         // Check boot timeout before each step
         self.check_boot_timeout(BOOT_TIMEOUT_SECS)?;
 
         // Step: Heartbeat emitter start
-        self.telemetry.emit(EventKind::InitStepStarted {
-            step: "heartbeat_emitter".to_string(),
-        })?;
+        self.telemetry.emit(
+            EventKind::InitStepStarted {
+                step: "heartbeat_emitter".to_string(),
+            },
+            chrono::Utc::now(),
+        )?;
         let step_start = Instant::now();
         if let Err(e) = self.health.start_emitter() {
             tracing::warn!(error = %e, "failed to start heartbeat emitter");
         }
-        self.telemetry.emit(EventKind::InitStepCompleted {
-            step: "heartbeat_emitter".to_string(),
-            duration_ms: step_start.elapsed().as_millis() as u64,
-        })?;
+        self.telemetry.emit(
+            EventKind::InitStepCompleted {
+                step: "heartbeat_emitter".to_string(),
+                duration_ms: step_start.elapsed().as_millis() as u64,
+            },
+            chrono::Utc::now(),
+        )?;
 
         // Emit worker started event — boot complete
-        self.telemetry.emit(EventKind::WorkerStarted {
-            worker_name: self.worker_name.clone(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-        })?;
+        self.telemetry.emit(
+            EventKind::WorkerStarted {
+                worker_name: self.worker_name.clone(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+            },
+            chrono::Utc::now(),
+        )?;
 
         self.set_state(WorkerState::Selecting)?;
 
@@ -1612,9 +1719,10 @@ impl Worker {
             if elapsed.as_secs() > timeout_secs {
                 let elapsed_ms = elapsed.as_millis() as u64;
                 // Emit the timeout event before aborting
-                let _ = self
-                    .telemetry
-                    .emit(EventKind::WorkerBootTimeout { elapsed_ms });
+                let _ = self.telemetry.emit(
+                    EventKind::WorkerBootTimeout { elapsed_ms },
+                    chrono::Utc::now(),
+                );
                 tracing::error!(
                     elapsed_ms,
                     "boot timeout exceeded {}s — aborting",
@@ -1721,7 +1829,7 @@ impl Worker {
                 self.telemetry.emit(EventKind::BeadReleased {
                     bead_id: bead.id.clone(),
                     reason: "single_claim_invariant_recovery".to_string(),
-                })?;
+                }, chrono::Utc::now())?;
                 bail!(
                     "single-claim invariant blocked a second claim attempt; released existing claim {}",
                     bead.id
@@ -2235,11 +2343,14 @@ impl Worker {
                     ),
                 );
                 // Emit telemetry for the suspect bead
-                self.telemetry.emit(EventKind::ClaimErrorThreshold {
-                    bead_id: bead_id.clone(),
-                    consecutive_errors,
-                    last_error,
-                })?;
+                self.telemetry.emit(
+                    EventKind::ClaimErrorThreshold {
+                        bead_id: bead_id.clone(),
+                        consecutive_errors,
+                        last_error,
+                    },
+                    chrono::Utc::now(),
+                )?;
                 // Exclude the suspect bead and continue
                 self.consecutive_race_lost = 0;
                 self.exclusion_set.insert(bead_id);
@@ -2267,10 +2378,13 @@ impl Worker {
                 threshold = skip_threshold,
                 "consecutive race_lost exceeded skip threshold, treating queue as exhausted"
             );
-            self.telemetry.emit(EventKind::ClaimRaceLostSkipped {
-                consecutive_losses: self.consecutive_race_lost,
-                threshold: skip_threshold,
-            })?;
+            self.telemetry.emit(
+                EventKind::ClaimRaceLostSkipped {
+                    consecutive_losses: self.consecutive_race_lost,
+                    threshold: skip_threshold,
+                },
+                chrono::Utc::now(),
+            )?;
             self.consecutive_race_lost = 0;
             self.retry_count = 0;
             self.exclusion_set.clear();
@@ -2373,10 +2487,13 @@ impl Worker {
             loop {
                 interval.tick().await;
                 let elapsed_ms = start.elapsed().as_millis() as u64;
-                let _ = telemetry.emit(EventKind::BuildHeartbeat {
-                    bead_id: heartbeat_bead_id.clone(),
-                    elapsed_ms,
-                });
+                let _ = telemetry.emit(
+                    EventKind::BuildHeartbeat {
+                        bead_id: heartbeat_bead_id.clone(),
+                        elapsed_ms,
+                    },
+                    chrono::Utc::now(),
+                );
             }
         });
 
@@ -2405,10 +2522,13 @@ impl Worker {
             );
 
             // Emit split.skipped event.
-            let _ = self.telemetry.emit(EventKind::SplitSkipped {
-                bead_id: bead_id.clone(),
-                reason: "references NEEDLE-internal configuration".to_string(),
-            });
+            let _ = self.telemetry.emit(
+                EventKind::SplitSkipped {
+                    bead_id: bead_id.clone(),
+                    reason: "references NEEDLE-internal configuration".to_string(),
+                },
+                chrono::Utc::now(),
+            );
 
             // Release the bead with timeout protection.
             let _ = tokio::time::timeout(
@@ -2418,10 +2538,13 @@ impl Worker {
             .await;
 
             // Emit bead.released event.
-            let _ = self.telemetry.emit(EventKind::BeadReleased {
-                bead_id: bead_id.clone(),
-                reason: "split_out_of_scope".to_string(),
-            });
+            let _ = self.telemetry.emit(
+                EventKind::BeadReleased {
+                    bead_id: bead_id.clone(),
+                    reason: "split_out_of_scope".to_string(),
+                },
+                chrono::Utc::now(),
+            );
 
             // Clear current bead and transition to RETRYING.
             self.current_bead = None;
@@ -2464,10 +2587,13 @@ impl Worker {
                 );
 
                 // Emit build.timeout event.
-                let _ = self.telemetry.emit(EventKind::BuildTimeout {
-                    bead_id: bead_id.clone(),
-                    timeout_secs,
-                });
+                let _ = self.telemetry.emit(
+                    EventKind::BuildTimeout {
+                        bead_id: bead_id.clone(),
+                        timeout_secs,
+                    },
+                    chrono::Utc::now(),
+                );
                 crate::hoop_hooks::emit_needle_event(
                     &self.current_workspace,
                     &self.worker_name,
@@ -2485,10 +2611,13 @@ impl Worker {
                 .await;
 
                 // Emit bead.released event.
-                let _ = self.telemetry.emit(EventKind::BeadReleased {
-                    bead_id: bead_id.clone(),
-                    reason: "build_timeout".to_string(),
-                });
+                let _ = self.telemetry.emit(
+                    EventKind::BeadReleased {
+                        bead_id: bead_id.clone(),
+                        reason: "build_timeout".to_string(),
+                    },
+                    chrono::Utc::now(),
+                );
                 crate::hoop_hooks::emit_needle_event(
                     &self.current_workspace,
                     &self.worker_name,
@@ -2573,11 +2702,14 @@ impl Worker {
                 reason = %reason,
                 "rate limited, waiting before retry"
             );
-            self.telemetry.emit(EventKind::RateLimitWait {
-                provider: provider.unwrap_or("unknown").to_string(),
-                model: model.map(|s| s.to_string()),
-                reason: reason.clone(),
-            })?;
+            self.telemetry.emit(
+                EventKind::RateLimitWait {
+                    provider: provider.unwrap_or("unknown").to_string(),
+                    model: model.map(|s| s.to_string()),
+                    reason: reason.clone(),
+                },
+                chrono::Utc::now(),
+            )?;
 
             // Wait before retrying (5 seconds).
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
@@ -2586,10 +2718,13 @@ impl Worker {
             return Ok(());
         }
 
-        self.telemetry.emit(EventKind::RateLimitAllowed {
-            provider: provider.unwrap_or("unknown").to_string(),
-            model: model.map(|s| s.to_string()),
-        })?;
+        self.telemetry.emit(
+            EventKind::RateLimitAllowed {
+                provider: provider.unwrap_or("unknown").to_string(),
+                model: model.map(|s| s.to_string()),
+            },
+            chrono::Utc::now(),
+        )?;
 
         // Check system resources (CPU and memory warnings).
         crate::rate_limit::RateLimiter::check_system_resources(
@@ -2633,14 +2768,17 @@ impl Worker {
                                 "claim verification failed at dispatch — bead not properly claimed"
                             );
 
-                            self.telemetry.emit(EventKind::ClaimVerifyFailed {
-                                bead_id: bead_id.clone(),
-                                expected_actor: worker_id.clone(),
-                                actual_status: format!("{:?}", status.status),
-                                actual_assignee: status
-                                    .assignee
-                                    .unwrap_or_else(|| "none".to_string()),
-                            })?;
+                            self.telemetry.emit(
+                                EventKind::ClaimVerifyFailed {
+                                    bead_id: bead_id.clone(),
+                                    expected_actor: worker_id.clone(),
+                                    actual_status: format!("{:?}", status.status),
+                                    actual_assignee: status
+                                        .assignee
+                                        .unwrap_or_else(|| "none".to_string()),
+                                },
+                                chrono::Utc::now(),
+                            )?;
 
                             bail!("claim verification failed: {}", reason);
                         }
@@ -2654,10 +2792,13 @@ impl Worker {
                             "claim verification passed — dispatching agent"
                         );
 
-                        self.telemetry.emit(EventKind::ClaimVerifySuccess {
-                            bead_id: bead_id.clone(),
-                            expected_actor: worker_id.clone(),
-                        })?;
+                        self.telemetry.emit(
+                            EventKind::ClaimVerifySuccess {
+                                bead_id: bead_id.clone(),
+                                expected_actor: worker_id.clone(),
+                            },
+                            chrono::Utc::now(),
+                        )?;
                     }
                     Err(e) => {
                         // Failed to query claim status — log but proceed with dispatch.
@@ -2811,7 +2952,7 @@ impl Worker {
                         expected_actor: qualified_actor.clone(),
                         actual_status: "unknown".to_string(),
                         actual_assignee: "(not verified)".to_string(),
-                    });
+                    }, chrono::Utc::now());
 
                     bail!(
                         "dispatch-time claim verification failed for bead {}: bead is not assigned to worker {}",
@@ -3001,10 +3142,13 @@ impl Worker {
         // Emit an initial heartbeat event to signal we've entered HANDLING state.
         // This provides immediate visibility in the JSONL log when handling starts.
         // Use emit_try_lock() to avoid blocking if telemetry writer is stuck.
-        let _ = self.telemetry.emit_try_lock(EventKind::HeartbeatEmitted {
-            bead_id: Some(bead.id.clone()),
-            state: "HANDLING".to_string(),
-        });
+        let _ = self.telemetry.emit_try_lock(
+            EventKind::HeartbeatEmitted {
+                bead_id: Some(bead.id.clone()),
+                state: "HANDLING".to_string(),
+            },
+            Utc::now(),
+        );
 
         // Create a cancellation flag that can be used to abort the outcome handler
         // if it hangs. This is a workaround for tokio::time::timeout not cancelling
@@ -3041,10 +3185,13 @@ impl Worker {
                     break;
                 }
                 // Use emit_try_lock() to avoid blocking if telemetry writer is stuck.
-                let _ = telemetry_for_heartbeat.emit_try_lock(EventKind::HeartbeatEmitted {
-                    bead_id: Some(bead_id_for_heartbeat.clone()),
-                    state: "HANDLING".to_string(),
-                });
+                let _ = telemetry_for_heartbeat.emit_try_lock(
+                    EventKind::HeartbeatEmitted {
+                        bead_id: Some(bead_id_for_heartbeat.clone()),
+                        state: "HANDLING".to_string(),
+                    },
+                    Utc::now(),
+                );
             }
         });
 
@@ -3126,7 +3273,7 @@ impl Worker {
                         outcome: "unknown".to_string(),
                         operation: "handle".to_string(),
                         error: e.to_string(),
-                    });
+                    }, Utc::now());
                     Err(anyhow::anyhow!("handler failed: {}", e))
                 }
                 Err(_) => {
@@ -3146,7 +3293,7 @@ impl Worker {
                         outcome: "unknown".to_string(),
                         operation: "handle".to_string(),
                         error: "timeout after 60s".to_string(),
-                    });
+                    }, Utc::now());
                     Err(anyhow::anyhow!("handler timed out after 60s"))
                 }
             }
@@ -3194,7 +3341,7 @@ impl Worker {
                     outcome: "unknown".to_string(),
                     operation: "handling_state".to_string(),
                     error: "critical timeout after 90s".to_string(),
-                });
+                }, Utc::now());
                 return BeadAction::Errored;
             }
         };
@@ -3211,9 +3358,8 @@ impl Worker {
             self.watchdog_triggered.store(false, Ordering::Release);
             self.handling_state_entered_at = None;
             // Emit critical timeout event.
-            let _ = self
-                .telemetry
-                .emit_try_lock(EventKind::WorkerHandlingTimeout {
+            let _ = self.telemetry.emit_try_lock(
+                EventKind::WorkerHandlingTimeout {
                     bead_id: bead.id.clone(),
                     outcome: "unknown".to_string(),
                     operation: "watchdog".to_string(),
@@ -3221,7 +3367,9 @@ impl Worker {
                         "HANDLING state exceeded {}s timeout",
                         HANDLING_WATCHDOG_TIMEOUT_SECS
                     ),
-                });
+                },
+                Utc::now(),
+            );
             // Stop the heartbeat task.
             cancelled.store(true, Ordering::Release);
             heartbeat_task.abort();
@@ -3655,10 +3803,13 @@ impl Worker {
                 // Release the bead back to open status.
                 tokio::time::timeout(Duration::from_secs(30), self.store.release(&bead.id))
                     .await??;
-                self.telemetry.emit(EventKind::BeadReleased {
-                    bead_id: bead.id.clone(),
-                    reason: "handler_action:released".to_string(),
-                })?;
+                self.telemetry.emit(
+                    EventKind::BeadReleased {
+                        bead_id: bead.id.clone(),
+                        reason: "handler_action:released".to_string(),
+                    },
+                    chrono::Utc::now(),
+                )?;
             }
             BeadAction::Deferred => {
                 // Release and add deferred label.
@@ -3669,19 +3820,25 @@ impl Worker {
                     self.store.add_label(&bead.id, "deferred"),
                 )
                 .await;
-                self.telemetry.emit(EventKind::BeadReleased {
-                    bead_id: bead.id.clone(),
-                    reason: "handler_action:deferred".to_string(),
-                })?;
+                self.telemetry.emit(
+                    EventKind::BeadReleased {
+                        bead_id: bead.id.clone(),
+                        reason: "handler_action:deferred".to_string(),
+                    },
+                    chrono::Utc::now(),
+                )?;
             }
             BeadAction::Alerted => {
                 // Release after creating an alert bead.
                 tokio::time::timeout(Duration::from_secs(30), self.store.release(&bead.id))
                     .await??;
-                self.telemetry.emit(EventKind::BeadReleased {
-                    bead_id: bead.id.clone(),
-                    reason: "handler_action:alerted".to_string(),
-                })?;
+                self.telemetry.emit(
+                    EventKind::BeadReleased {
+                        bead_id: bead.id.clone(),
+                        reason: "handler_action:alerted".to_string(),
+                    },
+                    chrono::Utc::now(),
+                )?;
             }
             BeadAction::Quarantined => {
                 // Block the bead (status=blocked, labeled 'cycling').
@@ -3697,19 +3854,25 @@ impl Worker {
                 // Release due to worker interruption.
                 tokio::time::timeout(Duration::from_secs(30), self.store.release(&bead.id))
                     .await??;
-                self.telemetry.emit(EventKind::BeadReleased {
-                    bead_id: bead.id.clone(),
-                    reason: "worker_interrupted".to_string(),
-                })?;
+                self.telemetry.emit(
+                    EventKind::BeadReleased {
+                        bead_id: bead.id.clone(),
+                        reason: "worker_interrupted".to_string(),
+                    },
+                    chrono::Utc::now(),
+                )?;
             }
             BeadAction::Errored => {
                 // Release after handler error.
                 tokio::time::timeout(Duration::from_secs(30), self.store.release(&bead.id))
                     .await??;
-                self.telemetry.emit(EventKind::BeadReleased {
-                    bead_id: bead.id.clone(),
-                    reason: "handler_error_recovery".to_string(),
-                })?;
+                self.telemetry.emit(
+                    EventKind::BeadReleased {
+                        bead_id: bead.id.clone(),
+                        reason: "handler_error_recovery".to_string(),
+                    },
+                    chrono::Utc::now(),
+                )?;
             }
         }
 
@@ -3741,16 +3904,19 @@ impl Worker {
         // Emit effort.recorded telemetry event.
         if let (Some(ref effort), Some(ref id)) = (&self.last_effort, &bead_id) {
             let elapsed_ms = effort.cycle_start.elapsed().as_millis() as u64;
-            self.telemetry.emit(EventKind::EffortRecorded {
-                bead_id: id.clone(),
-                elapsed_ms,
-                agent_name: effort.agent_name.clone(),
-                model: effort.model.clone(),
-                provider: effort.provider.clone(),
-                tokens_in: effort.tokens.input_tokens,
-                tokens_out: effort.tokens.output_tokens,
-                estimated_cost_usd: effort.estimated_cost_usd,
-            })?;
+            self.telemetry.emit(
+                EventKind::EffortRecorded {
+                    bead_id: id.clone(),
+                    elapsed_ms,
+                    agent_name: effort.agent_name.clone(),
+                    model: effort.model.clone(),
+                    provider: effort.provider.clone(),
+                    tokens_in: effort.tokens.input_tokens,
+                    tokens_out: effort.tokens.output_tokens,
+                    estimated_cost_usd: effort.estimated_cost_usd,
+                },
+                chrono::Utc::now(),
+            )?;
 
             if let Some(cost_usd) = effort.estimated_cost_usd {
                 tracing::info!(
@@ -3850,9 +4016,12 @@ impl Worker {
         let suite_id = runner.testing_binary().display().to_string();
         tracing::info!(suite = %suite_id, "testing binary detected — running canary suite");
 
-        if let Err(e) = self.telemetry.emit(EventKind::CanaryStarted {
-            suite: suite_id.clone(),
-        }) {
+        if let Err(e) = self.telemetry.emit(
+            EventKind::CanaryStarted {
+                suite: suite_id.clone(),
+            },
+            chrono::Utc::now(),
+        ) {
             tracing::warn!(error = %e, "failed to emit CanaryStarted telemetry");
         }
 
@@ -3864,11 +4033,14 @@ impl Worker {
             }
         };
 
-        let _ = self.telemetry.emit(EventKind::CanarySuiteCompleted {
-            suite: suite_id.clone(),
-            passed: report.passed as u32,
-            failed: (report.failed + report.timed_out + report.errors) as u32,
-        });
+        let _ = self.telemetry.emit(
+            EventKind::CanarySuiteCompleted {
+                suite: suite_id.clone(),
+                passed: report.passed as u32,
+                failed: (report.failed + report.timed_out + report.errors) as u32,
+            },
+            chrono::Utc::now(),
+        );
 
         if report.can_promote() {
             tracing::info!("canary passed — promoting :testing to :stable");
@@ -3878,7 +4050,9 @@ impl Worker {
                 tracing::warn!(error = %e, "canary promotion failed");
                 return Ok(());
             }
-            let _ = self.telemetry.emit(EventKind::CanaryPromoted { hash });
+            let _ = self
+                .telemetry
+                .emit(EventKind::CanaryPromoted { hash }, chrono::Utc::now());
             tracing::info!("promotion complete — fleet will hot-reload on next cycle");
         } else {
             let reason = format!(
@@ -3889,7 +4063,9 @@ impl Worker {
             if let Err(e) = runner.reject() {
                 tracing::warn!(error = %e, "canary reject failed");
             }
-            let _ = self.telemetry.emit(EventKind::CanaryRejected { reason });
+            let _ = self
+                .telemetry
+                .emit(EventKind::CanaryRejected { reason }, chrono::Utc::now());
         }
 
         Ok(())
@@ -3917,11 +4093,14 @@ impl Worker {
                     "new :stable binary detected — exiting cleanly for supervisor relaunch"
                 );
 
-                self.telemetry.emit(EventKind::BinaryFreshnessExit {
-                    old_hash: old_hash.clone(),
-                    new_hash: new_hash.clone(),
-                    was_deleted: false,
-                })?;
+                self.telemetry.emit(
+                    EventKind::BinaryFreshnessExit {
+                        old_hash: old_hash.clone(),
+                        new_hash: new_hash.clone(),
+                        was_deleted: false,
+                    },
+                    chrono::Utc::now(),
+                )?;
 
                 // Flush telemetry before exit
                 std::mem::forget(self.telemetry.clone());
@@ -3948,11 +4127,14 @@ impl Worker {
                     "current binary has been deleted/unlinked — exiting cleanly for supervisor relaunch"
                 );
 
-                self.telemetry.emit(EventKind::BinaryFreshnessExit {
-                    old_hash: "<deleted>".to_string(),
-                    new_hash: stable_hash.clone(),
-                    was_deleted: true,
-                })?;
+                self.telemetry.emit(
+                    EventKind::BinaryFreshnessExit {
+                        old_hash: "<deleted>".to_string(),
+                        new_hash: stable_hash.clone(),
+                        was_deleted: true,
+                    },
+                    chrono::Utc::now(),
+                )?;
 
                 // Flush telemetry before exit
                 std::mem::forget(self.telemetry.clone());
@@ -4145,10 +4327,10 @@ impl Worker {
     /// worker. The event intentionally carries diagnostics only; it never
     /// includes configuration contents or resolved secret/header values.
     fn reject_config_reload(&self, validation_errors: Vec<String>) {
-        if let Err(error) = self
-            .telemetry
-            .emit_try_lock(EventKind::ConfigReloadRejected { validation_errors })
-        {
+        if let Err(error) = self.telemetry.emit_try_lock(
+            EventKind::ConfigReloadRejected { validation_errors },
+            Utc::now(),
+        ) {
             tracing::warn!(error = %error, "failed to emit config.reload.rejected");
         }
     }
@@ -4357,7 +4539,7 @@ impl Worker {
                     let _ = self.telemetry.emit(EventKind::ConfigWarning {
                         warning_type: "idle_action_explicit_override".to_string(),
                         message: "config reload set idle_action=exit with no supervisor detected, but allow_exit_without_supervisor is enabled. Worker will exit on empty queue - ensure an external recovery mechanism exists.".to_string(),
-                    });
+                    }, chrono::Utc::now());
                 } else {
                     tracing::warn!(
                         idle_action = "exit",
@@ -4366,7 +4548,7 @@ impl Worker {
                     let _ = self.telemetry.emit(EventKind::ConfigWarning {
                         warning_type: "idle_action_default_to_wait".to_string(),
                         message: format!("config reload: {reason} - retaining Wait. Set allow_exit_without_supervisor=true to explicitly opt in to Exit without a supervisor."),
-                    });
+                    }, chrono::Utc::now());
                     reloaded_idle_action = IdleAction::Wait;
                 }
             }
@@ -4659,25 +4841,44 @@ impl Worker {
 
         // Compare commit SHAs
         if current_commit != stable_commit {
-            // Only warn if we haven't already warned about this stale binary
-            if !self.stale_binary_warned {
-                let current_display = truncate_commit_sha(current_commit);
-                let stable_display = truncate_commit_sha(stable_commit);
-                tracing::warn!(
-                    current_commit = %current_display,
-                    stable_commit = %stable_display,
-                    current_version = %current_metadata.version,
-                    stable_version = %stable_metadata.version,
-                    "running binary is STALE — current commit {} differs from needle-stable commit {}. \
-                     Consider restarting this worker to pick up the latest binary. \
-                     This check runs every {} seconds (configured by worker.freshness_check_interval_secs). \
-                     Set to 0 to disable freshness checking.",
-                    current_display,
-                    stable_display,
-                    interval_secs
-                );
-                self.stale_binary_warned = true;
-            }
+            let current_display = truncate_commit_sha(current_commit);
+            let stable_display = truncate_commit_sha(stable_commit);
+
+            // Exit cleanly when stale binary is detected
+            // This check runs between dispatch cycles (in LOGGING state), ensuring
+            // no bead is left mid-dispatch. The exit code signals the supervisor
+            // to relaunch with the new binary.
+            tracing::info!(
+                current_commit = %current_display,
+                stable_commit = %stable_display,
+                current_version = %current_metadata.version,
+                stable_version = %stable_metadata.version,
+                "running binary is STALE — current commit {} differs from needle-stable commit {}. \
+                 Exiting cleanly for supervisor relaunch with new binary. \
+                 This check runs every {} seconds (configured by worker.freshness_check_interval_secs). \
+                 Set to 0 to disable freshness checking.",
+                current_display,
+                stable_display,
+                interval_secs
+            );
+
+            self.telemetry.emit(
+                EventKind::BinaryFreshnessExit {
+                    old_hash: current_commit.clone(),
+                    new_hash: stable_commit.clone(),
+                    was_deleted: false,
+                },
+                chrono::Utc::now(),
+            )?;
+
+            // Flush telemetry before exit
+            std::mem::forget(self.telemetry.clone());
+
+            tracing::info!(
+                "exiting with code {} to signal binary refresh",
+                EXIT_CODE_STALE_BINARY
+            );
+            std::process::exit(EXIT_CODE_STALE_BINARY);
         } else {
             // Binary is fresh — reset the warned flag so we warn again if it becomes stale later
             self.stale_binary_warned = false;
@@ -4696,18 +4897,21 @@ impl Worker {
 
     /// Handle the EXHAUSTED state: either wait and retry or exit.
     async fn handle_exhausted(&mut self) -> Result<WorkerState> {
-        self.telemetry.emit(EventKind::WorkerExhausted {
-            cycle_count: self.beads_processed,
-            last_strand: self
-                .strands
-                .strand_names()
-                .last()
-                .unwrap_or(&"none")
-                .to_string(),
-            waterfall_restarts: self.last_waterfall_restarts,
-            restart_triggers: self.last_restart_triggers.clone(),
-            strand_evaluations: self.last_strand_evaluations.clone(),
-        })?;
+        self.telemetry.emit(
+            EventKind::WorkerExhausted {
+                cycle_count: self.beads_processed,
+                last_strand: self
+                    .strands
+                    .strand_names()
+                    .last()
+                    .unwrap_or(&"none")
+                    .to_string(),
+                waterfall_restarts: self.last_waterfall_restarts,
+                restart_triggers: self.last_restart_triggers.clone(),
+                strand_evaluations: self.last_strand_evaluations.clone(),
+            },
+            chrono::Utc::now(),
+        )?;
 
         match self.config.worker.idle_action {
             IdleAction::Wait => {
@@ -4727,16 +4931,22 @@ impl Worker {
                     backoff_reason = backoff_reason,
                     "all strands exhausted, waiting before retry"
                 );
-                self.telemetry.emit(EventKind::WorkerIdle {
-                    backoff_seconds: backoff,
-                })?;
+                self.telemetry.emit(
+                    EventKind::WorkerIdle {
+                        backoff_seconds: backoff,
+                    },
+                    chrono::Utc::now(),
+                )?;
 
                 // Emit diagnostic event BEFORE updating state to ensure we have
                 // a record even if the worker dies during the state update.
-                if let Err(e) = self.telemetry.emit(EventKind::HeartbeatEmitted {
-                    bead_id: None,
-                    state: "EXHAUSTED_PRE_IDLE".to_string(),
-                }) {
+                if let Err(e) = self.telemetry.emit(
+                    EventKind::HeartbeatEmitted {
+                        bead_id: None,
+                        state: "EXHAUSTED_PRE_IDLE".to_string(),
+                    },
+                    chrono::Utc::now(),
+                ) {
                     tracing::warn!(error = %e, "failed to emit pre-idle heartbeat, continuing anyway");
                 }
 
@@ -4756,10 +4966,13 @@ impl Worker {
                 );
 
                 // Emit diagnostic event AFTER state update to confirm it succeeded.
-                if let Err(e) = self.telemetry.emit(EventKind::HeartbeatEmitted {
-                    bead_id: None,
-                    state: "EXHAUSTED_POST_IDLE_UPDATE".to_string(),
-                }) {
+                if let Err(e) = self.telemetry.emit(
+                    EventKind::HeartbeatEmitted {
+                        bead_id: None,
+                        state: "EXHAUSTED_POST_IDLE_UPDATE".to_string(),
+                    },
+                    chrono::Utc::now(),
+                ) {
                     tracing::warn!(error = %e, "failed to emit post-update heartbeat, continuing anyway");
                 }
 
@@ -4786,21 +4999,27 @@ impl Worker {
                 // Emit an initial heartbeat to show we're entering idle sleep.
                 // This ensures there's at least one diagnostic event even if the
                 // worker dies before the first sleep iteration completes.
-                if let Err(e) = self.telemetry.emit(EventKind::HeartbeatEmitted {
-                    bead_id: None,
-                    state: "EXHAUSTED_IDLE".to_string(),
-                }) {
+                if let Err(e) = self.telemetry.emit(
+                    EventKind::HeartbeatEmitted {
+                        bead_id: None,
+                        state: "EXHAUSTED_IDLE".to_string(),
+                    },
+                    chrono::Utc::now(),
+                ) {
                     tracing::warn!(error = %e, "failed to emit initial idle heartbeat, continuing anyway");
                 }
 
                 // Emit diagnostic event to help identify external killer.
                 // This event is emitted before the sleep loop starts so that if the worker
                 // is killed during idle sleep, there's a record of when it entered the idle state.
-                if let Err(e) = self.telemetry.emit(EventKind::IdleSleepEntered {
-                    backoff_secs: backoff,
-                    beads_processed: self.beads_processed,
-                    uptime_secs: self.boot_time.map(|t| t.elapsed().as_secs()).unwrap_or(0),
-                }) {
+                if let Err(e) = self.telemetry.emit(
+                    EventKind::IdleSleepEntered {
+                        backoff_secs: backoff,
+                        beads_processed: self.beads_processed,
+                        uptime_secs: self.boot_time.map(|t| t.elapsed().as_secs()).unwrap_or(0),
+                    },
+                    chrono::Utc::now(),
+                ) {
                     tracing::warn!(error = %e, "failed to emit idle_sleep_entered event");
                 }
 
@@ -4835,10 +5054,13 @@ impl Worker {
                     // This ensures that if the worker is killed during sleep, we have
                     // a record of how long it survived. The heartbeat event includes
                     // the elapsed time, which helps identify when the worker died.
-                    if let Err(e) = self.telemetry.emit(EventKind::HeartbeatEmitted {
-                        bead_id: None,
-                        state: "EXHAUSTED_IDLE".to_string(),
-                    }) {
+                    if let Err(e) = self.telemetry.emit(
+                        EventKind::HeartbeatEmitted {
+                            bead_id: None,
+                            state: "EXHAUSTED_IDLE".to_string(),
+                        },
+                        chrono::Utc::now(),
+                    ) {
                         tracing::warn!(error = %e, "failed to emit idle heartbeat, continuing anyway");
                     }
 
@@ -5017,11 +5239,14 @@ impl Worker {
                 // Emit a diagnostic event BEFORE the tracing log to ensure we have
                 // a record even if the worker dies immediately after. This helps
                 // diagnose cases where workers die mysteriously after idle sleep.
-                if let Err(e) = self.telemetry.emit(EventKind::IdleSleepCompleted {
-                    backoff_secs: backoff,
-                    elapsed_secs: elapsed,
-                    shutdown_checks: shutdown_check_count,
-                }) {
+                if let Err(e) = self.telemetry.emit(
+                    EventKind::IdleSleepCompleted {
+                        backoff_secs: backoff,
+                        elapsed_secs: elapsed,
+                        shutdown_checks: shutdown_check_count,
+                    },
+                    chrono::Utc::now(),
+                ) {
                     tracing::warn!(error = %e, "failed to emit idle_sleep_completed event");
                 }
 
@@ -5075,11 +5300,14 @@ impl Worker {
                     .await;
 
                 // Emit telemetry to show idle sleep completed successfully
-                self.telemetry.emit(EventKind::StateTransition {
-                    from: WorkerState::Exhausted,
-                    to: WorkerState::Selecting,
-                    entered_at: None,
-                })?;
+                self.telemetry.emit(
+                    EventKind::StateTransition {
+                        from: WorkerState::Exhausted,
+                        to: WorkerState::Selecting,
+                        entered_at: None,
+                    },
+                    chrono::Utc::now(),
+                )?;
 
                 // Force-flush AFTER state transition to ensure it's persisted.
                 // Use async version to avoid blocking in the async context.
@@ -5117,10 +5345,13 @@ impl Worker {
             tracing::info!(bead_id = %bead_id, reason = %shutdown_reason, "releasing bead on shutdown");
             let _ = self.store.release(&bead_id).await;
             // Emit bead.released event for observability
-            let _ = self.telemetry.emit(EventKind::BeadReleased {
-                bead_id: bead_id.clone(),
-                reason: shutdown_reason.to_string(),
-            });
+            let _ = self.telemetry.emit(
+                EventKind::BeadReleased {
+                    bead_id: bead_id.clone(),
+                    reason: shutdown_reason.to_string(),
+                },
+                chrono::Utc::now(),
+            );
         }
     }
 
@@ -5134,11 +5365,14 @@ impl Worker {
         tracing::Span::current().record("needle.uptime_seconds", uptime);
         tracing::Span::current().record("needle.exit_reason", reason);
 
-        self.telemetry.emit(EventKind::WorkerStopped {
-            reason: reason.to_string(),
-            beads_processed: self.beads_processed,
-            uptime_secs: uptime,
-        })?;
+        self.telemetry.emit(
+            EventKind::WorkerStopped {
+                reason: reason.to_string(),
+                beads_processed: self.beads_processed,
+                uptime_secs: uptime,
+            },
+            chrono::Utc::now(),
+        )?;
 
         // Clear the global shutdown flag to prevent dangling pointers.
         #[cfg(unix)]
@@ -5461,12 +5695,15 @@ impl Worker {
                 .model
                 .clone()
                 .unwrap_or_else(|| "unknown".to_string());
-            self.telemetry.emit(EventKind::RoutingDecision {
-                bead_id: id,
-                model,
-                matched_rule: matched_rule.clone(),
-                chosen_adapter: chosen_adapter_name.clone(),
-            })?;
+            self.telemetry.emit(
+                EventKind::RoutingDecision {
+                    bead_id: id,
+                    model,
+                    matched_rule: matched_rule.clone(),
+                    chosen_adapter: chosen_adapter_name.clone(),
+                },
+                chrono::Utc::now(),
+            )?;
         }
 
         // A routed adapter must come from an operator-provided YAML file.
@@ -5547,11 +5784,14 @@ impl Worker {
                         let bead_id = self.current_bead.as_ref().map(|b| b.id.clone());
                         if let Some(id) = bead_id {
                             // Emit RoutingFailed telemetry event.
-                            let _ = self.telemetry.emit(EventKind::RoutingFailed {
-                                bead_id: id,
-                                model: model_name.to_string(),
-                                rules_tried: routing_config.rules.len() as u32,
-                            });
+                            let _ = self.telemetry.emit(
+                                EventKind::RoutingFailed {
+                                    bead_id: id,
+                                    model: model_name.to_string(),
+                                    rules_tried: routing_config.rules.len() as u32,
+                                },
+                                chrono::Utc::now(),
+                            );
                         }
                         bail!(
                             "no routing rule matched model '{}' — add a rule to agent.routing.rules or set routing.strict: false to fall back to the default adapter",
@@ -5585,11 +5825,14 @@ impl Worker {
                     let bead_id = self.current_bead.as_ref().map(|b| b.id.clone());
                     if let Some(id) = bead_id {
                         // Emit RoutingFailed telemetry event.
-                        let _ = self.telemetry.emit(EventKind::RoutingFailed {
-                            bead_id: id,
-                            model: model_name.to_string(),
-                            rules_tried: routing_config.rules.len() as u32,
-                        });
+                        let _ = self.telemetry.emit(
+                            EventKind::RoutingFailed {
+                                bead_id: id,
+                                model: model_name.to_string(),
+                                rules_tried: routing_config.rules.len() as u32,
+                            },
+                            chrono::Utc::now(),
+                        );
                     }
                     bail!(
                         "no routing rule matched model '{}' and no default adapter available — add a rule to agent.routing.rules or set routing.strict: false to fall back to the default adapter",
@@ -5635,10 +5878,13 @@ impl Worker {
                     threshold = %format!("{:.2}", threshold),
                     "daily cost exceeds warning threshold"
                 );
-                self.telemetry.emit(EventKind::BudgetWarning {
-                    daily_cost,
-                    threshold,
-                })?;
+                self.telemetry.emit(
+                    EventKind::BudgetWarning {
+                        daily_cost,
+                        threshold,
+                    },
+                    chrono::Utc::now(),
+                )?;
             }
             BudgetCheck::Stop {
                 daily_cost,
@@ -5649,10 +5895,13 @@ impl Worker {
                     threshold = %format!("{:.2}", threshold),
                     "daily cost exceeds stop threshold — shutting down"
                 );
-                self.telemetry.emit(EventKind::BudgetStop {
-                    daily_cost,
-                    threshold,
-                })?;
+                self.telemetry.emit(
+                    EventKind::BudgetStop {
+                        daily_cost,
+                        threshold,
+                    },
+                    chrono::Utc::now(),
+                )?;
                 self.state = WorkerState::Stopped;
             }
         }

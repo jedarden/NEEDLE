@@ -1128,3 +1128,182 @@ async fn otlp_integration_drop_path() -> Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn otlp_export_contains_process_owner_resource_attribute() -> Result<()> {
+    // Start the OpenTelemetry Collector container using docker directly.
+    let collector = CollectorContainer::start().context("failed to start collector container")?;
+
+    let otlp_endpoint = collector.endpoint();
+
+    // Create a test workspace.
+    let temp_dir = tempfile::tempdir()?;
+    let workspace_home = temp_dir.path();
+
+    // Create a file sink for drop events
+    let file_sink =
+        needle::telemetry::FileSink::with_dir(workspace_home, "test-worker", "resource-test")?;
+
+    // Create OTLP config pointing to the collector
+    let otlp_config = needle::config::OtlpSinkConfig {
+        enabled: true,
+        endpoint: otlp_endpoint,
+        protocol: "grpc".to_string(),
+        timeout_secs: 5,
+        compression: "none".to_string(),
+        tls: needle::config::OtlpTlsConfig {
+            insecure: true,
+            ca_file: String::new(),
+        },
+        headers: vec![],
+        resource_attributes: vec![
+            "deployment.cluster=test-cluster".to_string(),
+            "needle.worker.pool=test-pool".to_string(),
+        ],
+        metrics_interval_secs: 10,
+        service_namespace: "needle-test".to_string(),
+        max_queue_size: 2048,
+    };
+
+    // Create an OTLP telemetry sink pointing to the collector.
+    let otlp_sink = needle::telemetry::OtlpSink::new(
+        "test-worker".to_string(),
+        "resource-test".to_string(),
+        &otlp_config,
+        Some(Box::new(file_sink)),
+        None, // agent
+        None, // model
+        workspace_home.to_str(),
+    )
+    .context("failed to create OTLP sink")?;
+
+    let telemetry = Telemetry::with_sink("test-worker".to_string(), Arc::new(otlp_sink));
+
+    // Emit a simple event to trigger export
+    let event = needle::telemetry::TelemetryEvent {
+        timestamp: chrono::Utc::now(),
+        event_type: "worker.started".to_string(),
+        worker_id: "test-worker".to_string(),
+        session_id: "resource-test".to_string(),
+        sequence: 0,
+        bead_id: None,
+        workspace: None,
+        duration_ms: None,
+        data: serde_json::json!({}),
+        trace_id: None,
+        span_id: None,
+    };
+
+    telemetry.emit(&event).context("failed to emit event")?;
+
+    // Give the exporter time to flush the batch
+    std::thread::sleep(Duration::from_secs(2));
+
+    // Flush the telemetry sink to ensure all data is exported
+    telemetry
+        .flush(Duration::from_secs(5))
+        .context("failed to flush telemetry")?;
+
+    // Copy output files from the collector container
+    let output_dir = temp_dir.path().join("otel-output");
+    collector.copy_output_files(&output_dir)?;
+
+    let logs_path = output_dir.join("logs.json");
+
+    // Parse and verify resource attributes in logs
+    assert!(
+        logs_path.exists(),
+        "logs.json should exist in collector output"
+    );
+    let logs_content = std::fs::read_to_string(&logs_path)?;
+    let resource_logs: Vec<ResourceLogs> = serde_json::from_str(&logs_content)
+        .with_context(|| format!("failed to parse logs: {}", logs_content))?;
+
+    // Verify that at least one resource log exists
+    assert!(
+        !resource_logs.is_empty(),
+        "expected at least one resource log in collector output"
+    );
+
+    // Check the resource attributes from the first resource log
+    let first_resource = &resource_logs[0].resource;
+
+    // Verify process.owner is present in resource attributes
+    let process_owner_attr = first_resource
+        .attributes
+        .iter()
+        .find(|a| a.key == "process.owner");
+
+    assert!(
+        process_owner_attr.is_some(),
+        "process.owner must be present in resource attributes. Found attributes: {:?}",
+        first_resource
+            .attributes
+            .iter()
+            .map(|a| &a.key)
+            .collect::<Vec<_>>()
+    );
+
+    if let Some(attr) = process_owner_attr {
+        let owner_value = attr.as_str();
+        assert!(
+            owner_value.is_some() && !owner_value.unwrap().is_empty(),
+            "process.owner must have a non-empty value"
+        );
+
+        // Verify it's either a username or uid:NNNN format
+        let value = owner_value.unwrap();
+        assert!(
+            value.starts_with("uid:") || !value.starts_with('u'),
+            "process.owner should be a username or uid:NNNN format, got: {}",
+            value
+        );
+    }
+
+    // Verify other expected resource attributes
+    let expected_attributes = [
+        "service.name",
+        "service.namespace",
+        "service.version",
+        "service.instance.id",
+        "deployment.cluster",
+        "needle.worker.pool",
+    ];
+
+    for expected_key in &expected_attributes {
+        let attr = first_resource
+            .attributes
+            .iter()
+            .find(|a| a.key == *expected_key);
+        assert!(
+            attr.is_some(),
+            "{} must be present in resource attributes",
+            expected_key
+        );
+    }
+
+    // Verify deployment.cluster value matches config
+    let cluster_attr = first_resource
+        .attributes
+        .iter()
+        .find(|a| a.key == "deployment.cluster");
+    assert_eq!(
+        cluster_attr.and_then(|a| a.as_str()),
+        Some("test-cluster"),
+        "deployment.cluster should match config value"
+    );
+
+    // Verify needle.worker.pool value matches config
+    let pool_attr = first_resource
+        .attributes
+        .iter()
+        .find(|a| a.key == "needle.worker.pool");
+    assert_eq!(
+        pool_attr.and_then(|a| a.as_str()),
+        Some("test-pool"),
+        "needle.worker.pool should match config value"
+    );
+
+    Ok(())
+}
