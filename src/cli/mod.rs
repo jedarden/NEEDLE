@@ -699,9 +699,12 @@ fn cmd_run(
                 tracing::warn!(error = %e, "hook telemetry init failed, falling back");
                 crate::telemetry::Telemetry::new(worker_id.clone())
             });
-        tel.emit(crate::telemetry::EventKind::UpgradeCompleted {
-            new_hash: current_hash,
-        })?;
+        tel.emit(
+            crate::telemetry::EventKind::UpgradeCompleted {
+                new_hash: current_hash,
+            },
+            chrono::Utc::now(),
+        )?;
 
         return run_worker(config, worker_id, sources);
     }
@@ -1206,10 +1209,13 @@ fn run_worker(config: Config, worker_name: String, config_sources: SourceMap) ->
     // This guarantees the event is written to disk even if start_and_wait() hangs.
     // Fixes the silent pre-init deadlock where the JSONL file is created but empty.
     eprintln!("NEEDLE worker boot: emitting worker.booting event (sync)...");
-    telemetry.emit_sync(EventKind::WorkerBooting {
-        worker_name: worker_name.clone(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
-    })?;
+    telemetry.emit_sync(
+        EventKind::WorkerBooting {
+            worker_name: worker_name.clone(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        },
+        chrono::Utc::now(),
+    )?;
     eprintln!("NEEDLE worker boot: worker.booting written to disk");
 
     // Start the async writer thread after worker.booting is on disk.
@@ -1243,16 +1249,18 @@ fn run_worker(config: Config, worker_name: String, config_sources: SourceMap) ->
         Ok(outcome) => record_scratch_sweep_outcome(&telemetry, &outcome),
         Err(error) => {
             tracing::warn!(error = %error, "scratch startup sweep failed; worker startup will continue");
-            let _ = telemetry.emit(EventKind::Log {
-                phase: "scratch_sweep".to_string(),
-                context: serde_json::json!({
-                    "status": "failed",
-                    "error": error.to_string(),
-                }),
-                timestamp: chrono::Utc::now(),
-                level: "warn".to_string(),
-                bead_id: None,
-            });
+            let _ = telemetry.emit(
+                EventKind::Log {
+                    phase: "scratch_sweep".to_string(),
+                    context: serde_json::json!({
+                        "status": "failed",
+                        "error": error.to_string(),
+                    }),
+                    level: "warn".to_string(),
+                    bead_id: None,
+                },
+                chrono::Utc::now(),
+            );
         }
     }
     let scratch_sweep_elapsed = scratch_sweep_started.elapsed();
@@ -1293,14 +1301,17 @@ fn run_worker(config: Config, worker_name: String, config_sources: SourceMap) ->
             Err(e) => {
                 if resource_wait_total >= MAX_RESOURCE_WAIT_SECS {
                     // Still saturated after max wait, fail the launch explicitly
-                    telemetry.emit(EventKind::WorkerLaunchDeferred {
-                        deferred_count: resource_wait_total / resource_retry_delay,
-                        total_wait_secs: resource_wait_total,
-                        reason: format!(
-                            "system still saturated after {}s wait: {}",
-                            MAX_RESOURCE_WAIT_SECS, e
-                        ),
-                    }, chrono::Utc::now())?;
+                    telemetry.emit(
+                        EventKind::WorkerLaunchDeferred {
+                            deferred_count: resource_wait_total / resource_retry_delay,
+                            total_wait_secs: resource_wait_total,
+                            reason: format!(
+                                "system still saturated after {}s wait: {}",
+                                MAX_RESOURCE_WAIT_SECS, e
+                            ),
+                        },
+                        chrono::Utc::now(),
+                    )?;
                     bail!(
                         "worker launch deferred {} times ({}s total wait), system still saturated: {}. Launch aborted — retry when load drops",
                         resource_wait_total / resource_retry_delay,
@@ -1317,11 +1328,14 @@ fn run_worker(config: Config, worker_name: String, config_sources: SourceMap) ->
                     "system resources saturated, deferring worker construction"
                 );
 
-                telemetry.emit(EventKind::WorkerLaunchDeferred {
-                    deferred_count: resource_wait_total / resource_retry_delay + 1,
-                    total_wait_secs: resource_wait_total + resource_retry_delay,
-                    reason: format!("system saturated: {}", e),
-                }, chrono::Utc::now())?;
+                telemetry.emit(
+                    EventKind::WorkerLaunchDeferred {
+                        deferred_count: resource_wait_total / resource_retry_delay + 1,
+                        total_wait_secs: resource_wait_total + resource_retry_delay,
+                        reason: format!("system saturated: {}", e),
+                    },
+                    chrono::Utc::now(),
+                )?;
 
                 std::thread::sleep(std::time::Duration::from_secs(resource_retry_delay));
                 resource_wait_total += resource_retry_delay;
@@ -1349,7 +1363,10 @@ fn run_worker(config: Config, worker_name: String, config_sources: SourceMap) ->
         .saturating_sub(scratch_sweep_elapsed)
         .as_millis() as u64;
     if elapsed_ms > 60_000 {
-        telemetry.emit(EventKind::WorkerBootTimeout { elapsed_ms }, chrono::Utc::now())?;
+        telemetry.emit(
+            EventKind::WorkerBootTimeout { elapsed_ms },
+            chrono::Utc::now(),
+        )?;
         bail!("boot exceeded 60 s ({elapsed_ms} ms), aborting");
     }
 
@@ -1430,16 +1447,22 @@ where
     F: FnOnce() -> Result<T>,
 {
     eprintln!("NEEDLE worker boot: starting init step '{name}'...");
-    tel.emit(EventKind::InitStepStarted {
-        step: name.to_string(),
-    }, chrono::Utc::now())?;
+    tel.emit(
+        EventKind::InitStepStarted {
+            step: name.to_string(),
+        },
+        chrono::Utc::now(),
+    )?;
     let t = Instant::now();
     let result = f();
     let elapsed = t.elapsed().as_millis() as u64;
-    tel.emit(EventKind::InitStepCompleted {
-        step: name.to_string(),
-        duration_ms: elapsed,
-    }, chrono::Utc::now())?;
+    tel.emit(
+        EventKind::InitStepCompleted {
+            step: name.to_string(),
+            duration_ms: elapsed,
+        },
+        chrono::Utc::now(),
+    )?;
     eprintln!("NEEDLE worker boot: init step '{name}' completed in {elapsed}ms");
     // Force-flush so the step completion is visible before the next (potentially blocking) step.
     tel.force_flush(std::time::Duration::from_secs(1))?;
@@ -5572,18 +5595,24 @@ fn cmd_canary(show_status: bool) -> Result<()> {
         });
 
     let suite_id = runner.testing_binary().display().to_string();
-    tel.emit(crate::telemetry::EventKind::CanaryStarted {
-        suite: suite_id.clone(),
-    })?;
+    tel.emit(
+        crate::telemetry::EventKind::CanaryStarted {
+            suite: suite_id.clone(),
+        },
+        chrono::Utc::now(),
+    )?;
 
     println!("Running canary tests...");
     let report = runner.run()?;
 
-    tel.emit(crate::telemetry::EventKind::CanarySuiteCompleted {
-        suite: suite_id,
-        passed: report.passed as u32,
-        failed: (report.failed + report.timed_out + report.errors) as u32,
-    })?;
+    tel.emit(
+        crate::telemetry::EventKind::CanarySuiteCompleted {
+            suite: suite_id,
+            passed: report.passed as u32,
+            failed: (report.failed + report.timed_out + report.errors) as u32,
+        },
+        chrono::Utc::now(),
+    )?;
 
     println!("\nCanary Report");
     println!("─────────────");
@@ -5626,7 +5655,10 @@ fn cmd_canary(show_status: bool) -> Result<()> {
             let hash = crate::upgrade::file_hash(&report.testing_binary)
                 .unwrap_or_else(|_| "unknown".to_string());
             runner.promote()?;
-            tel.emit(crate::telemetry::EventKind::CanaryPromoted { hash })?;
+            tel.emit(
+                crate::telemetry::EventKind::CanaryPromoted { hash },
+                chrono::Utc::now(),
+            )?;
             println!("Promotion complete. Fleet will hot-reload on next cycle.");
         } else {
             println!("\nAll tests passed. Run `needle canary --status` to verify, then promote manually.");
@@ -5642,7 +5674,10 @@ fn cmd_canary(show_status: bool) -> Result<()> {
         );
         println!("\nCanary tests FAILED. :testing will NOT be promoted.");
         runner.reject()?;
-        tel.emit(crate::telemetry::EventKind::CanaryRejected { reason })?;
+        tel.emit(
+            crate::telemetry::EventKind::CanaryRejected { reason },
+            chrono::Utc::now(),
+        )?;
         println!("Testing binary discarded.");
     }
 
@@ -5713,10 +5748,13 @@ fn cmd_rollback() -> Result<()> {
             tracing::warn!(error = %e, "hook telemetry init failed, falling back");
             crate::telemetry::Telemetry::new("rollback".to_string())
         });
-    tel.emit(crate::telemetry::EventKind::RollbackCompleted {
-        rolled_back_hash: stable_hash,
-        restored_hash: prev_hash,
-    })?;
+    tel.emit(
+        crate::telemetry::EventKind::RollbackCompleted {
+            rolled_back_hash: stable_hash,
+            restored_hash: prev_hash,
+        },
+        chrono::Utc::now(),
+    )?;
 
     println!("Rollback complete. Fleet will hot-reload on next cycle.");
     Ok(())

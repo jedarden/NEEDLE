@@ -11,7 +11,7 @@ use needle::supervisor::{BinaryFreshnessChecker, FreshnessCheck};
 
 #[test]
 fn test_binary_freshness_detection_workflow() {
-    let temp_dir = tempfile::TempDir::expect("failed to create temp dir");
+    let temp_dir = tempfile::TempDir::new().expect("failed to create temp dir");
     let binary_path = temp_dir.path().join("test-worker");
 
     // Create initial binary
@@ -57,7 +57,7 @@ fn test_binary_freshness_detection_workflow() {
 
 #[test]
 fn test_binary_freshness_rate_limiting() {
-    let temp_dir = tempfile::TempDir::expect("failed to create temp dir");
+    let temp_dir = tempfile::TempDir::new().expect("failed to create temp dir");
     let binary_path = temp_dir.path().join("rate-limited-binary");
 
     fs::write(&binary_path, b"initial").expect("failed to write binary");
@@ -94,7 +94,7 @@ fn test_binary_freshness_rate_limiting() {
 
 #[test]
 fn test_binary_freshness_missing_binary() {
-    let temp_dir = tempfile::TempDir::expect("failed to create temp dir");
+    let temp_dir = tempfile::TempDir::new().expect("failed to create temp dir");
     let binary_path = temp_dir.path().join("nonexistent-binary");
 
     let mut checker = BinaryFreshnessChecker::new(binary_path.clone(), 1);
@@ -112,7 +112,7 @@ fn test_binary_freshness_missing_binary() {
 
 #[test]
 fn test_binary_freshness_multiple_changes() {
-    let temp_dir = tempfile::TempDir::expect("failed to create temp dir");
+    let temp_dir = tempfile::TempDir::new().expect("failed to create temp dir");
     let binary_path = temp_dir.path().join("multi-change-binary");
 
     let mut checker = BinaryFreshnessChecker::new(binary_path.clone(), 1);
@@ -147,7 +147,7 @@ fn test_binary_freshness_multiple_changes() {
 
 #[test]
 fn test_binary_freshness_persistence_across_polls() {
-    let temp_dir = tempfile::TempDir::expect("failed to create temp dir");
+    let temp_dir = tempfile::TempDir::new().expect("failed to create temp dir");
     let binary_path = temp_dir.path().join("persistent-binary");
 
     fs::write(&binary_path, b"stable-content").expect("failed to write binary");
@@ -191,7 +191,7 @@ fn test_binary_freshness_persistence_across_polls() {
 
 #[test]
 fn test_binary_freshness_large_binary() {
-    let temp_dir = tempfile::TempDir::expect("failed to create temp dir");
+    let temp_dir = tempfile::TempDir::new().expect("failed to create temp dir");
     let binary_path = temp_dir.path().join("large-binary");
 
     // Create a larger binary (1MB of data)

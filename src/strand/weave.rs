@@ -326,10 +326,13 @@ impl WeaveStrand {
     async fn evaluate_internal(&self, store: &dyn BeadStore) -> StrandResult {
         // Guard: disabled.
         if !self.config.enabled {
-            let _ = self.telemetry.emit(EventKind::StrandSkipped {
-                strand_name: "weave".to_string(),
-                reason: "disabled".to_string(),
-            });
+            let _ = self.telemetry.emit(
+                EventKind::StrandSkipped {
+                    strand_name: "weave".to_string(),
+                    reason: "disabled".to_string(),
+                },
+                Utc::now(),
+            );
             tracing::debug!("weave strand disabled");
             return StrandResult::NoWork;
         }
@@ -349,10 +352,13 @@ impl WeaveStrand {
 
         // Guard: workspace exclusion.
         if self.is_workspace_excluded() {
-            let _ = self.telemetry.emit(EventKind::StrandSkipped {
-                strand_name: "weave".to_string(),
-                reason: "workspace_excluded".to_string(),
-            });
+            let _ = self.telemetry.emit(
+                EventKind::StrandSkipped {
+                    strand_name: "weave".to_string(),
+                    reason: "workspace_excluded".to_string(),
+                },
+                Utc::now(),
+            );
             tracing::debug!(
                 workspace = %self.workspace.display(),
                 "weave strand: workspace excluded"
@@ -371,18 +377,21 @@ impl WeaveStrand {
         };
 
         if !state.cooldown_elapsed(self.config.cooldown_hours) {
-            let _ = self.telemetry.emit(EventKind::StrandSkipped {
-                strand_name: "weave".to_string(),
-                reason: format!(
-                    "cooldown ({}/{}/{}h)",
-                    state
-                        .last_run
-                        .map(|t| (Utc::now() - t).num_hours())
-                        .unwrap_or(-1),
-                    0,
-                    self.config.cooldown_hours
-                ),
-            });
+            let _ = self.telemetry.emit(
+                EventKind::StrandSkipped {
+                    strand_name: "weave".to_string(),
+                    reason: format!(
+                        "cooldown ({}/{}/{}h)",
+                        state
+                            .last_run
+                            .map(|t| (Utc::now() - t).num_hours())
+                            .unwrap_or(-1),
+                        0,
+                        self.config.cooldown_hours
+                    ),
+                },
+                Utc::now(),
+            );
             tracing::debug!(
                 last_run = ?state.last_run,
                 cooldown_hours = self.config.cooldown_hours,
@@ -394,10 +403,13 @@ impl WeaveStrand {
         // Discover documentation files.
         let doc_files = self.discover_doc_files();
         if doc_files.is_empty() {
-            let _ = self.telemetry.emit(EventKind::StrandSkipped {
-                strand_name: "weave".to_string(),
-                reason: "no_documentation_files".to_string(),
-            });
+            let _ = self.telemetry.emit(
+                EventKind::StrandSkipped {
+                    strand_name: "weave".to_string(),
+                    reason: "no_documentation_files".to_string(),
+                },
+                Utc::now(),
+            );
             tracing::debug!("weave strand: no documentation files found");
             return StrandResult::NoWork;
         }
@@ -557,10 +569,13 @@ impl super::Strand for WeaveStrand {
                     "weave strand evaluation timed out after {}s - returning NoWork to prevent SELECTING stall",
                     WEAVE_STRAND_TIMEOUT_SECS
                 );
-                let _ = self.telemetry.emit(EventKind::StrandSkipped {
-                    strand_name: "weave".to_string(),
-                    reason: format!("timeout after {}s", WEAVE_STRAND_TIMEOUT_SECS),
-                });
+                let _ = self.telemetry.emit(
+                    EventKind::StrandSkipped {
+                        strand_name: "weave".to_string(),
+                        reason: format!("timeout after {}s", WEAVE_STRAND_TIMEOUT_SECS),
+                    },
+                    Utc::now(),
+                );
                 StrandResult::NoWork
             }
         }

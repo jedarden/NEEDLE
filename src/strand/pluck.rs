@@ -1332,14 +1332,15 @@ impl super::Strand for PluckStrand {
             *self.last_exclusion_reasons.lock().unwrap() = stats.exclusion_reasons.clone();
 
             // Emit PluckStarvationDetected telemetry event with filtering statistics.
-            let _ = self
-                .telemetry
-                .emit(crate::telemetry::EventKind::PluckStarvationDetected {
+            let _ = self.telemetry.emit(
+                crate::telemetry::EventKind::PluckStarvationDetected {
                     workspace: workspace_path.clone(),
                     open_count: stats.open_count,
                     excluded_count: stats.excluded_count,
                     candidate_exclusion_reasons: stats.exclusion_reasons.clone(),
-                });
+                },
+                Utc::now(),
+            );
 
             // Persist a point-in-time snapshot whenever the inventory proves
             // that open work remained.  This is intentionally outside the

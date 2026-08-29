@@ -173,10 +173,13 @@ impl<'a> PeerMonitor<'a> {
 
         // Emit peer.stale telemetry for each stuck peer.
         if let Some(ref bead_id) = peer.current_bead {
-            self.telemetry.emit(EventKind::StuckDetected {
-                bead_id: bead_id.clone(),
-                age_secs,
-            })?;
+            self.telemetry.emit(
+                EventKind::StuckDetected {
+                    bead_id: bead_id.clone(),
+                    age_secs,
+                },
+                Utc::now(),
+            )?;
         }
 
         Ok(())
@@ -224,14 +227,17 @@ impl<'a> PeerMonitor<'a> {
             }
 
             // Emit peer.crashed telemetry.
-            self.telemetry.emit(EventKind::StuckReleased {
-                bead_id: bead_id.clone(),
-                peer_worker: peer
-                    .qualified_id
-                    .as_deref()
-                    .unwrap_or(&peer.worker_id)
-                    .to_string(),
-            })?;
+            self.telemetry.emit(
+                EventKind::StuckReleased {
+                    bead_id: bead_id.clone(),
+                    peer_worker: peer
+                        .qualified_id
+                        .as_deref()
+                        .unwrap_or(&peer.worker_id)
+                        .to_string(),
+                },
+                Utc::now(),
+            )?;
         }
 
         // 2. Remove the heartbeat file.

@@ -12,8 +12,8 @@
 //! 4. Error logging follows structured logging patterns
 
 use std::io;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
 // Import log capture helper for verifying log messages
@@ -195,7 +195,7 @@ async fn permission_denied_propagates_without_retry_logging() {
 
     // Simulate a retry function that encounters PermissionDenied
     let attempts = Arc::new(AtomicUsize::new(0));
-    let attempts_for_spawn = Arc::clone(&attempts);
+    let _attempts_for_spawn = Arc::clone(&attempts);
 
     // Simulate the retry pattern from ETXTBSY retry infrastructure
     let error = io::Error::new(io::ErrorKind::PermissionDenied, "access denied");
@@ -375,7 +375,7 @@ async fn lock_acquisition_failed_includes_lock_path() {
 
     // Simulate a LockAcquisitionFailed error with lock path context
     let lock_path = "/tmp/workspace/.beads/locks/needle-claim-xyz789.lock";
-    let error = io::Error::new(io::ErrorKind::Other, "Lock acquisition failed");
+    let error = io::Error::other("Lock acquisition failed");
 
     // Log the error with full context (production pattern from mend.rs)
     tracing::error!(
@@ -399,7 +399,7 @@ async fn lock_acquisition_failed_during_mend_cleanup() {
     let (logs, _guard) = log_capture_helper::setup_log_capture_with_level(tracing::Level::DEBUG);
 
     // Simulate mend cleanup failure (from strand/mend.rs pattern)
-    let lock_path = "/tmp/workspace/.beads/locks/needle-claim-def456.lock";
+    let lock_path = Path::new("/tmp/workspace/.beads/locks/needle-claim-def456.lock");
     let error = io::Error::new(io::ErrorKind::PermissionDenied, "Access denied");
 
     // This matches the pattern in MendStrand::cleanup_orphaned_locks()
@@ -462,7 +462,7 @@ async fn serialization_failed_includes_event_context() {
     // Simulate a SerializationFailed error with event context
     let event_type = "worker.state_transition";
     let worker_id = "test-worker";
-    let error = io::Error::new(io::ErrorKind::Other, "JSON serialization error");
+    let error = io::Error::other("JSON serialization error");
 
     // Log the error with full context (production pattern from file_sink.rs)
     tracing::error!(
@@ -582,7 +582,6 @@ fn test_config(heartbeat_dir: &Path) -> needle::config::Config {
 ///     log_capture_helper::assert_log_contains(&logs, "operation failed");
 /// }
 /// ```
-
 #[cfg(test)]
 mod module_tests {
     use super::*;

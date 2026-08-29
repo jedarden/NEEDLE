@@ -417,7 +417,7 @@ impl ResolveStrand {
                     decision: format!("{:?}", decision),
                     evidence: outcome.evidence().to_string(),
                     duration_ms: start.elapsed().as_millis() as u64,
-                });
+                }, chrono::Utc::now());
 
                 Ok(outcome)
             }

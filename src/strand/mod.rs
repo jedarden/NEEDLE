@@ -360,14 +360,14 @@ impl StrandRunner {
                             self.telemetry.record_queue_depth(depths);
                         }
 
-                        if let Err(e) =
-                            self.telemetry
-                                .emit(crate::telemetry::EventKind::StrandEvaluated {
-                                    strand_name: strand_name.clone(),
-                                    result: "bead_found".to_string(),
-                                    duration_ms: elapsed_ms,
-                                })
-                        {
+                        if let Err(e) = self.telemetry.emit(
+                            crate::telemetry::EventKind::StrandEvaluated {
+                                strand_name: strand_name.clone(),
+                                result: "bead_found".to_string(),
+                                duration_ms: elapsed_ms,
+                            },
+                            chrono::Utc::now(),
+                        ) {
                             tracing::warn!(
                                 strand = %strand_name,
                                 error = %e,
@@ -394,14 +394,14 @@ impl StrandRunner {
                     }
                     StrandResult::Split(bead, failure_count) => {
                         let bead = *bead;
-                        if let Err(e) =
-                            self.telemetry
-                                .emit(crate::telemetry::EventKind::StrandEvaluated {
-                                    strand_name: strand_name.clone(),
-                                    result: "split".to_string(),
-                                    duration_ms: elapsed_ms,
-                                })
-                        {
+                        if let Err(e) = self.telemetry.emit(
+                            crate::telemetry::EventKind::StrandEvaluated {
+                                strand_name: strand_name.clone(),
+                                result: "split".to_string(),
+                                duration_ms: elapsed_ms,
+                            },
+                            chrono::Utc::now(),
+                        ) {
                             tracing::warn!(
                                 strand = %strand_name,
                                 error = %e,
@@ -423,14 +423,14 @@ impl StrandRunner {
                         });
                     }
                     StrandResult::WorkCreated => {
-                        if let Err(e) =
-                            self.telemetry
-                                .emit(crate::telemetry::EventKind::StrandEvaluated {
-                                    strand_name: strand_name.clone(),
-                                    result: "work_created".to_string(),
-                                    duration_ms: elapsed_ms,
-                                })
-                        {
+                        if let Err(e) = self.telemetry.emit(
+                            crate::telemetry::EventKind::StrandEvaluated {
+                                strand_name: strand_name.clone(),
+                                result: "work_created".to_string(),
+                                duration_ms: elapsed_ms,
+                            },
+                            chrono::Utc::now(),
+                        ) {
                             tracing::warn!(
                                 strand = %strand_name,
                                 error = %e,
@@ -459,14 +459,14 @@ impl StrandRunner {
                         continue 'waterfall;
                     }
                     StrandResult::NoWork => {
-                        if let Err(e) =
-                            self.telemetry
-                                .emit(crate::telemetry::EventKind::StrandEvaluated {
-                                    strand_name: strand_name.clone(),
-                                    result: "no_work".to_string(),
-                                    duration_ms: elapsed_ms,
-                                })
-                        {
+                        if let Err(e) = self.telemetry.emit(
+                            crate::telemetry::EventKind::StrandEvaluated {
+                                strand_name: strand_name.clone(),
+                                result: "no_work".to_string(),
+                                duration_ms: elapsed_ms,
+                            },
+                            chrono::Utc::now(),
+                        ) {
                             tracing::warn!(
                                 strand = %strand_name,
                                 error = %e,
@@ -481,14 +481,14 @@ impl StrandRunner {
                         continue;
                     }
                     StrandResult::Skipped { reason } => {
-                        if let Err(e) =
-                            self.telemetry
-                                .emit(crate::telemetry::EventKind::StrandEvaluated {
-                                    strand_name: strand_name.clone(),
-                                    result: format!("skipped({})", reason),
-                                    duration_ms: elapsed_ms,
-                                })
-                        {
+                        if let Err(e) = self.telemetry.emit(
+                            crate::telemetry::EventKind::StrandEvaluated {
+                                strand_name: strand_name.clone(),
+                                result: format!("skipped({})", reason),
+                                duration_ms: elapsed_ms,
+                            },
+                            chrono::Utc::now(),
+                        ) {
                             tracing::warn!(
                                 strand = %strand_name,
                                 error = %e,
@@ -504,14 +504,14 @@ impl StrandRunner {
                         continue;
                     }
                     StrandResult::FoundButExcluded => {
-                        if let Err(e) =
-                            self.telemetry
-                                .emit(crate::telemetry::EventKind::StrandEvaluated {
-                                    strand_name: strand_name.clone(),
-                                    result: "found_but_excluded".to_string(),
-                                    duration_ms: elapsed_ms,
-                                })
-                        {
+                        if let Err(e) = self.telemetry.emit(
+                            crate::telemetry::EventKind::StrandEvaluated {
+                                strand_name: strand_name.clone(),
+                                result: "found_but_excluded".to_string(),
+                                duration_ms: elapsed_ms,
+                            },
+                            chrono::Utc::now(),
+                        ) {
                             tracing::warn!(
                                 strand = %strand_name,
                                 error = %e,
@@ -526,14 +526,14 @@ impl StrandRunner {
                         continue;
                     }
                     StrandResult::Error(e) => {
-                        if let Err(te) =
-                            self.telemetry
-                                .emit(crate::telemetry::EventKind::StrandEvaluated {
-                                    strand_name: strand_name.clone(),
-                                    result: "error".to_string(),
-                                    duration_ms: elapsed_ms,
-                                })
-                        {
+                        if let Err(te) = self.telemetry.emit(
+                            crate::telemetry::EventKind::StrandEvaluated {
+                                strand_name: strand_name.clone(),
+                                result: "error".to_string(),
+                                duration_ms: elapsed_ms,
+                            },
+                            chrono::Utc::now(),
+                        ) {
                             tracing::warn!(
                                 strand = %strand_name,
                                 error = %te,

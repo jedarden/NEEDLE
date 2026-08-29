@@ -293,9 +293,12 @@ impl super::Strand for PulseStrand {
                 "pulse strand: in cooldown, skipping"
             );
             self.telemetry
-                .emit(EventKind::PulseSkipped {
-                    reason: "cooldown".to_string(),
-                })
+                .emit(
+                    EventKind::PulseSkipped {
+                        reason: "cooldown".to_string(),
+                    },
+                    chrono::Utc::now(),
+                )
                 .ok();
             return StrandResult::NoWork;
         }
@@ -311,9 +314,12 @@ impl super::Strand for PulseStrand {
             );
 
             self.telemetry
-                .emit(EventKind::PulseScannerStarted {
-                    scanner_name: scanner.name.clone(),
-                })
+                .emit(
+                    EventKind::PulseScannerStarted {
+                        scanner_name: scanner.name.clone(),
+                    },
+                    chrono::Utc::now(),
+                )
                 .ok();
 
             let output = match self.run_scanner(&scanner.name, &scanner.command).await {
@@ -325,10 +331,13 @@ impl super::Strand for PulseStrand {
                         "pulse strand: scanner failed"
                     );
                     self.telemetry
-                        .emit(EventKind::PulseScannerFailed {
-                            scanner_name: scanner.name.clone(),
-                            error: e.to_string(),
-                        })
+                        .emit(
+                            EventKind::PulseScannerFailed {
+                                scanner_name: scanner.name.clone(),
+                                error: e.to_string(),
+                            },
+                            chrono::Utc::now(),
+                        )
                         .ok();
                     continue;
                 }
@@ -350,10 +359,13 @@ impl super::Strand for PulseStrand {
 
             // Emit telemetry for this scanner
             self.telemetry
-                .emit(EventKind::PulseScannerCompleted {
-                    scanner_name: scanner.name.clone(),
-                    findings_count: findings.len() as u32,
-                })
+                .emit(
+                    EventKind::PulseScannerCompleted {
+                        scanner_name: scanner.name.clone(),
+                        findings_count: findings.len() as u32,
+                    },
+                    chrono::Utc::now(),
+                )
                 .ok();
         }
 
@@ -403,11 +415,14 @@ impl super::Strand for PulseStrand {
                         "pulse strand: created bead for finding"
                     );
                     self.telemetry
-                        .emit(EventKind::PulseBeadCreated {
-                            bead_id: bead_id.clone(),
-                            scanner_name: scanner_name.clone(),
-                            severity: finding.severity,
-                        })
+                        .emit(
+                            EventKind::PulseBeadCreated {
+                                bead_id: bead_id.clone(),
+                                scanner_name: scanner_name.clone(),
+                                severity: finding.severity,
+                            },
+                            chrono::Utc::now(),
+                        )
                         .ok();
                     state.mark_seen(&finding.fingerprint);
                     created += 1;

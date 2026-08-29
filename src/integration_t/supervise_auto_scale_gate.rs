@@ -323,11 +323,14 @@ fn check_resources_with_mocked_proc(
                     .unwrap_or(1);
                 let normalized = load / num_cpus as f64;
                 if normalized > cpu_load_warn {
-                    let _ = telemetry.emit(EventKind::FleetCpuSaturated {
-                        load_average: load,
-                        threshold: cpu_load_warn,
-                        core_count: num_cpus,
-                    });
+                    let _ = telemetry.emit(
+                        EventKind::FleetCpuSaturated {
+                            load_average: load,
+                            threshold: cpu_load_warn,
+                            core_count: num_cpus,
+                        },
+                        chrono::Utc::now(),
+                    );
                     return Err(anyhow::anyhow!(
                         "CPU load saturated: {:.2} (1-minute average) / {} cores = {:.2} > threshold {:.2}",
                         load,
@@ -354,10 +357,13 @@ fn check_resources_with_mocked_proc(
         if let Some(avail_kb) = mem_available_kb {
             let avail_mb = avail_kb / 1024;
             if avail_mb < memory_free_warn_mb {
-                let _ = telemetry.emit(EventKind::FleetMemoryLow {
-                    free_mb: avail_mb,
-                    threshold_mb: memory_free_warn_mb,
-                });
+                let _ = telemetry.emit(
+                    EventKind::FleetMemoryLow {
+                        free_mb: avail_mb,
+                        threshold_mb: memory_free_warn_mb,
+                    },
+                    chrono::Utc::now(),
+                );
                 return Err(anyhow::anyhow!(
                     "Memory saturated: {} MB available < {} MB threshold",
                     avail_mb,
@@ -401,12 +407,15 @@ async fn simulate_supervisor_spawn_with_retry(
             Err(e) => {
                 if total_waited >= max_wait_secs {
                     // Still saturated after max wait - fail explicitly
-                    telemetry.emit(EventKind::SupervisorSpawnFailed {
-                        error: format!(
-                            "system still saturated after {}s wait: {}",
-                            max_wait_secs, e
-                        ),
-                    })?;
+                    telemetry.emit(
+                        EventKind::SupervisorSpawnFailed {
+                            error: format!(
+                                "system still saturated after {}s wait: {}",
+                                max_wait_secs, e
+                            ),
+                        },
+                        chrono::Utc::now(),
+                    )?;
                     return Err(anyhow::anyhow!(
                         "worker spawn deferred {} times ({}s total wait), system still saturated: {}. Spawn aborted",
                         deferred_count,
@@ -417,9 +426,12 @@ async fn simulate_supervisor_spawn_with_retry(
 
                 // Resources saturated - defer and retry
                 deferred_count += 1;
-                telemetry.emit(EventKind::SupervisorSpawnFailed {
-                    error: format!("system saturated: {}", e),
-                })?;
+                telemetry.emit(
+                    EventKind::SupervisorSpawnFailed {
+                        error: format!("system saturated: {}", e),
+                    },
+                    chrono::Utc::now(),
+                )?;
 
                 tokio::time::sleep(Duration::from_secs(retry_delay)).await;
                 total_waited += retry_delay;

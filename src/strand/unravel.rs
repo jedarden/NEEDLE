@@ -315,10 +315,13 @@ impl super::Strand for UnravelStrand {
                     "unravel strand: bead is in cooldown, skipping"
                 );
                 self.telemetry
-                    .emit(EventKind::UnravelSkipped {
-                        bead_id: bead.id.clone(),
-                        reason: "cooldown".to_string(),
-                    })
+                    .emit(
+                        EventKind::UnravelSkipped {
+                            bead_id: bead.id.clone(),
+                            reason: "cooldown".to_string(),
+                        },
+                        chrono::Utc::now(),
+                    )
                     .ok();
                 continue;
             }
@@ -455,10 +458,13 @@ impl super::Strand for UnravelStrand {
 
             // Emit telemetry for this bead.
             self.telemetry
-                .emit(EventKind::UnravelAnalyzed {
-                    bead_id: bead.id.clone(),
-                    alternatives_proposed: created_for_this_bead,
-                })
+                .emit(
+                    EventKind::UnravelAnalyzed {
+                        bead_id: bead.id.clone(),
+                        alternatives_proposed: created_for_this_bead,
+                    },
+                    chrono::Utc::now(),
+                )
                 .ok();
 
             state.mark_analyzed(&bead.id);

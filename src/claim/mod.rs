@@ -6,6 +6,7 @@
 //!
 //! Depends on: `types`, `bead_store`, `telemetry`.
 
+use chrono::Utc;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::io;
@@ -128,16 +129,22 @@ impl Claimer {
         if let Err(error) = self.store.block(bead_id).await {
             let failure = format!("{reason}; quarantine failed: {error}");
             tracing::error!(%bead_id, %error, "failed to quarantine bead after claim history limit");
-            self.telemetry.emit(EventKind::ClaimFailed {
-                bead_id: bead_id.clone(),
-                reason: failure.clone(),
-            })?;
+            self.telemetry.emit(
+                EventKind::ClaimFailed {
+                    bead_id: bead_id.clone(),
+                    reason: failure.clone(),
+                },
+                Utc::now(),
+            )?;
             return Err(anyhow!(failure));
         }
-        self.telemetry.emit(EventKind::ClaimFailed {
-            bead_id: bead_id.clone(),
-            reason: reason.clone(),
-        })?;
+        self.telemetry.emit(
+            EventKind::ClaimFailed {
+                bead_id: bead_id.clone(),
+                reason: reason.clone(),
+            },
+            chrono::Utc::now(),
+        )?;
         Ok(reason)
     }
 
@@ -200,10 +207,13 @@ impl Claimer {
             tracing::Span::current().record("needle.bead.id", bead_id.as_ref());
             tracing::Span::current().record("needle.claim.retry_number", attempts);
 
-            self.telemetry.emit(EventKind::ClaimAttempt {
-                bead_id: bead_id.clone(),
-                attempt: attempts,
-            })?;
+            self.telemetry.emit(
+                EventKind::ClaimAttempt {
+                    bead_id: bead_id.clone(),
+                    attempt: attempts,
+                },
+                chrono::Utc::now(),
+            )?;
 
             // Compute workspace lock path
             let lock_path = workspace_lock_path(&self.lock_dir, &candidate.workspace);
@@ -213,10 +223,13 @@ impl Claimer {
                 Ok(f) => f,
                 Err(e) => {
                     tracing::warn!(bead_id = %bead_id, error = %e, "flock timeout, skipping");
-                    self.telemetry.emit(EventKind::ClaimFailed {
-                        bead_id: bead_id.clone(),
-                        reason: format!("flock timeout: {e}"),
-                    })?;
+                    self.telemetry.emit(
+                        EventKind::ClaimFailed {
+                            bead_id: bead_id.clone(),
+                            reason: format!("flock timeout: {e}"),
+                        },
+                        chrono::Utc::now(),
+                    )?;
                     // Set Error status on the bead.claim span
                     tracing::Span::current().record("otel.status_code", 2u64);
                     tracing::Span::current()
@@ -231,10 +244,13 @@ impl Claimer {
                     Ok(b) => b,
                     Err(e) => {
                         drop(lock_file);
-                        self.telemetry.emit(EventKind::ClaimFailed {
-                            bead_id: bead_id.clone(),
-                            reason: format!("verify failed: {e}"),
-                        })?;
+                        self.telemetry.emit(
+                            EventKind::ClaimFailed {
+                                bead_id: bead_id.clone(),
+                                reason: format!("verify failed: {e}"),
+                            },
+                            chrono::Utc::now(),
+                        )?;
                         // Set Error status on the bead.claim span
                         tracing::Span::current().record("otel.status_code", 2u64);
                         tracing::Span::current()
@@ -248,14 +264,20 @@ impl Claimer {
                 // Distinguish stale-assignee from race-lost: race_lost means another worker
                 // won the race (status changed), not that this bead has a leftover assignee.
                 if current.status == BeadStatus::Open && current.assignee.is_some() {
-                    self.telemetry.emit(EventKind::ClaimFailed {
-                        bead_id: bead_id.clone(),
-                        reason: "stale assignee".to_string(),
-                    })?;
+                    self.telemetry.emit(
+                        EventKind::ClaimFailed {
+                            bead_id: bead_id.clone(),
+                            reason: "stale assignee".to_string(),
+                        },
+                        chrono::Utc::now(),
+                    )?;
                 } else {
-                    self.telemetry.emit(EventKind::ClaimRaceLost {
-                        bead_id: bead_id.clone(),
-                    })?;
+                    self.telemetry.emit(
+                        EventKind::ClaimRaceLost {
+                            bead_id: bead_id.clone(),
+                        },
+                        chrono::Utc::now(),
+                    )?;
                 }
                 // Apply backoff before trying next candidate (same as store.claim RaceLost path)
                 if attempts < self.max_retries {
@@ -302,18 +324,24 @@ impl Claimer {
                         .filter(|name| !name.is_empty())
                         .map(|name| name.to_string());
                     self.telemetry.set_workspace_basename(workspace_basename);
-                    self.telemetry.emit(EventKind::ClaimSuccess {
-                        bead_id: bead_id.clone(),
-                        priority: candidate.priority as i32,
-                        strand: strand.to_string(),
-                    })?;
+                    self.telemetry.emit(
+                        EventKind::ClaimSuccess {
+                            bead_id: bead_id.clone(),
+                            priority: candidate.priority as i32,
+                            strand: strand.to_string(),
+                        },
+                        chrono::Utc::now(),
+                    )?;
                     return Ok(ClaimOutcome::Claimed(bead));
                 }
                 Ok(ClaimResult::RaceLost { .. }) => {
                     tracing::Span::current().record("needle.claim.result", "race_lost");
-                    self.telemetry.emit(EventKind::ClaimRaceLost {
-                        bead_id: bead_id.clone(),
-                    })?;
+                    self.telemetry.emit(
+                        EventKind::ClaimRaceLost {
+                            bead_id: bead_id.clone(),
+                        },
+                        chrono::Utc::now(),
+                    )?;
                     if attempts < self.max_retries {
                         tokio::time::sleep(Duration::from_millis(
                             self.retry_backoff_ms * u64::from(attempts),
@@ -324,28 +352,37 @@ impl Claimer {
                 }
                 Ok(ClaimResult::NotClaimable { reason }) => {
                     tracing::Span::current().record("needle.claim.result", &reason);
-                    self.telemetry.emit(EventKind::ClaimFailed {
-                        bead_id: bead_id.clone(),
-                        reason: reason.clone(),
-                    })?;
+                    self.telemetry.emit(
+                        EventKind::ClaimFailed {
+                            bead_id: bead_id.clone(),
+                            reason: reason.clone(),
+                        },
+                        chrono::Utc::now(),
+                    )?;
                     continue;
                 }
                 Ok(ClaimResult::ClaimError { reason }) => {
                     had_claim_error = true;
                     tracing::Span::current().record("needle.claim.result", &reason);
-                    self.telemetry.emit(EventKind::ClaimFailed {
-                        bead_id: bead_id.clone(),
-                        reason: reason.clone(),
-                    })?;
+                    self.telemetry.emit(
+                        EventKind::ClaimFailed {
+                            bead_id: bead_id.clone(),
+                            reason: reason.clone(),
+                        },
+                        chrono::Utc::now(),
+                    )?;
                     // Record claim error and check if threshold reached
                     if let Some((consecutive, last_error)) =
                         self.record_claim_error(bead_id, &reason)
                     {
-                        self.telemetry.emit(EventKind::ClaimErrorThreshold {
-                            bead_id: bead_id.clone(),
-                            consecutive_errors: consecutive,
-                            last_error: last_error.clone(),
-                        })?;
+                        self.telemetry.emit(
+                            EventKind::ClaimErrorThreshold {
+                                bead_id: bead_id.clone(),
+                                consecutive_errors: consecutive,
+                                last_error: last_error.clone(),
+                            },
+                            chrono::Utc::now(),
+                        )?;
                         // Set Error status on the bead.claim span
                         tracing::Span::current().record("otel.status_code", 2u64);
                         tracing::Span::current().record("otel.status_description", &last_error);
@@ -388,19 +425,25 @@ impl Claimer {
                 Err(e) => {
                     let reason = format!("store error: {e}");
                     tracing::Span::current().record("needle.claim.result", &reason);
-                    self.telemetry.emit(EventKind::ClaimFailed {
-                        bead_id: bead_id.clone(),
-                        reason: reason.clone(),
-                    })?;
+                    self.telemetry.emit(
+                        EventKind::ClaimFailed {
+                            bead_id: bead_id.clone(),
+                            reason: reason.clone(),
+                        },
+                        chrono::Utc::now(),
+                    )?;
                     // Record claim error and check if threshold reached
                     if let Some((consecutive, last_error)) =
                         self.record_claim_error(bead_id, &reason)
                     {
-                        self.telemetry.emit(EventKind::ClaimErrorThreshold {
-                            bead_id: bead_id.clone(),
-                            consecutive_errors: consecutive,
-                            last_error: last_error.clone(),
-                        })?;
+                        self.telemetry.emit(
+                            EventKind::ClaimErrorThreshold {
+                                bead_id: bead_id.clone(),
+                                consecutive_errors: consecutive,
+                                last_error: last_error.clone(),
+                            },
+                            chrono::Utc::now(),
+                        )?;
                         // Set Error status on the bead.claim span
                         tracing::Span::current().record("otel.status_code", 2u64);
                         tracing::Span::current().record("otel.status_description", &last_error);
@@ -501,10 +544,13 @@ impl Claimer {
         expected_actor: &str,
     ) -> Result<bool> {
         // Emit start event
-        self.telemetry.emit(EventKind::ClaimVerifyStarted {
-            bead_id: bead_id.clone(),
-            expected_actor: expected_actor.to_string(),
-        })?;
+        self.telemetry.emit(
+            EventKind::ClaimVerifyStarted {
+                bead_id: bead_id.clone(),
+                expected_actor: expected_actor.to_string(),
+            },
+            chrono::Utc::now(),
+        )?;
 
         // Use claim_status to query the live store with revision information
         match self.store.claim_status(bead_id).await {
@@ -520,15 +566,18 @@ impl Claimer {
                         revision = ?claim_status.revision,
                         "atomic claim verification at dispatch failed - aborting"
                     );
-                    self.telemetry.emit(EventKind::ClaimVerifyFailed {
-                        bead_id: bead_id.clone(),
-                        expected_actor: expected_actor.to_string(),
-                        actual_status: format!("{:?}", claim_status.status),
-                        actual_assignee: claim_status
-                            .assignee
-                            .clone()
-                            .unwrap_or_else(|| "(none)".to_string()),
-                    })?;
+                    self.telemetry.emit(
+                        EventKind::ClaimVerifyFailed {
+                            bead_id: bead_id.clone(),
+                            expected_actor: expected_actor.to_string(),
+                            actual_status: format!("{:?}", claim_status.status),
+                            actual_assignee: claim_status
+                                .assignee
+                                .clone()
+                                .unwrap_or_else(|| "(none)".to_string()),
+                        },
+                        chrono::Utc::now(),
+                    )?;
                 } else {
                     tracing::debug!(
                         bead_id = %bead_id,
@@ -537,10 +586,13 @@ impl Claimer {
                         "atomic claim verification at dispatch passed"
                     );
                     // Emit success event
-                    self.telemetry.emit(EventKind::ClaimVerifySuccess {
-                        bead_id: bead_id.clone(),
-                        expected_actor: expected_actor.to_string(),
-                    })?;
+                    self.telemetry.emit(
+                        EventKind::ClaimVerifySuccess {
+                            bead_id: bead_id.clone(),
+                            expected_actor: expected_actor.to_string(),
+                        },
+                        chrono::Utc::now(),
+                    )?;
                 }
                 Ok(is_valid)
             }
@@ -571,10 +623,13 @@ impl Claimer {
     /// - `NotClaimable(reason)`: no beads available to claim
     /// - `StoreError(e)`: bead store error
     pub async fn claim_auto(&self, actor: &str, strand: &str) -> Result<ClaimResult> {
-        self.telemetry.emit(EventKind::ClaimAttempt {
-            bead_id: BeadId::from("(auto)".to_string()),
-            attempt: 1,
-        })?;
+        self.telemetry.emit(
+            EventKind::ClaimAttempt {
+                bead_id: BeadId::from("(auto)".to_string()),
+                attempt: 1,
+            },
+            chrono::Utc::now(),
+        )?;
 
         match self.store.claim_auto(actor).await {
             Ok(ClaimResult::Claimed(bead)) => {
@@ -610,19 +665,25 @@ impl Claimer {
                     .filter(|name| !name.is_empty())
                     .map(|name| name.to_string());
                 self.telemetry.set_workspace_basename(workspace_basename);
-                self.telemetry.emit(EventKind::ClaimSuccess {
-                    bead_id: bead.id.clone(),
-                    priority: bead.priority as i32,
-                    strand: strand.to_string(),
-                })?;
+                self.telemetry.emit(
+                    EventKind::ClaimSuccess {
+                        bead_id: bead.id.clone(),
+                        priority: bead.priority as i32,
+                        strand: strand.to_string(),
+                    },
+                    chrono::Utc::now(),
+                )?;
                 Ok(ClaimResult::Claimed(bead))
             }
             Ok(ClaimResult::NotClaimable { reason }) => {
                 tracing::Span::current().record("needle.claim.result", &reason);
-                self.telemetry.emit(EventKind::ClaimFailed {
-                    bead_id: BeadId::from("(auto)".to_string()),
-                    reason: reason.clone(),
-                })?;
+                self.telemetry.emit(
+                    EventKind::ClaimFailed {
+                        bead_id: BeadId::from("(auto)".to_string()),
+                        reason: reason.clone(),
+                    },
+                    chrono::Utc::now(),
+                )?;
                 Ok(ClaimResult::NotClaimable { reason })
             }
             Ok(other) => {
@@ -635,10 +696,13 @@ impl Claimer {
                 tracing::Span::current().record("needle.claim.result", &reason);
                 tracing::Span::current().record("otel.status_code", 2u64);
                 tracing::Span::current().record("otel.status_description", &reason);
-                self.telemetry.emit(EventKind::ClaimFailed {
-                    bead_id: BeadId::from("(auto)".to_string()),
-                    reason: reason.clone(),
-                })?;
+                self.telemetry.emit(
+                    EventKind::ClaimFailed {
+                        bead_id: BeadId::from("(auto)".to_string()),
+                        reason: reason.clone(),
+                    },
+                    chrono::Utc::now(),
+                )?;
                 Err(e)
             }
         }

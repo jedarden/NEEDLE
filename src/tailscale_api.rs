@@ -107,7 +107,14 @@ pub struct TailscaleClient {
 
 impl TailscaleClient {
     /// Create a new Tailscale API client.
+    ///
+    /// Fails if no API key is configured, ensuring fail-closed behavior.
     pub fn new(config: ApiConfig) -> Result<Self> {
+        // Validate that an API key is configured
+        if config.api_key.is_none() {
+            anyhow::bail!("No API key configured - set api_key in config or NEEDLE_SEAM_API_KEY environment variable");
+        }
+
         let timeout = Duration::from_secs(config.timeout_secs);
 
         // Configure HTTP client with appropriate settings

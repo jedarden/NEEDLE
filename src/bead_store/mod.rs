@@ -246,6 +246,12 @@ fn verify_backend_identity(
 /// - "bf" -> "bead-forge"
 /// - Other names are returned as-is (for extensibility)
 fn derive_expected_backend_from_filename(binary: &Path) -> String {
+    // Check if the path ends with a separator or looks like a directory
+    let path_str = binary.to_string_lossy();
+    if path_str.ends_with('/') || path_str.ends_with('\\') {
+        return "unknown".to_string();
+    }
+
     binary
         .file_name()
         .and_then(|name| name.to_str())
@@ -1380,7 +1386,7 @@ mod tests {
     #[test]
     fn configured_store_accepts_matching_bead_rs_identity() {
         let workspace = tempfile::tempdir().unwrap();
-        let binary = version_fixture(workspace.path(), "custom-bead", "bead 0.1.1");
+        let binary = version_fixture(workspace.path(), "bead", "bead 0.1.1");
         let config = crate::config::BeadCliConfig {
             backend: crate::config::BeadBackend::Bead,
             path: Some(binary),
@@ -1409,7 +1415,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let workspace = tempfile::tempdir().unwrap();
-        let binary = workspace.path().join("custom-bead");
+        let binary = workspace.path().join("bead");
         std::fs::write(
             &binary,
             "#!/bin/sh\nif [ \"$1\" = capabilities ]; then echo '{\"implementation\":\"bead-rs\",\"atomic_claim\":false}'; else echo 'bead 0.1.3'; fi\n",

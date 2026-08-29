@@ -1054,7 +1054,7 @@ impl<'a> CiCoordinator<'a> {
                     "workflow": key.workflow,
                     "correlation_id": format!("{}:{}:{}", key.repository, key.commit_sha, key.workflow),
                 }),
-            });
+            }, chrono::Utc::now());
         }
     }
 }
@@ -1280,18 +1280,21 @@ fn emit_correlation_failure(
     error: &CorrelationError,
 ) {
     if let Some(telemetry) = telemetry {
-        let _ = telemetry.emit_try_lock(EventKind::Log {
-            phase: "ci.reconcile".to_string(),
-            level: "warn".to_string(),
-            bead_id: Some(parent_id.clone()),
-            context: serde_json::json!({
-                "transition": "correlation_failed",
-                "correlation_id": format!("parent:{}:commit:{}", parent_id, commit_sha),
-                "parent_id": parent_id,
-                "commit_sha": commit_sha,
-                "error": error.to_string(),
-            }),
-        });
+        let _ = telemetry.emit_try_lock(
+            EventKind::Log {
+                phase: "ci.reconcile".to_string(),
+                level: "warn".to_string(),
+                bead_id: Some(parent_id.clone()),
+                context: serde_json::json!({
+                    "transition": "correlation_failed",
+                    "correlation_id": format!("parent:{}:commit:{}", parent_id, commit_sha),
+                    "parent_id": parent_id,
+                    "commit_sha": commit_sha,
+                    "error": error.to_string(),
+                }),
+            },
+            Utc::now(),
+        );
     }
 }
 

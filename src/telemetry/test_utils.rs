@@ -50,7 +50,7 @@ impl Sink for MemorySink {
 /// let helper = TestHelper::new("test-worker");
 ///
 /// // Emit events through the helper's telemetry emitter
-/// helper.telemetry().emit(EventKind::WorkerStarted { ... }).unwrap();
+/// helper.telemetry().emit(EventKind::WorkerStarted { ... }, chrono::Utc::now()).unwrap();
 ///
 /// // Query captured events
 /// let started_events = helper.events_by_type("worker.started");
@@ -315,7 +315,10 @@ mod tests {
     async fn test_helper_captures_events() {
         let helper = TestHelper::new("test-worker");
 
-        helper.telemetry().emit(EventKind::QueueEmpty).unwrap();
+        helper
+            .telemetry()
+            .emit(EventKind::QueueEmpty, chrono::Utc::now())
+            .unwrap();
         helper.sync().await;
 
         assert_eq!(helper.event_count(), 1);
@@ -329,18 +332,24 @@ mod tests {
 
         helper
             .telemetry()
-            .emit(EventKind::ClaimAttempt {
-                bead_id: BeadId::from("needle-abc"),
-                attempt: 1,
-            })
+            .emit(
+                EventKind::ClaimAttempt {
+                    bead_id: BeadId::from("needle-abc"),
+                    attempt: 1,
+                },
+                chrono::Utc::now(),
+            )
             .unwrap();
 
         helper
             .telemetry()
-            .emit(EventKind::ClaimAttempt {
-                bead_id: BeadId::from("needle-def"),
-                attempt: 1,
-            })
+            .emit(
+                EventKind::ClaimAttempt {
+                    bead_id: BeadId::from("needle-def"),
+                    attempt: 1,
+                },
+                chrono::Utc::now(),
+            )
             .unwrap();
         helper.sync().await;
 
@@ -356,7 +365,10 @@ mod tests {
     async fn assert_event_emitted_works() {
         let helper = TestHelper::new("test-worker");
 
-        helper.telemetry().emit(EventKind::QueueEmpty).unwrap();
+        helper
+            .telemetry()
+            .emit(EventKind::QueueEmpty, chrono::Utc::now())
+            .unwrap();
         helper.sync().await;
 
         helper.assert_event_emitted("worker.queue_empty");
@@ -373,7 +385,10 @@ mod tests {
     async fn assert_event_not_emitted_works() {
         let helper = TestHelper::new("test-worker");
 
-        helper.telemetry().emit(EventKind::QueueEmpty).unwrap();
+        helper
+            .telemetry()
+            .emit(EventKind::QueueEmpty, chrono::Utc::now())
+            .unwrap();
 
         helper.assert_event_not_emitted("worker.started");
     }
@@ -383,7 +398,10 @@ mod tests {
     async fn assert_event_not_emitted_panics_when_present() {
         let helper = TestHelper::new("test-worker");
 
-        helper.telemetry().emit(EventKind::QueueEmpty).unwrap();
+        helper
+            .telemetry()
+            .emit(EventKind::QueueEmpty, chrono::Utc::now())
+            .unwrap();
         helper.sync().await;
 
         helper.assert_event_not_emitted("worker.queue_empty");
@@ -393,8 +411,14 @@ mod tests {
     async fn assert_event_count_works() {
         let helper = TestHelper::new("test-worker");
 
-        helper.telemetry().emit(EventKind::QueueEmpty).unwrap();
-        helper.telemetry().emit(EventKind::QueueEmpty).unwrap();
+        helper
+            .telemetry()
+            .emit(EventKind::QueueEmpty, chrono::Utc::now())
+            .unwrap();
+        helper
+            .telemetry()
+            .emit(EventKind::QueueEmpty, chrono::Utc::now())
+            .unwrap();
         helper.sync().await;
 
         helper.assert_event_count("worker.queue_empty", 2);
@@ -405,7 +429,10 @@ mod tests {
     async fn assert_event_count_panics_on_mismatch() {
         let helper = TestHelper::new("test-worker");
 
-        helper.telemetry().emit(EventKind::QueueEmpty).unwrap();
+        helper
+            .telemetry()
+            .emit(EventKind::QueueEmpty, chrono::Utc::now())
+            .unwrap();
 
         helper.assert_event_count("worker.queue_empty", 5);
     }
@@ -414,7 +441,10 @@ mod tests {
     async fn find_event_works() {
         let helper = TestHelper::new("test-worker");
 
-        helper.telemetry().emit(EventKind::QueueEmpty).unwrap();
+        helper
+            .telemetry()
+            .emit(EventKind::QueueEmpty, chrono::Utc::now())
+            .unwrap();
         helper.sync().await;
 
         let found = helper.find_event("worker.queue_empty");
@@ -435,18 +465,24 @@ mod tests {
 
         helper
             .telemetry()
-            .emit(EventKind::ClaimAttempt {
-                bead_id: BeadId::from("needle-abc"),
-                attempt: 1,
-            })
+            .emit(
+                EventKind::ClaimAttempt {
+                    bead_id: BeadId::from("needle-abc"),
+                    attempt: 1,
+                },
+                chrono::Utc::now(),
+            )
             .unwrap();
 
         helper
             .telemetry()
-            .emit(EventKind::ClaimAttempt {
-                bead_id: BeadId::from("needle-def"),
-                attempt: 2,
-            })
+            .emit(
+                EventKind::ClaimAttempt {
+                    bead_id: BeadId::from("needle-def"),
+                    attempt: 2,
+                },
+                chrono::Utc::now(),
+            )
             .unwrap();
         helper.sync().await;
 
@@ -460,8 +496,14 @@ mod tests {
     async fn clear_works() {
         let helper = TestHelper::new("test-worker");
 
-        helper.telemetry().emit(EventKind::QueueEmpty).unwrap();
-        helper.telemetry().emit(EventKind::QueueEmpty).unwrap();
+        helper
+            .telemetry()
+            .emit(EventKind::QueueEmpty, chrono::Utc::now())
+            .unwrap();
+        helper
+            .telemetry()
+            .emit(EventKind::QueueEmpty, chrono::Utc::now())
+            .unwrap();
         helper.sync().await;
 
         assert_eq!(helper.event_count(), 2);
@@ -475,12 +517,18 @@ mod tests {
 
         assert_eq!(helper.event_count(), 0);
 
-        helper.telemetry().emit(EventKind::QueueEmpty).unwrap();
+        helper
+            .telemetry()
+            .emit(EventKind::QueueEmpty, chrono::Utc::now())
+            .unwrap();
         helper.sync().await;
 
         assert_eq!(helper.event_count(), 1);
 
-        helper.telemetry().emit(EventKind::QueueEmpty).unwrap();
+        helper
+            .telemetry()
+            .emit(EventKind::QueueEmpty, chrono::Utc::now())
+            .unwrap();
         helper.sync().await;
 
         assert_eq!(helper.event_count(), 2);

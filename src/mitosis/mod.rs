@@ -212,9 +212,12 @@ impl MitosisEvaluator {
                 title = %bead.title,
                 "mitosis skipped: bead references NEEDLE-internal configuration"
             );
-            self.telemetry.emit(EventKind::MitosisOutOfScope {
-                bead_id: bead.id.clone(),
-            })?;
+            self.telemetry.emit(
+                EventKind::MitosisOutOfScope {
+                    bead_id: bead.id.clone(),
+                },
+                chrono::Utc::now(),
+            )?;
             return Ok(MitosisResult::OutOfScope);
         }
 
@@ -237,10 +240,13 @@ impl MitosisEvaluator {
                     "failed to add 'human' label to depth-limited bead"
                 );
             }
-            self.telemetry.emit(EventKind::MitosisSkipped {
-                parent_id: bead.id.clone(),
-                existing_children: 0,
-            })?;
+            self.telemetry.emit(
+                EventKind::MitosisSkipped {
+                    parent_id: bead.id.clone(),
+                    existing_children: 0,
+                },
+                chrono::Utc::now(),
+            )?;
             return Ok(MitosisResult::Skipped {
                 reason: format!(
                     "depth {} exceeds maximum depth {}",
@@ -351,11 +357,14 @@ impl MitosisEvaluator {
 
         match response {
             Some(resp) if resp.splittable && !resp.children.is_empty() => {
-                self.telemetry.emit(EventKind::MitosisEvaluated {
-                    bead_id: bead.id.clone(),
-                    splittable: true,
-                    proposed_children: resp.children.len() as u32,
-                })?;
+                self.telemetry.emit(
+                    EventKind::MitosisEvaluated {
+                        bead_id: bead.id.clone(),
+                        splittable: true,
+                        proposed_children: resp.children.len() as u32,
+                    },
+                    chrono::Utc::now(),
+                )?;
 
                 self.create_children(store, bead, &resp.children).await
             }
@@ -365,11 +374,14 @@ impl MitosisEvaluator {
                     bead_id = %bead.id,
                     "agent said splittable but proposed no children"
                 );
-                self.telemetry.emit(EventKind::MitosisEvaluated {
-                    bead_id: bead.id.clone(),
-                    splittable: false,
-                    proposed_children: 0,
-                })?;
+                self.telemetry.emit(
+                    EventKind::MitosisEvaluated {
+                        bead_id: bead.id.clone(),
+                        splittable: false,
+                        proposed_children: 0,
+                    },
+                    chrono::Utc::now(),
+                )?;
                 Ok(MitosisResult::NotSplittable)
             }
             Some(resp) => {
@@ -383,11 +395,14 @@ impl MitosisEvaluator {
                 } else {
                     tracing::info!(bead_id = %bead.id, "agent determined bead is single task");
                 }
-                self.telemetry.emit(EventKind::MitosisEvaluated {
-                    bead_id: bead.id.clone(),
-                    splittable: false,
-                    proposed_children: 0,
-                })?;
+                self.telemetry.emit(
+                    EventKind::MitosisEvaluated {
+                        bead_id: bead.id.clone(),
+                        splittable: false,
+                        proposed_children: 0,
+                    },
+                    chrono::Utc::now(),
+                )?;
                 Ok(MitosisResult::NotSplittable)
             }
             None => {
@@ -396,11 +411,14 @@ impl MitosisEvaluator {
                     exit_code = exec_result.exit_code,
                     "could not parse mitosis response from agent"
                 );
-                self.telemetry.emit(EventKind::MitosisEvaluated {
-                    bead_id: bead.id.clone(),
-                    splittable: false,
-                    proposed_children: 0,
-                })?;
+                self.telemetry.emit(
+                    EventKind::MitosisEvaluated {
+                        bead_id: bead.id.clone(),
+                        splittable: false,
+                        proposed_children: 0,
+                    },
+                    chrono::Utc::now(),
+                )?;
                 Ok(MitosisResult::NotSplittable)
             }
         }
@@ -479,9 +497,12 @@ impl MitosisEvaluator {
                 title = %bead.title,
                 "timeout mitosis skipped: bead references NEEDLE-internal configuration"
             );
-            self.telemetry.emit(EventKind::MitosisOutOfScope {
-                bead_id: bead.id.clone(),
-            })?;
+            self.telemetry.emit(
+                EventKind::MitosisOutOfScope {
+                    bead_id: bead.id.clone(),
+                },
+                chrono::Utc::now(),
+            )?;
             return Ok(MitosisResult::OutOfScope);
         }
 
@@ -501,10 +522,13 @@ impl MitosisEvaluator {
                     "failed to add 'human' label to depth-limited bead"
                 );
             }
-            self.telemetry.emit(EventKind::MitosisSkipped {
-                parent_id: bead.id.clone(),
-                existing_children: 0,
-            })?;
+            self.telemetry.emit(
+                EventKind::MitosisSkipped {
+                    parent_id: bead.id.clone(),
+                    existing_children: 0,
+                },
+                chrono::Utc::now(),
+            )?;
             return Ok(MitosisResult::Skipped {
                 reason: format!(
                     "depth {} exceeds maximum depth {}",
@@ -595,11 +619,14 @@ impl MitosisEvaluator {
 
         match response {
             Some(resp) if resp.splittable && !resp.children.is_empty() => {
-                self.telemetry.emit(EventKind::MitosisEvaluated {
-                    bead_id: bead.id.clone(),
-                    splittable: true,
-                    proposed_children: resp.children.len() as u32,
-                })?;
+                self.telemetry.emit(
+                    EventKind::MitosisEvaluated {
+                        bead_id: bead.id.clone(),
+                        splittable: true,
+                        proposed_children: resp.children.len() as u32,
+                    },
+                    chrono::Utc::now(),
+                )?;
 
                 self.create_children(store, bead, &resp.children).await
             }
@@ -609,11 +636,14 @@ impl MitosisEvaluator {
                     bead_id = %bead.id,
                     "agent said splittable but proposed no children for timeout"
                 );
-                self.telemetry.emit(EventKind::MitosisEvaluated {
-                    bead_id: bead.id.clone(),
-                    splittable: false,
-                    proposed_children: 0,
-                })?;
+                self.telemetry.emit(
+                    EventKind::MitosisEvaluated {
+                        bead_id: bead.id.clone(),
+                        splittable: false,
+                        proposed_children: 0,
+                    },
+                    chrono::Utc::now(),
+                )?;
                 Ok(MitosisResult::NotSplittable)
             }
             Some(resp) => {
@@ -630,11 +660,14 @@ impl MitosisEvaluator {
                         "agent determined timeout bead is single task or unsafe to split"
                     );
                 }
-                self.telemetry.emit(EventKind::MitosisEvaluated {
-                    bead_id: bead.id.clone(),
-                    splittable: false,
-                    proposed_children: 0,
-                })?;
+                self.telemetry.emit(
+                    EventKind::MitosisEvaluated {
+                        bead_id: bead.id.clone(),
+                        splittable: false,
+                        proposed_children: 0,
+                    },
+                    chrono::Utc::now(),
+                )?;
                 Ok(MitosisResult::NotSplittable)
             }
             None => {
@@ -643,11 +676,14 @@ impl MitosisEvaluator {
                     exit_code = exec_result.exit_code,
                     "could not parse timeout mitosis response from agent"
                 );
-                self.telemetry.emit(EventKind::MitosisEvaluated {
-                    bead_id: bead.id.clone(),
-                    splittable: false,
-                    proposed_children: 0,
-                })?;
+                self.telemetry.emit(
+                    EventKind::MitosisEvaluated {
+                        bead_id: bead.id.clone(),
+                        splittable: false,
+                        proposed_children: 0,
+                    },
+                    chrono::Utc::now(),
+                )?;
                 Ok(MitosisResult::NotSplittable)
             }
         }
@@ -772,21 +808,27 @@ impl MitosisEvaluator {
                 existing = existing.len(),
                 "all proposed children already exist (dedup)"
             );
-            self.telemetry.emit(EventKind::MitosisSkipped {
-                parent_id: parent.id.clone(),
-                existing_children: existing.len() as u32,
-            })?;
+            self.telemetry.emit(
+                EventKind::MitosisSkipped {
+                    parent_id: parent.id.clone(),
+                    existing_children: existing.len() as u32,
+                },
+                chrono::Utc::now(),
+            )?;
             return Ok(MitosisResult::Skipped {
                 reason: "all children already exist".to_string(),
             });
         }
 
-        self.telemetry.emit(EventKind::MitosisSplit {
-            parent_id: parent.id.clone(),
-            children_created: created_ids.len() as u32,
-            children_skipped: skipped,
-            child_ids: created_ids.clone(),
-        })?;
+        self.telemetry.emit(
+            EventKind::MitosisSplit {
+                parent_id: parent.id.clone(),
+                children_created: created_ids.len() as u32,
+                children_skipped: skipped,
+                child_ids: created_ids.clone(),
+            },
+            chrono::Utc::now(),
+        )?;
 
         // Record the final counts on the bead.mitosis span
         tracing::Span::current()

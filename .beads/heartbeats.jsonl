@@ -2524,3 +2524,6 @@
 {"last_strand":null,"state":"idle","ts":"2026-08-29T08:37:31.965469813+00:00","worker":"glm-needle"}
 {"last_strand":null,"state":"idle","ts":"2026-08-29T08:39:12.579968847+00:00","worker":"glm-needle2"}
 {"last_strand":null,"state":"idle","ts":"2026-08-29T09:04:21.278774882+00:00","worker":"isolation-test"}
+{"last_strand":null,"state":"idle","ts":"2026-08-29T10:09:34.918159335+00:00","worker":"atomic-test"}
+{"last_strand":null,"state":"idle","ts":"2026-08-29T11:39:06.052018305+00:00","worker":"cleanup-test"}
+{"last_strand":null,"state":"idle","ts":"2026-08-29T11:39:06.057281287+00:00","worker":"cleanup-running-test"}

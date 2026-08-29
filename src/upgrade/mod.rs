@@ -4,6 +4,7 @@
 //! newer versions and downloads/replaces the binary. Also provides hot-reload
 //! support: detecting a new `:stable` binary and re-exec'ing into it.
 
+use chrono::Utc;
 use std::env;
 use std::fs;
 use std::io::{self, Cursor, Read};
@@ -106,9 +107,12 @@ pub fn check_for_update_with_telemetry(telemetry: Option<&Telemetry>) -> Result<
 
     // Emit upgrade check started event
     if let Some(telemetry) = telemetry {
-        let _ = telemetry.emit(EventKind::UpgradeCheckStarted {
-            source: source.to_string(),
-        });
+        let _ = telemetry.emit(
+            EventKind::UpgradeCheckStarted {
+                source: source.to_string(),
+            },
+            Utc::now(),
+        );
     }
 
     let result = check_for_update_internal();
@@ -117,23 +121,29 @@ pub fn check_for_update_with_telemetry(telemetry: Option<&Telemetry>) -> Result<
     match &result {
         Ok(check) => {
             if let Some(telemetry) = telemetry {
-                let _ = telemetry.emit(EventKind::UpgradeCheckCompleted {
-                    source: source.to_string(),
-                    current_version: check.current_version.clone(),
-                    latest_version: check.latest_version.clone(),
-                    update_available: check.update_available,
-                    has_release_notes: check.release_notes.is_some(),
-                });
+                let _ = telemetry.emit(
+                    EventKind::UpgradeCheckCompleted {
+                        source: source.to_string(),
+                        current_version: check.current_version.clone(),
+                        latest_version: check.latest_version.clone(),
+                        update_available: check.update_available,
+                        has_release_notes: check.release_notes.is_some(),
+                    },
+                    chrono::Utc::now(),
+                );
             }
         }
         Err(error) => {
             if let Some(telemetry) = telemetry {
                 let error_type = classify_upgrade_error(error);
-                let _ = telemetry.emit(EventKind::UpgradeCheckFailed {
-                    source: source.to_string(),
-                    error_message: error.to_string(),
-                    error_type,
-                });
+                let _ = telemetry.emit(
+                    EventKind::UpgradeCheckFailed {
+                        source: source.to_string(),
+                        error_message: error.to_string(),
+                        error_type,
+                    },
+                    chrono::Utc::now(),
+                );
             }
         }
     }
@@ -226,9 +236,12 @@ pub fn download_to_testing_channel_with_telemetry(
 
     // Emit upgrade check started event
     if let Some(telemetry) = telemetry {
-        let _ = telemetry.emit(EventKind::UpgradeCheckStarted {
-            source: source.to_string(),
-        });
+        let _ = telemetry.emit(
+            EventKind::UpgradeCheckStarted {
+                source: source.to_string(),
+            },
+            Utc::now(),
+        );
     }
 
     let result = download_to_testing_channel_internal();
@@ -257,23 +270,29 @@ pub fn download_to_testing_channel_with_telemetry(
                         ),
                     };
 
-                let _ = telemetry.emit(EventKind::UpgradeCheckCompleted {
-                    source: source.to_string(),
-                    current_version,
-                    latest_version,
-                    update_available,
-                    has_release_notes: has_notes,
-                });
+                let _ = telemetry.emit(
+                    EventKind::UpgradeCheckCompleted {
+                        source: source.to_string(),
+                        current_version,
+                        latest_version,
+                        update_available,
+                        has_release_notes: has_notes,
+                    },
+                    chrono::Utc::now(),
+                );
             }
         }
         Err(error) => {
             if let Some(telemetry) = telemetry {
                 let error_type = classify_upgrade_error(error);
-                let _ = telemetry.emit(EventKind::UpgradeCheckFailed {
-                    source: source.to_string(),
-                    error_message: error.to_string(),
-                    error_type,
-                });
+                let _ = telemetry.emit(
+                    EventKind::UpgradeCheckFailed {
+                        source: source.to_string(),
+                        error_message: error.to_string(),
+                        error_type,
+                    },
+                    chrono::Utc::now(),
+                );
             }
         }
     }

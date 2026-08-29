@@ -289,6 +289,7 @@ async fn test_workspace_path_included_in_event_envelope() {
         EventKind::StateTransition {
             from: WorkerState::Selecting,
             to: WorkerState::Exhausted,
+            entered_at: None,
         },
     )
     .await
@@ -381,6 +382,7 @@ async fn test_sequence_numbers_increment_correctly() {
         EventKind::StateTransition {
             from: WorkerState::Booting,
             to: WorkerState::Selecting,
+            entered_at: None,
         },
     )
     .await

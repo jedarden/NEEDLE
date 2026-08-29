@@ -369,11 +369,14 @@ impl RateLimiter {
                             "CPU load exceeds warning threshold"
                         );
                         // Emit structured telemetry event.
-                        let _ = telemetry.emit(EventKind::FleetCpuSaturated {
-                            load_average: load,
-                            threshold: cpu_load_warn,
-                            core_count: num_cpus,
-                        });
+                        let _ = telemetry.emit(
+                            EventKind::FleetCpuSaturated {
+                                load_average: load,
+                                threshold: cpu_load_warn,
+                                core_count: num_cpus,
+                            },
+                            chrono::Utc::now(),
+                        );
                     }
                 }
             }
@@ -399,10 +402,13 @@ impl RateLimiter {
                         "available memory below warning threshold"
                     );
                     // Emit structured telemetry event.
-                    let _ = telemetry.emit(EventKind::FleetMemoryLow {
-                        free_mb: avail_mb,
-                        threshold_mb: memory_free_warn_mb,
-                    });
+                    let _ = telemetry.emit(
+                        EventKind::FleetMemoryLow {
+                            free_mb: avail_mb,
+                            threshold_mb: memory_free_warn_mb,
+                        },
+                        chrono::Utc::now(),
+                    );
                 }
             }
         }
@@ -452,11 +458,14 @@ impl RateLimiter {
                     let normalized = load / num_cpus as f64;
                     if normalized > cpu_load_warn {
                         // Emit structured telemetry event.
-                        let _ = telemetry.emit(EventKind::FleetCpuSaturated {
-                            load_average: load,
-                            threshold: cpu_load_warn,
-                            core_count: num_cpus,
-                        });
+                        let _ = telemetry.emit(
+                            EventKind::FleetCpuSaturated {
+                                load_average: load,
+                                threshold: cpu_load_warn,
+                                core_count: num_cpus,
+                            },
+                            chrono::Utc::now(),
+                        );
                         return Err(anyhow::anyhow!(
                             "CPU load saturated: {:.2} (1-minute average) / {} cores = {:.2} > threshold {:.2}",
                             load,
@@ -484,10 +493,13 @@ impl RateLimiter {
                 let avail_mb = avail_kb / 1024;
                 if avail_mb < memory_free_warn_mb {
                     // Emit structured telemetry event.
-                    let _ = telemetry.emit(EventKind::FleetMemoryLow {
-                        free_mb: avail_mb,
-                        threshold_mb: memory_free_warn_mb,
-                    });
+                    let _ = telemetry.emit(
+                        EventKind::FleetMemoryLow {
+                            free_mb: avail_mb,
+                            threshold_mb: memory_free_warn_mb,
+                        },
+                        chrono::Utc::now(),
+                    );
                     return Err(anyhow::anyhow!(
                         "Memory saturated: {} MB available < {} MB threshold",
                         avail_mb,
@@ -630,11 +642,15 @@ impl RateLimiter {
                     deferred_count = deferred_count,
                     "load recovered - proceeding with launch"
                 );
-                let _ = telemetry.emit(EventKind::WorkerLaunchDeferred {
-                    deferred_count,
-                    total_wait_secs: total_waited,
-                    reason: "load-adaptive stagger: load recovered within wait window".to_string(),
-                });
+                let _ = telemetry.emit(
+                    EventKind::WorkerLaunchDeferred {
+                        deferred_count,
+                        total_wait_secs: total_waited,
+                        reason: "load-adaptive stagger: load recovered within wait window"
+                            .to_string(),
+                    },
+                    chrono::Utc::now(),
+                );
                 return;
             }
         }
@@ -645,12 +661,15 @@ impl RateLimiter {
             deferred_count = deferred_count,
             "max stagger wait reached without load recovery - proceeding anyway"
         );
-        let _ = telemetry.emit(EventKind::WorkerLaunchDeferred {
-            deferred_count,
-            total_wait_secs: total_waited,
-            reason: "load-adaptive stagger: max wait reached, proceeding despite saturation"
-                .to_string(),
-        });
+        let _ = telemetry.emit(
+            EventKind::WorkerLaunchDeferred {
+                deferred_count,
+                total_wait_secs: total_waited,
+                reason: "load-adaptive stagger: max wait reached, proceeding despite saturation"
+                    .to_string(),
+            },
+            chrono::Utc::now(),
+        );
     }
 }
 
