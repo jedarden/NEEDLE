@@ -12299,6 +12299,129 @@ resource_attributes:
         );
     }
 
+    #[test]
+    fn test_otlp_config_timeout_ms_only() {
+        // Test that timeout_ms works directly (no conversion needed)
+        let yaml = r#"
+enabled: true
+endpoint: "http://localhost:4317"
+protocol: "grpc"
+timeout_ms: 7000
+"#;
+
+        let result: Result<OtlpSinkConfig, _> = serde_yaml::from_str(yaml);
+        assert!(result.is_ok(), "timeout_ms should deserialize successfully");
+        let config = result.unwrap();
+        assert_eq!(
+            config.timeout_ms, 7000,
+            "timeout_ms should be used directly"
+        );
+    }
+
+    #[test]
+    fn test_otlp_config_timeout_secs_only() {
+        // Test that timeout_secs is converted to milliseconds (secs * 1000)
+        let yaml = r#"
+enabled: true
+endpoint: "http://localhost:4317"
+protocol: "grpc"
+timeout_secs: 8
+"#;
+
+        let result: Result<OtlpSinkConfig, _> = serde_yaml::from_str(yaml);
+        assert!(
+            result.is_ok(),
+            "timeout_secs should deserialize successfully"
+        );
+        let config = result.unwrap();
+        assert_eq!(
+            config.timeout_ms, 8000,
+            "timeout_secs should be converted to milliseconds (8 * 1000 = 8000)"
+        );
+    }
+
+    #[test]
+    fn test_otlp_config_timeout_secs_to_ms_conversion() {
+        // Test various timeout_secs values to verify conversion is correct
+        let test_cases = [
+            (0, 0),      // 0 seconds = 0 milliseconds
+            (1, 1000),   // 1 second = 1000 milliseconds
+            (5, 5000),   // 5 seconds = 5000 milliseconds (matches default)
+            (10, 10000), // 10 seconds = 10000 milliseconds
+            (60, 60000), // 1 minute = 60000 milliseconds
+        ];
+
+        for (secs, expected_ms) in test_cases {
+            let yaml = format!(
+                r#"
+enabled: true
+endpoint: "http://localhost:4317"
+protocol: "grpc"
+timeout_secs: {}
+"#,
+                secs
+            );
+
+            let result: Result<OtlpSinkConfig, _> = serde_yaml::from_str(&yaml);
+            assert!(
+                result.is_ok(),
+                "timeout_secs {} should deserialize successfully",
+                secs
+            );
+            let config = result.unwrap();
+            assert_eq!(
+                config.timeout_ms, expected_ms,
+                "timeout_secs {} should convert to {}ms",
+                secs, expected_ms
+            );
+        }
+    }
+
+    #[test]
+    fn test_otlp_config_timeout_default() {
+        // Test that default timeout (5000ms) is used when neither field is specified
+        let yaml = r#"
+enabled: true
+endpoint: "http://localhost:4317"
+protocol: "grpc"
+"#;
+
+        let result: Result<OtlpSinkConfig, _> = serde_yaml::from_str(yaml);
+        assert!(
+            result.is_ok(),
+            "config without timeout should deserialize successfully"
+        );
+        let config = result.unwrap();
+        assert_eq!(
+            config.timeout_ms, 5000,
+            "default timeout should be 5000ms (5 seconds)"
+        );
+    }
+
+    #[test]
+    fn test_otlp_config_timeout_ms_takes_precedence() {
+        // Test that when both timeout_ms and timeout_secs are specified,
+        // timeout_ms takes precedence (no double conversion)
+        let yaml = r#"
+enabled: true
+endpoint: "http://localhost:4317"
+protocol: "grpc"
+timeout_ms: 3000
+timeout_secs: 60
+"#;
+
+        let result: Result<OtlpSinkConfig, _> = serde_yaml::from_str(yaml);
+        assert!(
+            result.is_ok(),
+            "both timeout fields should deserialize successfully"
+        );
+        let config = result.unwrap();
+        assert_eq!(
+            config.timeout_ms, 3000,
+            "timeout_ms should take precedence over timeout_secs (3000ms, not 60000ms)"
+        );
+    }
+
     // ──────────────────────────────────────────────────────────────────────────────
     // Key path validation tests
     // ──────────────────────────────────────────────────────────────────────────────
