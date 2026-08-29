@@ -242,6 +242,10 @@ pub enum CliCommand {
     },
 
     /// Check system health and repair.
+    ///
+    /// Exit codes:
+    ///   0 - All checks passed (or only warnings)
+    ///   1 - One or more checks failed
     Doctor {
         /// Attempt automatic repair of issues found.
         #[arg(long)]
@@ -263,8 +267,12 @@ pub enum CliCommand {
     /// .needle.yaml with an explicit bead backend binding.
     Init {
         /// Bead backend to bind in .needle.yaml (default: bead-rs).
-        #[arg(long, default_value = "bead-rs")]
+        #[arg(long, default_value = "bead-rs", value_parser = clap::builder::PossibleValuesParser::new(["bead-rs", "bead-forge"]))]
         backend: String,
+
+        /// Skip creating/updating AGENTS.md with bead workflow instructions.
+        #[arg(long)]
+        no_agents_md: bool,
     },
 
     /// Show version information.
@@ -512,7 +520,10 @@ pub fn run() -> Result<()> {
             live,
         } => cmd_config(get, set, dump, show_source, live),
         CliCommand::Doctor { repair, workspace } => cmd_doctor(repair, workspace),
-        CliCommand::Init { backend } => cmd_init(&backend),
+        CliCommand::Init {
+            backend,
+            no_agents_md,
+        } => cmd_init(&backend, no_agents_md),
         CliCommand::Version => {
             cmd_version();
             Ok(())
@@ -2296,7 +2307,30 @@ fn cmd_list(format: ListFormat) -> Result<()> {
 /// in ~/.needle/ and migrates compatible settings (agent name, workspace
 /// path, worker count) to the v2 YAML schema. Safe to run on already-
 /// initialized installs (idempotent).
-fn cmd_init(backend: &str) -> Result<()> {
+/// Replace the content between needle markers in AGENTS.md with new template.
+fn replace_needle_block(content: &str, template: &str) -> String {
+    let begin_marker = "<!-- needle:begin -->";
+    let end_marker = "<!-- needle:end -->";
+
+    if let Some(begin_pos) = content.find(begin_marker) {
+        if let Some(end_pos) = content.find(end_marker) {
+            // Found both markers, replace the content between them.
+            let before = &content[..begin_pos];
+            let _after = &content[end_pos + end_marker.len()..];
+            format!("{}{}\n{}\n{}\n", before, begin_marker, template, end_marker)
+                .trim()
+                .to_string()
+        } else {
+            // Found begin but not end - this shouldn't happen in valid files.
+            content.to_string()
+        }
+    } else {
+        // No markers found, return original.
+        content.to_string()
+    }
+}
+
+fn cmd_init(backend: &str, no_agents_md: bool) -> Result<()> {
     /// Resolve a path relative to the user's home directory.
     fn dirs_or_home(relative: &str) -> PathBuf {
         if let Some(home) = std::env::var_os("HOME") {
@@ -2709,6 +2743,53 @@ fabric:
             println!("\nCreated workspace config: {}", workspace_config.display());
             println!("  bead_cli.backend: {}", backend);
         }
+    }
+
+    // Handle AGENTS.md template injection if not opted out.
+    if !no_agents_md {
+        let agents_md_path = current_dir.join("AGENTS.md");
+        let template = include_str!("../../docs/templates/AGENTS-needle.md");
+
+        let action = if agents_md_path.exists() {
+            // Read existing content to check if it already contains our markers.
+            let existing_content = std::fs::read_to_string(&agents_md_path).with_context(|| {
+                format!("failed to read AGENTS.md: {}", agents_md_path.display())
+            })?;
+
+            if existing_content.contains("<!-- needle:begin -->") {
+                // Replace existing block.
+                let updated = replace_needle_block(&existing_content, template);
+                if updated == existing_content {
+                    // No change needed.
+                    "no-op (already up to date)"
+                } else {
+                    std::fs::write(&agents_md_path, updated).with_context(|| {
+                        format!("failed to write AGENTS.md: {}", agents_md_path.display())
+                    })?;
+                    "updated"
+                }
+            } else {
+                // Append to existing content.
+                let updated = format!(
+                    "{}\n\n<!-- needle:begin -->\n{}\n<!-- needle:end -->",
+                    existing_content.trim(),
+                    template
+                );
+                std::fs::write(&agents_md_path, updated).with_context(|| {
+                    format!("failed to write AGENTS.md: {}", agents_md_path.display())
+                })?;
+                "appended"
+            }
+        } else {
+            // Create new file with just the template.
+            let content = format!("<!-- needle:begin -->\n{}\n<!-- needle:end -->", template);
+            std::fs::write(&agents_md_path, content).with_context(|| {
+                format!("failed to write AGENTS.md: {}", agents_md_path.display())
+            })?;
+            "created"
+        };
+
+        println!("\nAGENTS.md: {}", action);
     }
 
     // Print onboarding checklist.
@@ -4433,6 +4514,35 @@ fn doctor_check_adapter_transforms(config: &Config) -> CheckResult {
     }
 }
 
+fn doctor_check_adapter_template_executables(config: &Config) -> CheckResult {
+    match dispatch::load_adapters(&config.agent.adapters_dir, &dispatch::builtin_adapters()) {
+        Err(e) => CheckResult::fail(
+            "Adapter template executables",
+            format!("cannot load adapters: {e}"),
+        ),
+        Ok(adapters) => {
+            let mut missing: Vec<String> = adapters
+                .values()
+                .flat_map(|a| dispatch::check_template_executables(&a.invoke_template))
+                .collect();
+            missing.sort();
+            missing.dedup();
+            if missing.is_empty() {
+                CheckResult::pass("Adapter template executables", "all commands available")
+            } else {
+                CheckResult::warn(
+                    "Adapter template executables",
+                    format!(
+                        "{} executable(s) referenced in invoke_template not on PATH",
+                        missing.len()
+                    ),
+                )
+                .with_detail(missing)
+            }
+        }
+    }
+}
+
 fn doctor_check_disk_space(path: &Path) -> CheckResult {
     // df --block-size=1M --output=avail <path> prints a header + one value.
     let output = std::process::Command::new("df")
@@ -4605,6 +4715,9 @@ fn cmd_doctor(repair: bool, workspace: Option<PathBuf>) -> Result<()> {
     // Adapter transform binaries
     results.push(doctor_check_adapter_transforms(&config));
 
+    // Adapter template executables
+    results.push(doctor_check_adapter_template_executables(&config));
+
     // Disk space
     results.push(doctor_check_disk_space(&workspace_root));
 
@@ -4638,9 +4751,17 @@ fn cmd_doctor(repair: bool, workspace: Option<PathBuf>) -> Result<()> {
         println!("{passed} check(s) passed.");
     } else {
         println!("{passed} passed, {warns} warning(s), {fails} failure(s).");
+        if fails > 0 {
+            println!("Exit code 1: {fails} failure(s).");
+        }
         if !repair && (fails > 0 || warns > 0) {
             println!("Run `needle doctor --repair` to attempt automatic fixes.");
         }
+    }
+
+    // Exit with code 1 if any checks failed.
+    if fails > 0 {
+        std::process::exit(1);
     }
 
     Ok(())

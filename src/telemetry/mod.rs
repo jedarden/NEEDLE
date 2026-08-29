@@ -342,6 +342,15 @@ pub enum EventKind {
         failure_count: u32,
         threshold: u32,
     },
+    /// False close detected: bead appeared closed but shipped-work verification failed.
+    /// This indicates the agent closed the bead without actually shipping work (e.g.,
+    /// a GitHub comment was posted but not verified, causing a repeat loop).
+    FalseCloseDetected {
+        bead_id: BeadId,
+        failure_count: u32,
+        threshold: u32,
+        reason: String,
+    },
 
     // ── Agent dispatch ──
     DispatchStarted {
@@ -1039,6 +1048,7 @@ impl EventKind {
             EventKind::BeadCompleted { .. } => "bead.completed",
             EventKind::BeadOrphaned { .. } => "bead.orphaned",
             EventKind::BeadQuarantined { .. } => "bead.quarantined",
+            EventKind::FalseCloseDetected { .. } => "bead.false_close_detected",
             EventKind::DispatchStarted { .. } => "agent.dispatched",
             EventKind::DispatchCompleted { .. } => "agent.completed",
             EventKind::AgentTimeout { .. } => "agent.timeout",
@@ -1177,6 +1187,8 @@ impl EventKind {
             | EventKind::BeadReleaseFailed { bead_id, .. }
             | EventKind::BeadCompleted { bead_id, .. }
             | EventKind::BeadOrphaned { bead_id }
+            | EventKind::BeadQuarantined { bead_id, .. }
+            | EventKind::FalseCloseDetected { bead_id, .. }
             | EventKind::DispatchStarted { bead_id, .. }
             | EventKind::DispatchCompleted { bead_id, .. }
             | EventKind::RoutingDecision { bead_id, .. }
@@ -1207,7 +1219,6 @@ impl EventKind {
             | EventKind::ReflectDecisionExtracted { bead_id, .. }
             | EventKind::ReflectAdrCreated { bead_id, .. }
             | EventKind::SplitSkipped { bead_id, .. }
-            | EventKind::BeadQuarantined { bead_id, .. }
             | EventKind::AgentTimeout { bead_id, .. } => Some(bead_id.clone()),
             EventKind::MitosisSplit { parent_id, .. }
             | EventKind::MitosisSkipped { parent_id, .. } => Some(parent_id.clone()),
@@ -2530,6 +2541,17 @@ impl EventKind {
                 "failure_count": failure_count,
                 "threshold": threshold,
             }),
+            EventKind::FalseCloseDetected {
+                bead_id,
+                failure_count,
+                threshold,
+                reason,
+            } => serde_json::json!({
+                "bead_id": bead_id,
+                "failure_count": failure_count,
+                "threshold": threshold,
+                "reason": reason,
+            }),
             EventKind::SpawnPathModifiedInPlace {
                 path,
                 old_metadata,
@@ -2777,6 +2799,7 @@ impl EventKind {
             | EventKind::WorkerLaunchDeferred { .. }
             | EventKind::ConfigWarning { .. }
             | EventKind::BeadQuarantined { .. }
+            | EventKind::FalseCloseDetected { .. }
             | EventKind::SpawnPathModifiedInPlace { .. }
             | EventKind::Log { .. } => None,
         }

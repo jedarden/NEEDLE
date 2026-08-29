@@ -721,6 +721,72 @@ validation:
 
 ---
 
+## CLI Commands
+
+### `needle doctor` — System Health Check
+
+The `needle doctor` command performs comprehensive system health checks and optionally attempts automatic repairs.
+
+#### Usage
+
+```bash
+needle doctor [--workspace <path>] [--repair]
+```
+
+#### Checks Performed
+
+- **Config** — Validates configuration file syntax and structure
+- **Workspace** — Checks workspace accessibility and `.beads/` presence
+- **JSONL consistency** — Validates `.beads/issues.jsonl` integrity
+- **SQLite integrity** — Checks bead store database integrity
+- **Lock files** — Detects stale lock files (optional repair)
+- **Bead backend** — Verifies bead CLI availability and compatibility
+- **Worker registry** — Checks for orphaned worker entries
+- **Heartbeat directory** — Validates heartbeat directory permissions
+- **Heartbeat files** — Checks heartbeat file staleness
+- **Peer status** — Reports active worker peers
+- **Agent binary** — Verifies agent adapter binary availability
+- **Adapter transforms** — Checks transform binary availability
+- **Disk space** — Validates available disk space
+- **Telemetry logs** — Checks telemetry log directory health
+
+#### Exit Codes
+
+| Code | Condition |
+|------|-----------|
+| **0** | All checks passed (or only warnings — warnings never cause non-zero exit) |
+| **1** | One or more checks failed |
+
+The exit code rule applies to both normal and `--repair` mode: repairs run first, then the exit code reflects the post-repair state.
+
+#### Output Format
+
+```
+NEEDLE Doctor
+────────────────────────────────────────────────────────────
+[PASS]  Config                       valid
+[FAIL]  Bead backend                 binary not found: nonexistent-backend
+         └─ bead_cli.backend points to 'nonexistent-backend'
+         └─ but no such binary exists on PATH
+────────────────────────────────────────────────────────────
+12 passed, 1 warning(s), 1 failure(s).
+Exit code 1: 1 failure(s).
+Run `needle doctor --repair` to attempt automatic fixes.
+```
+
+When all checks pass:
+```
+────────────────────────────────────────────────────────────
+13 check(s) passed.
+```
+
+#### Use Cases
+
+- **Pre-deploy validation** — Verify system health before starting workers
+- **Troubleshooting** — Identify configuration or dependency issues
+- **CI/CD gates** — Use exit codes for automated health checks in pipelines
+- **Fresh container validation** — Quickstart gate for new deployments (see `needle-e759f7f3`)
+
 ## See Also
 
 - [README.md](../README.md) — Project overview and quickstart

@@ -460,10 +460,6 @@ impl OutcomeHandler {
             );
         }
 
-        // Reset failure count on successful gate completion.
-        // This ensures the bead starts fresh on the next cycle if re-claimed.
-        let _ = self.reset_failure_count(store, bead).await;
-
         // Normal success flow: check if agent closed the bead.
         let mut events = Vec::new();
 
@@ -481,7 +477,11 @@ impl OutcomeHandler {
                             let report = GateReport::single_failure("shipped_work", reason);
                             return self.handle_gate_failure(store, bead, &report).await;
                         }
-                        Ok(crate::validation::GateResult::Pass) => {}
+                        Ok(crate::validation::GateResult::Pass) => {
+                            // Shipped-work check passed — reset failure count now that we're
+                            // certain the bead is properly closed and shipped.
+                            let _ = self.reset_failure_count(store, bead).await;
+                        }
                         Err(e) => {
                             tracing::warn!(
                                 bead_id = %bead.id,
@@ -490,6 +490,9 @@ impl OutcomeHandler {
                             );
                         }
                     }
+                } else {
+                    // Shipped-work enforcement disabled — reset failure count on closure.
+                    let _ = self.reset_failure_count(store, bead).await;
                 }
 
                 // Dispatch is fully accounted for — drop its snapshot so the
@@ -536,6 +539,8 @@ impl OutcomeHandler {
                             );
                             // Clear the predispatch snapshot since work is complete.
                             crate::validation::predispatch::clear(&bead.workspace, &bead.id).await;
+                            // Shipped work detected — reset failure count.
+                            let _ = self.reset_failure_count(store, bead).await;
                             // Mark as completed - the agent shipped work but forgot to close.
                             // We can't close via bead store (no close method), so emit completion
                             // event and release. The bead remains open but work is done.
@@ -1227,10 +1232,10 @@ impl OutcomeHandler {
         Ok(())
     }
 
-    /// Quarantine a bead by setting status=blocked and adding the 'cycling' label.
+    /// Quarantine a bead by setting it deferred with a quarantine reason label.
     ///
     /// This is called when a bead exceeds the configured failure threshold.
-    /// Emits a BeadQuarantined telemetry event.
+    /// Emits a BeadQuarantined telemetry event and a FalseCloseDetected event.
     ///
     /// All `br` calls are wrapped in timeouts to prevent indefinite hang in
     /// HANDLING state. Failures are non-fatal — we log and continue.
@@ -1250,59 +1255,68 @@ impl OutcomeHandler {
             "quarantining bead after exceeding failure threshold"
         );
 
-        // Set status=blocked with timeout. This is what actually stops Pluck
-        // from re-selecting the bead — the 'cycling' label below is a
-        // human-facing marker, not the enforcement mechanism.
-        match tokio::time::timeout(std::time::Duration::from_secs(30), store.block(&bead.id)).await
-        {
-            Ok(Ok(())) => {
-                tracing::debug!(bead_id = %bead.id, "set status=blocked");
-            }
-            Ok(Err(e)) => {
-                tracing::warn!(
-                    bead_id = %bead.id,
-                    error = %e,
-                    "failed to set status=blocked during quarantine"
-                );
-                events.push(EventKind::WorkerHandlingTimeout {
-                    bead_id: bead.id.clone(),
-                    outcome: "quarantine".to_string(),
-                    operation: "block".to_string(),
-                    error: e.to_string(),
-                });
-            }
-            Err(_) => {
-                tracing::warn!(
-                    bead_id = %bead.id,
-                    "block timed out after 30s during quarantine"
-                );
-                events.push(EventKind::WorkerHandlingTimeout {
-                    bead_id: bead.id.clone(),
-                    outcome: "quarantine".to_string(),
-                    operation: "block".to_string(),
-                    error: "timeout after 30s".to_string(),
-                });
-            }
-        }
-
-        // Add the 'cycling' label with timeout.
+        // Add 'deferred' label to stop Pluck from re-selecting the bead.
         match tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            store.add_label(&bead.id, "cycling"),
+            store.add_label(&bead.id, "deferred"),
         )
         .await
         {
             Ok(Ok(())) => {
                 tracing::debug!(
                     bead_id = %bead.id,
-                    "added 'cycling' label"
+                    "added 'deferred' label"
                 );
             }
             Ok(Err(e)) => {
                 tracing::warn!(
                     bead_id = %bead.id,
                     error = %e,
-                    "failed to add 'cycling' label"
+                    "failed to add 'deferred' label during quarantine"
+                );
+                events.push(EventKind::WorkerHandlingTimeout {
+                    bead_id: bead.id.clone(),
+                    outcome: "quarantine".to_string(),
+                    operation: "add_label".to_string(),
+                    error: e.to_string(),
+                });
+            }
+            Err(_) => {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    "add_label timed out after 30s during quarantine"
+                );
+                events.push(EventKind::WorkerHandlingTimeout {
+                    bead_id: bead.id.clone(),
+                    outcome: "quarantine".to_string(),
+                    operation: "add_label".to_string(),
+                    error: "timeout after 30s".to_string(),
+                });
+            }
+        }
+
+        // Add a quarantine reason label with the failure count and context.
+        let reason_label = format!(
+            "quarantine: false-close-detected-after-{}-tries",
+            failure_count
+        );
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            store.add_label(&bead.id, &reason_label),
+        )
+        .await
+        {
+            Ok(Ok(())) => {
+                tracing::debug!(
+                    bead_id = %bead.id,
+                    "added quarantine reason label"
+                );
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    error = %e,
+                    "failed to add quarantine reason label"
                 );
                 events.push(EventKind::WorkerHandlingTimeout {
                     bead_id: bead.id.clone(),
@@ -1330,6 +1344,14 @@ impl OutcomeHandler {
             bead_id: bead.id.clone(),
             failure_count,
             threshold,
+        });
+
+        // Emit the FalseCloseDetected event for observability.
+        events.push(EventKind::FalseCloseDetected {
+            bead_id: bead.id.clone(),
+            failure_count,
+            threshold,
+            reason: "shipped-work-verification-failed".to_string(),
         });
 
         Ok(events)
@@ -1850,6 +1872,120 @@ mod tests {
                 |a| matches!(a, StoreAction::RemoveLabel(_, label) if label == "failure-count:3")
             ),
             "should remove failure-count:3 on success"
+        );
+    }
+
+    // ── Regression tests for needle-b39fe1b6: failure count reset timing ──
+
+    #[tokio::test]
+    async fn handle_success_without_shipped_work_quarantines_after_three_attempts() {
+        // Regression test for GitHub issue #16: a bead that closes without
+        // shipped work (e.g., a GitHub comment) should increment the failure
+        // count each time and quarantine after the third attempt, not loop
+        // forever because the count was reset before shipped-work verification.
+        let mut config = Config::default();
+        config.outcome.quarantine_after_failures = 3;
+        config.worker.enforce_shipped_work = true;
+        let handler = test_handler_with_config(config);
+
+        // First attempt: bead has failure-count:2, closes with no shipped work
+        let store =
+            MockBeadStore::new(BeadStatus::Done).with_labels(vec!["failure-count:2".to_string()]);
+        let bead = test_bead(BeadStatus::InProgress);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+
+        // Should quarantine because shipped-work check fails
+        assert_eq!(result.bead_action, BeadAction::Quarantined);
+        let actions = store.actions();
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, StoreAction::AddLabel(_, label) if label == "deferred")),
+            "quarantine must add the deferred label"
+        );
+        assert!(
+            actions.iter().any(
+                |a| matches!(a, StoreAction::AddLabel(_, label) if label.contains("quarantine:"))
+            ),
+            "quarantine must add a reason label"
+        );
+        assert!(
+            result.telemetry_events.iter().any(|e| matches!(
+                e,
+                EventKind::FalseCloseDetected {
+                    failure_count: 3,
+                    threshold: 3,
+                    ..
+                }
+            )),
+            "must emit FalseCloseDetected with failure_count=3"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_success_with_shipped_work_resets_failure_count() {
+        // A bead that closes WITH shipped work should reset the failure count.
+        // This is the positive case: genuine success clears the slate.
+        let mut config = Config::default();
+        config.worker.enforce_shipped_work = true;
+        let handler = test_handler_with_config(config);
+
+        // Bead has failure-count:2 but ships real work (simulated by Done status)
+        let store =
+            MockBeadStore::new(BeadStatus::Done).with_labels(vec!["failure-count:2".to_string()]);
+        let bead = test_bead(BeadStatus::InProgress);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+
+        assert_eq!(result.outcome, Outcome::Success);
+        let actions = store.actions();
+        assert!(
+            actions.iter().any(
+                |a| matches!(a, StoreAction::RemoveLabel(_, label) if label == "failure-count:2")
+            ),
+            "shipped work should remove failure-count:2"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_orphan_without_shipped_work_increments_failure_count() {
+        // Orphan path: agent exits 0, bead still open, no shipped work.
+        // Should increment failure count, not reset it.
+        let mut config = Config::default();
+        config.worker.enforce_shipped_work = true;
+        let handler = test_handler_with_config(config);
+
+        // Bead is still open (InProgress) with failure-count:1
+        let store = MockBeadStore::new(BeadStatus::InProgress)
+            .with_labels(vec!["failure-count:1".to_string()]);
+        let bead = test_bead(BeadStatus::InProgress);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+
+        assert_eq!(result.outcome, Outcome::Success);
+        assert_eq!(result.bead_action, BeadAction::Released);
+        let actions = store.actions();
+        assert!(
+            actions.iter().any(
+                |a| matches!(a, StoreAction::AddLabel(_, label) if label == "failure-count:2")
+            ),
+            "orphan without shipped work should increment to failure-count:2"
+        );
+        assert!(
+            actions.iter().any(
+                |a| matches!(a, StoreAction::RemoveLabel(_, label) if label == "failure-count:1")
+            ),
+            "should remove old failure-count:1"
         );
     }
 
