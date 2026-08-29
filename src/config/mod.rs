@@ -1952,6 +1952,62 @@ mod tests {
 
     #[serial]
     #[test]
+    fn test_resolve_bead_cli_auto_error_both_bead_and_bf_non_executable() {
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let home = tmp_dir.path().to_path_buf();
+
+        // Create PATH directory with both bead and bf files WITHOUT execute permissions
+        let path_dir = tmp_dir.path().join("bin");
+        std::fs::create_dir_all(&path_dir).unwrap();
+
+        let bead_file = path_dir.join("bead");
+        std::fs::write(&bead_file, "#!/bin/sh\necho bead").unwrap();
+        // Explicitly do NOT set execute permissions - leave it mode 644
+
+        let bf_file = path_dir.join("bf");
+        std::fs::write(&bf_file, "#!/bin/sh\necho bf").unwrap();
+        // Explicitly do NOT set execute permissions - leave it mode 644
+
+        // Verify files exist but are NOT executable
+        use std::os::unix::fs::PermissionsExt;
+        let bead_perms = std::fs::metadata(&bead_file).unwrap().permissions().mode();
+        let bf_perms = std::fs::metadata(&bf_file).unwrap().permissions().mode();
+        assert_eq!(
+            bead_perms & 0o111,
+            0,
+            "bead file should not have execute permissions"
+        );
+        assert_eq!(
+            bf_perms & 0o111,
+            0,
+            "bf file should not have execute permissions"
+        );
+
+        // Set environment
+        std::env::set_var("HOME", &home);
+        std::env::set_var("PATH", &path_dir.to_str().unwrap());
+
+        let config = BeadCliConfig {
+            backend: BeadBackend::Auto,
+            path: None,
+        };
+
+        let result = resolve_bead_cli(&config);
+        assert!(
+            result.is_err(),
+            "Auto backend should error when both bead and bf lack execute permissions"
+        );
+
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("no bead CLI found"),
+            "Error should indicate no executable CLI was found"
+        );
+    }
+
+    #[serial]
+    #[test]
     fn test_resolve_bead_cli_auto_error_nonexistent_path_directories() {
         let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
