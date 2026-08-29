@@ -352,4 +352,336 @@ mod tests {
 
         assert_ne!(hash_a, hash_b);
     }
+
+    #[test]
+    fn checker_first_poll_records_initial_hash() {
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
+        let binary_path = temp_dir.path().join("test-binary");
+
+        fs::write(&binary_path, b"initial content").expect("failed to write binary");
+
+        let mut checker = BinaryFreshnessChecker::new(binary_path.clone(), 1);
+        let now = Instant::now();
+
+        // First poll should record initial hash and report unchanged
+        let result = checker.poll_at(now).expect("first poll failed");
+        assert!(result.is_some());
+
+        match result.unwrap() {
+            FreshnessCheck::Unchanged { current_hash, .. } => {
+                assert!(!current_hash.is_empty());
+                assert_eq!(checker.last_hash(), Some(current_hash.as_str()));
+            }
+            other => panic!("expected Unchanged on first poll, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn checker_multiple_sequential_polls() {
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
+        let binary_path = temp_dir.path().join("test-binary");
+
+        fs::write(&binary_path, b"v1").expect("failed to write binary");
+
+        let mut checker = BinaryFreshnessChecker::new(binary_path.clone(), 5);
+        let now = Instant::now();
+
+        // First poll at t=0
+        let result = checker.poll_at(now).expect("poll 1 failed");
+        assert!(result.is_some());
+        assert_eq!(checker.last_hash().unwrap().len(), 64); // SHA256 hex length
+
+        // Polls at t=1, t=3 should be skipped (before interval)
+        assert!(checker
+            .poll_at(now + Duration::from_secs(1))
+            .expect("poll 2 failed")
+            .is_none());
+        assert!(checker
+            .poll_at(now + Duration::from_secs(3))
+            .expect("poll 3 failed")
+            .is_none());
+
+        // Poll at t=5 should execute (at interval)
+        let result = checker
+            .poll_at(now + Duration::from_secs(5))
+            .expect("poll 4 failed");
+        assert!(result.is_some());
+
+        // Update binary
+        fs::write(&binary_path, b"v2").expect("failed to update binary");
+
+        // Poll at t=10 should detect change
+        let result = checker
+            .poll_at(now + Duration::from_secs(10))
+            .expect("poll 5 failed");
+        assert!(result.is_some());
+
+        match result.unwrap() {
+            FreshnessCheck::NewBinary {
+                old_hash, new_hash, ..
+            } => {
+                assert_ne!(old_hash, new_hash);
+            }
+            other => panic!("expected NewBinary, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn checker_boundary_conditions() {
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
+        let binary_path = temp_dir.path().join("test-binary");
+
+        fs::write(&binary_path, b"boundary test").expect("failed to write binary");
+
+        let mut checker = BinaryFreshnessChecker::new(binary_path, 2);
+        let now = Instant::now();
+
+        // First poll at t=0
+        assert!(checker.poll_at(now).expect("poll 0 failed").is_some());
+
+        // Poll at t=1 should be skipped
+        assert!(checker
+            .poll_at(now + Duration::from_secs(1))
+            .expect("poll 1 failed")
+            .is_none());
+
+        // Poll at exactly t=2 (interval boundary) should execute
+        assert!(checker
+            .poll_at(now + Duration::from_secs(2))
+            .expect("poll 2 failed")
+            .is_some());
+
+        // Poll at t=4 (next boundary) should execute
+        assert!(checker
+            .poll_at(now + Duration::from_secs(4))
+            .expect("poll 4 failed")
+            .is_some());
+    }
+
+    #[test]
+    fn checker_skipped_poll_does_not_update_state() {
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
+        let binary_path = temp_dir.path().join("test-binary");
+
+        fs::write(&binary_path, b"initial").expect("failed to write binary");
+
+        let mut checker = BinaryFreshnessChecker::new(binary_path.clone(), 10);
+        let now = Instant::now();
+
+        // First poll
+        let result = checker.poll_at(now).expect("first poll failed").unwrap();
+        let initial_hash = match result {
+            FreshnessCheck::Unchanged {
+                ref current_hash, ..
+            } => current_hash.clone(),
+            _ => panic!("expected Unchanged"),
+        };
+
+        // Update binary immediately after first poll
+        fs::write(&binary_path, b"updated").expect("failed to update binary");
+
+        // Poll before interval should be skipped and NOT update hash
+        let skipped = checker
+            .poll_at(now + Duration::from_secs(5))
+            .expect("skipped poll failed");
+        assert!(skipped.is_none());
+
+        // Hash should still be the initial hash (not updated)
+        assert_eq!(checker.last_hash(), Some(initial_hash.as_str()));
+
+        // Poll after interval should detect the change
+        let result = checker
+            .poll_at(now + Duration::from_secs(10))
+            .expect("interval poll failed")
+            .unwrap();
+        match result {
+            FreshnessCheck::NewBinary {
+                old_hash, new_hash, ..
+            } => {
+                assert_eq!(old_hash, initial_hash);
+                assert_ne!(new_hash, initial_hash);
+            }
+            other => panic!("expected NewBinary, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn checker_immediate_second_poll_is_skipped() {
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
+        let binary_path = temp_dir.path().join("test-binary");
+
+        fs::write(&binary_path, b"test").expect("failed to write binary");
+
+        let mut checker = BinaryFreshnessChecker::new(binary_path, 60);
+        let now = Instant::now();
+
+        // First poll should execute
+        assert!(checker.poll_at(now).expect("first poll failed").is_some());
+
+        // Immediate second poll should be skipped
+        assert!(checker.poll_at(now).expect("second poll failed").is_none());
+
+        // Poll 1 nanosecond later should still be skipped
+        assert!(checker
+            .poll_at(now + Duration::from_nanos(1))
+            .expect("nanosecond poll failed")
+            .is_none());
+    }
+
+    #[test]
+    fn checker_persists_last_hash_across_polls() {
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
+        let binary_path = temp_dir.path().join("test-binary");
+
+        fs::write(&binary_path, b"persistent").expect("failed to write binary");
+
+        let mut checker = BinaryFreshnessChecker::new(binary_path.clone(), 1);
+        let now = Instant::now();
+
+        // First poll records hash
+        let result = checker.poll_at(now).expect("first poll failed").unwrap();
+        let first_hash = match result {
+            FreshnessCheck::Unchanged {
+                ref current_hash, ..
+            } => current_hash.clone(),
+            _ => panic!("expected Unchanged"),
+        };
+
+        // Multiple subsequent polls should report the same hash
+        for i in 1..5 {
+            let poll_time = now + Duration::from_secs(i as u64);
+            let result = checker
+                .poll_at(poll_time)
+                .expect("subsequent poll failed")
+                .unwrap();
+            match result {
+                FreshnessCheck::Unchanged {
+                    ref current_hash, ..
+                } => {
+                    assert_eq!(
+                        current_hash, &first_hash,
+                        "hash should remain consistent across poll {}",
+                        i
+                    );
+                }
+                other => panic!("expected Unchanged on poll {}, got {:?}", i, other),
+            }
+        }
+
+        // Verify last_hash is still the original
+        assert_eq!(checker.last_hash(), Some(first_hash.as_str()));
+    }
+
+    #[test]
+    fn checker_detects_change_after_multiple_unchanged_polls() {
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
+        let binary_path = temp_dir.path().join("test-binary");
+
+        fs::write(&binary_path, b"original").expect("failed to write binary");
+
+        let mut checker = BinaryFreshnessChecker::new(binary_path.clone(), 1);
+        let now = Instant::now();
+
+        // Perform several unchanged polls
+        for i in 0..3 {
+            let poll_time = now + Duration::from_secs(i as u64);
+            let result = checker.poll_at(poll_time).expect("poll {} failed").unwrap();
+            match result {
+                FreshnessCheck::Unchanged { .. } => {}
+                other => panic!("expected Unchanged on poll {}, got {:?}", i, other),
+            }
+        }
+
+        // Now change the binary
+        fs::write(&binary_path, b"changed").expect("failed to update binary");
+
+        // Next poll should detect the change
+        let result = checker
+            .poll_at(now + Duration::from_secs(3))
+            .expect("change detection poll failed")
+            .unwrap();
+        match result {
+            FreshnessCheck::NewBinary {
+                old_hash, new_hash, ..
+            } => {
+                assert!(!old_hash.is_empty());
+                assert!(!new_hash.is_empty());
+                assert_ne!(old_hash, new_hash);
+            }
+            other => panic!("expected NewBinary, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn checker_one_second_interval_works() {
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
+        let binary_path = temp_dir.path().join("test-binary");
+
+        fs::write(&binary_path, b"1-second test").expect("failed to write binary");
+
+        let mut checker = BinaryFreshnessChecker::new(binary_path, 1);
+        let now = Instant::now();
+
+        // Test with 1-second interval (minimum practical interval)
+        assert!(checker.poll_at(now).expect("poll at 0s failed").is_some());
+        assert!(checker
+            .poll_at(now + Duration::from_millis(999))
+            .expect("poll at 999ms failed")
+            .is_none());
+        assert!(checker
+            .poll_at(now + Duration::from_secs(1))
+            .expect("poll at 1s failed")
+            .is_some());
+        assert!(checker
+            .poll_at(now + Duration::from_millis(1999))
+            .expect("poll at 1.999s failed")
+            .is_none());
+        assert!(checker
+            .poll_at(now + Duration::from_secs(2))
+            .expect("poll at 2s failed")
+            .is_some());
+    }
+
+    #[test]
+    fn checker_returns_none_for_skipped_checks() {
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
+        let binary_path = temp_dir.path().join("test-binary");
+
+        fs::write(&binary_path, b"test content").expect("failed to write binary");
+
+        let mut checker = BinaryFreshnessChecker::new(binary_path, 10);
+        let now = Instant::now();
+
+        // First poll should return Some
+        let result = checker.poll_at(now).expect("first poll failed");
+        assert!(
+            result.is_some(),
+            "first poll should return Some(FreshnessCheck)"
+        );
+
+        // Immediate poll should return None (skipped)
+        let result = checker.poll_at(now).expect("immediate poll failed");
+        assert!(
+            result.is_none(),
+            "immediate poll should return None (skipped)"
+        );
+
+        // Poll before interval should return None
+        let result = checker
+            .poll_at(now + Duration::from_secs(5))
+            .expect("early poll failed");
+        assert!(
+            result.is_none(),
+            "poll before interval should return None (skipped)"
+        );
+
+        // Poll after interval should return Some
+        let result = checker
+            .poll_at(now + Duration::from_secs(10))
+            .expect("interval poll failed");
+        assert!(
+            result.is_some(),
+            "poll after interval should return Some(FreshnessCheck)"
+        );
+    }
 }
