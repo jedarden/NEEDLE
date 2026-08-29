@@ -437,25 +437,27 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_mock_retry_basic() {
+    async fn test_mock_retry_basic() -> Result<(), String> {
         let mock = MockRetryBehavior::new()
             .with_max_attempts(3)
             .with_success_on_attempts(vec![1]);
 
-        let result = mock.run_async().await.unwrap();
+        let result = mock.run_async().await?;
         assert_eq!(result.attempts, 1);
         assert!(result.succeeded);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_mock_retry_with_etxtbsy() {
+    async fn test_mock_retry_with_etxtbsy() -> Result<(), String> {
         let mock = MockRetryBehavior::new()
             .with_max_attempts(3)
             .with_etxtbsy_on_attempt(1)
             .with_success_on_attempts(vec![2]);
 
-        let result = mock.run_async().await.unwrap();
+        let result = mock.run_async().await?;
         assert_eq!(result.attempts, 2);
         assert!(result.succeeded);
+        Ok(())
     }
 }
