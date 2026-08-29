@@ -480,8 +480,7 @@ mod io_error_tests {
         // When: Attempting to create file in non-existent directory
         match fs::File::create(&nonexistent_dir) {
             Err(_e) => {
-                // Expected to fail
-                return; // Test passes - error was returned
+                // Expected to fail - test passes
             }
             Ok(_file) => {
                 // If we reach here, the file was created (unexpected)
