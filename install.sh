@@ -177,7 +177,7 @@ detect_arch() {
     esac
 }
 
-# Get the latest release version from GitHub
+# Get the latest release version from GitHub and check asset availability
 get_latest_version() {
     local version
     local api_output
@@ -210,7 +210,42 @@ get_latest_version() {
         error "Failed to determine the latest version. Please check your internet connection."
     fi
 
+    # Check if the required asset exists in the release
+    check_asset_available "$api_output" "$1" "$version" || return 1
+
     echo "$version"
+}
+
+# Check if the required asset exists in the release JSON
+check_asset_available() {
+    local api_output="$1"
+    local asset_name="$2"
+    local version="$3"
+
+    # Extract all asset names from the release JSON
+    local assets_found=0
+    local asset_re='"name"[[:space:]]*:[[:space:]]*"([^"]+)"'
+    local asset_list
+
+    # Use a while loop to find all asset names
+    while [[ "$api_output" =~ $asset_re ]]; do
+        asset_list="${BASH_REMATCH[1]}"$'\n'"${asset_list:-}"
+        # Remove the matched part from api_output to find the next match
+        api_output="${api_output#*"${BASH_REMATCH[1]}"}"
+        ((assets_found++)) || true
+    done
+
+    # Check if our required asset is in the list
+    if ! echo "$asset_list" | grep -qxF "$asset_name"; then
+        cat >&2 <<EOF
+No prebuilt binary for ${asset_name} in ${version}.
+Build from source instead: cargo install --git https://github.com/jedarden/NEEDLE
+(toolchain pinned in rust-toolchain.toml)
+EOF
+        return 1
+    fi
+
+    return 0
 }
 
 # Download a file using curl or wget
@@ -242,8 +277,8 @@ main() {
 
     info "Detected platform: ${arch}-${os}"
 
-    # Get latest version
-    version=$(get_latest_version)
+    # Get latest version and check asset availability
+    version=$(get_latest_version "$asset_name") || exit 1
     info "Latest version: $version"
 
     # Construct download URL

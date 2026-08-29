@@ -571,6 +571,68 @@ EOF
     teardown
 }
 
+# Test: arm64 host fails early with clear message (no download attempted)
+test_arm64_host_fails_early() {
+    echo "TEST: test_arm64_host_fails_early"
+
+    setup
+    local mock_dir="$tmp_dir/mock"
+    mkdir -p "$mock_dir/bin"
+
+    # Create a mock uname that reports arm64 Linux
+    cat > "$mock_dir/bin/uname" << "UNAMEEOF"
+#!/usr/bin/env bash
+if [[ "$1" == "-m" ]]; then
+    echo "arm64"
+else
+    echo "Linux"
+fi
+UNAMEEOF
+    chmod +x "$mock_dir/bin/uname"
+
+    # Create mock curl that returns a fake release with only x86_64 assets
+    cat > "$mock_dir/bin/curl" << "CURLEOF"
+#!/usr/bin/env bash
+# Use full path to grep to avoid circular dependency with our mock
+if echo "$*" | /run/current-system/sw/bin/grep -q "api.github.com"; then
+    cat << "APIJSON"
+{
+  "tag_name": "v0.5.0",
+  "assets": [
+    {"name": "needle-x86_64-unknown-linux-gnu"},
+    {"name": "checksums.txt"}
+  ]
+}
+APIJSON
+else
+    echo "ERROR: Unexpected curl call: $*" >&2
+    exit 1
+fi
+CURLEOF
+    chmod +x "$mock_dir/bin/curl"
+
+    # Prepend mock bin to PATH
+    export PATH="$mock_dir/bin:$PATH"
+
+    # Run install.sh - it should fail during asset availability check
+    local install_script="$REPO_INSTALL_SH"
+    local output
+    local exit_code
+    output=$(bash "$install_script" 2>&1)
+    exit_code=$?
+
+    # Should exit with non-zero
+    assert_exit_code 1 "$exit_code" "install.sh should exit 1 for unsupported arch"
+
+    # Should contain the error message about no prebuilt binary
+    assert_contains "$output" "No prebuilt binary for needle-aarch64-unknown-linux-gnu in v0.5.0" "error message includes arch-os and version"
+
+    # Should mention building from source
+    assert_contains "$output" "cargo install --git https://github.com/jedarden/NEEDLE" "error message mentions cargo install"
+
+    teardown
+}
+
 # ============================================================================
 # TEST RUNNER
 # ============================================================================
@@ -600,6 +662,7 @@ main() {
     test_binary_verification
     test_install_path_configurable
     test_checksum_download_failure
+    test_arm64_host_fails_early
 
     echo ""
     echo "========================================="
