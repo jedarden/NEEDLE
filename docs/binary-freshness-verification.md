@@ -1,348 +1,508 @@
 # Binary Freshness Verification Guide
 
-This guide explains how to verify that the binary freshness system is working correctly in your NEEDLE deployment.
+This guide provides comprehensive procedures for manually verifying that the binary freshness system works correctly in production and development environments.
 
 ## Overview
 
-The binary freshness system ensures that workers automatically detect and rotate onto new binaries when fixes are deployed. This eliminates the need for manual rolling restarts or worker redeployments.
+The binary freshness system ensures that workers automatically detect and rotate onto new binaries when they're deployed, without manual intervention. This enables the "fix-loop" workflow:
 
-## Architecture
-
-### Components
-
-1. **Worker Freshness Check** (`src/worker/mod.rs`)
-   - Each worker periodically checks if its running binary matches `needle-stable`
-   - Runs at `worker.freshness_check_interval_secs` (default: 60s)
-   - Compares SHA256 hashes of current vs. stable binary
-   - Exits cleanly with exit code 0 if mismatch detected
-
-2. **Supervisor Freshness Monitor** (`src/supervisor/mod.rs`)
-   - Supervisor monitors `needle-stable` for changes
-   - Uses `BinaryFreshnessChecker` with configurable interval
-   - Detects `NewBinary`, `BinaryMissing`, and `CheckFailed` states
-   - Emits telemetry events for each state transition
-
-3. **Build Metadata** (`src/build_metadata.rs`)
-   - Embeds version, commit SHA, and build timestamp in binary
-   - Read via `BuildMetadata::current()` and `BuildMetadata::from_binary()`
-   - Provides human-readable version strings for logs and telemetry
-
-## Manual Verification Procedure
-
-### Prerequisites
-
-- SSH access to the supervisor server (rs-manager or ex44)
-- `kubectl` configured for the appropriate cluster
-- `needle` binary installed
-- Supervisor running (either systemd service or Kubernetes deployment)
-
-### Step 1: Verify Supervisor is Running
-
-```bash
-# Check supervisor process (systemd deployment)
-ps aux | grep needle-supervisor
-
-# Or check Kubernetes deployment (if deployed in cluster)
-kubectl get pods -n <namespace> -l app=needle-supervisor
-
-# Check supervisor heartbeat file
-ls -la ~/.needle/supervisor.heartbeat
-stat ~/.needle/supervisor.heartbeat
+```
+Developer commits fix → CI builds new binary → Binary deployed → Workers detect change → Workers rotate → New code runs automatically
 ```
 
-**Expected:** Supervisor process/deployment is running and heartbeat file is recent (modified within last 60 seconds).
+## Verification Procedures
 
-### Step 2: Check Current Binary Metadata
+### 1. Verify Basic Binary Freshness Detection
 
-```bash
-# Check version of currently running needle
-needle --version
+**Purpose**: Confirm that workers can detect when their running binary differs from `needle-stable`.
 
-# Check needle-stable binary metadata
-~/.needle/bin/needle-stable --version
+**Procedure**:
 
-# Compare commit SHAs
-needle --version | grep -oE 'commit [a-f0-9]+'
-~/.needle/bin/needle-stable --version | grep -oE 'commit [a-f0-9]+'
-```
+1. Start a worker process:
+   ```bash
+   needle worker --config ~/.needle.yaml
+   ```
 
-**Expected:** Both binaries show the same version and commit SHA (if workers are up-to-date).
+2. Record the current worker PID:
+   ```bash
+   pgrep -f "needle worker" | head -1
+   ```
+   Let's call this `$WORKER_PID`.
 
-### Step 3: Deploy a Test Binary Change
+3. Check the current binary hash:
+   ```bash
+   sha256sum $(needle home)/bin/needle-stable
+   ```
+   Record this as `$OLD_HASH`.
 
-```bash
-# Backup current stable binary
-cp ~/.needle/bin/needle-stable ~/.needle/bin/needle-stable.backup
+4. Trigger a binary update:
+   ```bash
+   cd /path/to/NEEDLE
+   cargo build --release
+   cp target/release/needle $(needle home)/bin/needle-stable
+   ```
 
-# Create a test binary change (e.g., rebuild with a comment)
-# In production, this would be a real CI/CD deployment
-cargo build --release
-cp target/release/needle ~/.needle/bin/needle-stable-test
+5. Compute the new binary hash:
+   ```bash
+   sha256sum $(needle home)/bin/needle-stable
+   ```
+   Record this as `$NEW_HASH`.
 
-# Simulate deployment by replacing stable binary
-mv ~/.needle/bin/needle-stable-test ~/.needle/bin/needle-stable
-```
+6. **Expected Result**: Within the freshness check interval (default 5 minutes), the worker should:
+   - Detect the hash change
+   - Log a message at INFO level: "new binary detected, initiating worker rotation"
+   - Exit cleanly (exit code 0)
+   - Supervisor should spawn a new worker process
 
-### Step 4: Monitor Supervisor Logs
+7. Verify the new worker is running:
+   ```bash
+   ps -p $WORKER_PID
+   # Should show "No such process" (old worker exited)
+   
+   pgrep -f "needle worker" | head -1
+   # Should show a new PID (new worker spawned)
+   ```
 
-```bash
-# Tail supervisor logs (systemd)
-journalctl -u needle-supervisor -f
+**Success Criteria**:
+- Old worker process exits within 5 minutes of binary update
+- New worker process is spawned automatically
+- No manual intervention required
 
-# Or Kubernetes logs
-kubectl logs -f <supervisor-pod> -n <namespace>
+### 2. Verify Edge Cases
 
-# Look for these log messages:
-# - "new binary detected, initiating worker rotation"
-# - "monitored binary missing, skipping rotation check"
-# - "binary freshness check failed"
-```
+#### 2.1 Binary Missing Scenario
 
-**Expected:** Within 60 seconds (or configured `supervisor.freshness_check_interval_secs`), you should see a log message indicating the new binary was detected.
+**Purpose**: Ensure graceful handling when `needle-stable` is missing.
 
-### Step 5: Monitor Worker Telemetry
+**Procedure**:
+1. Remove the stable binary:
+   ```bash
+   rm $(needle home)/bin/needle-stable
+   ```
 
-```bash
-# Check recent worker telemetry events
-grep "worker.binary_freshness_exit" ~/.needle/logs/needle-supervisor.events.jsonl | tail -5
+2. **Expected Result**: Worker should:
+   - Log `WARN` level message: "monitored binary missing, skipping rotation check"
+   - Continue running (not exit)
+   - Check again on next interval
 
-# Or query OpenTelemetry if configured
-# Look for events with:
-# - event_kind: "worker.binary_freshness_exit"
-# - old_hash: <previous binary hash>
-# - new_hash: <new binary hash>
-```
+3. Restore the binary:
+   ```bash
+   cp target/release/needle $(needle home)/bin/needle-stable
+   ```
 
-**Expected:** Worker exits with `worker.binary_freshness_exit` event containing the old and new binary hashes.
+**Success Criteria**: Worker continues running despite missing binary.
 
-### Step 6: Verify Worker Rotation
+#### 2.2 Corrupt Binary Scenario
 
-```bash
-# Check worker registry
-ls -la ~/.needle/registry/
+**Purpose**: Verify system handles corrupt or unreadable binaries.
 
-# Check for new worker processes
-ps aux | grep 'needle.*worker'
+**Procedure**:
+1. Replace binary with corrupt data:
+   ```bash
+   dd if=/dev/urandom of=$(needle home)/bin/needle-stable bs=1024 count=10
+   ```
 
-# Verify new binary is being used
-# Get PID of a worker and check its executable
-WORKER_PID=$(pgrep -f 'needle.*worker' | head -1)
-ls -l /proc/$WORKER_PID/exe
-readlink /proc/$WORKER_PID/exe
+2. **Expected Result**: Next freshness check should:
+   - Log `WARN` level message: "binary freshness check failed"
+   - Include error details
+   - Continue running (graceful degradation)
 
-# Check worker version
-~/.needle/bin/needle-stable --version
-```
+3. Restore valid binary:
+   ```bash
+   cp target/release/needle $(needle home)/bin/needle-stable
+   ```
 
-**Expected:** Workers are running the new binary (`/proc/$PID/exe` points to the new needle-stable).
+**Success Criteria**: System degrades gracefully without crashes.
 
-### Step 7: Restore Original Binary (Cleanup)
+#### 2.3 Binary Unchanged (No Rotation)
 
-```bash
-# Restore original stable binary
-mv ~/.needle/bin/needle-stable.backup ~/.needle/bin/needle-stable
+**Purpose**: Verify workers don't rotate when binary is unchanged.
 
-# Verify supervisor detects this change too
-journalctl -u needle-supervisor -f | grep -i "new binary"
-```
+**Procedure**:
+1. Touch the binary (update mtime without changing content):
+   ```bash
+   touch $(needle home)/bin/needle-stable
+   ```
 
-## Verifying needle-supervisor-seam
+2. **Expected Result**: Worker should:
+   - Not exit
+   - Continue running normally
+   - No rotation logs should appear
 
-The SEAM supervisor deployment should automatically cycle workers when new binaries are deployed.
+**Success Criteria**: No false positives - hash comparison prevents unnecessary rotation.
 
-### Check SEAM Supervisor Status
+#### 2.4 Mid-Dispatch Check Blocked
 
-```bash
-# Get SEAM supervisor pod
-kubectl get pods -n seam -l app=needle-supervisor-seam
+**Purpose**: Ensure freshness checks don't interrupt active bead processing.
 
-# Check logs
-kubectl logs -f <pod-name> -n seam
+**Procedure**:
+1. Start a worker processing a long-running bead (simulate with sleep):
+   ```bash
+   # Create a test bead that takes 2 minutes
+   bead create --title "Long-running test" --priority 0 --body "Sleep for 120 seconds" --test-bead
+   ```
 
-# Describe pod to see restarts
-kubectl describe pod <pod-name> -n seam
-```
+2. While bead is processing, update the binary:
+   ```bash
+   cargo build --release
+   cp target/release/needle $(needle home)/bin/needle-stable
+   ```
 
-**Expected:** Pod is running and logs show periodic freshness checks without errors.
+3. **Expected Result**: Worker should:
+   - Finish processing the current bead
+   - Check freshness AFTER bead completion
+   - Rotate before starting next bead
 
-### Deploy Test Change to SEAM
+**Success Criteria**: Freshness checks respect bead processing boundaries.
 
-```bash
-# Build new binary
-cd /home/coding/NEEDLE
-cargo build --release
+### 3. Verify SEAM Supervisor Worker Cycling
 
-# Copy to SEAM's stable binary location
-# (This may vary based on deployment - adjust path accordingly)
-kubectl cp target/release/needle <seam-supervisor-pod>:/app/.needle/bin/needle-stable -n seam
+**Purpose**: Confirm that `needle-supervisor-seam` actively monitors and cycles workers.
 
-# Monitor SEAM supervisor logs
-kubectl logs -f <seam-supervisor-pod> -n seam | grep -i "binary"
-```
+**Prerequisites**: Access to SEAM supervisor logs and metrics.
 
-**Expected:** SEAM supervisor detects the new binary and initiates worker rotation.
+**Procedure**:
+
+1. Check supervisor status:
+   ```bash
+   # On the SEAM host
+   systemctl status needle-supervisor-seam
+   # or
+   ps aux | grep "needle-supervisor-seam"
+   ```
+
+2. Verify supervisor is running and has workers:
+   ```bash
+   # Get supervisor PID
+   SUP_PID=$(pgrep -f "needle-supervisor-seam")
+   
+   # Check for child worker processes
+   pgrep -P $SUP_PID
+   # Should list worker PIDs
+   ```
+
+3. Trigger a binary update:
+   ```bash
+   # On the SEAM host
+   cd /path/to/NEEDLE
+   git pull
+   cargo build --release
+   sudo cp target/release/needle /usr/local/bin/needle-stable
+   ```
+
+4. Monitor supervisor logs for rotation events:
+   ```bash
+   # Tail supervisor logs (adjust log path as needed)
+   tail -f /var/log/needle-supervisor-seam.log | grep -i "rotation\|freshness\|new binary"
+   ```
+
+5. **Expected Results**: Within 5 minutes, you should see:
+   - `INFO`: "new binary detected, initiating worker rotation"
+   - Workers receiving SIGTERM signals
+   - Workers exiting cleanly
+   - New workers spawning
+
+6. Verify worker processes changed:
+   ```bash
+   # Before rotation
+   ps aux | grep "needle worker" | awk '{print $2}' > /tmp/workers-before.txt
+   
+   # Wait for rotation (up to 5 minutes)
+   sleep 300
+   
+   # After rotation
+   ps aux | grep "needle worker" | awk '{print $2}' > /tmp/workers-after.txt
+   
+   # Compare PIDs
+   diff /tmp/workers-before.txt /tmp/workers-after.txt
+   # Should show different PIDs (rotation occurred)
+   ```
+
+**Success Criteria**:
+- Supervisor detects binary change
+- All workers rotate within 5 minutes
+- No worker crashes during rotation
+- Service availability maintained
+
+### 4. Verify Fix-Loop End-to-End
+
+**Purpose**: Demonstrate the complete fix-loop workflow from code commit to worker rotation.
+
+**Procedure**:
+
+1. **Make a trivial fix**:
+   ```bash
+   cd /path/to/NEEDLE
+   echo "// Test fix" >> src/worker/mod.rs
+   git add -A
+   git commit -m "test: add binary freshness verification marker"
+   git push
+   ```
+
+2. **Verify CI builds binary**:
+   ```bash
+   # Check iad-ci workflow
+   kubectl --kubeconfig=/home/coding/.kube/iad-ci.kubeconfig \
+     get workflows -n argo-workflows \
+     -l workflows.argoproj.io/workflow-template=needle-ci \
+     --sort-by=.metadata.creationTimestamp | tail -5
+   
+   # Wait for build to complete
+   # Verify new binary is available
+   ```
+
+3. **Deploy new binary**:
+   ```bash
+   # On SEAM host
+   sudo cp target/release/needle /usr/local/bin/needle-stable
+   ```
+
+4. **Monitor rotation**:
+   ```bash
+   # Watch supervisor logs
+   tail -f /var/log/needle-supervisor-seam.log | grep -i "rotation"
+   
+   # Watch for SIGTERM delivery
+   tail -f /var/log/needle-supervisor-seam.log | grep -i "sigterm\|drain"
+   ```
+
+5. **Verify new workers are running**:
+   ```bash
+   # Check worker binary timestamps
+   ls -l /proc/$(pgrep -f "needle worker" | head -1)/exe
+   
+   # Should point to the newly deployed needle-stable
+   ```
+
+6. **Verify fix is active**:
+   ```bash
+   # Check worker logs for the marker
+   grep "binary freshness verification marker" /var/log/needle-worker*
+   ```
+
+**Success Criteria**:
+- Entire loop completes without manual intervention
+- Workers rotate within 5 minutes of deployment
+- New code is running on all workers
+
+### 5. Configuration Verification
+
+**Purpose**: Confirm binary freshness configuration is correct.
+
+**Procedure**:
+
+1. Check freshness check interval:
+   ```yaml
+   # In ~/.needle.yaml or /etc/needle/config.yaml
+   worker:
+     freshness_check_interval_secs: 300  # 5 minutes default
+   ```
+
+2. Verify binary path configuration:
+   ```yaml
+   worker:
+     worker_binary_path: /usr/local/bin/needle-stable  # Explicit path
+     # OR leave unset to use auto-detection
+   ```
+
+3. Test configuration reload:
+   ```bash
+   # Change interval to 60 seconds for testing
+   vi ~/.needle.yaml
+   # Set freshness_check_interval_secs: 60
+   
+   # Reload supervisor
+   systemctl reload needle-supervisor-seam
+   # or
+   kill -HUP $(pgrep -f "needle-supervisor-seam")
+   ```
+
+4. Verify new interval is active:
+   ```bash
+   # Check logs for configuration reload
+   tail -f /var/log/needle-supervisor-seam.log | grep -i "reload\|config"
+   ```
+
+**Success Criteria**:
+- Configuration values are loaded correctly
+- Changes take effect on reload
+- Workers respect configured intervals
 
 ## Troubleshooting
 
 ### Workers Not Rotating
 
-**Symptom:** Workers continue running old binary after new deployment.
+**Symptoms**: Binary updated but workers continue running old version.
 
-**Possible Causes:**
+**Diagnosis**:
+1. Check if supervisor is running:
+   ```bash
+   ps aux | grep supervisor
+   ```
 
-1. **Stale binary not detected**
-   - Check freshness check interval: `grep freshness_check_interval ~/.needle/config.yaml`
-   - Verify needle-stable path is correct: `ls -la ~/.needle/bin/needle-stable`
-   - Check file permissions: `ls -l ~/.needle/bin/needle-stable`
+2. Check freshness check interval:
+   ```bash
+   grep freshness_check_interval ~/.needle.yaml
+   ```
 
-2. **Supervisor not running**
-   - Verify supervisor process: `ps aux | grep needle-supervisor`
-   - Check systemd status: `systemctl status needle-supervisor`
-   - Review logs: `journalctl -u needle-supervisor -n 50`
+3. Check logs for errors:
+   ```bash
+   tail -100 /var/log/needle-supervisor-seam.log | grep -i "error\|fail"
+   ```
 
-3. **Workers ignoring freshness check**
-   - Check worker config: `grep worker.freshness_check ~/.needle/config.yaml`
-   - Review worker logs: `grep freshness ~/.needle/logs/worker-*.log`
-   - Verify telemetry events: `grep worker.binary_freshness ~/.needle/events.jsonl`
+**Solutions**:
+- Ensure supervisor is running
+- Reduce `freshness_check_interval_secs` temporarily for testing
+- Verify binary path is correct
+- Check file permissions on `needle-stable`
 
-### Binary Hash Mismatch
+### Workers Crashing During Rotation
 
-**Symptom:** Logs show hash mismatch but workers don't exit.
+**Symptoms**: Workers exit with non-zero status during rotation.
 
-**Possible Causes:**
+**Diagnosis**:
+1. Check worker exit codes:
+   ```bash
+   tail -100 /var/log/needle-worker* | grep -i "exit\|shutdown"
+   ```
 
-1. **Check interval too long**
-   - Reduce `worker.freshness_check_interval_secs` in config
-   - Workers check only at the configured interval (default: 60s)
+2. Check for SIGTERM handling issues:
+   ```bash
+   grep -i "sigterm\|signal" /var/log/needle-worker*
+   ```
 
-2. **Worker stuck in long-running dispatch**
-   - Workers complete current dispatch before checking freshness
-   - Check agent timeout: `grep timeout ~/.needle/config.yaml`
-   - Review active agent processes: `ps aux | grep 'claude\|aider\|opencode'`
+**Solutions**:
+- Verify signal handlers are correctly installed
+- Check for cleanup code that might be failing
+- Ensure bead processing can be interrupted cleanly
 
-### Deleted Binary Detection
+### Supervisor Not Detecting Binary Changes
 
-**Symptom:** Worker binary shows " (deleted)" in `/proc/self/exe`.
+**Symptoms**: Supervisor logs no rotation events despite binary update.
 
-**Explanation:** This occurs when the running binary is replaced (e.g., `mv needle needle.old`).
+**Diagnosis**:
+1. Manually check binary hash:
+   ```bash
+   sha256sum /usr/local/bin/needle-stable
+   ```
 
-**Expected Behavior:** Worker should detect this and hot-reload to `needle-stable`.
+2. Check supervisor's cached hash:
+   ```bash
+   # This may require debug logging or introspection
+   ```
 
-**Verification:**
+3. Verify binary path:
+   ```bash
+   readlink -f /usr/local/bin/needle-stable
+   ```
 
-```bash
-# Check if current binary is deleted
-readlink /proc/$WORKER_PID/exe | grep "deleted"
+**Solutions**:
+- Confirm binary path is correct
+- Check file permissions
+- Restart supervisor to clear cached state
+- Verify SHA256 computation isn't failing
 
-# Worker should exit and reload to stable
-tail -f ~/.needle/logs/worker-*.log | grep "hot.reload"
-```
+## Automated Verification Scripts
 
-## Testing the Fix-Loop
-
-The following test demonstrates the complete fix-loop:
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    FIX LANDS                                 │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │ 1. Developer commits fix                             │   │
-│  │ 2. CI builds new needle binary                       │   │
-│  │ 3. New binary deployed to ~/.needle/bin/needle-stable│   │
-│  └──────────────────────────────────────────────────────┘   │
-│                         │                                     │
-│                         ▼                                     │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │ Supervisor detects new binary (within check interval) │   │
-│  │ - Emits FreshnessCheck::NewBinary                    │   │
-│  │ - Logs new hash                                       │   │
-│  └──────────────────────────────────────────────────────┘   │
-│                         │                                     │
-│                         ▼                                     │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │ Workers continue current dispatch                     │   │
-│  │ - Finish processing current bead                      │   │
-│  │ - Emit outcome telemetry                             │   │
-│  └──────────────────────────────────────────────────────┘   │
-│                         │                                     │
-│                         ▼                                     │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │ Worker check_hot_reload() on next iteration          │   │
-│  │ - Compares current binary hash to stable             │   │
-│  │ - Detects mismatch                                   │   │
-│  │ - Exits cleanly (exit code 0)                        │   │
-│  │ - Emits worker.binary_freshness_exit telemetry      │   │
-│  └──────────────────────────────────────────────────────┘   │
-│                         │                                     │
-│                         ▼                                     │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │ Supervisor spawns new worker                          │   │
-│  │ - Launches needle-stable (new binary)                │   │
-│  │ - Worker runs with new code                           │   │
-│  │ - Future beads use new fix                           │   │
-│  └──────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────┘
-```
-
-## Automated Tests
-
-Run the integration tests to verify the system:
+### Script: `verify-binary-freshness.sh`
 
 ```bash
-# Run binary freshness integration tests
-cargo test binary_freshness_integration
+#!/bin/bash
+set -e
 
-# Run long-lived worker rotation test
-cargo test long_lived_worker_binary_rotation
+NEEDLE_HOME="${NEEDLE_HOME:-$HOME/.needle}"
+BINARY_PATH="$NEEDLE_HOME/bin/needle-stable"
 
-# Run deleted binary hot-reload test
-cargo test verify_deleted_binary_hot_reload
+echo "=== Binary Freshness Verification ==="
+echo "NEEDLE_HOME: $NEEDLE_HOME"
+echo "Binary path: $BINARY_PATH"
+echo
 
-# Run all binary freshness tests
-cargo test freshness
+# Check binary exists
+if [ ! -f "$BINARY_PATH" ]; then
+    echo "❌ FAIL: Binary not found at $BINARY_PATH"
+    exit 1
+fi
+echo "✅ Binary exists"
+
+# Check binary is executable
+if [ ! -x "$BINARY_PATH" ]; then
+    echo "❌ FAIL: Binary is not executable"
+    exit 1
+fi
+echo "✅ Binary is executable"
+
+# Get current hash
+CURRENT_HASH=$(sha256sum "$BINARY_PATH" | awk '{print $1}')
+echo "Current hash: $CURRENT_HASH"
+
+# Check for running workers
+WORKER_COUNT=$(pgrep -c -f "needle worker" || echo "0")
+echo "Running workers: $WORKER_COUNT"
+
+if [ "$WORKER_COUNT" -eq 0 ]; then
+    echo "⚠️  WARNING: No workers currently running"
+else
+    echo "✅ Workers are running"
+fi
+
+# Check supervisor
+if pgrep -f "needle-supervisor" > /dev/null; then
+    echo "✅ Supervisor is running"
+else
+    echo "❌ FAIL: Supervisor is not running"
+    exit 1
+fi
+
+echo
+echo "=== Verification Complete ==="
+echo "To trigger rotation, update the binary:"
+echo "  cargo build --release && cp target/release/needle $BINARY_PATH"
+echo "Workers should rotate within 5 minutes."
 ```
 
-## Configuration Reference
+### Script: `monitor-rotation.sh`
 
-### Worker Config
+```bash
+#!/bin/bash
+echo "=== Monitoring for worker rotation ==="
+echo "Watching for process changes..."
+echo
 
-```yaml
-worker:
-  # Path to worker binary (optional, defaults to current exe)
-  worker_binary_path: /path/to/needle
+# Get initial workers
+WORKERS_BEFORE=$(pgrep -f "needle worker" | tr '\n' ' ')
+echo "Initial workers: $WORKERS_BEFORE"
+echo
 
-  # How often workers check binary freshness (seconds)
-  freshness_check_interval_secs: 60
+MAX_WAIT=300  # 5 minutes
+ELAPSED=0
 
-  # Action to take when stale binary detected
-  idle_action: exit  # or "continue" for testing
+while [ $ELAPSED -lt $MAX_WAIT ]; do
+    sleep 10
+    ELAPSED=$((ELAPSED + 10))
+    
+    WORKERS_NOW=$(pgrep -f "needle worker" | tr '\n' ' ')
+    
+    if [ "$WORKERS_NOW" != "$WORKERS_BEFORE" ]; then
+        echo "✅ Worker rotation detected at ${ELAPSED}s"
+        echo "New workers: $WORKERS_NOW"
+        exit 0
+    fi
+    
+    echo "[$ELAPSED/${MAX_WAIT}s] No rotation yet..."
+done
+
+echo "❌ Timeout: No rotation detected within $MAX_WAIT seconds"
+exit 1
 ```
 
-### Supervisor Config
+## Conclusion
 
-```yaml
-supervisor:
-  # Maximum concurrent workers
-  max_workers: 4
+This verification guide provides comprehensive procedures for ensuring the binary freshness system works correctly. Regular verification of these procedures ensures that:
 
-  # How often supervisor checks for new binary (seconds)
-  freshness_check_interval_secs: 60
+1. Workers automatically rotate onto new binaries
+2. Edge cases are handled gracefully
+3. The fix-loop workflow operates without manual intervention
+4. Production deployments are reliable and safe
 
-  # Path to worker binary (optional)
-  worker_binary_path: /path/to/needle
-```
-
-## Summary
-
-The binary freshness system provides:
-
-- ✅ **Zero-downtime upgrades**: Workers rotate onto new binaries without manual intervention
-- ✅ **Automatic propagation**: Fixes land → binary builds → workers adopt new code
-- ✅ **Clean exits**: Workers complete current dispatch before exiting
-- ✅ **Comprehensive telemetry**: All state changes logged for monitoring
-- ✅ **Graceful degradation**: Missing/corrupt binaries handled safely
-
-For issues or questions, refer to:
-- Integration tests: `tests/binary_freshness_integration.rs`
-- Worker implementation: `src/worker/mod.rs` (check_hot_reload)
-- Supervisor implementation: `src/supervisor/mod.rs` (BinaryFreshnessChecker)
+For issues or questions about binary freshness verification, consult the main NEEDLE documentation or raise an issue in the project repository.

@@ -751,6 +751,36 @@ fn builtin_claude_sonnet() -> AgentAdapter {
     }
 }
 
+/// Claude Code (default) built-in adapter.
+///
+/// This is an alias for claude-sonnet, providing the default "claude" adapter
+/// name that users expect from `needle init`, quickstart config, and documentation.
+fn builtin_claude() -> AgentAdapter {
+    AgentAdapter {
+        name: "claude".to_string(),
+        description: Some("Claude Code (Sonnet) with JSON output".to_string()),
+        agent_cli: "claude".to_string(),
+        version_command: Some("claude --version".to_string()),
+        input_method: InputMethod::Stdin,
+        invoke_template: concat!(
+            "cd {workspace} && claude -p --model claude-sonnet-4-6",
+            " --max-turns 30 --output-format stream-json --dangerously-skip-permissions",
+            " --verbose < {prompt_file}",
+        )
+        .to_string(),
+        environment: HashMap::new(),
+        timeout_secs: 3600,
+        idle_timeout_secs: 0,
+        hard_timeout_secs: 0,
+        provider: Some("anthropic".to_string()),
+        model: Some("claude-sonnet-4-6".to_string()),
+        token_extraction: TokenExtraction::None,
+        output_transform: Some("needle-transform-claude".to_string()),
+        harness: Some("needle".to_string()),
+        harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+    }
+}
+
 /// Claude Code (Opus) built-in adapter.
 fn builtin_claude_opus() -> AgentAdapter {
     AgentAdapter {
@@ -891,6 +921,7 @@ fn builtin_generic() -> AgentAdapter {
 /// Returns all built-in adapters.
 pub fn builtin_adapters() -> Vec<AgentAdapter> {
     vec![
+        builtin_claude(),
         builtin_claude_sonnet(),
         builtin_claude_opus(),
         builtin_opencode(),
@@ -3266,6 +3297,28 @@ output_transform: "needle-transform-custom"
     }
 
     #[test]
+    fn builtin_claude_config() {
+        let adapter = builtin_claude();
+        assert_eq!(adapter.name, "claude");
+        assert_eq!(adapter.agent_cli, "claude");
+        assert_eq!(adapter.model, Some("claude-sonnet-4-6".to_string()));
+        assert_eq!(adapter.provider, Some("anthropic".to_string()));
+        assert!(adapter.invoke_template.contains("claude-sonnet-4-6"));
+        assert!(adapter.invoke_template.contains("--max-turns 30"));
+        assert_eq!(adapter.timeout_secs, 3600);
+        assert!(matches!(adapter.token_extraction, TokenExtraction::None));
+    }
+
+    #[test]
+    fn builtin_claude_no_unbuffer() {
+        let adapter = builtin_claude();
+        assert!(
+            !adapter.invoke_template.contains("unbuffer"),
+            "claude template should not contain 'unbuffer'"
+        );
+    }
+
+    #[test]
     fn builtin_claude_opus_no_unbuffer() {
         let adapter = builtin_claude_opus();
         assert!(
@@ -3322,6 +3375,7 @@ output_transform: "needle-transform-custom"
     fn load_adapters_includes_builtins() {
         let adapters =
             load_adapters(Path::new("/nonexistent/adapters"), &builtin_adapters()).unwrap();
+        assert!(adapters.contains_key("claude"));
         assert!(adapters.contains_key("claude-sonnet"));
         assert!(adapters.contains_key("generic"));
     }
@@ -3350,6 +3404,21 @@ output_transform: "needle-transform-custom"
 
         let adapters = load_adapters(&dir, &builtin_adapters()).unwrap();
         let adapter = adapters.get("claude-sonnet").unwrap();
+        assert_eq!(adapter.agent_cli, "claude-custom");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn user_adapter_overrides_claude_builtin() {
+        let dir = std::env::temp_dir().join("needle-adapter-override-claude-test");
+        let _ = std::fs::create_dir_all(&dir);
+        let yaml =
+            "name: claude\nagent_cli: claude-custom\ninvoke_template: \"custom {prompt_file}\"\n";
+        std::fs::write(dir.join("claude.yaml"), yaml).unwrap();
+
+        let adapters = load_adapters(&dir, &builtin_adapters()).unwrap();
+        let adapter = adapters.get("claude").unwrap();
         assert_eq!(adapter.agent_cli, "claude-custom");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -5076,624 +5145,627 @@ output_transform: "needle-transform-custom"
             line_count
         );
     }
-}
 
-// ── Hard timeout tests ──
+    // ── Hard timeout tests ──
 
-#[tokio::test]
-async fn hard_timeout_kills_active_agent() {
-    // Test that hard deadline kills the process even when agent is actively producing output.
-    // This is the key differentiator from idle timeout - hard timeout is absolute and
-    // cannot be reset by activity.
-    let adapter = test_adapter(
-        "hard-timeout-active",
-        // Echo continuously with very short sleep to generate activity
-        "while true; do echo 'active output'; sleep 0.05; done",
-    );
-    let mut adapters = HashMap::new();
+    #[tokio::test]
+    async fn hard_timeout_kills_active_agent() {
+        // Test that hard deadline kills the process even when agent is actively producing output.
+        // This is the key differentiator from idle timeout - hard timeout is absolute and
+        // cannot be reset by activity.
+        let adapter = test_adapter(
+            "hard-timeout-active",
+            // Echo continuously with very short sleep to generate activity
+            "while true; do echo 'active output'; sleep 0.05; done",
+        );
+        let mut adapters = HashMap::new();
 
-    // Configure hard timeout only (no idle timeout)
-    let mut adapter_with_hard = adapter.clone();
-    adapter_with_hard.timeout_secs = 0; // Disable legacy timeout
-    adapter_with_hard.idle_timeout_secs = 0; // No idle timeout
-    adapter_with_hard.hard_timeout_secs = 1; // 1 second hard deadline
+        // Configure hard timeout only (no idle timeout)
+        let mut adapter_with_hard = adapter.clone();
+        adapter_with_hard.timeout_secs = 0; // Disable legacy timeout
+        adapter_with_hard.idle_timeout_secs = 0; // No idle timeout
+        adapter_with_hard.hard_timeout_secs = 1; // 1 second hard deadline
 
-    adapters.insert("hard-timeout-active".to_string(), adapter_with_hard);
-    let dispatcher = test_dispatcher(adapters);
-    let adapter_ref = dispatcher.adapter("hard-timeout-active").unwrap().clone();
+        adapters.insert("hard-timeout-active".to_string(), adapter_with_hard);
+        let dispatcher = test_dispatcher(adapters);
+        let adapter_ref = dispatcher.adapter("hard-timeout-active").unwrap().clone();
 
-    let start = Instant::now();
-    let result = dispatcher
-        .dispatch(
-            &BeadId::from("nd-hard-timeout-active"),
-            &test_prompt("test"),
-            &adapter_ref,
-            Path::new("/tmp"),
-        )
-        .await
-        .unwrap();
-    let wall = start.elapsed();
+        let start = Instant::now();
+        let result = dispatcher
+            .dispatch(
+                &BeadId::from("nd-hard-timeout-active"),
+                &test_prompt("test"),
+                &adapter_ref,
+                Path::new("/tmp"),
+            )
+            .await
+            .unwrap();
+        let wall = start.elapsed();
 
-    // Should be killed by hard timeout
-    assert_eq!(result.exit_code, 124, "hard timeout should yield exit 124");
+        // Should be killed by hard timeout
+        assert_eq!(result.exit_code, 124, "hard timeout should yield exit 124");
 
-    // Should have a Hard timeout reason
-    assert!(
-        matches!(result.timeout_reason, Some(TimeoutReason::Hard { .. })),
-        "expected Hard timeout reason, got {:?}",
-        result.timeout_reason
-    );
+        // Should have a Hard timeout reason
+        assert!(
+            matches!(result.timeout_reason, Some(TimeoutReason::Hard { .. })),
+            "expected Hard timeout reason, got {:?}",
+            result.timeout_reason
+        );
 
-    // Should have been killed after ~1 second (the hard deadline)
-    assert!(
-        wall < Duration::from_secs(3),
-        "should have been killed by hard deadline after ~1s, took {:?}",
-        wall
-    );
-    assert!(
-        wall >= Duration::from_millis(900),
-        "should have waited at least ~1s for hard deadline"
-    );
+        // Should have been killed after ~1 second (the hard deadline)
+        assert!(
+            wall < Duration::from_secs(3),
+            "should have been killed by hard deadline after ~1s, took {:?}",
+            wall
+        );
+        assert!(
+            wall >= Duration::from_millis(900),
+            "should have waited at least ~1s for hard deadline"
+        );
 
-    // Should have captured output before being killed (proving activity was happening)
-    assert!(result.stdout.contains("active output"));
-}
-
-#[tokio::test]
-async fn hard_timeout_kills_entire_process_group_active() {
-    // Test that hard timeout kills the entire process group, even when agent is active.
-    let pid_file = std::env::temp_dir().join(format!("needle-hard-pg-{}.pid", std::process::id()));
-    let pid_file_str = pid_file.display().to_string();
-
-    let cmd = format!(
-        "sleep 1000 & echo $! > {pid_file_str}; while true; do echo 'active'; sleep 0.05; done"
-    );
-
-    let adapter = test_adapter("hard-pgkill", &cmd);
-    let mut adapters = HashMap::new();
-
-    let mut adapter_with_hard = adapter.clone();
-    adapter_with_hard.timeout_secs = 0;
-    adapter_with_hard.idle_timeout_secs = 0;
-    adapter_with_hard.hard_timeout_secs = 2;
-
-    adapters.insert("hard-pgkill".to_string(), adapter_with_hard);
-    let dispatcher = test_dispatcher(adapters);
-    let adapter_ref = dispatcher.adapter("hard-pgkill").unwrap().clone();
-
-    let result = dispatcher
-        .dispatch(
-            &BeadId::from("nd-hard-pgkill"),
-            &test_prompt("test"),
-            &adapter_ref,
-            Path::new("/tmp"),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(result.exit_code, 124);
-    assert!(matches!(
-        result.timeout_reason,
-        Some(TimeoutReason::Hard { .. })
-    ));
-
-    let pid_str =
-        std::fs::read_to_string(&pid_file).expect("grandchild PID file should have been written");
-    let grandchild_pid: libc::pid_t = pid_str
-        .trim()
-        .parse()
-        .expect("PID file should contain a valid integer PID");
-
-    let deadline = std::time::Instant::now() + Duration::from_secs(3);
-    let dead = loop {
-        let alive = unsafe { libc::kill(grandchild_pid, 0) == 0 };
-        if !alive {
-            break true;
-        }
-        if std::time::Instant::now() >= deadline {
-            break false;
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    };
-    assert!(dead);
-
-    let _ = std::fs::remove_file(&pid_file);
-}
-
-#[tokio::test]
-async fn hard_timeout_shorter_than_idle_timeout() {
-    // Integration test: hard timeout fires before idle timeout even when agent is active.
-    let adapter = test_adapter(
-        "hard-before-idle",
-        "while true; do echo 'continuous activity'; sleep 0.1; done",
-    );
-    let mut adapters = HashMap::new();
-
-    let mut adapter_with_both = adapter.clone();
-    adapter_with_both.timeout_secs = 0;
-    adapter_with_both.idle_timeout_secs = 5;
-    adapter_with_both.hard_timeout_secs = 1;
-
-    adapters.insert("hard-before-idle".to_string(), adapter_with_both);
-    let dispatcher = test_dispatcher(adapters);
-    let adapter_ref = dispatcher.adapter("hard-before-idle").unwrap().clone();
-
-    let start = Instant::now();
-    let result = dispatcher
-        .dispatch(
-            &BeadId::from("nd-hard-before-idle"),
-            &test_prompt("test"),
-            &adapter_ref,
-            Path::new("/tmp"),
-        )
-        .await
-        .unwrap();
-    let wall = start.elapsed();
-
-    assert_eq!(result.exit_code, 124);
-
-    match &result.timeout_reason {
-        Some(TimeoutReason::Hard { timeout_secs }) => {
-            assert_eq!(*timeout_secs, 1);
-        }
-        other => panic!("expected Hard timeout reason, got {:?}", other),
+        // Should have captured output before being killed (proving activity was happening)
+        assert!(result.stdout.contains("active output"));
     }
 
-    assert!(wall < Duration::from_secs(3));
-    assert!(result.stdout.contains("continuous activity"));
-}
+    #[tokio::test]
+    async fn hard_timeout_kills_entire_process_group_active() {
+        // Test that hard timeout kills the entire process group, even when agent is active.
+        let pid_file =
+            std::env::temp_dir().join(format!("needle-hard-pg-{}.pid", std::process::id()));
+        let pid_file_str = pid_file.display().to_string();
 
-#[tokio::test]
-async fn idle_timeout_resets_on_activity_hard_does_not() {
-    // Unit test: idle deadline resets, hard deadline does not.
-    let adapter = test_adapter(
-        "idle-resets-hard-does-not",
-        "for i in $(seq 1 10); do echo \"output $i\"; sleep 0.5; done",
-    );
-    let mut adapters = HashMap::new();
+        let cmd = format!(
+            "sleep 1000 & echo $! > {pid_file_str}; while true; do echo 'active'; sleep 0.05; done"
+        );
 
-    let mut adapter_with_both = adapter.clone();
-    adapter_with_both.timeout_secs = 0;
-    adapter_with_both.idle_timeout_secs = 1;
-    adapter_with_both.hard_timeout_secs = 2;
+        let adapter = test_adapter("hard-pgkill", &cmd);
+        let mut adapters = HashMap::new();
 
-    adapters.insert("idle-resets-hard-does-not".to_string(), adapter_with_both);
-    let dispatcher = test_dispatcher(adapters);
-    let adapter_ref = dispatcher
-        .adapter("idle-resets-hard-does-not")
-        .unwrap()
-        .clone();
+        let mut adapter_with_hard = adapter.clone();
+        adapter_with_hard.timeout_secs = 0;
+        adapter_with_hard.idle_timeout_secs = 0;
+        adapter_with_hard.hard_timeout_secs = 2;
 
-    let start = Instant::now();
-    let result = dispatcher
-        .dispatch(
-            &BeadId::from("nd-idle-resets-hard-does-not"),
-            &test_prompt("test"),
-            &adapter_ref,
-            Path::new("/tmp"),
-        )
-        .await
-        .unwrap();
-    let wall = start.elapsed();
+        adapters.insert("hard-pgkill".to_string(), adapter_with_hard);
+        let dispatcher = test_dispatcher(adapters);
+        let adapter_ref = dispatcher.adapter("hard-pgkill").unwrap().clone();
 
-    assert_eq!(result.exit_code, 124);
+        let result = dispatcher
+            .dispatch(
+                &BeadId::from("nd-hard-pgkill"),
+                &test_prompt("test"),
+                &adapter_ref,
+                Path::new("/tmp"),
+            )
+            .await
+            .unwrap();
 
-    match &result.timeout_reason {
-        Some(TimeoutReason::Hard { timeout_secs }) => {
-            assert_eq!(*timeout_secs, 2);
+        assert_eq!(result.exit_code, 124);
+        assert!(matches!(
+            result.timeout_reason,
+            Some(TimeoutReason::Hard { .. })
+        ));
+
+        let pid_str = std::fs::read_to_string(&pid_file)
+            .expect("grandchild PID file should have been written");
+        let grandchild_pid: libc::pid_t = pid_str
+            .trim()
+            .parse()
+            .expect("PID file should contain a valid integer PID");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let dead = loop {
+            let alive = unsafe { libc::kill(grandchild_pid, 0) == 0 };
+            if !alive {
+                break true;
+            }
+            if std::time::Instant::now() >= deadline {
+                break false;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        };
+        assert!(dead);
+
+        let _ = std::fs::remove_file(&pid_file);
+    }
+
+    #[tokio::test]
+    async fn hard_timeout_shorter_than_idle_timeout() {
+        // Integration test: hard timeout fires before idle timeout even when agent is active.
+        let adapter = test_adapter(
+            "hard-before-idle",
+            "while true; do echo 'continuous activity'; sleep 0.1; done",
+        );
+        let mut adapters = HashMap::new();
+
+        let mut adapter_with_both = adapter.clone();
+        adapter_with_both.timeout_secs = 0;
+        adapter_with_both.idle_timeout_secs = 5;
+        adapter_with_both.hard_timeout_secs = 1;
+
+        adapters.insert("hard-before-idle".to_string(), adapter_with_both);
+        let dispatcher = test_dispatcher(adapters);
+        let adapter_ref = dispatcher.adapter("hard-before-idle").unwrap().clone();
+
+        let start = Instant::now();
+        let result = dispatcher
+            .dispatch(
+                &BeadId::from("nd-hard-before-idle"),
+                &test_prompt("test"),
+                &adapter_ref,
+                Path::new("/tmp"),
+            )
+            .await
+            .unwrap();
+        let wall = start.elapsed();
+
+        assert_eq!(result.exit_code, 124);
+
+        match &result.timeout_reason {
+            Some(TimeoutReason::Hard { timeout_secs }) => {
+                assert_eq!(*timeout_secs, 1);
+            }
+            other => panic!("expected Hard timeout reason, got {:?}", other),
         }
-        other => panic!("expected Hard timeout reason, got {:?}", other),
+
+        assert!(wall < Duration::from_secs(3));
+        assert!(result.stdout.contains("continuous activity"));
     }
 
-    assert!(wall >= Duration::from_millis(1900) && wall < Duration::from_secs(4));
-    assert!(result.stdout.contains("output"));
-}
+    #[tokio::test]
+    async fn idle_timeout_resets_on_activity_hard_does_not() {
+        // Unit test: idle deadline resets, hard deadline does not.
+        let adapter = test_adapter(
+            "idle-resets-hard-does-not",
+            "for i in $(seq 1 10); do echo \"output $i\"; sleep 0.5; done",
+        );
+        let mut adapters = HashMap::new();
 
-#[tokio::test]
-async fn hard_timeout_reason_serialization() {
-    use crate::dispatch::TimeoutReason;
+        let mut adapter_with_both = adapter.clone();
+        adapter_with_both.timeout_secs = 0;
+        adapter_with_both.idle_timeout_secs = 1;
+        adapter_with_both.hard_timeout_secs = 2;
 
-    let reason = TimeoutReason::Hard { timeout_secs: 120 };
+        adapters.insert("idle-resets-hard-does-not".to_string(), adapter_with_both);
+        let dispatcher = test_dispatcher(adapters);
+        let adapter_ref = dispatcher
+            .adapter("idle-resets-hard-does-not")
+            .unwrap()
+            .clone();
 
-    let json = serde_json::to_string(&reason).expect("serialization failed");
-    assert!(json.contains("\"hard\""));
-    assert!(json.contains("120"));
+        let start = Instant::now();
+        let result = dispatcher
+            .dispatch(
+                &BeadId::from("nd-idle-resets-hard-does-not"),
+                &test_prompt("test"),
+                &adapter_ref,
+                Path::new("/tmp"),
+            )
+            .await
+            .unwrap();
+        let wall = start.elapsed();
 
-    let deserialized: TimeoutReason = serde_json::from_str(&json).expect("deserialization failed");
-    assert!(matches!(
-        deserialized,
-        TimeoutReason::Hard { timeout_secs: 120 }
-    ));
-}
+        assert_eq!(result.exit_code, 124);
 
-#[tokio::test]
-async fn hard_timeout_disabled_when_zero() {
-    let adapter = test_adapter("hard-disabled", "sleep 0.5");
-    let mut adapters = HashMap::new();
+        match &result.timeout_reason {
+            Some(TimeoutReason::Hard { timeout_secs }) => {
+                assert_eq!(*timeout_secs, 2);
+            }
+            other => panic!("expected Hard timeout reason, got {:?}", other),
+        }
 
-    let mut adapter_idle_only = adapter.clone();
-    adapter_idle_only.timeout_secs = 0;
-    adapter_idle_only.idle_timeout_secs = 10;
-    adapter_idle_only.hard_timeout_secs = 0;
-
-    adapters.insert("hard-disabled".to_string(), adapter_idle_only);
-    let dispatcher = test_dispatcher(adapters);
-    let adapter_ref = dispatcher.adapter("hard-disabled").unwrap().clone();
-
-    let result = dispatcher
-        .dispatch(
-            &BeadId::from("nd-hard-disabled"),
-            &test_prompt("test"),
-            &adapter_ref,
-            Path::new("/tmp"),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(result.exit_code, 0);
-    assert!(result.timeout_reason.is_none());
-}
-
-// ── HardDeadlineTimer tests ──
-
-#[test]
-fn hard_deadline_timer_disabled_with_zero_duration() {
-    let timer = HardDeadlineTimer::new(Duration::ZERO);
-    assert!(!timer.is_enabled());
-    assert!(timer.deadline().is_none());
-    assert!(timer.is_expired().is_none());
-    assert!(timer.remaining().is_none());
-}
-
-#[test]
-fn hard_deadline_timer_enabled_with_nonzero_duration() {
-    let timer = HardDeadlineTimer::new(Duration::from_secs(10));
-    assert!(timer.is_enabled());
-    assert!(timer.deadline().is_some());
-}
-
-#[test]
-fn hard_deadline_timer_deadline_is_absolute() {
-    let start = tokio::time::Instant::now();
-    let timer = HardDeadlineTimer::new(Duration::from_millis(100));
-
-    let deadline = timer.deadline().expect("deadline should be set");
-
-    // Deadline should be approximately start + 100ms
-    let elapsed = deadline.duration_since(start);
-    assert!(elapsed >= Duration::from_millis(99));
-    assert!(elapsed <= Duration::from_millis(150));
-}
-
-#[test]
-fn hard_deadline_timer_not_expired_initially() {
-    let timer = HardDeadlineTimer::new(Duration::from_secs(10));
-    assert_eq!(timer.is_expired(), Some(false));
-}
-
-#[test]
-fn hard_deadline_timer_remaining_positive_initially() {
-    let timer = HardDeadlineTimer::new(Duration::from_secs(10));
-    let remaining = timer.remaining().expect("should have remaining time");
-
-    // Should be close to 10 seconds
-    assert!(remaining >= Duration::from_secs(9));
-    assert!(remaining <= Duration::from_secs(10));
-}
-
-#[test]
-fn hard_deadline_timer_clone_shares_deadline() {
-    let timer1 = HardDeadlineTimer::new(Duration::from_secs(5));
-    let timer2 = timer1.clone();
-
-    assert_eq!(timer1.deadline(), timer2.deadline());
-
-    if let (Some(d1), Some(d2)) = (timer1.deadline(), timer2.deadline()) {
-        // Both should reference the same absolute deadline
-        assert_eq!(d1, d2);
+        assert!(wall >= Duration::from_millis(1900) && wall < Duration::from_secs(4));
+        assert!(result.stdout.contains("output"));
     }
-}
 
-#[tokio::test]
-async fn hard_deadline_timer_wait_returns_immediately_when_disabled() {
-    let timer = HardDeadlineTimer::new(Duration::ZERO);
+    #[tokio::test]
+    async fn hard_timeout_reason_serialization() {
+        use crate::dispatch::TimeoutReason;
 
-    // Should return immediately since no deadline is set
-    let start = tokio::time::Instant::now();
-    timer.wait_until_expired().await;
-    let elapsed = start.elapsed();
+        let reason = TimeoutReason::Hard { timeout_secs: 120 };
 
-    assert!(elapsed < Duration::from_millis(10));
-}
+        let json = serde_json::to_string(&reason).expect("serialization failed");
+        assert!(json.contains("\"hard\""));
+        assert!(json.contains("120"));
 
-#[tokio::test]
-async fn hard_deadline_timer_waits_until_deadline() {
-    let duration = Duration::from_millis(100);
-    let timer = HardDeadlineTimer::new(duration);
-
-    let start = tokio::time::Instant::now();
-    timer.wait_until_expired().await;
-    let elapsed = start.elapsed();
-
-    // Should have waited approximately 100ms
-    assert!(elapsed >= Duration::from_millis(90));
-    assert!(elapsed < Duration::from_millis(200));
-}
-
-#[tokio::test]
-async fn hard_deadline_timer_remaining_decreases_over_time() {
-    let timer = HardDeadlineTimer::new(Duration::from_millis(100));
-
-    let remaining1 = timer.remaining().expect("should have remaining time");
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
-    let remaining2 = timer.remaining().expect("should have remaining time");
-
-    // remaining2 should be less than remaining1
-    assert!(remaining2 < remaining1);
-}
-
-#[tokio::test]
-async fn hard_deadline_timer_expires_after_duration() {
-    let duration = Duration::from_millis(100);
-    let timer = HardDeadlineTimer::new(duration);
-
-    // Initially not expired
-    assert_eq!(timer.is_expired(), Some(false));
-
-    // Wait until deadline
-    timer.wait_until_expired().await;
-
-    // Now expired
-    assert_eq!(timer.is_expired(), Some(true));
-
-    // Remaining should be zero
-    let remaining = timer.remaining().expect("should have remaining time");
-    assert!(remaining <= Duration::from_millis(10));
-}
-
-// ── Tsnet integration tests ──
-
-#[tokio::test]
-async fn tsnet_enabled_with_no_key_source_does_not_inject_env_vars() {
-    use crate::tsnet::{IdentityRegistry, TsnetConfig};
-    use crate::types::BeadId;
-
-    // Create a tsnet config with enabled=true but no key source
-    let tsnet_config = TsnetConfig {
-        enabled: true,
-        ..Default::default()
-    };
-
-    let tsnet_registry = IdentityRegistry::new(tsnet_config.clone());
-
-    // Attempt to provision an identity (should fail since no key source)
-    let worker_id = "test-worker".to_string();
-    let bead_id = BeadId::from("needle-test");
-
-    let provision_result = tsnet_registry
-        .provision_identity(&worker_id, &bead_id)
-        .await;
-
-    // Verify that provisioning failed
-    assert!(
-        provision_result.is_err(),
-        "provision_identity should fail when no key source is configured"
-    );
-
-    let error_msg = provision_result.unwrap_err().to_string();
-    assert!(
-        error_msg.contains("Tailscale API client not initialized")
-            || error_msg.contains("API key")
-            || error_msg.contains("failed to initialize"),
-        "error should indicate missing API key or initialization failure, got: {}",
-        error_msg
-    );
-
-    // Verify that no environment variables would be injected
-    let mut env = std::collections::HashMap::new();
-    env.insert("EXISTING_VAR".to_string(), "value".to_string());
-
-    // Since provision failed, inject_identity_env should never be called
-    // Verify the env doesn't contain tsnet variables
-    assert!(!env.contains_key("NEEDLE_TSNET_AUTH_KEY"));
-    assert!(!env.contains_key("NEEDLE_TSNET_HOSTNAME"));
-    assert!(!env.contains_key("NEEDLE_TSNET_CONTROL_URL"));
-    assert!(!env.contains_key("NEEDLE_TSNET_FUNNEL_URL"));
-    assert!(!env.contains_key("NEEDLE_TSNET_TAG"));
-
-    // Verify existing vars are preserved
-    assert_eq!(env.get("EXISTING_VAR"), Some(&"value".to_string()));
-}
-
-#[test]
-fn tsnet_disabled_does_not_inject_env_vars() {
-    use crate::tsnet::TsnetConfig;
-
-    // Create a tsnet config with enabled=false
-    let _tsnet_config = TsnetConfig {
-        enabled: false,
-        ..Default::default()
-    };
-
-    let mut env = std::collections::HashMap::new();
-    env.insert("EXISTING_VAR".to_string(), "value".to_string());
-
-    // When tsnet is disabled, inject_identity_env should not be called at all
-    // Verify the env doesn't contain tsnet variables
-    assert!(!env.contains_key("NEEDLE_TSNET_AUTH_KEY"));
-    assert!(!env.contains_key("NEEDLE_TSNET_HOSTNAME"));
-    assert!(!env.contains_key("NEEDLE_TSNET_CONTROL_URL"));
-    assert!(!env.contains_key("NEEDLE_TSNET_FUNNEL_URL"));
-    assert!(!env.contains_key("NEEDLE_TSNET_TAG"));
-
-    // Verify existing vars are preserved
-    assert_eq!(env.get("EXISTING_VAR"), Some(&"value".to_string()));
-}
-
-// ── Template executable extraction tests ──
-
-#[test]
-fn extract_executables_simple_command() {
-    let template = "claude -p --model claude-sonnet-4-6 < {prompt_file}";
-    let executables = extract_executables_from_template(template);
-    assert_eq!(executables, vec!["claude"]);
-}
-
-#[test]
-fn extract_executables_with_cd() {
-    let template = "cd {workspace} && claude -p < {prompt_file}";
-    let executables = extract_executables_from_template(template);
-    assert_eq!(executables, vec!["claude"]);
-}
-
-#[test]
-fn extract_executables_with_unbuffer() {
-    let template = "cd {workspace} && unbuffer claude -p < {prompt_file}";
-    let executables = extract_executables_from_template(template);
-    assert_eq!(executables, vec!["unbuffer", "claude"]);
-}
-
-#[test]
-fn extract_executables_with_variable_assignment() {
-    let template = "VAR=value && cd {workspace} && API_KEY=secret my-agent < {prompt_file}";
-    let executables = extract_executables_from_template(template);
-    assert_eq!(executables, vec!["my-agent"]);
-}
-
-#[test]
-fn extract_executables_with_pipe() {
-    let template = "cat {prompt_file} | my-agent | jq .";
-    let executables = extract_executables_from_template(template);
-    assert_eq!(executables, vec!["cat", "my-agent", "jq"]);
-}
-
-#[test]
-fn extract_executables_with_or_operator() {
-    let template = "my-agent < {prompt_file} || fallback-agent";
-    let executables = extract_executables_from_template(template);
-    assert_eq!(executables, vec!["my-agent", "fallback-agent"]);
-}
-
-#[test]
-fn extract_executables_with_semicolon() {
-    let template = "cd {workspace} ; my-agent < {prompt_file}";
-    let executables = extract_executables_from_template(template);
-    assert_eq!(executables, vec!["my-agent"]);
-}
-
-#[test]
-fn extract_executables_with_timeout() {
-    let template = "timeout 60 my-agent < {prompt_file}";
-    let executables = extract_executables_from_template(template);
-    assert_eq!(executables, vec!["timeout", "my-agent"]);
-}
-
-#[test]
-fn extract_executables_with_script() {
-    let template = "script /dev/null my-agent < {prompt_file}";
-    let executables = extract_executables_from_template(template);
-    assert_eq!(executables, vec!["script", "my-agent"]);
-}
-
-#[test]
-fn extract_executables_skips_redirection() {
-    let template = "my-agent < input.txt > output.txt 2> error.txt";
-    let executables = extract_executables_from_template(template);
-    assert_eq!(executables, vec!["my-agent"]);
-}
-
-#[test]
-fn extract_executables_skips_placeholders() {
-    let template = "cd {workspace} && my-agent < {prompt_file} --bead {bead_id} --model {model}";
-    let executables = extract_executables_from_template(template);
-    assert_eq!(executables, vec!["my-agent"]);
-}
-
-#[test]
-fn extract_executables_with_full_path() {
-    let template = "/usr/local/bin/my-agent < {prompt_file}";
-    let executables = extract_executables_from_template(template);
-    assert_eq!(executables, vec!["my-agent"]);
-}
-
-#[test]
-fn extract_executables_complex_template() {
-    let template = "cd {workspace} && unbuffer claude -p --model claude-sonnet-4-6 --max-turns 30 < {prompt_file}";
-    let executables = extract_executables_from_template(template);
-    assert_eq!(executables, vec!["unbuffer", "claude"]);
-}
-
-#[test]
-fn extract_executables_deduplicates() {
-    let template = "git status && git commit && git push";
-    let executables = extract_executables_from_template(template);
-    assert_eq!(executables, vec!["git"]);
-}
-
-#[test]
-fn package_hint_unbuffer() {
-    assert_eq!(package_hint("unbuffer"), Some("expect"));
-}
-
-#[test]
-fn package_hint_script() {
-    assert_eq!(package_hint("script"), Some("bsdutils"));
-}
-
-#[test]
-fn package_hint_timeout() {
-    assert_eq!(package_hint("timeout"), Some("coreutils"));
-}
-
-#[test]
-fn package_hint_gh() {
-    assert_eq!(package_hint("gh"), Some("gh"));
-}
-
-#[test]
-fn package_hint_tmux() {
-    assert_eq!(package_hint("tmux"), Some("tmux"));
-}
-
-#[test]
-fn package_hint_unknown() {
-    assert_eq!(package_hint("some-unknown-binary"), None);
-}
-
-#[test]
-fn check_template_executables_all_present() {
-    // This test uses binaries that should always be present on a Unix-like system
-    let template = "echo hello && cat file | grep pattern";
-    let missing = check_template_executables(template);
-    assert!(missing.is_empty());
-}
-
-#[test]
-fn check_template_executables_missing_unbuffer() {
-    // unbuffer is often not installed by default
-    let template = "unbuffer my-agent < {prompt_file}";
-    let missing = check_template_executables(template);
-
-    // Either unbuffer is missing (we get the hint) or it's present (we get nothing)
-    if !missing.is_empty() {
-        assert!(missing[0].contains("unbuffer"));
-        assert!(missing[0].contains("expect"));
+        let deserialized: TimeoutReason =
+            serde_json::from_str(&json).expect("deserialization failed");
+        assert!(matches!(
+            deserialized,
+            TimeoutReason::Hard { timeout_secs: 120 }
+        ));
     }
-}
 
-#[test]
-fn check_template_executables_missing_multiple() {
-    let template = "unbuffer my-agent < {prompt_file} && script log.txt";
-    let missing = check_template_executables(template);
+    #[tokio::test]
+    async fn hard_timeout_disabled_when_zero() {
+        let adapter = test_adapter("hard-disabled", "sleep 0.5");
+        let mut adapters = HashMap::new();
 
-    // We should get at least one missing (these are not always installed)
-    // The order might vary, so we check for both
-    let has_unbuffer = missing.iter().any(|m| m.contains("unbuffer"));
-    let has_script = missing.iter().any(|m| m.contains("script"));
+        let mut adapter_idle_only = adapter.clone();
+        adapter_idle_only.timeout_secs = 0;
+        adapter_idle_only.idle_timeout_secs = 10;
+        adapter_idle_only.hard_timeout_secs = 0;
 
-    assert!(
-        has_unbuffer || has_script,
-        "Should detect at least one missing executable"
-    );
+        adapters.insert("hard-disabled".to_string(), adapter_idle_only);
+        let dispatcher = test_dispatcher(adapters);
+        let adapter_ref = dispatcher.adapter("hard-disabled").unwrap().clone();
+
+        let result = dispatcher
+            .dispatch(
+                &BeadId::from("nd-hard-disabled"),
+                &test_prompt("test"),
+                &adapter_ref,
+                Path::new("/tmp"),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        assert!(result.timeout_reason.is_none());
+    }
+
+    // ── HardDeadlineTimer tests ──
+
+    #[test]
+    fn hard_deadline_timer_disabled_with_zero_duration() {
+        let timer = HardDeadlineTimer::new(Duration::ZERO);
+        assert!(!timer.is_enabled());
+        assert!(timer.deadline().is_none());
+        assert!(timer.is_expired().is_none());
+        assert!(timer.remaining().is_none());
+    }
+
+    #[test]
+    fn hard_deadline_timer_enabled_with_nonzero_duration() {
+        let timer = HardDeadlineTimer::new(Duration::from_secs(10));
+        assert!(timer.is_enabled());
+        assert!(timer.deadline().is_some());
+    }
+
+    #[test]
+    fn hard_deadline_timer_deadline_is_absolute() {
+        let start = tokio::time::Instant::now();
+        let timer = HardDeadlineTimer::new(Duration::from_millis(100));
+
+        let deadline = timer.deadline().expect("deadline should be set");
+
+        // Deadline should be approximately start + 100ms
+        let elapsed = deadline.duration_since(start);
+        assert!(elapsed >= Duration::from_millis(99));
+        assert!(elapsed <= Duration::from_millis(150));
+    }
+
+    #[test]
+    fn hard_deadline_timer_not_expired_initially() {
+        let timer = HardDeadlineTimer::new(Duration::from_secs(10));
+        assert_eq!(timer.is_expired(), Some(false));
+    }
+
+    #[test]
+    fn hard_deadline_timer_remaining_positive_initially() {
+        let timer = HardDeadlineTimer::new(Duration::from_secs(10));
+        let remaining = timer.remaining().expect("should have remaining time");
+
+        // Should be close to 10 seconds
+        assert!(remaining >= Duration::from_secs(9));
+        assert!(remaining <= Duration::from_secs(10));
+    }
+
+    #[test]
+    fn hard_deadline_timer_clone_shares_deadline() {
+        let timer1 = HardDeadlineTimer::new(Duration::from_secs(5));
+        let timer2 = timer1.clone();
+
+        assert_eq!(timer1.deadline(), timer2.deadline());
+
+        if let (Some(d1), Some(d2)) = (timer1.deadline(), timer2.deadline()) {
+            // Both should reference the same absolute deadline
+            assert_eq!(d1, d2);
+        }
+    }
+
+    #[tokio::test]
+    async fn hard_deadline_timer_wait_returns_immediately_when_disabled() {
+        let timer = HardDeadlineTimer::new(Duration::ZERO);
+
+        // Should return immediately since no deadline is set
+        let start = tokio::time::Instant::now();
+        timer.wait_until_expired().await;
+        let elapsed = start.elapsed();
+
+        assert!(elapsed < Duration::from_millis(10));
+    }
+
+    #[tokio::test]
+    async fn hard_deadline_timer_waits_until_deadline() {
+        let duration = Duration::from_millis(100);
+        let timer = HardDeadlineTimer::new(duration);
+
+        let start = tokio::time::Instant::now();
+        timer.wait_until_expired().await;
+        let elapsed = start.elapsed();
+
+        // Should have waited approximately 100ms
+        assert!(elapsed >= Duration::from_millis(90));
+        assert!(elapsed < Duration::from_millis(200));
+    }
+
+    #[tokio::test]
+    async fn hard_deadline_timer_remaining_decreases_over_time() {
+        let timer = HardDeadlineTimer::new(Duration::from_millis(100));
+
+        let remaining1 = timer.remaining().expect("should have remaining time");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let remaining2 = timer.remaining().expect("should have remaining time");
+
+        // remaining2 should be less than remaining1
+        assert!(remaining2 < remaining1);
+    }
+
+    #[tokio::test]
+    async fn hard_deadline_timer_expires_after_duration() {
+        let duration = Duration::from_millis(100);
+        let timer = HardDeadlineTimer::new(duration);
+
+        // Initially not expired
+        assert_eq!(timer.is_expired(), Some(false));
+
+        // Wait until deadline
+        timer.wait_until_expired().await;
+
+        // Now expired
+        assert_eq!(timer.is_expired(), Some(true));
+
+        // Remaining should be zero
+        let remaining = timer.remaining().expect("should have remaining time");
+        assert!(remaining <= Duration::from_millis(10));
+    }
+
+    // ── Tsnet integration tests ──
+
+    #[tokio::test]
+    async fn tsnet_enabled_with_no_key_source_does_not_inject_env_vars() {
+        use crate::tsnet::{IdentityRegistry, TsnetConfig};
+        use crate::types::BeadId;
+
+        // Create a tsnet config with enabled=true but no key source
+        let tsnet_config = TsnetConfig {
+            enabled: true,
+            ..Default::default()
+        };
+
+        let tsnet_registry = IdentityRegistry::new(tsnet_config.clone());
+
+        // Attempt to provision an identity (should fail since no key source)
+        let worker_id = "test-worker".to_string();
+        let bead_id = BeadId::from("needle-test");
+
+        let provision_result = tsnet_registry
+            .provision_identity(&worker_id, &bead_id)
+            .await;
+
+        // Verify that provisioning failed
+        assert!(
+            provision_result.is_err(),
+            "provision_identity should fail when no key source is configured"
+        );
+
+        let error_msg = provision_result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("Tailscale API client not initialized")
+                || error_msg.contains("API key")
+                || error_msg.contains("failed to initialize"),
+            "error should indicate missing API key or initialization failure, got: {}",
+            error_msg
+        );
+
+        // Verify that no environment variables would be injected
+        let mut env = std::collections::HashMap::new();
+        env.insert("EXISTING_VAR".to_string(), "value".to_string());
+
+        // Since provision failed, inject_identity_env should never be called
+        // Verify the env doesn't contain tsnet variables
+        assert!(!env.contains_key("NEEDLE_TSNET_AUTH_KEY"));
+        assert!(!env.contains_key("NEEDLE_TSNET_HOSTNAME"));
+        assert!(!env.contains_key("NEEDLE_TSNET_CONTROL_URL"));
+        assert!(!env.contains_key("NEEDLE_TSNET_FUNNEL_URL"));
+        assert!(!env.contains_key("NEEDLE_TSNET_TAG"));
+
+        // Verify existing vars are preserved
+        assert_eq!(env.get("EXISTING_VAR"), Some(&"value".to_string()));
+    }
+
+    #[test]
+    fn tsnet_disabled_does_not_inject_env_vars() {
+        use crate::tsnet::TsnetConfig;
+
+        // Create a tsnet config with enabled=false
+        let _tsnet_config = TsnetConfig {
+            enabled: false,
+            ..Default::default()
+        };
+
+        let mut env = std::collections::HashMap::new();
+        env.insert("EXISTING_VAR".to_string(), "value".to_string());
+
+        // When tsnet is disabled, inject_identity_env should not be called at all
+        // Verify the env doesn't contain tsnet variables
+        assert!(!env.contains_key("NEEDLE_TSNET_AUTH_KEY"));
+        assert!(!env.contains_key("NEEDLE_TSNET_HOSTNAME"));
+        assert!(!env.contains_key("NEEDLE_TSNET_CONTROL_URL"));
+        assert!(!env.contains_key("NEEDLE_TSNET_FUNNEL_URL"));
+        assert!(!env.contains_key("NEEDLE_TSNET_TAG"));
+
+        // Verify existing vars are preserved
+        assert_eq!(env.get("EXISTING_VAR"), Some(&"value".to_string()));
+    }
+
+    // ── Template executable extraction tests ──
+
+    #[test]
+    fn extract_executables_simple_command() {
+        let template = "claude -p --model claude-sonnet-4-6 < {prompt_file}";
+        let executables = extract_executables_from_template(template);
+        assert_eq!(executables, vec!["claude"]);
+    }
+
+    #[test]
+    fn extract_executables_with_cd() {
+        let template = "cd {workspace} && claude -p < {prompt_file}";
+        let executables = extract_executables_from_template(template);
+        assert_eq!(executables, vec!["claude"]);
+    }
+
+    #[test]
+    fn extract_executables_with_unbuffer() {
+        let template = "cd {workspace} && unbuffer claude -p < {prompt_file}";
+        let executables = extract_executables_from_template(template);
+        assert_eq!(executables, vec!["unbuffer", "claude"]);
+    }
+
+    #[test]
+    fn extract_executables_with_variable_assignment() {
+        let template = "VAR=value && cd {workspace} && API_KEY=secret my-agent < {prompt_file}";
+        let executables = extract_executables_from_template(template);
+        assert_eq!(executables, vec!["my-agent"]);
+    }
+
+    #[test]
+    fn extract_executables_with_pipe() {
+        let template = "cat {prompt_file} | my-agent | jq .";
+        let executables = extract_executables_from_template(template);
+        assert_eq!(executables, vec!["cat", "my-agent", "jq"]);
+    }
+
+    #[test]
+    fn extract_executables_with_or_operator() {
+        let template = "my-agent < {prompt_file} || fallback-agent";
+        let executables = extract_executables_from_template(template);
+        assert_eq!(executables, vec!["my-agent", "fallback-agent"]);
+    }
+
+    #[test]
+    fn extract_executables_with_semicolon() {
+        let template = "cd {workspace} ; my-agent < {prompt_file}";
+        let executables = extract_executables_from_template(template);
+        assert_eq!(executables, vec!["my-agent"]);
+    }
+
+    #[test]
+    fn extract_executables_with_timeout() {
+        let template = "timeout 60 my-agent < {prompt_file}";
+        let executables = extract_executables_from_template(template);
+        assert_eq!(executables, vec!["timeout", "my-agent"]);
+    }
+
+    #[test]
+    fn extract_executables_with_script() {
+        let template = "script /dev/null my-agent < {prompt_file}";
+        let executables = extract_executables_from_template(template);
+        assert_eq!(executables, vec!["script", "my-agent"]);
+    }
+
+    #[test]
+    fn extract_executables_skips_redirection() {
+        let template = "my-agent < input.txt > output.txt 2> error.txt";
+        let executables = extract_executables_from_template(template);
+        assert_eq!(executables, vec!["my-agent"]);
+    }
+
+    #[test]
+    fn extract_executables_skips_placeholders() {
+        let template =
+            "cd {workspace} && my-agent < {prompt_file} --bead {bead_id} --model {model}";
+        let executables = extract_executables_from_template(template);
+        assert_eq!(executables, vec!["my-agent"]);
+    }
+
+    #[test]
+    fn extract_executables_with_full_path() {
+        let template = "/usr/local/bin/my-agent < {prompt_file}";
+        let executables = extract_executables_from_template(template);
+        assert_eq!(executables, vec!["my-agent"]);
+    }
+
+    #[test]
+    fn extract_executables_complex_template() {
+        let template = "cd {workspace} && unbuffer claude -p --model claude-sonnet-4-6 --max-turns 30 < {prompt_file}";
+        let executables = extract_executables_from_template(template);
+        assert_eq!(executables, vec!["unbuffer", "claude"]);
+    }
+
+    #[test]
+    fn extract_executables_deduplicates() {
+        let template = "git status && git commit && git push";
+        let executables = extract_executables_from_template(template);
+        assert_eq!(executables, vec!["git"]);
+    }
+
+    #[test]
+    fn package_hint_unbuffer() {
+        assert_eq!(package_hint("unbuffer"), Some("expect"));
+    }
+
+    #[test]
+    fn package_hint_script() {
+        assert_eq!(package_hint("script"), Some("bsdutils"));
+    }
+
+    #[test]
+    fn package_hint_timeout() {
+        assert_eq!(package_hint("timeout"), Some("coreutils"));
+    }
+
+    #[test]
+    fn package_hint_gh() {
+        assert_eq!(package_hint("gh"), Some("gh"));
+    }
+
+    #[test]
+    fn package_hint_tmux() {
+        assert_eq!(package_hint("tmux"), Some("tmux"));
+    }
+
+    #[test]
+    fn package_hint_unknown() {
+        assert_eq!(package_hint("some-unknown-binary"), None);
+    }
+
+    #[test]
+    fn check_template_executables_all_present() {
+        // This test uses binaries that should always be present on a Unix-like system
+        let template = "echo hello && cat file | grep pattern";
+        let missing = check_template_executables(template);
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn check_template_executables_missing_unbuffer() {
+        // unbuffer is often not installed by default
+        let template = "unbuffer my-agent < {prompt_file}";
+        let missing = check_template_executables(template);
+
+        // Either unbuffer is missing (we get the hint) or it's present (we get nothing)
+        if !missing.is_empty() {
+            assert!(missing[0].contains("unbuffer"));
+            assert!(missing[0].contains("expect"));
+        }
+    }
+
+    #[test]
+    fn check_template_executables_missing_multiple() {
+        let template = "unbuffer my-agent < {prompt_file} && script log.txt";
+        let missing = check_template_executables(template);
+
+        // We should get at least one missing (these are not always installed)
+        // The order might vary, so we check for both
+        let has_unbuffer = missing.iter().any(|m| m.contains("unbuffer"));
+        let has_script = missing.iter().any(|m| m.contains("script"));
+
+        assert!(
+            has_unbuffer || has_script,
+            "Should detect at least one missing executable"
+        );
+    }
 }
