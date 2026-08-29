@@ -6,8 +6,8 @@ agent:
   routing:
     rules:
     - match_model: (claude-)?(sonnet|opus|fable|haiku).*
-      adapter: claude-print
-    default_adapter: claude-code-glm-4.7
+      adapter: claude
+    default_adapter: claude
     strict: false
 bead_cli:
   backend: bead-rs
