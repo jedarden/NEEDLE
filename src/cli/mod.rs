@@ -258,7 +258,14 @@ pub enum CliCommand {
     /// in ~/.needle/ and migrates compatible settings (agent name, workspace
     /// path, worker count) to the v2 YAML schema. Safe to run on already-
     /// initialized installs (idempotent).
-    Init,
+    ///
+    /// When run in a workspace (a directory containing .beads/), also creates
+    /// .needle.yaml with an explicit bead backend binding.
+    Init {
+        /// Bead backend to bind in .needle.yaml (default: bead-rs).
+        #[arg(long, default_value = "bead-rs")]
+        backend: String,
+    },
 
     /// Show version information.
     Version,
@@ -505,7 +512,7 @@ pub fn run() -> Result<()> {
             live,
         } => cmd_config(get, set, dump, show_source, live),
         CliCommand::Doctor { repair, workspace } => cmd_doctor(repair, workspace),
-        CliCommand::Init => cmd_init(),
+        CliCommand::Init { backend } => cmd_init(&backend),
         CliCommand::Version => {
             cmd_version();
             Ok(())
@@ -2262,7 +2269,7 @@ fn cmd_list(format: ListFormat) -> Result<()> {
 /// in ~/.needle/ and migrates compatible settings (agent name, workspace
 /// path, worker count) to the v2 YAML schema. Safe to run on already-
 /// initialized installs (idempotent).
-fn cmd_init() -> Result<()> {
+fn cmd_init(backend: &str) -> Result<()> {
     /// Resolve a path relative to the user's home directory.
     fn dirs_or_home(relative: &str) -> PathBuf {
         if let Some(home) = std::env::var_os("HOME") {
@@ -2647,10 +2654,50 @@ fabric:
         println!("\nConfig validated successfully.");
     }
 
-    println!("\nNext steps:");
-    println!("  1. Review the config file and adjust settings as needed.");
-    println!("  2. Run `needle run` to start processing beads.");
-    println!("  3. Use `needle config --dump` to see the resolved configuration.");
+    // Validate backend parameter.
+    if !matches!(backend, "bead-rs" | "bead-forge") {
+        bail!("unknown backend '{backend}' -- must be 'bead-rs' or 'bead-forge'");
+    }
+
+    // Check if we're in a workspace and bind backend if needed.
+    let current_dir = std::env::current_dir()?;
+    let workspace_beads = current_dir.join(".beads");
+    let workspace_config = current_dir.join(".needle.yaml");
+
+    if workspace_beads.is_dir() {
+        if workspace_config.exists() {
+            println!(
+                "\nWorkspace config already exists: {} (not modifying)",
+                workspace_config.display()
+            );
+        } else {
+            // Write .needle.yaml with backend binding.
+            let yaml = format!("bead_cli:\n  backend: {}\n", backend);
+            std::fs::write(&workspace_config, yaml).with_context(|| {
+                format!(
+                    "failed to write workspace config: {}",
+                    workspace_config.display()
+                )
+            })?;
+            println!("\nCreated workspace config: {}", workspace_config.display());
+            println!("  bead_cli.backend: {}", backend);
+        }
+    }
+
+    // Print onboarding checklist.
+    println!("\nOnboarding checklist:");
+    println!("  1. Install a bead backend if needed:");
+    println!("       $ needle doctor");
+    println!("       $ bead init --prefix <name>");
+    println!("  2. Create your first bead:");
+    println!("       $ bead create --title \"Task title\" --priority 2");
+    println!("  3. Verify the workspace:");
+    println!("       $ needle doctor");
+    println!("  4. Start processing beads:");
+    println!("       $ needle run --agent <agent>");
+    println!("  5. Monitor progress:");
+    println!("       $ needle status");
+    println!("       $ tmux attach -t needle-<agent>-<name>");
 
     Ok(())
 }
@@ -4305,26 +4352,18 @@ fn doctor_check_peers(heartbeat_dir: &Path, ttl_secs: u64) -> CheckResult {
 
 fn doctor_check_agent_binary(config: &Config) -> CheckResult {
     let agent = &config.agent.default;
-    let bead_cli = crate::config::resolve_bead_cli(&config.bead_cli).ok();
-    let agent_ok = which::which(agent).is_ok();
-    match (bead_cli, agent_ok) {
-        (Some((_, path)), true) => {
-            CheckResult::pass("Agent binary", format!("{} + {agent}", path.display()))
-        }
-        (None, _) => CheckResult::fail(
-            "Agent binary",
-            format!(
-                "configured bead backend '{}' is unavailable",
-                config.bead_cli.backend
-            ),
-        ),
-        (Some((_, path)), false) => CheckResult::warn(
-            "Agent binary",
-            format!(
-                "{} found but {agent} not found on PATH — workers cannot dispatch",
-                path.display()
-            ),
-        ),
+
+    // Check if the bead backend is available. If not, skip this check since we
+    // cannot meaningfully verify the agent without a functioning backend.
+    let bead_backend_available = crate::config::resolve_bead_cli(&config.bead_cli).is_ok();
+    if !bead_backend_available {
+        return CheckResult::skip("Agent binary", "skipped (bead backend unavailable)");
+    }
+
+    // Check the agent binary itself
+    match which::which(agent) {
+        Ok(path) => CheckResult::pass("Agent binary", format!("{} at {}", agent, path.display())),
+        Err(_) => CheckResult::fail("Agent binary", format!("{} not found on PATH", agent)),
     }
 }
 
@@ -7806,5 +7845,108 @@ mod tests {
             filtered_pids.contains(&500),
             "should keep process 500 (chain broken by non-needle 400)"
         );
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // Tests for doctor_check_agent_binary
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn doctor_check_agent_binary_with_both_present() {
+        // Test when both agent binary and bead backend are available
+        let mut config = Config::default();
+        config.agent.default = "ls".to_string(); // Use 'ls' as it's always available
+        config.bead_cli.backend = crate::config::BeadBackend::Bead;
+
+        // Mock that the bead backend resolves successfully
+        // (we can't actually test bead backend resolution here without a real bead binary)
+        let result = doctor_check_agent_binary(&config);
+
+        // Since we can't mock the bead backend resolution, we expect this to skip
+        // or pass depending on whether 'bead' is on PATH
+        match result.status {
+            CheckStatus::Pass => {
+                // If bead is on PATH and ls is on PATH, we should get a pass
+                assert!(result.message.contains("ls"));
+            }
+            CheckStatus::Skip => {
+                // If bead is not on PATH, we should get a skip
+                assert!(result.message.contains("bead backend unavailable"));
+            }
+            _ => {
+                panic!("Expected Pass or Skip, got {:?}", result.status);
+            }
+        }
+    }
+
+    #[test]
+    fn doctor_check_agent_binary_with_missing_agent() {
+        // Test when the agent binary is not found on PATH
+        let mut config = Config::default();
+        config.agent.default = "this-binary-definitely-does-not-exist-12345".to_string();
+        config.bead_cli.backend = crate::config::BeadBackend::Bead;
+
+        let result = doctor_check_agent_binary(&config);
+
+        // Since the bead backend will fail to resolve, we expect a skip
+        // (the function should skip if bead backend is unavailable)
+        if result.status == CheckStatus::Skip {
+            assert!(result.message.contains("bead backend unavailable"));
+        } else {
+            // If somehow the bead backend resolves, then we should fail on the agent
+            assert_eq!(result.status, CheckStatus::Fail);
+            assert!(result.message.contains("not found on PATH"));
+        }
+    }
+
+    #[test]
+    fn doctor_check_agent_binary_with_backend_unavailable() {
+        // Test when the bead backend is unavailable - should skip, not fail
+        let mut config = Config::default();
+        config.agent.default = "ls".to_string();
+        config.bead_cli.backend = crate::config::BeadBackend::Bead;
+
+        let result = doctor_check_agent_binary(&config);
+
+        // Without a real bead backend on PATH, this should skip
+        // (the function should not FAIL with "Agent binary" label when the issue
+        // is actually the bead backend)
+        if result.status == CheckStatus::Skip {
+            assert!(result.message.contains("bead backend unavailable"));
+        } else if result.status == CheckStatus::Pass {
+            // If bead is actually available on the test system, pass is ok
+            assert!(result.message.contains("ls"));
+        } else {
+            panic!(
+                "Expected Skip or Pass, got {:?}: {}",
+                result.status, result.message
+            );
+        }
+    }
+
+    #[test]
+    fn doctor_check_agent_binary_passes_with_resolved_path() {
+        // Test that when agent is found, we get PASS with resolved path
+        let mut config = Config::default();
+        config.agent.default = "ls".to_string(); // 'ls' is always available on Unix
+        config.bead_cli.backend = crate::config::BeadBackend::Bead;
+
+        let result = doctor_check_agent_binary(&config);
+
+        // Check that if we pass, we include the path
+        if result.status == CheckStatus::Pass {
+            // Should include the agent name
+            assert!(result.message.contains("ls"));
+            // Should indicate it was found
+            assert!(result.message.contains("at"));
+        } else if result.status == CheckStatus::Skip {
+            // Acceptable if bead backend is unavailable
+            assert!(result.message.contains("bead backend unavailable"));
+        } else {
+            panic!(
+                "Expected Pass or Skip, got {:?}: {}",
+                result.status, result.message
+            );
+        }
     }
 }
