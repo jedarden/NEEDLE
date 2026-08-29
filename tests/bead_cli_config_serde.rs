@@ -426,7 +426,10 @@ fn test_yaml_round_trip_all_backends() {
         (BeadBackend::Br, None::<PathBuf>),
         (BeadBackend::Br, Some(PathBuf::from("/opt/bin/bf"))),
         (BeadBackend::Bead, None::<PathBuf>),
-        (BeadBackend::Bead, Some(PathBuf::from("/usr/local/bin/bead"))),
+        (
+            BeadBackend::Bead,
+            Some(PathBuf::from("/usr/local/bin/bead")),
+        ),
     ];
 
     for (backend, path) in test_cases {
@@ -468,7 +471,7 @@ fn test_toml_serialize_auto_backend() {
     let toml = toml::to_string_pretty(&config).unwrap();
     let parsed: toml::Value = toml::from_str(&toml).unwrap();
 
-    assert_eq!(parsed["backend"], "auto");
+    assert_eq!(parsed["backend"], "auto".into());
     assert!(parsed.get("path").is_none());
 }
 
@@ -482,8 +485,8 @@ fn test_toml_serialize_bead_backend_with_path() {
     let toml = toml::to_string_pretty(&config).unwrap();
     let parsed: toml::Value = toml::from_str(&toml).unwrap();
 
-    assert_eq!(parsed["backend"], "bead-rs");
-    assert_eq!(parsed["path"], "/usr/local/bin/bead");
+    assert_eq!(parsed["backend"], "bead-rs".into());
+    assert_eq!(parsed["path"], "/usr/local/bin/bead".into());
 }
 
 #[test]
@@ -533,7 +536,10 @@ fn test_toml_round_trip_all_backends() {
         (BeadBackend::Br, None::<PathBuf>),
         (BeadBackend::Br, Some(PathBuf::from("/opt/bin/bf"))),
         (BeadBackend::Bead, None::<PathBuf>),
-        (BeadBackend::Bead, Some(PathBuf::from("/usr/local/bin/bead"))),
+        (
+            BeadBackend::Bead,
+            Some(PathBuf::from("/usr/local/bin/bead")),
+        ),
     ];
 
     for (backend, path) in test_cases {

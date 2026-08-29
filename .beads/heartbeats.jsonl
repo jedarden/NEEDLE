@@ -2519,3 +2519,8 @@
 {"last_strand":null,"state":"idle","ts":"2026-08-29T01:06:54.211300475+00:00","worker":"test-worker"}
 {"last_strand":null,"state":"idle","ts":"2026-08-29T01:06:55.978138738+00:00","worker":"test-worker"}
 {"last_strand":null,"state":"idle","ts":"2026-08-29T01:07:08.174319998+00:00","worker":"test-zero-budget"}
+{"last_strand":null,"state":"idle","ts":"2026-08-29T07:36:58.639535973+00:00","worker":"glm-needle"}
+{"last_strand":null,"state":"idle","ts":"2026-08-29T07:37:49.070535059+00:00","worker":"glm-needle2"}
+{"last_strand":null,"state":"idle","ts":"2026-08-29T08:37:31.965469813+00:00","worker":"glm-needle"}
+{"last_strand":null,"state":"idle","ts":"2026-08-29T08:39:12.579968847+00:00","worker":"glm-needle2"}
+{"last_strand":null,"state":"idle","ts":"2026-08-29T09:04:21.278774882+00:00","worker":"isolation-test"}

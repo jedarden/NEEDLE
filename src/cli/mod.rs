@@ -3815,6 +3815,7 @@ enum CheckStatus {
     Pass,
     Warn,
     Fail,
+    Skip,
 }
 
 struct CheckResult {
@@ -3850,6 +3851,14 @@ impl CheckResult {
             detail: vec![],
         }
     }
+    fn skip(name: impl Into<String>, msg: impl Into<String>) -> Self {
+        CheckResult {
+            name: name.into(),
+            status: CheckStatus::Skip,
+            message: msg.into(),
+            detail: vec![],
+        }
+    }
     fn with_detail(mut self, lines: Vec<String>) -> Self {
         self.detail = lines;
         self
@@ -3859,6 +3868,7 @@ impl CheckResult {
             CheckStatus::Pass => "PASS",
             CheckStatus::Warn => "WARN",
             CheckStatus::Fail => "FAIL",
+            CheckStatus::Skip => "SKIP",
         };
         format!("[{label}]  {:<28}  {}", self.name, self.message)
     }

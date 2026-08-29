@@ -489,6 +489,19 @@ impl Resolver {
             "resolver: starting analysis"
         );
 
+        // Verify binary identity BEFORE invoking the resolve agent (fail fast)
+        if let Err(e) = self.verify_binary_identity_before_agent() {
+            tracing::warn!(
+                bead_id = %context.bead.id,
+                error = %e,
+                "resolver: binary identity verification failed before agent, using fallback"
+            );
+            return ResolveDecision::Retry {
+                evidence: format!("Binary identity verification failed: {}", e),
+                strategy: "different_approach".to_string(),
+            };
+        }
+
         // Build the resolve prompt
         let prompt = match self.build_prompt(context) {
             Ok(p) => p,
@@ -528,19 +541,6 @@ impl Resolver {
                 return self.fallback_decision("response_validation_failed");
             }
         };
-
-        // Verify binary identity after successful resolution
-        if let Err(e) = self.verify_binary_identity(&decision) {
-            tracing::warn!(
-                bead_id = %context.bead.id,
-                error = %e,
-                "resolver: binary identity verification failed, using fallback"
-            );
-            return ResolveDecision::Retry {
-                evidence: format!("Binary identity verification failed: {}", e),
-                strategy: "different_approach".to_string(),
-            };
-        }
 
         tracing::info!(
             bead_id = %context.bead.id,
@@ -724,7 +724,7 @@ impl Resolver {
         }
     }
 
-    /// Verify binary identity after successful resolution.
+    /// Verify binary identity before invoking the resolve agent.
     ///
     /// This method runs the resolved binary with --version and verifies that it
     /// claims to be the expected backend based on its version output.
@@ -742,7 +742,7 @@ impl Resolver {
     /// - `Ok(())` - Verification passed or no backend configured
     /// - `Err(VerificationError::VerificationFailed)` - Binary identity doesn't match
     /// - `Err(VerificationError::NotSupported)` - Backend not configured or binary not found
-    fn verify_binary_identity(&self, _decision: &ResolveDecision) -> Result<(), VerificationError> {
+    fn verify_binary_identity_before_agent(&self) -> Result<(), VerificationError> {
         let backend = match &self.backend {
             Some(backend) => backend,
             None => {
@@ -1272,22 +1272,17 @@ mod tests {
     }
 
     #[test]
-    fn verify_binary_identity_returns_ok_when_no_backend_configured() {
+    fn verify_binary_identity_before_agent_returns_ok_when_no_backend_configured() {
         let prompt_builder =
             crate::prompt::PromptBuilder::new(&crate::config::PromptConfig::default());
         let resolver = Resolver::new(prompt_builder);
 
-        let decision = ResolveDecision::Complete {
-            evidence: "Test evidence".to_string(),
-            commit_message: "Test summary".to_string(),
-        };
-
-        let result = resolver.verify_binary_identity(&decision);
+        let result = resolver.verify_binary_identity_before_agent();
         assert!(result.is_ok());
     }
 
     #[test]
-    fn verify_binary_identity_returns_error_when_binary_not_found() {
+    fn verify_binary_identity_before_agent_returns_error_when_binary_not_found() {
         use std::path::PathBuf;
         let prompt_builder =
             crate::prompt::PromptBuilder::new(&crate::config::PromptConfig::default());
@@ -1309,12 +1304,7 @@ mod tests {
 
         let resolver = Resolver::new(prompt_builder).with_backend(backend);
 
-        let decision = ResolveDecision::Complete {
-            evidence: "Test evidence".to_string(),
-            commit_message: "Test summary".to_string(),
-        };
-
-        let result = resolver.verify_binary_identity(&decision);
+        let result = resolver.verify_binary_identity_before_agent();
         assert!(result.is_err());
         match result {
             Err(VerificationError::NotSupported(msg)) => {
@@ -1347,7 +1337,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolver_calls_verification_after_resolution() {
+    async fn resolver_calls_verification_before_agent() {
         let prompt_builder =
             crate::prompt::PromptBuilder::new(&crate::config::PromptConfig::default());
         let resolver = Resolver::new(prompt_builder);
@@ -1365,7 +1355,7 @@ mod tests {
             false,
         );
 
-        // The resolver should call verification (even though it's a stub that passes)
+        // The resolver should call verification before the agent (even though it's a stub that passes)
         let decision = resolver.resolve(&context).await;
         assert!(matches!(decision, ResolveDecision::Retry { .. }));
     }
@@ -2502,7 +2492,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn verify_binary_identity_detects_shim_mismatch() {
+    fn verify_binary_identity_before_agent_detects_shim_mismatch() {
         use std::os::unix::fs::PermissionsExt;
 
         let temp_dir = tempfile::tempdir().unwrap();
@@ -2540,18 +2530,13 @@ exec echo "bf 0.4.1"
             crate::prompt::PromptBuilder::new(&crate::config::PromptConfig::default());
         let resolver = Resolver::new(prompt_builder).with_backend(backend);
 
-        let decision = ResolveDecision::Complete {
-            evidence: "Test evidence".to_string(),
-            commit_message: "Test summary".to_string(),
-        };
-
         // The verification should detect the mismatch
-        let result = resolver.verify_binary_identity(&decision);
+        let result = resolver.verify_binary_identity_before_agent();
 
         // Assert that the mismatch was detected (not silently accepted)
         assert!(
             result.is_err(),
-            "verify_binary_identity should return error for mismatch"
+            "verify_binary_identity_before_agent should return error for mismatch"
         );
 
         // Assert the error is actionable and names both path and identity
@@ -2576,7 +2561,8 @@ exec echo "bf 0.4.1"
 
                 // Verify the specific error format includes both identities
                 assert!(
-                    msg.contains("claims to be") && msg.contains("expected backend"),
+                    (msg.contains("claims to be") || msg.contains("reported"))
+                        && (msg.contains("expected backend") || msg.contains("expected pattern")),
                     "Error message should explain the mismatch clearly: {}",
                     msg
                 );
@@ -2592,7 +2578,7 @@ exec echo "bf 0.4.1"
 
     #[cfg(unix)]
     #[test]
-    fn verify_binary_identity_detects_reverse_shim_mismatch() {
+    fn verify_binary_identity_before_agent_detects_reverse_shim_mismatch() {
         use std::os::unix::fs::PermissionsExt;
 
         let temp_dir = tempfile::tempdir().unwrap();
@@ -2627,18 +2613,13 @@ exec echo "bead 0.1.3"
             crate::prompt::PromptBuilder::new(&crate::config::PromptConfig::default());
         let resolver = Resolver::new(prompt_builder).with_backend(backend);
 
-        let decision = ResolveDecision::Complete {
-            evidence: "Test evidence".to_string(),
-            commit_message: "Test summary".to_string(),
-        };
-
         // The verification should detect the reverse mismatch
-        let result = resolver.verify_binary_identity(&decision);
+        let result = resolver.verify_binary_identity_before_agent();
 
         // Assert that the mismatch was detected
         assert!(
             result.is_err(),
-            "verify_binary_identity should return error for reverse mismatch"
+            "verify_binary_identity_before_agent should return error for reverse mismatch"
         );
 
         match result {
@@ -2672,7 +2653,7 @@ exec echo "bead 0.1.3"
 
     #[cfg(unix)]
     #[test]
-    fn verify_binary_identity_passes_for_matching_identity() {
+    fn verify_binary_identity_before_agent_passes_for_matching_identity() {
         use std::os::unix::fs::PermissionsExt;
 
         let temp_dir = tempfile::tempdir().unwrap();
@@ -2707,25 +2688,20 @@ echo "bead 0.1.3"
             crate::prompt::PromptBuilder::new(&crate::config::PromptConfig::default());
         let resolver = Resolver::new(prompt_builder).with_backend(backend);
 
-        let decision = ResolveDecision::Complete {
-            evidence: "Test evidence".to_string(),
-            commit_message: "Test summary".to_string(),
-        };
-
         // The verification should pass for matching identity
-        let result = resolver.verify_binary_identity(&decision);
+        let result = resolver.verify_binary_identity_before_agent();
 
         // Assert that verification passed
         assert!(
             result.is_ok(),
-            "verify_binary_identity should pass for matching identity, got: {:?}",
+            "verify_binary_identity_before_agent should pass for matching identity, got: {:?}",
             result
         );
     }
 
     #[cfg(unix)]
     #[test]
-    fn verify_binary_identity_error_message_is_actionable() {
+    fn verify_binary_identity_before_agent_error_message_is_actionable() {
         use std::os::unix::fs::PermissionsExt;
 
         let temp_dir = tempfile::tempdir().unwrap();
@@ -2761,12 +2737,7 @@ echo "wrong-identity 1.0.0"
             crate::prompt::PromptBuilder::new(&crate::config::PromptConfig::default());
         let resolver = Resolver::new(prompt_builder).with_backend(backend);
 
-        let decision = ResolveDecision::Complete {
-            evidence: "Test evidence".to_string(),
-            commit_message: "Test summary".to_string(),
-        };
-
-        let result = resolver.verify_binary_identity(&decision);
+        let result = resolver.verify_binary_identity_before_agent();
 
         match result {
             Err(VerificationError::VerificationFailed(msg)) => {

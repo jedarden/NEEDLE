@@ -2804,6 +2804,82 @@ mod tests {
         drop(home_guard);
     }
 
+    /// Test that heartbeats respect isolated HOME when using default heartbeat_dir.
+    ///
+    /// This test validates that when `config.health.heartbeat_dir` is None (the default),
+    /// heartbeats are written to the isolated HOME directory, not to the real user's
+    /// state directory (`~/.needle/state/heartbeats/`).
+    ///
+    /// Unlike `heartbeat_respects_isolated_home_directory`, this test does NOT pass an
+    /// explicit heartbeat_dir to the config, so it tests the actual default behavior
+    /// where `resolve_heartbeat_dir()` reads `std::env::var("HOME")` at runtime.
+    #[tokio::test]
+    async fn heartbeat_uses_isolated_home_with_default_config() {
+        // Record the real HOME before isolation
+        let real_home = std::env::var("HOME")
+            .ok()
+            .map(PathBuf::from)
+            .expect("HOME must be set");
+
+        // Isolate HOME to a temp directory
+        let home_guard = isolate_test_home();
+        let temp_home = std::env::var("HOME")
+            .ok()
+            .map(PathBuf::from)
+            .expect("HOME should be set by HomeGuard");
+
+        // Create a config WITHOUT setting heartbeat_dir explicitly
+        // This tests the default case where heartbeat_dir is None
+        let mut config = Config::default();
+        config.workspace.home = temp_home.clone();
+        config.health.heartbeat_interval_secs = 1;
+        config.health.heartbeat_ttl_secs = 5;
+        // Important: DO NOT set config.health.heartbeat_dir - leave it as None
+
+        let mut monitor = HealthMonitor::new(
+            config,
+            "default-home-test".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        // Start the emitter to trigger a heartbeat write
+        monitor.start_emitter().unwrap();
+
+        let heartbeat_path = monitor.heartbeat_path();
+
+        // Verify the heartbeat file exists
+        assert!(heartbeat_path.exists(), "heartbeat file should exist");
+
+        // Verify the heartbeat path is under the temp HOME, not the real HOME
+        let heartbeat_str = heartbeat_path.to_string_lossy();
+        let temp_home_str = temp_home.to_string_lossy();
+        let real_home_str = real_home.to_string_lossy();
+
+        assert!(
+            heartbeat_str.contains(&*temp_home_str),
+            "heartbeat path should be under temp HOME ({}), but got: {}",
+            temp_home_str,
+            heartbeat_str
+        );
+
+        assert!(
+            !heartbeat_str.contains(&*real_home_str),
+            "heartbeat path should NOT be under real HOME ({}), but got: {}",
+            real_home_str,
+            heartbeat_str
+        );
+
+        // Verify the heartbeat file contains valid data
+        let content = std::fs::read_to_string(&heartbeat_path).unwrap();
+        let data: HeartbeatData = serde_json::from_str(&content).unwrap();
+        assert_eq!(data.worker_id, "default-home-test");
+
+        // Cleanup
+        monitor.stop();
+        drop(home_guard);
+    }
+
     /// Test that cleanup_heartbeat_file returns Err when permission is denied.
     ///
     /// This test creates a file and removes write permissions from the parent

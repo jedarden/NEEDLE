@@ -417,6 +417,53 @@ test_unknown_option_rejected() {
     teardown
 }
 
+test_unsupported_architecture_fails_early() {
+    echo "TEST: unsupported architecture (arm64) fails before download"
+    setup
+
+    # Create a mock uname that reports arm64
+    local mock_uname="$BASE_DIR/bin/uname"
+    cat > "$mock_uname" <<'EOF'
+#!/bin/bash
+# Mock uname that reports arm64 to simulate unsupported architecture
+case "$1" in
+    -m) echo "aarch64" ;;
+    -s) echo "Linux" ;;
+    *)  echo "Linux" ;;
+esac
+EOF
+    chmod +x "$mock_uname"
+
+    # Create API response with only x86_64 assets (no aarch64)
+    cat > "$MOCK_ROOT/api.json" <<'EOF'
+{
+  "tag_name": "v0.5.0",
+  "assets": [
+    {"name": "needle-x86_64-unknown-linux-gnu"},
+    {"name": "checksums.txt"}
+  ]
+}
+EOF
+
+    # Restricted PATH with our mock uname first
+    local rc=0
+    env -i \
+        PATH="$BASE_DIR/bin:/usr/bin:/bin" \
+        HOME="$MOCK_HOME" \
+        NEEDLE_INSTALL_PATH="$MOCK_HOME/bin/needle" \
+        MOCK_ROOT="$MOCK_ROOT" \
+        bash "$INSTALL_SH" </dev/null \
+        >"$LAST_OUT" 2>"$LAST_ERR" || rc=$?
+    LAST_RC=$rc
+
+    assert_rc_nonzero
+    assert_not_installed
+    assert_output_contains "architecture error message" "No prebuilt binary for needle-aarch64-unknown-linux-gnu"
+    assert_output_contains "build from source message" "cargo install --git https://github.com/jedarden/NEEDLE"
+    assert_output_lacks "no download attempted" "Downloading"
+    teardown
+}
+
 main() {
     echo "========================================="
     echo "NEEDLE Installer E2E Tests (real install.sh + mock curl)"
@@ -437,6 +484,7 @@ main() {
     test_version_discovery_large_payload
     test_help_documents_security_tradeoff
     test_unknown_option_rejected
+    test_unsupported_architecture_fails_early
 
     echo ""
     echo "========================================="

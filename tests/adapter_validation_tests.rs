@@ -789,15 +789,22 @@ worker:
         // Create an isolated HOME environment
         let temp_home = TempHome::new().unwrap();
 
+        // Create a test workspace
+        let workspace = temp_home.create_workspace("test-workspace").unwrap();
+
         // Define a nonexistent adapter name
         let nonexistent_adapter = "nonexistent-test-adapter-xyz123";
 
-        // Create a .needle.yaml config that specifies the nonexistent adapter
+        // Create a .needle.yaml config in the workspace that specifies the nonexistent adapter
         let config_yaml = format!(
             r#"
 # Worker configuration
 worker:
   name: test-worker
+
+# Bead store backend (required for worker initialization)
+bead_cli:
+  backend: bead-rs
 
 # Agent configuration with nonexistent adapter
 agent:
@@ -806,17 +813,19 @@ agent:
             nonexistent_adapter
         );
 
-        let config_path = temp_home.create_needle_config(&config_yaml).unwrap();
+        let config_path = workspace.path().join(".needle.yaml");
+        std::fs::write(&config_path, config_yaml).expect("Failed to write .needle.yaml");
         assert!(config_path.exists(), "config file should be created");
 
         // Get the path to the needle binary
         let bin_path =
             std::env::var("CARGO_BIN_EXE_needle").unwrap_or_else(|_| "needle".to_string());
 
-        // Spawn the needle worker subprocess with isolated HOME
+        // Spawn the needle worker subprocess with isolated HOME and workspace
         let output = Command::new(&bin_path)
             .arg("run")
-            .arg("--once")
+            .arg("-w")
+            .arg(workspace.path()) // Specify the workspace directory
             .env("HOME", temp_home.path()) // Isolate HOME to prevent scanning real workspaces
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -879,15 +888,24 @@ agent:
         // Create an isolated HOME environment
         let temp_home = TempHome::new().expect("Failed to create temporary HOME directory");
 
+        // Create a test workspace
+        let workspace = temp_home
+            .create_workspace("test-workspace-2")
+            .expect("Failed to create workspace");
+
         // Define a nonexistent adapter name
         let nonexistent_adapter = "totally-bogus-adapter";
 
-        // Create a .needle.yaml config that specifies the nonexistent adapter
+        // Create a .needle.yaml config in the workspace that specifies the nonexistent adapter
         let config_yaml = format!(
             r#"
 # Worker configuration
 worker:
   name: test-worker
+
+# Bead store backend (required for worker initialization)
+bead_cli:
+  backend: bead-rs
 
 # Agent configuration with nonexistent adapter
 agent:
@@ -896,9 +914,8 @@ agent:
             nonexistent_adapter
         );
 
-        let config_path = temp_home
-            .create_needle_config(&config_yaml)
-            .expect("Failed to create .needle.yaml config");
+        let config_path = workspace.path().join(".needle.yaml");
+        std::fs::write(&config_path, config_yaml).expect("Failed to write .needle.yaml");
 
         // Verify config file was created successfully
         assert!(
@@ -918,10 +935,11 @@ agent:
         let bin_path =
             std::env::var("CARGO_BIN_EXE_needle").unwrap_or_else(|_| "needle".to_string());
 
-        // Spawn the needle worker subprocess with isolated HOME
+        // Spawn the needle worker subprocess with isolated HOME and workspace
         let output = Command::new(&bin_path)
             .arg("run")
-            .arg("--once")
+            .arg("-w")
+            .arg(workspace.path()) // Specify the workspace directory
             .env("HOME", temp_home.path()) // Isolate HOME to prevent scanning real workspaces
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

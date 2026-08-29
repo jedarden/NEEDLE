@@ -57,7 +57,8 @@ The command MUST return a JSON object with the following top-level fields:
     {"schema_ref": "urn:bead-rs:schema:issue:native-v1"},
     {"schema_ref": "urn:bead-rs:schema:event:native-v1"},
     {"schema_ref": "urn:bead-rs:schema:field-guide:native-v1"}
-  ]
+  ],
+  "commands": ["ref", "data", "query"]
 }
 ```
 
@@ -141,6 +142,45 @@ for schema_ref in [
     }
 }
 ```
+
+#### `commands` (array of strings)
+- **Required values:** All three commands MUST be present
+  - `"ref"` — External reference management (add, remove, list, find)
+  - `"data"` — Bead-attached data storage (set, get, list, remove)
+  - `"query"` — Advanced bead querying and filtering
+- **Purpose:** Validate that the backend supports core operations beyond basic bead CRUD
+- **Validation:** Each required command must be present in the commands array
+- **Failure mode:** Workspace open fails with "missing command {command}" error
+
+```rust
+// src/bead_store/mod.rs:326-336
+for command in ["ref", "data", "query"] {
+    let present = capabilities["commands"]
+        .as_array()
+        .is_some_and(|commands| commands.iter().any(|cmd| cmd == command));
+    if !present {
+        bail!("bead-rs capability mismatch for workspace {}: missing command {command}");
+    }
+}
+```
+
+**Command capabilities and their operations:**
+
+- **`ref`** — External reference management
+  - `ref_add` — Link a bead to an external resource (ticket, PR, doc)
+  - `ref_remove` — Remove a reference from a bead
+  - `ref_list` — List all references on a bead
+  - `ref_find` — Find beads by reference (reverse lookup)
+
+- **`data`** — Bead-attached key-value storage
+  - `data_set` — Store structured data on a bead (results, metrics, state)
+  - `data_get` — Retrieve data from a bead
+  - `data_list` — List all data keys on a bead
+  - `data_remove` — Remove a data key from a bead
+
+- **`query`** — Advanced bead querying
+  - `query` — Execute structured queries with filters (status, labels, assignee, etc.)
+  - Returns JSON-lines output for streaming large result sets
 
 ## Backend Descriptor Capabilities
 
