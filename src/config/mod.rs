@@ -7250,7 +7250,7 @@ fn validate_worker_field(
         match field {
             "scratch_sweep" => validate_scratch_sweep_field(third, key_path),
             _ => Err(ConfigError {
-                field: key_path.to_string(),
+                full_path: key_path.to_string(),
                 message: format!(
                     "worker field '{}' does not support nested access (attempted: '{}')",
                     field, third
