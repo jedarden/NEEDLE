@@ -2675,6 +2675,135 @@ mod tests {
         assert!(!path.exists(), "heartbeat file should be removed");
     }
 
+    /// Test that heartbeats respect isolated HOME directory (test isolation bug).
+    ///
+    /// This test verifies that when HOME is isolated to a temp directory via
+    /// HomeGuard, heartbeats are written to the temp directory, not to the
+    /// real user's state directory (`~/.needle/state/heartbeats/`).
+    ///
+    /// This test validates the fix for the test isolation bug where tests were
+    /// leaking into the live fleet's state directory. Before the fix to
+    /// `resolve_heartbeat_dir()`, this test would fail because heartbeats
+    /// were written to `~/.needle/state/heartbeats/` regardless of the HOME
+    /// environment variable.
+    ///
+    /// The test demonstrates the bug by:
+    /// 1. Recording the real HOME path before isolation
+    /// 2. Creating a HomeGuard to isolate HOME to a temp directory
+    /// 3. Starting a HealthMonitor and triggering a heartbeat
+    /// 4. Asserting the heartbeat file appears in the temp directory (not real HOME)
+    #[tokio::test]
+    async fn heartbeat_respects_isolated_home_directory() {
+        // Step 1: Record the real HOME path before isolation
+        let real_home = std::env::var("HOME")
+            .ok()
+            .map(PathBuf::from)
+            .expect("HOME must be set");
+
+        let real_heartbeat_dir = real_home.join(".needle").join("state").join("heartbeats");
+
+        // Step 2: Isolate HOME to a temp directory using HomeGuard
+        let home_guard = isolate_test_home();
+        let temp_home = std::env::var("HOME")
+            .ok()
+            .map(PathBuf::from)
+            .expect("HOME should be set by HomeGuard");
+
+        let temp_heartbeat_dir = temp_home.join(".needle").join("state").join("heartbeats");
+
+        // Step 3: Create a HealthMonitor with the isolated HOME
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        std::fs::create_dir_all(&hb_dir).unwrap();
+
+        let mut config = test_config(&hb_dir);
+        config.workspace.home = temp_home.clone();
+
+        let mut monitor = HealthMonitor::new(
+            config,
+            "isolation-test".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        // Step 4: Start the emitter to trigger a heartbeat write
+        monitor.start_emitter().unwrap();
+
+        // The initial heartbeat is written synchronously in start_emitter()
+        let heartbeat_path = monitor.heartbeat_path();
+
+        // Step 5: Verify the heartbeat file exists in the temp directory
+        assert!(
+            heartbeat_path.exists(),
+            "heartbeat file should exist in temp directory"
+        );
+
+        // Verify the heartbeat path is under the temp HOME, not the real HOME
+        let heartbeat_str = heartbeat_path.to_string_lossy();
+        let temp_home_str = temp_home.to_string_lossy();
+        let real_home_str = real_home.to_string_lossy();
+
+        assert!(
+            heartbeat_str.contains(&*temp_home_str),
+            "heartbeat path should be under temp HOME ({}), but got: {}",
+            temp_home_str,
+            heartbeat_str
+        );
+
+        assert!(
+            !heartbeat_str.contains(&*real_home_str),
+            "heartbeat path should NOT be under real HOME ({}), but got: {}. \
+             This indicates the test isolation bug - heartbeats are leaking into the live fleet's state directory!",
+            real_home_str,
+            heartbeat_str
+        );
+
+        // Verify the heartbeat file contains valid data
+        let content = std::fs::read_to_string(&heartbeat_path).unwrap();
+        let data: HeartbeatData = serde_json::from_str(&content).unwrap();
+        assert_eq!(data.worker_id, "isolation-test");
+        assert_eq!(data.qualified_id, monitor.qualified_id());
+
+        // Step 6: Verify no heartbeat was written to the real HOME directory
+        // (This would be the bug - leaking into the live fleet's state)
+        let real_heartbeat_files = std::fs::read_dir(&real_heartbeat_dir);
+
+        // If the directory doesn't exist, that's fine (no pollution)
+        // If it does exist, verify our test heartbeat didn't leak there
+        if let Ok(entries) = real_heartbeat_files {
+            for entry in entries {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                let file_name = path.file_name().and_then(|n| n.to_str());
+
+                // If a file matches our test worker, it's a leak
+                if let Some(name) = file_name {
+                    if name.contains("isolation-test") || name.contains(monitor.qualified_id()) {
+                        panic!(
+                            "TEST ISOLATION BUG: Heartbeat file leaked into real HOME directory! \
+                            Real HOME: {}, Leaked file: {}, Expected heartbeat to be in: {}",
+                            real_home.display(),
+                            path.display(),
+                            temp_heartbeat_dir.display()
+                        );
+                    }
+                }
+            }
+        }
+
+        // Cleanup
+        monitor.stop();
+
+        // Verify cleanup happened in the temp directory
+        assert!(
+            !heartbeat_path.exists(),
+            "heartbeat file should be removed from temp directory after stop"
+        );
+
+        // Drop the HomeGuard to restore the original HOME
+        drop(home_guard);
+    }
+
     /// Test that cleanup_heartbeat_file returns Err when permission is denied.
     ///
     /// This test creates a file and removes write permissions from the parent
