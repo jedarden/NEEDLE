@@ -260,23 +260,20 @@ impl fmt::Display for HardDeadline {
 pub enum BeadStatus {
     Open,
     InProgress,
-    /// `bf` (bead-forge) has been observed emitting `"completed"` for done
-    /// beads on some workspaces (bf's own `Status` enum has no `Completed`
-    /// variant — it falls through to an untagged `Custom(String)`, so this
-    /// slips through bf-side validation). Accept it as an alias so a single
-    /// such bead doesn't fail `bf list --json` deserialization for every
-    /// other bead in the same call — see needle-weave-completed-status.
+    /// Bead has been completed and shipped.
+    ///
+    /// The `completed` alias is retained for backward compatibility with
+    /// historical bead data.
     #[serde(alias = "completed")]
     Done,
     /// `br show --json` emits `"closed"` for done beads. Treat as equivalent
     /// to `Done` so deserialization succeeds.
     Closed,
     Blocked,
-    /// `bf` (bead-forge) emits `"deferred"` for beads deliberately postponed
-    /// rather than blocked by a dependency. Distinct from `Blocked`: a
-    /// deferred bead has no unmet dependency, it was just set aside — see
-    /// GitHub issue jedarden/NEEDLE#10. Without this variant, `bf list --json`
-    /// fails deserialization for every such bead, and it silently disappears
+    /// Bead is deliberately deferred (postponed without blocking dependencies).
+    ///
+    /// Distinct from `Blocked`: a deferred bead has no unmet dependency,
+    /// it was intentionally set aside.
     /// from strand/supervise visibility with no surfaced error.
     Deferred,
 }
@@ -1584,13 +1581,11 @@ mod tests {
 
     #[test]
     fn bead_status_deferred_deserialization() {
-        // bf (bead-forge) emits "deferred" for beads deliberately postponed —
-        // GitHub issue jedarden/NEEDLE#10. Previously this failed deserialization
-        // and silently dropped the bead from every strand/supervise view.
+        // Verify that "deferred" deserializes correctly as BeadStatus::Deferred.
         let status: BeadStatus = serde_json::from_str(r#""deferred""#).unwrap();
         assert_eq!(status, BeadStatus::Deferred);
         assert!(!status.is_done());
-        // Round-trip: serializing back must produce the same wire format bf expects.
+        // Round-trip: serializing back produces the same wire format.
         assert_eq!(serde_json::to_string(&status).unwrap(), r#""deferred""#);
     }
 
@@ -1611,9 +1606,8 @@ mod tests {
 
     #[test]
     fn bead_status_completed_deserialization() {
-        // bf emits "completed" for some done beads (via its untagged Custom(String)
-        // fallback, since bf's own Status enum has no Completed variant) — must
-        // deserialize correctly instead of aborting the whole `bf list --json` parse.
+        // Historical data may contain "completed" as a status value; verify it
+        // correctly deserializes to BeadStatus::Done via the serde alias.
         let status: BeadStatus = serde_json::from_str(r#""completed""#).unwrap();
         assert_eq!(status, BeadStatus::Done);
         assert!(status.is_done());

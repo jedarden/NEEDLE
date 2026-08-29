@@ -30,7 +30,7 @@
 //! # Why not `updated_at`
 //!
 //! The original fallback compared `post.updated_at > pre.updated_at`. That is
-//! unsound: `bf close` *is* an update, so the timestamp always advances on the
+//! unsound: bead close *is* an update, so the timestamp always advances on the
 //! exact path the gate exists to judge — an agent that closed a bead having
 //! shipped nothing. Combined with a missing snapshot writer, this made the gate
 //! inert from the day it shipped (2026-07-30) until this change: no closure was
@@ -390,7 +390,7 @@ mod tests {
     }
 
     /// The hole this gate was written for and did not close: an agent that
-    /// closes a bead having shipped nothing. `bf close` bumps `updated_at`, so
+    /// closes a bead having shipped nothing. Bead close bumps `updated_at`, so
     /// the old timestamp fallback passed here unconditionally.
     #[tokio::test]
     async fn closing_without_shipping_or_noting_anything_fails() {

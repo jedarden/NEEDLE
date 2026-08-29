@@ -5688,6 +5688,7 @@ impl Default for StdoutSinkConfig {
 ///       url: "https://dashboard.example.com/ingest"
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HookConfig {
     /// Glob pattern matched against `event_type` (e.g. `"outcome.*"`).
     pub event_filter: String,
@@ -5769,31 +5770,28 @@ impl<'de> Deserialize<'de> for OtlpTlsConfig {
             where
                 M: serde::de::MapAccess<'de>,
             {
-                #[derive(Deserialize)]
-                #[serde(field_identifier)]
-                enum Field {
-                    #[serde(alias = "insecure")]
-                    Insecure,
-                    #[serde(alias = "ca_file")]
-                    CaFile,
-                }
-
                 let mut insecure = None;
                 let mut ca_file = None;
 
-                while let Some(key) = access.next_key()? {
-                    match key {
-                        Field::Insecure => {
+                while let Some(key) = access.next_key::<String>()? {
+                    match key.as_str() {
+                        "insecure" => {
                             if insecure.is_some() {
                                 return Err(serde::de::Error::duplicate_field("insecure"));
                             }
                             insecure = Some(access.next_value()?);
                         }
-                        Field::CaFile => {
+                        "ca_file" => {
                             if ca_file.is_some() {
                                 return Err(serde::de::Error::duplicate_field("ca_file"));
                             }
                             ca_file = Some(access.next_value()?);
+                        }
+                        other => {
+                            return Err(serde::de::Error::unknown_field(
+                                other,
+                                &["insecure", "ca_file"],
+                            ));
                         }
                     }
                 }

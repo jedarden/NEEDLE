@@ -580,7 +580,7 @@ impl MendStrand {
             // 2. The worker has a heartbeat and is explicitly working on a DIFFERENT bead
             //
             // This handles the --count 1 relaunch case where a worker name is reused:
-            // - If the worker is idle (no current bead), keep the assignee (may resume work)
+            // - If the worker is idle (no current bead), clear the stale assignee
             // - If the worker is working on THIS bead, keep the assignee
             // - If the worker is working on a DIFFERENT bead, clear the stale assignee
             // - If no heartbeat but worker is in registry (backward compat), keep assignee
@@ -912,11 +912,11 @@ impl MendStrand {
                     continue;
                 }
 
-                // bead-rs does not carry a per-dependency status in its JSON (bf did),
-                // so `dep.status` is the serde default of "" on the canonical backend
-                // and this check could never fire -- stale-dependency cleanup was dead
-                // code there. Resolve the blocker's status directly when the edge does
-                // not carry one. See needle-ab52a15a.
+                // The canonical bead-rs backend does not carry a per-dependency status
+                // in its JSON, so `dep.status` is the serde default of "" and this check
+                // could never fire -- stale-dependency cleanup was dead code there.
+                // Resolve the blocker's status directly when the edge does not carry one.
+                // See needle-ab52a15a.
                 let blocker_closed = if dep.status.is_empty() {
                     match store.show(&dep.id).await {
                         Ok(blocker) => blocker.status.is_done(),
@@ -6855,6 +6855,16 @@ mod tests {
 
     // ── Stale assignee cleanup on open beads tests ─────────────────────────────────
 
+    /// REGRESSION TEST for needle-44e7e5cd: Open beads with stale assignees accumulate
+    /// when `--count 1` workers relaunch under the same name forever.
+    ///
+    /// Failure case (2026-08-16): 583 beads became assigned+open but unclaimable
+    /// because workers reused the same name after relaunch, making the assignee
+    /// appear "alive" to Mend even though the worker was no longer working on that
+    /// bead.
+    ///
+    /// This test verifies the fix: Mend now clears the assignee from an open bead
+    /// when a live worker with that name is working on a DIFFERENT bead.
     #[tokio::test]
     async fn open_bead_with_stale_assignee_cleared_when_worker_alive_but_working_on_different_bead()
     {

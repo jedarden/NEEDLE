@@ -74,7 +74,7 @@ pub enum TimeoutOrigin {
     /// (e.g., running a real test suite, linting, static analysis).
     HandlerTimeout { gate_name: Option<String> },
 
-    /// Bead-store timeout (bf/br CLI operation exceeded timeout).
+    /// Bead-store timeout (bead CLI operation exceeded timeout).
     ///
     /// Never qualifies — no agent activity evidence, represents
     /// infrastructure slowness, not productive work.
@@ -344,12 +344,9 @@ fn classify_timeout_origin(outcome: &AgentOutcome, _duration: Duration) -> Timeo
         };
     }
 
-    // Heuristic: if stderr contains "bead store" or "bf/br timeout", classify as bead-store timeout
+    // Heuristic: if stderr contains "bead store" or CLI timeout patterns, classify as bead-store timeout
     let stderr_lower = outcome.stderr.to_lowercase();
-    if stderr_lower.contains("bead store")
-        || stderr_lower.contains("bf timeout")
-        || stderr_lower.contains("br timeout")
-    {
+    if stderr_lower.contains("bead store") || stderr_lower.contains("bead timeout") {
         return TimeoutOrigin::BeadStoreTimeout;
     }
 

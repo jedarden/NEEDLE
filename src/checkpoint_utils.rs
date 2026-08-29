@@ -1,6 +1,6 @@
 //! Test utilities for checkpoint flush and restore operations.
 //!
-//! This module provides helper functions for testing bead-forge checkpoint
+//! This module provides helper functions for testing bead checkpoint
 //! functionality by flushing workspace state to temporary directories and
 //! restoring it into fresh empty workspaces.
 
@@ -271,7 +271,7 @@ pub fn cleanup_file(path: &Path) -> Result<()> {
 /// Flush a workspace checkpoint to a temporary directory.
 ///
 /// This function creates a temporary directory, flushes the current workspace
-/// state using bead-forge's checkpoint mechanism, and returns the path to the
+/// state using the bead checkpoint mechanism, and returns the path to the
 /// checkpoint directory.
 ///
 /// # Arguments
@@ -1306,7 +1306,7 @@ mod tests {
         let checkpoint_beads = checkpoint_path.join(".beads");
         fs::create_dir_all(&checkpoint_beads).expect("failed to create checkpoint .beads");
 
-        // Create essential bead-forge files
+        // Create essential checkpoint files (test fixtures only)
         fs::write(checkpoint_beads.join("beads.db"), b"database").expect("failed to write db");
         fs::write(checkpoint_beads.join("issues.jsonl"), b"issues").expect("failed to write jsonl");
 

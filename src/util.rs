@@ -612,6 +612,173 @@ pub fn probe_bead_cli() -> Option<BeadCli> {
     None
 }
 
+/// Detect bead CLI backend by checking config first, then probing PATH.
+///
+/// This function implements a two-phase detection strategy:
+///
+/// 1. **Config-first**: Check if `bead_cli.backend` is explicitly set in config
+///    - If `bead_cli.path` is set, use that explicit path directly
+///    - If backend is set to a specific value (bead-rs, bf, br), probe for that CLI
+///    - If backend is `Auto`, proceed to phase 2
+///
+/// 2. **Auto-detection**: Probe PATH for available CLIs in priority order
+///    - Tries `bead` (bead-rs) first
+///    - Falls back to `bf` (bead-forge)
+///    - Finally tries `br` (deprecated)
+///
+/// # Arguments
+///
+/// * `config_backend` - The backend setting from config (`bead_cli.backend`)
+/// * `config_path` - Optional explicit path from config (`bead_cli.path`)
+///
+/// # Returns
+///
+/// * `Option<crate::config::BackendDetection>` - The detected backend with name and path,
+///   or `None` if no CLI is available
+///
+/// # Examples
+///
+/// ```no_run
+/// use needle::util::detect_bead_cli_backend;
+/// use needle::config::BeadBackend;
+///
+/// // Auto-detect from PATH
+/// let detection = detect_bead_cli_backend(BeadBackend::Auto, None);
+///
+/// // Use explicit path from config
+/// let detection = detect_bead_cli_backend(BeadBackend::Auto, Some("/path/to/bead".into()));
+///
+/// // Force specific backend
+/// let detection = detect_bead_cli_backend(BeadBackend::Bead, None);
+/// ```
+///
+/// # Detection Priority
+///
+/// When `bead_cli.path` is set, that path is used regardless of backend setting.
+/// Otherwise, the backend setting guides the probe:
+///
+/// - `BeadBackend::Bead` → probe for `bead` binary only
+/// - `BeadBackend::Br` → probe for `br` binary only
+/// - `BeadBackend::Auto` → probe in priority order (bead > bf > br)
+///
+/// # Verification
+///
+/// All detected binaries are verified using backend identity checks via
+/// [`VersionProbe`] to ensure the binary actually reports as the expected
+/// backend (e.g., a binary named "bead" must report as "bead" in version output).
+pub fn detect_bead_cli_backend(
+    config_backend: crate::config::BeadBackend,
+    config_path: Option<&std::path::PathBuf>,
+) -> Option<crate::config::BackendDetection> {
+    use crate::config::BeadBackend;
+    use crate::version_probe::VersionProbe;
+
+    // Phase 1: Check for explicit path override
+    if let Some(explicit_path) = config_path {
+        debug!(
+            path = %explicit_path.display(),
+            "using explicit bead_cli.path from config"
+        );
+
+        // Verify the explicit binary is accessible
+        if !explicit_path.exists() {
+            warn!(
+                path = %explicit_path.display(),
+                "explicit bead_cli.path does not exist, falling back to auto-detection"
+            );
+            // Fall through to auto-detection
+        } else {
+            // Use the explicit path - derive backend from binary name if possible,
+            // otherwise infer from the version output
+            let probe = VersionProbe::new();
+            // We trust the explicit path - detect backend from the binary
+            match probe.detect_backend(
+                explicit_path
+                    .to_str()
+                    .unwrap_or(explicit_path.display().to_string().as_str()),
+            ) {
+                Ok(Some(backend_name)) => {
+                    return Some(crate::config::BackendDetection::new(
+                        backend_name,
+                        explicit_path.clone(),
+                    ));
+                }
+                Ok(None) => {
+                    warn!(
+                        path = %explicit_path.display(),
+                        "could not detect backend from explicit path, falling back to auto-detection"
+                    );
+                    // Fall through to auto-detection
+                }
+                Err(e) => {
+                    warn!(
+                        path = %explicit_path.display(),
+                        error = %e,
+                        "failed to identify backend from explicit path, falling back to auto-detection"
+                    );
+                    // Fall through to auto-detection
+                }
+            }
+        }
+    }
+
+    // Phase 2: Check if backend is explicitly set (not Auto)
+    match config_backend {
+        BeadBackend::Bead => {
+            // Probe specifically for bead (bead-rs)
+            debug!("backend set to bead-rs, probing for 'bead' binary");
+            if let Some(path) = resolve_command_in_path("bead") {
+                let probe = VersionProbe::new();
+                match probe.verify_backend("bead") {
+                    Ok(()) => {
+                        return Some(crate::config::BackendDetection::new(
+                            "bead-rs".to_string(),
+                            path,
+                        ));
+                    }
+                    Err(e) => {
+                        warn!(
+                            path = %path.display(),
+                            error = %e,
+                            "bead binary failed verification"
+                        );
+                    }
+                }
+            }
+            debug!("bead binary not found or verification failed");
+            None
+        }
+        BeadBackend::Br => {
+            // Probe specifically for br (deprecated)
+            debug!("backend set to br, probing for 'br' binary");
+            if let Some(path) = resolve_command_in_path("br") {
+                let probe = VersionProbe::new();
+                match probe.verify_backend("br") {
+                    Ok(()) => {
+                        return Some(crate::config::BackendDetection::new("br".to_string(), path));
+                    }
+                    Err(e) => {
+                        warn!(
+                            path = %path.display(),
+                            error = %e,
+                            "br binary failed verification"
+                        );
+                    }
+                }
+            }
+            debug!("br binary not found or verification failed");
+            None
+        }
+        BeadBackend::Auto => {
+            // Phase 3: Auto-detect by probing PATH in priority order
+            debug!("backend set to auto, probing PATH in priority order");
+            probe_bead_cli().map(|cli| {
+                crate::config::BackendDetection::new(cli.backend_name().to_string(), cli.path)
+            })
+        }
+    }
+}
+
 /// Resolve a command to its full path using the `which` or `command -v` utilities.
 ///
 /// This function attempts to locate a command in PATH using standard Unix utilities.
@@ -2710,5 +2877,380 @@ echo "beads-rust 0.26.0"
             result.is_none(),
             "should reject bead binary that reports as beads-rust (expected 'bead', got 'beads-rust')"
         );
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // Tests for detect_bead_cli_backend (config-first, then auto-detect)
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    #[serial]
+    #[test]
+    fn test_detect_bead_cli_backend_with_explicit_path() {
+        use crate::config::BeadBackend;
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let fake_bead = tmp_dir.path().join("my-custom-bead");
+
+        std::fs::write(
+            &fake_bead,
+            r#"#!/bin/sh
+echo "bead 0.26.0"
+"#,
+        )
+        .unwrap();
+
+        let mut perms = std::fs::metadata(&fake_bead).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_bead, perms).unwrap();
+
+        // Test with explicit path override
+        let result = detect_bead_cli_backend(BeadBackend::Auto, Some(&fake_bead));
+
+        assert!(result.is_some(), "should find CLI with explicit path");
+        let detection = result.unwrap();
+        assert_eq!(detection.backend, "bead-rs");
+        assert_eq!(detection.cli_path, fake_bead);
+    }
+
+    #[serial]
+    #[test]
+    fn test_detect_bead_cli_backend_with_config_set_to_bead() {
+        use crate::config::BeadBackend;
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let fake_bead = tmp_dir.path().join("bead");
+
+        std::fs::write(
+            &fake_bead,
+            r#"#!/bin/sh
+echo "bead 0.26.0"
+"#,
+        )
+        .unwrap();
+
+        let mut perms = std::fs::metadata(&fake_bead).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_bead, perms).unwrap();
+
+        set_hermetic_probe_path(tmp_dir.path());
+
+        // Config set to bead-rs, should find it
+        let result = detect_bead_cli_backend(BeadBackend::Bead, None);
+
+        assert!(
+            result.is_some(),
+            "should find bead when config is set to Bead"
+        );
+        let detection = result.unwrap();
+        assert_eq!(detection.backend, "bead-rs");
+        assert_eq!(detection.cli_path, fake_bead);
+    }
+
+    #[serial]
+    #[test]
+    fn test_detect_bead_cli_backend_with_config_set_to_br() {
+        use crate::config::BeadBackend;
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let fake_br = tmp_dir.path().join("br");
+
+        std::fs::write(
+            &fake_br,
+            r#"#!/bin/sh
+echo "br (deprecated)"
+"#,
+        )
+        .unwrap();
+
+        let mut perms = std::fs::metadata(&fake_br).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_br, perms).unwrap();
+
+        set_hermetic_probe_path(tmp_dir.path());
+
+        // Config set to br, should find it
+        let result = detect_bead_cli_backend(BeadBackend::Br, None);
+
+        assert!(result.is_some(), "should find br when config is set to Br");
+        let detection = result.unwrap();
+        assert_eq!(detection.backend, "br");
+        assert_eq!(detection.cli_path, fake_br);
+    }
+
+    #[serial]
+    #[test]
+    fn test_detect_bead_cli_backend_auto_with_bead_available() {
+        use crate::config::BeadBackend;
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let fake_bead = tmp_dir.path().join("bead");
+
+        std::fs::write(
+            &fake_bead,
+            r#"#!/bin/sh
+echo "bead 0.26.0"
+"#,
+        )
+        .unwrap();
+
+        let mut perms = std::fs::metadata(&fake_bead).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_bead, perms).unwrap();
+
+        set_hermetic_probe_path(tmp_dir.path());
+
+        // Auto mode should detect bead
+        let result = detect_bead_cli_backend(BeadBackend::Auto, None);
+
+        assert!(result.is_some(), "should auto-detect bead");
+        let detection = result.unwrap();
+        assert_eq!(detection.backend, "bead-rs");
+        assert_eq!(detection.cli_path, fake_bead);
+    }
+
+    #[serial]
+    #[test]
+    fn test_detect_bead_cli_backend_auto_with_bf_available() {
+        use crate::config::BeadBackend;
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let fake_bf = tmp_dir.path().join("bf");
+
+        std::fs::write(
+            &fake_bf,
+            r#"#!/bin/sh
+echo "bf 0.4.1"
+"#,
+        )
+        .unwrap();
+
+        let mut perms = std::fs::metadata(&fake_bf).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_bf, perms).unwrap();
+
+        set_hermetic_probe_path(tmp_dir.path());
+
+        // Auto mode should detect bf (bead not available)
+        let result = detect_bead_cli_backend(BeadBackend::Auto, None);
+
+        assert!(
+            result.is_some(),
+            "should auto-detect bf when bead unavailable"
+        );
+        let detection = result.unwrap();
+        assert_eq!(detection.backend, "bf");
+        assert_eq!(detection.cli_path, fake_bf);
+    }
+
+    #[serial]
+    #[test]
+    fn test_detect_bead_cli_backend_auto_with_br_available() {
+        use crate::config::BeadBackend;
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let fake_br = tmp_dir.path().join("br");
+
+        std::fs::write(
+            &fake_br,
+            r#"#!/bin/sh
+echo "br (deprecated)"
+"#,
+        )
+        .unwrap();
+
+        let mut perms = std::fs::metadata(&fake_br).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_br, perms).unwrap();
+
+        set_hermetic_probe_path(tmp_dir.path());
+
+        // Auto mode should detect br (bead and bf not available)
+        let result = detect_bead_cli_backend(BeadBackend::Auto, None);
+
+        assert!(result.is_some(), "should auto-detect br as fallback");
+        let detection = result.unwrap();
+        assert_eq!(detection.backend, "br");
+        assert_eq!(detection.cli_path, fake_br);
+    }
+
+    #[serial]
+    #[test]
+    fn test_detect_bead_cli_backend_none_available() {
+        use crate::config::BeadBackend;
+
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        set_hermetic_probe_path(tmp_dir.path());
+
+        // No CLI available, should return None
+        let result = detect_bead_cli_backend(BeadBackend::Auto, None);
+
+        assert!(result.is_none(), "should return None when no CLI available");
+    }
+
+    #[serial]
+    #[test]
+    fn test_detect_bead_cli_backend_config_bead_when_only_br_available() {
+        use crate::config::BeadBackend;
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let fake_br = tmp_dir.path().join("br");
+
+        std::fs::write(
+            &fake_br,
+            r#"#!/bin/sh
+echo "br (deprecated)"
+"#,
+        )
+        .unwrap();
+
+        let mut perms = std::fs::metadata(&fake_br).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_br, perms).unwrap();
+
+        set_hermetic_probe_path(tmp_dir.path());
+
+        // Config set to bead, but only br available - should return None
+        let result = detect_bead_cli_backend(BeadBackend::Bead, None);
+
+        assert!(
+            result.is_none(),
+            "should return None when config backend not available"
+        );
+    }
+
+    #[serial]
+    #[test]
+    fn test_detect_bead_cli_backend_config_br_when_only_bead_available() {
+        use crate::config::BeadBackend;
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let fake_bead = tmp_dir.path().join("bead");
+
+        std::fs::write(
+            &fake_bead,
+            r#"#!/bin/sh
+echo "bead 0.26.0"
+"#,
+        )
+        .unwrap();
+
+        let mut perms = std::fs::metadata(&fake_bead).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_bead, perms).unwrap();
+
+        set_hermetic_probe_path(tmp_dir.path());
+
+        // Config set to br, but only bead available - should return None
+        let result = detect_bead_cli_backend(BeadBackend::Br, None);
+
+        assert!(
+            result.is_none(),
+            "should return None when config backend not available"
+        );
+    }
+
+    #[serial]
+    #[test]
+    fn test_detect_bead_cli_backend_priority_order_auto() {
+        use crate::config::BeadBackend;
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+
+        // Create all three CLIs
+        for (name, output) in [
+            ("bead", "bead 0.26.0"),
+            ("bf", "bf 0.4.1"),
+            ("br", "br (deprecated)"),
+        ] {
+            let path = tmp_dir.path().join(name);
+            std::fs::write(
+                &path,
+                format!(
+                    r#"#!/bin/sh
+echo "{}"
+"#,
+                    output
+                ),
+            )
+            .unwrap();
+            let mut perms = std::fs::metadata(&path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&path, perms).unwrap();
+        }
+
+        set_hermetic_probe_path(tmp_dir.path());
+
+        // Auto should prioritize bead over bf and br
+        let result = detect_bead_cli_backend(BeadBackend::Auto, None);
+
+        assert!(result.is_some(), "should detect a CLI");
+        let detection = result.unwrap();
+        assert_eq!(detection.backend, "bead-rs", "should prioritize bead");
+        assert_eq!(detection.cli_path, tmp_dir.path().join("bead"));
+    }
+
+    #[serial]
+    #[test]
+    fn test_detect_bead_cli_backend_fallback_from_explicit_path_not_found() {
+        use crate::config::BeadBackend;
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let fake_bead = tmp_dir.path().join("bead");
+
+        std::fs::write(
+            &fake_bead,
+            r#"#!/bin/sh
+echo "bead 0.26.0"
+"#,
+        )
+        .unwrap();
+
+        let mut perms = std::fs::metadata(&fake_bead).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_bead, perms).unwrap();
+
+        set_hermetic_probe_path(tmp_dir.path());
+
+        // Explicit path that doesn't exist - should fall back to auto-detect
+        let nonexistent = tmp_dir.path().join("nonexistent-bead");
+        let result = detect_bead_cli_backend(BeadBackend::Auto, Some(&nonexistent));
+
+        // Should fall back to auto-detection and find bead
+        assert!(result.is_some(), "should fall back to auto-detection");
+        let detection = result.unwrap();
+        assert_eq!(detection.backend, "bead-rs");
+        assert_eq!(detection.cli_path, fake_bead);
     }
 }
