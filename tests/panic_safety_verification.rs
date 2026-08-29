@@ -24,9 +24,9 @@
 use needle::commit_hook::{inject_bead_id_trailer, validate_commit};
 use needle::panic_capture::install_panic_hook;
 use needle::resolve::Resolver;
-use needle::validation::predispatch::{clear, record, PreDispatch};
+use needle::validation::predispatch::{clear, record};
 use needle::validation::{GateConfig, RunIn, ValidationGate};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
@@ -242,7 +242,7 @@ async fn predispatch_clear_is_idempotent() {
     clear(&repo_path, &bead_id).await;
 
     // If we reach here without panicking, the test passes
-    assert!(true);
+    // Test completed successfully without panic
 }
 
 #[tokio::test]
@@ -255,7 +255,7 @@ async fn predispatch_clear_handles_nonexistent_path() {
     // Should not panic even with completely invalid path
     clear(&nonexistent_path, &bead_id).await;
 
-    assert!(true);
+    // Test completed successfully without panic
 }
 
 #[tokio::test]
@@ -285,7 +285,7 @@ async fn predispatch_clear_concurrent_safe() {
         handle.await.expect("task failed");
     }
 
-    assert!(true);
+    // Test completed successfully without panic
 }
 
 #[tokio::test]
@@ -464,7 +464,7 @@ async fn resolver_handles_invalid_json_without_panic() {
         }
     }
 
-    assert!(true);
+    // Test completed successfully without panic
 }
 
 #[tokio::test]
@@ -516,7 +516,7 @@ async fn resolver_handles_timeout_without_panic() {
         }
     }
 
-    assert!(true);
+    // Test completed successfully without panic
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -625,7 +625,7 @@ async fn validation_gate_handles_timeout_without_panic() {
         }
     }
 
-    assert!(true);
+    // Test completed successfully without panic
 }
 
 #[tokio::test]
@@ -684,7 +684,7 @@ fn panic_hook_installation_is_idempotent() {
     install_panic_hook();
 
     // Should not have panicked
-    assert!(true);
+    // Test completed successfully without panic
 }
 
 #[test]
@@ -697,7 +697,7 @@ fn panic_hook_does_not_panic_on_env_var_errors() {
     install_panic_hook();
 
     // Should not panic even with invalid env var
-    assert!(true);
+    // Test completed successfully without panic
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -769,7 +769,7 @@ async fn concurrent_snapshot_operations_are_safe() {
 
         let handle = tokio::spawn(async move {
             let repo = repo_clone.lock().await;
-            let _result = record(&repo, &bead_clone, &store_clone).await;
+            let _result = record(&repo, &bead_clone, store_clone.as_ref()).await;
         });
 
         handles.push(handle);
@@ -795,7 +795,7 @@ async fn concurrent_snapshot_operations_are_safe() {
     }
 
     // If we reach here without panicking, the test passes
-    assert!(true);
+    // Test completed successfully without panic
 }
 
 #[tokio::test]
@@ -857,7 +857,7 @@ async fn concurrent_validation_gates_are_safe() {
     }
 
     // If we reach here without panicking, the test passes
-    assert!(true);
+    // Test completed successfully without panic
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -873,7 +873,7 @@ async fn cleanup_happens_on_error_paths() {
     let bead_id = needle::types::BeadId::from("needle-test-cleanup-on-error");
 
     // Create a snapshot
-    let result = record(&repo_path, &bead_id, &MockBeadStore {}).await;
+    let _result = record(&repo_path, &bead_id, &MockBeadStore {}).await;
 
     // Clear should work regardless of whether record succeeded or failed
     clear(&repo_path, &bead_id).await;
@@ -881,7 +881,7 @@ async fn cleanup_happens_on_error_paths() {
     // Double-clear should also be safe (idempotent cleanup)
     clear(&repo_path, &bead_id).await;
 
-    assert!(true);
+    // Test completed successfully without panic
 }
 
 #[tokio::test]
@@ -898,5 +898,5 @@ async fn error_in_cleanup_does_not_cause_panic() {
     clear(&nonexistent_path, &bead_id).await;
     clear(&nonexistent_path, &bead_id).await;
 
-    assert!(true);
+    // Test completed successfully without panic
 }

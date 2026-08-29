@@ -206,6 +206,7 @@ fn sync_flush_only_rejects_profile_flag() {
 
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
+    let home = root.path().join("home");
     let bin_dir = root.path().join("bin");
     fs::create_dir_all(&workspace).unwrap();
     fs::create_dir_all(&bin_dir).unwrap();
@@ -220,14 +221,23 @@ fn sync_flush_only_rejects_profile_flag() {
         fs::set_permissions(&bead, permissions).unwrap();
     }
 
-    // Initialize a bead-rs workspace
-    run(bead_command(&bead, &workspace).args(["init", "--prefix", "test"]));
+    // Initialize a bead-rs workspace with isolated HOME and skip foreign workspace
+    let mut cmd = bead_command(&bead, &workspace);
+    cmd.args(["--skip-foreign-workspace", "init", "--prefix", "test"]);
+    cmd.env("HOME", &home);
+    run(&mut cmd);
 
     // Test 1: --profile is rejected on default forensic path (no --output)
-    let output = bead_command(&bead, &workspace)
-        .args(["sync", "flush-only", "--profile", "native-v1"])
-        .output()
-        .expect("failed to execute bead command");
+    let mut cmd = bead_command(&bead, &workspace);
+    cmd.args([
+        "--skip-foreign-workspace",
+        "sync",
+        "flush-only",
+        "--profile",
+        "native-v1",
+    ]);
+    cmd.env("HOME", &home);
+    let output = cmd.output().expect("failed to execute bead command");
     assert!(
         !output.status.success(),
         "flush-only with --profile should fail"
@@ -240,17 +250,18 @@ fn sync_flush_only_rejects_profile_flag() {
     );
 
     // Test 2: --profile is rejected when using --output
-    let output = bead_command(&bead, &workspace)
-        .args([
-            "sync",
-            "flush-only",
-            "--output",
-            root.path().join("test.jsonl").to_str().unwrap(),
-            "--profile",
-            "native-v1",
-        ])
-        .output()
-        .expect("failed to execute bead command");
+    let mut cmd = bead_command(&bead, &workspace);
+    cmd.args([
+        "--skip-foreign-workspace",
+        "sync",
+        "flush-only",
+        "--output",
+        root.path().join("test.jsonl").to_str().unwrap(),
+        "--profile",
+        "native-v1",
+    ]);
+    cmd.env("HOME", &home);
+    let output = cmd.output().expect("failed to execute bead command");
     assert!(
         !output.status.success(),
         "flush-only with --output and --profile should fail"
@@ -263,5 +274,8 @@ fn sync_flush_only_rejects_profile_flag() {
     );
 
     // Test 3: flush-only works correctly without --profile
-    run(bead_command(&bead, &workspace).args(["sync", "flush-only"]));
+    let mut cmd = bead_command(&bead, &workspace);
+    cmd.args(["--skip-foreign-workspace", "sync", "flush-only"]);
+    cmd.env("HOME", &home);
+    run(&mut cmd);
 }

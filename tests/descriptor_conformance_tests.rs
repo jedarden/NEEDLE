@@ -117,7 +117,7 @@ printf '%s\n' "$@" >> invocations.log
 "#,
     );
     let store =
-        CliBeadStore::new(backend, binary, root.to_path_buf(), None, None, None).unwrap();
+        CliBeadStore::new(backend, binary, root.path().to_path_buf(), None, None, None).unwrap();
 
     let _result = store.claim(&BeadId::from("test-1"), "worker-a").await;
 
@@ -268,7 +268,8 @@ async fn bead_forge_release_uses_batch_operation() {
 printf '%s\n' "$@" >> invocations.log
 "#,
     );
-    let store = CliBeadStore::new(backend, binary, root.to_path_buf(), None, None, None).unwrap();
+    let store =
+        CliBeadStore::new(backend, binary, root.path().to_path_buf(), None, None, None).unwrap();
 
     store.release(&BeadId::from("bf-1")).await.unwrap();
 
@@ -375,7 +376,7 @@ async fn dependency_operations_maintain_dialect_specific_order() {
     let binary = root.path().join("mock-cli-forge");
     executable(&binary, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n");
     let forge_store =
-        CliBeadStore::new(backend, binary, root.to_path_buf(), None, None, None).unwrap();
+        CliBeadStore::new(backend, binary, root.path().to_path_buf(), None, None, None).unwrap();
     let forge_argv = forge_store.render_operation("dep_add", &values).unwrap();
     assert!(
         forge_argv
@@ -514,7 +515,8 @@ printf '%s\n' "$@" >> invocations.log
 printf '{"id":"test-1","title":"Test","description":null,"priority":2,"status":"open","assignee":null,"labels":[],"source_repo":"","dependencies":[],"dependents":[],"comments":[],"created_at":"2026-08-12T00:00:00Z","updated_at":"2026-08-12T00:00:00Z"}'
 "#,
     );
-    let store = CliBeadStore::new(backend, binary, root.to_path_buf(), None, None, None).unwrap();
+    let store =
+        CliBeadStore::new(backend, binary, root.path().to_path_buf(), None, None, None).unwrap();
 
     store.show(&BeadId::from("test-1")).await.unwrap();
 

@@ -907,6 +907,7 @@ impl Resolver {
 
     /// Normalize backend name for comparison.
     /// Maps short names to descriptor names: "bead" -> "bead-rs", "bf" -> "bead-forge"
+    #[allow(dead_code)]
     fn normalize_backend_name(&self, name: &str) -> String {
         match name {
             "bead" => "bead-rs".to_string(),
@@ -2791,7 +2792,7 @@ echo "wrong-identity 1.0.0"
                 );
 
                 // Error message should not be empty or whitespace-only
-                assert!(msg.trim().len() > 0, "Error message should not be empty");
+                assert!(!msg.trim().is_empty(), "Error message should not be empty");
 
                 // Error message should use actionable language ("claims", "expected", "normalized")
                 assert!(
