@@ -3273,7 +3273,7 @@ impl Worker {
                         outcome: "unknown".to_string(),
                         operation: "handle".to_string(),
                         error: e.to_string(),
-                    }, Utc::now());
+                    }, chrono::Utc::now());
                     Err(anyhow::anyhow!("handler failed: {}", e))
                 }
                 Err(_) => {
@@ -3293,7 +3293,7 @@ impl Worker {
                         outcome: "unknown".to_string(),
                         operation: "handle".to_string(),
                         error: "timeout after 60s".to_string(),
-                    }, Utc::now());
+                    }, chrono::Utc::now());
                     Err(anyhow::anyhow!("handler timed out after 60s"))
                 }
             }
@@ -3341,7 +3341,7 @@ impl Worker {
                     outcome: "unknown".to_string(),
                     operation: "handling_state".to_string(),
                     error: "critical timeout after 90s".to_string(),
-                }, Utc::now());
+                }, chrono::Utc::now());
                 return BeadAction::Errored;
             }
         };
@@ -3421,10 +3421,13 @@ impl Worker {
         // still alive. This helps detect hangs in post-handler code (commit hook,
         // mitosis, state transitions) that occur after the handler finishes.
         // Use emit_try_lock() to avoid blocking if telemetry writer is stuck.
-        let _ = self.telemetry.emit_try_lock(EventKind::HeartbeatEmitted {
-            bead_id: Some(bead.id.clone()),
-            state: "HANDLING_POST_HANDLER".to_string(),
-        });
+        let _ = self.telemetry.emit_try_lock(
+            EventKind::HeartbeatEmitted {
+                bead_id: Some(bead.id.clone()),
+                state: "HANDLING_POST_HANDLER".to_string(),
+            },
+            chrono::Utc::now(),
+        );
 
         // Evaluate for mitosis after failure — the bead has already been
         // released and failure count incremented by the outcome handler.
@@ -4050,9 +4053,16 @@ impl Worker {
                 tracing::warn!(error = %e, "canary promotion failed");
                 return Ok(());
             }
+            let timestamp = chrono::Utc::now();
+            tracing::debug!(
+                event_type = "canary.promoted",
+                timestamp = %timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+                hash = %hash,
+                "captured timestamp for canary promoted telemetry event"
+            );
             let _ = self
                 .telemetry
-                .emit(EventKind::CanaryPromoted { hash }, chrono::Utc::now());
+                .emit(EventKind::CanaryPromoted { hash }, timestamp);
             tracing::info!("promotion complete — fleet will hot-reload on next cycle");
         } else {
             let reason = format!(
@@ -4063,9 +4073,16 @@ impl Worker {
             if let Err(e) = runner.reject() {
                 tracing::warn!(error = %e, "canary reject failed");
             }
+            let timestamp = chrono::Utc::now();
+            tracing::debug!(
+                event_type = "canary.rejected",
+                timestamp = %timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+                reason = %reason,
+                "captured timestamp for canary rejected telemetry event"
+            );
             let _ = self
                 .telemetry
-                .emit(EventKind::CanaryRejected { reason }, chrono::Utc::now());
+                .emit(EventKind::CanaryRejected { reason }, timestamp);
         }
 
         Ok(())
@@ -4205,9 +4222,15 @@ impl Worker {
                 path = %path.display(),
                 "global configuration change detected at cycle boundary"
             );
+            let timestamp = Utc::now();
+            tracing::debug!(
+                event_type = "config.reload.detected",
+                timestamp = %timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+                "captured timestamp for config reload detected telemetry event"
+            );
             if let Err(error) = self
                 .telemetry
-                .emit_try_lock(EventKind::ConfigReloadDetected)
+                .emit_try_lock(EventKind::ConfigReloadDetected, timestamp)
             {
                 tracing::warn!(error = %error, "failed to emit config.reload.detected");
             }
@@ -4261,12 +4284,12 @@ impl Worker {
                         reload_generation = self.config_reload_generation,
                         "applied configuration at cycle boundary"
                     );
-                    if let Err(error) =
-                        self.telemetry
-                            .emit_try_lock(EventKind::ConfigReloadApplied {
-                                changed_keys: changed_keys.clone(),
-                            })
-                    {
+                    if let Err(error) = self.telemetry.emit_try_lock(
+                        EventKind::ConfigReloadApplied {
+                            changed_keys: changed_keys.clone(),
+                        },
+                        chrono::Utc::now(),
+                    ) {
                         tracing::warn!(error = %error, "failed to emit config.reload.applied");
                     }
                     // Update registry to reflect new reload generation
@@ -5600,11 +5623,14 @@ impl Worker {
         // State transitions must not block — if telemetry is wedged, we skip
         // the event and continue anyway. The heartbeat shared state is always
         // updated below, so monitoring can detect the new state via heartbeat files.
-        let _ = self.telemetry.emit_try_lock(EventKind::StateTransition {
-            from,
-            to: to.clone(),
-            entered_at: self.handling_state_entered_at,
-        });
+        let _ = self.telemetry.emit_try_lock(
+            EventKind::StateTransition {
+                from,
+                to: to.clone(),
+                entered_at: self.handling_state_entered_at,
+            },
+            chrono::Utc::now(),
+        );
 
         // Update heartbeat shared state with the new worker state.
         let current_bead_id = self.current_bead.as_ref().map(|b| &b.id);
@@ -6052,7 +6078,10 @@ fn report_restart_required_config(telemetry: &Telemetry, keys: Vec<String>) {
         keys = ?keys,
         "configuration changes require a worker restart; keeping the running values"
     );
-    if let Err(error) = telemetry.emit_try_lock(EventKind::ConfigReloadRestartRequired { keys }) {
+    if let Err(error) = telemetry.emit_try_lock(
+        EventKind::ConfigReloadRestartRequired { keys },
+        chrono::Utc::now(),
+    ) {
         tracing::warn!(error = %error, "failed to emit config.reload.restart_required");
     }
 }

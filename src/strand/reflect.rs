@@ -397,12 +397,15 @@ impl ReflectStrand {
                     threshold = self.config.min_beads_since_last,
                     "reflect: below minimum bead threshold, skipping"
                 );
-                let _ = self.telemetry.emit(EventKind::ReflectSkipped {
-                    reason: format!(
-                        "only {} beads closed since last consolidation (need {})",
-                        beads_since, self.config.min_beads_since_last
-                    ),
-                });
+                let _ = self.telemetry.emit(
+                    EventKind::ReflectSkipped {
+                        reason: format!(
+                            "only {} beads closed since last consolidation (need {})",
+                            beads_since, self.config.min_beads_since_last
+                        ),
+                    },
+                    Utc::now(),
+                );
                 return Ok(ReflectSummary::default());
             }
 
@@ -415,20 +418,26 @@ impl ReflectStrand {
                         cooldown = self.config.cooldown_hours,
                         "reflect: cooldown not elapsed, skipping"
                     );
-                    let _ = self.telemetry.emit(EventKind::ReflectSkipped {
-                        reason: format!(
-                            "cooldown not elapsed ({}/{}h)",
-                            hours_since, self.config.cooldown_hours
-                        ),
-                    });
+                    let _ = self.telemetry.emit(
+                        EventKind::ReflectSkipped {
+                            reason: format!(
+                                "cooldown not elapsed ({}/{}h)",
+                                hours_since, self.config.cooldown_hours
+                            ),
+                        },
+                        Utc::now(),
+                    );
                     return Ok(ReflectSummary::default());
                 }
             }
         }
 
-        let _ = self.telemetry.emit(EventKind::ReflectStarted {
-            beads_since_last: beads_since,
-        });
+        let _ = self.telemetry.emit(
+            EventKind::ReflectStarted {
+                beads_since_last: beads_since,
+            },
+            chrono::Utc::now(),
+        );
 
         tracing::info!(beads_since, force, "reflect: starting consolidation cycle");
 
@@ -606,10 +615,13 @@ impl ReflectStrand {
                 // Reinforce the most similar entry instead of adding a duplicate.
                 let most_similar_id = similar[0].bead_id.clone();
                 let _ = learnings.reinforce_entry(&most_similar_id);
-                let _ = self.telemetry.emit(EventKind::ReflectLearningDeduplicated {
-                    learning_id: candidate.bead_id.clone(),
-                    existing_entry: most_similar_id,
-                });
+                let _ = self.telemetry.emit(
+                    EventKind::ReflectLearningDeduplicated {
+                        learning_id: candidate.bead_id.clone(),
+                        existing_entry: most_similar_id,
+                    },
+                    chrono::Utc::now(),
+                );
                 continue;
             }
             learnings.add_entry(candidate)?;
@@ -657,12 +669,15 @@ impl ReflectStrand {
         };
         new_state.save(&self.state_dir)?;
 
-        let _ = self.telemetry.emit(EventKind::ReflectConsolidated {
-            learnings_added: summary.learnings_added,
-            learnings_pruned: summary.learnings_pruned,
-            skills_promoted: summary.skills_promoted,
-            beads_processed: summary.beads_processed,
-        });
+        let _ = self.telemetry.emit(
+            EventKind::ReflectConsolidated {
+                learnings_added: summary.learnings_added,
+                learnings_pruned: summary.learnings_pruned,
+                skills_promoted: summary.skills_promoted,
+                beads_processed: summary.beads_processed,
+            },
+            chrono::Utc::now(),
+        );
 
         tracing::info!(
             learnings_added = summary.learnings_added,
@@ -812,12 +827,15 @@ impl ReflectStrand {
 
             if global.promote(entry.clone(), self.max_global_learnings) {
                 promoted += 1;
-                let _ = self.telemetry.emit(EventKind::ReflectLearningPromoted {
-                    learning_id: entry.bead_id.clone(),
-                    target_path: self.global_learnings_path.display().to_string(),
-                    workspace_count: self.known_workspaces.len() + 1,
-                    is_decision: entry.decision_context.is_some(),
-                });
+                let _ = self.telemetry.emit(
+                    EventKind::ReflectLearningPromoted {
+                        learning_id: entry.bead_id.clone(),
+                        target_path: self.global_learnings_path.display().to_string(),
+                        workspace_count: self.known_workspaces.len() + 1,
+                        is_decision: entry.decision_context.is_some(),
+                    },
+                    chrono::Utc::now(),
+                );
                 tracing::info!(
                     bead_id = %entry.bead_id,
                     observation = %entry.observation,
@@ -918,11 +936,14 @@ impl ReflectStrand {
                     } else {
                         self.workspace.join("CLAUDE.md").display().to_string()
                     };
-                    let _ = self.telemetry.emit(EventKind::ReflectClaudeMdWritten {
-                        path: target_path,
-                        entries_added: 1,
-                        entries_updated: 0,
-                    });
+                    let _ = self.telemetry.emit(
+                        EventKind::ReflectClaudeMdWritten {
+                            path: target_path,
+                            entries_added: 1,
+                            entries_updated: 0,
+                        },
+                        chrono::Utc::now(),
+                    );
                     tracing::info!(
                         bead_id = %entry.bead_id,
                         observation = %entry.observation,
@@ -1029,11 +1050,14 @@ impl ReflectStrand {
             "reflect: discovered recent transcripts"
         );
 
-        let _ = self.telemetry.emit(EventKind::ReflectTranscriptsRead {
-            sessions_count: transcripts.len(),
-            entries_count: transcripts.iter().map(|t| t.actions.len()).sum(),
-            parse_errors: 0, // TODO: track parse errors if discovery reports them
-        });
+        let _ = self.telemetry.emit(
+            EventKind::ReflectTranscriptsRead {
+                sessions_count: transcripts.len(),
+                entries_count: transcripts.iter().map(|t| t.actions.len()).sum(),
+                parse_errors: 0, // TODO: track parse errors if discovery reports them
+            },
+            chrono::Utc::now(),
+        );
 
         let mut entries: Vec<LearningEntry> = Vec::new();
         let mut tool_usage_counts: HashMap<String, usize> = HashMap::new();
@@ -1074,11 +1098,14 @@ impl ReflectStrand {
                 );
                 entries.push(entry);
 
-                let _ = self.telemetry.emit(EventKind::ReflectDecisionExtracted {
-                    bead_id: bead_id.clone(),
-                    has_alternatives: !decision.alternatives.is_empty(),
-                    rationale_length: decision.rationale.len(),
-                });
+                let _ = self.telemetry.emit(
+                    EventKind::ReflectDecisionExtracted {
+                        bead_id: bead_id.clone(),
+                        has_alternatives: !decision.alternatives.is_empty(),
+                        rationale_length: decision.rationale.len(),
+                    },
+                    chrono::Utc::now(),
+                );
 
                 tracing::debug!(
                     decision = %decision.decision,
@@ -1220,22 +1247,31 @@ impl ReflectStrand {
         transcripts: &[ParsedTranscript],
     ) -> Result<(usize, Vec<LearningEntry>)> {
         if !self.config.drift_enabled {
-            let _ = self.telemetry.emit(EventKind::DriftDetectionSkipped {
-                reason: "drift detection disabled in config".to_string(),
-            });
+            let _ = self.telemetry.emit(
+                EventKind::DriftDetectionSkipped {
+                    reason: "drift detection disabled in config".to_string(),
+                },
+                chrono::Utc::now(),
+            );
             return Ok((0, Vec::new()));
         }
 
         if transcripts.len() < 2 {
-            let _ = self.telemetry.emit(EventKind::DriftDetectionSkipped {
-                reason: format!("need at least 2 sessions, got {}", transcripts.len()),
-            });
+            let _ = self.telemetry.emit(
+                EventKind::DriftDetectionSkipped {
+                    reason: format!("need at least 2 sessions, got {}", transcripts.len()),
+                },
+                chrono::Utc::now(),
+            );
             return Ok((0, Vec::new()));
         }
 
-        let _ = self.telemetry.emit(EventKind::DriftDetectionStarted {
-            sessions_analyzed: transcripts.len(),
-        });
+        let _ = self.telemetry.emit(
+            EventKind::DriftDetectionStarted {
+                sessions_analyzed: transcripts.len(),
+            },
+            chrono::Utc::now(),
+        );
 
         // Create drift detector with configured similarity threshold
         let detector = DriftDetector::new(self.config.drift_similarity_threshold);
@@ -1255,12 +1291,15 @@ impl ReflectStrand {
             .filter(|c| c.category == crate::drift::DriftCategory::Inconsistent)
             .count();
 
-        let _ = self.telemetry.emit(EventKind::DriftDetectionCompleted {
-            sessions_analyzed: report.sessions_analyzed,
-            clusters_found: report.clusters_detected,
-            evolved_count,
-            inconsistent_count,
-        });
+        let _ = self.telemetry.emit(
+            EventKind::DriftDetectionCompleted {
+                sessions_analyzed: report.sessions_analyzed,
+                clusters_found: report.clusters_detected,
+                evolved_count,
+                inconsistent_count,
+            },
+            chrono::Utc::now(),
+        );
 
         // Emit ReflectDriftDetected for each cluster
         for cluster in &report.clusters {
@@ -1269,11 +1308,14 @@ impl ReflectStrand {
                 .iter()
                 .map(|s| s.session_id.clone())
                 .collect();
-            let _ = self.telemetry.emit(EventKind::ReflectDriftDetected {
-                cluster_size: cluster.sessions.len(),
-                category: cluster.category.as_str().to_string(),
-                sessions,
-            });
+            let _ = self.telemetry.emit(
+                EventKind::ReflectDriftDetected {
+                    cluster_size: cluster.sessions.len(),
+                    category: cluster.category.as_str().to_string(),
+                    sessions,
+                },
+                chrono::Utc::now(),
+            );
         }
 
         // Extract learning entries from drift clusters
@@ -1288,10 +1330,13 @@ impl ReflectStrand {
                 }
                 crate::drift::DriftCategory::Unknown => "divergent-approach-pattern".to_string(),
             };
-            let _ = self.telemetry.emit(EventKind::ReflectDriftPromoted {
-                pattern: pattern.clone(),
-                category: cluster.category.as_str().to_string(),
-            });
+            let _ = self.telemetry.emit(
+                EventKind::ReflectDriftPromoted {
+                    pattern: pattern.clone(),
+                    category: cluster.category.as_str().to_string(),
+                },
+                chrono::Utc::now(),
+            );
         }
 
         // Write drift report if any clusters were found
@@ -1302,10 +1347,21 @@ impl ReflectStrand {
 
             report.write(&report_path)?;
 
-            let _ = self.telemetry.emit(EventKind::DriftReportWritten {
-                report_path: report_path.display().to_string(),
-                clusters: report.clusters_detected,
-            });
+            let telemetry_timestamp = chrono::Utc::now();
+            tracing::debug!(
+                event_type = "drift.report.written",
+                timestamp = %telemetry_timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+                report_path = %report_path.display(),
+                clusters = report.clusters_detected,
+                "captured timestamp for drift report written telemetry event"
+            );
+            let _ = self.telemetry.emit(
+                EventKind::DriftReportWritten {
+                    report_path: report_path.display().to_string(),
+                    clusters: report.clusters_detected,
+                },
+                telemetry_timestamp,
+            );
 
             tracing::info!(
                 report_path = %report_path.display(),
@@ -1325,22 +1381,31 @@ impl ReflectStrand {
     /// Returns the number of decisions detected.
     fn detect_decisions(&self, transcripts: &[ParsedTranscript]) -> Result<usize> {
         if !self.config.adr_enabled {
-            let _ = self.telemetry.emit(EventKind::DecisionDetectionSkipped {
-                reason: "ADR decision extraction disabled in config".to_string(),
-            });
+            let _ = self.telemetry.emit(
+                EventKind::DecisionDetectionSkipped {
+                    reason: "ADR decision extraction disabled in config".to_string(),
+                },
+                chrono::Utc::now(),
+            );
             return Ok(0);
         }
 
         if transcripts.is_empty() {
-            let _ = self.telemetry.emit(EventKind::DecisionDetectionSkipped {
-                reason: "no transcripts to analyze".to_string(),
-            });
+            let _ = self.telemetry.emit(
+                EventKind::DecisionDetectionSkipped {
+                    reason: "no transcripts to analyze".to_string(),
+                },
+                chrono::Utc::now(),
+            );
             return Ok(0);
         }
 
-        let _ = self.telemetry.emit(EventKind::DecisionDetectionStarted {
-            sessions_analyzed: transcripts.len(),
-        });
+        let _ = self.telemetry.emit(
+            EventKind::DecisionDetectionStarted {
+                sessions_analyzed: transcripts.len(),
+            },
+            chrono::Utc::now(),
+        );
 
         // Create decision detector
         let detector = crate::decision::DecisionDetector::new();
@@ -1348,10 +1413,13 @@ impl ReflectStrand {
         // Detect decisions
         let analysis = detector.analyze(transcripts)?;
 
-        let _ = self.telemetry.emit(EventKind::DecisionDetectionCompleted {
-            sessions_analyzed: analysis.transcripts_analyzed,
-            decisions_found: analysis.decisions.len(),
-        });
+        let _ = self.telemetry.emit(
+            EventKind::DecisionDetectionCompleted {
+                sessions_analyzed: analysis.transcripts_analyzed,
+                decisions_found: analysis.decisions.len(),
+            },
+            chrono::Utc::now(),
+        );
 
         // Write ADR records if any decisions were found
         if !analysis.decisions.is_empty() {
@@ -1373,10 +1441,13 @@ impl ReflectStrand {
                     .bead_id
                     .clone()
                     .unwrap_or_else(|| BeadId::from(format!("session-{}", decision.session_id)));
-                let _ = self.telemetry.emit(EventKind::ReflectAdrCreated {
-                    bead_id,
-                    path: path.display().to_string(),
-                });
+                let _ = self.telemetry.emit(
+                    EventKind::ReflectAdrCreated {
+                        bead_id,
+                        path: path.display().to_string(),
+                    },
+                    chrono::Utc::now(),
+                );
 
                 tracing::debug!(
                     decision_id = %decision.id,

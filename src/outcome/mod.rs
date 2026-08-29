@@ -108,10 +108,13 @@ impl OutcomeHandler {
 
         // Flush local writes to JSONL before the release happens in apply_bead_action().
         // Emit heartbeat before br call to track where hang occurs.
-        let _ = self.telemetry.emit_try_lock(EventKind::HeartbeatEmitted {
-            bead_id: Some(bead.id.clone()),
-            state: "HANDLING_FLUSH".to_string(),
-        });
+        let _ = self.telemetry.emit_try_lock(
+            EventKind::HeartbeatEmitted {
+                bead_id: Some(bead.id.clone()),
+                state: "HANDLING_FLUSH".to_string(),
+            },
+            Utc::now(),
+        );
 
         match self.timeout_op(|| store.flush(), "flush").await {
             Ok(Some(())) => {
@@ -120,10 +123,13 @@ impl OutcomeHandler {
                     "flushed local changes to JSONL before release"
                 );
                 // Emit heartbeat after successful flush.
-                let _ = self.telemetry.emit_try_lock(EventKind::HeartbeatEmitted {
-                    bead_id: Some(bead.id.clone()),
-                    state: "HANDLING_FLUSH_DONE".to_string(),
-                });
+                let _ = self.telemetry.emit_try_lock(
+                    EventKind::HeartbeatEmitted {
+                        bead_id: Some(bead.id.clone()),
+                        state: "HANDLING_FLUSH_DONE".to_string(),
+                    },
+                    Utc::now(),
+                );
             }
             Ok(None) => {
                 tracing::warn!(
@@ -252,11 +258,14 @@ impl OutcomeHandler {
 
         // Use emit_try_lock() to avoid blocking if telemetry writer is stuck.
         // This prevents worker hang in HANDLING state when telemetry is wedged.
-        let _ = self.telemetry.emit_try_lock(EventKind::OutcomeClassified {
-            bead_id: bead.id.clone(),
-            outcome: outcome.as_str().to_string(),
-            exit_code: output.exit_code,
-        });
+        let _ = self.telemetry.emit_try_lock(
+            EventKind::OutcomeClassified {
+                bead_id: bead.id.clone(),
+                outcome: outcome.as_str().to_string(),
+                exit_code: output.exit_code,
+            },
+            Utc::now(),
+        );
 
         let (bead_action, telemetry_events) = match outcome.clone() {
             Outcome::Success => self.handle_success(store, bead, gate_report).await?,
@@ -282,15 +291,33 @@ impl OutcomeHandler {
         // telemetry sink so they appear in the JSONL log.
         // Use emit_try_lock() to avoid blocking if telemetry writer is stuck.
         for event in &telemetry_events {
-            let _ = self.telemetry.emit_try_lock(event.clone());
+            let timestamp = Utc::now();
+            tracing::debug!(
+                event_type = %event.event_type(),
+                timestamp = %timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+                "captured timestamp for sub-handler telemetry event"
+            );
+            let _ = self.telemetry.emit_try_lock(event.clone(), timestamp);
         }
 
         // Use emit_try_lock() to avoid blocking if telemetry writer is stuck.
-        let _ = self.telemetry.emit_try_lock(EventKind::OutcomeHandled {
-            bead_id: bead.id.clone(),
-            outcome: outcome.as_str().to_string(),
-            action: bead_action.to_string(),
-        });
+        let timestamp = Utc::now();
+        tracing::debug!(
+            event_type = "outcome.handled",
+            timestamp = %timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+            bead_id = %bead.id,
+            outcome = %outcome.as_str(),
+            action = %bead_action.to_string(),
+            "captured timestamp for outcome handled telemetry event"
+        );
+        let _ = self.telemetry.emit_try_lock(
+            EventKind::OutcomeHandled {
+                bead_id: bead.id.clone(),
+                outcome: outcome.as_str().to_string(),
+                action: bead_action.to_string(),
+            },
+            timestamp,
+        );
 
         // Set action as span attribute
         tracing::Span::current().record("needle.outcome.action", bead_action.to_string());
@@ -372,14 +399,17 @@ impl OutcomeHandler {
                     "outcome handler timed out, returning early to allow worker recovery"
                 );
                 // Emit a timeout event for observability.
-                let _ = telemetry.emit(EventKind::WorkerHandlingTimeout {
-                    bead_id: bead_id.clone(),
-                    outcome: classify(output.exit_code, was_interrupted, false)
-                        .as_str()
-                        .to_string(),
-                    operation: "handle".to_string(),
-                    error: format!("timeout after {}s", timeout_secs),
-                });
+                let _ = telemetry.emit(
+                    EventKind::WorkerHandlingTimeout {
+                        bead_id: bead_id.clone(),
+                        outcome: classify(output.exit_code, was_interrupted, false)
+                            .as_str()
+                            .to_string(),
+                        operation: "handle".to_string(),
+                        error: format!("timeout after {}s", timeout_secs),
+                    },
+                    chrono::Utc::now(),
+                );
                 // Return an explicit error action. The worker must apply it,
                 // which runs release recovery before the cycle can advance.
                 // Verification never ran, so conservatively treat as unverified.
@@ -416,10 +446,13 @@ impl OutcomeHandler {
         // If gates ran and passed, emit telemetry.
         if let Some(report) = gate_report {
             let gates_run = report.results.len() as u32;
-            self.telemetry.emit(EventKind::VerificationPassed {
-                bead_id: bead.id.clone(),
-                gates_run,
-            })?;
+            self.telemetry.emit(
+                EventKind::VerificationPassed {
+                    bead_id: bead.id.clone(),
+                    gates_run,
+                },
+                chrono::Utc::now(),
+            )?;
             tracing::info!(
                 bead_id = %bead.id,
                 gates_run,
@@ -647,12 +680,15 @@ impl OutcomeHandler {
         );
 
         // Emit verification failure telemetry.
-        self.telemetry.emit(EventKind::VerificationFailed {
-            bead_id: bead.id.clone(),
-            command: failed_gate.clone(),
-            exit_code: None,
-            output: reason,
-        })?;
+        self.telemetry.emit(
+            EventKind::VerificationFailed {
+                bead_id: bead.id.clone(),
+                command: failed_gate.clone(),
+                exit_code: None,
+                output: reason,
+            },
+            chrono::Utc::now(),
+        )?;
 
         let mut events = Vec::new();
 

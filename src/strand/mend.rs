@@ -267,14 +267,20 @@ async fn cleanup_in_progress(
 
         match store.release(&bead.id).await {
             Ok(()) => {
-                let _ = telemetry.emit(EventKind::BeadReleased {
-                    bead_id: bead.id.clone(),
-                    reason,
-                });
-                let _ = telemetry.emit(EventKind::StuckReleased {
-                    bead_id: bead.id.clone(),
-                    peer_worker: assignee.clone(),
-                });
+                let _ = telemetry.emit(
+                    EventKind::BeadReleased {
+                        bead_id: bead.id.clone(),
+                        reason,
+                    },
+                    chrono::Utc::now(),
+                );
+                let _ = telemetry.emit(
+                    EventKind::StuckReleased {
+                        bead_id: bead.id.clone(),
+                        peer_worker: assignee.clone(),
+                    },
+                    chrono::Utc::now(),
+                );
                 released += 1;
             }
             Err(e) => {
@@ -283,11 +289,14 @@ async fn cleanup_in_progress(
                     error = %e,
                     "failed to release orphaned in-progress bead"
                 );
-                let _ = telemetry.emit(EventKind::MendBeadReleaseFailed {
-                    bead_id: bead.id.to_string(),
-                    assignee: assignee.clone(),
-                    error: e.to_string(),
-                });
+                let _ = telemetry.emit(
+                    EventKind::MendBeadReleaseFailed {
+                        bead_id: bead.id.to_string(),
+                        assignee: assignee.clone(),
+                        error: e.to_string(),
+                    },
+                    chrono::Utc::now(),
+                );
             }
         }
     }
@@ -621,10 +630,13 @@ impl MendStrand {
 
             match store.clear_assignee(&bead.id).await {
                 Ok(()) => {
-                    let _ = self.telemetry.emit(EventKind::MendStaleAssigneeCleared {
-                        bead_id: bead.id.clone(),
-                        assignee: assignee.clone(),
-                    });
+                    let _ = self.telemetry.emit(
+                        EventKind::MendStaleAssigneeCleared {
+                            bead_id: bead.id.clone(),
+                            assignee: assignee.clone(),
+                        },
+                        chrono::Utc::now(),
+                    );
                     summary.assignees_cleared += 1;
                 }
                 Err(e) => {
@@ -634,11 +646,14 @@ impl MendStrand {
                         error = %e,
                         "failed to clear stale assignee from open bead"
                     );
-                    let _ = self.telemetry.emit(EventKind::MendAssigneeClearFailed {
-                        bead_id: bead.id.to_string(),
-                        assignee: assignee.clone(),
-                        error: e.to_string(),
-                    });
+                    let _ = self.telemetry.emit(
+                        EventKind::MendAssigneeClearFailed {
+                            bead_id: bead.id.to_string(),
+                            assignee: assignee.clone(),
+                            error: e.to_string(),
+                        },
+                        chrono::Utc::now(),
+                    );
                 }
             }
         }
@@ -732,12 +747,13 @@ impl MendStrand {
                         "removed orphaned heartbeat file"
                     );
 
-                    let _ = self
-                        .telemetry
-                        .emit(EventKind::MendOrphanedHeartbeatRemoved {
+                    let _ = self.telemetry.emit(
+                        EventKind::MendOrphanedHeartbeatRemoved {
                             worker_id: worker_key.clone(),
                             age_secs,
-                        });
+                        },
+                        chrono::Utc::now(),
+                    );
 
                     summary.orphaned_heartbeats_removed += 1;
                 }
@@ -820,10 +836,13 @@ impl MendStrand {
                             error = %e,
                             "failed to remove orphaned lock file"
                         );
-                        let _ = self.telemetry.emit(EventKind::MendLockRemoveFailed {
-                            lock_path: path.display().to_string(),
-                            error: e.to_string(),
-                        });
+                        let _ = self.telemetry.emit(
+                            EventKind::MendLockRemoveFailed {
+                                lock_path: path.display().to_string(),
+                                error: e.to_string(),
+                            },
+                            chrono::Utc::now(),
+                        );
                         continue;
                     }
 
@@ -833,10 +852,13 @@ impl MendStrand {
                         "removed orphaned lock file"
                     );
 
-                    let _ = self.telemetry.emit(EventKind::MendOrphanedLockRemoved {
-                        lock_path: path.display().to_string(),
-                        age_secs,
-                    });
+                    let _ = self.telemetry.emit(
+                        EventKind::MendOrphanedLockRemoved {
+                            lock_path: path.display().to_string(),
+                            age_secs,
+                        },
+                        chrono::Utc::now(),
+                    );
 
                     summary.locks_removed += 1;
                 }
@@ -923,10 +945,13 @@ impl MendStrand {
                     match store.remove_dependency(&bead.id, &dep.id).await {
                         Ok(()) => {
                             // Emit telemetry for the removed dependency.
-                            let _ = self.telemetry.emit(EventKind::MendDependencyRemoved {
-                                bead_id: bead.id.clone(),
-                                blocker_id: dep.id.clone(),
-                            });
+                            let _ = self.telemetry.emit(
+                                EventKind::MendDependencyRemoved {
+                                    bead_id: bead.id.clone(),
+                                    blocker_id: dep.id.clone(),
+                                },
+                                chrono::Utc::now(),
+                            );
                             summary.deps_cleaned += 1;
                         }
                         Err(e) => {
@@ -936,11 +961,14 @@ impl MendStrand {
                                 error = %e,
                                 "failed to remove stale dependency link"
                             );
-                            let _ = self.telemetry.emit(EventKind::MendDependencyCleanupFailed {
-                                bead_id: bead.id.to_string(),
-                                blocker_id: dep.id.to_string(),
-                                error: e.to_string(),
-                            });
+                            let _ = self.telemetry.emit(
+                                EventKind::MendDependencyCleanupFailed {
+                                    bead_id: bead.id.to_string(),
+                                    blocker_id: dep.id.to_string(),
+                                    error: e.to_string(),
+                                },
+                                chrono::Utc::now(),
+                            );
                         }
                     }
                 }
@@ -997,10 +1025,13 @@ impl MendStrand {
                         "removed dead worker from registry"
                     );
 
-                    let _ = self.telemetry.emit(EventKind::MendWorkerDeregistered {
-                        worker_id: entry.id.clone(),
-                        pid: entry.pid,
-                    });
+                    let _ = self.telemetry.emit(
+                        EventKind::MendWorkerDeregistered {
+                            worker_id: entry.id.clone(),
+                            pid: entry.pid,
+                        },
+                        chrono::Utc::now(),
+                    );
 
                     summary.workers_deregistered += 1;
                 }
@@ -1150,10 +1181,13 @@ impl MendStrand {
                 );
                 summary.zero_activity_logs_cleaned += 1;
 
-                let _ = self.telemetry.emit(EventKind::MendZeroActivityLogCleaned {
-                    worker_id: worker_id.clone().unwrap_or_else(|| "unknown".to_string()),
-                    log_path: path.display().to_string(),
-                });
+                let _ = self.telemetry.emit(
+                    EventKind::MendZeroActivityLogCleaned {
+                        worker_id: worker_id.clone().unwrap_or_else(|| "unknown".to_string()),
+                        log_path: path.display().to_string(),
+                    },
+                    chrono::Utc::now(),
+                );
                 continue;
             }
 
@@ -1208,10 +1242,13 @@ impl MendStrand {
                 summary.traces_cleaned = cleanup_summary.traces_deleted;
 
                 if cleanup_summary.traces_pruned > 0 || cleanup_summary.traces_deleted > 0 {
-                    let _ = self.telemetry.emit(EventKind::MendTraceCleanup {
-                        traces_pruned: cleanup_summary.traces_pruned,
-                        traces_deleted: cleanup_summary.traces_deleted,
-                    });
+                    let _ = self.telemetry.emit(
+                        EventKind::MendTraceCleanup {
+                            traces_pruned: cleanup_summary.traces_pruned,
+                            traces_deleted: cleanup_summary.traces_deleted,
+                        },
+                        chrono::Utc::now(),
+                    );
 
                     tracing::info!(
                         traces_pruned = cleanup_summary.traces_pruned,
@@ -1278,10 +1315,13 @@ impl MendStrand {
         }
 
         if summary.learnings_pruned > 0 || summary.learnings_consolidated > 0 {
-            let _ = self.telemetry.emit(EventKind::MendLearningCleanup {
-                pruned: summary.learnings_pruned,
-                consolidated: summary.learnings_consolidated,
-            });
+            let _ = self.telemetry.emit(
+                EventKind::MendLearningCleanup {
+                    pruned: summary.learnings_pruned,
+                    consolidated: summary.learnings_consolidated,
+                },
+                chrono::Utc::now(),
+            );
         }
 
         Ok(())
@@ -1330,11 +1370,14 @@ impl MendStrand {
                     "flagging idle worker (0 beads processed for longer than idle_timeout)"
                 );
 
-                let _ = self.telemetry.emit(EventKind::MendIdleWorkerFlagged {
-                    worker_id: worker.id.clone(),
-                    pid: worker.pid,
-                    age_secs,
-                });
+                let _ = self.telemetry.emit(
+                    EventKind::MendIdleWorkerFlagged {
+                        worker_id: worker.id.clone(),
+                        pid: worker.pid,
+                        age_secs,
+                    },
+                    chrono::Utc::now(),
+                );
 
                 summary.idle_workers_flagged += 1;
             }
@@ -1409,10 +1452,13 @@ impl MendStrand {
                             "removed rate limit state file for provider not in config"
                         );
 
-                        let _ = self.telemetry.emit(EventKind::MendRateLimitCleaned {
-                            provider: provider.to_string(),
-                            age_secs,
-                        });
+                        let _ = self.telemetry.emit(
+                            EventKind::MendRateLimitCleaned {
+                                provider: provider.to_string(),
+                                age_secs,
+                            },
+                            chrono::Utc::now(),
+                        );
 
                         summary.rate_limit_providers_removed += 1;
                         summary.rate_limits_cleaned += 1;
@@ -1494,10 +1540,13 @@ impl MendStrand {
                             "reset stale rate limit state to full capacity"
                         );
 
-                        let _ = self.telemetry.emit(EventKind::MendRateLimitProviderReset {
-                            provider: provider.to_string(),
-                            age_secs,
-                        });
+                        let _ = self.telemetry.emit(
+                            EventKind::MendRateLimitProviderReset {
+                                provider: provider.to_string(),
+                                age_secs,
+                            },
+                            chrono::Utc::now(),
+                        );
 
                         summary.rate_limit_providers_reset += 1;
                         summary.rate_limits_cleaned += 1;
@@ -1561,9 +1610,10 @@ impl MendStrand {
                 let fixed = report.fixed.len() as u32;
                 tracing::info!(warnings, fixed, "br doctor --repair completed");
 
-                let _ = self
-                    .telemetry
-                    .emit(EventKind::MendDbRepaired { warnings, fixed });
+                let _ = self.telemetry.emit(
+                    EventKind::MendDbRepaired { warnings, fixed },
+                    chrono::Utc::now(),
+                );
 
                 // Only mark as repaired if actual fixes were applied.
                 // If warnings persist without fixes, returning WorkCreated would
@@ -1600,7 +1650,13 @@ impl MendStrand {
             Ok(()) => {
                 tracing::info!("database fully rebuilt from JSONL");
 
-                let _ = self.telemetry.emit(EventKind::MendDbRebuilt);
+                let timestamp = Utc::now();
+                tracing::debug!(
+                    event_type = "mend.db_rebuilt",
+                    timestamp = %timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+                    "captured timestamp for database rebuild telemetry event"
+                );
+                let _ = self.telemetry.emit(EventKind::MendDbRebuilt, timestamp);
 
                 summary.db_rebuilt = true;
                 Ok(())
@@ -1732,21 +1788,24 @@ impl super::Strand for MendStrand {
         }
 
         // Emit cycle summary telemetry.
-        let _ = self.telemetry.emit(EventKind::MendCycleSummary {
-            beads_released: summary.beads_released,
-            locks_removed: summary.locks_removed,
-            deps_cleaned: summary.deps_cleaned,
-            db_repaired: summary.db_repaired,
-            db_rebuilt: summary.db_rebuilt,
-            agent_logs_cleaned: summary.agent_logs_cleaned,
-            zero_activity_logs_cleaned: summary.zero_activity_logs_cleaned,
-            traces_pruned: summary.traces_pruned,
-            traces_deleted: summary.traces_cleaned,
-            workers_deregistered: summary.workers_deregistered,
-            idle_workers_flagged: summary.idle_workers_flagged,
-            rate_limits_cleaned: summary.rate_limits_cleaned,
-            assignees_cleared: summary.assignees_cleared,
-        });
+        let _ = self.telemetry.emit(
+            EventKind::MendCycleSummary {
+                beads_released: summary.beads_released,
+                locks_removed: summary.locks_removed,
+                deps_cleaned: summary.deps_cleaned,
+                db_repaired: summary.db_repaired,
+                db_rebuilt: summary.db_rebuilt,
+                agent_logs_cleaned: summary.agent_logs_cleaned,
+                zero_activity_logs_cleaned: summary.zero_activity_logs_cleaned,
+                traces_pruned: summary.traces_pruned,
+                traces_deleted: summary.traces_cleaned,
+                workers_deregistered: summary.workers_deregistered,
+                idle_workers_flagged: summary.idle_workers_flagged,
+                rate_limits_cleaned: summary.rate_limits_cleaned,
+                assignees_cleared: summary.assignees_cleared,
+            },
+            chrono::Utc::now(),
+        );
 
         let result = if summary.did_work() {
             tracing::info!(
