@@ -4,6 +4,9 @@
 //! - Weave: gap analysis and bead creation from documentation
 //! - Unravel: alternatives for HUMAN-blocked beads
 //! - Pulse: codebase health scans
+//! - Reflect: learning consolidation from closed beads
+//! - Splice: failed-worker detection and escalation bead creation
+//! - Knot: exhaustion diagnosis and starvation telemetry
 //! - Validation gates: pre-closure verification
 //! - Hook sink: telemetry dispatch to external commands
 //! - Release channels: canary promote/reject/rollback
@@ -21,11 +24,14 @@ use tempfile::TempDir;
 
 use needle::bead_store::{builtin_bead_backends, BeadStore, CliBeadStore};
 use needle::canary::CanaryRunner;
-use needle::config::{HookConfig, PulseConfig, ScannerConfig, UnravelConfig, WeaveConfig};
+use needle::config::{
+    HookConfig, KnotConfig, PulseConfig, ReflectConfig, ScannerConfig, SpliceConfig, UnravelConfig,
+    WeaveConfig,
+};
 use needle::strand::pulse::PulseStrand;
 use needle::strand::unravel::UnravelStrand;
 use needle::strand::weave::WeaveStrand;
-use needle::strand::Strand;
+use needle::strand::{KnotStrand, ReflectStrand, SpliceStrand, Strand};
 use needle::telemetry::{HookSink, Telemetry, TelemetryEvent};
 use needle::types::{Bead, BeadId, BeadStatus, StrandResult};
 use needle::upgrade::{check_hot_reload, file_hash, HotReloadCheck};
@@ -80,6 +86,28 @@ fn create_test_workspace(prefix: &str) -> Result<TempDir> {
 fn create_bead(workspace: &Path, title: &str) -> Result<BeadId> {
     let output = bead_command(workspace)
         .args(["create", "--title", title, "--description", title])
+        .output()
+        .context("failed to run bead create")?;
+
+    if !output.status.success() {
+        anyhow::bail!(
+            "bead create failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let id = String::from_utf8(output.stdout)?.trim().to_string();
+    Ok(BeadId::from(id))
+}
+
+/// Create a bead whose description exercises consumers of completed work.
+fn create_bead_with_description(
+    workspace: &Path,
+    title: &str,
+    description: &str,
+) -> Result<BeadId> {
+    let output = bead_command(workspace)
+        .args(["create", "--title", title, "--description", description])
         .output()
         .context("failed to run bead create")?;
 
@@ -530,7 +558,206 @@ async fn pulse_deduplicates_across_scans() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Test 4: Validation gates — block closure on test failure
+// Test 4: Reflect — consolidates completed work into durable learnings
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn reflect_consolidates_closed_bead_into_learnings() {
+    let workspace = create_test_workspace("reflect-consolidate").unwrap();
+    let state_dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(store_for_workspace(workspace.path()).unwrap());
+    let retrospective = r#"Implemented and verified.
+
+## Retrospective
+- **What worked:** Kept the fixture isolated in a temporary workspace
+- **What didn't:** N/A
+- **Surprise:** The strand outcome remains NoWork after consolidation
+- **Reusable pattern:** Dispatch Reflect against the configured bead store"#;
+    let bead_id = create_bead_with_description(
+        workspace.path(),
+        "Reflect integration test bead",
+        retrospective,
+    )
+    .unwrap();
+
+    let output = bead_command(workspace.path())
+        .args([
+            "close",
+            bead_id.as_ref(),
+            "--reason",
+            "Completed with retrospective",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "bead close failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let config = ReflectConfig {
+        enabled: true,
+        min_beads_since_last: 1,
+        cooldown_hours: 0,
+        drift_enabled: false,
+        adr_enabled: false,
+        claude_md_placement: false,
+        ..ReflectConfig::default()
+    };
+    let strand = ReflectStrand::new(
+        config,
+        workspace.path().to_path_buf(),
+        state_dir.path().to_path_buf(),
+        Telemetry::new("test-reflect".to_string()),
+        None,
+    );
+
+    let result = strand.evaluate(store.as_ref(), &HashSet::new()).await;
+    assert!(
+        matches!(result, StrandResult::NoWork),
+        "reflect should finish consolidation and continue the waterfall, got {result:?}"
+    );
+
+    let learnings = fs::read_to_string(workspace.path().join(".beads/learnings.md"))
+        .expect("reflect should persist workspace learnings");
+    assert!(
+        learnings.contains("Dispatch Reflect against the configured bead store"),
+        "reflect should extract the reusable pattern from the closed bead"
+    );
+    assert!(
+        state_dir.path().join("reflect_state.json").is_file(),
+        "reflect should persist its consolidation watermark"
+    );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Test 5: Splice — documents a failed worker once
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn splice_documents_stale_worker_and_deduplicates_session() {
+    let workspace = create_test_workspace("splice-failure").unwrap();
+    let heartbeat_dir = tempfile::tempdir().unwrap();
+    let state_dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(store_for_workspace(workspace.path()).unwrap());
+    let session = format!(
+        "needle-p3-splice-{}-{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_micros()
+    );
+    let heartbeat = serde_json::json!({
+        "worker_id": "failed-integration-worker",
+        "pid": std::process::id(),
+        "state": "executing",
+        "current_bead": "p3-stuck",
+        "workspace": workspace.path(),
+        "last_heartbeat": chrono::Utc::now() - chrono::Duration::hours(1),
+        "session": session,
+        "beads_processed": 3
+    });
+    fs::write(
+        heartbeat_dir.path().join("failed-integration-worker.json"),
+        serde_json::to_vec_pretty(&heartbeat).unwrap(),
+    )
+    .unwrap();
+
+    let config = SpliceConfig {
+        enabled: true,
+        stale_threshold_secs: 1,
+        report_workspace: Some(workspace.path().to_path_buf()),
+        detect_live_loops: false,
+        ..SpliceConfig::default()
+    };
+    let strand = SpliceStrand::new(
+        config,
+        heartbeat_dir.path().to_path_buf(),
+        state_dir.path().to_path_buf(),
+        Telemetry::new("test-splice".to_string()),
+    );
+
+    let first = strand.evaluate(store.as_ref(), &HashSet::new()).await;
+    assert!(
+        matches!(first, StrandResult::WorkCreated),
+        "splice should create escalation work for a stale worker, got {first:?}"
+    );
+
+    let beads_after_first = store.list_all().await.unwrap();
+    assert_eq!(
+        beads_after_first
+            .iter()
+            .filter(|bead| {
+                bead.title
+                    .contains("Worker failure: failed-integration-worker")
+            })
+            .count(),
+        1,
+        "splice should create exactly one worker-failure bead"
+    );
+
+    let second = strand.evaluate(store.as_ref(), &HashSet::new()).await;
+    assert!(
+        matches!(second, StrandResult::NoWork),
+        "splice should deduplicate an already documented session, got {second:?}"
+    );
+    assert_eq!(
+        store.list_all().await.unwrap().len(),
+        beads_after_first.len(),
+        "a repeated dispatch must not create another escalation bead"
+    );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Test 6: Knot — reports an invisible open queue through telemetry
+// ═════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn knot_emits_starvation_telemetry_for_open_beads() {
+    let workspace = create_test_workspace("knot-invisible").unwrap();
+    create_bead(workspace.path(), "Open bead hidden from Pluck").unwrap();
+    let store = Arc::new(store_for_workspace(workspace.path()).unwrap());
+    let log_dir = workspace.path().join(".needle/logs");
+    let telemetry = Telemetry::with_log_dir("test-knot".to_string(), &log_dir);
+    telemetry.start();
+    let strand = KnotStrand::new(
+        KnotConfig {
+            exhaustion_threshold: 1,
+            alert_cooldown_minutes: 60,
+            ..KnotConfig::default()
+        },
+        telemetry.clone(),
+    );
+
+    let result = strand.evaluate(store.as_ref(), &HashSet::new()).await;
+    assert!(
+        matches!(result, StrandResult::NoWork),
+        "knot should diagnose exhaustion without dispatching work, got {result:?}"
+    );
+    telemetry
+        .force_flush_async(std::time::Duration::from_secs(2))
+        .await
+        .unwrap();
+    telemetry.shutdown().await;
+
+    let events: Vec<serde_json::Value> = fs::read_dir(&log_dir)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| fs::read_to_string(entry.path()).ok())
+        .flat_map(|content| {
+            content
+                .lines()
+                .filter_map(|line| serde_json::from_str(line).ok())
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let starvation = events
+        .iter()
+        .find(|event| event["event_type"] == "strand.pluck.starvation_detected")
+        .expect("knot should emit starvation telemetry for an invisible open bead");
+    assert_eq!(starvation["data"]["open_count"], 1);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Test 7: Validation gates — block closure on test failure
 // ═════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
@@ -621,7 +848,7 @@ async fn validation_gate_captures_stderr() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Test 5: Hook sink — delivers to configured command
+// Test 8: Hook sink — delivers to configured command
 // ═════════════════════════════════════════════════════════════════════════════
 
 #[test]
@@ -734,7 +961,7 @@ fn hook_sink_prevents_recursion_on_sink_errors() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Test 6: Release channels — canary promote/reject/rollback
+// Test 9: Release channels — canary promote/reject/rollback
 // ═════════════════════════════════════════════════════════════════════════════
 
 #[test]
@@ -859,7 +1086,7 @@ fn canary_status_reports_channel_state() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Test 7: Hot-reload — binary hash comparison
+// Test 10: Hot-reload — binary hash comparison
 // ═════════════════════════════════════════════════════════════════════════════
 
 #[test]
@@ -918,7 +1145,7 @@ fn hot_reload_same_binary_returns_no_change() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Test 8: Rollback — file_hash verifies integrity
+// Test 11: Rollback — file_hash verifies integrity
 // ═════════════════════════════════════════════════════════════════════════════
 
 #[test]
