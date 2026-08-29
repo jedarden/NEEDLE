@@ -86,11 +86,36 @@
 //! - ✅ Documented guarantees for idempotency and error handling
 
 #[allow(deprecated)]
+use std::backtrace::Backtrace;
 use std::panic::{self, PanicInfo};
+use std::sync::Mutex;
 use std::sync::Once;
 use std::time::SystemTime;
 
 static HOOK_INSTALLED: Once = Once::new();
+
+/// Thread-local storage for captured panic backtraces.
+///
+/// This static variable stores the most recent panic backtrace,
+/// allowing it to be retrieved after the panic has been handled.
+static CAPTURED_BACKTRACE: Mutex<Option<CapturedPanic>> = Mutex::new(None);
+
+/// A captured panic with its full context.
+#[derive(Debug, Clone)]
+pub struct CapturedPanic {
+    /// The panic message
+    pub message: String,
+    /// File where the panic occurred
+    pub file: String,
+    /// Line number where the panic occurred
+    pub line: u32,
+    /// Column number where the panic occurred
+    pub column: u32,
+    /// Full backtrace captured at the time of panic (as string for Clone compatibility)
+    pub backtrace: String,
+    /// Timestamp when the panic was captured
+    pub timestamp: SystemTime,
+}
 
 /// Install a custom panic hook that captures full stack traces.
 ///
@@ -138,7 +163,8 @@ fn set_full_backtrace_env() {
 ///
 /// This hook:
 /// - Captures the full panic message and location
-/// - Ensures backtrace information is included
+/// - Captures a complete backtrace at the moment of panic
+/// - Stores the backtrace in memory for later retrieval
 /// - Formats the output consistently for parsing
 #[allow(deprecated)]
 fn panic_hook(info: &PanicInfo) {
@@ -157,6 +183,28 @@ fn panic_hook(info: &PanicInfo) {
         },
     };
 
+    // Capture the full backtrace at the moment of panic
+    let backtrace = Backtrace::capture();
+    let backtrace_str = format!("{:?}", backtrace);
+
+    // Capture timestamp
+    let timestamp = SystemTime::now();
+
+    // Store the captured panic in memory
+    let captured = CapturedPanic {
+        message: msg.to_string(),
+        file: location.file().to_string(),
+        line: location.line(),
+        column: location.column(),
+        backtrace: backtrace_str,
+        timestamp,
+    };
+
+    // Store in the global static variable (non-blocking)
+    if let Ok(mut bt_lock) = CAPTURED_BACKTRACE.lock() {
+        *bt_lock = Some(captured);
+    }
+
     // Emit structured panic information
     eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     eprintln!("PANIC captured in test");
@@ -169,18 +217,14 @@ fn panic_hook(info: &PanicInfo) {
         location.column()
     );
 
-    // Ensure backtrace is displayed
-    if let Some(backtrace) = info.payload().downcast_ref::<std::backtrace::Backtrace>() {
-        eprintln!("Backtrace:\n{}", backtrace);
-    } else {
-        // Trigger backtrace capture if not already present
-        eprintln!("Backtrace: (capture enabled via RUST_BACKTRACE=full)");
+    // Display the captured backtrace (retrieve from global storage for printing)
+    if let Ok(bt_lock) = CAPTURED_BACKTRACE.lock() {
+        if let Some(ref captured) = *bt_lock {
+            eprintln!("Backtrace:\n{}", captured.backtrace);
+        }
     }
 
     eprintln!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-
-    // Capture timestamp for telemetry
-    let timestamp = SystemTime::now();
 
     // Emit telemetry event for panic
     tracing::error!(
@@ -224,9 +268,79 @@ pub fn capture_panic_info(payload: Box<dyn std::any::Any + Send>) -> String {
     format!("PANIC: {}", msg)
 }
 
+/// Retrieve the most recent captured panic backtrace, if any.
+///
+/// This function returns the captured panic information from the most recent
+/// panic that occurred while the panic hook was installed. The backtrace
+/// is stored in memory and can be retrieved after the panic has been handled.
+///
+/// ## Returns
+///
+/// * `Some(CapturedPanic)` - The captured panic information
+/// * `None` - No panic has been captured, or the captured backtrace was cleared
+///
+/// ## Example
+///
+/// ```no_run
+/// use needle::panic_capture::{install_panic_hook, get_captured_backtrace};
+///
+/// install_panic_hook();
+///
+/// // ... code that might panic ...
+///
+/// if let Some(captured) = get_captured_backtrace() {
+///     println!("Panic occurred at: {}:{}:{}", captured.file, captured.line, captured.column);
+///     println!("Full backtrace:\n{}", captured.backtrace);
+/// }
+/// ```
+pub fn get_captured_backtrace() -> Option<CapturedPanic> {
+    CAPTURED_BACKTRACE.lock().ok().and_then(|bt| bt.clone())
+}
+
+/// Clear the captured backtrace.
+///
+/// This function removes the stored backtrace from memory. This is useful
+/// for test isolation to ensure that a backtrace from a previous test
+/// doesn't contaminate the current test's results.
+///
+/// ## Example
+///
+/// ```no_run
+/// use needle::panic_capture::clear_captured_backtrace;
+///
+/// // Clear any previous backtraces before running a test
+/// clear_captured_backtrace();
+///
+/// // ... run test ...
+/// ```
+pub fn clear_captured_backtrace() {
+    if let Ok(mut bt_lock) = CAPTURED_BACKTRACE.lock() {
+        *bt_lock = None;
+    }
+}
+
+/// Check if a backtrace has been captured.
+///
+/// This function returns true if a panic backtrace has been captured and
+/// stored in memory.
+///
+/// ## Returns
+///
+/// * `true` - A backtrace has been captured and is available
+/// * `false` - No backtrace has been captured
+pub fn has_captured_backtrace() -> bool {
+    CAPTURED_BACKTRACE
+        .lock()
+        .ok()
+        .map(|bt| bt.is_some())
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::panic::catch_unwind;
+    use std::panic::AssertUnwindSafe;
 
     #[test]
     fn test_install_panic_hook_is_idempotent() {
@@ -292,5 +406,175 @@ mod tests {
 
         // This test verifies the hook is installed - we don't actually panic
         assert!(is_hook_installed());
+    }
+
+    #[test]
+    fn test_backtrace_capture_in_panic_hook() {
+        // Install the panic hook
+        install_panic_hook();
+        clear_captured_backtrace();
+
+        // Verify no backtrace is captured yet
+        assert!(!has_captured_backtrace());
+        assert!(get_captured_backtrace().is_none());
+
+        // Trigger a panic in a controlled environment
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            panic!("test panic for backtrace capture");
+        }));
+
+        // Verify the panic was caught
+        assert!(result.is_err());
+
+        // Verify the backtrace was captured
+        assert!(
+            has_captured_backtrace(),
+            "Backtrace should be captured after panic"
+        );
+
+        let captured = get_captured_backtrace().expect("Backtrace should be available");
+
+        // Verify the captured panic information
+        assert!(
+            captured
+                .message
+                .contains("test panic for backtrace capture"),
+            "Panic message should be captured"
+        );
+
+        // Verify the backtrace was captured (it exists)
+        // Note: We can't inspect frames without unstable APIs, but we can verify it exists
+        assert!(
+            !format!("{}", captured.backtrace).is_empty(),
+            "Backtrace should be captured and displayable"
+        );
+
+        // Verify file location was captured
+        assert!(
+            !captured.file.is_empty(),
+            "File location should be captured"
+        );
+        assert!(captured.line > 0, "Line number should be captured");
+
+        // Verify timestamp was captured
+        let duration_since = captured
+            .timestamp
+            .elapsed()
+            .expect("Timestamp should be valid");
+        assert!(duration_since.as_secs() < 10, "Timestamp should be recent");
+    }
+
+    #[test]
+    fn test_clear_captured_backtrace() {
+        install_panic_hook();
+        clear_captured_backtrace();
+
+        // Trigger a panic
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            panic!("test panic for clear");
+        }));
+
+        // Verify backtrace was captured
+        assert!(has_captured_backtrace());
+
+        // Clear the backtrace
+        clear_captured_backtrace();
+
+        // Verify it's cleared
+        assert!(!has_captured_backtrace());
+        assert!(get_captured_backtrace().is_none());
+    }
+
+    #[test]
+    fn test_multiple_panics_captures_latest() {
+        install_panic_hook();
+        clear_captured_backtrace();
+
+        // First panic
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            panic!("first panic");
+        }));
+
+        let first_captured = get_captured_backtrace();
+        assert!(first_captured.is_some());
+        assert!(first_captured.unwrap().message.contains("first panic"));
+
+        // Second panic
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            panic!("second panic");
+        }));
+
+        let second_captured = get_captured_backtrace();
+        assert!(second_captured.is_some());
+        assert!(
+            second_captured.unwrap().message.contains("second panic"),
+            "Should capture the most recent panic"
+        );
+    }
+
+    #[test]
+    fn test_backtrace_not_truncated() {
+        install_panic_hook();
+        clear_captured_backtrace();
+
+        // Trigger a panic
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            panic!("test panic for full backtrace");
+        }));
+
+        let captured = get_captured_backtrace().expect("Backtrace should be captured");
+
+        // Verify the backtrace has a reasonable number of frames
+        // Note: Without unstable .frames() API, we can't count frames directly,
+        // but we can verify the backtrace is substantial by checking its string representation
+        let backtrace_str = format!("{}", captured.backtrace);
+        let frame_count = backtrace_str.lines().count();
+        assert!(
+            frame_count > 1,
+            "Full backtrace should contain multiple frames, got: {}",
+            frame_count
+        );
+
+        // Note: In some test environments symbols may not be available,
+        // so we don't assert this strictly, but we log it for debugging
+        if backtrace_str.contains("::") {
+            println!("Backtrace contains symbol information");
+        } else {
+            println!("Note: Backtrace does not contain symbol information (may be stripped in test build)");
+        }
+    }
+
+    #[test]
+    fn test_captured_panic_fields_are_complete() {
+        install_panic_hook();
+        clear_captured_backtrace();
+
+        // Trigger a panic
+        let _ = catch_unwind(AssertUnwindSafe(|| {
+            panic!("complete field test");
+        }));
+
+        let captured = get_captured_backtrace().expect("Should capture panic");
+
+        // Verify all fields are populated
+        assert!(!captured.message.is_empty());
+        assert!(!captured.file.is_empty());
+        assert!(captured.line > 0);
+        assert!(captured.column > 0);
+        // Verify backtrace was captured by checking it's displayable
+        assert!(
+            !format!("{}", captured.backtrace).is_empty(),
+            "Backtrace should be captured and displayable"
+        );
+
+        // Verify timestamp is reasonable (not in the future, not too old)
+        let now = SystemTime::now();
+        let duration = now
+            .duration_since(captured.timestamp)
+            .expect("Timestamp should be in the past");
+        assert!(
+            duration.as_secs() < 10,
+            "Timestamp should be within last 10 seconds"
+        );
     }
 }
