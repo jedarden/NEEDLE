@@ -248,14 +248,15 @@ impl super::Strand for KnotStrand {
                     };
 
                     // Emit telemetry instead of creating a bead.
-                    let _ =
-                        self.telemetry
-                            .emit(crate::telemetry::EventKind::PluckStarvationDetected {
-                                workspace: workspace_path,
-                                open_count: *open_count,
-                                excluded_count,
-                                candidate_exclusion_reasons,
-                            });
+                    let _ = self.telemetry.emit(
+                        crate::telemetry::EventKind::PluckStarvationDetected {
+                            workspace: workspace_path,
+                            open_count: *open_count,
+                            excluded_count,
+                            candidate_exclusion_reasons,
+                        },
+                        Utc::now(),
+                    );
 
                     self.record_alert();
                     tracing::warn!(

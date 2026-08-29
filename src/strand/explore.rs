@@ -53,6 +53,7 @@ use crate::registry::Registry;
 use crate::telemetry::Telemetry;
 use crate::types::{BeadId, StrandResult};
 use crate::util::capture_timestamp;
+use chrono::Utc;
 
 /// Factory for creating bead stores for workspaces.
 ///
@@ -570,12 +571,13 @@ impl super::Strand for ExploreStrand {
 
         // If disabled, nothing to explore.
         if !self.enabled {
-            let _ = self
-                .telemetry
-                .emit(crate::telemetry::EventKind::StrandSkipped {
+            let _ = self.telemetry.emit(
+                crate::telemetry::EventKind::StrandSkipped {
                     strand_name: "explore".to_string(),
                     reason: "disabled".to_string(),
-                });
+                },
+                chrono::Utc::now(),
+            );
             return StrandResult::NoWork;
         }
 
@@ -583,12 +585,13 @@ impl super::Strand for ExploreStrand {
         // evaluating Weave and all later escalation strands in their normal
         // order; only Explore's remote scan is deferred.
         if !self.should_scan_this_cycle() {
-            let _ = self
-                .telemetry
-                .emit(crate::telemetry::EventKind::StrandSkipped {
+            let _ = self.telemetry.emit(
+                crate::telemetry::EventKind::StrandSkipped {
                     strand_name: "explore".to_string(),
                     reason: "adaptive_scan_backoff".to_string(),
-                });
+                },
+                chrono::Utc::now(),
+            );
             tracing::debug!(
                 worker = %self.qualified_id,
                 "Explore scan deferred by adaptive empty-scan backoff"
@@ -619,12 +622,13 @@ impl super::Strand for ExploreStrand {
         {
             let workspaces = self.workspaces.lock().unwrap();
             if workspaces.is_empty() {
-                let _ = self
-                    .telemetry
-                    .emit(crate::telemetry::EventKind::StrandSkipped {
+                let _ = self.telemetry.emit(
+                    crate::telemetry::EventKind::StrandSkipped {
                         strand_name: "explore".to_string(),
                         reason: "no_workspaces_discovered".to_string(),
-                    });
+                    },
+                    chrono::Utc::now(),
+                );
                 self.record_scan_result(false);
                 return StrandResult::NoWork;
             }
@@ -916,25 +920,27 @@ impl super::Strand for ExploreStrand {
 
         // Emit the scan summary once, covering every workspace visited this cycle.
         let duration_ms = scan_start.elapsed().as_millis() as u64;
-        let _ = self
-            .telemetry
-            .emit(crate::telemetry::EventKind::ExploreScanSummary {
+        let _ = self.telemetry.emit(
+            crate::telemetry::EventKind::ExploreScanSummary {
                 workspaces_visited,
                 workspaces_with_candidates,
                 total_candidates,
                 exclusion_reasons: exclusion_reasons.into_iter().collect(),
                 duration_ms,
                 scan_start_at,
-            });
+            },
+            chrono::Utc::now(),
+        );
 
         if all_candidates.is_empty() {
             self.record_scan_result(false);
-            let _ = self
-                .telemetry
-                .emit(crate::telemetry::EventKind::StrandSkipped {
+            let _ = self.telemetry.emit(
+                crate::telemetry::EventKind::StrandSkipped {
                     strand_name: "explore".to_string(),
                     reason: "no_candidates_in_any_workspace".to_string(),
-                });
+                },
+                Utc::now(),
+            );
             return StrandResult::NoWork;
         }
 

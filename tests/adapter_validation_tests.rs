@@ -793,7 +793,9 @@ worker:
         let workspace = temp_home.create_workspace("test-workspace").unwrap();
 
         // Initialize bead store in the workspace
-        workspace.create_bead_store().expect("Failed to create .beads directory");
+        workspace
+            .create_bead_store()
+            .expect("Failed to create .beads directory");
 
         // Define a nonexistent adapter name
         let nonexistent_adapter = "nonexistent-test-adapter-xyz123";
@@ -833,7 +835,8 @@ agent:
             .filter_map(|entry| entry.ok())
             .filter(|entry| {
                 let path = entry.path();
-                path.extension().map_or(false, |ext| ext == "jsonl" || ext == "json")
+                path.extension()
+                    .is_some_and(|ext| ext == "jsonl" || ext == "json")
             })
             .count();
 
@@ -921,7 +924,8 @@ agent:
             .filter_map(|entry| entry.ok())
             .filter(|entry| {
                 let path = entry.path();
-                path.extension().map_or(false, |ext| ext == "jsonl" || ext == "json")
+                path.extension()
+                    .is_some_and(|ext| ext == "jsonl" || ext == "json")
             })
             .count();
 
@@ -934,9 +938,9 @@ agent:
 
         // Verify no bead claim events appear in output
         assert!(
-            !combined_output.contains("claimed") &&
-            !combined_output.contains("claim.") &&
-            !combined_output.contains("bead.claim"),
+            !combined_output.contains("claimed")
+                && !combined_output.contains("claim.")
+                && !combined_output.contains("bead.claim"),
             "worker output should contain no claim-related events when startup fails. \
              Output:\n{}",
             combined_output

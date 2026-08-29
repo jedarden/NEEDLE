@@ -1179,14 +1179,17 @@ impl Dispatcher {
             "dispatching agent with timeout policy"
         );
 
-        self.telemetry.emit(EventKind::DispatchStarted {
-            bead_id: bead_id.clone(),
-            agent: adapter.name.clone(),
-            prompt_len: prompt.content.len(),
-            template_name: prompt.template_name.clone(),
-            template_version: prompt.template_version.clone(),
-            prompt_hash: prompt.hash.clone(),
-        })?;
+        self.telemetry.emit(
+            EventKind::DispatchStarted {
+                bead_id: bead_id.clone(),
+                agent: adapter.name.clone(),
+                prompt_len: prompt.content.len(),
+                template_name: prompt.template_name.clone(),
+                template_version: prompt.template_version.clone(),
+                prompt_hash: prompt.hash.clone(),
+            },
+            chrono::Utc::now(),
+        )?;
 
         let result = self
             .execute_agent(bead_id, &prompt.content, adapter, workspace)
@@ -1219,21 +1222,27 @@ impl Dispatcher {
                     );
                 }
 
-                let _ = self.telemetry.emit(EventKind::DispatchCompleted {
-                    bead_id: bead_id.clone(),
-                    exit_code: exec.exit_code,
-                    duration_ms: exec.elapsed.as_millis() as u64,
-                    agent: agent_name,
-                    model: agent_model,
-                    provider: agent_provider,
-                });
+                let _ = self.telemetry.emit(
+                    EventKind::DispatchCompleted {
+                        bead_id: bead_id.clone(),
+                        exit_code: exec.exit_code,
+                        duration_ms: exec.elapsed.as_millis() as u64,
+                        agent: agent_name,
+                        model: agent_model,
+                        provider: agent_provider,
+                    },
+                    chrono::Utc::now(),
+                );
 
                 // Emit structured timeout event if applicable.
                 if let Some(ref reason) = exec.timeout_reason {
-                    let _ = self.telemetry.emit(EventKind::AgentTimeout {
-                        bead_id: bead_id.clone(),
-                        reason: reason.clone(),
-                    });
+                    let _ = self.telemetry.emit(
+                        EventKind::AgentTimeout {
+                            bead_id: bead_id.clone(),
+                            reason: reason.clone(),
+                        },
+                        chrono::Utc::now(),
+                    );
                 }
             }
             Err(_) => {
@@ -1241,14 +1250,17 @@ impl Dispatcher {
                 tracing::Span::current().record("otel.status_code", 2u64);
                 tracing::Span::current().record("otel.status_description", "dispatch_error");
 
-                let _ = self.telemetry.emit(EventKind::DispatchCompleted {
-                    bead_id: bead_id.clone(),
-                    exit_code: -1,
-                    duration_ms: 0,
-                    agent: agent_name,
-                    model: agent_model,
-                    provider: agent_provider,
-                });
+                let _ = self.telemetry.emit(
+                    EventKind::DispatchCompleted {
+                        bead_id: bead_id.clone(),
+                        exit_code: -1,
+                        duration_ms: 0,
+                        agent: agent_name,
+                        model: agent_model,
+                        provider: agent_provider,
+                    },
+                    chrono::Utc::now(),
+                );
             }
         }
 
@@ -1369,16 +1381,17 @@ impl Dispatcher {
                             "atomic claim verification failed at process spawn — aborting"
                         );
 
-                        let _ =
-                            self.telemetry
-                                .emit(crate::telemetry::EventKind::ClaimVerifyFailed {
-                                    bead_id: bead_id.clone(),
-                                    expected_actor: verify_worker_id.clone(),
-                                    actual_status: format!("{:?}", status.status),
-                                    actual_assignee: status
-                                        .assignee
-                                        .unwrap_or_else(|| "none".to_string()),
-                                });
+                        let _ = self.telemetry.emit(
+                            crate::telemetry::EventKind::ClaimVerifyFailed {
+                                bead_id: bead_id.clone(),
+                                expected_actor: verify_worker_id.clone(),
+                                actual_status: format!("{:?}", status.status),
+                                actual_assignee: status
+                                    .assignee
+                                    .unwrap_or_else(|| "none".to_string()),
+                            },
+                            chrono::Utc::now(),
+                        );
 
                         return Err(anyhow::anyhow!("claim verification failed: {}", reason));
                     }
@@ -1392,12 +1405,13 @@ impl Dispatcher {
                         "atomic claim verification passed — proceeding with process spawn"
                     );
 
-                    let _ = self
-                        .telemetry
-                        .emit(crate::telemetry::EventKind::ClaimVerifySuccess {
+                    let _ = self.telemetry.emit(
+                        crate::telemetry::EventKind::ClaimVerifySuccess {
                             bead_id: bead_id.clone(),
                             expected_actor: verify_worker_id.clone(),
-                        });
+                        },
+                        chrono::Utc::now(),
+                    );
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -1511,17 +1525,23 @@ impl Dispatcher {
         ) = if let Some(ref transform_cmd) = adapter.output_transform {
             // Check if the transform binary is available.
             if which::which(transform_cmd).is_err() {
-                let _ = self.telemetry.emit(EventKind::TransformSkipped {
-                    bead_id: bead_id.clone(),
-                    reason: format!("binary not found: {transform_cmd}"),
-                });
+                let _ = self.telemetry.emit(
+                    EventKind::TransformSkipped {
+                        bead_id: bead_id.clone(),
+                        reason: format!("binary not found: {transform_cmd}"),
+                    },
+                    chrono::Utc::now(),
+                );
                 (None, None, None, None, None)
             } else {
-                let _ = self.telemetry.emit(EventKind::TransformStarted {
-                    bead_id: bead_id.clone(),
-                    transform_binary: transform_cmd.clone(),
-                    agent: adapter.name.clone(),
-                });
+                let _ = self.telemetry.emit(
+                    EventKind::TransformStarted {
+                        bead_id: bead_id.clone(),
+                        transform_binary: transform_cmd.clone(),
+                        agent: adapter.name.clone(),
+                    },
+                    chrono::Utc::now(),
+                );
 
                 // Safety: setpgid(0,0) is async-signal-safe and idempotent. Puts
                 // the transform in its own process group (mirroring the agent's
@@ -1613,30 +1633,39 @@ impl Dispatcher {
                                 )
                             }
                             None => {
-                                let _ = self.telemetry.emit(EventKind::TransformFailed {
-                                    bead_id: bead_id.clone(),
-                                    error: "failed to open transform stdin".to_string(),
-                                    exit_code: -1,
-                                });
+                                let _ = self.telemetry.emit(
+                                    EventKind::TransformFailed {
+                                        bead_id: bead_id.clone(),
+                                        error: "failed to open transform stdin".to_string(),
+                                        exit_code: -1,
+                                    },
+                                    chrono::Utc::now(),
+                                );
                                 (None, None, None, None, None)
                             }
                         }
                     }
                     Err(e) => {
-                        let _ = self.telemetry.emit(EventKind::TransformFailed {
-                            bead_id: bead_id.clone(),
-                            error: e.to_string(),
-                            exit_code: -1,
-                        });
+                        let _ = self.telemetry.emit(
+                            EventKind::TransformFailed {
+                                bead_id: bead_id.clone(),
+                                error: e.to_string(),
+                                exit_code: -1,
+                            },
+                            chrono::Utc::now(),
+                        );
                         (None, None, None, None, None)
                     }
                 }
             }
         } else {
-            let _ = self.telemetry.emit(EventKind::TransformSkipped {
-                bead_id: bead_id.clone(),
-                reason: "not configured".to_string(),
-            });
+            let _ = self.telemetry.emit(
+                EventKind::TransformSkipped {
+                    bead_id: bead_id.clone(),
+                    reason: "not configured".to_string(),
+                },
+                chrono::Utc::now(),
+            );
             (None, None, None, None, None)
         };
 
@@ -1988,11 +2017,14 @@ impl Dispatcher {
             match outcome {
                 TransformOutcome::NaturalExit(status) => {
                     if status.success() {
-                        let _ = self.telemetry.emit(EventKind::TransformCompleted {
-                            bead_id: bead_id.clone(),
-                            events_written,
-                            duration_ms,
-                        });
+                        let _ = self.telemetry.emit(
+                            EventKind::TransformCompleted {
+                                bead_id: bead_id.clone(),
+                                events_written,
+                                duration_ms,
+                            },
+                            chrono::Utc::now(),
+                        );
                     } else {
                         use std::os::unix::process::ExitStatusExt;
                         let t_exit_code = status.code().unwrap_or(-1);
@@ -2005,34 +2037,43 @@ impl Dispatcher {
                                 None => "exited with unknown status".to_string(),
                             },
                         };
-                        let _ = self.telemetry.emit(EventKind::TransformFailed {
-                            bead_id: bead_id.clone(),
-                            error,
-                            exit_code: t_exit_code,
-                        });
+                        let _ = self.telemetry.emit(
+                            EventKind::TransformFailed {
+                                bead_id: bead_id.clone(),
+                                error,
+                                exit_code: t_exit_code,
+                            },
+                            chrono::Utc::now(),
+                        );
                     }
                 }
                 TransformOutcome::KilledAfterDrain => {
-                    let _ = self.telemetry.emit(EventKind::TransformFailed {
-                        bead_id: bead_id.clone(),
-                        error: format!(
-                            "transform did not exit within {}s of receiving stdin EOF \
+                    let _ = self.telemetry.emit(
+                        EventKind::TransformFailed {
+                            bead_id: bead_id.clone(),
+                            error: format!(
+                                "transform did not exit within {}s of receiving stdin EOF \
                              (all input confirmed delivered); killed as cleanup",
-                            TRANSFORM_EXIT_GRACE.as_secs()
-                        ),
-                        exit_code: -1,
-                    });
+                                TRANSFORM_EXIT_GRACE.as_secs()
+                            ),
+                            exit_code: -1,
+                        },
+                        chrono::Utc::now(),
+                    );
                 }
                 TransformOutcome::KilledNoDrain => {
-                    let _ = self.telemetry.emit(EventKind::TransformFailed {
-                        bead_id: bead_id.clone(),
-                        error: format!(
-                            "transform feeder did not finish forwarding stdin within {}ms \
+                    let _ = self.telemetry.emit(
+                        EventKind::TransformFailed {
+                            bead_id: bead_id.clone(),
+                            error: format!(
+                                "transform feeder did not finish forwarding stdin within {}ms \
                              (input delivery unconfirmed); killed as cleanup",
-                            FEEDER_DRAIN_TIMEOUT.as_millis()
-                        ),
-                        exit_code: -1,
-                    });
+                                FEEDER_DRAIN_TIMEOUT.as_millis()
+                            ),
+                            exit_code: -1,
+                        },
+                        chrono::Utc::now(),
+                    );
                 }
             }
         }

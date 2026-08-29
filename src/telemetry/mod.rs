@@ -3921,15 +3921,14 @@ impl Telemetry {
         }
     }
 
-    fn make_event(&self, kind: &EventKind) -> TelemetryEvent {
+    fn make_event(&self, kind: &EventKind, timestamp: DateTime<Utc>) -> TelemetryEvent {
         let seq = self.sequence.fetch_add(1, Ordering::Relaxed);
         let (trace_id, span_id) = current_trace_ids();
-        let timestamp = Utc::now();
         tracing::debug!(
             event_type = %kind.event_type(),
             seq,
             timestamp = %timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ"),
-            "captured timestamp for telemetry event"
+            "using provided timestamp for telemetry event"
         );
         TelemetryEvent {
             timestamp,
@@ -3949,8 +3948,8 @@ impl Telemetry {
     /// Emit an event. Non-blocking — returns immediately.
     ///
     /// Returns `Err` only if the channel is disconnected (background task died).
-    pub fn emit(&self, kind: EventKind) -> Result<()> {
-        let event = self.make_event(&kind);
+    pub fn emit(&self, kind: EventKind, timestamp: DateTime<Utc>) -> Result<()> {
+        let event = self.make_event(&kind, timestamp);
         let seq = event.sequence;
         tracing::debug!(event_type = %event.event_type, seq, "telemetry event");
         // Use try_lock() to avoid blocking indefinitely if the telemetry writer
@@ -3981,8 +3980,8 @@ impl Telemetry {
     ///
     /// Use this in timeout recovery paths where blocking on emit() would
     /// prevent the worker from recovering.
-    pub fn emit_try_lock(&self, kind: EventKind) -> Result<()> {
-        let event = self.make_event(&kind);
+    pub fn emit_try_lock(&self, kind: EventKind, timestamp: DateTime<Utc>) -> Result<()> {
+        let event = self.make_event(&kind, timestamp);
         let seq = event.sequence;
         // Use try_lock() to avoid blocking indefinitely if the telemetry writer
         // is stuck holding the lock. If the lock is contended, we log and return
@@ -4086,8 +4085,8 @@ impl Telemetry {
     ///
     /// Returns `Err` if the pending writer is not available (already started)
     /// or if writing to the file fails.
-    pub fn emit_sync(&self, kind: EventKind) -> Result<()> {
-        let event = self.make_event(&kind);
+    pub fn emit_sync(&self, kind: EventKind, timestamp: DateTime<Utc>) -> Result<()> {
+        let event = self.make_event(&kind, timestamp);
 
         // Take the pending writer temporarily to write directly to sinks.
         let pending_guard = self.pending_writer.lock().unwrap();
@@ -4370,12 +4369,15 @@ impl Telemetry {
         context: serde_json::Value,
         bead_id: Option<BeadId>,
     ) -> Result<()> {
-        self.emit(EventKind::Log {
-            phase: phase.into(),
-            level: level.into(),
-            context,
-            bead_id,
-        })
+        self.emit(
+            EventKind::Log {
+                phase: phase.into(),
+                level: level.into(),
+                context,
+                bead_id,
+            },
+            chrono::Utc::now(),
+        )
     }
 
     /// Emit an info-level log event.
@@ -5373,10 +5375,13 @@ mod tests {
         let telemetry = Telemetry::new("needle-test".to_string());
         for i in 0..100u32 {
             telemetry
-                .emit(EventKind::ClaimAttempt {
-                    bead_id: BeadId::from("needle-abc"),
-                    attempt: i,
-                })
+                .emit(
+                    EventKind::ClaimAttempt {
+                        bead_id: BeadId::from("needle-abc"),
+                        attempt: i,
+                    },
+                    chrono::Utc::now(),
+                )
                 .expect("emit should not fail");
         }
     }
@@ -5387,16 +5392,22 @@ mod tests {
         let telemetry = Telemetry::with_sink("test-worker".to_string(), sink);
 
         telemetry
-            .emit(EventKind::WorkerStarted {
-                worker_name: "test-worker".to_string(),
-                version: "0.1.0".to_string(),
-            })
+            .emit(
+                EventKind::WorkerStarted {
+                    worker_name: "test-worker".to_string(),
+                    version: "0.1.0".to_string(),
+                },
+                chrono::Utc::now(),
+            )
             .unwrap();
         telemetry
-            .emit(EventKind::ClaimAttempt {
-                bead_id: BeadId::from("nd-test"),
-                attempt: 1,
-            })
+            .emit(
+                EventKind::ClaimAttempt {
+                    bead_id: BeadId::from("nd-test"),
+                    attempt: 1,
+                },
+                chrono::Utc::now(),
+            )
             .unwrap();
 
         // Drop to close channel and drain
@@ -5423,9 +5434,11 @@ mod tests {
         let telemetry = Telemetry::with_sink("test-worker".to_string(), sink);
 
         telemetry.set_workspace("/home/coding/commitgraph");
-        telemetry.emit(EventKind::QueueEmpty).unwrap();
+        telemetry.emit(EventKind::QueueEmpty, Utc::now()).unwrap();
         telemetry.set_workspace("/home/coding/SEAM");
-        telemetry.emit_try_lock(EventKind::QueueEmpty).unwrap();
+        telemetry
+            .emit_try_lock(EventKind::QueueEmpty, Utc::now())
+            .unwrap();
 
         drop(telemetry);
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -5449,7 +5462,9 @@ mod tests {
             Telemetry::with_boxed_sinks("test-worker".to_string(), vec![Box::new(sink)]);
 
         telemetry.set_workspace("/tmp/private/repo");
-        telemetry.emit_sync(EventKind::QueueEmpty).unwrap();
+        telemetry
+            .emit_sync(EventKind::QueueEmpty, Utc::now())
+            .unwrap();
 
         let collected = events.lock().unwrap();
         assert_eq!(
@@ -5464,7 +5479,7 @@ mod tests {
         let telemetry = Telemetry::with_sink("test-seq".to_string(), sink);
 
         for _ in 0..10 {
-            telemetry.emit(EventKind::QueueEmpty).unwrap();
+            telemetry.emit(EventKind::QueueEmpty, Utc::now()).unwrap();
         }
 
         drop(telemetry);
@@ -5491,12 +5506,15 @@ mod tests {
 
         let telemetry = Telemetry::with_sink("test-broken".to_string(), BrokenSink);
         telemetry
-            .emit(EventKind::WorkerStarted {
-                worker_name: "test".to_string(),
-                version: "0.1.0".to_string(),
-            })
+            .emit(
+                EventKind::WorkerStarted {
+                    worker_name: "test".to_string(),
+                    version: "0.1.0".to_string(),
+                },
+                chrono::Utc::now(),
+            )
             .unwrap();
-        telemetry.emit(EventKind::QueueEmpty).unwrap();
+        telemetry.emit(EventKind::QueueEmpty, Utc::now()).unwrap();
         // No panic, no block
         drop(telemetry);
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -5509,16 +5527,22 @@ mod tests {
 
         // emit_try_lock() should succeed when the lock is available.
         telemetry
-            .emit_try_lock(EventKind::WorkerStarted {
-                worker_name: "test-worker".to_string(),
-                version: "0.1.0".to_string(),
-            })
+            .emit_try_lock(
+                EventKind::WorkerStarted {
+                    worker_name: "test-worker".to_string(),
+                    version: "0.1.0".to_string(),
+                },
+                Utc::now(),
+            )
             .unwrap();
         telemetry
-            .emit_try_lock(EventKind::ClaimAttempt {
-                bead_id: BeadId::from("nd-test"),
-                attempt: 1,
-            })
+            .emit_try_lock(
+                EventKind::ClaimAttempt {
+                    bead_id: BeadId::from("nd-test"),
+                    attempt: 1,
+                },
+                Utc::now(),
+            )
             .unwrap();
 
         // Drop to close channel and drain.
@@ -5546,7 +5570,7 @@ mod tests {
         let _guard = sender_lock.lock().unwrap();
 
         // emit_try_lock() should return Ok(()) without blocking when lock is contended.
-        let result = telemetry.emit_try_lock(EventKind::QueueEmpty);
+        let result = telemetry.emit_try_lock(EventKind::QueueEmpty, Utc::now());
         assert!(
             result.is_ok(),
             "emit_try_lock should not error on contention"
@@ -5568,7 +5592,7 @@ mod tests {
         let _guard = sender_lock.lock().unwrap();
 
         // emit() should return Ok(()) without blocking when lock is contended.
-        let result = telemetry.emit(EventKind::QueueEmpty);
+        let result = telemetry.emit(EventKind::QueueEmpty, Utc::now());
         assert!(result.is_ok(), "emit should not error on contention");
 
         // Drop the guard and cleanup.
@@ -5664,7 +5688,7 @@ mod tests {
         let (sink, events) = MemorySink::new();
         let telemetry = Telemetry::with_sink("test-utc".to_string(), sink);
 
-        telemetry.emit(EventKind::QueueEmpty).unwrap();
+        telemetry.emit(EventKind::QueueEmpty, Utc::now()).unwrap();
         drop(telemetry);
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
@@ -5841,7 +5865,7 @@ mod tests {
         ];
 
         for kind in &kinds {
-            telemetry.emit(kind.clone()).unwrap();
+            telemetry.emit(kind.clone(), chrono::Utc::now()).unwrap();
         }
 
         drop(telemetry);
@@ -6579,7 +6603,7 @@ mod tests {
         // of a Tokio 1.x runtime".
         let telemetry = Telemetry::new("needle-test".to_string());
         // emit() should be safe even without a started writer (channel is unbounded)
-        assert!(telemetry.emit(EventKind::QueueEmpty).is_ok());
+        assert!(telemetry.emit(EventKind::QueueEmpty, Utc::now()).is_ok());
     }
 
     #[tokio::test]
@@ -6591,10 +6615,13 @@ mod tests {
         telemetry.start();
 
         telemetry
-            .emit(EventKind::WorkerStarted {
-                worker_name: "test-start".to_string(),
-                version: "0.0.0".to_string(),
-            })
+            .emit(
+                EventKind::WorkerStarted {
+                    worker_name: "test-start".to_string(),
+                    version: "0.0.0".to_string(),
+                },
+                chrono::Utc::now(),
+            )
             .unwrap();
 
         // Give the background task a moment to drain the channel.
@@ -6624,18 +6651,24 @@ mod tests {
 
         // Emit a handful of small events — total << 8 KB BufWriter threshold.
         telemetry
-            .emit(EventKind::WorkerStarted {
-                worker_name: "test-worker".to_string(),
-                version: "0.1.0".to_string(),
-            })
+            .emit(
+                EventKind::WorkerStarted {
+                    worker_name: "test-worker".to_string(),
+                    version: "0.1.0".to_string(),
+                },
+                chrono::Utc::now(),
+            )
             .unwrap();
-        telemetry.emit(EventKind::QueueEmpty).unwrap();
+        telemetry.emit(EventKind::QueueEmpty, Utc::now()).unwrap();
         telemetry
-            .emit(EventKind::WorkerStopped {
-                reason: "exhausted".to_string(),
-                beads_processed: 0,
-                uptime_secs: 0,
-            })
+            .emit(
+                EventKind::WorkerStopped {
+                    reason: "exhausted".to_string(),
+                    beads_processed: 0,
+                    uptime_secs: 0,
+                },
+                chrono::Utc::now(),
+            )
             .unwrap();
 
         // shutdown() closes the channel, awaits the writer task, and guarantees
@@ -6717,7 +6750,7 @@ mod tests {
 
         let ctx = Context::current().with_span(FakeSpan(span_ctx));
         let _guard = ctx.attach();
-        telemetry.emit(EventKind::QueueEmpty).unwrap();
+        telemetry.emit(EventKind::QueueEmpty, Utc::now()).unwrap();
         drop(_guard);
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -6743,7 +6776,7 @@ mod tests {
         let telemetry = Telemetry::with_sink("test-worker".to_string(), sink);
         telemetry.start();
 
-        telemetry.emit(EventKind::QueueEmpty).unwrap();
+        telemetry.emit(EventKind::QueueEmpty, Utc::now()).unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let received = events.lock().unwrap();
@@ -6771,7 +6804,7 @@ mod tests {
             vec![Box::new(sink1), Box::new(sink2)],
         );
         telemetry.start();
-        telemetry.emit(EventKind::QueueEmpty).unwrap();
+        telemetry.emit(EventKind::QueueEmpty, Utc::now()).unwrap();
         telemetry.shutdown().await;
 
         let e1 = events1.lock().unwrap();
@@ -6789,12 +6822,15 @@ mod tests {
             Telemetry::with_boxed_sinks("test-replace-sinks".to_string(), vec![Box::new(old_sink)]);
         telemetry.start_and_wait().await.unwrap();
 
-        telemetry.emit(EventKind::QueueEmpty).unwrap();
+        telemetry.emit(EventKind::QueueEmpty, Utc::now()).unwrap();
         telemetry
-            .emit(EventKind::WorkerStarted {
-                worker_name: "test-replace-sinks".to_string(),
-                version: "0.0.0".to_string(),
-            })
+            .emit(
+                EventKind::WorkerStarted {
+                    worker_name: "test-replace-sinks".to_string(),
+                    version: "0.0.0".to_string(),
+                },
+                chrono::Utc::now(),
+            )
             .unwrap();
 
         let (new_sink, new_events) = MemorySink::new();
@@ -6803,7 +6839,7 @@ mod tests {
             .await
             .unwrap();
 
-        telemetry.emit(EventKind::QueueEmpty).unwrap();
+        telemetry.emit(EventKind::QueueEmpty, Utc::now()).unwrap();
         telemetry.shutdown().await;
 
         let old_events = old_events.lock().unwrap();
@@ -6846,7 +6882,7 @@ mod tests {
             })],
         );
         telemetry.start();
-        telemetry.emit(EventKind::QueueEmpty).unwrap();
+        telemetry.emit(EventKind::QueueEmpty, Utc::now()).unwrap();
         telemetry.shutdown().await;
 
         let dl = deadline_received.lock().unwrap();
@@ -6880,7 +6916,7 @@ mod tests {
         let telemetry =
             Telemetry::with_boxed_sinks("test-slow-flush".to_string(), vec![Box::new(SlowFlusher)]);
         telemetry.start();
-        telemetry.emit(EventKind::QueueEmpty).unwrap();
+        telemetry.emit(EventKind::QueueEmpty, Utc::now()).unwrap();
 
         // shutdown() must complete in a reasonable wall-clock window even though
         // SlowFlusher sleeps past its own deadline.
@@ -6914,7 +6950,7 @@ mod tests {
         // Emit an event inside a span using the tracer's in_span method.
         tracer.in_span("test-span", |_cx| {
             telemetry
-                .emit(EventKind::QueueEmpty)
+                .emit(EventKind::QueueEmpty, Utc::now())
                 .expect("emit should succeed");
         });
 
@@ -6964,7 +7000,7 @@ mod tests {
 
         // Emit an event outside any span context.
         telemetry
-            .emit(EventKind::QueueEmpty)
+            .emit(EventKind::QueueEmpty, Utc::now())
             .expect("emit should succeed");
 
         // Drop telemetry to close channel and drain events.

@@ -431,15 +431,13 @@ impl Supervisor {
         let upgrade_poller =
             UpgradePoller::new(config.auto_upgrade_check, config.update_check_interval_secs);
 
-        // Initialize binary freshness checker if using needle-stable
-        let binary_freshness = if worker_binary.ends_with("needle-stable") {
-            Some(BinaryFreshnessChecker::new(
-                worker_binary.clone(),
-                config.poll_interval_secs,
-            ))
-        } else {
-            None
-        };
+        // Initialize binary freshness checker for any needle binary
+        // This enables the supervisor to detect when the worker binary is updated
+        // (e.g., via `needle install` or manual replacement) and gracefully rotate workers.
+        let binary_freshness = Some(BinaryFreshnessChecker::new(
+            worker_binary.clone(),
+            config.poll_interval_secs,
+        ));
 
         Ok(Supervisor {
             config,
@@ -504,16 +502,22 @@ impl Supervisor {
         } else {
             "current_exe()"
         };
-        self.telemetry.emit(EventKind::SupervisorBinaryResolved {
-            worker_binary: worker_binary.display().to_string(),
-            source: binary_source.to_string(),
-        })?;
+        self.telemetry.emit(
+            EventKind::SupervisorBinaryResolved {
+                worker_binary: worker_binary.display().to_string(),
+                source: binary_source.to_string(),
+            },
+            chrono::Utc::now(),
+        )?;
 
         // Emit supervisor started event
-        self.telemetry.emit(EventKind::SupervisorStarted {
-            workspace: self.config.workspace.display().to_string(),
-            max_workers: self.config.max_workers,
-        })?;
+        self.telemetry.emit(
+            EventKind::SupervisorStarted {
+                workspace: self.config.workspace.display().to_string(),
+                max_workers: self.config.max_workers,
+            },
+            chrono::Utc::now(),
+        )?;
 
         tracing::info!(
             workspace = %self.config.workspace.display(),
@@ -555,12 +559,15 @@ impl Supervisor {
                     .ready(&Filters::default())
                     .await
                     .unwrap_or_default();
-                let _ = self.telemetry.emit(EventKind::SupervisorSummary {
-                    polls: total_polls,
-                    spawned: total_spawned,
-                    total_workers: active_workers.len() as u32,
-                    ready_beads: ready_beads.len() as u32,
-                });
+                let _ = self.telemetry.emit(
+                    EventKind::SupervisorSummary {
+                        polls: total_polls,
+                        spawned: total_spawned,
+                        total_workers: active_workers.len() as u32,
+                        ready_beads: ready_beads.len() as u32,
+                    },
+                    chrono::Utc::now(),
+                );
             }
 
             match self.tick().await {
@@ -580,9 +587,12 @@ impl Supervisor {
                     );
 
                     // Emit spawn failed event
-                    let _ = self.telemetry.emit(EventKind::SupervisorSpawnFailed {
-                        error: e.to_string(),
-                    });
+                    let _ = self.telemetry.emit(
+                        EventKind::SupervisorSpawnFailed {
+                            error: e.to_string(),
+                        },
+                        chrono::Utc::now(),
+                    );
 
                     // Enter long backoff if error threshold exceeded
                     if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
@@ -593,10 +603,13 @@ impl Supervisor {
                         );
 
                         // Emit backoff event
-                        let _ = self.telemetry.emit(EventKind::SupervisorBackoff {
-                            backoff_secs: ERROR_BACKOFF_SECS,
-                            consecutive_failures: consecutive_errors,
-                        });
+                        let _ = self.telemetry.emit(
+                            EventKind::SupervisorBackoff {
+                                backoff_secs: ERROR_BACKOFF_SECS,
+                                consecutive_failures: consecutive_errors,
+                            },
+                            chrono::Utc::now(),
+                        );
 
                         tokio::time::sleep(Duration::from_secs(ERROR_BACKOFF_SECS)).await;
                     }
@@ -608,9 +621,12 @@ impl Supervisor {
         }
 
         // Emit supervisor stopped event
-        self.telemetry.emit(EventKind::SupervisorStopped {
-            reason: "shutdown_requested".to_string(),
-        })?;
+        self.telemetry.emit(
+            EventKind::SupervisorStopped {
+                reason: "shutdown_requested".to_string(),
+            },
+            chrono::Utc::now(),
+        )?;
 
         // Shutdown telemetry
         self.telemetry.shutdown().await;
@@ -647,14 +663,15 @@ impl Supervisor {
                         );
 
                         // Emit binary rotation detected event
-                        let _ = self
-                            .telemetry
-                            .emit(EventKind::SupervisorBinaryRotationDetected {
+                        let _ = self.telemetry.emit(
+                            EventKind::SupervisorBinaryRotationDetected {
                                 old_binary: self.current_worker_binary.display().to_string(),
                                 new_binary: binary_path.display().to_string(),
                                 old_hash,
                                 new_hash,
-                            });
+                            },
+                            chrono::Utc::now(),
+                        );
 
                         // Drain existing workers and relaunch with new binary
                         let _ = self.rotate_workers(&binary_path).await;
@@ -736,11 +753,14 @@ impl Supervisor {
         );
 
         // Emit spawn decision event
-        self.telemetry.emit(EventKind::SupervisorSpawnDecision {
-            to_spawn: 1,
-            ready_beads: ready_count as u32,
-            max_workers: self.config.max_workers,
-        })?;
+        self.telemetry.emit(
+            EventKind::SupervisorSpawnDecision {
+                to_spawn: 1,
+                ready_beads: ready_count as u32,
+                max_workers: self.config.max_workers,
+            },
+            chrono::Utc::now(),
+        )?;
 
         // Spawn the worker
         self.spawn_worker(ready_count).await?;
@@ -772,12 +792,15 @@ impl Supervisor {
                 Err(e) => {
                     if resource_wait_total >= MAX_RESOURCE_WAIT_SECS {
                         // Still saturated after max wait, fail the spawn explicitly
-                        self.telemetry.emit(EventKind::SupervisorSpawnFailed {
-                            error: format!(
-                                "system still saturated after {}s wait: {}",
-                                MAX_RESOURCE_WAIT_SECS, e
-                            ),
-                        })?;
+                        self.telemetry.emit(
+                            EventKind::SupervisorSpawnFailed {
+                                error: format!(
+                                    "system still saturated after {}s wait: {}",
+                                    MAX_RESOURCE_WAIT_SECS, e
+                                ),
+                            },
+                            chrono::Utc::now(),
+                        )?;
                         bail!(
                             "worker spawn deferred {} times ({}s total wait), system still saturated: {}. Spawn aborted — retry when load drops",
                             resource_wait_total / resource_retry_delay,
@@ -794,9 +817,12 @@ impl Supervisor {
                         "system resources saturated, deferring worker spawn"
                     );
 
-                    self.telemetry.emit(EventKind::SupervisorSpawnFailed {
-                        error: format!("system saturated: {}", e),
-                    })?;
+                    self.telemetry.emit(
+                        EventKind::SupervisorSpawnFailed {
+                            error: format!("system saturated: {}", e),
+                        },
+                        chrono::Utc::now(),
+                    )?;
 
                     tokio::time::sleep(Duration::from_secs(resource_retry_delay)).await;
                     resource_wait_total += resource_retry_delay;
@@ -884,10 +910,13 @@ impl Supervisor {
         )?;
 
         // Emit worker spawned event
-        self.telemetry.emit(EventKind::SupervisorWorkerSpawned {
-            ready_count,
-            total_spawned: 1,
-        })?;
+        self.telemetry.emit(
+            EventKind::SupervisorWorkerSpawned {
+                ready_count,
+                total_spawned: 1,
+            },
+            chrono::Utc::now(),
+        )?;
 
         tracing::info!(worker_id = %worker_id, "worker spawned successfully");
         Ok(())
@@ -937,12 +966,13 @@ impl Supervisor {
         );
 
         // Emit drain started event
-        let _ = self
-            .telemetry
-            .emit(EventKind::SupervisorWorkerDrainStarted {
+        let _ = self.telemetry.emit(
+            EventKind::SupervisorWorkerDrainStarted {
                 active_workers: workers_count,
                 drain_timeout_secs: DRAIN_TIMEOUT_SECS,
-            });
+            },
+            chrono::Utc::now(),
+        );
 
         // Send SIGTERM to all workers for graceful shutdown
         #[cfg(unix)]
@@ -1010,12 +1040,13 @@ impl Supervisor {
         let drain_duration = drain_start.elapsed().as_secs();
 
         // Emit drain completed event
-        let _ = self
-            .telemetry
-            .emit(EventKind::SupervisorWorkerDrainCompleted {
+        let _ = self.telemetry.emit(
+            EventKind::SupervisorWorkerDrainCompleted {
                 workers_drained: workers_count,
                 duration_secs: drain_duration,
-            });
+            },
+            chrono::Utc::now(),
+        );
 
         tracing::info!(
             workers_drained = workers_count,
@@ -1095,10 +1126,13 @@ impl Supervisor {
         }
 
         // Emit worker relaunched event
-        let _ = self.telemetry.emit(EventKind::SupervisorWorkerRelaunched {
-            workers_count,
-            new_binary: new_binary_path.display().to_string(),
-        });
+        let _ = self.telemetry.emit(
+            EventKind::SupervisorWorkerRelaunched {
+                workers_count,
+                new_binary: new_binary_path.display().to_string(),
+            },
+            chrono::Utc::now(),
+        );
 
         tracing::info!(workers_count, "worker rotation completed successfully");
 
@@ -1979,10 +2013,13 @@ poll_interval_secs = 12
         };
 
         // Emit the same event that Supervisor::new() emits
-        let emit_result = telemetry.emit(EventKind::SupervisorBinaryResolved {
-            worker_binary: resolved.path.display().to_string(),
-            source: source_display.to_string(),
-        });
+        let emit_result = telemetry.emit(
+            EventKind::SupervisorBinaryResolved {
+                worker_binary: resolved.path.display().to_string(),
+                source: source_display.to_string(),
+            },
+            chrono::Utc::now(),
+        );
 
         // Verify the event was emitted successfully
         assert!(emit_result.is_ok(), "telemetry emit should succeed");
@@ -2083,10 +2120,13 @@ poll_interval_secs = 12
             BinarySource::PathLookup => "PATH lookup of 'needle' (fallback)",
         };
 
-        let emit_result = telemetry.emit(EventKind::SupervisorBinaryResolved {
-            worker_binary: resolved.path.display().to_string(),
-            source: source_display.to_string(),
-        });
+        let emit_result = telemetry.emit(
+            EventKind::SupervisorBinaryResolved {
+                worker_binary: resolved.path.display().to_string(),
+                source: source_display.to_string(),
+            },
+            chrono::Utc::now(),
+        );
 
         assert!(emit_result.is_ok(), "telemetry emit should succeed");
 
@@ -2173,10 +2213,13 @@ poll_interval_secs = 12
             BinarySource::PathLookup => "PATH lookup of 'needle' (fallback)",
         };
 
-        let emit_result = telemetry.emit(EventKind::SupervisorBinaryResolved {
-            worker_binary: resolved.path.display().to_string(),
-            source: source_display.to_string(),
-        });
+        let emit_result = telemetry.emit(
+            EventKind::SupervisorBinaryResolved {
+                worker_binary: resolved.path.display().to_string(),
+                source: source_display.to_string(),
+            },
+            chrono::Utc::now(),
+        );
 
         assert!(emit_result.is_ok());
 
@@ -2304,10 +2347,13 @@ poll_interval_secs = 12
                 BinarySource::PathLookup => "PATH lookup of 'needle' (fallback)",
             };
 
-            let emit_result = telemetry.emit(EventKind::SupervisorBinaryResolved {
-                worker_binary: resolved.path.display().to_string(),
-                source: source_display.to_string(),
-            });
+            let emit_result = telemetry.emit(
+                EventKind::SupervisorBinaryResolved {
+                    worker_binary: resolved.path.display().to_string(),
+                    source: source_display.to_string(),
+                },
+                chrono::Utc::now(),
+            );
 
             assert!(emit_result.is_ok());
 
