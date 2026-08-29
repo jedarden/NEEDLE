@@ -59,6 +59,7 @@ pub mod scratch_sweep;
 pub mod skill;
 pub mod span;
 pub mod spawn_path;
+pub mod spawn_version;
 pub mod stats;
 pub mod strand;
 pub mod supervisor;

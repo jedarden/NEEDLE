@@ -33,6 +33,70 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use tracing::debug;
 
+/// Parse backend name from version output.
+///
+/// Extracts the backend identity from various version output formats.
+/// This handles different bead CLI backends (bf, bead-rs, etc.) and returns
+/// a clean backend name without version numbers.
+///
+/// # Arguments
+///
+/// * `version_output` - Raw stdout output from a `--version` command
+///
+/// # Returns
+///
+/// Backend name as a String, or a sensible default for unknown formats
+///
+/// # Supported Formats
+///
+/// - `bf 0.x.y` → `"bf"`
+/// - `bead 0.x.y` (bead-rs) → `"bead-rs"`
+/// - `bead-rs 0.x.y` → `"bead-rs"`
+/// - Custom format: `backend-name 0.x.y` → `"backend-name"`
+/// - Unknown/malformed → `"unknown"`
+///
+/// # Examples
+///
+/// ```
+/// # use needle::spawn_version::parse_backend_name;
+/// assert_eq!(parse_backend_name("bf 0.1.0"), "bf");
+/// assert_eq!(parse_backend_name("bead 2.0.5"), "bead-rs");
+/// assert_eq!(parse_backend_name("bead-rs 2.0.5"), "bead-rs");
+/// assert_eq!(parse_backend_name("unknown format"), "unknown");
+/// ```
+///
+/// # Notes
+///
+/// - This is parsing only - no validation or error handling yet
+/// - Version numbers are stripped - only the backend name is returned
+/// - Handles whitespace and newlines gracefully
+/// - "bead" output is mapped to "bead-rs" for consistency
+pub fn parse_backend_name(version_output: &str) -> String {
+    use regex::Regex;
+
+    let output = version_output.trim();
+
+    // Try to extract the first word (backend name) from version output
+    // Common formats: "bf 0.1.0", "bead 2.0.5", "bead-rs 2.0.5"
+    let first_word = output.split_whitespace().next().unwrap_or("unknown");
+
+    match first_word {
+        "bead" => "bead-rs".to_string(), // bead CLI is bead-rs backend
+        "bf" => "bf".to_string(),
+        "bead-rs" => "bead-rs".to_string(),
+        backend => {
+            // For unknown backends, validate it looks like a name (alphanumeric + hyphens/underscores)
+            // Must start with a letter, followed by letters, digits, hyphens, or underscores only
+            let name_regex = Regex::new(r"^[a-zA-Z][a-zA-Z0-9_-]*$").unwrap();
+            if name_regex.is_match(backend) && !backend.contains('@') && !backend.contains('.') {
+                backend.to_string()
+            } else {
+                "unknown".to_string()
+            }
+        }
+    }
+}
+
 /// Spawn a binary with `--version` flag and capture its stdout.
 ///
 /// This is a low-level spawning function that executes a binary with the
@@ -139,6 +203,101 @@ mod tests {
         fs::set_permissions(&binary_path, perms).expect("failed to set permissions");
 
         binary_path
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // parse_backend_name tests
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_backend_name_handles_bf_format() {
+        // Test basic bf version format
+        assert_eq!(parse_backend_name("bf 0.1.0"), "bf");
+        assert_eq!(parse_backend_name("bf 1.2.3"), "bf");
+        assert_eq!(parse_backend_name("bf 2.0.5-beta"), "bf");
+    }
+
+    #[test]
+    fn parse_backend_name_handles_bead_format() {
+        // Test bead format (should map to bead-rs)
+        assert_eq!(parse_backend_name("bead 0.1.0"), "bead-rs");
+        assert_eq!(parse_backend_name("bead 2.0.5"), "bead-rs");
+        assert_eq!(parse_backend_name("bead 1.0.0-alpha"), "bead-rs");
+    }
+
+    #[test]
+    fn parse_backend_name_handles_bead_rs_format() {
+        // Test explicit bead-rs format
+        assert_eq!(parse_backend_name("bead-rs 2.0.5"), "bead-rs");
+        assert_eq!(parse_backend_name("bead-rs 1.0.0"), "bead-rs");
+        assert_eq!(parse_backend_name("bead-rs 0.1.0-beta"), "bead-rs");
+    }
+
+    #[test]
+    fn parse_backend_name_handles_multiline_output() {
+        // Test parsing from multiline version output
+        let multiline = "bead 2.0.5\nBuild metadata: some info\nCopyright 2026";
+        assert_eq!(parse_backend_name(multiline), "bead-rs");
+
+        let bf_multiline = "bf 0.1.0\nAnother line\nYet another line";
+        assert_eq!(parse_backend_name(bf_multiline), "bf");
+    }
+
+    #[test]
+    fn parse_backend_name_handles_whitespace_variations() {
+        // Test various whitespace handling
+        assert_eq!(parse_backend_name("  bf 0.1.0  "), "bf");
+        assert_eq!(parse_backend_name("\nbead 2.0.5\n"), "bead-rs");
+        assert_eq!(parse_backend_name("bf\t0.1.0"), "bf");
+    }
+
+    #[test]
+    fn parse_backend_name_returns_unknown_for_unknown_formats() {
+        // Test unknown/malformed formats return "unknown"
+        assert_eq!(parse_backend_name("unknown format"), "unknown");
+        assert_eq!(parse_backend_name("12345"), "unknown");
+        assert_eq!(parse_backend_name(""), "unknown");
+        assert_eq!(parse_backend_name("   "), "unknown");
+    }
+
+    #[test]
+    fn parse_backend_name_handles_custom_backend_names() {
+        // Test custom backend names (alphanumeric + hyphens/underscores)
+        assert_eq!(parse_backend_name("my-backend 1.0.0"), "my-backend");
+        assert_eq!(parse_backend_name("custom_backend 2.0.0"), "custom_backend");
+        assert_eq!(
+            parse_backend_name("my-custom_backend 1.0"),
+            "my-custom_backend"
+        );
+    }
+
+    #[test]
+    fn parse_backend_name_rejects_invalid_backend_names() {
+        // Test invalid backend names return "unknown"
+        assert_eq!(parse_backend_name("123invalid 1.0.0"), "unknown");
+        assert_eq!(parse_backend_name("-starts-with-dash 1.0.0"), "unknown");
+        assert_eq!(
+            parse_backend_name("_starts-with-underscore 1.0.0"),
+            "unknown"
+        );
+        assert_eq!(parse_backend_name("has@symbol 1.0.0"), "unknown");
+        assert_eq!(parse_backend_name("has space 1.0.0"), "unknown");
+    }
+
+    #[test]
+    fn parse_backend_name_returns_string_type() {
+        // Verify the function returns String type (not &str)
+        let result: String = parse_backend_name("bf 1.0.0");
+        assert_eq!(result, "bf");
+        assert!(result == "bf");
+    }
+
+    #[test]
+    fn parse_backend_name_strips_version_numbers() {
+        // Verify version numbers are not included in output
+        assert_eq!(parse_backend_name("bf 0.1.0"), "bf");
+        assert_eq!(parse_backend_name("bead 2.0.5-beta"), "bead-rs");
+        assert_eq!(parse_backend_name("bead-rs 1.2.3-rc1"), "bead-rs");
     }
 
     #[test]
