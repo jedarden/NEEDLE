@@ -397,3 +397,155 @@ fn extract_section(output: &str, section_marker: &str) -> String {
 
     section_content
 }
+
+#[test]
+fn test_verification_runner_preserves_argument_boundaries_and_runs_both_lanes() {
+    let test_dir = tempfile::tempdir().unwrap();
+    let test_config = test_dir.path().join("test-config.yaml");
+    let fast_marker = test_dir.path().join("fast marker.txt");
+    let slow_marker = test_dir.path().join("slow marker.txt");
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    // The marker path and payload both contain spaces. A runner that rebuilds
+    // the YAML list into one shell string will not pass these argv elements
+    // correctly; direct argv execution will.
+    let config_content = format!(
+        r#"version: "1.0"
+
+fast_lane:
+  - name: "Fast argument boundary check"
+    command: "bash"
+    args: ["-c", "printf '%s' \"$1\" > \"$2\"", "--", "fast payload with spaces", "{fast_marker}"]
+    timeout: 10
+
+slow_lane:
+  - name: "Slow lane marker"
+    command: "bash"
+    args: ["-c", "printf '%s' \"$1\" > \"$2\"", "--", "slow payload", "{slow_marker}"]
+    timeout: 10
+"#,
+        fast_marker = fast_marker.display(),
+        slow_marker = slow_marker.display(),
+    );
+    fs::write(&test_config, config_content).unwrap();
+
+    let runner_script = repo_root.join("scripts/verification-runner.sh");
+    let fast_output = Command::new("bash")
+        .arg(&runner_script)
+        .arg("--config")
+        .arg(&test_config)
+        .arg("--fast")
+        .env("NO_COLOR", "1")
+        .current_dir(&repo_root)
+        .output()
+        .expect("Failed to execute fast lane");
+
+    assert!(
+        fast_output.status.success(),
+        "fast lane should pass: {}",
+        String::from_utf8_lossy(&fast_output.stderr)
+    );
+    assert!(
+        fast_marker.exists(),
+        "fast check should receive its path as one argument"
+    );
+    assert_eq!(
+        fs::read_to_string(&fast_marker).unwrap(),
+        "fast payload with spaces"
+    );
+    assert!(
+        !slow_marker.exists(),
+        "--fast must not run slow lane checks"
+    );
+
+    let all_output = Command::new("bash")
+        .arg(&runner_script)
+        .arg("--config")
+        .arg(&test_config)
+        .arg("--all")
+        .env("NO_COLOR", "1")
+        .current_dir(&repo_root)
+        .output()
+        .expect("Failed to execute all lanes");
+    let all_stdout = String::from_utf8_lossy(&all_output.stdout);
+
+    assert!(
+        all_output.status.success(),
+        "all lanes should pass: {}",
+        String::from_utf8_lossy(&all_output.stderr)
+    );
+    assert!(all_stdout.contains("Checks run: 2"));
+    assert!(slow_marker.exists(), "--all must run slow lane checks");
+}
+
+#[test]
+fn test_verification_runner_generates_empty_failures_json_when_all_pass() {
+    let test_dir = tempfile::tempdir().unwrap();
+    let test_config = test_dir.path().join("test-config.yaml");
+    let json_output = test_dir.path().join("nested/results.json");
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    fs::write(
+        &test_config,
+        r#"version: "1.0"
+fast_lane:
+  - name: "Passing check"
+    command: "true"
+    args: []
+    timeout: 10
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new("bash")
+        .arg(repo_root.join("scripts/verification-runner.sh"))
+        .arg("--config")
+        .arg(&test_config)
+        .arg("--fast")
+        .arg("--json")
+        .arg(&json_output)
+        .env("NO_COLOR", "1")
+        .current_dir(&repo_root)
+        .output()
+        .expect("Failed to execute verification runner");
+
+    assert!(output.status.success());
+    let report: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&json_output).unwrap()).unwrap();
+    assert_eq!(report["totals"]["checks"], 1);
+    assert_eq!(report["totals"]["failed"], 0);
+    assert_eq!(report["failures"], serde_json::json!([]));
+}
+
+#[test]
+fn test_verification_runner_records_explicit_bypass() {
+    let test_dir = tempfile::tempdir().unwrap();
+    let bypass_log = test_dir.path().join("bypasses.jsonl");
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    let output = Command::new("bash")
+        .arg(repo_root.join("scripts/verification-runner.sh"))
+        .arg("--fast")
+        .arg("--no-verify")
+        .env("NO_COLOR", "1")
+        .env("VERIFICATION_BYPASS_LOG", &bypass_log)
+        .current_dir(&repo_root)
+        .output()
+        .expect("Failed to execute bypass path");
+
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Definition of Done bypass detected"));
+
+    let bypass_contents = fs::read_to_string(&bypass_log).expect("bypass log should be written");
+    let event: serde_json::Value =
+        serde_json::from_str(bypass_contents.lines().next().unwrap()).unwrap();
+    assert_eq!(event["pattern"], "--no-verify");
+    assert_eq!(event["lanes_skipped"], serde_json::json!(["fast"]));
+    assert!(event["timestamp"]
+        .as_str()
+        .is_some_and(|value| !value.is_empty()));
+    assert!(event["commit_sha"]
+        .as_str()
+        .is_some_and(|value| !value.is_empty()));
+}

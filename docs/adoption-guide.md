@@ -14,9 +14,10 @@ together. It returns zero only when every non-optional check passes.
 
 This document covers `scripts/verification-runner.sh`, the configurable YAML
 runner. NEEDLE also contains `scripts/definition-of-done.sh`, a separate,
-hard-coded and bypass-aware gate used by NEEDLE's own pre-commit hook and
-NEEDLE gate. Do not pass `--count-bypass` to the configurable runner; that flag
-belongs to the NEEDLE-specific script.
+hard-coded gate used by NEEDLE's own pre-commit hook and NEEDLE gate. The
+configurable runner supports explicit skip detection itself; when paired with
+NEEDLE's hook protocol, `--count-bypass` also records pre-commit state for the
+shared post-commit logger.
 
 ## Quick start
 
@@ -87,12 +88,10 @@ Each check has the following fields:
 | `allow_failure` | No | Set to `true` for a warning-only check; defaults to `false`. |
 | `environment` | No | List of `KEY=value` strings exported only while that check runs. |
 
-Keep `args` to simple shell words and use the flow-style list form shown in the
-examples (`args: ["..."]`). The current runner converts the YAML list to a
-shell command before execution, so arguments containing spaces, quotes, or
-shell metacharacters should be placed in a small checked-in wrapper script and
-called through `command` instead. This also makes complex commands easier to
-test locally.
+The runner passes each `args` list item as one argv element, so arguments with
+spaces, quotes, or shell metacharacters do not get reinterpreted by a shell.
+Pipelines and redirections are intentionally not YAML commands; put those in a
+small checked-in wrapper script and call that wrapper instead.
 
 An optional environment example looks like this:
 
@@ -203,12 +202,12 @@ add `./scripts/verification-runner.sh --fast` as one command in that manager
 instead of replacing its generated hook. Do not run `--all` from pre-commit;
 slow checks belong in CI.
 
-The configurable runner does not implement NEEDLE's `--count-bypass` protocol.
-If the repository requires an auditable record of `git commit --no-verify`,
-retain the repository's existing bypass logger or adopt
-`scripts/definition-of-done.sh` and `scripts/bypass-detection.sh` together.
-Adding `--count-bypass` to `verification-runner.sh` will produce an invalid
-argument error.
+The runner recognizes `--no-verify` and the explicit skip environments
+`SKIP_CHECKS=1`, `VERIFICATION_SKIP=1`, and
+`NEEDLE_SKIP_VERIFICATION=1`. It records a structured event to
+`.beads/bypasses.jsonl`, or to `VERIFICATION_BYPASS_LOG` when set. If the
+repository uses NEEDLE's pre-commit/post-commit logger, add `--count-bypass`
+to allow the logger to attach the final commit SHA.
 
 ## Optional NEEDLE gate
 
@@ -276,10 +275,9 @@ not a drop-in replacement.
 
 ### Arguments are not passed as expected
 
-The runner joins the `args` list into a shell command. Keep each argument a
-simple token and avoid embedding shell quoting in YAML. Move pipelines,
-redirections, substitutions, and arguments containing spaces into a checked-in
-wrapper script, then configure that script as the check command.
+The runner passes each `args` list item as one argv element. Pipelines,
+redirections, and substitutions are intentionally not YAML commands; put those
+in a checked-in wrapper script and configure that script as the check command.
 
 ### A check fails with exit code 124
 
@@ -314,10 +312,10 @@ aliases or untracked wrapper scripts; NEEDLE sees only the committed workspace.
 
 ### I need bypass logging
 
-The generic runner has no bypass flag or bypass log. Keep an existing hook
-logger, or use NEEDLE's paired `definition-of-done.sh` and
-`bypass-detection.sh` implementation. Do not silently treat `git commit
---no-verify` as a successful verification result.
+The generic runner logs explicit skip requests. To record a commit skipped
+entirely by `git commit --no-verify`, retain a post-commit hook/logger because a
+process that was never started cannot observe that Git flag. Do not silently
+treat that commit as a successful verification result.
 
 ## Adoption checklist
 

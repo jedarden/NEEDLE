@@ -749,3 +749,98 @@ strands:
 
     println!("✓ strand fields mixed tilde/non-tilde paths test passed");
 }
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Multiple tildes in same config value tests
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Test that multiple tildes in the same config value are handled correctly.
+///
+/// Expected behavior: only a leading tilde is expanded. Tildes appearing elsewhere
+/// in the path (e.g., in the middle or end) are treated as literal path components
+/// and remain unchanged. This matches standard shell tilde expansion behavior.
+///
+/// Examples:
+/// - `~/path/~/other` → `$HOME/path/~/other` (only leading ~ expands)
+/// - `~/~/nested` → `$HOME/~/nested` (only leading ~ expands)
+#[tokio::test]
+#[serial]
+async fn explore_workspace_root_multiple_tildes_same_value() {
+    let _guard = HomeGuard::isolate();
+    let isolated_home = env::var("HOME").unwrap();
+
+    // Test: multiple tildes in same path value
+    let yaml = r#"
+strands:
+  explore:
+    workspace_root: ~/path/~/other
+"#;
+
+    let mut config: Config = serde_yaml::from_str(yaml).expect("failed to parse config");
+    config.expand_tildes();
+
+    // Only the leading ~ should be expanded
+    let expected = PathBuf::from(&isolated_home).join("path/~/other");
+    assert_eq!(
+        config.strands.explore.workspace_root, expected,
+        "only leading tilde should expand, tildes in path middle remain literal"
+    );
+
+    println!("✓ strands.explore.workspace_root multiple tildes test passed");
+
+    // Test: consecutive tildes at start
+    let yaml = r#"
+strands:
+  explore:
+    workspace_root: ~/~/nested
+"#;
+
+    let mut config: Config = serde_yaml::from_str(yaml).expect("failed to parse config");
+    config.expand_tildes();
+
+    // First ~ expands to HOME, second ~ is literal
+    let expected = PathBuf::from(&isolated_home).join("~/nested");
+    assert_eq!(
+        config.strands.explore.workspace_root, expected,
+        "consecutive tildes: only first ~ expands, rest are literal"
+    );
+
+    println!("✓ strands.explore.workspace_root consecutive tildes test passed");
+}
+
+/// Test multiple tildes in vector path values (Vec<PathBuf>).
+///
+/// Verifies that when each element in a vector may contain multiple tildes,
+/// only the leading tilde in each path is expanded.
+#[tokio::test]
+#[serial]
+async fn explore_workspaces_multiple_tildes_in_vector_elements() {
+    let _guard = HomeGuard::isolate();
+    let isolated_home = env::var("HOME").unwrap();
+
+    // Test: vector with paths containing multiple tildes
+    let yaml = r#"
+strands:
+  explore:
+    workspaces:
+      - ~/first/~/second
+      - ~/repo/~/deep/~/third
+      - ~/normal
+"#;
+
+    let mut config: Config = serde_yaml::from_str(yaml).expect("failed to parse config");
+    config.expand_tildes();
+
+    let expected = vec![
+        PathBuf::from(&isolated_home).join("first/~/second"),
+        PathBuf::from(&isolated_home).join("repo/~/deep/~/third"),
+        PathBuf::from(&isolated_home).join("normal"),
+    ];
+
+    assert_eq!(
+        config.strands.explore.workspaces, expected,
+        "only leading tilde in each vector element should expand"
+    );
+
+    println!("✓ strands.explore.workspaces multiple tildes in vector elements test passed");
+}

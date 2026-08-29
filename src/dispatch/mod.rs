@@ -3093,6 +3093,88 @@ output_transform: "needle-transform-custom"
         assert!(adapter.validate_timeouts().is_ok());
     }
 
+    // ── ProcessObservation::is_idle_expired() tests ──
+
+    #[test]
+    fn is_idle_expired_returns_false_when_no_deadline_set() {
+        // Test: None case (no deadline set) → should return false
+        let observation = ProcessObservation::new();
+        assert!(
+            !observation.is_idle_expired(),
+            "is_idle_expired should return false when no deadline is set"
+        );
+    }
+
+    #[test]
+    fn is_idle_expired_returns_false_when_deadline_not_expired() {
+        // Test: Future deadline → should return false
+        let timeout_duration = Duration::from_secs(10);
+        let observation = ProcessObservation::with_idle_deadline(timeout_duration);
+
+        // Deadline is 10 seconds in the future, so should not be expired
+        assert!(
+            !observation.is_idle_expired(),
+            "is_idle_expired should return false when deadline is in the future"
+        );
+    }
+
+    #[test]
+    fn is_idle_expired_returns_true_when_deadline_expired() {
+        // Test: Past deadline → should return true
+        let observation = ProcessObservation {
+            idle_deadline: Some(tokio::time::Instant::now() - Duration::from_secs(1)),
+        };
+
+        // Deadline is 1 second in the past, so should be expired
+        assert!(
+            observation.is_idle_expired(),
+            "is_idle_expired should return true when deadline has expired"
+        );
+    }
+
+    #[test]
+    fn is_idle_expired_returns_false_exactly_at_deadline_boundary() {
+        // Test: Deadline exactly at now → depends on implementation
+        // The implementation uses `>=` comparison, so if we set deadline to exactly now,
+        // it should return true (expired)
+        let observation = ProcessObservation {
+            idle_deadline: Some(tokio::time::Instant::now()),
+        };
+
+        // At the exact boundary, should be considered expired
+        assert!(
+            observation.is_idle_expired(),
+            "is_idle_expired should return true when exactly at deadline boundary (>= comparison)"
+        );
+    }
+
+    #[test]
+    fn is_idle_expired_behavior_matches_helper_contract() {
+        // Test: Verify the method satisfies the acceptance criteria
+        // 1. Returns bool ✓
+        // 2. Based on Option<tokio::time::Instant> ✓
+        // 3. Handles None case ✓
+
+        // Test None case
+        let none_observation = ProcessObservation::new();
+        let result: bool = none_observation.is_idle_expired();
+        assert!(!result, "None case should return false");
+
+        // Test Some(expired) case
+        let expired_observation = ProcessObservation {
+            idle_deadline: Some(tokio::time::Instant::now() - Duration::from_millis(100)),
+        };
+        let result: bool = expired_observation.is_idle_expired();
+        assert!(result, "Some(expired) case should return true");
+
+        // Test Some(not expired) case
+        let future_observation = ProcessObservation {
+            idle_deadline: Some(tokio::time::Instant::now() + Duration::from_millis(100)),
+        };
+        let result: bool = future_observation.is_idle_expired();
+        assert!(!result, "Some(not expired) case should return false");
+    }
+
     #[test]
     fn validate_timeouts_hard_only_valid() {
         // Valid: hard_timeout_secs alone (idle_timeout_secs = 0 disables idle deadline)

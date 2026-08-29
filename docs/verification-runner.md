@@ -1,10 +1,14 @@
 # Verification Runner
 
-A configurable, YAML-based verification runner that executes definition-of-done checks with proper failure aggregation.
+A configurable, YAML-based verification runner that executes definition-of-done
+checks with proper failure aggregation.
 
 ## Overview
 
-The verification runner (`scripts/verification-runner.sh`) provides a generic alternative to the hardcoded `definition-of-done.sh` script. Instead of embedding checks in shell code, you declare them in a YAML configuration file that the runner loads and executes.
+The verification runner (`scripts/verification-runner.sh`) is a reusable
+alternative to embedding checks in shell code. Declare each check in YAML; the
+runner loads it, invokes each command with its arguments intact, and reports
+every result.
 
 **When to use:**
 - You want a reusable verification pattern across multiple repositories
@@ -47,10 +51,10 @@ The NEEDLE project organizes checks as follows:
 2. **Clippy linting** (`cargo clippy --all-targets -- -D warnings`) - Runs clippy lints with deny warnings (60s timeout)
 3. **Cargo check** (`cargo check`) - Verifies compilation without running tests (60s timeout)
 
-**Slow Lane (3 checks, ~20 minutes):**
-1. **Unit tests** (`cargo test --lib`) - Runs library unit tests (300s timeout)
-2. **Integration tests** (`cargo test --test *`) - Runs integration tests (600s timeout)
-3. **Doc tests** (`cargo test --doc`) - Runs documentation tests (300s timeout)
+**Slow Lane:**
+The committed NEEDLE configuration names the test-target build, unit tests,
+five integration suites, and installer tests. See `.verification/config.yaml`
+for the authoritative list and timeouts.
 
 ### Usage Examples
 
@@ -114,13 +118,13 @@ version: "1.0"              # Required: Configuration format version
 description: |               # Optional: Human-readable description
   This configuration defines the verification checks for this repository.
 
-fast_lane:                  # Required: Fast checks (seconds, local cgroup)
+fast_lane:                  # Optional: Fast checks (seconds, local cgroup)
   - name: "Check name"
     command: "command"
     args: ["arg1", "arg2"]
     timeout: 30
 
-slow_lane:                  # Required: Slow checks (tests, integration)
+slow_lane:                  # Optional: Slow checks (tests, integration)
   - name: "Test name"
     command: "command"
     args: ["arg1", "arg2"]
@@ -135,11 +139,11 @@ Each check in `fast_lane` or `slow_lane` supports:
 |-------|----------|------|-------------|
 | `name` | Yes | string | Human-readable name for the check |
 | `command` | Yes | string | Command to execute (must be in PATH) |
-| `args` | Yes | array | Arguments passed to the command |
-| `timeout` | Yes | number | Maximum seconds before check is aborted |
+| `args` | No | array | Arguments passed to the command (default: `[]`) |
+| `timeout` | No | number | Maximum seconds before check is aborted (default: 60) |
 | `description` | No | string | Optional description of what the check verifies |
 | `allow_failure` | No | boolean | If true, failure doesn't cause overall failure (default: false) |
-| `environment` | No | object | Environment variables to set for the check |
+| `environment` | No | array | `KEY=value` entries set only while the check runs |
 
 ### Example Configurations
 
@@ -247,8 +251,11 @@ slow_lane:
 | `--slow` | Run slow lane only |
 | `--all` | Run both fast and slow lanes (default) |
 | `--config PATH` | Load configuration from specific path |
+| `--json PATH` | Write a machine-readable JSON report |
 | `--verbose` | Show detailed output from each check |
-| `--dry-run` | Show what would run without executing |
+| `--dry-run` | Validate and list checks without executing |
+| `--count-bypass` | Record pre-commit state when the NEEDLE helper is present |
+| `--no-verify` | Explicitly skip checks and record a bypass |
 | `--help` | Show help message |
 
 ## Exit Codes
@@ -257,7 +264,7 @@ slow_lane:
 |------|---------|
 | 0 | All checks passed |
 | 1 | One or more checks failed |
-| 2 | Configuration error or missing config file |
+| 2 | Configuration, dependency, or report-output error |
 | 3 | Invalid arguments |
 
 ## Behavior
@@ -278,10 +285,13 @@ Running: Cargo check...
 === Verification Summary ===
 Lane: fast
 Checks run: 3
-Failures: 1
+Passed: 2
+Failed: 1
 
 Failed checks:
-  - Clippy linting: exit code 1
+  [2] Clippy linting
+      Status: failed
+      Exit code: 1
 
 ❌ Verification failed
 ```
@@ -297,13 +307,14 @@ Running: Unit tests...
 
 ### Dry Run Mode
 
-Use `--dry-run` to see what would execute without actually running checks:
+Use `--dry-run` to validate the YAML and see what would execute without running
+checks. Dry-run results are reported as `skipped` in JSON:
 
 ```bash
 $ ./scripts/verification-runner.sh --dry-run --fast
-[Dry Run] Would execute: cargo fmt --check (timeout: 30s)
-[Dry Run] Would execute: cargo clippy --all-targets -- -D warnings (timeout: 60s)
-[Dry Run] Would execute: cargo check (timeout: 120s)
+[dry run] would run with 30s timeout
+[dry run] would run with 60s timeout
+[dry run] would run with 120s timeout
 ```
 
 ## Configuration Discovery
@@ -312,7 +323,11 @@ The runner searches for configuration files in this order:
 
 1. `.verification/config.yaml` (preferred)
 2. `definition-of-done.yaml`
-3. Path specified via `--config`
+3. `.verification/config.yml`
+4. `definition-of-done.yml`
+
+An explicit `--config PATH` overrides discovery. Relative paths are resolved
+from the repository root.
 
 This allows you to:
 - Keep verification configs in a dedicated `.verification/` directory
@@ -327,7 +342,7 @@ This allows you to:
 #!/usr/bin/env bash
 # .githooks/pre-commit
 
-./scripts/verification-runner.sh --fast || {
+./scripts/verification-runner.sh --fast --count-bypass || {
   echo "Pre-commit verification failed. Use --no-verify to bypass."
   exit 1
 }
@@ -357,6 +372,8 @@ gates:
 
 - Bash 4.0+
 - `yq` for YAML parsing ([https://github.com/mikefarah/yq](https://github.com/mikefarah/yq))
+- `jq` for validation and JSON reports
+- GNU `timeout` for per-check limits
 - Git repository (for repo root detection)
 
 ## Migration from definition-of-done.sh
@@ -415,9 +432,7 @@ fast_lane:
     command: "cargo"
     args: ["test", "--lib"]
     timeout: 120
-    environment:
-      RUSTFLAGS: "-D warnings"
-      CARGO_TERM_COLOR: "always"
+    environment: ["RUSTFLAGS=-D warnings", "CARGO_TERM_COLOR=always"]
 ```
 
 ### Conditional Checks
@@ -435,9 +450,10 @@ fast_lane:
 
 ## Troubleshooting
 
-**Problem:** `yq: command not found`
+**Problem:** `yq`, `jq`, or `timeout` is not found
 
-**Solution:** Install `yq`:
+**Solution:** Install the missing host dependency. The runner uses mikefarah
+`yq`, `jq`, and GNU `timeout`.
 ```bash
 # Linux
 wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
@@ -455,18 +471,27 @@ brew install yq
 
 **Solution:** This means the check timed out. Increase the timeout in your configuration or optimize the check.
 
-## Future Enhancements
+## Bypass detection
 
-The scaffold is intentionally minimal. Future work may add:
+`SKIP_CHECKS=1`, `VERIFICATION_SKIP=1`, `NEEDLE_SKIP_VERIFICATION=1`, and the
+explicit `--no-verify` option skip execution, print a warning, and append a
+JSON Lines event to `.beads/bypasses.jsonl` (or the path in
+`VERIFICATION_BYPASS_LOG`). Events include a timestamp, current commit SHA,
+hostname, username, skipped lanes, and the detected pattern. Writes are locked
+so concurrent invocations cannot interleave records.
 
-- [ ] Actual check execution (currently scaffold only)
-- [ ] Parallel check execution within lanes
-- [ ] Check caching and invalidation
-- [ ] Progress reporting and real-time output
-- [ ] JSON output format for tool integration
-- [ ] Check retry logic with exponential backoff
-- [ ] Per-lane configuration inheritance
-- [ ] Check templates and composition
+When the runner is used from NEEDLE's pre-commit protocol, add
+`--count-bypass` and source the repository's `bypass-detection.sh` helper.
+That helper's post-commit hook can then attach the final SHA when Git skips the
+pre-commit hook entirely through `git commit --no-verify`.
+
+## Structured reports
+
+Set `--json PATH` or `VERIFICATION_JSON_OUTPUT=true` (with optional
+`VERIFICATION_JSON_PATH`) to write a JSON report. It contains top-level totals,
+one result for every selected check, and a `failures` array containing only
+failed or timed-out checks. Command output is preserved separately as
+`stdout` and `stderr`.
 
 ## See Also
 

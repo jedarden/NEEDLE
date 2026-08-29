@@ -212,6 +212,60 @@ impl BeadBackend {
         );
     }
 
+    /// Parse backend identity from raw version output string.
+    ///
+    /// This function takes a raw version output string (e.g., from a `--version` command)
+    /// and extracts the backend name from various common formats.
+    ///
+    /// # Arguments
+    /// * `version_output` - Raw stdout/stderr from version command execution
+    ///
+    /// # Returns
+    /// The backend name extracted from the version output (e.g., "bead", "bf").
+    ///
+    /// # Supported Formats
+    /// - `"bf 0.x.y"` → returns "bf"
+    /// - `"bead 0.x.y"` → returns "bead" (bead-rs backend)
+    /// - `"bead 0.x.y (details)"` → returns "bead"
+    /// - Single-word outputs → returns the word
+    /// - Unknown formats → returns "unknown"
+    ///
+    /// # Examples
+    /// ```
+    /// assert_eq!(parse_backend_name("bf 0.1.0"), "bf");
+    /// assert_eq!(parse_backend_name("bead 0.2.3"), "bead");
+    /// assert_eq!(parse_backend_name("bead 0.2.3 (bead-rs)"), "bead");
+    /// assert_eq!(parse_backend_name("unknown-format"), "unknown");
+    /// ```
+    pub fn parse_backend_name(version_output: &str) -> String {
+        let trimmed = version_output.trim();
+
+        // Pattern 1: First word before whitespace (e.g., "bead" from "bead 0.1.3")
+        let first_word_pattern = Regex::new(r"^(\S+)\s").unwrap();
+        if let Some(caps) = first_word_pattern.captures(trimmed) {
+            if let Some(name) = caps.get(1) {
+                return name.as_str().to_string();
+            }
+        }
+
+        // Pattern 2: If no space, entire output is the name (e.g., just "bead")
+        if !trimmed.is_empty() && !trimmed.contains(char::is_whitespace) {
+            return trimmed.to_string();
+        }
+
+        // Pattern 3: Empty or unparseable output
+        if trimmed.is_empty() {
+            return "unknown".to_string();
+        }
+
+        // Pattern 4: Multi-word output but no clear pattern - return first word
+        trimmed
+            .split_whitespace()
+            .next()
+            .unwrap_or("unknown")
+            .to_string()
+    }
+
     /// Classify an error using only this backend's declared markers.
     pub fn error_contains_any(&self, message: &str, markers: &[String]) -> bool {
         let message = message.to_lowercase();
@@ -837,6 +891,74 @@ mod tests {
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("failed to spawn"));
+    }
+
+    #[test]
+    fn test_parse_backend_name_bf_format() {
+        // Test "bf 0.x.y" format
+        assert_eq!(BeadBackend::parse_backend_name("bf 0.1.0"), "bf");
+        assert_eq!(BeadBackend::parse_backend_name("bf 0.4.2"), "bf");
+        assert_eq!(BeadBackend::parse_backend_name("bf 1.0.0"), "bf");
+    }
+
+    #[test]
+    fn test_parse_backend_name_bead_format() {
+        // Test "bead 0.x.y" format (bead-rs)
+        assert_eq!(BeadBackend::parse_backend_name("bead 0.1.0"), "bead");
+        assert_eq!(BeadBackend::parse_backend_name("bead 0.2.3"), "bead");
+        assert_eq!(BeadBackend::parse_backend_name("bead 0.3.1"), "bead");
+    }
+
+    #[test]
+    fn test_parse_backend_name_bead_with_details() {
+        // Test "bead 0.x.y (details)" format
+        assert_eq!(
+            BeadBackend::parse_backend_name("bead 0.1.3 (commit 85f36ac)"),
+            "bead"
+        );
+        assert_eq!(
+            BeadBackend::parse_backend_name("bead 0.2.0 (bead-rs)"),
+            "bead"
+        );
+        assert_eq!(
+            BeadBackend::parse_backend_name("bf 0.4.1 (build 123)"),
+            "bf"
+        );
+    }
+
+    #[test]
+    fn test_parse_backend_name_single_word() {
+        // Test single-word outputs
+        assert_eq!(BeadBackend::parse_backend_name("bead"), "bead");
+        assert_eq!(BeadBackend::parse_backend_name("bf"), "bf");
+    }
+
+    #[test]
+    fn test_parse_backend_name_empty_output() {
+        // Test empty output
+        assert_eq!(BeadBackend::parse_backend_name(""), "unknown");
+        assert_eq!(BeadBackend::parse_backend_name("   "), "unknown");
+    }
+
+    #[test]
+    fn test_parse_backend_name_unknown_format() {
+        // Test unknown/complex formats
+        assert_eq!(
+            BeadBackend::parse_backend_name("some random output"),
+            "some"
+        );
+        assert_eq!(
+            BeadBackend::parse_backend_name("multiple words here"),
+            "multiple"
+        );
+    }
+
+    #[test]
+    fn test_parse_backend_name_with_whitespace_variations() {
+        // Test various whitespace patterns
+        assert_eq!(BeadBackend::parse_backend_name("bead\t0.1.0"), "bead");
+        assert_eq!(BeadBackend::parse_backend_name("bf\n0.2.0"), "bf");
+        assert_eq!(BeadBackend::parse_backend_name("  bead 0.1.0  "), "bead");
     }
 
     #[test]

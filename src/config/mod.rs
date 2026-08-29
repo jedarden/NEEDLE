@@ -1985,7 +1985,6 @@ mod tests {
     ///
     // REMOVED: test_auto_fallback_chain_search_order_bead_then_bf_then_error
     // Bead-forge/bf backend is no longer supported; fallback chain is now bead-only.
-
     /// Test PATH search behavior with multiple directories.
     ///
     /// Per ADR-013 §7: auto detection prefers bead (primary), then bf (secondary).
@@ -5552,64 +5551,116 @@ impl OtlpSignalsConfig {
     }
 }
 
+/// Intermediate struct for deserializing OtlpSinkConfig with flexible timeout field names.
+///
+/// Accepts both `timeout_ms` and `timeout_secs`, with `timeout_secs` values converted
+/// to milliseconds (multiplied by 1000).
+#[derive(Debug, Clone, Deserialize)]
+struct OtlpSinkConfigIntermediate {
+    enabled: Option<bool>,
+    endpoint: Option<String>,
+    protocol: Option<String>,
+    /// Timeout in milliseconds
+    timeout_ms: Option<u64>,
+    /// Timeout in seconds (converted to ms)
+    timeout_secs: Option<u64>,
+    compression: Option<String>,
+    tls: Option<OtlpTlsConfig>,
+    headers: Option<Vec<String>>,
+    signals: Option<OtlpSignalsConfig>,
+    resource_attributes: Option<Vec<String>>,
+    metrics_interval_secs: Option<u64>,
+    service_namespace: Option<String>,
+    max_queue_size: Option<usize>,
+}
+
+impl From<OtlpSinkConfigIntermediate> for OtlpSinkConfig {
+    fn from(intermediate: OtlpSinkConfigIntermediate) -> Self {
+        // Determine timeout: prefer timeout_ms, convert timeout_secs to ms, or use default
+        let timeout_ms = match (intermediate.timeout_ms, intermediate.timeout_secs) {
+            (Some(ms), _) => ms,
+            (None, Some(secs)) => secs.saturating_mul(1000),
+            (None, None) => 5000,
+        };
+
+        OtlpSinkConfig {
+            enabled: intermediate.enabled.unwrap_or(false),
+            endpoint: intermediate
+                .endpoint
+                .unwrap_or_else(|| "http://localhost:4317".to_string()),
+            protocol: intermediate.protocol.unwrap_or_else(|| "grpc".to_string()),
+            timeout_ms,
+            compression: intermediate
+                .compression
+                .unwrap_or_else(|| "gzip".to_string()),
+            tls: intermediate.tls.unwrap_or_default(),
+            headers: intermediate.headers.unwrap_or_default(),
+            signals: intermediate.signals.unwrap_or_default(),
+            resource_attributes: intermediate.resource_attributes.unwrap_or_default(),
+            metrics_interval_secs: intermediate.metrics_interval_secs.unwrap_or(10),
+            service_namespace: intermediate
+                .service_namespace
+                .unwrap_or_else(|| "needle-fleet".to_string()),
+            max_queue_size: intermediate.max_queue_size.unwrap_or(2048),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for OtlpSinkConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let intermediate = OtlpSinkConfigIntermediate::deserialize(deserializer)?;
+        Ok(OtlpSinkConfig::from(intermediate))
+    }
+}
+
 /// OTLP sink configuration for OpenTelemetry export.
 ///
 /// When enabled, NEEDLE exports traces, metrics, and logs to any OTLP-compliant
 /// collector (e.g., Grafana Tempo, Jaeger, OpenTelemetry Collector).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Serialize)]
 pub struct OtlpSinkConfig {
     /// Enable or disable the OTLP sink.
-    #[serde(default = "OtlpSinkConfig::default_enabled")]
     pub enabled: bool,
 
     /// OTLP endpoint URL (e.g., `http://localhost:4317` for gRPC).
-    #[serde(default = "OtlpSinkConfig::default_endpoint")]
     pub endpoint: String,
 
     /// Protocol: "grpc" or "http".
-    #[serde(default = "OtlpSinkConfig::default_protocol")]
     pub protocol: String,
 
     /// Request timeout in milliseconds (default: 5000).
     ///
     /// Backward compatibility: also accepts `timeout_secs` (converted to ms).
-    #[serde(alias = "timeout_secs", default = "OtlpSinkConfig::default_timeout_ms")]
     pub timeout_ms: u64,
 
     /// Compression: "gzip", "none", or "zstd".
-    #[serde(default = "OtlpSinkConfig::default_compression")]
     pub compression: String,
 
     /// TLS configuration.
-    #[serde(default)]
     pub tls: OtlpTlsConfig,
 
     /// HTTP headers to send with each request (format: "key: value").
-    #[serde(default)]
     pub headers: Vec<String>,
 
     /// Signal export configuration (traces, metrics, logs).
-    #[serde(default)]
     pub signals: OtlpSignalsConfig,
 
     /// Resource attributes attached to all exported signals (format: "key=value").
     /// Reserved keys `service.name` and `service.instance.id` cannot be overridden.
-    #[serde(default)]
     pub resource_attributes: Vec<String>,
 
     /// Metrics export interval in seconds (default: 10).
-    #[serde(default = "OtlpSinkConfig::default_metrics_interval_secs")]
     pub metrics_interval_secs: u64,
 
     /// Service namespace for OpenTelemetry semantic conventions.
     /// Defaults to "needle-fleet" if not specified.
-    #[serde(default = "OtlpSinkConfig::default_service_namespace")]
     pub service_namespace: String,
 
     /// Maximum queue size for batch processors (default: 2048).
     /// When the queue fills, the OTel SDK drops the oldest items.
-    #[serde(default = "OtlpSinkConfig::default_max_queue_size")]
     pub max_queue_size: usize,
 }
 

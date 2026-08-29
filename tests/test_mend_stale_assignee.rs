@@ -354,6 +354,8 @@ async fn test_no_heartbeat_but_in_registry() {
         model: Some("claude-sonnet-4".to_string()),
         provider: Some("anthropic".to_string()),
         started_at: chrono::Utc::now(),
+        beads_processed: 0,
+        config_reload_generation: 0,
     };
     registry.register(worker_entry).unwrap();
 

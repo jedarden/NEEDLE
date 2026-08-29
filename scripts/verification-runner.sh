@@ -1,68 +1,61 @@
 #!/usr/bin/env bash
-# Verification Runner - Configurable Definition of Done Execution
+# Configurable definition-of-done runner.
 #
-# A generic verification runner that loads checks from a configuration file
-# and executes them with proper failure aggregation.
+# The configuration is YAML so repositories can keep their verification policy
+# separate from this reusable execution engine. Checks are run sequentially,
+# but a failure never prevents a later check from running.
 #
 # Usage:
-#   scripts/verification-runner.sh [--fast|--slow|--all] [--config PATH] [--help]
-#
-# Configuration:
-#   By default, loads from:
-#   - .verification/config.yaml
-#   - definition-of-done.yaml
-#   - Or path specified via --config
-#
-# Lanes:
-#   - Fast: Quick checks (fmt, lint, typecheck)
-#   - Slow: Full test suite
-#   - All: Both fast and slow lanes
-#
-# Behavior:
-#   - Aggregates all failures rather than aborting on first
-#   - Returns non-zero if ANY check fails
-#   - Outputs structured failure report
+#   scripts/verification-runner.sh [--fast|--slow|--all]
+#       [--config PATH] [--json PATH] [--verbose] [--dry-run]
+#       [--count-bypass] [--no-verify]
 #
 # Exit codes:
-#   0 - All checks passed
-#   1 - One or more checks failed
-#   2 - Configuration error or missing config file
-#   3 - Invalid arguments
+#   0 - all selected checks passed (allowed failures do not count as failures)
+#   1 - one or more selected checks failed
+#   2 - configuration, dependency, or report-output error
+#   3 - invalid command-line arguments
 
 set -euo pipefail
 
-# Result storage
-declare -a PASSED_CHECKS=()
-declare -a FAILED_CHECKS=()
-declare -a PASSED_NAMES=()
-declare -a FAILED_NAMES=()
-declare -a FAILED_EXIT_CODES=()
-declare -a FAILED_OUTPUTS=()
-declare -a FAILED_STDOUTS=()
-declare -a FAILED_STDERRS=()
-
-# Global counters
-TOTAL_PASSED=0
-TOTAL_FAILED=0
-
-# Script directory for path resolution
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || echo "$SCRIPT_DIR/..")"
+if REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+  REPO_ROOT="$(cd "$REPO_ROOT" && pwd)"
+else
+  REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+fi
 cd "$REPO_ROOT"
 
-# Configuration
-LANE="all"                              # Default to running all lanes
-CONFIG_PATH=""                          # Will be auto-detected if not specified
-VERBOSE=false                           # Verbose output
-DRY_RUN=false                           # Show what would run without executing
+LANE="all"
+CONFIG_PATH=""
+VERBOSE=false
+DRY_RUN=false
+COUNT_BYPASS=false
+EXPLICIT_BYPASS=false
+JSON_PATH=""
+CONFIG_JSON=""
 
-# Color output (disable with NO_COLOR=1)
-if [[ -t 1 && "${NO_COLOR:-}" != "1" ]]; then
-  readonly RED='\033[0;31m'
-  readonly GREEN='\033[0;32m'
-  readonly YELLOW='\033[0;33m'
-  readonly BLUE='\033[0;34m'
-  readonly RESET='\033[0m'
+declare -a RESULT_LANES=()
+declare -a RESULT_NAMES=()
+declare -a RESULT_STATUS=()
+declare -a RESULT_EXIT_CODES=()
+declare -a RESULT_STDOUT=()
+declare -a RESULT_STDERR=()
+declare -a CURRENT_ARGS=()
+declare -a CURRENT_ENV=()
+
+TOTAL_CHECKS=0
+TOTAL_PASSED=0
+TOTAL_ALLOWED_FAILURES=0
+TOTAL_SKIPPED=0
+TOTAL_FAILED=0
+
+if [[ -t 1 && "${NO_COLOR:-}" != 1 ]]; then
+  readonly RED=$'\033[0;31m'
+  readonly GREEN=$'\033[0;32m'
+  readonly YELLOW=$'\033[0;33m'
+  readonly BLUE=$'\033[0;34m'
+  readonly RESET=$'\033[0m'
 else
   readonly RED=''
   readonly GREEN=''
@@ -71,166 +64,144 @@ else
   readonly RESET=''
 fi
 
-#######################################
-# Print usage information
-#######################################
 usage() {
   cat <<'EOF'
 Usage: scripts/verification-runner.sh [OPTIONS]
 
-Verification Runner - Execute definition-of-done checks from configuration
+Execute definition-of-done checks from a YAML configuration. Every check in
+the selected lane runs, even when an earlier check fails.
 
 OPTIONS:
-  --fast              Run fast lane only (quick checks)
-  --slow              Run slow lane only (test suite)
-  --all               Run both fast and slow lanes (default)
-  --config PATH       Load configuration from specified path
-  --verbose           Show detailed output from each check
-  --dry-run           Show what would run without executing
-  --help              Show this help message
+  --fast              Run fast_lane only
+  --slow              Run slow_lane only
+  --all               Run fast_lane and slow_lane (default)
+  --config PATH       Read this configuration instead of auto-detecting one
+  --json PATH         Write a machine-readable result report to PATH
+  --verbose           Print captured stdout and stderr for every check
+  --dry-run           Validate and list checks without executing them
+  --count-bypass      Record pre-commit verification state when helpers exist
+  --no-verify         Explicitly skip verification and record a bypass
+  --help, -h          Show this help
 
-CONFIGURATION:
-  By default, the runner looks for configuration in this order:
-  1. .verification/config.yaml
-  2. definition-of-done.yaml
-  3. Custom path via --config
+Configuration discovery (in order):
+  .verification/config.yaml
+  definition-of-done.yaml
+  .verification/config.yml
+  definition-of-done.yml
 
-  Configuration format (YAML):
-  ```yaml
-  version: "1.0"
-
-  fast_lane:
-    - name: "Format check"
-      command: "cargo"
-      args: ["fmt", "--check"]
-      timeout: 30
-
-    - name: "Linting"
-      command: "cargo"
-      args: ["clippy", "--all-targets", "--", "-D", "warnings"]
-      timeout: 60
-
-  slow_lane:
-    - name: "Unit tests"
-      command: "cargo"
-      args: ["test", "--lib"]
-      timeout: 900
-  ```
-
-EXAMPLES:
-  # Run all lanes with default config
-  ./scripts/verification-runner.sh
-
-  # Run fast lane only
-  ./scripts/verification-runner.sh --fast
-
-  # Use custom config file
-  ./scripts/verification-runner.sh --config .my-verification.yaml
-
-  # Dry run to see what would execute
-  ./scripts/verification-runner.sh --dry-run --verbose
-
-EXIT CODES:
-  0 - All checks passed
-  1 - One or more checks failed
-  2 - Configuration error or missing config file
-  3 - Invalid arguments
-
-For more information, see: docs/verification-runner.md
+The configuration format is documented in docs/verification-runner.md.
 EOF
 }
 
-#######################################
-# Log messages with timestamp
-#######################################
 log_info() {
-  echo -e "${BLUE}[$(date -u +%H:%M:%S)]${RESET} $*"
+  printf '%s[%s]%s %s\n' "$BLUE" "$(date -u +%H:%M:%S)" "$RESET" "$*"
 }
 
 log_success() {
-  echo -e "${GREEN}✓${RESET} $*"
+  printf '%s✓%s %s\n' "$GREEN" "$RESET" "$*"
 }
 
 log_error() {
-  echo -e "${RED}✗${RESET} $*" >&2
+  printf '%s✗%s %s\n' "$RED" "$RESET" "$*" >&2
 }
 
 log_warn() {
-  echo -e "${YELLOW}⚠${RESET} $*" >&2
+  printf '%s⚠%s %s\n' "$YELLOW" "$RESET" "$*" >&2
 }
 
-#######################################
-# Detect configuration file location
-#######################################
-detect_config_path() {
-  local candidates=(
-    ".verification/config.yaml"
-    "definition-of-done.yaml"
-    ".verification/config.yml"
-    "definition-of-done.yml"
-  )
-
-  for candidate in "${candidates[@]}"; do
-    if [[ -f "$REPO_ROOT/$candidate" ]]; then
-      echo "$REPO_ROOT/$candidate"
-      return 0
-    fi
-  done
-
-  return 1
+is_truthy() {
+  case "${1:-}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
-#######################################
-# Parse command-line arguments
-#######################################
+lane_csv() {
+  case "$1" in
+    fast) printf '%s' fast ;;
+    slow) printf '%s' slow ;;
+    all) printf '%s' 'fast,slow' ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
 parse_arguments() {
-  while [[ $# -gt 0 ]]; do
-    case $1 in
-      --fast)
-        LANE="fast"
-        shift
-        ;;
-      --slow)
-        LANE="slow"
-        shift
-        ;;
-      --all)
-        LANE="all"
-        shift
-        ;;
+  while (($# > 0)); do
+    case "$1" in
+      --fast) LANE=fast; shift ;;
+      --slow) LANE=slow; shift ;;
+      --all) LANE=all; shift ;;
       --config)
-        if [[ -z "${2:-}" ]]; then
-          log_error "Option --config requires an argument"
-          usage
+        if [[ $# -lt 2 || -z "$2" ]]; then
+          log_error '--config requires a path'
           exit 3
         fi
         CONFIG_PATH="$2"
         shift 2
         ;;
-      --verbose)
-        VERBOSE=true
-        shift
+      --config=*) CONFIG_PATH="${1#*=}"; shift ;;
+      --json)
+        if [[ $# -lt 2 || -z "$2" ]]; then
+          log_error '--json requires a path'
+          exit 3
+        fi
+        JSON_PATH="$2"
+        shift 2
         ;;
-      --dry-run)
-        DRY_RUN=true
-        shift
-        ;;
-      --help|-h)
-        usage
-        exit 0
-        ;;
+      --json=*) JSON_PATH="${1#*=}"; shift ;;
+      --verbose) VERBOSE=true; shift ;;
+      --dry-run) DRY_RUN=true; shift ;;
+      --count-bypass) COUNT_BYPASS=true; shift ;;
+      --no-verify) EXPLICIT_BYPASS=true; shift ;;
+      --help|-h) usage; exit 0 ;;
       *)
         log_error "Unknown argument: $1"
-        usage
+        usage >&2
         exit 3
         ;;
     esac
   done
 }
 
-#######################################
-# Load configuration file
-#######################################
+detect_config_path() {
+  local candidate
+  for candidate in \
+    .verification/config.yaml \
+    definition-of-done.yaml \
+    .verification/config.yml \
+    definition-of-done.yml; do
+    if [[ -f "$REPO_ROOT/$candidate" ]]; then
+      printf '%s/%s\n' "$REPO_ROOT" "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+validate_config() {
+  # A malformed check must fail the run rather than silently becoming a
+  # passing run with zero checks.
+  jq -e '
+    def valid_lane:
+      if . == null then true
+      elif type != "array" then false
+      else true end;
+    def valid_check:
+      type == "object"
+      and ((.name | type) == "string" and (.name | length) > 0)
+      and ((.command | type) == "string" and (.command | length) > 0)
+      and (((.args // []) | if type == "array" then all(.[]; type == "string") else false end))
+      and (((.timeout // 60) | if type == "number" then (. > 0 and floor == .) else false end))
+      and (((.allow_failure // false) | type) == "boolean")
+      and (((.environment // []) | if type == "array" then all(.[]; type == "string" and test("^[A-Za-z_][A-Za-z0-9_]*=")) else false end));
+    type == "object"
+    and ((.version | type) == "string" and (.version | length) > 0)
+    and ((.fast_lane | valid_lane) and (.slow_lane | valid_lane))
+    and (((.fast_lane // []) | all(.[]; valid_check)))
+    and (((.slow_lane // []) | all(.[]; valid_check)))
+  ' <<< "$CONFIG_JSON" >/dev/null
+}
+
 load_config() {
   local config_file="$1"
 
@@ -238,401 +209,445 @@ load_config() {
     log_error "Configuration file not found: $config_file"
     return 1
   fi
-
-  # Check if yq is available for YAML parsing
-  if ! command -v yq &>/dev/null; then
-    log_error "yq is required for YAML parsing but not found in PATH"
-    log_error "Install: https://github.com/mikefarah/yq"
+  if ! command -v yq >/dev/null 2>&1; then
+    log_error 'yq is required for YAML parsing but was not found in PATH'
+    return 1
+  fi
+  if ! command -v jq >/dev/null 2>&1; then
+    log_error 'jq is required for configuration validation and reports but was not found in PATH'
+    return 1
+  fi
+  if ! command -v timeout >/dev/null 2>&1; then
+    log_error 'GNU timeout is required to bound check execution but was not found in PATH'
     return 1
   fi
 
-  # Validate basic YAML structure
-  if ! yq eval '.version' "$config_file" &>/dev/null; then
-    log_error "Invalid configuration format (missing or invalid 'version' field)"
+  if ! CONFIG_JSON="$(yq eval -o=json '.' "$config_file")"; then
+    log_error "Unable to parse YAML configuration: $config_file"
     return 1
   fi
-
+  if ! validate_config; then
+    log_error "Invalid verification configuration: $config_file"
+    log_error 'version must be a non-empty string; lanes must be lists; every check needs a name and command'
+    log_error 'args must be strings, timeout must be a positive integer, and environment must contain KEY=value strings'
+    return 1
+  fi
   log_info "Loaded configuration from: $config_file"
-  return 0
 }
 
-#######################################
-# Parse checks from YAML for a given lane
-#######################################
-parse_checks() {
-  local config_file="$1"
-  local lane="$2"
-  local check_count
+fallback_bypass_requested() {
+  is_truthy "${SKIP_CHECKS:-}" ||
+    is_truthy "${VERIFICATION_SKIP:-}" ||
+    is_truthy "${NEEDLE_SKIP_VERIFICATION:-}"
+}
 
-  # Get the number of checks in this lane
-  check_count=$(yq eval ".${lane} | length" "$config_file" 2>/dev/null || echo "0")
+detect_bypass_pattern() {
+  if [[ "$EXPLICIT_BYPASS" == true ]]; then
+    printf '%s' '--no-verify'
+  elif type needle_bypass_requested >/dev/null 2>&1 && needle_bypass_requested; then
+    if type needle_bypass_pattern >/dev/null 2>&1; then
+      needle_bypass_pattern
+    else
+      printf 'SKIP_CHECKS=%s' "${SKIP_CHECKS}"
+    fi
+  elif fallback_bypass_requested; then
+    if is_truthy "${SKIP_CHECKS:-}"; then
+      printf 'SKIP_CHECKS=%s' "${SKIP_CHECKS}"
+    elif is_truthy "${VERIFICATION_SKIP:-}"; then
+      printf 'VERIFICATION_SKIP=%s' "${VERIFICATION_SKIP}"
+    else
+      printf 'NEEDLE_SKIP_VERIFICATION=%s' "${NEEDLE_SKIP_VERIFICATION}"
+    fi
+  fi
+}
 
-  if [[ "$check_count" -eq 0 ]]; then
-    log_warn "No checks found in $lane lane"
-    return 0
+append_bypass_event_fallback() {
+  local record="$1"
+  local log_file="${VERIFICATION_BYPASS_LOG:-$REPO_ROOT/.beads/bypasses.jsonl}"
+  local lock_file="${log_file}.lock"
+  local lock_fd
+  local lock_dir
+  local attempt
+  local status=0
+
+  mkdir -p "$(dirname "$log_file")" || return 1
+  if command -v flock >/dev/null 2>&1; then
+    if ! exec {lock_fd}>>"$lock_file"; then
+      return 1
+    fi
+    if ! flock -x "$lock_fd"; then
+      eval "exec ${lock_fd}>&-"
+      return 1
+    fi
+    printf '%s\n' "$record" >> "$log_file" || status=1
+    flock -u "$lock_fd" || status=1
+    eval "exec ${lock_fd}>&-"
+    return "$status"
   fi
 
-  echo "$check_count"
+  lock_dir="${lock_file}.d"
+  for ((attempt = 1; attempt <= 3000; attempt++)); do
+    if mkdir "$lock_dir" 2>/dev/null; then
+      printf '%s\n' "$record" >> "$log_file" || status=1
+      rmdir "$lock_dir" 2>/dev/null || status=1
+      return "$status"
+    fi
+    sleep 0.01
+  done
+  return 1
 }
 
-#######################################
-# Get check configuration by index
-#######################################
-get_check_config() {
-  local config_file="$1"
-  local lane="$2"
-  local index="$3"
-  local field="$4"
+record_bypass() {
+  local pattern="$1"
+  local lanes
+  local timestamp
+  local commit_sha
+  local working_directory
+  local hostname_value
+  local username_value
+  local record
 
-  yq eval ".${lane}[$index].${field}" "$config_file" 2>/dev/null || echo ""
+  lanes="$(lane_csv "$LANE")"
+  timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  if command -v git >/dev/null 2>&1; then
+    commit_sha="$(git rev-parse --verify HEAD 2>/dev/null || printf '%s' unknown)"
+  else
+    commit_sha=unknown
+  fi
+  working_directory="$(pwd -P)"
+  hostname_value="$(hostname 2>/dev/null || uname -n 2>/dev/null || printf '%s' unknown)"
+  username_value="$(id -un 2>/dev/null || printf '%s' "${USER:-unknown}")"
+
+  if type needle_json_event >/dev/null 2>&1 && type needle_append_bypass_event >/dev/null 2>&1; then
+    record="$(needle_json_event "$timestamp" "$commit_sha" "$lanes" "$pattern" 'Verification was explicitly skipped' "$working_directory")"
+    if [[ -n "${VERIFICATION_BYPASS_LOG:-}" ]]; then
+      NEEDLE_BYPASS_LOG="$VERIFICATION_BYPASS_LOG" needle_append_bypass_event "$record"
+    else
+      needle_append_bypass_event "$record"
+    fi
+    return $?
+  fi
+
+  record="$(jq -cn \
+    --arg timestamp "$timestamp" \
+    --arg commit_sha "$commit_sha" \
+    --arg hostname "$hostname_value" \
+    --arg username "$username_value" \
+    --arg lanes "$lanes" \
+    --arg pattern "$pattern" \
+    --arg working_directory "$working_directory" \
+    '{timestamp: $timestamp, commit_sha: $commit_sha, hostname: $hostname, username: $username, lanes_skipped: ($lanes | split(",") | map(select(length > 0))), pattern: $pattern, reason: "Verification was explicitly skipped", working_directory: $working_directory}')"
+  append_bypass_event_fallback "$record"
 }
 
-#######################################
-# Execute a single check with timeout
-#######################################
+handle_bypass() {
+  local pattern="$1"
+  local lanes
+
+  lanes="$(lane_csv "$LANE")"
+  if type needle_warn_bypass >/dev/null 2>&1; then
+    needle_warn_bypass "$pattern" "$lanes"
+  else
+    log_warn "Definition of Done bypass detected: $pattern"
+    log_warn "Verification lanes skipped: ${lanes//,/, }"
+    log_warn 'This bypass will be recorded in the configured bypass log.'
+  fi
+
+  # With the existing NEEDLE hook protocol, leave a marker for post-commit so
+  # the final commit SHA is recorded. A standalone copy records immediately.
+  if [[ "${NEEDLE_PRE_COMMIT:-}" == 1 && "$COUNT_BYPASS" == true ]] &&
+    type needle_mark_bypass >/dev/null 2>&1; then
+    needle_mark_bypass "$lanes" "$pattern"
+  else
+    record_bypass "$pattern"
+  fi
+}
+
+shell_join() {
+  local value
+  printf '%q' "$1"
+  shift
+  for value in "$@"; do
+    printf ' %q' "$value"
+  done
+}
+
+record_result() {
+  local lane="$1"
+  local name="$2"
+  local status="$3"
+  local exit_code="$4"
+  local stdout="$5"
+  local stderr="$6"
+
+  RESULT_LANES+=("$lane")
+  RESULT_NAMES+=("$name")
+  RESULT_STATUS+=("$status")
+  RESULT_EXIT_CODES+=("$exit_code")
+  RESULT_STDOUT+=("$stdout")
+  RESULT_STDERR+=("$stderr")
+  TOTAL_CHECKS=$((TOTAL_CHECKS + 1))
+
+  case "$status" in
+    passed) TOTAL_PASSED=$((TOTAL_PASSED + 1)) ;;
+    allowed_failure) TOTAL_ALLOWED_FAILURES=$((TOTAL_ALLOWED_FAILURES + 1)) ;;
+    skipped) TOTAL_SKIPPED=$((TOTAL_SKIPPED + 1)) ;;
+    failed|timeout) TOTAL_FAILED=$((TOTAL_FAILED + 1)) ;;
+    *) log_error "Internal error: unknown result status '$status'"; return 1 ;;
+  esac
+}
+
 execute_check() {
-  local name="$1"
-  local command="$2"
-  local args="$3"
-  local timeout="$4"
-  local allow_failure="${5:-false}"
-  local description="${6:-}"
-  local environment="${7:-}"
-
-  log_info "Running: $name..."
-
-  if [[ "$DRY_RUN" == "true" ]]; then
-    log_warn "[Dry Run] Would execute: $command $args (timeout: ${timeout}s)"
-    PASSED_CHECKS+=("$name")
-    PASSED_NAMES+=("$name")
-    TOTAL_PASSED=$((TOTAL_PASSED + 1))
-    return 0
-  fi
-
-  # Build environment variable exports if provided
-  local env_setup=""
-  if [[ -n "$environment" ]]; then
-    # Parse environment variables from YAML format
-    # Expected format from yq: "KEY1=value1\nKEY2=value2"
-    while IFS= read -r env_line; do
-      if [[ -n "$env_line" ]]; then
-        env_setup="$env_setup export $env_line;"
-      fi
-    done <<< "$environment"
-  fi
-
-  # Create temp files for output capture
+  local lane="$1"
+  local name="$2"
+  local command="$3"
+  local timeout_seconds="$4"
+  local allow_failure="$5"
   local stdout_file
   local stderr_file
-  stdout_file=$(mktemp)
-  stderr_file=$(mktemp)
-
-  # Ensure temp files are cleaned up
-  trap 'rm -f "${stdout_file:-}" "${stderr_file:-}"' RETURN
-
-  # Execute command with timeout
-  # Use bash -c to properly handle environment variables and command arguments
-  local cmd="$env_setup $command $args"
   local exit_code
-  local captured_stdout
-  local captured_stderr
+  local status
+  local stdout
+  local stderr
 
-  # Run with timeout, capturing output
-  timeout "$timeout" bash -c "$cmd" </dev/null >"$stdout_file" 2>"$stderr_file" || exit_code=$?
+  log_info "Running: $name ($(shell_join "$command" "${CURRENT_ARGS[@]}"))"
 
-  # Capture output before temp files are cleaned up
-  captured_stdout=$(cat "$stdout_file")
-  captured_stderr=$(cat "$stderr_file")
-
-  # timeout command returns 124 on timeout
-  if [[ ${exit_code:-0} -eq 124 ]]; then
-    log_error "✗ $name failed (timeout after ${timeout}s)"
-    FAILED_CHECKS+=("$name")
-    FAILED_NAMES+=("$name")
-    FAILED_EXIT_CODES+=("124")
-
-    # Store both stdout and stderr for timeout failures
-    local combined_output="STDOUT:\n$captured_stdout\nSTDERR:\n$captured_stderr"
-    FAILED_OUTPUTS+=("$combined_output")
-    FAILED_STDOUTS+=("$captured_stdout")
-    FAILED_STDERRS+=("$captured_stderr")
-    TOTAL_FAILED=$((TOTAL_FAILED + 1))
-
-    if [[ "$VERBOSE" == "true" ]]; then
-      echo "=== Output (captured before timeout) ==="
-      echo "$captured_stdout"
-      echo "=== Errors ==="
-      echo "$captured_stderr"
-    fi
-    return 1
+  if [[ "$DRY_RUN" == true ]]; then
+    log_warn "[dry run] would run with ${timeout_seconds}s timeout"
+    record_result "$lane" "$name" skipped 0 '' ''
+    return 0
   fi
 
-  # Check exit code
-  if [[ ${exit_code:-0} -ne 0 ]]; then
-    if [[ "$allow_failure" == "true" ]]; then
-      log_warn "⚠ $name failed (exit code: ${exit_code}) but failure is allowed"
-      PASSED_CHECKS+=("$name")
-      PASSED_NAMES+=("$name")
-      TOTAL_PASSED=$((TOTAL_PASSED + 1))
-    else
-      log_error "✗ $name failed (exit code: ${exit_code})"
+  stdout_file="$(mktemp "${TMPDIR:-/tmp}/verification-runner-stdout.XXXXXX")"
+  stderr_file="$(mktemp "${TMPDIR:-/tmp}/verification-runner-stderr.XXXXXX")"
 
-      FAILED_CHECKS+=("$name")
-      FAILED_NAMES+=("$name")
-      FAILED_EXIT_CODES+=("$exit_code")
-
-      # Store both stdout and stderr separately for better debugging
-      FAILED_OUTPUTS+=("STDOUT:\n$captured_stdout\nSTDERR:\n$captured_stderr")
-      FAILED_STDOUTS+=("$captured_stdout")
-      FAILED_STDERRS+=("$captured_stderr")
-      TOTAL_FAILED=$((TOTAL_FAILED + 1))
-
-      if [[ "$VERBOSE" == "true" ]]; then
-        echo "=== Output ==="
-        echo "$captured_stdout"
-        echo "=== Errors ==="
-        echo "$captured_stderr"
-      fi
-    fi
-    return 1
+  if timeout --kill-after=30s "$timeout_seconds" env \
+    "${CURRENT_ENV[@]}" "$command" "${CURRENT_ARGS[@]}" \
+    >"$stdout_file" 2>"$stderr_file"; then
+    exit_code=0
+  else
+    exit_code=$?
   fi
 
-  log_success "✓ $name passed"
-  PASSED_CHECKS+=("$name")
-  PASSED_NAMES+=("$name")
-  TOTAL_PASSED=$((TOTAL_PASSED + 1))
+  stdout="$(<"$stdout_file")"
+  stderr="$(<"$stderr_file")"
+  rm -f "$stdout_file" "$stderr_file"
 
-  if [[ "$VERBOSE" == "true" ]]; then
-    echo "=== Output ==="
-    echo "$captured_stdout"
+  if ((exit_code == 0)); then
+    status=passed
+    log_success "$name passed"
+  elif [[ "$allow_failure" == true ]]; then
+    status=allowed_failure
+    log_warn "$name failed (exit code: $exit_code), but failure is allowed"
+  elif ((exit_code == 124)); then
+    status=timeout
+    log_error "$name timed out after ${timeout_seconds}s"
+  else
+    status=failed
+    log_error "$name failed (exit code: $exit_code)"
   fi
 
+  record_result "$lane" "$name" "$status" "$exit_code" "$stdout" "$stderr"
+
+  if [[ "$VERBOSE" == true && ( -n "$stdout" || -n "$stderr" ) ]]; then
+    printf '=== Output: ===\n'
+    [[ -n "$stdout" ]] && printf '%s\n' "$stdout"
+    printf '=== Errors: ===\n'
+    [[ -n "$stderr" ]] && printf '%s\n' "$stderr"
+  fi
   return 0
 }
 
-#######################################
-# Run all checks in a lane
-#######################################
 run_lane() {
-  local config_file="$1"
-  local lane="$2"
+  local lane="$1"
+  local -a checks=()
+  local check
+  local name
+  local command
+  local timeout_seconds
+  local allow_failure
 
-  local check_count
-  check_count=$(parse_checks "$config_file" "$lane")
-
-  if [[ "$check_count" -eq 0 ]]; then
-    log_info "No checks to run in $lane lane"
+  mapfile -t checks < <(jq -c --arg lane "$lane" '.[$lane] // [] | .[]' <<< "$CONFIG_JSON")
+  if ((${#checks[@]} == 0)); then
+    log_info "No checks configured for $lane"
     return 0
   fi
 
-  log_info "Running $lane lane ($check_count checks)..."
+  log_info "Running $lane (${#checks[@]} checks)"
+  for check in "${checks[@]}"; do
+    name="$(jq -r '.name' <<< "$check")"
+    command="$(jq -r '.command' <<< "$check")"
+    timeout_seconds="$(jq -r '.timeout // 60' <<< "$check")"
+    allow_failure="$(jq -r '.allow_failure // false' <<< "$check")"
+    mapfile -t CURRENT_ARGS < <(jq -r '.args // [] | .[]' <<< "$check")
+    mapfile -t CURRENT_ENV < <(jq -r '.environment // [] | .[]' <<< "$check")
 
-  for ((i = 0; i < check_count; i++)); do
-    local name
-    local command
-    local args
-    local timeout
-    local allow_failure
-    local description
-    local environment
-
-    name=$(get_check_config "$config_file" "$lane" "$i" "name")
-    command=$(get_check_config "$config_file" "$lane" "$i" "command")
-    args=$(get_check_config "$config_file" "$lane" "$i" "args" | jq -r 'join(" ")' 2>/dev/null || echo "")
-    timeout=$(get_check_config "$config_file" "$lane" "$i" "timeout")
-    allow_failure=$(get_check_config "$config_file" "$lane" "$i" "allow_failure" 2>/dev/null || echo "false")
-    description=$(get_check_config "$config_file" "$lane" "$i" "description" 2>/dev/null || echo "")
-    environment=$(get_check_config "$config_file" "$lane" "$i" "environment" 2>/dev/null || echo "")
-
-    # Validate required fields
-    if [[ -z "$name" || -z "$command" ]]; then
-      log_error "Check at index $i is missing required fields (name or command)"
-      continue
-    fi
-
-    # Set default timeout if not specified
-    timeout=${timeout:-60}
-
-    # Convert YAML boolean to bash boolean
-    allow_failure=$( [[ "$allow_failure" == "true" ]] && echo "true" || echo "false" )
-
-    # Execute the check (continue even if it fails)
-    execute_check "$name" "$command" "$args" "$timeout" "$allow_failure" "$description" "$environment" || true
+    # execute_check always returns zero after recording a result, so the loop
+    # remains explicit and easy to audit for the aggregate-failure contract.
+    execute_check "$lane" "$name" "$command" "$timeout_seconds" "$allow_failure" || true
   done
-
-  log_info "Finished $lane lane"
 }
 
-#######################################
-# Generate and display summary report
-#######################################
-generate_report() {
-  local total_checks
-  local total_failed
-  local total_passed
-
-  total_checks=$((TOTAL_PASSED + TOTAL_FAILED))
-  total_failed=$TOTAL_FAILED
-  total_passed=$TOTAL_PASSED
-
-  echo ""
-  echo "=== Verification Summary ==="
-  echo "Lane: $LANE"
-  echo "Checks run: $total_checks"
-  echo "Passed: $total_passed"
-  echo "Failed: $total_failed"
-  echo ""
-
-  if [[ $total_failed -gt 0 ]]; then
-    echo "Failed checks:"
-    echo ""
-    for i in $(seq 0 $(($total_failed - 1))); do
-      local name="${FAILED_NAMES[$i]}"
-      local exit_code="${FAILED_EXIT_CODES[$i]}"
-      local stdout="${FAILED_STDOUTS[$i]:-}"
-      local stderr="${FAILED_STDERRS[$i]:-}"
-
-      echo "  [$((i+1))] $name"
-      echo "      Exit code: $exit_code"
-
-      # Always show stderr if present
-      if [[ -n "$stderr" ]]; then
-        echo "      Stderr:"
-        echo "$stderr" | sed 's/^/      | /'
-      fi
-
-      # Show stdout if present and in verbose mode
-      if [[ -n "$stdout" && "$VERBOSE" == "true" ]]; then
-        echo "      Stdout:"
-        echo "$stdout" | sed 's/^/      | /'
-      elif [[ -n "$stdout" ]]; then
-        # Show first line of stdout in non-verbose mode
-        local first_line
-        first_line=$(echo "$stdout" | head -n 1)
-        echo "      Stdout (first line): $first_line"
-        echo "      (Use --verbose to see full output)"
-      fi
-      echo ""
-    done
-
-    echo -e "${RED}❌ Verification failed${RESET}"
-    echo "Total failures: $total_failed out of $total_checks checks"
-    return 1
-  else
-    echo -e "${GREEN}✓ All checks passed${RESET}"
-    return 0
-  fi
-}
-
-#######################################
-# Generate JSON report for structured output
-#######################################
 generate_json_report() {
-  local json_output
-  json_output="{"
-  json_output+="\"lane\":\"$LANE\","
-  json_output+="\"total_checks\":$((TOTAL_PASSED + TOTAL_FAILED)),"
-  json_output+="\"passed\":$TOTAL_PASSED,"
-  json_output+="\"failed\":$TOTAL_FAILED,"
+  local results='[]'
+  local item
+  local i
+  local now
 
-  # Add passed checks
-  json_output+="\"passed_checks\":["
-  local first=true
-  for name in "${PASSED_NAMES[@]}"; do
-    if [[ "$first" == "true" ]]; then
-      first=false
-    else
-      json_output+=","
-    fi
-    json_output+="\"$name\""
+  for ((i = 0; i < TOTAL_CHECKS; i++)); do
+    item="$(jq -cn \
+      --arg lane "${RESULT_LANES[$i]}" \
+      --arg name "${RESULT_NAMES[$i]}" \
+      --arg status "${RESULT_STATUS[$i]}" \
+      --arg stdout "${RESULT_STDOUT[$i]}" \
+      --arg stderr "${RESULT_STDERR[$i]}" \
+      --argjson exit_code "${RESULT_EXIT_CODES[$i]}" \
+      '{lane: $lane, name: $name, status: $status, exit_code: $exit_code, stdout: $stdout, stderr: $stderr}')"
+    results="$(jq -c --argjson item "$item" '. + [$item]' <<< "$results")"
   done
-  json_output+="],"
 
-  # Add failed checks with full details
-  json_output+="\"failed_checks\":["
-  first=true
-  for i in $(seq 0 $((TOTAL_FAILED - 1))); do
-    if [[ "$first" == "true" ]]; then
-      first=false
-    else
-      json_output+=","
-    fi
-    json_output+="{"
-    json_output+="\"name\":\"${FAILED_NAMES[$i]}\","
-    json_output+="\"exit_code\":${FAILED_EXIT_CODES[$i]},"
-    json_output+="\"stdout\":$(echo "${FAILED_STDOUTS[$i]:-}" | jq -Rs .),"
-    json_output+="\"stderr\":$(echo "${FAILED_STDERRS[$i]:-}" | jq -Rs .),"
-    json_output+="\"output\":$(echo "${FAILED_OUTPUTS[$i]:-}" | jq -Rs .)"
-    json_output+="}"
-  done
-  json_output+="]"
-  json_output+="}"
-
-  echo "$json_output" | jq .
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  jq -cn \
+    --arg generated_at "$now" \
+    --arg lane "$LANE" \
+    --argjson checks "$TOTAL_CHECKS" \
+    --argjson passed "$TOTAL_PASSED" \
+    --argjson allowed_failures "$TOTAL_ALLOWED_FAILURES" \
+    --argjson skipped "$TOTAL_SKIPPED" \
+    --argjson failed "$TOTAL_FAILED" \
+    --argjson results "$results" \
+    '{schema_version: 1, generated_at: $generated_at, lane: $lane,
+      total_checks: $checks, passed: $passed, failed: $failed,
+      passed_checks: [$results[] | select(.status == "passed" or .status == "allowed_failure") | .name],
+      totals: {checks: $checks, passed: $passed, allowed_failures: $allowed_failures,
+               skipped: $skipped, failed: $failed},
+      results: $results,
+      failures: [$results[] | select(.status == "failed" or .status == "timeout")],
+      failed_checks: [$results[] | select(.status == "failed" or .status == "timeout")
+        | . + {output: ("STDOUT:\n" + .stdout + "\nSTDERR:\n" + .stderr)}]}'
 }
 
-#######################################
-# Main execution
-#######################################
+print_report() {
+  local i
+  local first_line
+
+  printf '\n=== Verification Summary ===\n'
+  printf 'Lane: %s\n' "$LANE"
+  printf 'Checks run: %d\n' "$TOTAL_CHECKS"
+  printf 'Passed: %d\n' "$TOTAL_PASSED"
+  printf 'Allowed failures: %d\n' "$TOTAL_ALLOWED_FAILURES"
+  printf 'Skipped: %d\n' "$TOTAL_SKIPPED"
+  printf 'Failed: %d\n' "$TOTAL_FAILED"
+
+  if ((TOTAL_FAILED > 0)); then
+    printf '\nFailed checks:\n\n'
+    for ((i = 0; i < TOTAL_CHECKS; i++)); do
+      [[ "${RESULT_STATUS[$i]}" == failed || "${RESULT_STATUS[$i]}" == timeout ]] || continue
+      printf '  [%d] %s\n' "$((i + 1))" "${RESULT_NAMES[$i]}"
+      printf '      Status: %s\n' "${RESULT_STATUS[$i]}"
+      printf '      Exit code: %s\n' "${RESULT_EXIT_CODES[$i]}"
+      if [[ -n "${RESULT_STDERR[$i]}" ]]; then
+        printf '      Stderr:\n'
+        printf '%s\n' "${RESULT_STDERR[$i]}" | sed 's/^/      | /'
+      fi
+      if [[ -n "${RESULT_STDOUT[$i]}" ]]; then
+        if [[ "$VERBOSE" == true ]]; then
+          printf '      Stdout:\n'
+          printf '%s\n' "${RESULT_STDOUT[$i]}" | sed 's/^/      | /'
+        else
+          first_line="${RESULT_STDOUT[$i]}"
+          [[ "$first_line" == *$'\n'* ]] && first_line="${first_line%%$'\n'*}"
+          printf '      Stdout (first line): %s\n' "$first_line"
+          printf '      (Use --verbose to see full output)\n'
+        fi
+      fi
+      printf '\n'
+    done
+    printf '%s❌ Verification failed%s\n' "$RED" "$RESET"
+    return 1
+  fi
+
+  printf '%s✓ All checks passed%s\n' "$GREEN" "$RESET"
+  return 0
+}
+
 main() {
-  # Parse arguments
+  local bypass_pattern
+  local final_status
+  local json_destination
+
   parse_arguments "$@"
 
-  # Detect or validate config path
-  if [[ -z "$CONFIG_PATH" ]]; then
-    if ! CONFIG_PATH=$(detect_config_path); then
-      log_error "No configuration file found"
-      log_error "Searched for: .verification/config.yaml, definition-of-done.yaml"
-      log_error "Create a config file or specify --config PATH"
-      usage
-      exit 2
-    fi
+  # The helper is optional: adopters can copy this runner by itself. When it
+  # exists, use the shared NEEDLE event format and pre/post-commit state files.
+  if [[ -r "$SCRIPT_DIR/bypass-detection.sh" ]]; then
+    # shellcheck source=/dev/null
+    source "$SCRIPT_DIR/bypass-detection.sh"
   fi
 
-  # Load configuration
+  bypass_pattern="$(detect_bypass_pattern || true)"
+  if [[ -n "$bypass_pattern" ]]; then
+    if ! handle_bypass "$bypass_pattern"; then
+      log_error 'Unable to record verification bypass'
+      exit 2
+    fi
+    exit 0
+  fi
+
+  if [[ -z "$CONFIG_PATH" ]]; then
+    if ! CONFIG_PATH="$(detect_config_path)"; then
+      log_error 'No verification configuration found'
+      log_error 'Expected .verification/config.yaml or definition-of-done.yaml (or pass --config PATH)'
+      exit 2
+    fi
+  elif [[ "$CONFIG_PATH" != /* ]]; then
+    CONFIG_PATH="$REPO_ROOT/$CONFIG_PATH"
+  fi
+
   if ! load_config "$CONFIG_PATH"; then
     exit 2
   fi
 
-  # Show configuration summary
-  log_info "Verification Runner"
-  log_info "Configuration: $CONFIG_PATH"
-  log_info "Lane: $LANE"
+  log_info "Verification Runner (lane: $LANE)"
+  [[ "$DRY_RUN" == true ]] && log_warn 'Dry run mode: no checks will execute'
 
-  if [[ "$DRY_RUN" == "true" ]]; then
-    log_warn "Dry run mode - no checks will be executed"
-  fi
-
-  # Run checks based on selected lane
   case "$LANE" in
-    fast)
-      run_lane "$CONFIG_PATH" "fast_lane"
-      ;;
-    slow)
-      run_lane "$CONFIG_PATH" "slow_lane"
-      ;;
+    fast) run_lane fast_lane ;;
+    slow) run_lane slow_lane ;;
     all)
-      run_lane "$CONFIG_PATH" "fast_lane"
-      run_lane "$CONFIG_PATH" "slow_lane"
+      run_lane fast_lane
+      run_lane slow_lane
       ;;
+    *) log_error "Internal error: invalid lane '$LANE'"; exit 3 ;;
   esac
 
-  # Generate and display report
-  local exit_code
-  if generate_report; then
-    exit_code=0
+  if print_report; then
+    final_status=0
   else
-    exit_code=1
+    final_status=1
   fi
 
-  # Optionally generate JSON report
-  if [[ "${VERIFICATION_JSON_OUTPUT:-}" == "true" ]]; then
-    generate_json_report > "${VERIFICATION_JSON_PATH:-verification-results.json}"
-    log_info "JSON report written to: ${VERIFICATION_JSON_PATH:-verification-results.json}"
+  json_destination="$JSON_PATH"
+  if [[ -z "$json_destination" && "${VERIFICATION_JSON_OUTPUT:-}" == true ]]; then
+    json_destination="${VERIFICATION_JSON_PATH:-verification-results.json}"
+  fi
+  if [[ -n "$json_destination" ]]; then
+    if ! mkdir -p "$(dirname "$json_destination")" || ! generate_json_report >"$json_destination"; then
+      log_error "Unable to write JSON report: $json_destination"
+      exit 2
+    fi
+    log_info "JSON report written to: $json_destination"
   fi
 
-  exit "$exit_code"
+  if [[ "$COUNT_BYPASS" == true && "${NEEDLE_PRE_COMMIT:-}" == 1 ]] &&
+    type needle_mark_verified >/dev/null 2>&1 && ((final_status == 0)); then
+    if ! needle_mark_verified "$LANE"; then
+      log_error 'Unable to record successful pre-commit verification state'
+      exit 2
+    fi
+  fi
+
+  exit "$final_status"
 }
 
-# Run main function with all arguments
 main "$@"
