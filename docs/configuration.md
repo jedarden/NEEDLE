@@ -340,6 +340,8 @@ grep "worker spawn path" ~/.needle/logs/supervisor.log
 
 The `agent` section controls how NEEDLE invokes AI agents.
 
+### Basic Agent Settings
+
 ```yaml
 # ~/.config/needle/config.yaml
 agent:
@@ -349,7 +351,103 @@ agent:
 
   # Directory containing adapter TOML files (default: ~/.config/needle/adapters)
   adapters_dir: ~/.config/needle/adapters
+```
 
+### Process Timeouts: Idle vs Hard Deadline
+
+NEEDLE supports two complementary timeout mechanisms for agent processes:
+
+#### Idle Timeout (Resettable)
+
+The **idle timeout** fires when no stdout/stderr activity occurs for the configured duration. It resets on each output byte, allowing long-running agents that stay active.
+
+**Characteristics:**
+- **Resettable**: Deadline resets to `now + idle_timeout` on each output byte
+- **Activity-dependent**: Only fires if the agent is silent for the full duration
+- **Permissive**: Allows indefinite execution as long as agent produces output
+
+**Example behavior:**
+```text
+idle_timeout = 10 seconds
+
+Timeline:
+t=0s:   Process spawns, idle deadline set to t=10s
+t=5s:   Agent produces output → deadline resets to t=15s
+t=12s:  Agent produces output → deadline resets to t=22s
+t=30s:  Agent goes silent...
+t=40s:  IDLE DEADLINE EXPIRES (10s of silence) → Process killed
+```
+
+**When to use:**
+- Allow long-running agents that make continuous progress
+- Detect hung or stalled agents (no output for an extended period)
+- Support streaming agents that produce incremental results
+
+#### Hard Deadline (Non-Resettable, Absolute)
+
+The **hard deadline** is an absolute upper bound on total execution time. Once a process is spawned, the deadline is set to `spawn_time + hard_timeout_secs` and **never changes**, regardless of agent activity.
+
+**Characteristics:**
+- **Absolute**: Computed once at spawn time from `Instant::now()`
+- **Non-resettable**: No mechanism extends or modifies the deadline after creation
+- **Activity-independent**: Fires even if the agent is producing output
+- **Strict enforcement**: Process is killed via `SIGKILL` when deadline expires
+
+**Example behavior:**
+```text
+hard_timeout = 5 seconds
+
+Timeline:
+t=0s:  Process spawns, hard deadline set to t=5s
+t=1s:  Agent produces output (deadline remains t=5s)
+t=2s:  Agent produces output (deadline remains t=5s)
+t=3s:  Agent produces output (deadline remains t=5s)
+t=5s:  HARD DEADLINE EXPIRES → Process killed
+```
+
+**When to use:**
+- Set strict upper bounds for expensive operations (e.g., model training, large file processing)
+- Prevent runaway agents that produce output but never terminate
+- Enforce service-level agreements on total execution time
+- Complement idle timeout with a maximum wall-clock limit
+
+#### Configuring Both Timeouts
+
+You can configure both timeouts simultaneously:
+
+```yaml
+agent:
+  default: claude
+  timeout: 3600                # Legacy single timeout (for backward compatibility)
+
+# New dual-timeout configuration (preferred)
+process_limits:
+  # 5 minutes of silence triggers idle timeout
+  idle_timeout: 300s
+
+  # 1 hour absolute upper bound (non-resettable)
+  hard_deadline:
+    enabled: true
+    duration_secs: 3600
+```
+
+In this configuration:
+- If the agent produces output continuously, it runs until the 1-hour hard deadline
+- If the agent goes silent for 5 minutes, the idle deadline fires first
+- The first deadline to expire kills the process
+
+**Disabling timeouts:**
+```yaml
+process_limits:
+  idle_timeout: null           # No idle timeout (process can hang indefinitely)
+  hard_deadline:
+    enabled: false             # No hard deadline (no absolute time limit)
+```
+
+### Model-to-Adapter Routing
+
+```yaml
+agent:
   # Model-to-adapter routing (optional)
   routing:
     # Rules are evaluated in order; first match wins
