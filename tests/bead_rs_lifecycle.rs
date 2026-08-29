@@ -206,9 +206,11 @@ fn sync_flush_only_rejects_profile_flag() {
 
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");
+    let bin_dir = root.path().join("bin");
     fs::create_dir_all(&workspace).unwrap();
+    fs::create_dir_all(&bin_dir).unwrap();
 
-    let bead = root.path().join("bin").join("bead");
+    let bead = bin_dir.join("bead");
     fs::copy(&source_binary, &bead).unwrap();
     #[cfg(unix)]
     {

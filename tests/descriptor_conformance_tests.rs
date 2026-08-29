@@ -11,7 +11,7 @@
 //! after those were consolidated into the descriptor-driven CliBeadStore.
 
 use needle::bead_store::{builtin_bead_backends, BeadStore, CliBeadStore};
-use needle::types::{BeadId, ClaimResult};
+use needle::types::BeadId;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -116,9 +116,10 @@ async fn bead_rs_claim_uses_compare_and_set_strategy() {
 printf '%s\n' "$@" >> invocations.log
 "#,
     );
-    let store = CliBeadStore::new(backend, binary, root.to_path_buf(), None, None, None).unwrap();
+    let store =
+        CliBeadStore::new(backend, binary, root.to_path_buf(), None, None, None).unwrap();
 
-    let result = store.claim(&BeadId::from("test-1"), "worker-a").await;
+    let _result = store.claim(&BeadId::from("test-1"), "worker-a").await;
 
     // Should fail because mock doesn't return valid JSON, but we can check invocation
     let invocations = fs::read_to_string(root.path().join("invocations.log")).unwrap();
@@ -153,7 +154,8 @@ async fn bead_forge_claim_uses_atomic_batch() {
 printf '%s\n' "$@" >> invocations.log
 "#,
     );
-    let store = CliBeadStore::new(backend, binary, root.to_path_buf(), None, None, None).unwrap();
+    let store =
+        CliBeadStore::new(backend, binary, root.path().to_path_buf(), None, None, None).unwrap();
 
     let _ = store.claim(&BeadId::from("bf-1"), "worker-a").await;
 
@@ -233,7 +235,8 @@ async fn release_operation_clears_assignee() {
 printf '%s\n' "$@" >> invocations.log
 "#,
     );
-    let store = CliBeadStore::new(backend, binary, root.to_path_buf(), None, None, None).unwrap();
+    let store =
+        CliBeadStore::new(backend, binary, root.path().to_path_buf(), None, None, None).unwrap();
 
     store.release(&BeadId::from("test-1")).await.unwrap();
 
