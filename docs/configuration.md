@@ -91,7 +91,7 @@ This guide covers the most commonly used configuration options.
 - `prompt.variants` — Prompt variants
 
 **Agent adapters:**
-- `agent.adapters_dir` — Directory containing adapter TOML files
+- `agent.adapters_dir` — Directory containing adapter YAML files
 
 **Rate limiting:**
 - `limits.providers` — Provider-level rate limits
@@ -349,7 +349,7 @@ agent:
   timeout: 3600                # Agent process timeout in seconds (default: 3600 = 1 hour)
   args: []                      # Extra arguments passed before the prompt (default: [])
 
-  # Directory containing adapter TOML files (default: ~/.config/needle/adapters)
+  # Directory containing adapter YAML files (default: ~/.config/needle/adapters)
   adapters_dir: ~/.config/needle/adapters
 ```
 
@@ -453,9 +453,39 @@ agent:
     # Rules are evaluated in order; first match wins
     rules:
       - match_model: "(claude-)?(sonnet|opus|fable|haiku).*"
-        adapter: claude-print    # Use subscription billing for Anthropic models
-    default_adapter: claude-code-glm-4.7  # Fallback for non-matching models
+        adapter: claude         # Built-in adapter for Anthropic models
+    default_adapter: claude     # Fallback for non-matching models
     strict: false                # If true, fail when no rule matches (default: false)
+```
+
+**User-defined adapter example:**
+
+You can create custom adapters by placing YAML files in `~/.config/needle/adapters/`:
+
+```yaml
+# ~/.config/needle/adapters/my-custom-adapter.yaml
+# Example: Custom adapter for a specific API endpoint
+adapter:
+  cli: my-custom-cli
+  args:
+    - --endpoint
+    - https://api.example.com/v1
+    - --model
+    - "$MODEL"
+  env:
+    API_KEY: "${MY_API_KEY}"  # Environment variable reference
+```
+
+Then reference it in routing rules:
+
+```yaml
+agent:
+  routing:
+    rules:
+      - match_model: "gpt-.*"
+        adapter: my-custom-adapter  # Uses ~/.config/needle/adapters/my-custom-adapter.yaml
+    default_adapter: claude
+    strict: false
 ```
 
 ---
@@ -734,7 +764,7 @@ export NEEDLE_AGENT__DEFAULT=claude-interactive
 export NEEDLE_AGENT__TIMEOUT=7200
 
 # Set routing
-export NEEDLE_AGENT__ROUTING__DEFAULT_ADAPTER=claude-print
+export NEEDLE_AGENT__ROUTING__DEFAULT_ADAPTER=claude
 
 # Set worker limits
 export NEEDLE_WORKER__MAX_WORKERS=8
@@ -766,8 +796,8 @@ agent:
   routing:
     rules:
       - match_model: "(claude-)?(sonnet|opus|fable|haiku).*"
-        adapter: claude-print
-    default_adapter: claude-code-glm-4.7
+        adapter: claude
+    default_adapter: claude
     strict: false
 
 # Put this binding in the repository's .needle.yaml, not only global config.
