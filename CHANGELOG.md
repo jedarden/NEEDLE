@@ -4,12 +4,185 @@ All notable changes to NEEDLE are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- `needle init --backend <name>` to explicitly select a bead backend during workspace initialization
+- Polling test infrastructure and skeleton for retry and timeout behavior validation
+- Comprehensive retry configuration test fixtures with exponential and jitter backoff coverage
+- Mock framework for error injection testing with configurable failure scenarios
+- `deliverable:external` support to shipped-work gate for non-code deliverables with evidence lines
+- Built-in `claude` adapter as alias for `claude-sonnet` for simplified routing configuration
+
+### Changed
+
+- Removed all `bf`/`bead-forge` references; now uses `bead` CLI exclusively across codebase
+- Release notes describe changes rather than listing only commit SHAs
+
 ### Fixed
 
 - Built-in `claude-sonnet` and `claude-opus` adapters no longer use `unbuffer`, which masked
   exit codes and introduced an undocumented dependency. Direct `claude -p` invocation now
   propagates exit codes correctly, ensuring authentication failures and other errors result
   in Failure outcomes rather than silent Success. [#17](https://github.com/jedarden/NEEDLE/issues/17)
+- Doctor `Agent` binary check now verifies agent executables, not bead backends
+- OTLP sink compression now applies to HTTP and gRPC exporters (was only HTTP)
+- All clippy warnings resolved, including dead code, unused variables, and type mismatches
+- Backtrace compilation error in panic_capture module fixed
+- Process-global test state serialized to prevent CI races and flaky tests
+- Unwrap() calls removed from retry test helpers for better error propagation
+- Worker discovery no longer inflates from descendant process false positives
+- Home directory isolation in health monitor now properly respected
+
+## [0.5.0] - 2026-08-26
+
+Phase 18: Configuration hot-reload and installer hardening.
+
+### Added
+
+- Configuration hot-reload system with Tier-A (restartless) and Tier-B (rebuild) components
+- Config reload detection at cycle boundary with content hashing and change reporting
+- Config reload telemetry events including reload attempts, successes, and failures
+- Reloadable OTLP tracing layer with transport-seam attribute tests
+- Idle-action supervisor guard to prevent misconfiguration in daemon mode
+- ConfigWarning telemetry event for idle_action misconfiguration detection
+- Fail-closed checksum verification in install.sh (SHA256 verification required by default)
+- Explicit checksum opt-out mechanism with `--no-verify-checksum` for air-gapped installs
+- CLI availability probing logic to detect installed bead commands
+- Isolated test coverage for install.sh with e2e verification
+- Structured OTLP TLS configuration acceptance
+- Version update warning to `needle status` output
+- Shipped commit verification gate to prevent empty dispatch closures
+- Sweep stale scratch checkouts at worker startup
+- Live worker config reporting via `needle config --live`
+- Tsnet fail-closed integration tests
+- Comprehensive panic capture tests with edge case coverage
+- Retry configuration test fixtures for exponential and sync variants
+- Error injection mock framework for resilient testing
+- Polling test infrastructure skeleton
+
+### Changed
+
+- Install.sh now fails closed on missing or mismatched checksums (security hardening)
+- Checkpoint commits now include active root objects for fresh clone verification
+- Default idle_action is `Wait` without supervisor detection (fail-safe behavior)
+- Supervisor detection errors treated as absent rather than fatal
+- Process-spawning test catalog moved to dedicated documentation
+- Health heartbeat tests converted to tokio virtual time (no more wall-clock waits)
+- Integration_spawn test target separated for clearer test boundaries
+
+### Fixed
+
+- OTLP sink compression now applies to both HTTP and gRPC exporters [#14](https://github.com/jedarden/NEEDLE/issues/14)
+- Predispatch notes now key on BeadStore::notes rather than show body content
+- Exit code 0 dispatches now enforce postcondition release via BeadAction
+- ETXTBSY retry telemetry added to util and dispatch retry loops
+- Binary freshness check safely truncates commit SHAs to prevent panic on short refs
+- Explore strand deadlock tests fixed with blocking thread pool configuration
+- Empty workspace names now handled correctly in store operations
+- Strands integration fixtures migrated to bead-rs backend
+- Reflect strand migrated to bead-rs store
+- Installer opt-out paths repaired and tested
+- CI slow-lane checks now build test targets first to prevent timeouts
+- Test isolation widened for adapter_validation timing bounds
+- Process-global test state serialized to fix CI races
+- Test output patterns added to .gitignore
+- Clippy warnings resolved across verification modules
+- Dispatch postcondition now releases orphaned beads
+- Worker discovery no longer inflates from descendant processes
+- Health monitor now respects isolated HOME directory
+- Missing serial_test/scopeguard dev-deps added to fix compilation
+
+## [0.4.2] - 2026-08-19
+
+Hotfix for explore strand test deadlock.
+
+### Fixed
+
+- Explore strand deadlock test hangs fixed by configuring blocking thread pool
+- Reflect strand migrated to bead-rs store
+
+## [0.4.1] - 2026-08-19
+
+Infrastructure and telemetry improvements.
+
+### Added
+
+- OTLP provider attribute emission tests
+- Tilde expansion integration tests for remaining config path fields
+- Supervisor presence detection function
+- Unit tests for resolve_bead_cli with Bead backend discovery
+- Process-spawning test catalog for --lib target
+
+### Changed
+
+- Enabled FABRIC telemetry to real endpoint
+- Retired unconditional `bf --limit 999999` workaround for bead-rs quirks
+- CI verification retryStrategy fixed and tested
+
+### Fixed
+
+- Worker discovery inflation from descendant process false positives
+- OTLP capture lock now released before reuse
+- Bead-Id trailer amend skipped when HEAD already pushed
+- RoutingConfig field name `default` -> `default_adapter`
+- Explore strand access pattern documentation added
+- ETXTBSY retry tests for verify_backend_identity spawn site
+- BeadBackend template rendering tests fixed
+- Missing placeholder definitions for BeadBackend operations added
+- Clippy useless_format lints resolved in tests
+- Tilde prefix path assertions use string comparison
+- Auto backend discovery order prefers bead over bf per ADR-013
+
+## [0.4.0] - 2026-08-17
+
+Major release: binary freshness, unified DoD, OTLP telemetry, and process lifecycle.
+
+### Added
+
+- Binary freshness check mechanism to detect stale running workers
+- Clean exit on stale binary detection with automatic termination
+- Backend detection function for automatic bead CLI discovery
+- Unified definition-of-done system with verification and shipped-work gates
+- Descriptor-declared quirks for version-specific workarounds
+- Atomic claim verification at dispatch time
+- Hard deadline timeout mechanism for dispatch outer bounds
+- OTLP telemetry export for NEEDLE dogfood configuration
+- OTLP resource propagation and roaming-worker identity (Phase 17)
+- `needle.model.provider` OTLP attribute
+- `needle.agent` and `needle.model` per-record OTLP attributes
+- ProcessGuard for child process lifecycle management
+- BeadStore::show replacing bf show subprocess calls
+- Telemetry for upgrade checks
+- Dot-notation key path parsing and validation
+- ProcessObservation struct with idle deadline field
+- Separate integration_spawn test target
+- Worker liveness detection integration test
+- Comprehensive tilde expansion integration tests
+- Comprehensive BeadBackend template rendering tests
+- ETXTBSY retry wrapper for binary spawn race conditions
+- Version update warning in needle status
+
+### Changed
+
+- Health heartbeat tests converted to tokio virtual time
+- Checkpoint commits now include active root objects for verification
+- All tests serialize through crate env lock for process-global state
+
+### Fixed
+
+- Superseded claims detection in mend reaps stale live claims before liveness
+- Dispatch postcondition enforces orphaned bead release
+- Bead-rs empty-array output accepted in JsonLines parsers
+- Missing placeholder definitions for BeadBackend operations
+- PathBuf type mismatch in heartbeat test
+- Clippy useless_format lints in tests
+- Error code categories now unique (no duplicates)
+- Explore strand access pattern documentation
+- Installer now exits 0 after successful install
+- README reverted to canonical install.sh URL
+- Plan.md OTLP config aligned with implementation
+- Transform reaped after timeout kill
+- Unbuffer dependency removed from built-in claude adapters (exit codes propagate) [#15](https://github.com/jedarden/NEEDLE/issues/15)
 
 ## [0.3.1] - 2026-08-15
 
