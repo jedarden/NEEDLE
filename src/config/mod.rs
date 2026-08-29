@@ -6992,7 +6992,7 @@ impl Config {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfigError {
     /// Dot-separated field path (e.g., `agent.default`).
-    pub field: String,
+    pub full_path: String,
     /// Human-readable explanation.
     pub message: String,
     /// The specific segment that failed validation (if applicable).
@@ -7005,9 +7005,9 @@ pub struct ConfigError {
 
 impl ConfigError {
     /// Create a new ConfigError with basic information.
-    pub fn new(field: String, message: String) -> Self {
+    pub fn new(full_path: String, message: String) -> Self {
         Self {
-            field,
+            full_path,
             message,
             invalid_segment: None,
             available_fields: None,
@@ -7023,7 +7023,7 @@ impl ConfigError {
         context: String,
     ) -> Self {
         Self {
-            field: full_path,
+            full_path,
             message: format!(
                 "invalid key path segment '{}'. {}",
                 invalid_segment,
@@ -7040,15 +7040,15 @@ impl ConfigError {
     }
 
     /// Create a ConfigError for an unknown top-level field.
-    pub fn unknown_field(field: String, available_fields: Vec<String>) -> Self {
+    pub fn unknown_field(full_path: String, available_fields: Vec<String>) -> Self {
         Self {
-            field: field.clone(),
+            full_path: full_path.clone(),
             message: format!(
                 "unknown field '{}'. Valid fields are: {}",
-                field,
+                full_path,
                 available_fields.join(", ")
             ),
-            invalid_segment: Some(field),
+            invalid_segment: Some(full_path),
             available_fields: Some(available_fields),
             context: Some("top-level".to_string()),
         }
@@ -7058,9 +7058,9 @@ impl ConfigError {
 impl std::fmt::Display for ConfigError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Some(context) = &self.context {
-            write!(f, "{} ({}): {}", self.field, context, self.message)
+            write!(f, "{} ({}): {}", self.full_path, context, self.message)
         } else {
-            write!(f, "{}: {}", self.field, self.message)
+            write!(f, "{}: {}", self.full_path, self.message)
         }
     }
 }
@@ -7249,16 +7249,15 @@ fn validate_worker_field(
         let third = remaining[0];
         match field {
             "scratch_sweep" => validate_scratch_sweep_field(third, key_path),
-            _ => Err(ConfigError {
-                full_path: key_path.to_string(),
-                message: format!(
+            _ => Err(ConfigError::invalid_segment(
+                key_path.to_string(),
+                third.to_string(),
+                vec![],
+                format!(
                     "worker field '{}' does not support nested access (attempted: '{}')",
                     field, third
                 ),
-                invalid_segment: Some(third.to_string()),
-                available_fields: Some(vec![]),
-                context: Some(format!("worker.{}", field)),
-            }),
+            )),
         }
     } else {
         Ok(())
@@ -7303,16 +7302,15 @@ fn validate_agent_field(
         let third = remaining[0];
         match field {
             "routing" => validate_routing_field(third, key_path),
-            _ => Err(ConfigError {
-                field: key_path.to_string(),
-                message: format!(
+            _ => Err(ConfigError::invalid_segment(
+                key_path.to_string(),
+                third.to_string(),
+                vec![],
+                format!(
                     "agent field '{}' does not support nested access (attempted: '{}')",
                     field, third
                 ),
-                invalid_segment: Some(third.to_string()),
-                available_fields: Some(vec![]),
-                context: Some(format!("agent.{}", field)),
-            }),
+            )),
         }
     } else {
         Ok(())
@@ -12562,7 +12560,7 @@ resource_attributes:
         assert!(result.is_err(), "unknown top-level field should fail");
 
         let err = result.unwrap_err();
-        assert_eq!(err.field, "unknown_field");
+        assert_eq!(err.full_path, "unknown_field");
         assert!(err.message.contains("unknown top-level field"));
         assert!(err.message.contains("Valid fields are:"));
     }
@@ -12573,7 +12571,7 @@ resource_attributes:
         assert!(result.is_err(), "empty key path should fail");
 
         let err = result.unwrap_err();
-        assert_eq!(err.field, "");
+        assert_eq!(err.full_path, "");
         assert!(err.message.contains("cannot be empty"));
     }
 
@@ -12644,7 +12642,7 @@ resource_attributes:
         assert!(result.is_err(), "unknown worker field should fail");
 
         let err = result.unwrap_err();
-        assert_eq!(err.field, "worker.unknown_field");
+        assert_eq!(err.full_path, "worker.unknown_field");
         assert!(err.message.contains("unknown worker field"));
         assert!(err.message.contains("Valid fields are:"));
     }
@@ -12674,7 +12672,7 @@ resource_attributes:
         assert!(result.is_err(), "unknown agent field should fail");
 
         let err = result.unwrap_err();
-        assert_eq!(err.field, "agent.unknown_field");
+        assert_eq!(err.full_path, "agent.unknown_field");
         assert!(err.message.contains("unknown agent field"));
         assert!(err.message.contains("Valid fields are:"));
     }
@@ -12702,7 +12700,7 @@ resource_attributes:
         assert!(result.is_err(), "unknown agent routing field should fail");
 
         let err = result.unwrap_err();
-        assert_eq!(err.field, "agent.routing.unknown_field");
+        assert_eq!(err.full_path, "agent.routing.unknown_field");
         assert!(err.message.contains("unknown routing field"));
         assert!(err.message.contains("Valid fields are:"));
     }
@@ -12713,7 +12711,7 @@ resource_attributes:
         assert!(result.is_err(), "unknown scratch_sweep field should fail");
 
         let err = result.unwrap_err();
-        assert_eq!(err.field, "worker.scratch_sweep.unknown_field");
+        assert_eq!(err.full_path, "worker.scratch_sweep.unknown_field");
         assert!(err.message.contains("unknown scratch_sweep field"));
         assert!(err.message.contains("Valid fields are:"));
     }
@@ -12750,7 +12748,7 @@ resource_attributes:
         assert!(result.is_err(), "unknown workspace field should fail");
 
         let err = result.unwrap_err();
-        assert_eq!(err.field, "workspace.unknown_field");
+        assert_eq!(err.full_path, "workspace.unknown_field");
         assert!(err.message.contains("unknown workspace field"));
         assert!(err.message.contains("Valid fields are:"));
     }
@@ -12777,7 +12775,7 @@ resource_attributes:
         assert!(result.is_err(), "unknown health field should fail");
 
         let err = result.unwrap_err();
-        assert_eq!(err.field, "health.unknown_field");
+        assert_eq!(err.full_path, "health.unknown_field");
         assert!(err.message.contains("unknown health field"));
         assert!(err.message.contains("Valid fields are:"));
     }
@@ -12811,7 +12809,7 @@ resource_attributes:
         assert!(result.is_err(), "unknown strands field should fail");
 
         let err = result.unwrap_err();
-        assert_eq!(err.field, "strands.unknown_field");
+        assert_eq!(err.full_path, "strands.unknown_field");
         assert!(err.message.contains("unknown strands field"));
         assert!(err.message.contains("Valid fields are:"));
     }
@@ -12847,7 +12845,7 @@ resource_attributes:
         assert!(result.is_err(), "unknown explore field should fail");
 
         let err = result.unwrap_err();
-        assert_eq!(err.field, "strands.explore.unknown_field");
+        assert_eq!(err.full_path, "strands.explore.unknown_field");
         assert!(err.message.contains("unknown explore field"));
         assert!(err.message.contains("Valid fields are:"));
     }
@@ -12875,7 +12873,7 @@ resource_attributes:
         assert!(result.is_err(), "unknown telemetry field should fail");
 
         let err = result.unwrap_err();
-        assert_eq!(err.field, "telemetry.unknown_field");
+        assert_eq!(err.full_path, "telemetry.unknown_field");
         assert!(err.message.contains("unknown telemetry field"));
         assert!(err.message.contains("Valid fields are:"));
     }
@@ -12908,7 +12906,7 @@ resource_attributes:
         assert!(result.is_err(), "unknown file_sink field should fail");
 
         let err = result.unwrap_err();
-        assert_eq!(err.field, "telemetry.file_sink.unknown_field");
+        assert_eq!(err.full_path, "telemetry.file_sink.unknown_field");
         assert!(err.message.contains("unknown file_sink field"));
         assert!(err.message.contains("Valid fields are:"));
     }
@@ -12936,7 +12934,7 @@ resource_attributes:
         assert!(result.is_err(), "unknown prompt field should fail");
 
         let err = result.unwrap_err();
-        assert_eq!(err.field, "prompt.unknown_field");
+        assert_eq!(err.full_path, "prompt.unknown_field");
         assert!(err.message.contains("unknown prompt field"));
         assert!(err.message.contains("Valid fields are:"));
     }
