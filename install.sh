@@ -95,38 +95,31 @@ show_usage() {
     cat <<EOF
 Usage: install.sh [OPTIONS]
 
-Installs the needle binary to ~/.local/bin/needle (or \$NEEDLE_INSTALL_PATH).
+NEEDLE installer downloads and verifies the latest release binary.
+
+CHECKSUM VERIFICATION:
+  By default, the installer verifies the downloaded binary's SHA-256 checksum
+  against the release metadata. Installation aborts if verification fails.
+
+  Opt-out: --skip-checksum or NEEDLE_SKIP_CHECKSUM=1
+    WARNING: Skipping verification is a SECURITY RISK. Only use this in
+    trusted environments (air-gapped networks, local development) where you
+    have alternative verification methods and accept the risk of installing a
+    tampered binary.
+
+  Important: Actual checksum MISMATCHES are never skippable, even with
+  --skip-checksum. This flag only applies when checksums are unavailable,
+  not when they indicate a mismatch.
 
 OPTIONS:
     -h, --help              Show this help message
-    --skip-checksum         Skip checksum verification (NOT RECOMMENDED - see SECURITY below)
+    --skip-checksum         Skip checksum verification (SECURITY RISK)
 
 ENVIRONMENT VARIABLES:
     NEEDLE_INSTALL_PATH     Installation path (default: ~/.local/bin/needle)
-    NEEDLE_SKIP_CHECKSUM    Set to '1' or 'true' to skip checksum verification (NOT RECOMMENDED)
+    NEEDLE_SKIP_CHECKSUM    Set to '1' or 'true' to skip checksum (SECURITY RISK)
 
-SECURITY NOTE:
-    This installer verifies SHA-256 checksums to ensure the downloaded binary has not been
-    corrupted or tampered with. Checksum verification is enabled by default for your safety.
-
-    ⚠️  SKIPPING CHECKSUM VERIFICATION IS NOT RECOMMENDED:
-    The --skip-checksum flag and NEEDLE_SKIP_CHECKSUM environment variable allow you to bypass
-    verification, but this exposes you to significant security risks:
-
-    • A corrupted binary could crash or behave unpredictably
-    • A tampered binary could execute arbitrary malicious code
-    • You cannot verify the binary matches what the project released
-
-    These options should ONLY be used as a temporary workaround when:
-    • Checksums.txt is temporarily unavailable due to network/infrastructure issues
-    • You have alternative verification methods in place
-    • You fully understand and accept the security risks
-
-    IMPORTANT: Even with --skip-checksum, actual checksum MISMATCHES will still cause
-    installation to abort. This flag only applies when checksums are unavailable, not when
-    they indicate a mismatch.
-
-Examples:
+EXAMPLES:
     # Normal installation (recommended)
     curl -fsSL https://github.com/jedarden/NEEDLE/releases/latest/download/install.sh | bash
 
