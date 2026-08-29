@@ -2145,3 +2145,64 @@ async fn real_bead_rs_close_preserves_assignee_for_historical_record() {
         "closed bead should not appear in ready frontier even with assignee preserved"
     );
 }
+
+/// Test that reopening an unclaimed, closed bead keeps it unclaimed.
+///
+/// This test verifies the edge case where a bead is closed without ever being
+/// claimed. When such a bead is reopened, it should remain unclaimed (assignee
+/// stays None).
+#[tokio::test]
+async fn real_bead_rs_reopen_unclaimed_bead_stays_unclaimed() {
+    let workspace = create_test_workspace("reopen-unclaimed").unwrap();
+    let store = Arc::new(store_for_workspace(workspace.path()).unwrap());
+
+    // Create a bead WITHOUT claiming it.
+    let bead_id = create_bead(workspace.path(), "unclaimed-test", 1).unwrap();
+
+    // Verify bead is open and unclaimed.
+    let bead = store.show(&bead_id).await.unwrap();
+    assert_eq!(
+        bead.status,
+        needle::types::BeadStatus::Open,
+        "new bead should be open"
+    );
+    assert!(bead.assignee.is_none(), "new bead should have no assignee");
+
+    // Close the bead (unclaimed close).
+    close_bead(workspace.path(), &bead_id, "Test complete").expect("close should succeed");
+
+    // Verify bead is closed and still has no assignee.
+    let bead = store.show(&bead_id).await.unwrap();
+    assert_eq!(
+        bead.status,
+        needle::types::BeadStatus::Closed,
+        "bead should be closed"
+    );
+    assert!(
+        bead.assignee.is_none(),
+        "closed unclaimed bead should have no assignee"
+    );
+
+    // Reopen the bead.
+    reopen_bead(workspace.path(), &bead_id).expect("reopen should succeed");
+
+    // Verify reopened bead is open and STILL has no assignee.
+    let bead = store.show(&bead_id).await.unwrap();
+    assert_eq!(
+        bead.status,
+        needle::types::BeadStatus::Open,
+        "reopened bead should be open"
+    );
+    assert!(
+        bead.assignee.is_none(),
+        "reopened unclaimed bead MUST have no assignee; got assignee={:?}",
+        bead.assignee
+    );
+
+    // Verify the bead appears in ready frontier (since it has no assignee).
+    let ready_beads = store.ready(&Filters::default()).await.unwrap();
+    assert!(
+        ready_beads.iter().any(|b| b.id == bead_id),
+        "reopened unclaimed bead should appear in ready frontier"
+    );
+}
