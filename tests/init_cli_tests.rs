@@ -82,7 +82,6 @@ fn init_unknown_backend_rejected() {
 
 /// Test that .needle.yaml is created in a workspace with .beads directory.
 #[test]
-#[cfg_attr(not(feature = "bead-rs"), ignore)]
 fn init_creates_workspace_config_in_bead_workspace() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let workspace = temp_dir.path();
@@ -91,7 +90,7 @@ fn init_creates_workspace_config_in_bead_workspace() {
     let beads_dir = workspace.join(".beads");
     fs::create_dir(&beads_dir).expect("Failed to create .beads directory");
 
-    let needle_config = workspace.join(".needle.yaml");
+    let _needle_config = workspace.join(".needle.yaml");
 
     // Set HOME to temp dir to avoid writing to real config
     std::env::set_var("HOME", temp_dir.path());
@@ -118,7 +117,6 @@ fn init_creates_workspace_config_in_bead_workspace() {
 
 /// Test that .needle.yaml is NOT modified if it already exists.
 #[test]
-#[cfg_attr(not(feature = "bead-rs"), ignore)]
 fn init_idempotent_with_existing_workspace_config() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let workspace = temp_dir.path();
@@ -147,13 +145,12 @@ fn init_idempotent_with_existing_workspace_config() {
 
 /// Test that .needle.yaml is NOT created when .beads directory is absent.
 #[test]
-#[cfg_attr(not(feature = "bead-rs"), ignore)]
 fn init_skips_workspace_config_outside_bead_workspace() {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let workspace = temp_dir.path();
 
     // Do NOT create .beads directory - not a bead workspace
-    let needle_config = workspace.join(".needle.yaml");
+    let _needle_config = workspace.join(".needle.yaml");
 
     // Set HOME to temp dir
     std::env::set_var("HOME", temp_dir.path());

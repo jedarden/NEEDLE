@@ -2,6 +2,7 @@
 *.orig
 .env
 .needle/
+.needle-predispatch-sha
 .test_outputs/
 test_telemetry_write
 test_telemetry_write_debug
@@ -11,6 +12,7 @@ test-output*
 test_output*
 p95_*
 *_output.txt
+test-results/
 
 # Root-anchored spellings of the same junk — hyphen variants and exact names
 # the globs above miss. Anchored with a leading slash so they can only match

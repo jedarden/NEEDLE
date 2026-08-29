@@ -4,7 +4,7 @@
 # when you need to capture logs from a passing run.
 #
 # Submit with:
-#   kubectl create -f needle-ci-podgc-override.yml --kubeconfig=/home/coding/.kube/iad-ci.kubeconfig
+#   kubectl create -f ci/needle-ci-podgc-override.yml --kubeconfig=/home/coding/.kube/iad-ci.kubeconfig
 #
 # Pods will be retained until the workflow's ttlStrategy GCs them (1h success,
 # 48h failure), giving you time to inspect logs with:
