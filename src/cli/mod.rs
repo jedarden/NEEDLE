@@ -4223,10 +4223,13 @@ fn doctor_check_bead_backend(config: &Config) -> CheckResult {
     let (backend, path, source) = match crate::config::resolve_bead_cli(&config.bead_cli) {
         Ok(resolved) => resolved,
         Err(error) => {
-            return CheckResult::fail(
-                "Bead backend",
-                format!("{}: {error:#}", config.bead_cli.backend),
-            )
+            let checked = bead_cli_candidates_checked(&config.bead_cli);
+            let message = if config.bead_cli.path.is_some() {
+                format!("configured bead CLI path unavailable (checked {checked}): {error:#}")
+            } else {
+                format!("no bead store CLI found on PATH (checked {checked}): {error:#}")
+            };
+            return CheckResult::fail("Bead backend", message);
         }
     };
     let name = match backend {
@@ -4250,6 +4253,22 @@ fn doctor_check_bead_backend(config: &Config) -> CheckResult {
         detail.push("capability gap: claim omits model/harness velocity metadata".to_string());
     }
     CheckResult::pass("Bead CLI Backend", descriptor.name).with_detail(detail)
+}
+
+/// Return the bead CLI candidates that the shared backend detector checks.
+///
+/// Keeping this list beside the doctor failure path ensures the diagnostic
+/// names every candidate in the same order as the detector.
+fn bead_cli_candidates_checked(config: &crate::config::BeadCliConfig) -> String {
+    if let Some(path) = &config.path {
+        return path.display().to_string();
+    }
+
+    match config.backend {
+        crate::config::BeadBackend::Auto => "bead, bf, br".to_string(),
+        crate::config::BeadBackend::Bead => "bead".to_string(),
+        crate::config::BeadBackend::Br => "br".to_string(),
+    }
 }
 
 fn doctor_run_bead_store_checks(
@@ -8119,5 +8138,32 @@ mod tests {
         assert_eq!(result.status, CheckStatus::Fail);
         assert!(result.message.contains("nonexistent-agent-xyz"));
         assert!(result.message.contains("not found on PATH"));
+    }
+
+    #[test]
+    fn bead_cli_candidates_checked_matches_backend_probe_scope() {
+        let cases = [
+            (crate::config::BeadBackend::Auto, "bead, bf, br"),
+            (crate::config::BeadBackend::Bead, "bead"),
+            (crate::config::BeadBackend::Br, "br"),
+        ];
+
+        for (backend, expected) in cases {
+            let config = crate::config::BeadCliConfig {
+                backend,
+                path: None,
+            };
+            assert_eq!(bead_cli_candidates_checked(&config), expected);
+        }
+    }
+
+    #[test]
+    fn bead_cli_candidates_checked_reports_explicit_path() {
+        let config = crate::config::BeadCliConfig {
+            backend: crate::config::BeadBackend::Auto,
+            path: Some(PathBuf::from("/tmp/custom-bead")),
+        };
+
+        assert_eq!(bead_cli_candidates_checked(&config), "/tmp/custom-bead");
     }
 }
