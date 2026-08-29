@@ -972,6 +972,9 @@ mod tests {
         // Stage the same dirty content (agent hasn't modified it)
         run_git(&repo_path, &["add", "foreign.txt"]);
 
+        // Drop the lock before await
+        drop(setup_env_lock);
+
         // Validate the commit - should reject
         let result = validate_commit(&repo_path, &bead_id).await;
 
@@ -992,7 +995,6 @@ mod tests {
         );
 
         drop(setup_env_guard);
-        drop(setup_env_lock);
     }
 
     #[serial]
@@ -1044,6 +1046,9 @@ mod tests {
         fs::write(&file, "agent's modification").unwrap();
         run_git(&repo_path, &["add", "shared.txt"]);
 
+        // Drop the lock before await
+        drop(setup_env_lock);
+
         // Validate the commit - should allow (agent modified it)
         let result = validate_commit(&repo_path, &bead_id).await;
 
@@ -1054,7 +1059,6 @@ mod tests {
         );
 
         drop(setup_env_guard);
-        drop(setup_env_lock);
     }
 
     #[serial]
@@ -1095,6 +1099,9 @@ mod tests {
         fs::write(&file, "new content").unwrap();
         run_git(&repo_path, &["add", "new_file.txt"]);
 
+        // Drop the lock before await
+        drop(setup_env_lock);
+
         // Validate the commit - should allow (file was clean at dispatch)
         let result = validate_commit(&repo_path, &bead_id).await;
 
@@ -1105,7 +1112,6 @@ mod tests {
         );
 
         drop(setup_env_guard);
-        drop(setup_env_lock);
     }
 
     #[serial]
@@ -1149,6 +1155,9 @@ mod tests {
         // Stage .beads/test.json (should be allowed)
         run_git(&repo_path, &["add", ".beads/test.json"]);
 
+        // Drop the lock before await
+        drop(setup_env_lock);
+
         let result = validate_commit(&repo_path, &bead_id).await;
 
         assert!(
@@ -1158,7 +1167,6 @@ mod tests {
         );
 
         drop(setup_env_guard);
-        drop(setup_env_lock);
     }
 
     #[serial]
@@ -1185,6 +1193,9 @@ mod tests {
         fs::write(&file, "content").unwrap();
         run_git(&repo_path, &["add", "test.txt"]);
 
+        // Drop the lock before await
+        drop(setup_env_lock);
+
         // No snapshot exists - should fall back to allowing the commit
         let result = validate_commit(&repo_path, &bead_id).await;
 
@@ -1195,6 +1206,5 @@ mod tests {
         );
 
         drop(setup_env_guard);
-        drop(setup_env_lock);
     }
 }

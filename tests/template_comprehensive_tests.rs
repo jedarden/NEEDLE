@@ -31,9 +31,11 @@ fn test_render_empty_template() {
 
 #[test]
 fn test_render_template_with_only_placeholders() {
-    let mut context = RenderContext::default();
-    context.bead_id = "test-123".to_string();
-    context.bead_title = "Test Title".to_string();
+    let context = RenderContext {
+        bead_id: "test-123".to_string(),
+        bead_title: "Test Title".to_string(),
+        ..Default::default()
+    };
 
     let template = "{bead_id}{bead_title}";
     let result = render(template, &context);
@@ -51,9 +53,11 @@ fn test_render_template_with_only_whitespace() {
 
 #[test]
 fn test_render_with_newlines_in_template() {
-    let mut context = RenderContext::default();
-    context.bead_title = "Line 1".to_string();
-    context.workspace = "/test".to_string();
+    let context = RenderContext {
+        bead_title: "Line 1".to_string(),
+        workspace: "/test".to_string(),
+        ..Default::default()
+    };
 
     let template = "Task: {bead_title}\nLocation: {workspace}\nDone";
     let result = render(template, &context);
@@ -63,10 +67,13 @@ fn test_render_with_newlines_in_template() {
 
 #[test]
 fn test_render_with_special_characters_in_values() {
-    let mut context = RenderContext::default();
-    context.bead_title = "Fix: $100 cost & 5% increase".to_string();
-    context.bead_body =
-        Some("Test with <html> tags, \"quotes\", 'apostrophes', and \\backslashes\\".to_string());
+    let context = RenderContext {
+        bead_title: "Fix: $100 cost & 5% increase".to_string(),
+        bead_body: Some(
+            "Test with <html> tags, \"quotes\", 'apostrophes', and \\backslashes\\".to_string(),
+        ),
+        ..Default::default()
+    };
 
     let template = "{bead_title}: {bead_body}";
     let result = render(template, &context);
@@ -81,9 +88,11 @@ fn test_render_with_special_characters_in_values() {
 
 #[test]
 fn test_render_with_unicode_emoji() {
-    let mut context = RenderContext::default();
-    context.bead_title = "🐛 Bug fix: 🚀 Feature ✨".to_string();
-    context.bead_body = Some("日本語 中文 한국ة العربية".to_string());
+    let context = RenderContext {
+        bead_title: "🐛 Bug fix: 🚀 Feature ✨".to_string(),
+        bead_body: Some("日本語 中文 한국ة العربية".to_string()),
+        ..Default::default()
+    };
 
     let template = "Title: {bead_title}\nBody: {bead_body}";
     let result = render(template, &context);
@@ -99,9 +108,11 @@ fn test_render_with_unicode_emoji() {
 
 #[test]
 fn test_render_with_very_long_values() {
-    let mut context = RenderContext::default();
     let long_string = "x".repeat(10000);
-    context.bead_body = Some(long_string.clone());
+    let context = RenderContext {
+        bead_body: Some(long_string.clone()),
+        ..Default::default()
+    };
 
     let template = "{bead_body}";
     let result = render(template, &context);
@@ -113,8 +124,10 @@ fn test_render_with_very_long_values() {
 
 #[test]
 fn test_render_with_multiple_occurrences_of_same_placeholder() {
-    let mut context = RenderContext::default();
-    context.bead_id = "XYZ".to_string();
+    let context = RenderContext {
+        bead_id: "XYZ".to_string(),
+        ..Default::default()
+    };
 
     let template = "{bead_id} {bead_id} {bead_id} {bead_id}";
     let result = render(template, &context);
@@ -124,10 +137,12 @@ fn test_render_with_multiple_occurrences_of_same_placeholder() {
 
 #[test]
 fn test_render_with_interleaved_placeholders_and_text() {
-    let mut context = RenderContext::default();
-    context.bead_id = "ABC".to_string();
-    context.bead_title = "Title".to_string();
-    context.workspace = "/path".to_string();
+    let context = RenderContext {
+        bead_id: "ABC".to_string(),
+        bead_title: "Title".to_string(),
+        workspace: "/path".to_string(),
+        ..Default::default()
+    };
 
     let template = "pre{id}mid{title}post{workspace}end";
     let result = render(template, &context);
@@ -137,9 +152,11 @@ fn test_render_with_interleaved_placeholders_and_text() {
 
 #[test]
 fn test_render_with_null_bytes_in_values() {
-    let mut context = RenderContext::default();
     // Note: Rust strings don't allow null bytes, but we can test other control chars
-    context.bead_title = "Tab\there and\nnewline".to_string();
+    let context = RenderContext {
+        bead_title: "Tab\there and\nnewline".to_string(),
+        ..Default::default()
+    };
 
     let template = "{bead_title}";
     let result = render(template, &context);
@@ -149,8 +166,10 @@ fn test_render_with_null_bytes_in_values() {
 
 #[test]
 fn test_render_with_brace_characters_in_values() {
-    let mut context = RenderContext::default();
-    context.bead_title = "Use {literal} braces [like] this (or not)".to_string();
+    let context = RenderContext {
+        bead_title: "Use {literal} braces [like] this (or not)".to_string(),
+        ..Default::default()
+    };
 
     let template = "{bead_title}";
     let result = render(template, &context);
@@ -164,9 +183,11 @@ fn test_render_with_brace_characters_in_values() {
 
 #[test]
 fn test_render_with_missing_placeholder_value() {
-    let mut context = RenderContext::default();
-    context.bead_title = "Test".to_string();
-    // bead_id is empty (default)
+    let context = RenderContext {
+        bead_title: "Test".to_string(),
+        // bead_id is empty (default)
+        ..Default::default()
+    };
 
     let template = "ID: {bead_id}, Title: {bead_title}";
     let result = render(template, &context);
@@ -226,8 +247,10 @@ fn test_render_with_vars_empty_extra_vars() {
 
 #[test]
 fn test_render_with_vars_conflicting_names() {
-    let mut context = RenderContext::default();
-    context.bead_title = "Original".to_string();
+    let context = RenderContext {
+        bead_title: "Original".to_string(),
+        ..Default::default()
+    };
 
     let template = "{bead_title}";
     let extra = vec![("bead_title".to_string(), "Overridden".to_string())];
@@ -638,9 +661,11 @@ operations:
 
 #[test]
 fn test_performance_simple_template() {
-    let mut context = RenderContext::default();
-    context.bead_title = "Performance Test".to_string();
-    context.workspace = "/test/path".to_string();
+    let context = RenderContext {
+        bead_title: "Performance Test".to_string(),
+        workspace: "/test/path".to_string(),
+        ..Default::default()
+    };
 
     let template = "Task: {bead_title} in {workspace}";
 
@@ -660,13 +685,15 @@ fn test_performance_simple_template() {
 
 #[test]
 fn test_performance_complex_template() {
-    let mut context = RenderContext::default();
-    context.bead_id = "perf-123".to_string();
-    context.bead_title = "Performance Test".to_string();
-    context.bead_body = Some("Testing performance with longer text".to_string());
-    context.bead_status = "in_progress".to_string();
-    context.workspace = "/very/long/workspace/path/that/goes/deep/into/the/filesystem".to_string();
-    context.worker_id = "worker-performance-test".to_string();
+    let context = RenderContext {
+        bead_id: "perf-123".to_string(),
+        bead_title: "Performance Test".to_string(),
+        bead_body: Some("Testing performance with longer text".to_string()),
+        bead_status: "in_progress".to_string(),
+        workspace: "/very/long/workspace/path/that/goes/deep/into/the/filesystem".to_string(),
+        worker_id: "worker-performance-test".to_string(),
+        ..Default::default()
+    };
 
     let template = "{bead_id}|{bead_title}|{bead_body}|{bead_status}|{workspace}|{worker_id}";
 
@@ -705,8 +732,10 @@ fn test_performance_extract_placeholders() {
 
 #[test]
 fn test_performance_large_template() {
-    let mut context = RenderContext::default();
-    context.bead_id = "large-perf-123".to_string();
+    let context = RenderContext {
+        bead_id: "large-perf-123".to_string(),
+        ..Default::default()
+    };
 
     // Create a template with 100 placeholders
     let placeholders: Vec<String> = (1..=100).map(|i| format!("{{{}}}", i)).collect();

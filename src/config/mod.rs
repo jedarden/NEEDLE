@@ -12662,6 +12662,42 @@ resource_attributes:
     }
 
     #[test]
+    fn all_top_level_config_fields_validate_successfully() {
+        // Test that every top-level Config field validates successfully
+        // This ensures the valid_top_level array stays in sync with actual Config struct
+        let all_top_level_fields = [
+            "agent",
+            "worker",
+            "workspace",
+            "bead_cli",
+            "strands",
+            "telemetry",
+            "prompt",
+            "health",
+            "limits",
+            "pricing",
+            "budget",
+            "verification",
+            "gates",
+            "self_modification",
+            "fabric",
+            "supervisor",
+            "outcome",
+            "tsnet",
+            "validation",
+            "post_push_ci",
+        ];
+
+        for field in all_top_level_fields {
+            assert!(
+                validate_key_path(field).is_ok(),
+                "top-level field '{}' should validate successfully",
+                field
+            );
+        }
+    }
+
+    #[test]
     fn test_otlp_config_matches_plan_md() {
         // This is the config from plan.md's OTLP Sink example (as corrected to
         // the implemented schema: the sink key is `otlp_sink`, not `otlp` —

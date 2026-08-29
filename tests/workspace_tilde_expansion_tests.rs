@@ -9,7 +9,6 @@
 //! use isolated HOME directories and proper HOME locking.
 
 use needle::config::Config;
-use needle::util::expand_tilde;
 use serial_test::serial;
 use std::env;
 use std::fs;
@@ -30,6 +29,7 @@ use std::path::PathBuf;
 /// both, making `~` expand to the other test's tempdir. `#[serial]` cannot prevent
 /// this -- it only orders serial-marked tests against each other, so any non-serial
 /// test racing one still corrupts it. The lock below makes isolation exclusive.
+#[allow(dead_code)]
 static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Take the HOME lock for tests that set HOME manually rather than via HomeGuard.
@@ -38,12 +38,14 @@ static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// other, but the ~24 HomeGuard users are not serial, so a guard dropping in another
 /// thread restores HOME mid-test. That is how a tilde expansion resolved to the real
 /// `/root` under CI. Hold this for the whole test, before touching HOME.
+#[allow(dead_code)]
 fn lock_home() -> std::sync::MutexGuard<'static, ()> {
     HOME_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+#[allow(dead_code)]
 struct HomeGuard {
     _temp_dir: tempfile::TempDir,
     original_home: Option<std::ffi::OsString>,
@@ -57,6 +59,7 @@ impl HomeGuard {
     /// Returns a guard that restores the original HOME value when dropped.
     /// Use this in any test that creates a HealthMonitor or Worker, as both
     /// may call `dirs_or_home()` which reads HOME directly.
+    #[allow(dead_code)]
     fn isolate() -> Self {
         // Take the lock before touching HOME. Recover from poisoning rather than
         // propagating it: one panicking test must not cascade into every other test

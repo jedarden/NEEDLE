@@ -152,7 +152,7 @@ fn test_panic_hook_does_not_interfere_with_normal_tests() {
     let x = 1 + 1;
     assert_eq!(x, 2);
 
-    let vec = vec![1, 2, 3];
+    let vec = [1, 2, 3];
     assert_eq!(vec.len(), 3);
 
     // Test should complete successfully

@@ -200,11 +200,10 @@ async fn capture_dirty_files(workspace: &Path) -> Option<Vec<DirtyFile>> {
 async fn git_hash_object(workspace: &Path, path: &str) -> Option<String> {
     let output = spawn_with_etxtbsy_retry(
         || {
-            let path = path.to_string();
             async move {
                 // Use git hash-object with the file path directly
                 tokio::process::Command::new("git")
-                    .args(["hash-object", &path])
+                    .args(["hash-object", path])
                     .current_dir(workspace)
                     .kill_on_drop(true)
                     .output()

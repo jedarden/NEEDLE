@@ -164,7 +164,7 @@ async fn context_file_read_failure_does_not_panic() {
             // This should not panic even if file doesn't exist
             let _content = std::fs::read_to_string(&abs_path);
             // If we get here, file exists
-            let _ = sections.push(format!("### {}\n\n{}", rel_path.display(), "dummy content"));
+            sections.push(format!("### {}\n\n{}", rel_path.display(), "dummy content"));
         }
         sections
     });
@@ -362,7 +362,7 @@ fn very_long_paths_are_handled_gracefully() {
 
     // Creating deep path should not panic
     let result = std::panic::catch_unwind(|| {
-        fs::create_dir_all(deep_path.parent().unwrap());
+        let _ = fs::create_dir_all(deep_path.parent().unwrap());
         fs::write(&deep_path, "test content")
     });
 
@@ -471,5 +471,6 @@ fn panic_safety_guarantees_are_documented() {
     // This test serves as documentation and a summary that the panic safety
     // properties have been verified.
 
-    assert!(true, "panic safety guarantees documented and verified");
+    // Documentation: panic safety guarantees documented and verified
+    // (test validates that the code compiles and runs without panics in normal operation)
 }
