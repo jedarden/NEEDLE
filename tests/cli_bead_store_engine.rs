@@ -2,7 +2,9 @@ use needle::bead_store::{builtin_bead_backends, BeadStore, CliBeadStore};
 use needle::types::{BeadId, ClaimResult};
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 #[cfg(unix)]
 fn executable(path: &Path, body: &str) {
@@ -25,6 +27,47 @@ fn store(root: &Path, backend_name: &str) -> CliBeadStore {
         "#!/bin/sh\nprintf '%s\\n' \"$@\" >> invocations.log\nprintf '%s\\n' '[{\"id\":\"fixture-1\",\"title\":\"fixture\",\"description\":null,\"notes\":\"backend note\",\"priority\":2,\"status\":\"open\",\"assignee\":null,\"labels\":[],\"source_repo\":\"\",\"dependencies\":[],\"dependents\":[],\"comments\":[],\"created_at\":\"2026-08-12T00:00:00Z\",\"updated_at\":\"2026-08-12T00:00:00Z\"}]'\n",
     );
     CliBeadStore::new(backend, binary, root.to_path_buf(), None, None, None).unwrap()
+}
+
+#[cfg(unix)]
+fn batch_backend() -> needle::bead_store::BeadBackend {
+    let mut backend = builtin_bead_backends().into_iter().next().unwrap();
+    backend.name = "bead-forge".to_string();
+    backend.operations.get_mut("claim").unwrap().strategy = Some("batch_op".to_string());
+    backend
+}
+
+#[cfg(unix)]
+#[derive(Clone)]
+struct TraceCapture(Arc<Mutex<Vec<u8>>>);
+
+#[cfg(unix)]
+struct TraceWriter(Arc<Mutex<Vec<u8>>>);
+
+#[cfg(unix)]
+impl Write for TraceWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for TraceCapture {
+    type Writer = TraceWriter;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        TraceWriter(Arc::clone(&self.0))
+    }
+}
+
+#[cfg(unix)]
+fn captured_trace(capture: &TraceCapture) -> String {
+    String::from_utf8(capture.0.lock().unwrap().clone()).unwrap()
 }
 
 #[test]
@@ -299,4 +342,69 @@ async fn bead_forge_split_is_one_transactional_batch() {
     assert_eq!(payload[3]["op"], "dep_add_blocker");
     assert_eq!(payload[3]["id"], "bf-parent");
     assert_eq!(payload[3]["blocker"], "@1");
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[cfg(unix)]
+async fn bead_forge_batch_retries_transient_etxtbsy_and_completes() {
+    let root = tempfile::tempdir().unwrap();
+    let binary = root.path().join("fixture-cli");
+    executable(
+        &binary,
+        r##"#!/bin/sh
+printf '%s\n' "$@" >> invocations.log
+if [ "$1" = show ]; then
+  if [ -e batch-seen ]; then
+    printf '%s\n' '[{"id":"bf-1","title":"fixture","description":null,"priority":2,"status":"in_progress","assignee":"worker-a","labels":[],"source_repo":"","dependencies":[],"dependents":[],"comments":[],"created_at":"2026-08-12T00:00:00Z","updated_at":"2026-08-12T00:00:00Z"}]'
+  else
+    touch show-seen
+    (exec 9>>"$0"; touch busy-started; sleep 0.05) >/dev/null 2>&1 &
+    while [ ! -e busy-started ]; do sleep 0.001; done
+    printf '%s\n' '[{"id":"bf-1","title":"fixture","description":null,"priority":2,"status":"open","assignee":null,"labels":[],"source_repo":"","dependencies":[],"dependents":[],"comments":[],"created_at":"2026-08-12T00:00:00Z","updated_at":"2026-08-12T00:00:00Z"}]'
+  fi
+elif [ "$1" = batch ]; then
+  touch batch-seen
+fi
+"##,
+    );
+    let store = CliBeadStore::new(
+        batch_backend(),
+        binary,
+        root.path().to_path_buf(),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+
+    let capture = TraceCapture(Arc::new(Mutex::new(Vec::new())));
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(capture.clone())
+        .with_ansi(false)
+        .without_time()
+        .with_max_level(tracing::Level::DEBUG)
+        .finish();
+    let subscriber_guard = tracing::subscriber::set_default(subscriber);
+
+    let result = store.claim(&BeadId::from("bf-1"), "worker-a").await;
+    drop(subscriber_guard);
+
+    let claimed = result.unwrap();
+    assert!(matches!(claimed, ClaimResult::Claimed(_)));
+
+    let invocations = fs::read_to_string(root.path().join("invocations.log")).unwrap();
+    assert_eq!(invocations.matches("show\n").count(), 2);
+    assert_eq!(invocations.matches("batch\n").count(), 1);
+    assert!(invocations
+        .contains(r#"[{"assignee":"worker-a","id":"bf-1","op":"update","status":"in_progress"}]"#));
+
+    let logs = captured_trace(&capture);
+    assert!(
+        logs.contains("Retry attempt 1/5") && logs.contains("ETXTBSY"),
+        "batch retry should emit an ETXTBSY attempt event: {logs}"
+    );
+    assert!(
+        logs.contains("Retry succeeded for spawn_with_etxtbsy_retry after"),
+        "successful batch retry should emit a completion event: {logs}"
+    );
 }

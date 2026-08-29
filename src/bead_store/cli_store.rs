@@ -197,8 +197,11 @@ impl CliBeadStore {
         let binary = self.binary.clone();
         let workspace = self.workspace.clone();
         let owned_args = args.to_vec();
-        let child = spawn_with_etxtbsy_retry_child(
-            || async {
+        self.run_argv_with_spawn(name, timeout_secs, move || {
+            let binary = binary.clone();
+            let workspace = workspace.clone();
+            let owned_args = owned_args.clone();
+            async move {
                 let mut command = tokio::process::Command::new(&binary);
                 command
                     .args(&owned_args)
@@ -207,19 +210,31 @@ impl CliBeadStore {
                     .stderr(Stdio::piped())
                     .kill_on_drop(true);
                 command.spawn()
-            },
-            5,
-            20,
-        )
+            }
+        })
         .await
-        .with_context(|| {
-            format!(
-                "failed to spawn backend '{}' operation '{}' using {}",
-                self.backend.name,
-                name,
-                self.binary.display()
-            )
-        })?;
+    }
+
+    async fn run_argv_with_spawn<F, Fut>(
+        &self,
+        name: &str,
+        timeout_secs: u64,
+        spawn_fn: F,
+    ) -> Result<String>
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = std::io::Result<tokio::process::Child>>,
+    {
+        let child = spawn_with_etxtbsy_retry_child(spawn_fn, 5, 20)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to spawn backend '{}' operation '{}' using {}",
+                    self.backend.name,
+                    name,
+                    self.binary.display()
+                )
+            })?;
         let output =
             tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output())
                 .await
@@ -961,6 +976,24 @@ impl BeadStore for CliBeadStore {
     }
 }
 
+fn bf_update_batch_args(
+    id: &BeadId,
+    status: Option<&str>,
+    assignee: Option<&str>,
+) -> Result<Vec<String>> {
+    let mut operation = serde_json::Map::new();
+    operation.insert("op".to_string(), serde_json::json!("update"));
+    operation.insert("id".to_string(), serde_json::json!(id.as_ref()));
+    if let Some(status) = status {
+        operation.insert("status".to_string(), serde_json::json!(status));
+    }
+    if let Some(assignee) = assignee {
+        operation.insert("assignee".to_string(), serde_json::json!(assignee));
+    }
+    let payload = serde_json::to_string(&vec![serde_json::Value::Object(operation)])?;
+    Ok(vec!["batch".to_string(), "--json".to_string(), payload])
+}
+
 impl CliBeadStore {
     async fn claim_via_batch(&self, id: &BeadId, actor: &str) -> Result<ClaimResult> {
         let shown = self.show(id).await?;
@@ -995,22 +1028,27 @@ impl CliBeadStore {
         status: Option<&str>,
         assignee: Option<&str>,
     ) -> Result<()> {
-        let mut operation = serde_json::Map::new();
-        operation.insert("op".to_string(), serde_json::json!("update"));
-        operation.insert("id".to_string(), serde_json::json!(id.as_ref()));
-        if let Some(status) = status {
-            operation.insert("status".to_string(), serde_json::json!(status));
-        }
-        if let Some(assignee) = assignee {
-            operation.insert("assignee".to_string(), serde_json::json!(assignee));
-        }
-        let payload = serde_json::to_string(&vec![serde_json::Value::Object(operation)])?;
-        self.run_argv(
-            "batch_update",
-            &["batch".to_string(), "--json".to_string(), payload],
-            DEFAULT_TIMEOUT_SECS,
-        )
-        .await?;
+        let args = bf_update_batch_args(id, status, assignee)?;
+        self.run_argv("batch_update", &args, DEFAULT_TIMEOUT_SECS)
+            .await?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    async fn run_bf_update_batch_with_spawn<F, Fut>(
+        &self,
+        id: &BeadId,
+        status: Option<&str>,
+        assignee: Option<&str>,
+        spawn_fn: F,
+    ) -> Result<()>
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = std::io::Result<tokio::process::Child>>,
+    {
+        let _args = bf_update_batch_args(id, status, assignee)?;
+        self.run_argv_with_spawn("batch_update", DEFAULT_TIMEOUT_SECS, spawn_fn)
+            .await?;
         Ok(())
     }
 
@@ -1061,6 +1099,89 @@ fn parse_doctor_output(output: &str) -> RepairReport {
 
 fn is_optional_placeholder(name: &str) -> bool {
     matches!(name, "model" | "harness" | "harness_version" | "limit")
+}
+
+#[cfg(test)]
+mod bf_batch_retry_tests {
+    use super::{super::builtin_bead_backends, CliBeadStore};
+    use crate::types::BeadId;
+    use std::io;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    fn test_store() -> (tempfile::TempDir, CliBeadStore) {
+        let directory = tempfile::tempdir().unwrap();
+        let binary = directory.path().join("fixture-cli");
+        std::fs::write(&binary, "fixture").unwrap();
+        let backend = builtin_bead_backends().into_iter().next().unwrap();
+        let store = CliBeadStore::new(
+            backend,
+            binary,
+            directory.path().to_path_buf(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        (directory, store)
+    }
+
+    #[tokio::test]
+    async fn run_bf_batch_retries_mock_etxtbsy_then_succeeds() {
+        let (_directory, store) = test_store();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_for_spawn = Arc::clone(&attempts);
+
+        let result = store
+            .run_bf_update_batch_with_spawn(
+                &BeadId::from("batch-retry"),
+                Some("in_progress"),
+                Some("worker-a"),
+                move || {
+                    let attempts = Arc::clone(&attempts_for_spawn);
+                    async move {
+                        if attempts.fetch_add(1, Ordering::SeqCst) < 2 {
+                            Err(io::Error::from_raw_os_error(26))
+                        } else {
+                            tokio::process::Command::new("true").spawn()
+                        }
+                    }
+                },
+            )
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "batch should recover from transient ETXTBSY: {result:?}"
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn run_bf_batch_returns_mock_etxtbsy_after_retry_exhaustion() {
+        let (_directory, store) = test_store();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_for_spawn = Arc::clone(&attempts);
+
+        let result = store
+            .run_bf_update_batch_with_spawn(
+                &BeadId::from("batch-retry-exhausted"),
+                Some("in_progress"),
+                Some("worker-a"),
+                move || {
+                    attempts_for_spawn.fetch_add(1, Ordering::SeqCst);
+                    async { Err::<tokio::process::Child, _>(io::Error::from_raw_os_error(26)) }
+                },
+            )
+            .await;
+
+        let error = result.expect_err("persistent ETXTBSY should exhaust retries");
+        let io_error = error
+            .downcast_ref::<io::Error>()
+            .expect("batch error should retain the spawn IO error");
+        assert_eq!(io_error.raw_os_error(), Some(26));
+        assert_eq!(attempts.load(Ordering::SeqCst), 5);
+    }
 }
 
 fn placeholders(template: &str) -> Result<Vec<String>> {
