@@ -29,7 +29,21 @@ The script:
 
 ## Superseded Objects
 
-Objects listed in `deleted_paths` of the checkpoint manifests are superseded and should not remain tracked. The script automatically removes these from git when they are no longer referenced by any active root.
+Objects listed in `deleted_paths` of the checkpoint manifests are superseded and should not remain tracked. The commit script automatically removes these from git when they are no longer referenced by any active root.
+
+**Strategy:** Git-based cleanup (see `docs/checkpoint-cleanup-strategy.md` for full rationale).
+
+**Implementation:** As part of each checkpoint commit, `scripts/commit-checkpoint.sh` calls `scripts/cleanup-superseded-checkpoint-objects.sh`, which:
+
+1. Extracts the two active objects from `current.json.active_root.path` and `previous.json.active_root.path`
+2. Lists all tracked objects in `.beads/checkpoint/objects/`
+3. Removes any tracked object not in the active set using `git rm`
+4. Commits the removals atomically with the new checkpoint
+
+This ensures:
+- Only two active objects exist in the working tree
+- Superseded objects remain in git history for recovery
+- The cleanup is automatic and idempotent
 
 ## Verification
 
@@ -55,6 +69,7 @@ However, this is a fallback - the committed checkpoint with active roots should 
 
 ## Related
 
+- `docs/checkpoint-cleanup-strategy.md` - Superseded object cleanup strategy
 - bead-rs plan.md section 7 (checkpoint design)
 - ADR-006 (bead store architecture)
 - Commit `ffbef35` in bead-rs (similar fix)

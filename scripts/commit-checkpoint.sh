@@ -84,6 +84,12 @@ echo "Validating active root objects..."
 validate_object_exists "$CURRENT_ROOT"
 validate_object_exists "$PREVIOUS_ROOT"
 
+# Cleanup superseded checkpoint objects
+echo ""
+echo "Cleaning up superseded checkpoint objects..."
+SCRIPT_DIR="$(dirname "$0")"
+"$SCRIPT_DIR/cleanup-superseded-checkpoint-objects.sh"
+
 # Stage files for commit
 echo ""
 echo "Staging files for commit..."

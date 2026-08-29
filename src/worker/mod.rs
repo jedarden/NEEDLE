@@ -1799,12 +1799,13 @@ impl Worker {
                 // correct workspace. Only switch if the workspace has a real
                 // .beads/ directory — avoids false triggers from mock/stub beads.
                 let bead_ws = bead.workspace.clone();
+                let bead_id = bead.id.clone();
                 if !is_workspace_unset(&bead_ws)
                     && bead_ws != self.config.workspace.default
                     && bead_ws.join(".beads").is_dir()
                 {
                     tracing::info!(
-                        bead_id = %bead.id,
+                        bead_id = %bead_id,
                         remote_workspace = %bead_ws.display(),
                         "bead is from remote workspace, switching store"
                     );
@@ -1822,7 +1823,7 @@ impl Worker {
                 crate::hoop_hooks::emit_needle_event(
                     &self.current_workspace,
                     &self.worker_name,
-                    Some(bead.id.as_ref()),
+                    Some(bead_id.as_ref()),
                     Some(strand_name.as_str()),
                     "claim",
                     serde_json::json!({}),
@@ -1837,11 +1838,8 @@ impl Worker {
                 // observers see the correct workspace even before transitioning to
                 // CLAIMING. This ensures heartbeats are accurate for cross-workspace
                 // work (see bead needle-c63c).
-                self.health.update_state(
-                    &WorkerState::Selecting,
-                    Some(&self.current_bead.as_ref().unwrap().id),
-                    Some(&bead_ws),
-                );
+                self.health
+                    .update_state(&WorkerState::Selecting, Some(&bead_id), Some(&bead_ws));
 
                 self.set_state(WorkerState::Claiming)?;
             }
