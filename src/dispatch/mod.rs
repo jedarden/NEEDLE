@@ -1080,6 +1080,76 @@ impl Dispatcher {
             prompt_hash: prompt.hash.clone(),
         })?;
 
+        // Atomically verify claim status immediately before dispatch.
+        // This verification happens within the dispatch transaction window,
+        // ensuring no race condition between check and agent spawn.
+        if let (Some(ref store), Some(ref worker_id)) = (&self.bead_store, &self.worker_id) {
+            match store.claim_status(bead_id).await {
+                Ok(status) => {
+                    let is_valid_claim = status.status == crate::types::BeadStatus::InProgress
+                        && status.assignee.as_deref() == Some(worker_id);
+
+                    if !is_valid_claim {
+                        let reason = if status.status != crate::types::BeadStatus::InProgress {
+                            format!("bead status is {:?}, not in_progress", status.status)
+                        } else {
+                            format!(
+                                "bead assigned to {:?}, not this worker ({})",
+                                status.assignee, worker_id
+                            )
+                        };
+
+                        tracing::warn!(
+                            bead_id = %bead_id.as_ref(),
+                            current_status = ?status.status,
+                            current_assignee = ?status.assignee,
+                            expected_worker = %worker_id,
+                            revision = ?status.revision,
+                            verification_result = "failed",
+                            reason = %reason,
+                            "atomic claim verification failed at dispatch — aborting"
+                        );
+
+                        let _ =
+                            self.telemetry
+                                .emit(crate::telemetry::EventKind::ClaimVerifyFailed {
+                                    bead_id: bead_id.clone(),
+                                    expected_actor: worker_id.clone(),
+                                    actual_status: format!("{:?}", status.status),
+                                    actual_assignee: status
+                                        .assignee
+                                        .unwrap_or_else(|| "none".to_string()),
+                                });
+
+                        return Err(anyhow::anyhow!("claim verification failed: {}", reason));
+                    }
+
+                    tracing::debug!(
+                        bead_id = %bead_id.as_ref(),
+                        current_status = ?status.status,
+                        current_assignee = ?status.assignee,
+                        revision = ?status.revision,
+                        verification_result = "passed",
+                        "atomic claim verification passed — proceeding with dispatch"
+                    );
+
+                    let _ = self
+                        .telemetry
+                        .emit(crate::telemetry::EventKind::ClaimVerifySuccess {
+                            bead_id: bead_id.clone(),
+                            expected_actor: worker_id.clone(),
+                        });
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        bead_id = %bead_id.as_ref(),
+                        error = %e,
+                        "atomic claim verification query failed — proceeding with dispatch"
+                    );
+                }
+            }
+        }
+
         let result = self
             .execute_agent(bead_id, &prompt.content, adapter, workspace)
             .await;
@@ -2270,8 +2340,9 @@ fn run_probe(agent_cli: &str) -> Result<ProbeResult> {
                         max_attempts = MAX_ATTEMPTS,
                         agent_cli = %agent_cli,
                         function = "run_probe",
-                        "ETXTBSY retry succeeded after {} attempts",
-                        attempt + 1
+                        "Retry succeeded for {function_name} after {attempts} attempts",
+                        function_name = "run_probe",
+                        attempts = attempt + 1
                     );
                 }
                 return Ok(ProbeResult {

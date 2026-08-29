@@ -441,8 +441,9 @@ where
                         attempt = attempt + 1,
                         max_attempts = max_attempts,
                         function = "spawn_with_etxtbsy_retry",
-                        "ETXTBSY retry succeeded after {} attempts",
-                        attempt + 1
+                        "Retry succeeded for {function_name} after {attempts} attempts",
+                        function_name = "spawn_with_etxtbsy_retry",
+                        attempts = attempt + 1
                     );
                 }
                 return Ok(output);
@@ -450,10 +451,8 @@ where
             Err(e) if e.raw_os_error() == Some(26) && attempt + 1 < max_attempts => {
                 last_err = Some(e);
                 warn!(
-                    attempt = attempt + 1,
-                    max_attempts = max_attempts,
-                    function = "spawn_with_etxtbsy_retry",
-                    "Retry attempt {attempt}/{max_attempts} for {function} due to ETXTBSY"
+                    "Retry attempt {}/{max_attempts} for 'spawn_with_etxtbsy_retry' due to ETXTBSY",
+                    attempt + 1
                 );
                 tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
             }
@@ -578,8 +577,9 @@ where
                         attempt = attempt + 1,
                         max_attempts = max_attempts,
                         function = "spawn_with_etxtbsy_retry_exponential",
-                        "ETXTBSY exponential retry succeeded after {} attempts",
-                        attempt + 1
+                        "Retry succeeded for {function_name} after {attempts} attempts",
+                        function_name = "spawn_with_etxtbsy_retry_exponential",
+                        attempts = attempt + 1
                     );
                 }
                 return Ok(output);
@@ -598,10 +598,8 @@ where
                     .saturating_sub(jitter_range);
 
                 warn!(
-                    attempt = attempt + 1,
-                    max_attempts = max_attempts,
-                    function = "spawn_with_etxtbsy_retry_exponential",
-                    "Retry attempt {attempt}/{max_attempts} for {function} due to ETXTBSY"
+                    "Retry attempt {}/{max_attempts} for 'spawn_with_etxtbsy_retry_exponential' due to ETXTBSY",
+                    attempt + 1
                 );
                 tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
             }
@@ -675,8 +673,9 @@ where
                         attempt = attempt + 1,
                         max_attempts = max_attempts,
                         function = "spawn_with_etxtbsy_retry_sync",
-                        "ETXTBSY sync retry succeeded after {} attempts",
-                        attempt + 1
+                        "Retry succeeded for {function_name} after {attempts} attempts",
+                        function_name = "spawn_with_etxtbsy_retry_sync",
+                        attempts = attempt + 1
                     );
                 }
                 return Ok(output);
@@ -684,10 +683,8 @@ where
             Err(e) if e.raw_os_error() == Some(26) && attempt + 1 < max_attempts => {
                 last_err = Some(e);
                 warn!(
-                    attempt = attempt + 1,
-                    max_attempts = max_attempts,
-                    function = "spawn_with_etxtbsy_retry_sync",
-                    "Retry attempt {attempt}/{max_attempts} for {function} due to ETXTBSY"
+                    "Retry attempt {}/{max_attempts} for 'spawn_with_etxtbsy_retry_sync' due to ETXTBSY",
+                    attempt + 1
                 );
                 std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
             }
@@ -764,8 +761,9 @@ where
                         attempt = attempt + 1,
                         max_attempts = max_attempts,
                         function = "spawn_with_etxtbsy_retry_sync_exponential",
-                        "ETXTBSY sync exponential retry succeeded after {} attempts",
-                        attempt + 1
+                        "Retry succeeded for {function_name} after {attempts} attempts",
+                        function_name = "spawn_with_etxtbsy_retry_sync_exponential",
+                        attempts = attempt + 1
                     );
                 }
                 return Ok(output);
@@ -784,10 +782,8 @@ where
                     .saturating_sub(jitter_range);
 
                 warn!(
-                    attempt = attempt + 1,
-                    max_attempts = max_attempts,
-                    function = "spawn_with_etxtbsy_retry_sync_exponential",
-                    "Retry attempt {attempt}/{max_attempts} for {function} due to ETXTBSY"
+                    "Retry attempt {}/{max_attempts} for 'spawn_with_etxtbsy_retry_sync_exponential' due to ETXTBSY",
+                    attempt + 1
                 );
                 std::thread::sleep(std::time::Duration::from_millis(delay));
             }

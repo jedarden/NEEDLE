@@ -406,8 +406,9 @@ pub fn parse_backend_name_from_version(
                         max_attempts = max_attempts,
                         binary = %binary_path.display(),
                         function = "parse_backend_name_from_version",
-                        "ETXTBSY retry succeeded after {} attempts",
-                        attempt + 1
+                        "Retry succeeded for {function_name} after {attempts} attempts",
+                        function_name = "parse_backend_name_from_version",
+                        attempts = attempt + 1
                     );
                 }
 
