@@ -1,38 +1,10 @@
 //! NEEDLE — Navigates Every Enqueued Deliverable, Logs Effort.
 
 use anyhow::Result;
-use std::panic::{self, PanicHookInfo};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::panic;
 
 #[cfg(unix)]
 use libc::{signal, SIGPIPE, SIG_DFL};
-
-/// Global flag to track if we're exiting due to BrokenPipe
-static IS_BROKEN_PIPE: AtomicBool = AtomicBool::new(false);
-
-/// Custom panic hook that suppresses BrokenPipe panics.
-///
-/// When stdout is closed (e.g., `needle status | head`), Rust's std library
-/// catches the EPIPE error and panics with "Broken pipe". This hook exits
-/// cleanly instead of showing a panic traceback.
-fn panic_hook(info: &PanicHookInfo) {
-    // Check if this is a BrokenPipe panic
-    let panic_msg = info.to_string();
-    if panic_msg.contains("Broken pipe") || panic_msg.contains("failed printing to stdout") {
-        // Set the flag so we can detect this in other threads
-        IS_BROKEN_PIPE.store(true, Ordering::SeqCst);
-        // Exit silently - the pipe reader already got what it needed
-        std::process::exit(0);
-    }
-
-    // For other panics, print to stderr and exit with error
-    if !IS_BROKEN_PIPE.load(Ordering::SeqCst) {
-        eprintln!("Panic: {}", info);
-        std::process::exit(101);
-    }
-
-    std::process::exit(0);
-}
 
 fn main() -> Result<()> {
     // Install custom panic hook BEFORE any other initialization

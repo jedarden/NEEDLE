@@ -86,7 +86,8 @@
 //! - ✅ Documented guarantees for idempotency and error handling
 
 use std::backtrace::Backtrace;
-use std::panic::{self, PanicHookInfo};
+#[allow(deprecated)]
+use std::panic::{self, PanicInfo};
 use std::sync::Mutex;
 use std::sync::Once;
 use std::time::SystemTime;
@@ -166,7 +167,7 @@ fn set_full_backtrace_env() {
 /// - Stores the backtrace in memory for later retrieval
 /// - Formats the output consistently for parsing
 #[allow(deprecated)]
-fn panic_hook(info: &PanicHookInfo) {
+fn panic_hook(info: &PanicInfo<'_>) {
     // Get panic location
     let location = info.location().unwrap_or_else(|| {
         // Fallback for cases where location isn't available
