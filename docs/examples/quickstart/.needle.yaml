@@ -1,0 +1,3 @@
+# Minimal backend configuration for quickstart example
+bead_cli:
+  backend: bead-rs

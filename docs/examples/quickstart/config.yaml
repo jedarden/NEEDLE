@@ -1,0 +1,12 @@
+# Minimal worker config for quickstart example
+# Place this at ~/.config/needle/config.yaml
+
+agent:
+  default: claude
+  timeout: 300  # 5 minute timeout per bead
+
+worker:
+  max_workers: 1           # Only one worker for this example
+  idle_timeout: 30         # Check for work every 30 seconds
+  idle_action: exit        # Exit when no work remains
+  identifier_scheme: sequential   # Use sequential identifiers (worker-1, worker-2, ...)
