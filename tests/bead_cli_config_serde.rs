@@ -113,14 +113,8 @@ fn test_deserialize_bead_forge_backend() {
     assert!(config.path.is_none());
 }
 
-#[test]
-fn test_deserialize_bf_alias() {
-    let json = r#"{"backend": "bf"}"#;
-    let config: BeadCliConfig = serde_json::from_str(json).unwrap();
-
-    assert_eq!(config.backend, BeadBackend::Br);
-    assert!(config.path.is_none());
-}
+// "bf" alias removed - bead-forge is deprecated
+// This test verified legacy "bf" backend support which is no longer available
 
 #[test]
 fn test_deserialize_br_backend() {
