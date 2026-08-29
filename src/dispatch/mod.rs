@@ -2802,45 +2802,6 @@ pub fn print_test_result(result: &AgentTestResult) {
 // ──────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-fn test_adapter(name: &str, template: &str) -> AgentAdapter {
-    AgentAdapter {
-        name: name.to_string(),
-        description: None,
-        agent_cli: "test".to_string(),
-        version_command: None,
-        input_method: InputMethod::Stdin,
-        invoke_template: template.to_string(),
-        environment: HashMap::new(),
-        timeout_secs: 10,
-        idle_timeout_secs: 0,
-        hard_timeout_secs: 0,
-        provider: None,
-        model: None,
-        token_extraction: TokenExtraction::None,
-        output_transform: None,
-        harness: None,
-        harness_version: None,
-    }
-}
-
-#[cfg(test)]
-fn test_prompt(content: &str) -> BuiltPrompt {
-    BuiltPrompt {
-        content: content.to_string(),
-        hash: "testhash".to_string(),
-        token_estimate: content.len() as u64 / 4,
-        template_name: "pluck".to_string(),
-        template_version: "pluck-default".to_string(),
-    }
-}
-
-#[cfg(test)]
-fn test_dispatcher(adapters: HashMap<String, AgentAdapter>) -> Dispatcher {
-    let telemetry = Telemetry::new("test-worker".to_string());
-    Dispatcher::with_adapters(adapters, telemetry, 3600)
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 

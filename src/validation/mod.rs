@@ -1645,4 +1645,153 @@ pub fn func2() {
             .output()
             .expect("Failed to run git commit");
     }
+
+    // ── ValidationError::InvalidKind tests ──
+
+    #[test]
+    fn validation_error_invalid_kind_display_formats_correctly() {
+        let error = ValidationError::InvalidKind {
+            kind: "test_kind".to_string(),
+        };
+        let display = format!("{}", error);
+        assert_eq!(display, "invalid kind: 'test_kind'");
+    }
+
+    #[test]
+    fn validation_error_invalid_kind_display_with_numeric_kind() {
+        let error = ValidationError::InvalidKind {
+            kind: "12345".to_string(),
+        };
+        let display = format!("{}", error);
+        assert_eq!(display, "invalid kind: '12345'");
+    }
+
+    #[test]
+    fn validation_error_invalid_kind_display_with_special_characters() {
+        let error = ValidationError::InvalidKind {
+            kind: "kind-with-special-chars_!@#$%".to_string(),
+        };
+        let display = format!("{}", error);
+        assert_eq!(display, "invalid kind: 'kind-with-special-chars_!@#$%'");
+    }
+
+    #[test]
+    fn validation_error_invalid_kind_display_with_empty_string() {
+        let error = ValidationError::InvalidKind {
+            kind: "".to_string(),
+        };
+        let display = format!("{}", error);
+        assert_eq!(display, "invalid kind: ''");
+    }
+
+    #[test]
+    fn validation_error_invalid_kind_display_with_whitespace() {
+        let error = ValidationError::InvalidKind {
+            kind: "kind with spaces".to_string(),
+        };
+        let display = format!("{}", error);
+        assert_eq!(display, "invalid kind: 'kind with spaces'");
+    }
+
+    #[test]
+    fn validation_error_invalid_kind_display_with_newlines() {
+        let error = ValidationError::InvalidKind {
+            kind: "kind\nwith\nnewlines".to_string(),
+        };
+        let display = format!("{}", error);
+        assert_eq!(display, "invalid kind: 'kind\nwith\nnewlines'");
+    }
+
+    #[test]
+    fn validation_error_invalid_kind_display_with_unicode() {
+        let error = ValidationError::InvalidKind {
+            kind: "kind-日本語-🎯".to_string(),
+        };
+        let display = format!("{}", error);
+        assert_eq!(display, "invalid kind: 'kind-日本語-🎯'");
+    }
+
+    #[test]
+    fn validation_error_invalid_kind_implements_error_trait() {
+        let error = ValidationError::InvalidKind {
+            kind: "test_kind".to_string(),
+        };
+        // Verify it can be used as an error source
+        let error_dyn: &dyn std::error::Error = &error;
+        assert_eq!(error_dyn.to_string(), "invalid kind: 'test_kind'");
+    }
+
+    #[test]
+    fn validation_error_invalid_kind_error_source_is_none() {
+        let error = ValidationError::InvalidKind {
+            kind: "test_kind".to_string(),
+        };
+        let error_dyn: &dyn std::error::Error = &error;
+        // ValidationError::InvalidKind has no underlying source
+        assert!(error_dyn.source().is_none());
+    }
+
+    #[test]
+    fn validation_error_invalid_kind_equality_same_kind() {
+        let error1 = ValidationError::InvalidKind {
+            kind: "same_kind".to_string(),
+        };
+        let error2 = ValidationError::InvalidKind {
+            kind: "same_kind".to_string(),
+        };
+        assert_eq!(error1, error2);
+    }
+
+    #[test]
+    fn validation_error_invalid_kind_inequality_different_kind() {
+        let error1 = ValidationError::InvalidKind {
+            kind: "kind_a".to_string(),
+        };
+        let error2 = ValidationError::InvalidKind {
+            kind: "kind_b".to_string(),
+        };
+        assert_ne!(error1, error2);
+    }
+
+    #[test]
+    fn validation_error_invalid_kind_clone() {
+        let error = ValidationError::InvalidKind {
+            kind: "clone_test".to_string(),
+        };
+        let cloned = error.clone();
+        assert_eq!(error, cloned);
+        assert_eq!(format!("{}", error), format!("{}", cloned));
+    }
+
+    #[test]
+    fn validation_error_invalid_kind_debug_format() {
+        let error = ValidationError::InvalidKind {
+            kind: "debug_test".to_string(),
+        };
+        let debug = format!("{:?}", error);
+        assert!(debug.contains("InvalidKind"));
+        assert!(debug.contains("debug_test"));
+    }
+
+    #[test]
+    fn validation_error_invalid_kind_very_long_string() {
+        let long_kind = "a".repeat(10000);
+        let error = ValidationError::InvalidKind {
+            kind: long_kind.clone(),
+        };
+        let display = format!("{}", error);
+        assert_eq!(display, format!("invalid kind: '{}'", long_kind));
+    }
+
+    #[test]
+    fn validation_error_invalid_kind_kind_field_accessible() {
+        let error = ValidationError::InvalidKind {
+            kind: "accessible_kind".to_string(),
+        };
+        match error {
+            ValidationError::InvalidKind { kind } => {
+                assert_eq!(kind, "accessible_kind");
+            }
+        }
+    }
 }
