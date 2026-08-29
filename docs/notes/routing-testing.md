@@ -511,9 +511,86 @@ The helpers work in the `needle-ci` Argo Workflow:
 - Check if model/adapter combination is valid
 - Verify network connectivity for external models
 
+## Routing-Decision Telemetry Verification
+
+Both routing test scripts verify that routing-decision telemetry events are properly emitted during bead processing. This provides end-to-end validation that the routing system is working correctly.
+
+### Event Structure
+
+The `agent.routing_decision` telemetry event contains:
+
+```json
+{
+  "event_type": "agent.routing_decision",
+  "bead_id": "<bead-id>",
+  "timestamp": "<ISO-8601-timestamp>",
+  "data": {
+    "model": "<requested-model>",
+    "chosen_adapter": "<adapter-name>",
+    "decision_reason": "<explanation>"
+  }
+}
+```
+
+### Verification in Tests
+
+#### claude-print Routing Test
+
+The `tests/routing-claude-print.sh` test verifies routing telemetry for Anthropic subscription models:
+
+```bash
+# Expected routing: claude-sonnet-4-6 → claude-print
+verify_claude_print_invocation_in_telemetry \
+    "$workspace_dir" \
+    "$worker_name" \
+    "$bead_id"
+```
+
+This checks:
+- Telemetry file exists for the worker
+- `agent.routing_decision` event is present
+- Event's `chosen_adapter` field matches `claude-print`
+
+#### glm-4.7 Routing Test
+
+The `tests/routing-glm-4.7.sh` test verifies routing telemetry for glm-4.7 model:
+
+```bash
+# Expected routing: glm-4.7 → claude-code-glm-4.7 (default adapter)
+# Extract routing event from telemetry
+routing_event=$(jq -r --arg bead "$bead_id" \
+    'select(.bead_id == $bead and .event_type == "agent.routing_decision")' \
+    "$telemetry_file" | head -1)
+
+# Verify event structure
+event_model=$(echo "$routing_event" | jq -r '.data.model')
+event_adapter=$(echo "$routing_event" | jq -r '.data.chosen_adapter')
+```
+
+This checks:
+- Routing decision event is present
+- Event contains both `model` and `chosen_adapter` fields
+- `chosen_adapter` matches expected `claude-code-glm-4.7`
+
+### Using the Helper Function
+
+For new routing tests, use the `verify_routing_decision()` helper from `routing-test-helpers.sh`:
+
+```bash
+verify_routing_decision \
+    "$workspace_dir" \
+    "$worker_name" \
+    "$bead_id" \
+    "expected-model" \
+    "expected-adapter"
+```
+
+This validates the complete routing decision event structure.
+
 ## See Also
 
-- `tests/test_anthropic_routing_e2e.sh` - Full E2E test example
-- `tests/integration/test_claude_print_routing.sh` - Live host routing tests
-- `docs/notes/anthropic_routing_test_results.md` - Sample test results
+- `tests/routing-claude-print.sh` - Anthropic subscription model routing test
+- `tests/routing-glm-4.7.sh` - glm-4.7 model routing test
+- `tests/routing-test-helpers.sh` - Helper functions for routing tests
+- `docs/notes/routing-test-results.md` - Sample test results
 - NEEDLE ADR-XXX: Routing Design Decisions

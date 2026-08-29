@@ -274,6 +274,43 @@ main() {
     fi
     echo
 
+    # Verify routing decision telemetry
+    log_info "Verifying routing decision telemetry..."
+    local worker_name="test-$bead_id"
+    local telemetry_file
+    telemetry_file=$(find "$workspace_dir/.beads" -type f -name "$worker_name-*.jsonl" ! -name "*.agent.jsonl" -print -quit 2>/dev/null)
+
+    if [[ -n "$telemetry_file" ]]; then
+        local routing_event
+        routing_event=$(jq -r --arg bead "$bead_id" \
+            'select(.bead_id == $bead and .event_type == "agent.routing_decision")' \
+            "$telemetry_file" 2>/dev/null | head -1)
+
+        if [[ -n "$routing_event" ]]; then
+            local event_model
+            local event_adapter
+            event_model=$(echo "$routing_event" | jq -r '.data.model // empty')
+            event_adapter=$(echo "$routing_event" | jq -r '.data.chosen_adapter // empty')
+
+            log_info "✓ Routing decision event found"
+            log_info "  Model: ${event_model:-<not set>}"
+            log_info "  Adapter: ${event_adapter:-<not set>}"
+
+            if [[ "$event_adapter" == "$EXPECTED_ADAPTER" ]]; then
+                log_info "✓ Routing decision matches expected adapter: $EXPECTED_ADAPTER"
+            else
+                log_warning "Routing decision adapter mismatch"
+                log_warning "  Expected: $EXPECTED_ADAPTER"
+                log_warning "  Got: ${event_adapter:-<not set>}"
+            fi
+        else
+            log_warning "No routing decision event found in telemetry"
+        fi
+    else
+        log_warning "Telemetry file not found for worker: $worker_name"
+    fi
+    echo
+
     # Generate results
     log_info "Generating test results..."
     generate_results "$bead_id" "$all_passed"

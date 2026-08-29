@@ -1077,107 +1077,109 @@ pub fn detect_bead_backend(workspace_root: &Path) -> Result<(Backend, PathBuf)> 
     }
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Common test helpers (shared across all test modules)
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+/// Isolate the bead CLI environment for testing.
+///
+/// This function sets up a hermetic test environment by:
+/// 1. Creating a temporary directory for test binaries
+/// 2. Isolating PATH to prevent interference with system CLIs
+/// 3. Returning a cleanup handle (RAII guard) that restores the environment on drop
+///
+/// # Returns
+///
+/// A tuple of:
+/// - `MutexGuard<'static, ()>`: The crate-wide environment lock
+/// - `EnvGuard`: RAII guard that restores PATH when dropped
+/// - `PathBuf`: Path to the temporary directory for test binaries
+pub fn isolate_bead_cli_env() -> (
+    std::sync::MutexGuard<'static, ()>,
+    crate::util::test_env::EnvGuard,
+    tempfile::TempDir,
+) {
+    let (lock, guard) = crate::util::test_env::isolate_env();
+    let tmp_dir = tempfile::tempdir().expect("failed to create temp dir for test binaries");
+
+    // Set PATH to only the temp directory, preventing interference from system CLIs
+    std::env::set_var(
+        "PATH",
+        tmp_dir
+            .path()
+            .to_str()
+            .expect("temp dir path is valid UTF-8"),
+    );
+
+    (lock, guard, tmp_dir)
+}
+
+#[cfg(test)]
+/// Create a dummy executable file with proper permissions.
+///
+/// This function creates an executable shell script in a temporary directory
+/// with the execute permission bit set (chmod +x).
+///
+/// # Arguments
+///
+/// * `dir` - The directory where the executable will be created
+/// * `name` - The name of the executable file
+/// * `content` - Optional content for the script. If `None`, a simple
+///   echo script is created.
+///
+/// # Returns
+///
+/// The full path to the created executable.
+pub fn create_test_executable(
+    dir: &std::path::Path,
+    name: &str,
+    content: Option<&str>,
+) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let executable_path = dir.join(name);
+    let script_content = content.unwrap_or("#!/bin/sh\necho 'test executable'");
+
+    std::fs::write(&executable_path, script_content).expect("failed to write executable file");
+
+    let mut perms = std::fs::metadata(&executable_path)
+        .expect("failed to read executable metadata")
+        .permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&executable_path, perms)
+        .expect("failed to set executable permissions");
+
+    executable_path
+}
+
+#[cfg(test)]
+/// Helper to make an existing file executable on Unix.
+///
+/// This is used when a file has already been created with content
+/// and just needs the executable permission bit set.
+pub fn make_executable(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(path, perms).unwrap();
+    }
+    #[cfg(not(unix))]
+    {
+        // No-op on non-Unix
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Tests
+// ──────────────────────────────────────────────────────────────────────────────
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serial_test::serial;
-
-    /// Isolate the bead CLI environment for testing.
-    ///
-    /// This function sets up a hermetic test environment by:
-    /// 1. Creating a temporary directory for test binaries
-    /// 2. Isolating PATH to prevent interference with system CLIs
-    /// 3. Returning a cleanup handle (RAII guard) that restores the environment on drop
-    ///
-    /// # Returns
-    ///
-    /// A tuple of:
-    /// - `MutexGuard<'static, ()>`: The crate-wide environment lock
-    /// - `EnvGuard`: RAII guard that restores PATH when dropped
-    /// - `PathBuf`: Path to the temporary directory for test binaries
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use needle::config::tests::isolate_bead_cli_env;
-    ///
-    /// let (_lock, _guard, tmp_dir) = isolate_bead_cli_env();
-    /// // Create test binaries in tmp_dir
-    /// // They are automatically cleaned up when the guard is dropped
-    /// ```
-    pub fn isolate_bead_cli_env() -> (
-        std::sync::MutexGuard<'static, ()>,
-        crate::util::test_env::EnvGuard,
-        tempfile::TempDir,
-    ) {
-        let (lock, guard) = crate::util::test_env::isolate_env();
-        let tmp_dir = tempfile::tempdir().expect("failed to create temp dir for test binaries");
-
-        // Set PATH to only the temp directory, preventing interference from system CLIs
-        std::env::set_var(
-            "PATH",
-            tmp_dir
-                .path()
-                .to_str()
-                .expect("temp dir path is valid UTF-8"),
-        );
-
-        (lock, guard, tmp_dir)
-    }
-
-    /// Create a dummy executable file with proper permissions.
-    ///
-    /// This function creates an executable shell script in a temporary directory
-    /// with the execute permission bit set (chmod +x).
-    ///
-    /// # Arguments
-    ///
-    /// * `dir` - The directory where the executable will be created
-    /// * `name` - The name of the executable file
-    /// * `content` - Optional content for the script. If `None`, a simple
-    ///   echo script is created.
-    ///
-    /// # Returns
-    ///
-    /// The full path to the created executable.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// use needle::config::tests::create_test_executable;
-    /// use std::path::PathBuf;
-    ///
-    /// let tmp_dir = tempfile::tempdir().unwrap();
-    /// let fake_bead = create_test_executable(tmp_dir.path(), "bead", None);
-    ///
-    /// // With custom content
-    /// let custom_cli = create_test_executable(
-    ///     tmp_dir.path(),
-    ///     "my-cli",
-    ///     Some("#!/bin/sh\necho 'custom output'")
-    /// );
-    /// ```
-    pub fn create_test_executable(
-        dir: &std::path::Path,
-        name: &str,
-        content: Option<&str>,
-    ) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-
-        let executable_path = dir.join(name);
-        let script_content = content.unwrap_or("#!/bin/sh\necho 'test executable'");
-
-        std::fs::write(&executable_path, script_content).expect("failed to write executable file");
-
-        let mut perms = std::fs::metadata(&executable_path)
-            .expect("failed to read executable metadata")
-            .permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&executable_path, perms)
-            .expect("failed to set executable permissions");
-
-        executable_path
-    }
 
     #[test]
     fn test_bead_cli_config_with_auto_backend() {
@@ -8445,8 +8447,9 @@ fn expand_tilde_option(path: &Option<PathBuf>) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod config_tests {
-    use super::tests::{create_test_executable, isolate_bead_cli_env};
     use super::*;
+    use create_test_executable;
+    use isolate_bead_cli_env;
 
     /// Delegates to the single crate-wide env lock. A module-private lock
     /// would not exclude the `HOME` mutations performed by other modules'
