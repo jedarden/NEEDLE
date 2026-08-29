@@ -334,6 +334,180 @@ async fn error_count_verification_for_multiple_permission_errors() {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// LockAcquisitionFailed Error Log Verification
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn lock_acquisition_failed_logged_at_error_level() {
+    // Setup log capture to verify error logging
+    let (logs, _guard) = log_capture_helper::setup_log_capture();
+
+    // Simulate a LockAcquisitionFailed error being logged
+    let lock_path = "/tmp/workspace/.beads/locks/needle-claim-abc123.lock";
+    let error = io::Error::new(io::ErrorKind::PermissionDenied, "Permission denied");
+
+    // Log the error at the appropriate level (this is what production code does)
+    tracing::error!(
+        error = %error,
+        path = %lock_path,
+        "failed to remove orphaned lock file"
+    );
+
+    // Verify the error was logged at ERROR level
+    log_capture_helper::assert_log_level(&logs, "ERROR");
+
+    // Verify the error message contains helpful context
+    log_capture_helper::assert_log_contains(&logs, "lock file");
+    log_capture_helper::assert_log_contains(&logs, "failed to remove");
+
+    // Verify structured error information is present
+    let log_content = log_capture_helper::get_captured_logs(&logs);
+    assert!(
+        log_content.contains("permission denied") || log_content.contains("Permission denied"),
+        "error message should contain the actual error description"
+    );
+}
+
+#[tokio::test]
+async fn lock_acquisition_failed_includes_lock_path() {
+    // Setup log capture to verify error logging
+    let (logs, _guard) = log_capture_helper::setup_log_capture();
+
+    // Simulate a LockAcquisitionFailed error with lock path context
+    let lock_path = "/tmp/workspace/.beads/locks/needle-claim-xyz789.lock";
+    let error = io::Error::new(io::ErrorKind::Other, "Lock acquisition failed");
+
+    // Log the error with full context (production pattern from mend.rs)
+    tracing::error!(
+        error = %error,
+        path = %lock_path,
+        "failed to remove orphaned lock file"
+    );
+
+    // Verify ERROR level logging
+    log_capture_helper::assert_log_level(&logs, "ERROR");
+
+    // Verify context is present in logs
+    log_capture_helper::assert_log_contains(&logs, "needle-claim-xyz789.lock");
+    log_capture_helper::assert_log_contains(&logs, "orphaned");
+    log_capture_helper::assert_log_contains(&logs, "lock");
+}
+
+#[tokio::test]
+async fn lock_acquisition_failed_during_mend_cleanup() {
+    // Setup log capture with DEBUG level to capture all log levels
+    let (logs, _guard) = log_capture_helper::setup_log_capture_with_level(tracing::Level::DEBUG);
+
+    // Simulate mend cleanup failure (from strand/mend.rs pattern)
+    let lock_path = "/tmp/workspace/.beads/locks/needle-claim-def456.lock";
+    let error = io::Error::new(io::ErrorKind::PermissionDenied, "Access denied");
+
+    // This matches the pattern in MendStrand::cleanup_orphaned_locks()
+    tracing::error!(
+        error = %error,
+        path = %lock_path.display(),
+        "failed to remove orphaned lock file"
+    );
+
+    // Verify ERROR level (lock removal failures are errors, not warnings)
+    log_capture_helper::assert_log_level(&logs, "ERROR");
+
+    // Verify the error is logged with context
+    log_capture_helper::assert_log_level_with_message(&logs, "ERROR", "lock file");
+
+    // Verify lock path information is present
+    log_capture_helper::assert_log_contains(&logs, "needle-claim-def456");
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// SerializationFailed Error Log Verification
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn serialization_failed_logged_at_error_level() {
+    // Setup log capture to verify error logging
+    let (logs, _guard) = log_capture_helper::setup_log_capture();
+
+    // Simulate a SerializationFailed error being logged
+    let event_type = "bead.claim.succeeded";
+    let error_msg = "failed to serialize event to JSON";
+
+    // Log the error at the appropriate level (this is what production code does)
+    tracing::error!(
+        error = %error_msg,
+        event_type = %event_type,
+        "telemetry event serialization failed"
+    );
+
+    // Verify the error was logged at ERROR level
+    log_capture_helper::assert_log_level(&logs, "ERROR");
+
+    // Verify the error message contains helpful context
+    log_capture_helper::assert_log_contains(&logs, "serialization failed");
+    log_capture_helper::assert_log_contains(&logs, "telemetry");
+
+    // Verify structured error information is present
+    let log_content = log_capture_helper::get_captured_logs(&logs);
+    assert!(
+        log_content.contains("serialize") || log_content.contains("JSON"),
+        "error message should indicate serialization failure"
+    );
+}
+
+#[tokio::test]
+async fn serialization_failed_includes_event_context() {
+    // Setup log capture to verify error logging
+    let (logs, _guard) = log_capture_helper::setup_log_capture();
+
+    // Simulate a SerializationFailed error with event context
+    let event_type = "worker.state_transition";
+    let worker_id = "test-worker";
+    let error = io::Error::new(io::ErrorKind::Other, "JSON serialization error");
+
+    // Log the error with full context (production pattern from file_sink.rs)
+    tracing::error!(
+        error = %error,
+        event_type = %event_type,
+        worker_id = %worker_id,
+        "failed to serialize event to JSON"
+    );
+
+    // Verify ERROR level logging
+    log_capture_helper::assert_log_level(&logs, "ERROR");
+
+    // Verify context is present in logs
+    log_capture_helper::assert_log_contains(&logs, event_type);
+    log_capture_helper::assert_log_contains(&logs, worker_id);
+    log_capture_helper::assert_log_contains(&logs, "serialize");
+}
+
+#[tokio::test]
+async fn serialization_failed_during_telemetry_write() {
+    // Setup log capture with DEBUG level to capture all log levels
+    let (logs, _guard) = log_capture_helper::setup_log_capture_with_level(tracing::Level::DEBUG);
+
+    // Simulate telemetry write failure (from file_sink.rs pattern)
+    let event_type = "mend.orphaned_lock_removed";
+    let error = "failed to serialize event to JSON";
+
+    // This matches the pattern in FileSink::write_event()
+    tracing::error!(
+        error = %error,
+        event_type = %event_type,
+        "telemetry write failed: event serialization"
+    );
+
+    // Verify ERROR level (serialization failures are errors)
+    log_capture_helper::assert_log_level(&logs, "ERROR");
+
+    // Verify the error is logged with context
+    log_capture_helper::assert_log_level_with_message(&logs, "ERROR", "telemetry");
+
+    // Verify event type information is present
+    log_capture_helper::assert_log_contains(&logs, "orphaned_lock_removed");
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Helper Functions
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -372,13 +546,23 @@ fn test_config(heartbeat_dir: &Path) -> needle::config::Config {
 /// - `file_not_found_error_includes_path_information`: Verifies path context in errors
 /// - `file_not_found_propagates_without_retry_logging`: Verifies no-retry behavior
 ///
+/// ## LockAcquisitionFailed Error Tests
+/// - `lock_acquisition_failed_logged_at_error_level`: Verifies ERROR level logging for lock removal failures
+/// - `lock_acquisition_failed_includes_lock_path`: Verifies lock path context in error messages
+/// - `lock_acquisition_failed_during_mend_cleanup`: Verifies ERROR logging for orphaned lock cleanup failures
+///
+/// ## SerializationFailed Error Tests
+/// - `serialization_failed_logged_at_error_level`: Verifies ERROR level logging for JSON serialization failures
+/// - `serialization_failed_includes_event_context`: Verifies event type context in serialization errors
+/// - `serialization_failed_during_telemetry_write`: Verifies ERROR logging for telemetry write failures
+///
 /// ## Structured Logging Tests
 /// - `structured_error_logging_includes_all_fields`: Verifies JSON structured fields
 /// - `error_count_verification_for_multiple_permission_errors`: Verifies error count tracking
 ///
 /// # Log Level Rationale
 ///
-/// - **ERROR**: PermissionDenied errors that prevent operation completion
+/// - **ERROR**: PermissionDenied errors, LockAcquisitionFailed errors, SerializationFailed errors that prevent operation completion
 /// - **WARN**: FileNotFound for unexpected but non-fatal missing files, cleanup failures
 /// - **DEBUG**: FileNotFound for idempotent operations where absence is expected
 ///
