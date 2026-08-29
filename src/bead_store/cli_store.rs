@@ -449,11 +449,94 @@ impl BeadStore for CliBeadStore {
 
     async fn show(&self, id: &BeadId) -> Result<Bead> {
         let values = HashMap::from([("id", id.to_string())]);
-        let stdout = self.run_operation("show", &values).await?;
-        self.parse_beads("show", &stdout)?
-            .into_iter()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("{} show {} returned no bead", self.backend.name, id))
+
+        // Run the show operation and capture any errors with full context
+        let stdout = match self.run_operation("show", &values).await {
+            Ok(output) => output,
+            Err(error) => {
+                let error_msg = error.to_string();
+
+                // Check if this is a corruption error and provide specific guidance
+                if self.is_corruption_error(&error_msg) {
+                    return Err(error.context(format!(
+                        "bead store database for '{}' appears to be corrupted - run 'bead doctor --repair' or recreate from checkpoint",
+                        self.backend.name
+                    )));
+                }
+
+                // Check if this is a lock error (temporary condition)
+                if self.is_lock_error(&error_msg) {
+                    return Err(error.context(format!(
+                        "bead store for '{}' is locked - another process may be accessing it",
+                        self.backend.name
+                    )));
+                }
+
+                // Check for binary not found or permission errors
+                if error_msg.contains("No such file or directory")
+                    || error_msg.contains("not found")
+                {
+                    return Err(error.context(format!(
+                        "bead backend binary '{}' not found - verify the binary path and permissions",
+                        self.binary.display()
+                    )));
+                }
+
+                if error_msg.contains("Permission denied")
+                    || error_msg.contains("permission denied")
+                {
+                    return Err(error.context(format!(
+                        "insufficient permissions to execute bead backend '{}'",
+                        self.binary.display()
+                    )));
+                }
+
+                // Generic backend error with context
+                return Err(error.context(format!(
+                    "failed to retrieve bead {} from backend '{}'",
+                    id, self.backend.name
+                )));
+            }
+        };
+
+        // Parse the output with comprehensive error handling
+        let beads = match self.parse_beads("show", &stdout) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                let error_msg = error.to_string();
+
+                // Check if this is a corruption error during parsing
+                if self.is_corruption_error(&error_msg) {
+                    return Err(error.context(format!(
+                        "database corruption detected while parsing bead {} - the bead store may need recovery",
+                        id
+                    )));
+                }
+
+                // JSON parsing errors with specific context
+                if error_msg.contains("JSON") || error_msg.contains("parse") {
+                    return Err(error.context(format!(
+                        "backend '{}' returned malformed JSON for bead {} - output could not be parsed",
+                        self.backend.name, id
+                    )));
+                }
+
+                // Generic parse error
+                return Err(error.context(format!(
+                    "failed to parse response from backend '{}' for bead {}",
+                    self.backend.name, id
+                )));
+            }
+        };
+
+        // Extract the bead from the parsed results
+        beads.into_iter().next().ok_or_else(|| {
+            anyhow::anyhow!(
+                "bead {} not found in backend '{}' - it may not exist or may have been closed",
+                id,
+                self.backend.name
+            )
+        })
     }
 
     async fn show_with_claim_history(&self, id: &BeadId) -> Result<(Bead, Option<u32>)> {
