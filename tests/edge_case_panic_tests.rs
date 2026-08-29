@@ -318,7 +318,7 @@ agent:
 
         // Then: Should load without panicking (validation happens elsewhere)
         assert!(result.is_ok(), "Config with negative timeout should load");
-        let config = result.unwrap();
+        let _config = result.unwrap();
         // Config loaded successfully - validation happens elsewhere
     }
 }

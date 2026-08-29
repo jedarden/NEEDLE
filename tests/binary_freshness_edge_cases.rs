@@ -129,7 +129,7 @@ fn test_large_binary_hash_performance() {
     let binary_path = temp_dir.path().join("needle-large");
 
     // Create a 10MB binary
-    let large_binary = vec![0xAB as u8; 10 * 1024 * 1024];
+    let large_binary = vec![0xAB_u8; 10 * 1024 * 1024];
     fs::write(&binary_path, large_binary).expect("failed to write large binary");
 
     let start = Instant::now();
@@ -372,7 +372,7 @@ fn test_multiple_checkers_same_binary() {
     {
         let result = checker
             .poll_at(now)
-            .expect(&format!("checker {} first check failed", i));
+            .unwrap_or_else(|_| panic!("checker {} first check failed", i));
         assert!(result.is_some());
     }
 
@@ -386,7 +386,7 @@ fn test_multiple_checkers_same_binary() {
     {
         let result = checker
             .poll_at(now + Duration::from_secs(2))
-            .expect(&format!("checker {} second check failed", i));
+            .unwrap_or_else(|_| panic!("checker {} second check failed", i));
         assert!(result.is_some());
 
         match result.unwrap() {
@@ -433,7 +433,7 @@ fn test_checker_with_very_long_interval() {
 /// DISABLED: mkfifo is unstable in stable Rust (see issue #139324)
 /// This test cannot be enabled until `unix_mkfifo` is stabilized.
 /// See: https://github.com/rust-lang/rust/issues/139324
-
+///
 /// Test edge case: Zero check interval (should clamp to minimum).
 #[test]
 fn test_checker_zero_interval_clamps_to_minimum() {
