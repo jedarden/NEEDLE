@@ -432,8 +432,8 @@ impl CanaryRunner {
         _bead_id: &str,
         path: &Path,
     ) -> Result<()> {
-        // Valid statuses for bead-rs backend
-        let valid_statuses = ["open", "in_progress", "blocked", "closed", "deferred"];
+        // Valid stored statuses for bead-rs backend (blocked is a derived presentation status, not stored)
+        let valid_statuses = ["open", "in_progress", "deferred", "closed"];
 
         let status_to_check = match expected {
             ExpectedOutcome::Success { final_status, .. } => Some(final_status.as_str()),
