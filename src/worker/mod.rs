@@ -4809,9 +4809,9 @@ impl Worker {
     ///
     /// This check runs between dispatch cycles (never mid-claim) at the interval
     /// configured by `worker.freshness_check_interval_secs`. When a stale binary
-    /// is detected, it logs a warning but does NOT exit — the worker continues
-    /// processing with the stale binary. This is distinct from `check_hot_reload()`,
-    /// which exits cleanly when a new binary is detected to allow supervisor relaunch.
+    /// is detected, it exits cleanly with `EXIT_CODE_STALE_BINARY` to signal the
+    /// supervisor to relaunch with the new binary. This ensures workers running
+    /// old binaries eventually pick up fixes and improvements.
     ///
     /// The check compares git commit SHAs embedded in the build metadata, not binary
     /// file hashes. This ensures we detect when the codebase has advanced even if the

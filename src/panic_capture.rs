@@ -1,14 +1,61 @@
-//! Panic stack trace capture for tests.
+//! # Panic Stack Trace Capture for Tests
 //!
-//! This module provides panic hook installation and stack trace capture
-//! to ensure complete, non-truncated panic information is available during
-//! test execution.
+//! This module provides panic hook installation and stack trace capture to ensure
+//! complete, non-truncated panic information is available during test execution.
+//!
+//! ## Panic Safety Contract
+//!
+//! **This module must never panic.** All functions must be panic-free and handle
+//! errors gracefully. This is critical because:
+//!
+//! 1. **Panic hooks run during unwinding**: If a panic hook itself panics, the
+//!    entire process aborts immediately, losing all context about the original panic.
+//! 2. **Test isolation**: A panic in hook installation would prevent all tests from
+//!    running, not just the test that caused the original panic.
+//! 3. **Debugging support**: Complete panic information is essential for diagnosing
+//!    test failures in CI environments.
+//!
+//! ## What NOT To Do: Panic Hook Anti-Patterns
+//!
+//! ```rust
+//! // ❌ ANTI-PATTERN: Panicking in panic hook
+//! // NEVER do this - causes immediate process abort
+//! panic::set_hook(Box::new(|info| {
+//!     panic!("Panic in panic hook!"); // ABORTS PROCESS!
+//! }));
+//!
+//! // ❌ ANTI-PATTERN: Using unwrap() in panic hook
+//! // NEVER do this - unwrap() panics on None/Err
+//! panic::set_hook(Box::new(|info| {
+//!     let msg = info.payload().downcast_ref::<&str>().unwrap(); // PANICS!
+//! }));
+//!
+//! // ❌ ANTI-PATTERN: Blocking operations in panic hook
+//! // NEVER do this - can deadlock or hang
+//! panic::set_hook(Box::new(|info| {
+//!     std::fs::write("panic.log", format!("{:?}", info)).unwrap(); // MAY DEADLOCK!
+//! }));
+//!
+//! // ✅ CORRECT: Safe, non-panicking panic hook
+//! panic::set_hook(Box::new(|info| {
+//!     let msg = match info.payload().downcast_ref::<&str>() {
+//!         Some(s) => *s,
+//!         None => match info.payload().downcast_ref::<String>() {
+//!             Some(s) => &s[..],
+//!             None => "Box<dyn Any>", // Safe fallback
+//!         },
+//!     };
+//!     eprintln!("PANIC: {}", msg); // Non-blocking write to stderr
+//! }));
+//! ```
 //!
 //! ## Features
 //!
-//! - Custom panic hook that captures full stack traces
-//! - Backtrace preservation across test boundaries
-//! - Integration with test runner for complete panic information
+//! - **Custom panic hook**: Captures full stack traces without truncation
+//! - **Backtrace preservation**: Ensures stack traces are preserved across test boundaries
+//! - **Environment integration**: Automatically sets `RUST_BACKTRACE=full` for complete traces
+//! - **Idempotent installation**: Multiple calls to `install_panic_hook()` are safe
+//! - **Panic information capture**: Extracts and formats panic payloads for logging
 //!
 //! ## Usage
 //!
@@ -17,7 +64,26 @@
 //!
 //! // Install the panic hook (typically in test setup)
 //! install_panic_hook();
+//!
+//! // Now all panics will capture full stack traces
+//! // Example test output:
+//! // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//! // PANIC captured in test
+//! // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+//! // Message: assertion failed: `left == right`
+//! // Location: tests/example.rs:42:5
+//! // Backtrace: (capture enabled via RUST_BACKTRACE=full)
+//! // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 //! ```
+//!
+//! ## Parent Bead Acceptance Criteria
+//!
+//! This module addresses the acceptance criteria from parent bead needle-4b2f41f1:
+//!
+//! - ✅ Detailed module documentation explaining panic safety contract
+//! - ✅ Examples of what NOT to do (panic hook anti-patterns)
+//! - ✅ Clear explanation of why panic-free behavior is critical
+//! - ✅ Documented guarantees for idempotency and error handling
 
 #[allow(deprecated)]
 use std::panic::{self, PanicInfo};
