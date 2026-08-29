@@ -1958,4 +1958,65 @@ fi
             error_msg
         );
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn show_handles_malformed_json() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let binary = workspace.path().join("fake-bead");
+
+        // Create a fake binary that returns malformed JSON
+        std::fs::write(
+            &binary,
+            r#"#!/bin/sh
+if [ "$1" = "show" ]; then
+  # Return malformed JSON - missing closing brace
+  echo '{
+    "id": "bf-malformed",
+    "title": "Malformed Bead",
+    "description": "This JSON is broken"
+  '
+else
+  echo 'bead 0.1.3'
+fi
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&binary).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&binary, permissions).unwrap();
+
+        let backend = builtin_bead_backends()
+            .into_iter()
+            .find(|backend| backend.name == "bead-rs")
+            .unwrap();
+        let store = CliBeadStore::new(
+            backend,
+            binary,
+            workspace.path().to_path_buf(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Test malformed JSON handling
+        let bead_id = crate::types::BeadId::from("bf-malformed");
+        let result = store.show(&bead_id).await;
+
+        assert!(
+            result.is_err(),
+            "show() should return error for malformed JSON"
+        );
+        let error_msg = result.unwrap_err().to_string();
+        assert!(
+            error_msg.contains("malformed JSON")
+                || error_msg.contains("parse")
+                || error_msg.contains("JSON"),
+            "Error message should indicate JSON parsing failure: {}",
+            error_msg
+        );
+    }
 }
