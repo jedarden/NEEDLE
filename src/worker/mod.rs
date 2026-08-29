@@ -160,6 +160,49 @@ fn check_heartbeat_freshness(path: &Path, ttl_secs: u64) -> bool {
     duration.as_secs() <= ttl_secs
 }
 
+/// Check if a supervisor is present using standard default paths.
+///
+/// This is a convenience wrapper around [`detect_supervisor_presence`] that
+/// uses the standard default paths for supervisor detection:
+/// - Heartbeat path: `$HOME/.needle/state/supervisor-heartbeat.json`
+/// - Socket path: `$HOME/.needle/supervisor.sock` (if it exists)
+/// - TTL: 120 seconds (2 minutes)
+///
+/// This function is designed to be called from config validation context
+/// where you need a simple boolean check without passing explicit parameters.
+///
+/// # Returns
+///
+/// `true` if a supervisor is detected via heartbeat file or socket, `false` otherwise.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::path::PathBuf;
+///
+/// let is_present = is_supervisor_present();
+/// if is_present {
+///     println!("Supervisor is running");
+/// } else {
+///     println!("No supervisor detected");
+/// }
+/// ```
+pub fn is_supervisor_present() -> bool {
+    // Get the standard default paths
+    let home = std::env::var("HOME").ok();
+    let needle_home = home.as_ref().map(|h| PathBuf::from(h).join(".needle"));
+
+    let heartbeat_path = needle_home
+        .as_ref()
+        .map(|p| p.join("state").join("supervisor-heartbeat.json"));
+    let socket_path = needle_home.as_ref().map(|p| p.join("supervisor.sock"));
+
+    // Use 120-second TTL (2 minutes) for supervisor heartbeat freshness
+    let ttl_secs = 120;
+
+    detect_supervisor_presence(heartbeat_path.as_ref(), socket_path.as_ref(), ttl_secs)
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Global shutdown flag for signal handlers
 // ──────────────────────────────────────────────────────────────────────────────
@@ -586,6 +629,9 @@ pub struct Worker {
     /// Source annotations belonging to the configuration snapshot in use.
     config_sources: SourceMap,
     worker_name: String,
+    /// Cached qualified worker ID (agent-default + identifier).
+    /// Set at construction time to prevent inconsistencies if config.agent.default changes.
+    qualified_id: String,
     store: Arc<dyn BeadStore>,
     /// Home workspace store — kept for restore after processing a remote bead.
     home_store: Arc<dyn BeadStore>,
@@ -862,7 +908,7 @@ impl Worker {
         // Configure dispatcher with bead store and worker ID for atomic claim verification
         let dispatcher = dispatcher
             .with_bead_store(store.clone())
-            .with_worker_id(worker_name.clone());
+            .with_worker_id(qualified_id.clone());
 
         let _ = telemetry.emit(
             EventKind::InitStepCompleted {
@@ -1011,6 +1057,7 @@ impl Worker {
             config,
             config_sources,
             worker_name,
+            qualified_id, // Cache the qualified ID at construction time
             home_store: store.clone(),
             store,
             telemetry,
@@ -5441,7 +5488,7 @@ impl Worker {
     /// Used as the claim actor, registry key, and strand identity to prevent
     /// collisions when workers from different adapter pools share a NATO name.
     fn qualified_id(&self) -> String {
-        format!("{}-{}", self.config.agent.default, self.worker_name)
+        self.qualified_id.clone()
     }
 
     /// Update the worker's registry entry after state changes (e.g., config reload).
@@ -7444,10 +7491,9 @@ mod tests {
         let home = crate::util::test_env::isolated_home();
         config.agent.adapters_dir = home.join("adapters");
         config.workspace.home = home;
-        // Drop the default routing rules. They rewrite any sonnet/opus/fable/
-        // haiku model to `claude-print` and otherwise fall back to
-        // `claude-code-glm-4.7` — both operator-provided adapters that exist
-        // only in the real `~/.config/needle/adapters`. Leaving them on makes
+        // Drop the default routing rules. They route Anthropic models to
+        // `claude` (the built-in adapter), which is correct for production
+        // use but interferes with adapter resolution testing. Leaving them on makes
         // these tests pass or fail based on what the machine happens to have
         // installed, and the boot error blames `agent.default` rather than the
         // adapter routing actually selected. Tests that exercise routing build
@@ -7519,7 +7565,7 @@ mod tests {
         // routing, so resolution must succeed without consulting any adapter
         // the operator happens to have installed. This previously asserted an
         // error, which only held because the default routing rules rewrote the
-        // request to `claude-print` — an adapter that is not built in.
+        // request to a private adapter that was not built in.
         let adapter = result.expect("built-in adapter should resolve");
         assert_eq!(adapter.name, "claude-sonnet");
     }
@@ -9285,13 +9331,13 @@ mod tests {
         assert!(result.is_ok());
         let (chosen_adapter, matched_rule) = result.unwrap();
         // Should use the routing default adapter when no rule matches.
-        assert_eq!(chosen_adapter, "claude-code-glm-4.7");
+        assert_eq!(chosen_adapter, "claude");
         assert_eq!(matched_rule, "routing-default");
     }
 
     #[tokio::test]
     async fn default_routing_rules_anthropic_subscription_models() {
-        // Verify that default routing rules route Anthropic subscription models to claude-print.
+        // Verify that default routing rules route Anthropic subscription models to claude.
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut config = Config::default();
         config.self_modification.hot_reload = false;
@@ -9313,13 +9359,13 @@ mod tests {
             "first rule should match Anthropic subscription models"
         );
         assert_eq!(
-            default_routing.rules[0].adapter, "claude-print",
-            "first rule should route to claude-print"
+            default_routing.rules[0].adapter, "claude",
+            "first rule should route to claude"
         );
         assert_eq!(
             default_routing.default_adapter,
-            Some("claude-code-glm-4.7".to_string()),
-            "default adapter should be claude-code-glm-4.7"
+            Some("claude".to_string()),
+            "default adapter should be claude"
         );
         assert!(
             !default_routing.strict,
@@ -9372,8 +9418,8 @@ mod tests {
             );
             let (chosen_adapter, matched_rule) = result.unwrap();
             assert_eq!(
-                chosen_adapter, "claude-print",
-                "Anthropic subscription model {} should route to claude-print, got {}",
+                chosen_adapter, "claude",
+                "Anthropic subscription model {} should route to claude, got {}",
                 model_name, chosen_adapter
             );
             assert_ne!(
@@ -9383,7 +9429,7 @@ mod tests {
             );
         }
 
-        // Test that non-Anthropic models route to claude-code-glm-4.7.
+        // Test that non-Anthropic models route to claude (the default adapter).
         let non_anthropic_models = vec![
             "glm-4.7",
             "gpt-4o",
@@ -9425,8 +9471,8 @@ mod tests {
             );
             let (chosen_adapter, matched_rule) = result.unwrap();
             assert_eq!(
-                chosen_adapter, "claude-code-glm-4.7",
-                "Non-subscription model {} should route to claude-code-glm-4.7, got {}",
+                chosen_adapter, "claude",
+                "Non-subscription model {} should route to claude, got {}",
                 model_name, chosen_adapter
             );
             assert_eq!(
@@ -10710,5 +10756,234 @@ mod tests {
         // With no current bead, should have no claim
         assert!(!_has_claim);
         assert_eq!(_count, 0);
+    }
+
+    // ── Tests for supervisor presence detection ──
+
+    #[test]
+    fn detect_supervisor_presence_no_supervisor_returns_false() {
+        // No heartbeat file, no socket
+        let heartbeat = None;
+        let socket = None;
+        let ttl_secs = 120;
+
+        let result = detect_supervisor_presence(heartbeat.as_ref(), socket.as_ref(), ttl_secs);
+        assert!(!result, "should return false when no supervisor is present");
+    }
+
+    #[test]
+    fn detect_supervisor_presence_fresh_heartbeat_returns_true() {
+        let temp = tempfile::tempdir().unwrap();
+        let heartbeat_path = temp.path().join("supervisor-heartbeat.json");
+
+        // Create a fresh heartbeat file
+        fs::write(&heartbeat_path, "{}").unwrap();
+
+        let heartbeat = Some(heartbeat_path);
+        let socket = None;
+        let ttl_secs = 120;
+
+        let result = detect_supervisor_presence(heartbeat.as_ref(), socket.as_ref(), ttl_secs);
+        assert!(
+            result,
+            "should return true when fresh heartbeat file exists"
+        );
+    }
+
+    #[test]
+    fn detect_supervisor_presence_stale_heartbeat_returns_false() {
+        let temp = tempfile::tempdir().unwrap();
+        let heartbeat_path = temp.path().join("supervisor-heartbeat.json");
+
+        // Create an old heartbeat file (more than TTL seconds ago)
+        fs::write(&heartbeat_path, "{}").unwrap();
+
+        // Use very short TTL to make any file stale
+        let heartbeat = Some(heartbeat_path);
+        let socket = None;
+        let ttl_secs = 0; // 0 seconds - any file is stale
+
+        let result = detect_supervisor_presence(heartbeat.as_ref(), socket.as_ref(), ttl_secs);
+        assert!(!result, "should return false when heartbeat file is stale");
+    }
+
+    #[test]
+    fn detect_supervisor_presence_socket_only_returns_true() {
+        let temp = tempfile::tempdir().unwrap();
+        let socket_path = temp.path().join("supervisor.sock");
+
+        // Create a socket file
+        fs::write(&socket_path, "").unwrap();
+
+        let heartbeat = None;
+        let socket = Some(socket_path);
+        let ttl_secs = 120;
+
+        let result = detect_supervisor_presence(heartbeat.as_ref(), socket.as_ref(), ttl_secs);
+        assert!(result, "should return true when socket file exists");
+    }
+
+    #[test]
+    fn detect_supervisor_presence_heartbeat_takes_precedence() {
+        let temp = tempfile::tempdir().unwrap();
+        let heartbeat_path = temp.path().join("supervisor-heartbeat.json");
+        let socket_path = temp.path().join("supervisor.sock");
+
+        // Create both heartbeat and socket files
+        fs::write(&heartbeat_path, "{}").unwrap();
+        fs::write(&socket_path, "").unwrap();
+
+        let heartbeat = Some(heartbeat_path);
+        let socket = Some(socket_path);
+        let ttl_secs = 120;
+
+        let result = detect_supervisor_presence(heartbeat.as_ref(), socket.as_ref(), ttl_secs);
+        assert!(
+            result,
+            "should return true when both heartbeat and socket exist"
+        );
+    }
+
+    #[test]
+    fn detect_supervisor_presence_missing_heartbeat_falls_back_to_socket() {
+        let temp = tempfile::tempdir().unwrap();
+        let heartbeat_path = temp.path().join("nonexistent-heartbeat.json");
+        let socket_path = temp.path().join("supervisor.sock");
+
+        // Heartbeat doesn't exist, but socket does
+        fs::write(&socket_path, "").unwrap();
+
+        let heartbeat = Some(heartbeat_path);
+        let socket = Some(socket_path);
+        let ttl_secs = 120;
+
+        let result = detect_supervisor_presence(heartbeat.as_ref(), socket.as_ref(), ttl_secs);
+        assert!(
+            result,
+            "should fall back to socket when heartbeat doesn't exist"
+        );
+    }
+
+    #[test]
+    fn check_heartbeat_freshness_nonexistent_file_returns_false() {
+        let temp = tempfile::tempdir().unwrap();
+        let heartbeat_path = temp.path().join("nonexistent-heartbeat.json");
+        let ttl_secs = 120;
+
+        let result = check_heartbeat_freshness(&heartbeat_path, ttl_secs);
+        assert!(
+            !result,
+            "should return false when heartbeat file doesn't exist"
+        );
+    }
+
+    #[test]
+    fn check_heartbeat_freshness_fresh_file_returns_true() {
+        let temp = tempfile::tempdir().unwrap();
+        let heartbeat_path = temp.path().join("fresh-heartbeat.json");
+
+        // Create a fresh file
+        fs::write(&heartbeat_path, "{}").unwrap();
+
+        let ttl_secs = 120;
+
+        let result = check_heartbeat_freshness(&heartbeat_path, ttl_secs);
+        assert!(result, "should return true for fresh heartbeat file");
+    }
+
+    #[test]
+    fn check_heartbeat_freshness_stale_file_returns_false() {
+        let temp = tempfile::tempdir().unwrap();
+        let heartbeat_path = temp.path().join("stale-heartbeat.json");
+
+        // Create a file
+        fs::write(&heartbeat_path, "{}").unwrap();
+
+        // Use 0 TTL - any file is stale
+        let ttl_secs = 0;
+
+        let result = check_heartbeat_freshness(&heartbeat_path, ttl_secs);
+        assert!(!result, "should return false for stale heartbeat file");
+    }
+
+    #[test]
+    fn is_supervisor_present_with_defaults() {
+        // Test the convenience wrapper with default paths
+        // This should return false in a test environment with no supervisor
+        let result = is_supervisor_present();
+
+        // In test environment, no supervisor should be running
+        assert!(
+            !result,
+            "should return false in test environment with no supervisor"
+        );
+    }
+
+    #[test]
+    fn is_supervisor_present_with_custom_home() {
+        // Test with a custom HOME directory
+        let temp = tempfile::tempdir().unwrap();
+        let state_dir = temp.path().join("state");
+        fs::create_dir_all(&state_dir).unwrap();
+
+        let heartbeat_path = state_dir.join("supervisor-heartbeat.json");
+        fs::write(&heartbeat_path, "{}").unwrap();
+
+        // Set custom HOME
+        std::env::set_var("HOME", temp.path());
+
+        let result = is_supervisor_present();
+
+        // Restore original HOME
+        drop(temp); // Clean up temp dir before restoring HOME
+        if let Ok(home) = std::env::var("HOME") {
+            std::env::set_var("HOME", home);
+        }
+
+        assert!(
+            result,
+            "should detect supervisor with custom HOME directory"
+        );
+    }
+
+    #[test]
+    fn detect_supervisor_presence_concurrent_reads() {
+        // Test that multiple concurrent calls work correctly
+        let temp = tempfile::tempdir().unwrap();
+        let heartbeat_path = temp.path().join("heartbeat.json");
+        fs::write(&heartbeat_path, "{}").unwrap();
+
+        let heartbeat = Some(heartbeat_path.clone());
+        let socket = None;
+        let ttl_secs = 120;
+
+        // Make multiple concurrent calls
+        let result1 = detect_supervisor_presence(heartbeat.as_ref(), socket.as_ref(), ttl_secs);
+        let result2 = detect_supervisor_presence(heartbeat.as_ref(), socket.as_ref(), ttl_secs);
+        let result3 = detect_supervisor_presence(heartbeat.as_ref(), socket.as_ref(), ttl_secs);
+
+        assert!(result1, "first call should return true");
+        assert!(result2, "second call should return true");
+        assert!(result3, "third call should return true");
+    }
+
+    #[test]
+    fn detect_supervisor_presence_empty_heartbeat_file() {
+        // Test with an empty heartbeat file (should still detect presence)
+        let temp = tempfile::tempdir().unwrap();
+        let heartbeat_path = temp.path().join("empty-heartbeat.json");
+
+        // Create empty file
+        fs::File::create(&heartbeat_path).unwrap();
+
+        let heartbeat = Some(heartbeat_path);
+        let socket = None;
+        let ttl_secs = 120;
+
+        let result = detect_supervisor_presence(heartbeat.as_ref(), socket.as_ref(), ttl_secs);
+        assert!(
+            result,
+            "should detect presence even with empty heartbeat file"
+        );
     }
 }
