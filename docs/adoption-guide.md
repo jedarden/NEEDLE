@@ -87,8 +87,9 @@ Each check has the following fields:
 | `allow_failure` | No | Set to `true` for a warning-only check; defaults to `false`. |
 | `environment` | No | List of `KEY=value` strings exported only while that check runs. |
 
-Keep `args` to simple shell words. The current runner converts the YAML list to
-a shell command before execution, so arguments containing spaces, quotes, or
+Keep `args` to simple shell words and use the flow-style list form shown in the
+examples (`args: ["..."]`). The current runner converts the YAML list to a
+shell command before execution, so arguments containing spaces, quotes, or
 shell metacharacters should be placed in a small checked-in wrapper script and
 called through `command` instead. This also makes complex commands easier to
 test locally.
@@ -96,9 +97,7 @@ test locally.
 An optional environment example looks like this:
 
 ```yaml
-environment:
-  - "CARGO_TERM_COLOR=always"
-  - "RUST_BACKTRACE=1"
+environment: ["CARGO_TERM_COLOR=always", "RUST_BACKTRACE=1"]
 ```
 
 Use the sequence form above, not a YAML mapping. Environment values may contain
