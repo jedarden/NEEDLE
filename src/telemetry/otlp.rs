@@ -3568,17 +3568,37 @@ mod tests {
     #[test]
     fn process_owner_fallback_to_numeric_uid() {
         let owner = OtlpSink::process_owner();
-        // In any environment, the fallback format is "uid:NNNN"
-        // The actual username may be returned on systems with a passwd entry,
-        // but we verify that the fallback format is valid when it occurs
+        // The process_owner() function uses getpwuid_r() to look up the current UID.
+        // In distroless/minimal containers, many UIDs have no passwd entry, triggering
+        // the fallback to "uid:NNNN" format. This test validates the fallback format.
+        //
+        // Note: We cannot force the no-passwd-entry case in a standard unit test because:
+        // 1. process_owner() is private and calls libc::getuid() directly
+        // 2. Isolating the test to run under a UID without a passwd entry requires
+        //    complex setup (chroot, nspawn container, or modifying /etc/passwd)
+        // 3. Mocking getpwuid_r would require refactoring to support dependency injection
+        //
+        // Instead, we validate that WHEN the fallback occurs (which it does in
+        // production distroless containers), the format is correct and non-empty.
+        assert!(
+            !owner.is_empty(),
+            "process owner must never be empty, even in fallback case"
+        );
+
         if owner.starts_with("uid:") {
             let uid_str = owner
                 .strip_prefix("uid:")
                 .expect("uid: prefix must be present");
             let uid = uid_str.parse::<u32>().expect("uid must be numeric");
             assert!(uid < 1_000_000, "uids are typically less than 1M");
+
+            // Explicitly verify the fallback contract for distroless containers:
+            // - No panic on getpwuid_r failure
+            // - Non-empty result
+            // - Parseable numeric format
+            assert!(uid > 0, "fallback uid must be positive");
         }
-        // If it doesn't start with "uid:", it's a username, which is also valid
+        // If it doesn't start with "uid:", it's a username from passwd, which is also valid
     }
 
     #[test]
