@@ -27,7 +27,7 @@
 
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use thiserror::Error;
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -76,6 +76,49 @@ pub const BACKEND_BEAD: &str = "bead";
 
 /// Backend name for bead-rs (alternative form).
 pub const BACKEND_BEADS_RUST: &str = "beads-rust";
+
+// ──────────────────────────────────────────────────────────────────────────────
+// ProbeError
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Error type for version probe failures.
+///
+/// This error represents all possible failure modes when attempting to detect
+/// a backend from a binary's --version output.
+#[derive(Debug, Error, Clone, PartialEq)]
+pub enum ProbeError {
+    /// Binary not found in PATH.
+    #[error("binary '{binary}' not found in PATH")]
+    BinaryNotFound { binary: String },
+
+    /// Binary execution failed (OS-level spawn failure).
+    #[error("failed to execute binary '{binary}': {reason}")]
+    ExecutionFailed { binary: String, reason: String },
+
+    /// Binary exited with non-zero exit code.
+    #[error("binary '{binary}' --version exited with code {code}: {stderr}")]
+    NonZeroExitCode {
+        binary: String,
+        code: i32,
+        stderr: String,
+    },
+
+    /// Binary produced output that could not be parsed as UTF-8.
+    #[error("binary '{binary}' --version produced non-UTF-8 output")]
+    Utf8Error { binary: String },
+
+    /// Binary execution timed out.
+    #[error("binary '{binary}' --version timed out after {timeout:?}")]
+    Timeout { binary: String, timeout: Duration },
+
+    /// Failed to create async runtime for timeout.
+    #[error("failed to create async runtime for version probe: {reason}")]
+    AsyncRuntimeFailed { reason: String },
+
+    /// Version output exists but backend name could not be parsed.
+    #[error("binary '{binary}' --version produced unparseable output: {output}")]
+    UnparseableOutput { binary: String, output: String },
+}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // VerifyError
@@ -155,9 +198,14 @@ impl VersionProbe {
     ///
     /// # Returns
     ///
-    /// - `Ok(Some(backend))` - Backend name successfully extracted
-    /// - `Ok(None)` - Binary exists but backend name could not be parsed
-    /// - `Err(e)` - Binary not found, execution failed, or other error
+    /// - `Ok(backend)` - Backend name successfully extracted
+    /// - `Err(ProbeError::BinaryNotFound)` - Binary not found in PATH
+    /// - `Err(ProbeError::NonZeroExitCode)` - Binary exited with non-zero code
+    /// - `Err(ProbeError::UnparseableOutput)` - Output exists but backend name could not be parsed
+    /// - `Err(ProbeError::Timeout)` - Execution timed out
+    /// - `Err(ProbeError::Utf8Error)` - Output is not valid UTF-8
+    /// - `Err(ProbeError::ExecutionFailed)` - Binary failed to execute
+    /// - `Err(ProbeError::AsyncRuntimeFailed)` - Async runtime creation failed
     ///
     /// # Examples
     ///
@@ -165,16 +213,20 @@ impl VersionProbe {
     /// # use needle::version_probe::VersionProbe;
     /// let probe = VersionProbe::new();
     /// match probe.detect_backend("bf") {
-    ///     Ok(Some(backend)) => println!("Backend: {}", backend),
-    ///     Ok(None) => println!("Could not parse backend name"),
+    ///     Ok(backend) => println!("Backend: {}", backend),
     ///     Err(e) => eprintln!("Error: {}", e),
     /// }
     /// ```
-    pub fn detect_backend(&self, binary_name: &str) -> Result<Option<String>> {
+    pub fn detect_backend(&self, binary_name: &str) -> Result<String, ProbeError> {
         let output = self.run_version_binary(binary_name)?;
 
         // Parse the output to extract backend name
-        let backend = self.parse_version_output(&output);
+        let backend =
+            self.parse_version_output(&output)
+                .ok_or_else(|| ProbeError::UnparseableOutput {
+                    binary: binary_name.to_string(),
+                    output: output.clone(),
+                })?;
 
         Ok(backend)
     }
@@ -191,16 +243,19 @@ impl VersionProbe {
     ///
     /// # Errors
     ///
-    /// Returns an error if:
-    /// - The binary is not found in PATH
-    /// - The binary fails to execute
-    /// - The binary returns a non-zero exit code
-    /// - Output cannot be decoded as UTF-8
-    fn run_version_binary(&self, binary_name: &str) -> Result<String> {
+    /// Returns `ProbeError` if:
+    /// - The binary is not found in PATH (`ProbeError::BinaryNotFound`)
+    /// - The binary fails to execute (`ProbeError::ExecutionFailed`)
+    /// - The binary returns a non-zero exit code (`ProbeError::NonZeroExitCode`)
+    /// - Output cannot be decoded as UTF-8 (`ProbeError::Utf8Error`)
+    /// - Execution times out (`ProbeError::Timeout`)
+    /// - Async runtime creation fails (`ProbeError::AsyncRuntimeFailed`)
+    fn run_version_binary(&self, binary_name: &str) -> Result<String, ProbeError> {
         // Use the which crate to check if binary exists first
         // This provides a clearer error than relying on Command::status
-        let path = which::which(binary_name)
-            .with_context(|| format!("binary '{}' not found in PATH", binary_name))?;
+        let path = which::which(binary_name).map_err(|_| ProbeError::BinaryNotFound {
+            binary: binary_name.to_string(),
+        })?;
 
         tracing::debug!(
             binary = binary_name,
@@ -209,41 +264,63 @@ impl VersionProbe {
         );
 
         // Execute with timeout
-        let output = tokio::runtime::Runtime::new()
-            .context("failed to create async runtime for version probe")?
-            .block_on(async {
-                tokio::time::timeout(self.timeout, async {
-                    tokio::process::Command::new(binary_name)
-                        .arg("--version")
-                        .output()
-                        .await
+        let output = match tokio::runtime::Runtime::new() {
+            Ok(runtime) => runtime,
+            Err(e) => {
+                return Err(ProbeError::AsyncRuntimeFailed {
+                    reason: e.to_string(),
                 })
-                .await
+            }
+        }
+        .block_on(async {
+            tokio::time::timeout(self.timeout, async {
+                tokio::process::Command::new(binary_name)
+                    .arg("--version")
+                    .output()
+                    .await
             })
-            .context(format!(
-                "version probe for '{}' timed out after {:?}",
-                binary_name, self.timeout
-            ))?
-            .context(format!("failed to execute '{}' --version", binary_name))?;
+            .await
+        });
+
+        let output = match output {
+            Ok(output) => output,
+            Err(_) => {
+                return Err(ProbeError::Timeout {
+                    binary: binary_name.to_string(),
+                    timeout: self.timeout,
+                })
+            }
+        };
+
+        let output = match output {
+            Ok(output) => output,
+            Err(e) => {
+                return Err(ProbeError::ExecutionFailed {
+                    binary: binary_name.to_string(),
+                    reason: e.to_string(),
+                })
+            }
+        };
 
         // Check exit code
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!(
-                "binary '{}' --version exited with {}: {}",
-                binary_name,
-                output.status,
-                stderr.trim()
-            );
+            return Err(ProbeError::NonZeroExitCode {
+                binary: binary_name.to_string(),
+                code: output.status.code().unwrap_or(-1),
+                stderr: stderr.trim().to_string(),
+            });
         }
 
         // Parse stdout as UTF-8
-        let stdout = String::from_utf8(output.stdout).with_context(|| {
-            format!(
-                "binary '{}' --version produced non-UTF-8 output",
-                binary_name
-            )
-        })?;
+        let stdout = match String::from_utf8(output.stdout) {
+            Ok(stdout) => stdout,
+            Err(_) => {
+                return Err(ProbeError::Utf8Error {
+                    binary: binary_name.to_string(),
+                })
+            }
+        };
 
         Ok(stdout)
     }
@@ -377,51 +454,30 @@ impl VersionProbe {
 
         // Detect actual backend from --version output
         let actual = match self.detect_backend(binary_name) {
-            Ok(Some(backend)) => backend,
-            Ok(None) => {
-                let error = VerifyError::NoBackendDetected {
-                    binary: binary_name.to_string(),
-                };
-                if let Some(telemetry) = &self.telemetry {
-                    telemetry.emit_version_event(VersionVerifyEvent::Failed {
-                        binary: binary_name.to_string(),
-                        expected_backend: expected.to_string(),
-                        actual_backend: None,
-                        error_type: "NoBackendDetected".to_string(),
-                        error_message: error.to_string(),
-                    });
-                }
-                return Err(error);
-            }
+            Ok(backend) => backend,
             Err(e) => {
-                // Check if it's a "binary not found" error
-                let error_msg = e.to_string();
-                if error_msg.contains("not found") || error_msg.contains("PATH") {
-                    let error = VerifyError::NoBackendDetected {
-                        binary: binary_name.to_string(),
-                    };
-                    if let Some(telemetry) = &self.telemetry {
-                        telemetry.emit_version_event(VersionVerifyEvent::Failed {
-                            binary: binary_name.to_string(),
-                            expected_backend: expected.to_string(),
-                            actual_backend: None,
-                            error_type: "BinaryNotFound".to_string(),
-                            error_message: error.to_string(),
-                        });
-                    }
-                    return Err(error);
-                }
-                // Other execution errors
                 let error = VerifyError::NoBackendDetected {
                     binary: binary_name.to_string(),
                 };
+
+                // Determine error type for telemetry
+                let error_type = match &e {
+                    ProbeError::BinaryNotFound { .. } => "BinaryNotFound",
+                    ProbeError::NonZeroExitCode { .. } => "NonZeroExitCode",
+                    ProbeError::UnparseableOutput { .. } => "UnparseableOutput",
+                    ProbeError::Timeout { .. } => "Timeout",
+                    ProbeError::Utf8Error { .. } => "Utf8Error",
+                    ProbeError::ExecutionFailed { .. } => "ExecutionFailed",
+                    ProbeError::AsyncRuntimeFailed { .. } => "AsyncRuntimeFailed",
+                };
+
                 if let Some(telemetry) = &self.telemetry {
                     telemetry.emit_version_event(VersionVerifyEvent::Failed {
                         binary: binary_name.to_string(),
                         expected_backend: expected.to_string(),
                         actual_backend: None,
-                        error_type: "ExecutionError".to_string(),
-                        error_message: error.to_string(),
+                        error_type: error_type.to_string(),
+                        error_message: e.to_string(),
                     });
                 }
                 return Err(error);
@@ -1325,6 +1381,277 @@ mod tests {
                 assert_eq!(error_message, "test error message");
             }
             _ => panic!("Should be Failed"),
+        }
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // Tests for ProbeError variants
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn probe_error_binary_not_found_message_formatting() {
+        let err = ProbeError::BinaryNotFound {
+            binary: "bf".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("bf"));
+        assert!(msg.contains("not found"));
+        assert!(msg.contains("PATH"));
+    }
+
+    #[test]
+    fn probe_error_non_zero_exit_code_message_formatting() {
+        let err = ProbeError::NonZeroExitCode {
+            binary: "bead".to_string(),
+            code: 1,
+            stderr: "invalid option".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("bead"));
+        assert!(msg.contains("exited with code 1"));
+        assert!(msg.contains("invalid option"));
+    }
+
+    #[test]
+    fn probe_error_unparseable_output_message_formatting() {
+        let err = ProbeError::UnparseableOutput {
+            binary: "bf".to_string(),
+            output: "1.0.0".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("bf"));
+        assert!(msg.contains("unparseable"));
+        assert!(msg.contains("1.0.0"));
+    }
+
+    #[test]
+    fn probe_error_timeout_message_formatting() {
+        let err = ProbeError::Timeout {
+            binary: "bead".to_string(),
+            timeout: Duration::from_secs(5),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("bead"));
+        assert!(msg.contains("timed out"));
+        assert!(msg.contains("5s") || msg.contains("5 sec"));
+    }
+
+    #[test]
+    fn probe_error_utf8_error_message_formatting() {
+        let err = ProbeError::Utf8Error {
+            binary: "bf".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("bf"));
+        assert!(msg.contains("non-UTF-8"));
+    }
+
+    #[test]
+    fn probe_error_execution_failed_message_formatting() {
+        let err = ProbeError::ExecutionFailed {
+            binary: "bead".to_string(),
+            reason: "permission denied".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("bead"));
+        assert!(msg.contains("failed to execute"));
+        assert!(msg.contains("permission denied"));
+    }
+
+    #[test]
+    fn probe_error_async_runtime_failed_message_formatting() {
+        let err = ProbeError::AsyncRuntimeFailed {
+            reason: "out of memory".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("async runtime"));
+        assert!(msg.contains("out of memory"));
+    }
+
+    #[test]
+    fn probe_error_equality_binary_not_found() {
+        let err1 = ProbeError::BinaryNotFound {
+            binary: "bf".to_string(),
+        };
+        let err2 = ProbeError::BinaryNotFound {
+            binary: "bf".to_string(),
+        };
+        assert_eq!(err1, err2);
+    }
+
+    #[test]
+    fn probe_error_inequality_binary_not_found() {
+        let err1 = ProbeError::BinaryNotFound {
+            binary: "bf".to_string(),
+        };
+        let err2 = ProbeError::BinaryNotFound {
+            binary: "bead".to_string(),
+        };
+        assert_ne!(err1, err2);
+    }
+
+    #[test]
+    fn probe_error_equality_non_zero_exit_code() {
+        let err1 = ProbeError::NonZeroExitCode {
+            binary: "bf".to_string(),
+            code: 1,
+            stderr: "error".to_string(),
+        };
+        let err2 = ProbeError::NonZeroExitCode {
+            binary: "bf".to_string(),
+            code: 1,
+            stderr: "error".to_string(),
+        };
+        assert_eq!(err1, err2);
+    }
+
+    #[test]
+    fn probe_error_equality_unparseable_output() {
+        let err1 = ProbeError::UnparseableOutput {
+            binary: "bf".to_string(),
+            output: "1.0.0".to_string(),
+        };
+        let err2 = ProbeError::UnparseableOutput {
+            binary: "bf".to_string(),
+            output: "1.0.0".to_string(),
+        };
+        assert_eq!(err1, err2);
+    }
+
+    #[test]
+    fn probe_error_cloneable() {
+        let err1 = ProbeError::BinaryNotFound {
+            binary: "bf".to_string(),
+        };
+        let err2 = err1.clone();
+        assert_eq!(err1, err2);
+
+        let err3 = ProbeError::NonZeroExitCode {
+            binary: "bead".to_string(),
+            code: 1,
+            stderr: "error".to_string(),
+        };
+        let err4 = err3.clone();
+        assert_eq!(err3, err4);
+    }
+
+    #[test]
+    fn detect_backend_returns_specific_binary_not_found_error() {
+        let probe = VersionProbe::new();
+        let result = probe.detect_backend("nonexistent-binary-xyz-123");
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ProbeError::BinaryNotFound { binary } => {
+                assert_eq!(binary, "nonexistent-binary-xyz-123");
+            }
+            other => panic!("Expected BinaryNotFound error, got: {}", other),
+        }
+    }
+
+    #[test]
+    fn detect_backend_error_messages_are_meaningful() {
+        let probe = VersionProbe::new();
+
+        // Test binary not found
+        let result = probe.detect_backend("totally-fake-binary-999");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("totally-fake-binary-999"));
+        assert!(msg.contains("not found") || msg.contains("PATH"));
+
+        // Test that the error message is actionable
+        assert!(msg.len() > 20); // Should have substantial information
+    }
+
+    #[test]
+    fn probe_error_variants_are_exhaustive() {
+        // Ensure all ProbeError variants can be created and displayed
+        let errors = vec![
+            ProbeError::BinaryNotFound {
+                binary: "bf".to_string(),
+            },
+            ProbeError::NonZeroExitCode {
+                binary: "bead".to_string(),
+                code: 1,
+                stderr: "error".to_string(),
+            },
+            ProbeError::UnparseableOutput {
+                binary: "bf".to_string(),
+                output: "1.0.0".to_string(),
+            },
+            ProbeError::Timeout {
+                binary: "bead".to_string(),
+                timeout: Duration::from_secs(5),
+            },
+            ProbeError::Utf8Error {
+                binary: "bf".to_string(),
+            },
+            ProbeError::ExecutionFailed {
+                binary: "bead".to_string(),
+                reason: "permission denied".to_string(),
+            },
+            ProbeError::AsyncRuntimeFailed {
+                reason: "out of memory".to_string(),
+            },
+        ];
+
+        // Verify all errors can be converted to strings without panicking
+        for err in errors {
+            let _ = format!("{}", err);
+            let _ = format!("{:?}", err);
+        }
+    }
+
+    #[test]
+    fn verify_backend_maps_probe_errors_to_no_backend_detected() {
+        let mock = std::sync::Arc::new(MockTelemetryEmitter::new());
+        let probe = VersionProbe::new().with_telemetry(mock.clone());
+
+        // Try to verify a nonexistent binary
+        let result = probe.verify_backend("nonexistent-binary-xyz-123");
+
+        // Should return NoBackendDetected, not the raw ProbeError
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            VerifyError::NoBackendDetected { .. } => {
+                // Expected - verification failures always return NoBackendDetected
+            }
+            other => panic!("Expected NoBackendDetected, got: {}", other),
+        }
+
+        // But telemetry should have the specific error type
+        let events = mock.get_events();
+        assert_eq!(events.len(), 2); // Started + Failed
+
+        match &events[1] {
+            VersionVerifyEvent::Failed { error_type, .. } => {
+                assert_eq!(error_type, "BinaryNotFound");
+            }
+            _ => panic!("Expected Failed event"),
+        }
+    }
+
+    #[test]
+    fn verify_backend_includes_probe_error_details_in_telemetry() {
+        let mock = std::sync::Arc::new(MockTelemetryEmitter::new());
+        let probe = VersionProbe::new().with_telemetry(mock.clone());
+
+        let result = probe.verify_backend("nonexistent-binary-xyz-123");
+        assert!(result.is_err());
+
+        let events = mock.get_events();
+        match &events[1] {
+            VersionVerifyEvent::Failed {
+                error_message,
+                error_type,
+                ..
+            } => {
+                // error_message should contain the ProbeError details
+                assert!(error_message.contains("nonexistent-binary-xyz-123"));
+                assert_eq!(error_type, "BinaryNotFound");
+            }
+            _ => panic!("Expected Failed event"),
         }
     }
 }

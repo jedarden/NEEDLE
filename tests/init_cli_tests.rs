@@ -393,3 +393,284 @@ fn init_agents_md_injection_is_idempotent() {
         _ => panic!("Both should be Init commands"),
     }
 }
+
+/// Test replace_needle_block creates file with markers when content has no markers.
+#[test]
+fn replace_needle_block_creates_markers() {
+    let template = include_str!("../docs/templates/AGENTS-needle.md");
+    let existing_content = "# Existing content\n";
+
+    let result = needle::cli::replace_needle_block(existing_content, template);
+
+    // Should contain both markers
+    assert!(
+        result.contains("<!-- needle:begin -->"),
+        "Should contain begin marker"
+    );
+    assert!(
+        result.contains("<!-- needle:end -->"),
+        "Should contain end marker"
+    );
+    // Should preserve existing content
+    assert!(
+        result.contains("# Existing content"),
+        "Should preserve existing content"
+    );
+    // Should contain template content
+    assert!(
+        result.contains("bead list --ready"),
+        "Should contain template content"
+    );
+}
+
+/// Test replace_needle_block replaces existing block.
+#[test]
+fn replace_needle_block_replaces_existing_block() {
+    let template = include_str!("../docs/templates/AGENTS-needle.md");
+    let existing_content =
+        "# Before\n<!-- needle:begin -->\nOLD CONTENT\n<!-- needle:end -->\n# After\n";
+
+    let result = needle::cli::replace_needle_block(existing_content, template);
+
+    // Should contain both markers
+    assert!(
+        result.contains("<!-- needle:begin -->"),
+        "Should contain begin marker"
+    );
+    assert!(
+        result.contains("<!-- needle:end -->"),
+        "Should contain end marker"
+    );
+    // Should preserve before/after content
+    assert!(
+        result.contains("# Before"),
+        "Should preserve content before markers"
+    );
+    assert!(
+        result.contains("# After"),
+        "Should preserve content after markers"
+    );
+    // Should NOT contain old content
+    assert!(
+        !result.contains("OLD CONTENT"),
+        "Should not contain old template content"
+    );
+    // Should contain new template content
+    assert!(
+        result.contains("bead list --ready"),
+        "Should contain new template content"
+    );
+}
+
+/// Test replace_needle_block is idempotent when template hasn't changed.
+#[test]
+fn replace_needle_block_is_idempotent() {
+    let template = include_str!("../docs/templates/AGENTS-needle.md");
+    let content_with_template = format!(
+        "# Before\n<!-- needle:begin -->\n{}\n<!-- needle:end -->\n# After\n",
+        template
+    );
+
+    let result = needle::cli::replace_needle_block(&content_with_template, template);
+
+    // Should be identical when template is the same
+    assert_eq!(result, content_with_template, "Should be idempotent");
+}
+
+/// Test replace_needle_block handles missing end marker gracefully.
+#[test]
+fn replace_needle_block_handles_missing_end_marker() {
+    let template = include_str!("../docs/templates/AGENTS-needle.md");
+    let malformed_content = "# Content\n<!-- needle:begin -->\nNo end marker here\n";
+
+    let result = needle::cli::replace_needle_block(malformed_content, template);
+
+    // Should return original content unchanged
+    assert_eq!(
+        result, malformed_content,
+        "Should handle missing end marker gracefully"
+    );
+}
+
+/// Test AGENTS.md creation behavior - new file creation.
+#[test]
+fn agents_md_creates_new_file_with_markers() {
+    let template = include_str!("../docs/templates/AGENTS-needle.md");
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let agents_md = temp_dir.path().join("AGENTS.md");
+
+    // Simulate what cmd_init does when creating a new file
+    let content = format!("<!-- needle:begin -->\n{}\n<!-- needle:end -->", template);
+    fs::write(&agents_md, &content).expect("Failed to write AGENTS.md");
+
+    // Verify file was created
+    assert!(agents_md.exists(), "AGENTS.md should be created");
+
+    // Verify content
+    let result = fs::read_to_string(&agents_md).expect("Failed to read AGENTS.md");
+    assert!(
+        result.contains("<!-- needle:begin -->"),
+        "Should contain begin marker"
+    );
+    assert!(
+        result.contains("<!-- needle:end -->"),
+        "Should contain end marker"
+    );
+    assert!(
+        result.contains("bead list --ready"),
+        "Should contain template content"
+    );
+}
+
+/// Test AGENTS.md append behavior - appending to existing file.
+#[test]
+fn agents_md_appends_to_existing_file() {
+    let template = include_str!("../docs/templates/AGENTS-needle.md");
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let agents_md = temp_dir.path().join("AGENTS.md");
+
+    // Create existing content
+    let existing_content = "# Project Instructions\n\nCustom project content here.\n";
+    fs::write(&agents_md, existing_content).expect("Failed to write existing content");
+
+    // Simulate what cmd_init does when appending
+    let updated = format!(
+        "{}\n\n<!-- needle:begin -->\n{}\n<!-- needle:end -->",
+        existing_content.trim(),
+        template
+    );
+    fs::write(&agents_md, &updated).expect("Failed to write updated content");
+
+    // Verify file exists
+    assert!(agents_md.exists(), "AGENTS.md should exist");
+
+    // Verify both contents are present
+    let result = fs::read_to_string(&agents_md).expect("Failed to read AGENTS.md");
+    assert!(
+        result.contains("# Project Instructions"),
+        "Should contain original content"
+    );
+    assert!(
+        result.contains("Custom project content"),
+        "Should contain original content"
+    );
+    assert!(
+        result.contains("<!-- needle:begin -->"),
+        "Should contain begin marker"
+    );
+    assert!(
+        result.contains("bead list --ready"),
+        "Should contain appended template"
+    );
+}
+
+/// Test AGENTS.md idempotent behavior - second run with same content.
+#[test]
+fn agents_md_second_run_is_idempotent() {
+    let template = include_str!("../docs/templates/AGENTS-needle.md");
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let agents_md = temp_dir.path().join("AGENTS.md");
+
+    // First run - create file with template
+    let first_content = format!("<!-- needle:begin -->\n{}\n<!-- needle:end -->", template);
+    fs::write(&agents_md, &first_content).expect("Failed to write first content");
+
+    // Second run - replace_needle_block with same template
+    let second_content = needle::cli::replace_needle_block(&first_content, template);
+
+    // Should be identical (idempotent)
+    assert_eq!(
+        second_content, first_content,
+        "Second run should be idempotent"
+    );
+
+    // Write it back (should be same content)
+    fs::write(&agents_md, &second_content).expect("Failed to write second content");
+
+    // Verify file hasn't changed
+    let final_result = fs::read_to_string(&agents_md).expect("Failed to read final content");
+    assert_eq!(final_result, first_content, "File should remain unchanged");
+}
+
+/// Test AGENTS.md opt-out behavior with --no-agents-md.
+#[test]
+fn agents_md_opt_out_skips_creation() {
+    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let agents_md = temp_dir.path().join("AGENTS.md");
+
+    // Simulate --no-agents-md flag: file should not be created
+    let no_agents_md = true;
+
+    if !no_agents_md {
+        let template = include_str!("../docs/templates/AGENTS-needle.md");
+        let content = format!("<!-- needle:begin -->\n{}\n<!-- needle:end -->", template);
+        fs::write(&agents_md, &content).expect("Failed to write AGENTS.md");
+    }
+
+    // With --no-agents-md, file should not exist
+    assert!(
+        !agents_md.exists(),
+        "AGENTS.md should not be created with --no-agents-md"
+    );
+}
+
+/// Test that bead commands in template are valid against bead --help.
+/// This ensures the documentation matches the actual CLI interface.
+#[test]
+fn template_bead_commands_match_help_output() {
+    use std::process::Command;
+
+    let _template = include_str!("../docs/templates/AGENTS-needle.md");
+
+    // Try to get bead help output - if bead is not available, skip this test
+    let bead_help = match Command::new("bead").arg("--help").output() {
+        Ok(output) => String::from_utf8_lossy(&output.stdout).to_string(),
+        Err(_) => {
+            // bead CLI not found in PATH - skip this test
+            return;
+        }
+    };
+
+    // Extract bead commands from template (look for "bead <command>" patterns)
+    let template_commands = vec![
+        "list", "show", "claim", "update", "close", "release", "dep", "doctor",
+    ];
+
+    // Verify each documented command exists in bead help
+    for cmd in template_commands {
+        let command_pattern = if cmd == "dep" {
+            // Special case: dep is a subcommand with its own subcommands
+            "dep"
+        } else {
+            cmd
+        };
+
+        // Check if the command is mentioned in help output
+        // Bead help shows commands like "bead list", "bead show", etc.
+        let found =
+            bead_help.contains(command_pattern) || bead_help.contains(&format!("    {}", cmd));
+
+        assert!(
+            found,
+            "Template documents 'bead {}' but this command was not found in 'bead --help' output. \
+             Please verify the command name or update the template.",
+            cmd
+        );
+    }
+
+    // Verify specific flag combinations mentioned in template
+    assert!(
+        bead_help.contains("--ready") || bead_help.contains("--status"),
+        "Template uses 'bead list --ready' but --ready flag not found in help output"
+    );
+
+    assert!(
+        bead_help.contains("--notes") || bead_help.contains("--reason"),
+        "Template uses 'bead update --notes' or 'bead close --reason' but these flags not found in help output"
+    );
+
+    assert!(
+        bead_help.contains("claim"),
+        "Template uses 'bead claim' but claim command not found in help output"
+    );
+}

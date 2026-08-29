@@ -5,8 +5,8 @@
 //! the output.
 
 use needle::version_probe::{
-    TelemetryEmitter, VersionProbe, VersionVerifyEvent, BACKEND_BEAD, BACKEND_BEADS_RUST,
-    BACKEND_BF,
+    ProbeError, TelemetryEmitter, VersionProbe, VersionVerifyEvent, BACKEND_BEAD,
+    BACKEND_BEADS_RUST, BACKEND_BF,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,12 +22,9 @@ fn test_version_probe_detects_bf_backend() {
     }
 
     match probe.detect_backend("bf") {
-        Ok(Some(backend)) => {
+        Ok(backend) => {
             assert_eq!(backend, BACKEND_BF);
             println!("✓ Detected bf backend: {}", backend);
-        }
-        Ok(None) => {
-            panic!("bf binary exists but backend name could not be parsed");
         }
         Err(e) => {
             panic!("Failed to detect bf backend: {}", e);
@@ -46,13 +43,10 @@ fn test_version_probe_detects_bead_backend() {
     }
 
     match probe.detect_backend("bead") {
-        Ok(Some(backend)) => {
+        Ok(backend) => {
             // bead-rs reports as "bead" in version output
             assert!(backend == BACKEND_BEAD || backend == BACKEND_BEADS_RUST);
             println!("✓ Detected bead backend: {}", backend);
-        }
-        Ok(None) => {
-            panic!("bead binary exists but backend name could not be parsed");
         }
         Err(e) => {
             panic!("Failed to detect bead backend: {}", e);
@@ -68,10 +62,13 @@ fn test_version_probe_handles_missing_binary() {
     let result = probe.detect_backend("nonexistent-binary-xyz-123");
 
     assert!(result.is_err());
-    let err_msg = result.unwrap_err().to_string();
-    assert!(err_msg.contains("not found") || err_msg.contains("PATH"));
-
-    println!("✓ Correctly error on missing binary");
+    match result.unwrap_err() {
+        ProbeError::BinaryNotFound { binary } => {
+            assert_eq!(binary, "nonexistent-binary-xyz-123");
+            println!("✓ Binary not found returns specific error");
+        }
+        other => panic!("Expected BinaryNotFound error, got: {}", other),
+    }
 }
 
 #[test]
@@ -119,13 +116,9 @@ fn test_version_probe_handles_git_version() {
     }
 
     match probe.detect_backend("git") {
-        Ok(Some(backend)) => {
+        Ok(backend) => {
             assert_eq!(backend, "git");
             println!("✓ Detected git backend: {}", backend);
-        }
-        Ok(None) => {
-            // git's version output might not match our parsing expectations
-            println!("Git version output could not be parsed (this is acceptable)");
         }
         Err(e) => {
             println!("Failed to detect git backend (may be expected): {}", e);
@@ -144,12 +137,9 @@ fn test_version_probe_handles_cargo_version() {
     }
 
     match probe.detect_backend("cargo") {
-        Ok(Some(backend)) => {
+        Ok(backend) => {
             assert_eq!(backend, "cargo");
             println!("✓ Detected cargo backend: {}", backend);
-        }
-        Ok(None) => {
-            println!("Cargo version output could not be parsed (this is acceptable)");
         }
         Err(e) => {
             println!("Failed to detect cargo backend (may be expected): {}", e);
@@ -186,16 +176,14 @@ fn test_version_probe_handles_version_flag_failure() {
         let result = probe.detect_backend("echo");
 
         // echo doesn't fail, but the output won't be a valid version string
-        // So we should get Ok(None) or Ok(Some("echo"))
+        // So we should get Ok("echo") since "echo" is a valid backend name
         match result {
-            Ok(Some(backend)) => {
+            Ok(backend) => {
                 println!("✓ echo treated as backend: {}", backend);
             }
-            Ok(None) => {
-                println!("✓ echo version output correctly parsed as non-backend");
-            }
-            Err(_) => {
-                println!("✓ echo --version failed (acceptable)");
+            Err(e) => {
+                // If echo outputs something unparseable, we get an error
+                println!("✓ echo --version produced unparseable output: {}", e);
             }
         }
     }

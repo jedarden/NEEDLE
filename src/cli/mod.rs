@@ -2308,7 +2308,7 @@ fn cmd_list(format: ListFormat) -> Result<()> {
 /// path, worker count) to the v2 YAML schema. Safe to run on already-
 /// initialized installs (idempotent).
 /// Replace the content between needle markers in AGENTS.md with new template.
-fn replace_needle_block(content: &str, template: &str) -> String {
+pub fn replace_needle_block(content: &str, template: &str) -> String {
     let begin_marker = "<!-- needle:begin -->";
     let end_marker = "<!-- needle:end -->";
 
@@ -2316,17 +2316,22 @@ fn replace_needle_block(content: &str, template: &str) -> String {
         if let Some(end_pos) = content.find(end_marker) {
             // Found both markers, replace the content between them.
             let before = &content[..begin_pos];
-            let _after = &content[end_pos + end_marker.len()..];
-            format!("{}{}\n{}\n{}\n", before, begin_marker, template, end_marker)
-                .trim()
-                .to_string()
+            let after = &content[end_pos + end_marker.len()..];
+            format!(
+                "{}{}\n{}{}\n{}",
+                before, begin_marker, template, end_marker, after
+            )
         } else {
             // Found begin but not end - this shouldn't happen in valid files.
             content.to_string()
         }
     } else {
-        // No markers found, return original.
-        content.to_string()
+        // No markers found, append markers with template.
+        format!(
+            "{}\n\n<!-- needle:begin -->\n{}\n<!-- needle:end -->",
+            content.trim(),
+            template
+        )
     }
 }
 

@@ -697,26 +697,14 @@ pub fn detect_bead_cli_backend(
                     .to_str()
                     .unwrap_or(explicit_path.display().to_string().as_str()),
             ) {
-                Ok(Some(backend_name)) => {
+                Ok(backend_name) => {
                     return Some(crate::config::BackendDetection::new(
                         backend_name,
                         explicit_path.clone(),
                     ));
                 }
-                Ok(None) => {
-                    warn!(
-                        path = %explicit_path.display(),
-                        "could not detect backend from explicit path, falling back to auto-detection"
-                    );
-                    // Fall through to auto-detection
-                }
-                Err(e) => {
-                    warn!(
-                        path = %explicit_path.display(),
-                        error = %e,
-                        "failed to identify backend from explicit path, falling back to auto-detection"
-                    );
-                    // Fall through to auto-detection
+                Err(_e) => {
+                    // Failed to run or detect - fall through to auto-detection
                 }
             }
         }

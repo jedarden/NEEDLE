@@ -1374,12 +1374,23 @@ mod tests {
 
     // ── Mock store ──
 
+    /// RAII guard that holds both created and deps_added locks atomically.
+    ///
+    /// This prevents race conditions where state could change between
+    /// releasing one lock and acquiring another.
+    struct MockStoreGuard<'a> {
+        created: std::sync::MutexGuard<'a, Vec<(String, String)>>,
+        deps_added: std::sync::MutexGuard<'a, Vec<(String, String)>>,
+    }
+
     struct MockStore {
         labels: Vec<String>,
         /// Existing child beads returned by `list_all()` for dedup testing.
         existing_children: Vec<Bead>,
         created: Mutex<Vec<(String, String)>>,
         deps_added: Mutex<Vec<(String, String)>>,
+        /// Coordination barrier for deterministic test execution
+        barrier: Mutex<Option<(std::sync::Arc<tokio::sync::Barrier>, usize)>>,
     }
 
     impl MockStore {
@@ -1389,6 +1400,7 @@ mod tests {
                 existing_children: Vec::new(),
                 created: Mutex::new(Vec::new()),
                 deps_added: Mutex::new(Vec::new()),
+                barrier: Mutex::new(None),
             }
         }
 
@@ -1401,6 +1413,45 @@ mod tests {
         fn with_existing_children(mut self, children: Vec<Bead>) -> Self {
             self.existing_children = children;
             self
+        }
+
+        /// Acquire both created and deps_added locks atomically.
+        ///
+        /// This prevents race conditions where state could change between
+        /// releasing one lock and acquiring another. Returns an RAII guard
+        /// that releases both locks when dropped.
+        fn lock_state(&self) -> MockStoreGuard<'_> {
+            // Acquire locks in a consistent order to prevent deadlock
+            let created = self.created.lock().unwrap();
+            let deps_added = self.deps_added.lock().unwrap();
+            MockStoreGuard {
+                created,
+                deps_added,
+            }
+        }
+
+        #[allow(dead_code)]
+        /// Assert that the current state is consistent (no race detected).
+        ///
+        /// This method checks for signs of race conditions:
+        /// - created and deps_added counts should match expected relationships
+        /// - state should be internally consistent
+        ///
+        /// Panics with a detailed message if a race is detected.
+        fn assert_consistent_state(&self, expected_created: usize, expected_deps: usize) {
+            let guard = self.lock_state();
+            let actual_created = guard.created.len();
+            let actual_deps = guard.deps_added.len();
+
+            if actual_created != expected_created || actual_deps != expected_deps {
+                panic!(
+                    "Race condition detected in MockStore state!\n\
+                     Expected: created={}, deps={}\n\
+                     Actual:   created={}, deps={}\n\
+                     This indicates concurrent modification without proper synchronization.",
+                    expected_created, expected_deps, actual_created, actual_deps
+                );
+            }
         }
     }
 
@@ -2188,12 +2239,12 @@ End of response."#;
         match result {
             MitosisResult::Split { children } => {
                 assert_eq!(children.len(), 1, "should create only the novel child");
-                let created = store.created.lock().unwrap();
-                assert_eq!(created.len(), 1);
-                assert_eq!(created[0].0, "Write migration");
-                let deps = store.deps_added.lock().unwrap();
-                assert_eq!(deps.len(), 1);
-                assert_eq!(deps[0].1, "parent-001");
+                // Use atomic lock to prevent race condition
+                let guard = store.lock_state();
+                assert_eq!(guard.created.len(), 1);
+                assert_eq!(guard.created[0].0, "Write migration");
+                assert_eq!(guard.deps_added.len(), 1);
+                assert_eq!(guard.deps_added[0].1, "parent-001");
             }
             other => panic!("expected Split, got {:?}", other),
         }
@@ -2239,7 +2290,11 @@ End of response."#;
             matches!(result, MitosisResult::Skipped { .. }),
             "all children deduped should result in Skipped"
         );
-        assert!(store.created.lock().unwrap().is_empty());
+        // Use atomic lock to prevent race condition
+        let guard = store.lock_state();
+        assert!(guard.created.is_empty());
+        // Assert consistency - no deps should have been added either
+        assert!(guard.deps_added.is_empty());
     }
 
     #[tokio::test]
@@ -2586,11 +2641,18 @@ End of response."#;
         }
 
         // Assert that NO child beads were created in the store
-        let created = store.created.lock().unwrap();
+        // Use atomic lock to prevent race condition
+        let guard = store.lock_state();
         assert!(
-            created.is_empty(),
+            guard.created.is_empty(),
             "expected no child beads to be created, but found: {:?}",
-            created
+            guard.created
+        );
+        // Also assert no deps were added
+        assert!(
+            guard.deps_added.is_empty(),
+            "expected no dependencies to be added, but found: {:?}",
+            guard.deps_added
         );
     }
 
@@ -2633,10 +2695,15 @@ End of response."#;
 
         assert!(matches!(result, MitosisResult::OutOfScope));
 
-        let created = store.created.lock().unwrap();
+        // Use atomic lock to prevent race condition
+        let guard = store.lock_state();
         assert!(
-            created.is_empty(),
+            guard.created.is_empty(),
             "expected no child beads for Pluck config bead"
+        );
+        assert!(
+            guard.deps_added.is_empty(),
+            "expected no dependencies for Pluck config bead"
         );
     }
 
@@ -2679,10 +2746,15 @@ End of response."#;
 
         assert!(matches!(result, MitosisResult::OutOfScope));
 
-        let created = store.created.lock().unwrap();
+        // Use atomic lock to prevent race condition
+        let guard = store.lock_state();
         assert!(
-            created.is_empty(),
+            guard.created.is_empty(),
             "expected no child beads for strand config bead"
+        );
+        assert!(
+            guard.deps_added.is_empty(),
+            "expected no dependencies for strand config bead"
         );
     }
 
@@ -2734,10 +2806,15 @@ End of response."#;
         }
 
         // No children should be created
-        let created = store.created.lock().unwrap();
+        // Use atomic lock to prevent race condition
+        let guard = store.lock_state();
         assert!(
-            created.is_empty(),
+            guard.created.is_empty(),
             "expected no child beads when max_depth exceeded"
+        );
+        assert!(
+            guard.deps_added.is_empty(),
+            "expected no dependencies when max_depth exceeded"
         );
     }
 
@@ -2823,9 +2900,10 @@ End of response."#;
             MitosisResult::Split { children } => {
                 assert_eq!(children.len(), 1);
                 // The child should have been created with depth 3 (parent depth 2 + 1)
-                let created = store.created.lock().unwrap();
-                assert_eq!(created.len(), 1);
-                assert_eq!(created[0].0, "Child task");
+                // Use atomic lock to prevent race condition
+                let guard = store.lock_state();
+                assert_eq!(guard.created.len(), 1);
+                assert_eq!(guard.created[0].0, "Child task");
             }
             other => panic!("expected Split, got {:?}", other),
         }
@@ -2864,9 +2942,10 @@ End of response."#;
             MitosisResult::Split { children } => {
                 assert_eq!(children.len(), 1);
                 // The child should have been created with depth 1 (root depth 0 + 1)
-                let created = store.created.lock().unwrap();
-                assert_eq!(created.len(), 1);
-                assert_eq!(created[0].0, "Child task");
+                // Use atomic lock to prevent race condition
+                let guard = store.lock_state();
+                assert_eq!(guard.created.len(), 1);
+                assert_eq!(guard.created[0].0, "Child task");
             }
             other => panic!("expected Split, got {:?}", other),
         }
@@ -2973,8 +3052,10 @@ End of response."#;
         assert!(matches!(result_gen3, MitosisResult::Split { .. }));
 
         // Total splits = 3 generations, so we should have created 3 beads total.
-        let created = store.created.lock().unwrap();
-        assert_eq!(created.len(), 3);
+        // Use atomic lock to prevent race condition
+        let guard = store.lock_state();
+        assert_eq!(guard.created.len(), 3);
+        assert_eq!(guard.deps_added.len(), 3, "should have 3 dependencies");
     }
 
     #[tokio::test]
@@ -3054,10 +3135,15 @@ End of response."#;
         }
 
         // No children should be created
-        let created = store.created.lock().unwrap();
+        // Use atomic lock to prevent race condition
+        let guard = store.lock_state();
         assert!(
-            created.is_empty(),
+            guard.created.is_empty(),
             "expected no children to be created for duplicate across generations"
+        );
+        assert!(
+            guard.deps_added.is_empty(),
+            "expected no dependencies for duplicate across generations"
         );
     }
 
