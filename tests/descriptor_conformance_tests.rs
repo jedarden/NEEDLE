@@ -7,8 +7,7 @@
 //! - Bugs in claim operations cause duplicate dispatch (multiple workers on the same bead)
 //! - Bugs in release operations cause lost beads (beads stuck in assigned state)
 //!
-//! These tests replaced the old BrCliBeadStore and BfCliBeadStore test suites
-//! after those were consolidated into the descriptor-driven CliBeadStore.
+//! These tests verify conformance of the descriptor-driven CliBeadStore.
 
 use needle::bead_store::{builtin_bead_backends, BeadStore, CliBeadStore};
 use needle::types::BeadId;
