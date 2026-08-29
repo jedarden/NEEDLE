@@ -510,7 +510,7 @@ impl MendStrand {
         summary: &mut MendSummary,
     ) -> Result<()> {
         let all_beads = store.list_all().await?;
-        let workers = self.registry.list()?;
+        let _workers = self.registry.list()?;
 
         // Build a map of live worker IDs to their current_bead from heartbeats.
         // This tells us which bead each live worker is actively working on.
@@ -550,14 +550,6 @@ impl MendStrand {
             }
         }
 
-        // Build a set of live worker IDs from the registry (fallback for workers without heartbeats).
-        // This maintains backward compatibility with tests that only register workers.
-        let live_worker_ids: std::collections::HashSet<String> = workers
-            .iter()
-            .filter(|w| HealthMonitor::check_pid_alive(w.pid))
-            .map(|w| w.id.clone())
-            .collect();
-
         for bead in &all_beads {
             // Only check open beads with an assignee.
             if bead.status != BeadStatus::Open {
@@ -585,28 +577,23 @@ impl MendStrand {
             // - If the worker is working on a DIFFERENT bead, clear the stale assignee
             // - If no heartbeat, treat as stale (registry liveness is not sufficient)
             let is_stale = match worker_current_beads.get(assignee.as_str()) {
-                Some(current_bead) => {
-                    // Worker has a heartbeat - only clear if working on DIFFERENT bead
-                    match current_bead {
-                        Some(active_bead_id) => {
-                            // Worker is actively working on some bead
-                            active_bead_id != &bead.id
-                        }
-                        None => {
-                            // Worker is alive but idle (no current bead).
-                            //
-                            // This IS stale. An assignee on an OPEN bead is not an
-                            // active claim -- claiming sets in_progress -- so an idle
-                            // worker holding one has already finished or abandoned it
-                            // and will not "resume" it. Treating it as fresh is what
-                            // let these accumulate: `--count 1` workers relaunch under
-                            // the same name forever, so the name stays alive and the
-                            // assignee was never reaped, while the bead stayed
-                            // invisible to the ready frontier and could never be
-                            // claimed by anyone.
-                            true
-                        }
-                    }
+                Some(Some(active_bead_id)) => {
+                    // Worker is actively working on some bead
+                    active_bead_id != &bead.id
+                }
+                Some(None) => {
+                    // Worker is alive but idle (no current bead).
+                    //
+                    // This IS stale. An assignee on an OPEN bead is not an
+                    // active claim -- claiming sets in_progress -- so an idle
+                    // worker holding one has already finished or abandoned it
+                    // and will not "resume" it. Treating it as fresh is what
+                    // let these accumulate: `--count 1` workers relaunch under
+                    // the same name forever, so the name stays alive and the
+                    // assignee was never reaped, while the bead stayed
+                    // invisible to the ready frontier and could never be
+                    // claimed by anyone.
+                    true
                 }
                 None => {
                     // No heartbeat found for this worker.
