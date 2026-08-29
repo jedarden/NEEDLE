@@ -17,6 +17,59 @@ The verification runner (`scripts/verification-runner.sh`) provides a generic al
 - You prefer the simplicity of a single bash script
 - Your checks are simple shell commands that don't benefit from YAML structure
 
+## Lane Selection
+
+The verification runner supports **fast lane**, **slow lane**, and **all lanes** modes to support different verification scenarios:
+
+### Lane Definitions
+
+**Fast Lane** - Quick checks that complete in under 2 minutes:
+- **Purpose**: Pre-commit validation, quick feedback loops
+- **Typical checks**: Code formatting, linting, compilation verification
+- **When to use**: Local development, pre-commit hooks, quick PR validation
+
+**Slow Lane** - Comprehensive test suite that may take several minutes:
+- **Purpose**: Full validation of codebase correctness
+- **Typical checks**: Unit tests, integration tests, documentation tests
+- **When to use**: CI pipelines, pre-merge validation, release gates
+
+**All Lanes** - Complete verification (fast then slow):
+- **Purpose**: End-to-end validation
+- **Execution**: Runs fast lane first, then slow lane sequentially
+- **When to use**: Full CI runs, release verification, comprehensive validation
+
+### NEEDLE Lane Configuration
+
+The NEEDLE project organizes checks as follows:
+
+**Fast Lane (3 checks, ~2 minutes):**
+1. **Format check** (`cargo fmt --check`) - Verifies code formatting with rustfmt (30s timeout)
+2. **Clippy linting** (`cargo clippy --all-targets -- -D warnings`) - Runs clippy lints with deny warnings (60s timeout)
+3. **Cargo check** (`cargo check`) - Verifies compilation without running tests (60s timeout)
+
+**Slow Lane (3 checks, ~20 minutes):**
+1. **Unit tests** (`cargo test --lib`) - Runs library unit tests (300s timeout)
+2. **Integration tests** (`cargo test --test *`) - Runs integration tests (600s timeout)
+3. **Doc tests** (`cargo test --doc`) - Runs documentation tests (300s timeout)
+
+### Usage Examples
+
+```bash
+# Quick pre-commit check (fast lane only)
+./scripts/verification-runner.sh --fast
+
+# Full test suite run (slow lane only)
+./scripts/verification-runner.sh --slow
+
+# Complete verification (both lanes, default)
+./scripts/verification-runner.sh --all
+./scripts/verification-runner.sh  # Same as --all
+```
+
+### Default Behavior
+
+The default mode is `--all` (both lanes). This ensures comprehensive verification by default. For quicker feedback during development, explicitly use `--fast`.
+
 ## Quick Start
 
 1. Create a configuration file:
@@ -25,13 +78,13 @@ The verification runner (`scripts/verification-runner.sh`) provides a generic al
    mkdir -p .verification
    cat > .verification/config.yaml <<'EOF'
    version: "1.0"
-   
+
    fast_lane:
      - name: "Format check"
        command: "cargo"
        args: ["fmt", "--check"]
        timeout: 30
-   
+
    slow_lane:
      - name: "Unit tests"
        command: "cargo"
@@ -44,10 +97,10 @@ The verification runner (`scripts/verification-runner.sh`) provides a generic al
    ```bash
    # Run all lanes (default)
    ./scripts/verification-runner.sh
-   
+
    # Run fast lane only
    ./scripts/verification-runner.sh --fast
-   
+
    # Run slow lane only
    ./scripts/verification-runner.sh --slow
    ```

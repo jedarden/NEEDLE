@@ -1,22 +1,44 @@
 version: "1.0"
 description: "NEEDLE project verification configuration"
 
+# Fast lane: Quick checks that complete in under 2 minutes
+# These are ideal for pre-commit validation and quick feedback
 fast_lane:
   - name: "Format check"
     command: "cargo"
     args: ["fmt", "--check"]
     timeout: 30
-    description: "Verify code formatting"
+    description: "Verify code formatting with rustfmt"
 
   - name: "Clippy linting"
     command: "cargo"
     args: ["clippy", "--all-targets", "--", "-D", "warnings"]
     timeout: 60
-    description: "Run clippy lints"
+    description: "Run clippy lints with deny warnings"
 
+  - name: "Cargo check"
+    command: "cargo"
+    args: ["check"]
+    timeout: 60
+    description: "Verify compilation without running tests"
+
+# Slow lane: Full test suite that may take several minutes
+# These provide comprehensive validation of the codebase
 slow_lane:
   - name: "Unit tests"
     command: "cargo"
     args: ["test", "--lib"]
     timeout: 300
-    description: "Run unit tests"
+    description: "Run library unit tests"
+
+  - name: "Integration tests"
+    command: "cargo"
+    args: ["test", "--test", "*"]
+    timeout: 600
+    description: "Run integration tests"
+
+  - name: "Doc tests"
+    command: "cargo"
+    args: ["test", "--doc"]
+    timeout: 300
+    description: "Run documentation tests"
