@@ -452,12 +452,8 @@ where
                 warn!(
                     attempt = attempt + 1,
                     max_attempts = max_attempts,
-                    backoff_ms = backoff_ms,
                     function = "spawn_with_etxtbsy_retry",
-                    "ETXTBSY error detected (attempt {}/{}), retrying in {}ms",
-                    attempt + 1,
-                    max_attempts,
-                    backoff_ms
+                    "Retry attempt {attempt}/{max_attempts} due to ETXTBSY"
                 );
                 tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
             }
@@ -604,12 +600,8 @@ where
                 warn!(
                     attempt = attempt + 1,
                     max_attempts = max_attempts,
-                    delay_ms = delay,
                     function = "spawn_with_etxtbsy_retry_exponential",
-                    "ETXTBSY error detected (attempt {}/{}), retrying in ~{}ms (exponential backoff with jitter)",
-                    attempt + 1,
-                    max_attempts,
-                    delay
+                    "Retry attempt {attempt}/{max_attempts} for {function} due to ETXTBSY"
                 );
                 tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
             }
@@ -694,12 +686,8 @@ where
                 warn!(
                     attempt = attempt + 1,
                     max_attempts = max_attempts,
-                    backoff_ms = backoff_ms,
                     function = "spawn_with_etxtbsy_retry_sync",
-                    "ETXTBSY error detected (attempt {}/{}), retrying in {}ms",
-                    attempt + 1,
-                    max_attempts,
-                    backoff_ms
+                    "Retry attempt {attempt}/{max_attempts} for {function} due to ETXTBSY"
                 );
                 std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
             }
@@ -798,12 +786,8 @@ where
                 warn!(
                     attempt = attempt + 1,
                     max_attempts = max_attempts,
-                    delay_ms = delay,
                     function = "spawn_with_etxtbsy_retry_sync_exponential",
-                    "ETXTBSY error detected (attempt {}/{}), retrying in ~{}ms (exponential backoff with jitter)",
-                    attempt + 1,
-                    max_attempts,
-                    delay
+                    "Retry attempt {attempt}/{max_attempts} for {function} due to ETXTBSY"
                 );
                 std::thread::sleep(std::time::Duration::from_millis(delay));
             }

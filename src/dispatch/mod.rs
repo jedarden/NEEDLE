@@ -963,6 +963,11 @@ impl Dispatcher {
         self
     }
 
+    /// Get the bead store for atomic claim verification.
+    pub fn bead_store(&self) -> Option<&Arc<dyn BeadStore>> {
+        self.bead_store.as_ref()
+    }
+
     /// Resolve an adapter name from a model name using routing rules.
     ///
     /// If routing is configured in the config, returns the adapter name that

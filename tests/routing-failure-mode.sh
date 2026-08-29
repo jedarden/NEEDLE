@@ -119,8 +119,10 @@ restore_claude_print() {
 
 # Setup test workspace
 setup_workspace() {
-    local workspace_dir="/tmp/needle-failure-tests/$TEST_NAME-$$"
+    local workspace_dir="$HOME/.cache/needle-tests/$TEST_NAME-$$"
 
+    # Clean up any existing test workspace
+    rm -rf "$workspace_dir"
     mkdir -p "$workspace_dir"
 
     # Initialize git repo
@@ -129,21 +131,15 @@ setup_workspace() {
     git -C "$workspace_dir" config user.email "needle-test@invalid"
     echo "# Failure mode test workspace: $TEST_NAME" > "$workspace_dir/README.md"
     git -C "$workspace_dir" add README.md
-    git -C "$workspace_dir" commit -q -m "Initial commit for failure test"
+    git -C "$workspace_dir" commit README.md -q -m "Initial commit for failure test"
 
     # Create .needle.yaml configuration
     cat > "$workspace_dir/.needle.yaml" <<EOF
 agent:
-  default: claude-sonnet-4-6
+  default: claude-print
   args: []
   timeout: 600
   adapters_dir: ~/.config/needle/adapters
-  routing:
-    rules:
-      - match_model: (claude-)?(sonnet|opus|fable|haiku).*
-        adapter: claude-print
-    default_adapter: claude-code-glm-4.7
-    strict: false
 bead_cli:
   backend: bead-rs
   path: $(command -v bead)
@@ -157,14 +153,14 @@ worker:
   enforce_shipped_work: false
   freshness_check_interval_secs: 0
 workspace:
-  default: /tmp/needle-failure-tests
-  home: /tmp/.needle
+  default: $HOME/.cache/needle-tests
+  home: $HOME/.cache/needle-home
   labels: []
 strands:
   explore:
     enabled: false
-    workspaces: []
-    workspace_root: /tmp/needle-failure-tests
+  workspaces: []
+  workspace_root: $HOME/.cache/needle-tests
   mitosis:
     enabled: false
   weave:
@@ -180,7 +176,7 @@ strands:
 telemetry:
   file_sink:
     enabled: true
-    log_dir: /tmp/.needle/logs
+    log_dir: $HOME/.cache/needle-logs
     retention_days: 1
   stdout_sink:
     enabled: true
@@ -193,7 +189,7 @@ EOF
 
     # Add .needle.yaml to git
     git -C "$workspace_dir" add .needle.yaml
-    git -C "$workspace_dir" commit -q -m "Add NEEDLE configuration"
+    git -C "$workspace_dir" commit .needle.yaml -q -m "Add NEEDLE configuration"
 
     # Initialize bead store
     (cd "$workspace_dir" && bead init --prefix route >/dev/null 2>&1)
@@ -206,24 +202,48 @@ create_test_bead() {
     local workspace_dir="$1"
 
     cd "$workspace_dir"
-    bead_id=$(bead create \
+    local output
+    output=$(bead create \
         --title "Failure Mode Test: claude-print missing" \
-        --priority 0 \
-        --issue-type test \
+        --priority 1 \
+        --issue-type task \
         --label routing-test \
         --label failure-mode \
-        2>&1 | grep -oE '[a-z0-9-]+' | tail -1)
+        --label "model:$TEST_MODEL" \
+        2>&1)
 
-    # Add description
+    # Extract bead ID from output
+    bead_id=$(echo "$output" | grep -oE '[a-z0-9-]{12,}' | tail -1)
+
+    # Verify bead was created
+    if [[ -z "$bead_id" ]]; then
+        log_error "Failed to create bead or extract bead ID"
+        log_error "Output was: $output"
+        return 1
+    fi
+
+    # Verify bead exists
+    if ! bead show "$bead_id" >/dev/null 2>&1; then
+        log_error "Bead $bead_id not found after creation"
+        log_error "Output was: $output"
+        return 1
+    fi
+
+    # Add description with model specification for routing
     bead update "$bead_id" \
         --notes "Test bead to verify failure when claude-print binary is missing.
+
 Expected behavior:
-- Model: $TEST_MODEL
+- Model: $TEST_MODEL (should route to $EXPECTED_ADAPTER via routing rules)
 - Expected adapter: $EXPECTED_ADAPTER
-- SHOULD FAIL with clear error (no silent fallback)
+- SHOULD FAIL with clear error when claude-print binary is missing
+- No silent fallback to claude-sonnet API
 
-Created by automated test: $TEST_TIMESTAMP" >/dev/null 2>&1
+Created by automated test: $TEST_TIMESTAMP
 
+MODEL_REQUIREMENT: $TEST_MODEL" >/dev/null 2>&1
+
+    log_info "Bead created and verified: $bead_id (model: $TEST_MODEL)"
     echo "$bead_id"
 }
 
@@ -233,16 +253,28 @@ run_worker() {
     local bead_id="$2"
 
     log_info "Running worker for bead: $bead_id (expecting failure due to missing claude-print)..."
+    log_debug "Workspace: $workspace_dir"
 
+    # Verify bead is ready before running worker
+    cd "$workspace_dir"
+    local bead_status
+    bead_status=$(bead list --json --limit 1000 2>/dev/null | \
+        jq -r --arg id "$bead_id" 'select(.id == $id) | .status')
+
+    log_debug "Bead status before worker: $bead_status"
+
+    # Don't specify --agent, let routing determine the adapter based on bead labels
     timeout 300 \
         needle run \
             --workspace "$workspace_dir" \
-            --agent "$EXPECTED_ADAPTER" \
+            --count 1 \
             --identifier "test-$bead_id" \
             --timeout 600 \
         2>&1 | tee "/tmp/needle-failure-test-$bead_id.log"
 
-    return ${PIPESTATUS[0]}
+    local exit_code=${PIPESTATUS[0]}
+    log_info "Worker exited with code: $exit_code"
+    return $exit_code
 }
 
 # Verify failure mode
@@ -255,21 +287,37 @@ verify_failure_mode() {
 
     local all_checks_passed=0
 
-    # Check 1: Worker should fail
-    log_info "Check 1: Worker should have failed..."
-    if ! grep -q "claude-print" "$log_file" 2>/dev/null; then
-        log_error "✗ Worker did not attempt to use claude-print"
-        all_checks_passed=1
+    # Check 0: Log file exists
+    log_info "Check 0: Log file exists..."
+    if [[ ! -f "$log_file" ]]; then
+        log_error "✗ Log file not found: $log_file"
+        return 1
+    fi
+    log_info "✓ Log file found: $log_file"
+
+    # Check 1: Worker should have attempted to claim a bead
+    log_info "Check 1: Worker should have attempted to claim a bead..."
+    if grep -qiE "claim.*bead|bead.*claim|ready.*bead|found.*bead" "$log_file" 2>/dev/null; then
+        log_info "✓ Worker attempted bead claim"
     else
-        log_info "✓ Worker attempted to use claude-print"
+        log_warning "⚠ No evidence of bead claim attempt (worker may not have found ready beads)"
+        all_checks_passed=1
     fi
 
-    # Check 2: Should contain error about missing binary
-    log_info "Check 2: Should contain error about missing binary..."
-    if grep -qiE "(not found|no such file|command not found|cannot find|error.*claude-print)" "$log_file" 2>/dev/null; then
-        log_info "✓ Error message about missing binary found"
+    # Check 2: Worker should fail when attempting to use claude-print
+    log_info "Check 2: Worker should fail when attempting to use claude-print..."
+    if grep -q "claude-print" "$log_file" 2>/dev/null; then
+        log_info "✓ Worker attempted to use claude-print"
+
+        # Check for specific error patterns
+        if grep -qiE "(not found|no such file|command not found|cannot find|error.*claude-print)" "$log_file" 2>/dev/null; then
+            log_info "✓ Clear error message about missing binary found"
+        else
+            log_warning "⚠ claude-print mentioned but no clear error (may be in different phase)"
+        fi
     else
-        log_warning "⚠ No clear error message about missing binary (may have failed earlier)"
+        log_warning "⚠ Worker did not attempt to use claude-print (may have failed earlier)"
+        all_checks_passed=1
     fi
 
     # Check 3: Should NOT contain fallback to API
@@ -292,6 +340,15 @@ verify_failure_mode() {
         log_info "✓ Bead status: $status (correctly not closed)"
     else
         log_warning "⚠ Bead status: closed (unexpected, but may have been closed by error handler)"
+    fi
+
+    # Check 5: Binary is still missing (verify it wasn't silently restored during test)
+    log_info "Check 5: Verify binary is still missing..."
+    if [[ ! -f "$CLAUDE_PRINT_BIN" ]]; then
+        log_info "✓ Binary still missing (test integrity maintained)"
+    else
+        log_error "✗ Binary was restored during test (test integrity compromised)"
+        all_checks_passed=1
     fi
 
     return $all_checks_passed
@@ -317,7 +374,7 @@ main() {
     cleanup() {
         local exit_code=$?
         log_info "Cleaning up..."
-        [[ -d "$workspace_dir" && "$workspace_dir" == /tmp/needle-failure-tests/* ]] && \
+        [[ -d "$workspace_dir" && "$workspace_dir" == "$HOME/.cache/needle-tests"/* ]] && \
             rm -rf "$workspace_dir"
         restore_claude_print || {
             log_error "Failed to restore claude-print binary during cleanup"

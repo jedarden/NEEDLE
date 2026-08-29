@@ -1095,7 +1095,7 @@ pub fn detect_bead_backend(workspace_root: &Path) -> Result<(Backend, PathBuf)> 
 /// - `MutexGuard<'static, ()>`: The crate-wide environment lock
 /// - `EnvGuard`: RAII guard that restores PATH when dropped
 /// - `PathBuf`: Path to the temporary directory for test binaries
-pub fn isolate_bead_cli_env() -> (
+pub(crate) fn isolate_bead_cli_env() -> (
     std::sync::MutexGuard<'static, ()>,
     crate::util::test_env::EnvGuard,
     tempfile::TempDir,
@@ -6897,13 +6897,77 @@ pub struct ConfigError {
     pub field: String,
     /// Human-readable explanation.
     pub message: String,
+    /// The specific segment that failed validation (if applicable).
+    pub invalid_segment: Option<String>,
+    /// Available valid fields at the point of failure (if applicable).
+    pub available_fields: Option<Vec<String>>,
+    /// Additional context about where the error occurred.
+    pub context: Option<String>,
+}
+
+impl ConfigError {
+    /// Create a new ConfigError with basic information.
+    pub fn new(field: String, message: String) -> Self {
+        Self {
+            field,
+            message,
+            invalid_segment: None,
+            available_fields: None,
+            context: None,
+        }
+    }
+
+    /// Create a ConfigError for an invalid key path segment.
+    pub fn invalid_segment(
+        full_path: String,
+        invalid_segment: String,
+        available_fields: Vec<String>,
+        context: String,
+    ) -> Self {
+        Self {
+            field: full_path,
+            message: format!(
+                "invalid key path segment '{}'. {}",
+                invalid_segment,
+                if available_fields.is_empty() {
+                    "This field does not support nested access".to_string()
+                } else {
+                    format!("Valid fields are: {}", available_fields.join(", "))
+                }
+            ),
+            invalid_segment: Some(invalid_segment),
+            available_fields: Some(available_fields),
+            context: Some(context),
+        }
+    }
+
+    /// Create a ConfigError for an unknown top-level field.
+    pub fn unknown_field(field: String, available_fields: Vec<String>) -> Self {
+        Self {
+            field: field.clone(),
+            message: format!(
+                "unknown field '{}'. Valid fields are: {}",
+                field,
+                available_fields.join(", ")
+            ),
+            invalid_segment: Some(field),
+            available_fields: Some(available_fields),
+            context: Some("top-level".to_string()),
+        }
+    }
 }
 
 impl std::fmt::Display for ConfigError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.field, self.message)
+        if let Some(context) = &self.context {
+            write!(f, "{} ({}): {}", self.field, context, self.message)
+        } else {
+            write!(f, "{}: {}", self.field, self.message)
+        }
     }
 }
+
+impl std::error::Error for ConfigError {}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Key path validation

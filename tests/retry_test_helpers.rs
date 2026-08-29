@@ -52,7 +52,7 @@ impl ErrorSpec {
     pub fn to_error(&self) -> io::Error {
         match self {
             ErrorSpec::Etxtbsy => io::Error::from_raw_os_error(26),
-            ErrorSpec::Io(kind, msg) => io::Error::new(kind.clone(), msg.as_str()),
+            ErrorSpec::Io(kind, msg) => io::Error::new(*kind, msg.as_str()),
         }
     }
 }
@@ -158,7 +158,7 @@ impl RetryConfig {
     /// Calculate the backoff delay for a given attempt number.
     pub fn backoff_for_attempt(&self, attempt: usize) -> Duration {
         if self.exponential_backoff {
-            let delay_ms = (self.exponential_initial_ms * 2_usize.pow(attempt as u32 - 1))
+            let delay_ms = (self.exponential_initial_ms * 2_u64.pow(attempt as u32 - 1))
                 .min(self.exponential_max_ms);
             Duration::from_millis(delay_ms)
         } else {
@@ -242,14 +242,27 @@ impl MockRetryBehavior {
     }
 
     /// Inject an error on a specific attempt.
-    pub fn with_error_on_attempt(mut self, attempt: usize, error: io::Error) -> Self {
-        self.error_injection = self.error_injection.with_error_on_attempt(attempt, error);
+    pub fn with_error_on_attempt(mut self, attempt: usize, spec: ErrorSpec) -> Self {
+        self.error_injection = self.error_injection.with_error_on_attempt(attempt, spec);
         self
     }
 
     /// Inject ETXTBSY error on a specific attempt.
     pub fn with_etxtbsy_on_attempt(self, attempt: usize) -> Self {
-        self.with_error_on_attempt(attempt, etxtbsy_error())
+        self.with_error_on_attempt(attempt, ErrorSpec::Etxtbsy)
+    }
+
+    /// Inject a generic IO error on a specific attempt.
+    pub fn with_io_error_on_attempt(
+        mut self,
+        attempt: usize,
+        kind: io::ErrorKind,
+        msg: &str,
+    ) -> Self {
+        self.error_injection = self
+            .error_injection
+            .with_io_error_on_attempt(attempt, kind, msg);
+        self
     }
 
     /// Set which attempts should succeed (default: first attempt only).
@@ -493,7 +506,7 @@ mod tests {
         let config = RetryConfig::new();
         assert_eq!(config.max_attempts, 5);
         assert_eq!(config.backoff_ms, 20);
-        assert_eq!(config.exponential_backoff, false);
+        assert!(!config.exponential_backoff);
     }
 
     #[test]
@@ -505,7 +518,7 @@ mod tests {
 
         assert_eq!(config.max_attempts, 10);
         assert_eq!(config.backoff_ms, 50);
-        assert_eq!(config.exponential_backoff, true);
+        assert!(config.exponential_backoff);
         assert_eq!(config.exponential_initial_ms, 100);
         assert_eq!(config.exponential_max_ms, 500);
     }
@@ -584,9 +597,12 @@ mod tests {
 
     #[test]
     fn test_mock_retry_non_etxtbsy_fails_immediately() -> Result<(), String> {
+        let error_injection =
+            ErrorInjection::new().with_io_error_on_attempt(1, io::ErrorKind::NotFound, "not found");
+
         let mock = MockRetryBehavior::new()
             .with_max_attempts(5)
-            .with_io_error_on_attempt(1, io::ErrorKind::NotFound, "not found");
+            .with_error_injection(error_injection);
 
         let result = mock.run_sync()?;
 

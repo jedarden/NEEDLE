@@ -305,7 +305,7 @@ fn test_retry_configuration_builder_pattern() -> Result<(), String> {
 
     assert_eq!(config.max_attempts, 10);
     assert_eq!(config.backoff_ms, 100);
-    assert_eq!(config.exponential_backoff, true);
+    assert!(config.exponential_backoff);
     assert_eq!(config.exponential_initial_ms, 50);
     assert_eq!(config.exponential_max_ms, 500);
 
