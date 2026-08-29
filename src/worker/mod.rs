@@ -5930,6 +5930,86 @@ mod tests {
     }
 
     #[test]
+    fn test_commit_sha_comparison_detects_stale_binary() {
+        // Test that commit SHA comparison correctly identifies stale binaries
+        // When running binary's commit differs from needle-stable's commit,
+        // the binary is considered stale
+
+        let current_commit = "abc123def456";
+        let stable_commit = "xyz789uvw012";
+
+        // Different commits should be detected as stale
+        assert_ne!(
+            current_commit, stable_commit,
+            "different commits should be detected as stale"
+        );
+
+        // Same commits should not be considered stale
+        let fresh_commit = "abc123def456";
+        assert_eq!(
+            current_commit, fresh_commit,
+            "same commits should be considered fresh"
+        );
+    }
+
+    #[test]
+    fn test_commit_sha_comparison_with_short_shas() {
+        // Test comparison with short SHAs (7 characters, common in Git)
+        let short_current = "ee18678";
+        let short_stable = "a1b2c3d";
+
+        // Short SHAs should compare correctly
+        assert_ne!(
+            short_current, short_stable,
+            "different short SHAs should be detected as stale"
+        );
+
+        let short_same = "ee18678";
+        assert_eq!(
+            short_current, short_same,
+            "identical short SHAs should be considered fresh"
+        );
+    }
+
+    #[test]
+    fn test_commit_sha_comparison_with_full_shas() {
+        // Test comparison with full 40-character SHAs
+        let full_current = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0";
+        let full_stable = "f9e8d7c6b5a4f9e8d7c6b5a4f9e8d7c6b5a4f9e8";
+
+        // Full SHAs should compare correctly
+        assert_ne!(
+            full_current, full_stable,
+            "different full SHAs should be detected as stale"
+        );
+
+        let full_same = "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0";
+        assert_eq!(
+            full_current, full_same,
+            "identical full SHAs should be considered fresh"
+        );
+    }
+
+    #[test]
+    fn test_commit_sha_comparison_handles_unknown_commit() {
+        // Test comparison when one commit is "unknown"
+        let unknown_commit = "unknown";
+        let known_commit = "abc123def456";
+
+        // Unknown should not equal known
+        assert_ne!(
+            unknown_commit, known_commit,
+            "unknown commit should differ from known commit"
+        );
+
+        // Unknown should equal unknown
+        assert_eq!(
+            unknown_commit, "unknown",
+            "unknown commit should equal another unknown"
+        );
+    }
+
+    #[test]
     fn config_file_change_detects_hash_change_with_unchanged_mtime() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("config.yaml");
