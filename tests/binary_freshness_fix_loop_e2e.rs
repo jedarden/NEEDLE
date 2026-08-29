@@ -10,11 +10,10 @@
 //! workers eventually run the new code without manual intervention.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
 use tempfile::TempDir;
 
 /// Simulates the complete fix-loop from development to deployment.
@@ -32,7 +31,7 @@ fn test_fix_loop_end_to_end() {
     make_executable(&v1_binary);
 
     // Step 2: Start worker with v1 binary
-    let mut worker = start_worker(&needle_home);
+    let mut worker = start_worker(needle_home.as_path());
     let start_time = Instant::now();
 
     // Verify worker is running v1
@@ -77,7 +76,7 @@ fn test_worker_clean_exit_on_stale_binary() {
     make_executable(&binary);
 
     // Start worker
-    let mut worker = start_worker(&needle_home);
+    let mut worker = start_worker(needle_home.as_path());
     assert!(worker.try_wait().map(|x| x.is_none()).unwrap_or(true));
 
     // Update binary
@@ -134,7 +133,7 @@ fn test_binary_unchanged_no_rotation() {
     make_executable(&binary);
 
     // Start worker
-    let mut worker = start_worker(&needle_home);
+    let mut worker = start_worker(needle_home);
 
     // Wait for several check intervals
     std::thread::sleep(Duration::from_secs(2));
@@ -159,13 +158,13 @@ fn test_corrupt_binary_handling() {
     make_executable(&binary);
 
     // Start worker
-    let mut worker = start_worker(&needle_home);
+    let mut worker = start_worker(needle_home);
 
     // Corrupt the binary (write garbage)
     fs::write(&binary, vec![0xFF_u8; 1000]).expect("failed to corrupt binary");
 
     // Worker should detect corruption and exit gracefully
-    let exit_status = wait_for_clean_exit(&mut worker, Duration::from_secs(10));
+    let _exit_status = wait_for_clean_exit(&mut worker, Duration::from_secs(10));
 
     // Worker should exit (either success or error code is acceptable)
     let exited = worker.try_wait().unwrap().is_some();
@@ -214,7 +213,7 @@ fn start_worker(needle_home: &Path) -> std::process::Child {
 }
 
 /// Helper: Assert worker is running with expected version.
-fn assert_worker_running(worker: &mut std::process::Child, expected_version: &str) {
+fn assert_worker_running(worker: &mut std::process::Child, _expected_version: &str) {
     // In a real test, we would check the worker's logs or status
     // to verify it's running with the expected binary version
     let status = worker.try_wait();
@@ -227,7 +226,7 @@ fn wait_for_worker_rotation(worker: &mut std::process::Child, timeout: Duration)
     let mut rotated = false;
 
     while start.elapsed() < timeout {
-        if let Some(Some(_)) = worker.try_wait().ok() {
+        if let Ok(Some(_)) = worker.try_wait() {
             // Worker exited - this indicates rotation happened
             rotated = true;
             break;

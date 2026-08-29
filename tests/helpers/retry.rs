@@ -92,7 +92,8 @@ impl ErrorInjection {
 
     /// Inject connection refused error on a specific attempt.
     pub fn with_connection_refused_on_attempt(mut self, attempt: usize) -> Self {
-        self.errors_on_attempts.push((attempt, ErrorSpec::ConnectionRefused));
+        self.errors_on_attempts
+            .push((attempt, ErrorSpec::ConnectionRefused));
         self
     }
 
@@ -104,25 +105,29 @@ impl ErrorInjection {
 
     /// Inject network unreachable error on a specific attempt.
     pub fn with_network_unreachable_on_attempt(mut self, attempt: usize) -> Self {
-        self.errors_on_attempts.push((attempt, ErrorSpec::NetworkUnreachable));
+        self.errors_on_attempts
+            .push((attempt, ErrorSpec::NetworkUnreachable));
         self
     }
 
     /// Inject broken pipe error on a specific attempt.
     pub fn with_broken_pipe_on_attempt(mut self, attempt: usize) -> Self {
-        self.errors_on_attempts.push((attempt, ErrorSpec::BrokenPipe));
+        self.errors_on_attempts
+            .push((attempt, ErrorSpec::BrokenPipe));
         self
     }
 
     /// Inject connection reset error on a specific attempt.
     pub fn with_connection_reset_on_attempt(mut self, attempt: usize) -> Self {
-        self.errors_on_attempts.push((attempt, ErrorSpec::ConnectionReset));
+        self.errors_on_attempts
+            .push((attempt, ErrorSpec::ConnectionReset));
         self
     }
 
     /// Inject permission denied error on a specific attempt.
     pub fn with_permission_denied_on_attempt(mut self, attempt: usize) -> Self {
-        self.errors_on_attempts.push((attempt, ErrorSpec::PermissionDenied));
+        self.errors_on_attempts
+            .push((attempt, ErrorSpec::PermissionDenied));
         self
     }
 
@@ -279,7 +284,9 @@ impl MockRetryBehavior {
 
     /// Inject connection refused error on a specific attempt.
     pub fn with_connection_refused_on_attempt(mut self, attempt: usize) -> Self {
-        self.error_injection = self.error_injection.with_connection_refused_on_attempt(attempt);
+        self.error_injection = self
+            .error_injection
+            .with_connection_refused_on_attempt(attempt);
         self
     }
 
@@ -291,7 +298,9 @@ impl MockRetryBehavior {
 
     /// Inject network unreachable error on a specific attempt.
     pub fn with_network_unreachable_on_attempt(mut self, attempt: usize) -> Self {
-        self.error_injection = self.error_injection.with_network_unreachable_on_attempt(attempt);
+        self.error_injection = self
+            .error_injection
+            .with_network_unreachable_on_attempt(attempt);
         self
     }
 
@@ -303,13 +312,17 @@ impl MockRetryBehavior {
 
     /// Inject connection reset error on a specific attempt.
     pub fn with_connection_reset_on_attempt(mut self, attempt: usize) -> Self {
-        self.error_injection = self.error_injection.with_connection_reset_on_attempt(attempt);
+        self.error_injection = self
+            .error_injection
+            .with_connection_reset_on_attempt(attempt);
         self
     }
 
     /// Inject permission denied error on a specific attempt.
     pub fn with_permission_denied_on_attempt(mut self, attempt: usize) -> Self {
-        self.error_injection = self.error_injection.with_permission_denied_on_attempt(attempt);
+        self.error_injection = self
+            .error_injection
+            .with_permission_denied_on_attempt(attempt);
         self
     }
 

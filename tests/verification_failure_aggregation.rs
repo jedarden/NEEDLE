@@ -9,9 +9,8 @@
 //! - Report format is clear and parseable (JSON and structured text)
 
 use std::fs;
-use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::Command;
 
 #[test]
 fn test_verification_runner_aggregates_all_failures() {
@@ -251,7 +250,7 @@ fast_lane:
     fs::write(&test_config, config_content).unwrap();
 
     let runner_script = repo_root.join("scripts/verification-runner.sh");
-    let output = Command::new("bash")
+    Command::new("bash")
         .arg(&runner_script)
         .arg("--config")
         .arg(&test_config)

@@ -127,6 +127,7 @@ impl ErrorInjection {
     }
 
     /// Inject network unreachable error on a specific attempt.
+    #[allow(dead_code)]
     pub fn with_network_unreachable_on_attempt(mut self, attempt: usize) -> Self {
         self.errors_on_attempts
             .push((attempt, ErrorSpec::NetworkUnreachable));
@@ -134,6 +135,7 @@ impl ErrorInjection {
     }
 
     /// Inject host unreachable error on a specific attempt.
+    #[allow(dead_code)]
     pub fn with_host_unreachable_on_attempt(mut self, attempt: usize) -> Self {
         self.errors_on_attempts
             .push((attempt, ErrorSpec::HostUnreachable));
@@ -148,6 +150,7 @@ impl ErrorInjection {
     }
 
     /// Inject connection reset error on a specific attempt.
+    #[allow(dead_code)]
     pub fn with_connection_reset_on_attempt(mut self, attempt: usize) -> Self {
         self.errors_on_attempts
             .push((attempt, ErrorSpec::ConnectionReset));
@@ -155,6 +158,7 @@ impl ErrorInjection {
     }
 
     /// Inject address in use error on a specific attempt.
+    #[allow(dead_code)]
     pub fn with_address_in_use_on_attempt(mut self, attempt: usize) -> Self {
         self.errors_on_attempts
             .push((attempt, ErrorSpec::AddressInUse));
@@ -162,6 +166,7 @@ impl ErrorInjection {
     }
 
     /// Inject permission denied error on a specific attempt.
+    #[allow(dead_code)]
     pub fn with_permission_denied_on_attempt(mut self, attempt: usize) -> Self {
         self.errors_on_attempts
             .push((attempt, ErrorSpec::PermissionDenied));
@@ -362,6 +367,7 @@ impl MockRetryBehavior {
     }
 
     /// Inject host unreachable error on a specific attempt.
+    #[allow(dead_code)]
     pub fn with_host_unreachable_on_attempt(self, attempt: usize) -> Self {
         self.with_error_on_attempt(attempt, ErrorSpec::HostUnreachable)
     }
@@ -377,6 +383,7 @@ impl MockRetryBehavior {
     }
 
     /// Inject address in use error on a specific attempt.
+    #[allow(dead_code)]
     pub fn with_address_in_use_on_attempt(self, attempt: usize) -> Self {
         self.with_error_on_attempt(attempt, ErrorSpec::AddressInUse)
     }
@@ -889,6 +896,7 @@ pub fn aggressive_retry_mock() -> MockRetryBehavior {
 }
 
 /// Create a mock retry behavior with conservative retry configuration.
+#[allow(dead_code)]
 pub fn conservative_retry_mock() -> MockRetryBehavior {
     MockRetryBehavior::new().with_config(conservative_retry_config())
 }
