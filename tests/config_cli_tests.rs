@@ -480,7 +480,7 @@ fn worker_binary_path_nonexistent_path_accepted() {
     assert!(
         !errors
             .iter()
-            .any(|e| e.field == "worker.worker_binary_path"),
+            .any(|e| e.full_path == "worker.worker_binary_path"),
         "path existence should not be validated at config load time"
     );
 }
@@ -572,4 +572,81 @@ fn config_live_requires_dump() {
         }
         _ => panic!("Expected ConfigCmd command"),
     }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Subprocess-based help text verification tests
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Integration test that spawns the needle binary and verifies `--set` flag help text.
+///
+/// This test:
+/// 1. Spawns the needle binary with `config --help`
+/// 2. Captures stdout
+/// 3. Verifies --set flag is documented
+/// 4. Verifies the help text describes the --set flag purpose
+///
+/// Test isolation: Sets HOME to a tempdir to prevent the Explore strand from
+/// scanning real bead workspaces during the subprocess invocation.
+#[test]
+fn config_set_flag_help_text_subprocess_verification() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().expect("failed to create temp dir for test isolation");
+
+    // Spawn the needle binary with config --help
+    let result = std::process::Command::new(env!("CARGO_BIN_EXE_needle"))
+        .arg("config")
+        .arg("--help")
+        .env("HOME", temp_dir.path()) // Isolate from real bead workspaces
+        .output();
+
+    // Verify the command executed successfully
+    let output = result.expect("failed to execute needle config --help");
+
+    // Help command should exit successfully (exit code 0)
+    assert!(
+        output.status.success(),
+        "needle config --help should exit successfully, stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Capture stdout
+    let stdout = String::from_utf8(output.stdout).expect("stdout should be valid UTF-8");
+
+    // Verify --set flag appears in help output
+    assert!(
+        stdout.contains("--set"),
+        "Help output should contain --set flag. Full output:\n{}",
+        stdout
+    );
+
+    // Verify the help text mentions the supported formats (KEY VALUE or KEY=VALUE)
+    assert!(
+        stdout.contains("KEY VALUE") || stdout.contains("KEY=VALUE"),
+        "Help output should mention KEY VALUE or KEY=VALUE format for --set flag. Full output:\n{}",
+        stdout
+    );
+
+    // Verify there's a meaningful description (not just the flag name)
+    // Find the --set section and verify it has content beyond the flag name
+    let set_section: Vec<&str> = stdout
+        .lines()
+        .skip_while(|line| !line.contains("--set"))
+        .take(10) // Take up to 10 lines to capture the description
+        .collect();
+
+    assert!(
+        !set_section.is_empty(),
+        "Should find --set flag in help output. Full output:\n{}",
+        stdout
+    );
+
+    // Verify the section has meaningful content
+    let set_text = set_section.join("\n");
+    assert!(
+        set_text.len() > "--set".len() + 20, // Flag name plus some description
+        "--set section should have a meaningful description. Got:\n{}",
+        set_text
+    );
 }
