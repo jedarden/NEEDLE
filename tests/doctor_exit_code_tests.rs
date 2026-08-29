@@ -16,6 +16,7 @@ fn create_test_workspace(temp_dir: &Path, backend_name: &str) -> PathBuf {
     fs::create_dir_all(workspace.join(".beads")).unwrap();
 
     // Create .needle.yaml with the specified backend
+    // Use the path field to point to a non-existent binary to trigger a failure
     let needle_yaml = workspace.join(".needle.yaml");
     fs::write(
         &needle_yaml,
@@ -23,8 +24,9 @@ fn create_test_workspace(temp_dir: &Path, backend_name: &str) -> PathBuf {
             r#"
 bead_cli:
   backend: {}
+  path: /totally/fake/path/not/on/path/12345/{}
 "#,
-            backend_name
+            backend_name, backend_name
         ),
     )
     .unwrap();
@@ -55,8 +57,7 @@ bead_cli:
 #[test]
 fn doctor_exits_nonzero_when_backend_not_on_path() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let workspace =
-        create_test_workspace(temp_dir.path(), "totally-fake-backend-not-on-path-12345");
+    let workspace = create_test_workspace(temp_dir.path(), "bead-rs");
 
     // Run needle doctor against this workspace
     let output = Command::new(env!("CARGO_BIN_EXE_needle"))

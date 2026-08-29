@@ -2318,7 +2318,7 @@ pub fn replace_needle_block(content: &str, template: &str) -> String {
             let before = &content[..begin_pos];
             let after = &content[end_pos + end_marker.len()..];
             format!(
-                "{}{}\n{}{}\n{}",
+                "{}{}\n{}\n{}{}",
                 before, begin_marker, template, end_marker, after
             )
         } else {

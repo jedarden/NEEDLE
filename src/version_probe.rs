@@ -185,6 +185,11 @@ impl VersionProbe {
         self
     }
 
+    /// Get the timeout duration.
+    pub fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
     /// Detect the backend identity by running a binary with --version.
     ///
     /// This method:

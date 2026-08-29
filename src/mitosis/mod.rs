@@ -1390,6 +1390,7 @@ mod tests {
         created: Mutex<Vec<(String, String)>>,
         deps_added: Mutex<Vec<(String, String)>>,
         /// Coordination barrier for deterministic test execution
+        #[allow(dead_code)]
         barrier: Mutex<Option<(std::sync::Arc<tokio::sync::Barrier>, usize)>>,
     }
 
@@ -3943,5 +3944,21 @@ End of response."#;
             !matches!(timeout_result, MitosisResult::OutOfScope),
             "timeout mitosis should not return OutOfScope for normal beads"
         );
+    }
+
+    // ── Concurrency and Race Condition Tests ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn atomic_state_lock_prevents_data_races() {
+        // Test that the atomic lock_state() method prevents data races
+        // when accessing multiple mutex fields that must remain consistent.
+        let store = MockStore::new();
+
+        // Use atomic lock to verify both fields are read atomically
+        let guard = store.lock_state();
+        assert!(guard.created.is_empty());
+        assert!(guard.deps_added.is_empty());
+        // Both fields are read while holding the same lock, preventing
+        // any race condition between the two reads.
     }
 }

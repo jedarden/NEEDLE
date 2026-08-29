@@ -664,9 +664,31 @@ fn template_bead_commands_match_help_output() {
         "Template uses 'bead list --ready' but --ready flag not found in help output"
     );
 
+    // Check subcommand-specific help for --notes and --reason flags
+    let update_help = match Command::new("bead").args(["update", "--help"]).output() {
+        Ok(output) => String::from_utf8_lossy(&output.stdout).to_string(),
+        Err(_) => {
+            // If subcommand help fails, skip this check
+            return;
+        }
+    };
+
+    let close_help = match Command::new("bead").args(["close", "--help"]).output() {
+        Ok(output) => String::from_utf8_lossy(&output.stdout).to_string(),
+        Err(_) => {
+            // If subcommand help fails, skip this check
+            return;
+        }
+    };
+
     assert!(
-        bead_help.contains("--notes") || bead_help.contains("--reason"),
-        "Template uses 'bead update --notes' or 'bead close --reason' but these flags not found in help output"
+        update_help.contains("--notes") || bead_help.contains("--notes"),
+        "Template uses 'bead update --notes' but this flag not found in help output"
+    );
+
+    assert!(
+        close_help.contains("--reason") || bead_help.contains("--reason"),
+        "Template uses 'bead close --reason' but this flag not found in help output"
     );
 
     assert!(
