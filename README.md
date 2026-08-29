@@ -383,6 +383,7 @@ If you want to run NEEDLE in your own workflow, open an issue and I'll help.
 
 ## 📚 Documentation
 
+- **[Documentation Index](docs/README.md)** — Complete index of all 143 documentation files (ADRs, architecture, operations, investigations, reference)
 - **[Binary Freshness Verification](docs/binary-freshness-verification.md)** — Guide for verifying automatic worker rotation when new binaries are deployed
 - **[Plan](docs/plan/plan.md)** — Complete project architecture and implementation plan
 - **[Integration Tests](tests/)** — Comprehensive test suite demonstrating all core functionality
