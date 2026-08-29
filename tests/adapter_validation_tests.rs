@@ -792,6 +792,9 @@ worker:
         // Create a test workspace
         let workspace = temp_home.create_workspace("test-workspace").unwrap();
 
+        // Initialize bead store in the workspace
+        workspace.create_bead_store().expect("Failed to create .beads directory");
+
         // Define a nonexistent adapter name
         let nonexistent_adapter = "nonexistent-test-adapter-xyz123";
 
@@ -817,6 +820,23 @@ agent:
         std::fs::write(&config_path, config_yaml).expect("Failed to write .needle.yaml");
         assert!(config_path.exists(), "config file should be created");
 
+        // Verify bead store exists and is empty before the test run
+        let beads_dir = workspace.path().join(".beads");
+        assert!(
+            beads_dir.exists(),
+            "bead store directory should exist before worker run"
+        );
+
+        // Check for any existing bead data files before the run
+        let bead_data_files_before = std::fs::read_dir(beads_dir.clone())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                let path = entry.path();
+                path.extension().map_or(false, |ext| ext == "jsonl" || ext == "json")
+            })
+            .count();
+
         // Get the path to the needle binary
         let bin_path =
             std::env::var("CARGO_BIN_EXE_needle").unwrap_or_else(|_| "needle".to_string());
@@ -832,6 +852,7 @@ agent:
             .output()
             .expect("Failed to spawn needle worker");
 
+        let stdout_output = String::from_utf8_lossy(&output.stdout);
         let stderr_output = String::from_utf8_lossy(&output.stderr);
 
         // Assert the worker exits with nonzero status
@@ -874,10 +895,52 @@ agent:
             stderr_output
         );
 
-        // Since the worker failed at startup (before entering the claim loop),
-        // no bead could have been claimed. This is verified by the startup
-        // sequence in worker/mod.rs where resolve_adapter() is called before
-        // the main loop begins.
+        // **CRITICAL VERIFICATION**: Ensure no beads were claimed during failed startup
+        //
+        // This prevents partial state corruption when the worker fails to start.
+        // If a worker claimed a bead but then crashed before completion, the bead
+        // would remain in "in_progress" status forever, blocking other workers from
+        // picking it up. This is a form of resource leak that can accumulate over
+        // time and starve the work queue.
+        //
+        // The architecture prevents this by validating adapter availability BEFORE
+        // entering the main claim loop. This test verifies that invariant holds.
+
+        // Verify no bead IDs appear in stdout or stderr
+        let combined_output = format!("{}{}", stdout_output, stderr_output);
+        assert!(
+            !combined_output.contains("bead-") && !combined_output.contains("nd-"),
+            "worker output should contain no bead IDs when startup fails. This would indicate \
+             a bead was claimed before the adapter was validated. Output:\n{}",
+            combined_output
+        );
+
+        // Verify bead store is unchanged (no new bead data files)
+        let bead_data_files_after = std::fs::read_dir(beads_dir.clone())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                let path = entry.path();
+                path.extension().map_or(false, |ext| ext == "jsonl" || ext == "json")
+            })
+            .count();
+
+        assert_eq!(
+            bead_data_files_before, bead_data_files_after,
+            "bead store file count should be unchanged after failed startup. \
+             Before: {}, After: {}. New files would indicate bead state was modified.",
+            bead_data_files_before, bead_data_files_after
+        );
+
+        // Verify no bead claim events appear in output
+        assert!(
+            !combined_output.contains("claimed") &&
+            !combined_output.contains("claim.") &&
+            !combined_output.contains("bead.claim"),
+            "worker output should contain no claim-related events when startup fails. \
+             Output:\n{}",
+            combined_output
+        );
     }
 
     #[test]
