@@ -279,3 +279,325 @@ fn sync_flush_only_rejects_profile_flag() {
     cmd.env("HOME", &home);
     run(&mut cmd);
 }
+
+#[test]
+#[ignore = "release gate requiring a real bead-rs binary; set BEAD_RS_BIN"]
+fn sync_import_only_diagnostics_flag() {
+    let source_binary = std::env::var_os("BEAD_RS_BIN")
+        .map(PathBuf::from)
+        .expect("BEAD_RS_BIN must name the pinned real bead-rs binary");
+    assert!(source_binary.is_file(), "BEAD_RS_BIN does not exist");
+
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    let restore = root.path().join("restore");
+    let home = root.path().join("home");
+    let bin_dir = root.path().join("bin");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::create_dir_all(&restore).unwrap();
+    fs::create_dir_all(&bin_dir).unwrap();
+
+    let bead = bin_dir.join("bead");
+    fs::copy(&source_binary, &bead).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&bead).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&bead, permissions).unwrap();
+    }
+
+    // Initialize a bead-rs workspace with isolated HOME and skip foreign workspace
+    let mut cmd = bead_command(&bead, &workspace);
+    cmd.args(["--skip-foreign-workspace", "init", "--prefix", "test"]);
+    cmd.env("HOME", &home);
+    run(&mut cmd);
+
+    // Create some beads to have checkpoint data
+    let _ = stdout(bead_command(&bead, &workspace).args([
+        "create",
+        "--title",
+        "Diagnostics test blocker",
+        "--priority",
+        "1",
+    ]));
+    let _ = stdout(bead_command(&bead, &workspace).args([
+        "create",
+        "--title",
+        "Diagnostics test dependent",
+        "--priority",
+        "2",
+    ]));
+
+    // Flush to create checkpoint data
+    let mut cmd = bead_command(&bead, &workspace);
+    cmd.args(["--skip-foreign-workspace", "sync", "flush-only"]);
+    cmd.env("HOME", &home);
+    run(&mut cmd);
+
+    // Test 1: --diagnostics works with dry-run (validation mode)
+    let mut cmd = bead_command(&bead, &workspace);
+    cmd.args([
+        "--skip-foreign-workspace",
+        "sync",
+        "import-only",
+        "--input",
+        ".beads/checkpoint",
+        "--diagnostics",
+        "--dry-run",
+    ]);
+    cmd.env("HOME", &home);
+    let output = cmd.output().expect("failed to execute bead command");
+    // In diagnostics mode with dry-run, this should succeed (validates without mutating)
+    assert!(
+        output.status.success(),
+        "import-only with --diagnostics --dry-run should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Should indicate it's a dry-run validation
+    assert!(
+        stdout.contains("dry-run") || stdout.contains("validation"),
+        "stdout should indicate dry-run or validation: {}",
+        stdout
+    );
+
+    // Test 2: --diagnostics works alone (simple import mode, no --restore-into-empty or --merge)
+    let mut cmd = bead_command(&bead, &workspace);
+    cmd.args([
+        "--skip-foreign-workspace",
+        "sync",
+        "import-only",
+        "--input",
+        ".beads/checkpoint",
+        "--diagnostics",
+    ]);
+    cmd.env("HOME", &home);
+    let output = cmd.output().expect("failed to execute bead command");
+    // Should succeed since --diagnostics uses simple import mode
+    assert!(
+        output.status.success(),
+        "import-only with --diagnostics should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("diagnostic") || stdout.contains("validation"),
+        "stdout should indicate diagnostic mode: {}",
+        stdout
+    );
+
+    // Test 3: --diagnostics is incompatible with --restore-into-empty
+    let mut cmd = bead_command(&bead, &workspace);
+    cmd.args([
+        "--skip-foreign-workspace",
+        "sync",
+        "import-only",
+        "--input",
+        ".beads/checkpoint",
+        "--restore-into-empty",
+        "--actor",
+        "test",
+        "--diagnostics",
+    ]);
+    cmd.env("HOME", &home);
+    let output = cmd.output().expect("failed to execute bead command");
+    assert!(
+        !output.status.success(),
+        "import-only with --restore-into-empty and --diagnostics should fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("incompatible") || stderr.contains("conflict") || stderr.contains("cannot"),
+        "stderr should indicate incompatibility: {}",
+        stderr
+    );
+
+    // Test 4: --diagnostics is incompatible with --merge
+    let mut cmd = bead_command(&bead, &workspace);
+    cmd.args([
+        "--skip-foreign-workspace",
+        "sync",
+        "import-only",
+        "--input",
+        ".beads/checkpoint",
+        "--merge",
+        "--actor",
+        "test",
+        "--diagnostics",
+    ]);
+    cmd.env("HOME", &home);
+    let output = cmd.output().expect("failed to execute bead command");
+    assert!(
+        !output.status.success(),
+        "import-only with --merge and --diagnostics should fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("incompatible") || stderr.contains("conflict") || stderr.contains("cannot"),
+        "stderr should indicate incompatibility: {}",
+        stderr
+    );
+
+    // Test 5: Diagnostics mode works on a fresh restore workspace
+    fs::create_dir_all(restore.join(".beads")).unwrap();
+    fs::write(
+        restore.join(".beads/config.json"),
+        fs::read_to_string(workspace.join(".beads/config.json")).unwrap(),
+    )
+    .unwrap();
+
+    let mut cmd = bead_command(&bead, &restore);
+    cmd.args([
+        "--skip-foreign-workspace",
+        "init",
+        "--prefix",
+        "restore-test",
+    ]);
+    cmd.env("HOME", &home);
+    run(&mut cmd);
+
+    let mut cmd = bead_command(&bead, &restore);
+    cmd.args([
+        "--skip-foreign-workspace",
+        "sync",
+        "import-only",
+        "--input",
+        workspace.join(".beads/checkpoint").to_str().unwrap(),
+        "--diagnostics",
+        "--dry-run",
+    ]);
+    cmd.env("HOME", &home);
+    let output = cmd.output().expect("failed to execute bead command");
+    assert!(
+        output.status.success(),
+        "import-only with --diagnostics --dry-run on restore workspace should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+#[ignore = "release gate requiring a real bead-rs binary; set BEAD_RS_BIN"]
+fn sync_flush_only_profile_flag_comprehensive() {
+    let source_binary = std::env::var_os("BEAD_RS_BIN")
+        .map(PathBuf::from)
+        .expect("BEAD_RS_BIN must name the pinned real bead-rs binary");
+    assert!(source_binary.is_file(), "BEAD_RS_BIN does not exist");
+
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    let home = root.path().join("home");
+    let bin_dir = root.path().join("bin");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::create_dir_all(&bin_dir).unwrap();
+
+    let bead = bin_dir.join("bead");
+    fs::copy(&source_binary, &bead).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&bead).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&bead, permissions).unwrap();
+    }
+
+    // Initialize a bead-rs workspace with isolated HOME and skip foreign workspace
+    let mut cmd = bead_command(&bead, &workspace);
+    cmd.args(["--skip-foreign-workspace", "init", "--prefix", "test"]);
+    cmd.env("HOME", &home);
+    run(&mut cmd);
+
+    // Test 1: --profile is rejected on default forensic path (no --output)
+    let mut cmd = bead_command(&bead, &workspace);
+    cmd.args([
+        "--skip-foreign-workspace",
+        "sync",
+        "flush-only",
+        "--profile",
+        "native-v1",
+    ]);
+    cmd.env("HOME", &home);
+    let output = cmd.output().expect("failed to execute bead command");
+    assert!(
+        !output.status.success(),
+        "flush-only with --profile should fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unexpected argument") || stderr.contains("--profile"),
+        "stderr should reject --profile: {}",
+        stderr
+    );
+
+    // Test 2: --profile is rejected when using --output
+    let output_path = root.path().join("test-output.jsonl");
+    let mut cmd = bead_command(&bead, &workspace);
+    cmd.args([
+        "--skip-foreign-workspace",
+        "sync",
+        "flush-only",
+        "--output",
+        output_path.to_str().unwrap(),
+        "--profile",
+        "native-v1",
+    ]);
+    cmd.env("HOME", &home);
+    let output = cmd.output().expect("failed to execute bead command");
+    assert!(
+        !output.status.success(),
+        "flush-only with --output and --profile should fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unexpected argument") || stderr.contains("--profile"),
+        "stderr should reject --profile: {}",
+        stderr
+    );
+
+    // Test 3: flush-only works correctly with --output alone (no --profile)
+    let output_path = root.path().join("working-output.jsonl");
+    let mut cmd = bead_command(&bead, &workspace);
+    cmd.args([
+        "--skip-foreign-workspace",
+        "sync",
+        "flush-only",
+        "--output",
+        output_path.to_str().unwrap(),
+    ]);
+    cmd.env("HOME", &home);
+    let output = cmd.output().expect("failed to execute bead command");
+    assert!(
+        output.status.success(),
+        "flush-only with --output (without --profile) should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // Verify the output file was created
+    assert!(
+        output_path.exists(),
+        "output file should be created with --output"
+    );
+
+    // Test 4: flush-only works correctly with default path (no --output, no --profile)
+    let mut cmd = bead_command(&bead, &workspace);
+    cmd.args(["--skip-foreign-workspace", "sync", "flush-only"]);
+    cmd.env("HOME", &home);
+    run(&mut cmd);
+
+    // Test 5: Multiple --profile flags are rejected
+    let mut cmd = bead_command(&bead, &workspace);
+    cmd.args([
+        "--skip-foreign-workspace",
+        "sync",
+        "flush-only",
+        "--profile",
+        "native-v1",
+        "--profile",
+        "native-v1",
+    ]);
+    cmd.env("HOME", &home);
+    let output = cmd.output().expect("failed to execute bead command");
+    assert!(
+        !output.status.success(),
+        "flush-only with multiple --profile flags should fail"
+    );
+}
