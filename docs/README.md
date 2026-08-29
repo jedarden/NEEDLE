@@ -1,6 +1,6 @@
 # NEEDLE Documentation Index
 
-This directory contains 143 markdown files documenting NEEDLE's architecture, design decisions, operations, and research. This index is the entry point for finding what you need.
+This directory contains 148 markdown files documenting NEEDLE's architecture, design decisions, operations, and research. This index is the entry point for finding what you need.
 
 ## Quick Navigation
 
@@ -142,7 +142,10 @@ Incident analyses, debugging sessions, and operational investigations (newest fi
 | Document | Date | Description |
 |----------|------|-------------|
 | **[Clippy Findings 2026-08-29](clippy-findings-2026-08-29.md)** | 2026-08-29 | Clippy lint results and fixes |
+| **[Clippy Findings 2026-08-29](clippy-findings-2026-08-29.md)** | 2026-08-29 | Clippy lint results and fixes |
 | **[Issue 16 Comment Loop](notes/2026-08-29-issue-16-comment-loop.md)** | 2026-08-29 | GitHub issue #16 comment loop analysis |
+| **[Test Isolation Consolidated Findings 2026-08-28](test-isolation-consolidated-findings-2026-08-28.md)** | 2026-08-28 | Test isolation consolidated findings |
+| **[Test Isolation Audit 2026-08-28](test-isolation-audit-2026-08-28.md)** | 2026-08-28 | Test isolation audit report |
 | **[Anthropic Routing Verification 2026-08-28](notes/anthropic-routing-verification-2026-08-28.md)** | 2026-08-28 | Anthropic model routing verification |
 | **[GLM-4.7 Routing Verification 2026-08-28](notes/glm-4.7-routing-verification-2026-08-28.md)** | 2026-08-28 | GLM-4.7 routing verification |
 | **[False Close Audit 2026-08](notes/false-close-audit-2026-08.md)** | 2026-08 | False close analysis |
@@ -150,8 +153,10 @@ Incident analyses, debugging sessions, and operational investigations (newest fi
 | **[Test Isolation Audit 2026-08-28](test-isolation-audit-2026-08-28.md)** | 2026-08-28 | Test isolation audit report |
 | **[Production OTLP Configuration 2026-08-15](production-otlp-configuration-2026-08-15.md)** | 2026-08-15 | OTLP configuration for production |
 | **[Needle CI Failure 2026-08-16](needle-ci-failure-investigation-2026-08-16.md)** | 2026-08-16 | CI failure investigation |
+| **[Production OTLP Configuration 2026-08-15](production-otlp-configuration-2026-08-15.md)** | 2026-08-15 | OTLP configuration for production |
 | **[Pulse Strand Enablement 2026-08-15](notes/pulse-strand-enablement-2026-08-15.md)** | 2026-08-15 | Pulse strand enablement analysis |
 | **[Bead-rs Fleet Migration 2026-08-15](notes/bead-rs-fleet-migration-2026-08-15.md)** | 2026-08-15 | Bead-rs migration notes |
+| **[Needle CI Failure 2026-08-16](needle-ci-failure-investigation-2026-08-16.md)** | 2026-08-16 | CI failure investigation |
 
 ### Historical Investigations (Pre-2026-08)
 
@@ -172,6 +177,8 @@ Incident analyses, debugging sessions, and operational investigations (newest fi
 | **[Test Output](test_output.md)** | Test output analysis |
 | **[Test Stack Trace Capture](test-stack-trace-capture.md)** | Stack trace capture in tests |
 | **[Tilde Expansion Config Fields](tilde-expansion-config-fields.md)** | Tilde expansion in configuration |
+| **[P95 Calculation Algorithms](p95-calculation-algorithms.md)** | Percentile calculation methods |
+| **[Tilde Expansion Config Fields](tilde-expansion-config-fields.md)** | Tilde expansion in configuration |
 | **[Timeout Mitosis Decomposition Design](timeout-mitosis-decomposition-design.md)** | Mitosis timeout design |
 | **[Wait Calls Audit](wait-calls-audit-baseline.md)** | Wait call audit baseline |
 | **[Worker Construction Logging](worker-construction-logging.md)** | Worker construction logging |
@@ -181,6 +188,7 @@ Incident analyses, debugging sessions, and operational investigations (newest fi
 | **[OTLP Resource Verification](otlp-resource-attribute-verification.md)** | OTLP resource verification |
 | **[API Pattern Transformation](api-pattern-transformation-guide.md)** | API transformation patterns |
 | **[ProcessGuard Coverage Catalog](processguard_coverage_catalog.md)** | ProcessGuard coverage |
+| **[Release History Gap v0.2.13-v0.2.15](release-history-gap-v0.2.13-v0.2.15.md)** | Release history gap analysis |
 | **[Release History Gap v0.2.13-v0.2.15](release-history-gap-v0.2.13-v0.2.15.md)** | Release history gap analysis |
 | **[Retry Test Infrastructure](retry-test-infrastructure-guide.md)** | Retry test infrastructure |
 | **[Test Isolation Inventory](test-isolation-inventory.md)** | Test isolation catalog |
@@ -205,8 +213,6 @@ Technical specifications, schemas, and reference documentation.
 |----------|-------------|
 | **[Telemetry Event Schema](telemetry-event-schema.md)** | Complete telemetry event catalog |
 | **[Telemetry Field Capture Strategy](telemetry-field-capture-strategy.md)** | How telemetry fields are captured |
-| **[Agent Event Schema](agent-event-schema.md)** | Structured events from agent execution |
-| **[Capabilities Negotiation](capabilities-negotiation.md)** | Backend capability negotiation contract |
 
 ### Verification Reports
 
@@ -249,6 +255,42 @@ Background research, operational notes, and exploratory investigations.
 | **[Spec2Beads Decomposition](research/spec2beads-decomposition.md)** | Task decomposition |
 | **[Steve Yegge Beads Vision](research/steveyegge-beads-vision.md)** | Historical vision |
 
+### 2026-08 Notes (Indexed in Investigations)
+
+See [Investigations & Post-Mortems](#investigations--post-mortems) for:
+- **[2026-08-29 Issue 16 Comment Loop](notes/2026-08-29-issue-16-comment-loop.md)** — GitHub issue #16 comment loop analysis
+- **[Anthropic Routing Verification 2026-08-28](notes/anthropic-routing-verification-2026-08-28.md)** — Anthropic model routing verification
+- **[GLM-4.7 Routing Verification 2026-08-28](notes/glm-4.7-routing-verification-2026-08-28.md)** — GLM-4.7 routing verification
+- **[False Close Audit 2026-08](notes/false-close-audit-2026-08.md)** — False close analysis
+- **[Pulse Strand Enablement 2026-08-15](notes/pulse-strand-enablement-2026-08-15.md)** — Pulse strand enablement analysis
+- **[Bead-rs Fleet Migration 2026-08-15](notes/bead-rs-fleet-migration-2026-08-15.md)** — Bead-rs migration notes
+
+### Operational Notes (Pre-2026-08)
+
+| Document | Description |
+|----------|-------------|
+| **[Bash at Scale Problems](notes/bash-at-scale-problems.md)** | Bash scaling issues |
+| **[Bead Lifecycle Bugs](notes/bead-lifecycle-bugs.md)** | Bead lifecycle bug catalog |
+| **[Bundler Build Integrity](notes/bundler-build-integrity.md)** | Build integrity lessons |
+| **[Claim Race Conditions](notes/claim-race-conditions.md)** | Race condition patterns |
+| **[Explore Strand Bugs](notes/explore-strand-bugs.md)** | Explore strand issues |
+| **[Mitosis Explosion Postmortem](notes/mitosis-explosion-postmortem.md)** | Mitosis failure analysis |
+| **[Needle Binary Rollback](notes/needle-binary-rollback.md)** | Rollback procedures |
+| **[Operational Fleet Lessons](notes/operational-fleet-lessons.md)** | Fleet operations lessons |
+| **[OTLP Wire Capture](notes/otlp-wire-capture.md)** | OTLP debugging |
+| **[Resource Awareness & Density](notes/resource-awareness-and-worker-density.md)** | Resource management |
+| **[Routing Failure Results](notes/routing-failure-results.md)** | Routing failure patterns |
+| **[Routing Telemetry Events](notes/routing-telemetry-events.md)** | Routing telemetry |
+| **[Routing Testing](notes/routing-testing.md)** | Routing test procedures |
+| **[Routing Test Results](notes/routing-test-results.md)** | Routing test outcomes |
+| **[Self-Modification Risks](notes/self-modification-risks.md)** | Self-modification hazards |
+| **[Worker Starvation Lessons](notes/worker-starvation-lessons.md)** | Starvation prevention |
+| **[Idle Strand Gating Semantics](notes/idle-strand-gating-semantics.md)** | Idle gating behavior |
+| **[Claude Print Routing Validation](notes/claude-print-routing-validation.md)** | Claude routing validation |
+| **[Anthropic Routing Verification](notes/anthropic_routing_verification.md)** | Anthropic routing checks |
+| **[BF-4utk](notes/bf-4utk.md)** | BF-4utk analysis |
+| **[CI Sensor Jetstream Watchdog](notes/ci-sensor-jetstream-watchdog.md)** | CI monitoring |
+
 ### Operational Notes
 
 | Document | Description |
@@ -272,7 +314,6 @@ Background research, operational notes, and exploratory investigations.
 | **[Idle Strand Gating Semantics](notes/idle-strand-gating-semantics.md)** | Idle gating behavior |
 | **[Claude Print Routing Validation](notes/claude-print-routing-validation.md)** | Claude routing validation |
 | **[Anthropic Routing Verification](notes/anthropic_routing_verification.md)** | Anthropic routing checks |
-| **[GLM-4.7 Routing Verification](notes/glm-4.7-routing-verification-2026-08-28.md)** | GLM routing verification |
 | **[BF-4utk](notes/bf-4utk.md)** | BF-4utk analysis |
 | **[CI Sensor Jetstream Watchdog](notes/ci-sensor-jetstream-watchdog.md)** | CI monitoring |
 
@@ -280,13 +321,14 @@ Background research, operational notes, and exploratory investigations.
 
 ## File Count Summary
 
-- **Total markdown files:** 143
+- **Total markdown files:** 148
 - **ADRs:** 21
 - **Research documents:** 19
 - **Operational notes:** 28
 - **Investigations:** 40
 - **Architecture & design:** 8
 - **Operations & guides:** 27
+- **Templates & examples:** 5
 
 ---
 
