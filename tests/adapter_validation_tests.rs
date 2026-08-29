@@ -873,12 +873,76 @@ agent:
 
     #[test]
     fn test_nonexistent_adapter_failure() {
-        // TODO: Implement test for nonexistent adapter failure
-        // This test skeleton will be filled in with actual assertions in a follow-up task
-        //
-        // Expected behavior:
-        // - Worker should fail to start when configured with a nonexistent adapter
-        // - Error message should indicate the adapter was not found
-        // - Error message should provide guidance on how to fix the issue
+        use std::process::Command;
+        use std::process::Stdio;
+
+        // Create an isolated HOME environment
+        let temp_home = TempHome::new().expect("Failed to create temporary HOME directory");
+
+        // Define a nonexistent adapter name
+        let nonexistent_adapter = "totally-bogus-adapter";
+
+        // Create a .needle.yaml config that specifies the nonexistent adapter
+        let config_yaml = format!(
+            r#"
+# Worker configuration
+worker:
+  name: test-worker
+
+# Agent configuration with nonexistent adapter
+agent:
+  default: {}
+"#,
+            nonexistent_adapter
+        );
+
+        let config_path = temp_home
+            .create_needle_config(&config_yaml)
+            .expect("Failed to create .needle.yaml config");
+
+        // Verify config file was created successfully
+        assert!(
+            config_path.exists(),
+            "Config file should exist at {:?}",
+            config_path
+        );
+
+        // Verify config file is valid YAML by reading it back
+        let config_content = fs::read_to_string(&config_path).expect("Failed to read config file");
+        assert!(
+            config_content.contains(nonexistent_adapter),
+            "Config should contain the nonexistent adapter name"
+        );
+
+        // Get the path to the needle binary
+        let bin_path =
+            std::env::var("CARGO_BIN_EXE_needle").unwrap_or_else(|_| "needle".to_string());
+
+        // Spawn the needle worker subprocess with isolated HOME
+        let output = Command::new(&bin_path)
+            .arg("run")
+            .arg("--once")
+            .env("HOME", temp_home.path()) // Isolate HOME to prevent scanning real workspaces
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .expect("Failed to spawn needle worker");
+
+        let stderr_output = String::from_utf8_lossy(&output.stderr);
+
+        // Verify the worker exits with nonzero status
+        assert!(
+            !output.status.success(),
+            "needle worker should fail with nonexistent adapter. Exit status: {:?}\nstderr: {}",
+            output.status.code(),
+            stderr_output
+        );
+
+        // Verify error message contains the adapter name
+        assert!(
+            stderr_output.contains(nonexistent_adapter) || stderr_output.contains("not found"),
+            "error message should mention the nonexistent adapter or indicate not found. Got: {}",
+            stderr_output
+        );
     }
 }
