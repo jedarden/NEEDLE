@@ -35,9 +35,11 @@ fn setup_test_path() -> String {
     format!("{}:{}", path_str, current_path)
 }
 
-/// Create a mock binary name
+/// Create a mock binary path
 fn mock_binary(name: &str) -> String {
-    format!("version-{}-mock.sh", name)
+    let mut path = fixtures_dir();
+    path.push(format!("version-{}-mock.sh", name));
+    path.to_string_lossy().to_string()
 }
 
 /// Mock telemetry emitter for testing
@@ -267,7 +269,7 @@ fn test_detect_backend_whitespace_only_output() {
 
     // Create a temporary mock that outputs only whitespace
     let mock_path = fixtures_dir().join("version-whitespace-mock.sh");
-    std::fs::write(&mock_path, "#!/bin/bash\necho \"   \"\n").unwrap();
+    std::fs::write(&mock_path, "#!/usr/bin/env bash\necho \"   \"\n").unwrap();
 
     // Make it executable
     #[cfg(unix)]
@@ -278,8 +280,8 @@ fn test_detect_backend_whitespace_only_output() {
         std::fs::set_permissions(&mock_path, perms).unwrap();
     }
 
-    let binary_name = "version-whitespace-mock.sh";
-    let result = probe.detect_backend(binary_name);
+    let binary_path = mock_path.to_string_lossy().to_string();
+    let result = probe.detect_backend(&binary_path);
 
     assert!(result.is_err());
     match result.unwrap_err() {
@@ -328,8 +330,8 @@ fn test_detect_backend_numeric_output() {
         std::fs::set_permissions(&mock_path, perms).unwrap();
     }
 
-    let binary_name = "version-numeric-mock.sh";
-    let result = probe.detect_backend(binary_name);
+    let binary_path = mock_path.to_string_lossy().to_string();
+    let result = probe.detect_backend(&binary_path);
 
     assert!(result.is_err());
     match result.unwrap_err() {
@@ -357,8 +359,8 @@ fn test_detect_backend_special_characters_output() {
         std::fs::set_permissions(&mock_path, perms).unwrap();
     }
 
-    let binary_name = "version-special-mock.sh";
-    let result = probe.detect_backend(binary_name);
+    let binary_path = mock_path.to_string_lossy().to_string();
+    let result = probe.detect_backend(&binary_path);
 
     assert!(result.is_err());
     match result.unwrap_err() {
@@ -494,8 +496,8 @@ fn test_detect_backend_multiline_output() {
         std::fs::set_permissions(&mock_path, perms).unwrap();
     }
 
-    let binary_name = "version-multiline-mock.sh";
-    let result = probe.detect_backend(binary_name);
+    let binary_path = mock_path.to_string_lossy().to_string();
+    let result = probe.detect_backend(&binary_path);
 
     match result {
         Ok(backend) => {
@@ -525,8 +527,8 @@ fn test_detect_backend_with_version_keyword() {
         std::fs::set_permissions(&mock_path, perms).unwrap();
     }
 
-    let binary_name = "version-with-keyword-mock.sh";
-    let result = probe.detect_backend(binary_name);
+    let binary_path = mock_path.to_string_lossy().to_string();
+    let result = probe.detect_backend(&binary_path);
 
     match result {
         Ok(backend) => {
@@ -556,8 +558,8 @@ fn test_detect_backend_with_extra_whitespace() {
         std::fs::set_permissions(&mock_path, perms).unwrap();
     }
 
-    let binary_name = "version-whitespace-mock2.sh";
-    let result = probe.detect_backend(binary_name);
+    let binary_path = mock_path.to_string_lossy().to_string();
+    let result = probe.detect_backend(&binary_path);
 
     match result {
         Ok(backend) => {
@@ -591,8 +593,8 @@ fn test_detect_backend_with_leading_empty_lines() {
         std::fs::set_permissions(&mock_path, perms).unwrap();
     }
 
-    let binary_name = "version-leading-empty-mock.sh";
-    let result = probe.detect_backend(binary_name);
+    let binary_path = mock_path.to_string_lossy().to_string();
+    let result = probe.detect_backend(&binary_path);
 
     match result {
         Ok(backend) => {

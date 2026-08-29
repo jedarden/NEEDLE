@@ -175,7 +175,7 @@ bead_cli:
 #[test]
 fn doctor_mentions_exit_code_in_summary_on_failure() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let workspace = create_test_workspace(temp_dir.path(), "nonexistent-backend-test");
+    let workspace = create_test_workspace(temp_dir.path(), "bead-rs");
 
     let output = Command::new(env!("CARGO_BIN_EXE_needle"))
         .arg("doctor")
