@@ -470,6 +470,7 @@ The scaffold is intentionally minimal. Future work may add:
 
 ## See Also
 
+- [Verification Runner Adoption Guide](adoption-guide.md) - Step-by-step setup for another repository
 - [Definition of Done Pattern](definition-of-done-pattern.md) - The motivation and design behind unified verification
 - [Definition of Done Adoption Guide](definition-of-done-adoption-guide.md) - How to adopt verification systems in new repos
 - [definition-of-done.sh](../scripts/definition-of-done.sh) - The hardcoded implementation for comparison

@@ -96,6 +96,7 @@ Running, maintaining, and operating NEEDLE fleets.
 | **[Definition of Done](definition-of-done.md)** | DoD adoption guide and pattern reference |
 | **[DoD Pattern](definition-of-done-pattern.md)** | Reusable DoD pattern for bead deliverables |
 | **[DoD Adoption Guide](definition-of-done-adoption-guide.md)** | How to adopt DoD in your workspace |
+| **[Verification Runner Adoption Guide](adoption-guide.md)** | Adopt the configurable YAML verification runner |
 | **[Marathon Instruction](marathon-instruction.md)** | Long-running session patterns |
 
 ### Checkpoint & Recovery

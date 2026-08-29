@@ -23,22 +23,46 @@ fast_lane:
     description: "Verify compilation without running tests"
 
 # Slow lane: Full test suite that may take several minutes
-# These provide comprehensive validation of the codebase
+# These mirror NEEDLE's named CI verification targets.
 slow_lane:
+  - name: "Build test targets"
+    command: "cargo"
+    args: ["test", "--no-run", "--lib", "--test", "integration_tests", "--test", "p2_integration_tests", "--test", "p3_integration_tests", "--test", "real_br_integration_tests"]
+    timeout: 1800
+    description: "Compile every test target before timed test runs"
+
   - name: "Unit tests"
     command: "cargo"
     args: ["test", "--lib"]
-    timeout: 300
+    timeout: 900
     description: "Run library unit tests"
 
-  - name: "Integration tests"
+  - name: "Core integration tests"
     command: "cargo"
-    args: ["test", "--test", "*"]
-    timeout: 600
-    description: "Run integration tests"
+    args: ["test", "--test", "integration_tests"]
+    timeout: 900
+    description: "Run core strand integration tests"
 
-  - name: "Doc tests"
+  - name: "P2 integration tests"
     command: "cargo"
-    args: ["test", "--doc"]
-    timeout: 300
-    description: "Run documentation tests"
+    args: ["test", "--test", "p2_integration_tests"]
+    timeout: 900
+    description: "Run Mend and Explore integration tests"
+
+  - name: "P3 integration tests"
+    command: "cargo"
+    args: ["test", "--test", "p3_integration_tests"]
+    timeout: 900
+    description: "Run Weave, Unravel, Pulse, and Knot integration tests"
+
+  - name: "Real bead-rs integration tests"
+    command: "cargo"
+    args: ["test", "--test", "real_br_integration_tests"]
+    timeout: 900
+    description: "Run integration tests against the real bead-rs backend"
+
+  - name: "Installer tests"
+    command: "bash"
+    args: ["tests/installer/run.sh"]
+    timeout: 60
+    description: "Run isolated installer regression tests"

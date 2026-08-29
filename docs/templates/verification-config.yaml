@@ -1,0 +1,54 @@
+# Configurable verification runner template.
+# Copy to .verification/config.yaml and replace the example commands.
+#
+# Required top-level field:
+#   version: configuration format version
+#
+# Each check requires name and command. The other check fields are optional:
+#   args: list of simple command arguments (default: [])
+#   timeout: seconds (default: 60)
+#   description: maintainer-facing explanation
+#   allow_failure: true for warning-only checks (default: false)
+#   environment: list of KEY=value strings for this check
+
+version: "1.0"
+description: "Verification checks for <repository-name>"
+
+# Fast checks run before commits. Keep them deterministic and short.
+fast_lane:
+  - name: "Format check"
+    command: "<format-command>"
+    args: ["<format-check-argument>"]
+    timeout: 60
+    description: "Verify files use the repository's required formatting"
+
+  - name: "Lint"
+    command: "<lint-command>"
+    args: []
+    timeout: 120
+    description: "Run the repository's mandatory static checks"
+
+  # Optional warning-only check. Remove this entry if it is not useful.
+  - name: "Advisory check"
+    command: "<advisory-command>"
+    args: []
+    timeout: 60
+    allow_failure: true
+    description: "Report a useful check without blocking adoption"
+
+# Expensive checks run in CI and before release.
+slow_lane:
+  - name: "Unit tests"
+    command: "<test-command>"
+    args: ["<unit-test-argument>"]
+    timeout: 600
+    description: "Run the repository's unit test suite"
+
+  - name: "Integration tests"
+    command: "<integration-test-command>"
+    args: []
+    timeout: 900
+    description: "Run integration tests and required service checks"
+
+  # Environment values use a list, not a YAML mapping. Do not commit secrets.
+  # environment: ["EXAMPLE_MODE=ci"]
