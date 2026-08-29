@@ -217,7 +217,7 @@ impl MockPoller {
         }
 
         // Only poll at exact interval boundaries
-        if elapsed % interval == Duration::ZERO && elapsed > Duration::ZERO {
+        if elapsed.as_nanos() % interval.as_nanos() == 0 && elapsed > Duration::ZERO {
             return true;
         }
 
@@ -411,7 +411,7 @@ mod tests {
 
     #[test]
     fn test_mock_clock_creation() {
-        let clock = MockClock::new();
+        let _clock = MockClock::new();
         // Clock should start at current time
         // This is a basic smoke test
     }
@@ -468,7 +468,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_poller_basic() {
-        let poller = MockPoller::new()
+        let mut poller = MockPoller::new()
             .with_interval_secs(10)
             .with_immediate_first(true);
 
@@ -484,7 +484,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_poller_disabled() {
-        let poller = MockPoller::new()
+        let mut poller = MockPoller::new()
             .with_enabled(false)
             .with_interval_secs(10);
 

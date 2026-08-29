@@ -351,7 +351,7 @@ impl CanaryRunner {
         let backend = &bead_cli.backend;
 
         // Verify the backend binary exists
-        let (backend_type, binary_path) =
+        let (backend_type, binary_path, _source) =
             crate::config::resolve_bead_cli(bead_cli).with_context(|| {
                 format!(
                     "failed to resolve bead CLI backend '{}' for canary workspace {}",
@@ -603,7 +603,7 @@ impl CanaryRunner {
                 self.canary_workspace.display()
             )
         })?;
-        let (_, binary) = crate::config::resolve_bead_cli(&bead_cli).with_context(|| {
+        let (_, binary, _source) = crate::config::resolve_bead_cli(&bead_cli).with_context(|| {
             format!(
                 "failed to resolve canary workspace bead backend '{}'",
                 bead_cli.backend
