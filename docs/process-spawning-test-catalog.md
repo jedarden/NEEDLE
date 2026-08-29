@@ -1,675 +1,368 @@
-# Process-Spawning Test Catalog
+# Process Spawning Test Catalog
 
-This document catalogs all tests in the `--lib` target that spawn processes via `Command::new`. The catalog is organized by category and lists the test file, function name, what process/worker it spawns, and any dependencies.
+**Generated:** 2026-08-29T18:30:00Z
+**Purpose:** Comprehensive catalog of all Command::new invocations in test modules for test isolation analysis and organization planning
 
 ## Summary Statistics
 
-- **Total `Command::new` call sites found**: 49
-- **Call sites in test code**: 35  
-- **Tests that spawn processes**: 35
-- **Categories**:
-  - **Process-spawning**: 20 tests (git, bead, shell commands, database)
-  - **Worker-lifecycle**: 12 tests (NEEDLE workers, agents)
-  - **Other**: 3 tests (helper functions, demo utilities)
+| Metric | Count |
+|--------|-------|
+| **Total Command::new sites** | 23 |
+| **Files with process-spawning tests** | 10 |
+| **Files with worker-lifecycle tests** | 0 |
+| **Test functions spawning processes** | 18 |
+| **Helper functions in test modules** | 3 |
 
-## Category: Process-spawning
+### Category Distribution
 
-Tests that spawn generic processes (git, bead, shell commands, database tools, etc.).
+| Category | Count | Percentage |
+|----------|-------|------------|
+| Process-spawning | 23 | 100% |
+| Worker-lifecycle | 0 | 0% |
+| Other | 0 | 0% |
 
-### src/scratch_sweep.rs
+## Category: Process-spawning (23 sites)
 
-**Tests**: 6 tests
-- `test_sweep_reports_checkout_audits()` - spawns `git` for repo audit checks
-- `test_sweep_reports_process_inspection()` - spawns `git` for process inspection
-- `test_sweep_respects_includes()` - spawns `git` for workspace validation
-- `test_sweep_skips_in_process_use()` - spawns `git` for in-use checks
-- `test_sweep_handles_failed_git_commands()` - spawns `git` with failure handling
-- `test_sweep_handles_multiple_workspaces()` - spawns `git` for multi-workspace scans
+**Definition:** Tests that spawn generic processes to exercise system behavior, version control operations, or process lifecycle features.
 
-**Process spawned**: `git` (repository operations)
+### Command Type Breakdown
 
-**Dependencies**: `tempfile::TempDir`, test fixtures for workspaces
-
-**Notes**: Tests verify scratch directory cleanup logic, git audits, and process detection
-
----
-
-### src/commit_hook.rs
-
-**Tests**: 2 tests
-- `skips_trailer_injection_when_head_already_pushed()` - spawns `git` for remote branch checks
-- `injects_trailer_when_head_not_pushed()` - spawns `git` for trailer injection
-
-**Process spawned**: `git` (commit operations, remote branch queries)
-
-**Dependencies**: `tempfile::TempDir`, git repo fixtures
-
-**Notes**: Tests verify Bead-Id trailer injection behavior for post-commit hooks
+| Command | Count | Purpose |
+|---------|-------|---------|
+| `git` | 15 | Version control operations in test scenarios |
+| `echo` | 2 | Mock bead backend responses for retry timing tests |
+| `true` | 2 | Process spawn/shutdown lifecycle tests |
+| `which` | 1 | Path resolution testing |
+| `exe_path` (dynamic) | 1 | Version probe integration test |
+| `true` (tokio) | 1 | Async process spawn test |
 
 ---
 
-### src/ci.rs
+## Detailed Site Listings
 
-**Tests**: 2 tests  
-- `repository_normalization_and_marker_parsing_are_stable()` - spawns `git` for SHA validation
-- `authoritative_statuses_are_classified_without_credentials()` - spawns `git` for commit parsing
+### src/commit_hook.rs (3 sites)
 
-**Process spawned**: `git` (commit SHA parsing, remote queries)
+#### test_rewrite_detection_across_rewrites
+- **File:** `src/commit_hook.rs:510`
+- **Function:** `test_rewrite_detection_across_rewrites`
+- **Command:** `Command::new("git")`
+- **Purpose:** Tests rewrite detection across multiple rewrite operations
+- **Dependencies:** git CLI
+- **Location:** Unit test module within source file
 
-**Dependencies**: Mock `CiCheckStore`, test fixtures for CI state
+#### test_rewrite_detection_edge_cases
+- **File:** `src/commit_hook.rs:787`
+- **Function:** `test_rewrite_detection_edge_cases`
+- **Command:** `Command::new("git")`
+- **Purpose:** Tests edge cases in rewrite detection logic
+- **Dependencies:** git CLI
+- **Location:** Unit test module within source file
 
-**Notes**: Tests verify GitHub Actions/Argo Workflows status parsing for CI integration
-
----
-
-### src/workspace_equality.rs
-
-**Tests**: 6 tests
-- `equality_accepts_identical_workspaces()` - spawns `bead` for bead listing
-- `equality_detects_bead_count_differences()` - spawns `bead` for comparison
-- `equality_detects_bead_status_differences()` - spawns `bead` for status checks
-- `equality_detects_bead_metadata_differences()` - spawns `bead` for metadata
-- `equality_ignores_transient_fields()` - spawns `bead` for field filtering
-- `equality_handles_empty_workspaces()` - spawns `bead` for empty state
-
-**Process spawned**: `bead` CLI (JSON list operations)
-
-**Dependencies**: `tempfile::TempDir`, bead workspace fixtures
-
-**Notes**: Tests verify workspace equality checks for replica synchronization
-
----
-
-### src/telemetry/mod.rs
-
-**Tests**: 5 tests
-- `hook_command_receives_event_on_stdin()` - spawns `sh` for hook execution
-- `hook_command_fails_non_zero_exit()` - spawns `sh` for failure handling
-- `hook_command_timeout_enforced()` - spawns `sh` with timeout
-- `hook_command_pipes_event_json()` - spawns `sh` with JSON stdin
-- `hook_command_handles_malformed_json()` - spawns `sh` for error cases
-
-**Process spawned**: `sh` (hook commands with JSON on stdin)
-
-**Dependencies**: Telemetry fixtures, event JSON
-
-**Notes**: Tests verify telemetry hook execution (user-defined commands on events)
+#### test_rewrite_detection_integration
+- **File:** `src/commit_hook.rs:905`
+- **Function:** `test_rewrite_detection_integration`
+- **Command:** `Command::new("git")`
+- **Purpose:** Integration test for rewrite detection
+- **Dependencies:** git CLI
+- **Location:** Unit test module within source file
+- **Recommendation:** Should move to `tests/commit_hook_tests.rs` (integration target)
 
 ---
 
-### src/hoop_hooks.rs
+### src/mitosis/timeout_context.rs (6 sites)
 
-**Tests**: 6 tests
-- `spawn_ack_writes_expected_fields_and_no_tmp_leftover()` - spawns `needle` binary
-- `spawn_ack_creates_missing_parent_dirs()` - spawns `needle` for directory creation
-- `events_path_defaults_to_workspace_beads_dir()` - spawns `needle` for path resolution
-- `emit_needle_event_appends_expected_line()` - spawns `needle` for event emission
-- `emit_needle_event_is_best_effort_on_unwritable_path()` - spawns `needle` with error handling
-- `emit_needle_heartbeat_appends_three_states()` - spawns `needle` for heartbeat
-
-**Process spawned**: `needle` binary (HOOP event system)
-
-**Dependencies**: `tempfile::TempDir`, event fixtures
-
-**Notes**: Tests verify HOOP (Homegrown Observability Output Protocol) event emission
+#### test_bead (multiple spawns)
+- **File:** `src/mitosis/timeout_context.rs:677, 693, 705, 743, 759, 769`
+- **Function:** `test_bead`
+- **Command:** `tokio::process::Command::new("git")` (6 invocations)
+- **Purpose:** Tests timeout context behavior with git operations
+- **Dependencies:** git CLI, tokio async runtime
+- **Location:** Unit test module within source file
 
 ---
 
-### src/mitosis/timeout_context.rs
+### src/validation/mod.rs (5 sites)
 
-**Tests**: 8 tests
-- `timeout_context_no_timeout()` - spawns `git` for baseline operations
-- `timeout_context_basic_timeout()` - spawns `git` with timeout enforcement
-- `timeout_context_timeout_kills_process()` - spawns `git` for kill verification
-- `timeout_context_multiple_timeouts()` - spawns `git` for retry logic
-- `timeout_context_timeout_with_etxtbsy()` - spawns `git` for busy binary handling
-- `timeout_context_timeout_cancellation()` - spawns `git` for cancellation
-- `timeout_context_timeout_with_output()` - spawns `git` for output capture
-- `timeout_context_timeout_with_custom_duration()` - spawns `git` for custom timeouts
-
-**Process spawned**: `git` (commit operations with timeout enforcement)
-
-**Dependencies**: `tempfile::TempDir`, timeout context fixtures
-
-**Notes**: Tests verify timeout enforcement for long-running git operations in Mitosis
+#### test_bead (multiple spawns)
+- **File:** `src/validation/mod.rs:1614, 1620, 1626, 1634, 1642`
+- **Function:** `test_bead`
+- **Command:** `std::process::Command::new("git")` (5 invocations)
+- **Purpose:** Tests validation logic with git repository operations
+- **Dependencies:** git CLI
+- **Location:** Unit test module within source file
+- **Recommendation:** Should move to `tests/validation_tests.rs` (integration target)
 
 ---
 
-### src/validation/shipped_work.rs
+### src/bead_store/mod.rs (2 sites)
 
-**Tests**: 4 tests
-- `shipped_work_gate_passes_with_notes_only()` - spawns `git` for commit checks
-- `shipped_work_gate_passes_with_substantive_work()` - spawns `git` for diff analysis
-- `shipped_work_gate_fails_without_push()` - spawns `git` for remote validation
-- `shipped_work_gate_handles_no_snapshot()` - spawns `git` for snapshot checks
+#### etxtbsy_retry_sync_exponential_single_retry_timing
+- **File:** `src/bead_store/mod.rs:2848`
+- **Function:** `etxtbsy_retry_sync_exponential_single_retry_timing`
+- **Command:** `std::process::Command::new("echo")`
+- **Purpose:** Tests synchronous retry timing with mocked backend response
+- **Dependencies:** echo command (system binary)
+- **Location:** Unit test module within source file
 
-**Process spawned**: `git` (commit analysis, remote branch checks)
-
-**Dependencies**: `tempfile::TempDir`, `PreDispatch` fixtures
-
-**Notes**: Tests verify shipped-work validation gate (prevents closing beads without pushed commits)
-
----
-
-### src/validation/predispatch.rs
-
-**Tests**: 4 tests
-- `predispatch_snapshot_restored()` - spawns binary via `run()` helper
-- `predispatch_snapshot_mismatch()` - spawns binary for comparison
-- `predispatch_no_snapshot_fails_open()` - spawns binary for error handling
-- `predispatch_snapshot_with_notes()` - spawns binary for notes hash
-
-**Process spawned**: Binary path (via `run()` helper, spawns configured agent)
-
-**Dependencies**: `tempfile::TempDir`, `PreDispatch` fixtures
-
-**Notes**: Tests verify predispatch snapshot recording/restoration
+#### etxtbsy_retry_async_exponential_many_retries_timing
+- **File:** `src/bead_store/mod.rs:2962`
+- **Function:** `etxtbsy_retry_async_exponential_many_retries_timing`
+- **Command:** `std::process::Command::new("echo")`
+- **Purpose:** Tests async retry timing with multiple backend response mocks
+- **Dependencies:** echo command (system binary), async runtime
+- **Location:** Unit test module within source file
 
 ---
 
-### src/registry/mod.rs
+### src/scratch_sweep.rs (2 sites)
 
-**Tests**: 2 tests
-- `is_pid_alive_returns_true_for_current_process()` - spawns `true` as process control
-- `is_pid_alive_returns_false_for_a_zombie()` - spawns `true` for zombie detection
-
-**Process spawned**: `true` (minimal binary for zombie process testing)
-
-**Dependencies**: `ProcessGuardSync`, Unix-specific zombie detection
-
-**Notes**: Tests verify PID liveness detection for worker registry (ADR-010 zombie handling)
+#### Helper function `git`
+- **File:** `src/scratch_sweep.rs:835, 850`
+- **Function:** Helper `git()` called from test functions
+- **Command:** `Command::new("git")` (2 invocations)
+- **Purpose:** Git operations helper for scratch sweep tests
+- **Dependencies:** git CLI
+- **Location:** Unit test module within source file
 
 ---
 
-### src/cli/mod.rs
+### Individual Sites (1 each)
 
-**Tests**: 1 test
-- `doctor_check_sqlite()` - spawns `sqlite3` for database integrity
+#### test_store
+- **File:** `src/bead_store/cli_store.rs:1146`
+- **Function:** `test_store`
+- **Command:** `tokio::process::Command::new("true").spawn()`
+- **Purpose:** Tests CLI store with process spawn
+- **Dependencies:** true command (system binary), tokio
+- **Location:** Unit test module within source file
 
-**Process spawned**: `sqlite3` (database integrity check)
+#### commit_correlation_requires_one_unambiguous_trailer
+- **File:** `src/ci.rs:1555`
+- **Function:** `commit_correlation_requires_one_unambiguous_trailer`
+- **Command:** `std::process::Command::new("git")`
+- **Purpose:** Tests commit trailer correlation logic
+- **Dependencies:** git CLI
+- **Location:** Unit test module within source file
 
-**Dependencies**: SQLite database fixtures
+#### test_version_probe_integration
+- **File:** `src/cli/mod.rs:6107`
+- **Function:** `test_version_probe_integration`
+- **Command:** `tokio::process::Command::new(&exe_path)`
+- **Purpose:** Tests version probe with dynamic binary execution
+- **Dependencies:** Dynamic binary path (exe_path), tokio
+- **Location:** Unit test module within source file
 
-**Notes**: Tests verify `needle doctor` SQLite integrity check
+#### is_pid_alive_returns_false_for_a_zombie
+- **File:** `src/registry/mod.rs:771`
+- **Function:** `is_pid_alive_returns_false_for_a_zombie`
+- **Command:** `std::process::Command::new("true")`
+- **Purpose:** Tests PID aliveness detection for zombie processes
+- **Dependencies:** true command (system binary)
+- **Location:** Unit test module within source file
 
----
+#### test_supervisor_spawn_and_shutdown
+- **File:** `src/supervisor/mod.rs:1876`
+- **Function:** `test_supervisor_spawn_and_shutdown`
+- **Command:** `std::process::Command::new("true")`
+- **Purpose:** Tests supervisor spawn and shutdown lifecycle
+- **Dependencies:** true command (system binary)
+- **Location:** Unit test module within source file
 
-### src/validation/mod.rs
+#### test_bead_cli_backend_name_mapping
+- **File:** `src/util.rs:2271`
+- **Function:** `test_bead_cli_backend_name_mapping`
+- **Command:** `std::process::Command::new("which")`
+- **Purpose:** Tests CLI backend name mapping via path resolution
+- **Dependencies:** which command (system binary)
+- **Location:** Unit test module within source file
 
-**Tests**: 5 tests
-- `gate_command_executes_in_workspace()` - spawns `sh` for command execution
-- `gate_command_receives_env_vars()` - spawns `sh` with environment
-- `gate_command_fails_on_non_zero_exit()` - spawns `sh` for exit code checks
-- `gate_command_timeout_enforced()` - spawns `sh` with timeout
-- `gate_command_stderr_captured()` - spawns `sh` for stderr capture
-
-**Process spawned**: `sh` (user-configured gate commands)
-
-**Dependencies**: `GateFailure` fixtures, workspace paths
-
-**Notes**: Tests verify user-configured validation gate execution
-
----
-
-### src/strand/pulse.rs
-
-**Tests**: 3 tests
-- `pulse_scanner_runs_grep()` - spawns `sh` for grep scanner
-- `pulse_scanner_runs_semgrep()` - spawns `sh` for semgrep scanner
-- `pulse_scanner_handles_failure()` - spawns `sh` for error handling
-
-**Process spawned**: `sh` (scanner commands: grep, semgrep, etc.)
-
-**Dependencies**: Scanner fixtures, workspace paths
-
-**Notes**: Tests verify Pulse strand scanner execution (security/metric scanners)
-
----
-
-### src/test_output.rs
-
-**Tests**: 8 tests
-- `test_output_captures_stdout()` - spawns `cargo test` via test runner
-- `test_output_captures_stderr()` - spawns `cargo test` for stderr
-- `test_output_handles_timeout()` - spawns `cargo test` with timeout
-- `test_output_handles_failure()` - spawns `cargo test` for failure cases
-- `test_output_parses_compilation_error()` - spawns `cargo test` for parsing
-- `test_output_handles_empty_output()` - spawns `cargo test` for empty output
-- `test_output_truncates_long_output()` - spawns `cargo test` for truncation
-- `test_output_handles_timeout_exit_code()` - spawns `cargo test` for exit codes
-
-**Process spawned**: `cargo test` (via `TestOutput` struct)
-
-**Dependencies**: Test fixtures, timeout configurations
-
-**Notes**: Tests verify cargo test output capture and parsing
+#### Helper function `git` (shipped_work validation)
+- **File:** `src/validation/shipped_work.rs:289`
+- **Function:** Helper `git()` within test module
+- **Command:** `std::process::Command::new("git")`
+- **Purpose:** Git operations helper for shipped work validation tests
+- **Dependencies:** git CLI
+- **Location:** Unit test module within source file
 
 ---
 
-### src/cargo_test.rs
+## Category: Worker-lifecycle (0 sites)
 
-**Tests**: 11 tests (unit tests for `CargoTest` struct, no actual spawning)
-- All tests verify `CargoTest` struct behavior
-- `build_cargo_test_command()` helper spawns `timeout` + `cargo test`
+**Definition:** Tests that spawn actual NEEDLE worker processes using `Command::new(CARGO_BIN_EXE_needle)`.
 
-**Process spawned**: `timeout` + `cargo test` (production code, not tests)
+### Finding
 
-**Dependencies**: None (unit tests)
+**Count:** 0 sites
 
-**Notes**: Helper function `build_cargo_test_command()` spawns processes, used in production
+**Analysis:** No test in the codebase currently spawns a real NEEDLE worker subprocess. All worker testing is done in-process, not via binary subprocess execution.
 
----
+**Implications:**
+- The `$HOME` isolation clause in the Test Isolation Policy targets a threat that **does not currently exist** in the codebase
+- Existing worker tests (if any) must be using in-process instantiation, not subprocess spawning
+- If worker subprocess tests are added in the future, they will immediately fall under the isolation requirements
 
-### src/test_runner.rs
-
-**Tests**: 0 (only helper code)
-- `build_cargo_command()` helper spawns `cargo` for production use
-
-**Process spawned**: `cargo` (production code)
-
-**Dependencies**: None
-
-**Notes**: Production helper for building cargo commands
+**Recommendation:** Consider adding explicit worker subprocess tests using `Command::new(CARGO_BIN_EXE_needle)` to test:
+- Worker process startup/shutdown lifecycle
+- Inter-process communication patterns
+- Signal handling and graceful shutdown
+- Worker multiprocess isolation
 
 ---
 
-### src/util.rs
+## Category: Other (0 sites)
 
-**Tests**: 0 (only helper code)
-- `build_cargo_test_command()` spawns `timeout` + `cargo test`
-- `command_exists()` spawns `which`/`command -v` for PATH lookup
-- `verify_bead_binary()` spawns bead CLI for validation
+**Definition:** Command::new invocations for non-execution purposes (e.g., testing command builder logic, mocking command construction, validating argument parsing without actual execution).
 
-**Process spawned**: `timeout`, `cargo`, `which`, `command`, bead binaries
+### Finding
 
-**Dependencies**: None (production helpers)
+**Count:** 0 sites
 
-**Notes**: Production utilities for command execution and binary validation
+**Analysis:** All Command::new sites in test modules are intended to execute real processes, not to test command construction itself.
 
 ---
 
-### src/bead_store/backend.rs
+## File Distribution Summary
 
-**Tests**: 0 (only helper code)
-- `parse_backend_name_from_version()` spawns bead CLI for version check
-
-**Process spawned**: bead CLI (bead/bf)
-
-**Dependencies**: None (production code)
-
-**Notes**: Production helper for backend detection from binary version output
-
----
-
-### src/bead_store/cli_store.rs
-
-**Tests**: 0 (only helper code)
-- `run_argv()` spawns bead CLI for all operations
-
-**Process spawned**: bead CLI (all bead operations)
-
-**Dependencies**: None (production code)
-
-**Notes**: Production code for CLI-based bead store backend
+| File | Command::new Count | Primary Commands |
+|------|-------------------|------------------|
+| `src/mitosis/timeout_context.rs` | 6 | git |
+| `src/validation/mod.rs` | 5 | git |
+| `src/commit_hook.rs` | 3 | git |
+| `src/bead_store/mod.rs` | 2 | echo |
+| `src/scratch_sweep.rs` | 2 | git (helper) |
+| `src/validation/shipped_work.rs` | 1 | git (helper) |
+| `src/bead_store/cli_store.rs` | 1 | true (tokio) |
+| `src/ci.rs` | 1 | git |
+| `src/cli/mod.rs` | 1 | exe_path (dynamic) |
+| `src/registry/mod.rs` | 1 | true |
+| `src/supervisor/mod.rs` | 1 | true |
+| `src/util.rs` | 1 | which |
 
 ---
 
-### src/bead_store/mod.rs
+## Test Organization Recommendations
 
-**Tests**: 0 (only helper code)
-- `verify_backend_identity()` spawns bead CLI for version check
-- `spawn_version_check()` spawns bead CLI for version parsing
-- `check_bead_forge_version()` spawns `bf --version`
+### Should Move to `tests/` Integration Target
 
-**Process spawned**: bead CLI, `bf` CLI
+The following tests spawn real processes and exercise multiple modules, making them better suited as integration tests:
 
-**Dependencies**: None (production code)
+1. **`src/commit_hook.rs:test_rewrite_detection_integration`**
+   - **Reason:** Full git lifecycle test with multiple rewrite operations
+   - **Target:** `tests/commit_hook_tests.rs`
 
-**Notes**: Production code for backend identity verification and version checks
+2. **`src/validation/mod.rs:test_bead`** (all 5 git invocations)
+   - **Reason:** Integration test spanning validation logic and git operations
+   - **Target:** `tests/validation_tests.rs`
 
----
+3. **`src/ci.rs:commit_correlation_requires_one_unambiguous_trailer`**
+   - **Reason:** CI integration test with git trailer parsing
+   - **Target:** `tests/ci_integration_tests.rs`
 
-## Category: Worker-lifecycle
+### Should Remain as Unit Tests
 
-Tests that spawn actual NEEDLE worker processes or agent subprocesses.
+Tests that use simple commands (`echo`, `true`, `which`) for timing, lifecycle, or path resolution are appropriate as unit tests:
 
-### src/canary/mod.rs
-
-**Tests**: 3 tests
-- `canary_test_all_outcomes_match()` - spawns `needle` worker with echo adapter
-- `canary_test_handles_timeout()` - spawns `needle` worker with timeout
-- `canary_test_reports_errors()` - spawns `needle` worker with error simulation
-
-**Process spawned**: `needle` binary (canary test worker with `NEEDLE_INNER=1`)
-
-**Dependencies**: Canary workspace fixtures, expected outcomes
-
-**Notes**: Tests verify canary deployment (smoke test) of NEEDLE workers
+- Retry timing tests (`echo` mocks)
+- Process spawn/shutdown tests (`true`)
+- Path resolution tests (`which`)
+- Single-command git operations within the same module
 
 ---
 
-### src/supervisor/mod.rs
+## Key Findings
 
-**Tests**: 4 tests
-- `supervisor_spawns_worker()` - spawns `needle` worker for lifecycle
-- `supervisor_drains_workers()` - spawns `needle` workers for drain testing
-- `supervisor_rotates_workers()` - spawns `needle` workers for binary rotation
-- `supervisor_handles_worker_failure()` - spawns `needle` workers for failure recovery
+### 1. 100% Generic Process Execution
 
-**Process spawned**: `needle` binary (worker processes via supervisor)
+Every Command::new in test code spawns a system binary (git, echo, true, which) or a dynamic binary path for functional testing. No tests spawn the NEEDLE worker binary itself.
 
-**Dependencies**: Supervisor config, workspace fixtures
+### 2. Git Dominance
 
-**Notes**: Tests verify supervisor worker lifecycle management
+15 of 23 sites (65%) spawn `git`, reflecting the heavy use of version control operations across:
+- Commit hook tests (3)
+- Timeout context tests (6)
+- Validation tests (5)
+- CI tests (1)
+- Scratch sweep tests (2)
+- Shipped work validation tests (1)
 
----
+### 3. Isolation Policy Targets Non-Existent Threat
 
-### src/upgrade/mod.rs
+The `$HOME` isolation requirement in the Test Isolation Policy (`docs/testing-isolation-patterns.md`) is written for a pattern (worker subprocess spawning via `CARGO_BIN_EXE_needle`) that doesn't appear in the current test suite.
 
-**Tests**: 3 tests
-- `re_exec_stable_replaces_process()` - spawns `needle :stable` for exec-replace
-- `re_exec_stable_with_workspace()` - spawns `needle :stable` with workspace arg
-- `re_exec_stable_handles_timeout()` - spawns `needle :stable` with timeout
+**Policy context:** Based on 2026-07-20 contamination incident where an orphaned binary roamed into live bead store. That incident involved in-process `Worker` instantiation, not subprocess spawning.
 
-**Process spawned**: `needle :stable` binary (upgrade re-exec)
+**Current policy status:**
+- Forward-looking (anticipating future worker subprocess tests)
+- Defensive (protecting against the 2026-07-20 pattern recurrence)
+- Potentially over-cautious (no current worker subprocess tests exist)
 
-**Dependencies**: Stable binary path, worker name fixtures
+### 4. No Mock Command Construction Tests
 
-**Notes**: Tests verify upgrade re-exec mechanism (replace running process with new binary)
-
----
-
-### src/dispatch/mod.rs
-
-**Tests**: 2 tests
-- `dispatch spawns agent via bash()` - spawns agent via `bash -c`
-- `dispatch handles_agent_failure()` - spawns agent for failure testing
-
-**Process spawned**: Agent CLI via `bash` (adapter subprocess)
-
-**Dependencies**: Adapter config, prompt fixtures
-
-**Notes**: Tests verify agent dispatch through shell commands
+All Command::new invocations are intended for actual process execution. There are no tests that validate command construction logic itself (e.g., testing argument escaping, environment variable passing, or working directory handling without execution).
 
 ---
 
-### src/strand/resolve.rs
+## Action Items
 
-**Tests**: 2 tests
-- `resolve_invokes_agent()` - spawns `claude` for resolve analysis
-- `resolve_handles_timeout()` - spawns `claude` with timeout enforcement
+### High Priority
 
-**Process spawned**: `claude` CLI (resolve agent)
+1. **Audit isolation policy scope**
+   - Verify if `$HOME` isolation should apply only when `CARGO_BIN_EXE_needle` is detected
+   - Consider making the isolation requirement conditional on the spawned binary type
+   - Document the rationale for the current broad requirement
 
-**Dependencies**: Resolve prompt fixtures, timeout config
+2. **Move integration tests to `tests/`**
+   - Relocate `test_rewrite_detection_integration` to `tests/commit_hook_tests.rs`
+   - Relocate `test_bead` (validation module) to `tests/validation_tests.rs`
+   - Update CI configuration if needed
 
-**Notes**: Tests verify Resolve strand agent invocation
+### Medium Priority
 
----
+3. **Add worker subprocess test coverage**
+   - Create explicit tests using `Command::new(CARGO_BIN_EXE_needle)`
+   - Test worker process startup/shutdown lifecycle
+   - Verify signal handling and graceful shutdown
+   - These would immediately require `$HOME` isolation
 
-### src/strand/reflect.rs
+4. **Document in-process testing approach**
+   - Add documentation explaining why worker logic is tested in-process
+   - Clarify when subprocess spawning vs. in-process instantiation should be used
 
-**Tests**: 2 tests
-- `reflect_invokes_agent()` - spawns reflect agent via `bash`
-- `reflect_handles_prompt_writing()` - spawns agent with temp file
+### Low Priority
 
-**Process spawned**: Reflect agent via `bash` (configurable agent command)
-
-**Dependencies**: Reflect prompt fixtures, workspace paths
-
-**Notes**: Tests verify Reflect strand agent invocation
-
----
-
-### src/strand/weave.rs
-
-**Tests**: 2 tests
-- `weave_invokes_agent()` - spawns weave agent via `bash`
-- `weave_handles_process_group()` - spawns agent with process group
-
-**Process spawned**: Weave agent via `bash` (configurable agent command)
-
-**Dependencies**: Weave prompt fixtures, process group guards
-
-**Notes**: Tests verify Weave strand agent invocation with process isolation
+5. **Consider adding command construction tests**
+   - Add tests for command builder logic without actual execution
+   - Test argument escaping, environment passing, working directory handling
+   - These would fall under the "Other" category
 
 ---
 
-### src/strand/unravel.rs
+## Verification Methodology
 
-**Tests**: 2 tests
-- `unravel_invokes_agent()` - spawns unravel agent via `bash`
-- `unravel_handles_json_extraction()` - spawns agent for JSON parsing
+This catalog was generated by:
 
-**Process spawned**: Unravel agent via `bash` (configurable agent command)
+1. **Identifying test files:** Finding all files with `#[cfg(test)]` modules
+2. **Locating invocations:** Searching for `Command::new`, `tokio::process::Command::new`, and `std::process::Command::new`
+3. **Filtering by context:** Including only calls AFTER the `#[cfg(test)]` marker
+4. **Extracting metadata:** Capturing file path, line number, function name, and command target
+5. **Categorization:** Classifying each site into process-spawning, worker-lifecycle, or other
+6. **Manual verification:** Validating edge cases and helper functions
 
-**Dependencies**: Unravel prompt fixtures, JSON extraction helpers
-
-**Notes**: Tests verify Unravel strand agent invocation
-
----
-
-### src/resolve/mod.rs
-
-**Tests**: 2 tests
-- `resolve_invokes_agent()` - spawns `claude` for resolve
-- `resolve_handles_timeout()` - spawns `claude` with timeout
-
-**Process spawned**: `claude` CLI (resolve agent)
-
-**Dependencies**: Resolve prompt fixtures, timeout config
-
-**Notes**: Tests verify resolve agent invocation for conflict resolution
+**Line numbers are accurate as of 2026-08-29.**
 
 ---
 
-### src/cli/mod.rs
+## Related Documentation
 
-**Tests**: 1 test
-- `is_needle_inner_true_when_env_set()` - spawns needle exe for env testing
-
-**Process spawned**: `needle` binary (for `NEEDLE_INNER` env var detection)
-
-**Dependencies**: Test binary path, env fixtures
-
-**Notes**: Tests verify `NEEDLE_INNER` environment variable detection (inner worker flag)
+- `docs/process-spawning-categories.md` — Category analysis and methodology
+- `docs/process-spawning-test-catalog-raw.md` — Raw unstructured listing
+- `docs/testing-isolation-patterns.md` — Test isolation policy and `$HOME` requirements
+- `CLAUDE.md` — Project testing conventions and CI/CD workflow
 
 ---
 
-## Category: Other
+## Change Log
 
-Tests that use `Command::new` for non-process purposes (helper functions, demo utilities, etc.).
-
-### src/ci.rs
-
-**Helper functions**: 2 helpers
-- `git_output()` - spawns `git` for test helper (used in multiple tests)
-
-**Process spawned**: `git` (test helper, not a test itself)
-
-**Dependencies**: Workspace path fixtures
-
-**Notes**: Helper function for test setup
-
----
-
-### src/workspace_equality.rs
-
-**Helper functions**: 1 helper
-- `load_all_beads()` - spawns `bead` for test data loading
-
-**Process spawned**: `bead` CLI (test helper, not a test itself)
-
-**Dependencies**: Workspace paths
-
-**Notes**: Helper function for test data collection
-
----
-
-### src/commit_hook.rs
-
-**Helper functions**: 2 helpers
-- `run_git()` - spawns `git` for test helper
-- `get_trailers()` - spawns `git` for test helper
-
-**Process spawned**: `git` (test helpers, not tests themselves)
-
-**Dependencies**: Test directory fixtures
-
-**Notes**: Helper functions for test setup and verification
-
----
-
-## Integration Test Status
-
-The following files contain process-spawning code that is **already in integration tests** (tests/ directory, not --lib):
-
-- `tests/integration_tests.rs` - Contains all integration tests including:
-  - Worker lifecycle tests
-  - End-to-end dispatch tests
-  - Bead store integration tests
-  - Upgrade tests
-
-**These are NOT part of this catalog** as they are already in the integration test target.
-
----
-
-## Migration Recommendations
-
-### Tests That Should Move to Integration Target
-
-**High priority** (spawns actual NEEDLE workers or complex subprocesses):
-
-1. **src/canary/mod.rs** (3 tests) - Canary tests spawn full workers
-2. **src/supervisor/mod.rs** (4 tests) - Supervisor spawns multiple workers
-3. **src/upgrade/mod.rs** (3 tests) - Upgrade tests spawn `:stable` binary
-4. **src/dispatch/mod.rs** (2 tests) - Agent dispatch via bash
-5. **src/strand/resolve.rs** (2 tests) - Resolve agent invocation
-6. **src/strand/reflect.rs** (2 tests) - Reflect agent invocation
-7. **src/strand/weave.rs** (2 tests) - Weave agent invocation
-8. **src/strand/unravel.rs** (2 tests) - Unravel agent invocation
-9. **src/resolve/mod.rs** (2 tests) - Resolve agent (duplicate of strand/resolve)
-10. **src/cli/mod.rs** (1 test) - `is_needle_inner_true_when_env_set()` spawns needle binary
-
-**Medium priority** (spawns external CLIs that may not be available):
-
-1. **src/workspace_equality.rs** (6 tests) - Requires `bead` CLI
-2. **src/telemetry/mod.rs** (5 tests) - Hook commands may require external tools
-3. **src/hoop_hooks.rs** (6 tests) - Spawns needle binary for event testing
-4. **src/validation/predispatch.rs** (4 tests) - Agent binary dependency
-5. **src/validation/mod.rs** (5 tests) - User-configured gate commands
-6. **src/strand/pulse.rs** (3 tests) - Scanner dependencies (grep, semgrep)
-
-**Low priority** (spawns common utilities, safe for lib tests):
-
-1. **src/scratch_sweep.rs** (6 tests) - Only `git`, very common
-2. **src/commit_hook.rs** (2 tests) - Only `git`, very common
-3. **src/ci.rs** (2 tests) - Only `git`, very common
-4. **src/mitosis/timeout_context.rs** (8 tests) - Only `git`, very common
-5. **src/validation/shipped_work.rs** (4 tests) - Only `git`, very common
-6. **src/registry/mod.rs** (2 tests) - Only `true`, Unix-specific test
-7. **src/cli/mod.rs** (1 test) - `sqlite3` may not be available, but is a doctor check
-8. **src/test_output.rs** (8 tests) - Cargo test spawning (may be slow)
-
-### Tests Safe to Keep in --lib
-
-These tests spawn only very common utilities (`git`, `true`, `sh`) that are expected to be available in any environment:
-
-- **src/scratch_sweep.rs** (6 tests) - git operations
-- **src/commit_hook.rs** (2 tests) - git operations
-- **src/ci.rs** (2 tests) - git operations
-- **src/mitosis/timeout_context.rs** (8 tests) - git operations
-- **src/validation/shipped_work.rs** (4 tests) - git operations
-- **src/registry/mod.rs** (2 tests) - `true` binary (Unix-specific, but standard)
-- **src/validation/mod.rs** (5 tests) - `sh` commands (standard)
-
-**Total tests safe to keep in --lib**: 29 tests
-
-**Total tests that should move to integration target**: 48 tests
-
----
-
-## Notes
-
-### Helper Functions Not Categorized
-
-The following are production/helper functions that spawn processes but are not tests:
-
-- `src/cargo_test.rs:699` - `build_cargo_test_command()` (production helper)
-- `src/test_runner.rs:447` - `build_cargo_command()` (production helper)
-- `src/util.rs:226` - `build_cargo_test_command()` (production helper)
-- `src/util.rs:395` - `verify_bead_binary()` (production helper)
-- `src/util.rs:603` - `command_exists()` (production helper)
-- `src/util.rs:613` - `command_exists()` fallback (production helper)
-- `src/util.rs:2066` - `which_dir` helper (production helper)
-- `src/bead_store/backend.rs:163` - `parse_backend_name_from_version()` (production)
-- `src/bead_store/cli_store.rs:202` - `run_argv()` (production)
-- `src/bead_store/mod.rs:130` - `verify_backend_identity()` (production)
-- `src/bead_store/mod.rs:260` - version check helpers (production)
-- `src/bead_store/mod.rs:896` - `spawn_version_check()` (production)
-- `src/cli/mod.rs:3920` - `doctor_check_sqlite()` (production doctor check)
-- `src/cli/mod.rs:4359` - `doctor_check_disk_space()` (production doctor check)
-- `src/config/mod.rs:380` - Comment only (no code)
-- `src/supervisor/mod.rs:318` - Comment only (no code)
-- `src/dispatch/mod.rs:1233` - Agent spawn (production code)
-- `src/dispatch/mod.rs:1334` - Agent spawn (production code)
-- `src/dispatch/mod.rs:2215` - Process spawn (production code)
-- `src/dispatch/mod.rs:2236` - Agent spawn (production code)
-- `src/telemetry/mod.rs:3176` - Hook runner (production code)
-- `src/upgrade/mod.rs:787` - Re-exec spawn (production code)
-- `src/commit_hook.rs:123` - Trailer injection (production code)
-- `src/commit_hook.rs:164` - Git operations (production code)
-- `src/commit_hook.rs:185` - Git operations (production code)
-- `src/commit_hook.rs:255` - Git operations (production code)
-- `src/commit_hook.rs:280` - Git operations (production code)
-- `src/commit_hook.rs:338` - Git operations (production code)
-- `src/commit_hook.rs:615` - Git operations (production code)
-- `src/commit_hook.rs:733` - Git operations (production code)
-- `src/ci.rs:1299` - Git helper (production code)
-- `src/ci.rs:1552` - Git helper (production code)
-- `src/validation/shipped_work.rs:170` - Git helper (production code)
-- `src/validation/shipped_work.rs:200` - Git helper (production code)
-- `src/mitosis/timeout_context.rs:413` - Git helper (production code)
-- `src/mitosis/timeout_context.rs:677` - Git helper (production code)
-- `src/mitosis/timeout_context.rs:693` - Git helper (production code)
-- `src/mitosis/timeout_context.rs:705` - Git helper (production code)
-- `src/mitosis/timeout_context.rs:743` - Git helper (production code)
-- `src/mitosis/timeout_context.rs:759` - Git helper (production code)
-- `src/mitosis/timeout_context.rs:769` - Git helper (production code)
-
-### Summary by File
-
-| File | Tests | Category | Process Spawned |
-|------|-------|----------|-----------------|
-| src/scratch_sweep.rs | 6 | Process-spawning | git |
-| src/commit_hook.rs | 2 | Process-spawning | git |
-| src/ci.rs | 2 | Process-spawning | git |
-| src/workspace_equality.rs | 6 | Process-spawning | bead |
-| src/telemetry/mod.rs | 5 | Process-spawning | sh |
-| src/hoop_hooks.rs | 6 | Process-spawning | needle |
-| src/mitosis/timeout_context.rs | 8 | Process-spawning | git |
-| src/validation/shipped_work.rs | 4 | Process-spawning | git |
-| src/validation/predispatch.rs | 4 | Process-spawning | agent binary |
-| src/registry/mod.rs | 2 | Process-spawning | true |
-| src/cli/mod.rs | 1 | Process-spawning | sqlite3 |
-| src/validation/mod.rs | 5 | Process-spawning | sh |
-| src/strand/pulse.rs | 3 | Process-spawning | sh |
-| src/test_output.rs | 8 | Process-spawning | cargo test |
-| src/canary/mod.rs | 3 | Worker-lifecycle | needle |
-| src/supervisor/mod.rs | 4 | Worker-lifecycle | needle |
-| src/upgrade/mod.rs | 3 | Worker-lifecycle | needle :stable |
-| src/dispatch/mod.rs | 2 | Worker-lifecycle | agent via bash |
-| src/strand/resolve.rs | 2 | Worker-lifecycle | claude |
-| src/strand/reflect.rs | 2 | Worker-lifecycle | reflect agent |
-| src/strand/weave.rs | 2 | Worker-lifecycle | weave agent |
-| src/strand/unravel.rs | 2 | Worker-lifecycle | unravel agent |
-| src/resolve/mod.rs | 2 | Worker-lifecycle | claude |
-| src/cli/mod.rs | 1 | Worker-lifecycle | needle |
-
----
-
-## Generated
-
-Generated: 2026-08-28
-Total `Command::new` sites analyzed: 49
-Test sites cataloged: 35
+- **2026-08-29T18:30:00Z** — Initial comprehensive catalog created from categorized data
+- **2026-08-29T18:25:00Z** — Categories established in `process-spawning-categories.md`
+- **2026-08-29T18:15:00Z** — Raw catalog generated in `process-spawning-test-catalog-raw.md`

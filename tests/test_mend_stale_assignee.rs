@@ -332,6 +332,91 @@ async fn test_control_scenario() {
     );
 }
 
+#[tokio::test]
+async fn test_no_heartbeat_but_in_registry() {
+    // This is the regression test for the bug where workers with --count 1
+    // relaunch under the same name indefinitely, staying in the registry
+    // even when their heartbeat files are missing. The old fallback logic
+    // checked registry liveness and would never clear the assignee.
+
+    // Setup
+    let hb_dir = tempfile::tempdir().unwrap();
+    let lock_dir = tempfile::tempdir().unwrap();
+    let reg_dir = tempfile::tempdir().unwrap();
+
+    // Register a worker (simulating it's in the registry)
+    let registry = Registry::new(reg_dir.path());
+    let worker_entry = needle::registry::WorkerEntry {
+        id: "claude-code-glm-5-test-worker-1".to_string(),
+        pid: std::process::id(), // Our own PID = alive
+        workspace: PathBuf::from("/tmp/test"),
+        agent: "test".to_string(),
+        model: Some("claude-sonnet-4".to_string()),
+        provider: Some("anthropic".to_string()),
+        started_at: chrono::Utc::now(),
+    };
+    registry.register(worker_entry).unwrap();
+
+    // DO NOT write a heartbeat file - this simulates the case where
+    // the heartbeat is missing (deleted, not written, etc.)
+
+    // Create an OPEN bead assigned to this worker
+    let bead = make_bead(
+        "orphaned-assigned-bead",
+        BeadStatus::Open,
+        Some("claude-code-glm-5-test-worker-1"),
+    );
+    println!(
+        "Created bead: id={}, status={}, assignee={:?}",
+        bead.id, bead.status, bead.assignee
+    );
+
+    let store = SimpleStore::new(vec![bead]);
+
+    let config = needle::config::MendConfig::default();
+    let heartbeat_ttl = Duration::from_secs(300);
+    let telemetry = Telemetry::new("test".to_string());
+
+    let mend = MendStrand::new(
+        config,
+        hb_dir.path().to_path_buf(),
+        heartbeat_ttl,
+        lock_dir.path().to_path_buf(),
+        "test-mend-worker".to_string(),
+        registry,
+        telemetry,
+        PathBuf::from("/tmp/logs"),
+        0,
+        PathBuf::from("/tmp/traces"),
+        30,
+        7,
+        PathBuf::from("/tmp/workspace"),
+        80,
+        tempfile::tempdir().unwrap().path().to_path_buf(),
+        needle::config::LimitsConfig::default(),
+    );
+
+    // Run Mend
+    let result = mend.evaluate(&store, &HashSet::new()).await;
+
+    // Check: assignee SHOULD be cleared even though worker is in registry
+    // The fix treats "no heartbeat" as stale regardless of registry liveness
+    println!("Mend result: {:?}", result);
+    println!("Clear count: {}", store.clear_count());
+
+    assert!(
+        matches!(result, StrandResult::WorkCreated),
+        "Expected WorkCreated after clearing stale assignee (no heartbeat), got: {:?}",
+        result
+    );
+    assert_eq!(
+        store.clear_count(),
+        1,
+        "Expected exactly 1 assignee cleared (worker in registry but no heartbeat), got: {}",
+        store.clear_count()
+    );
+}
+
 fn main() {
     println!("Run with: cargo test --test test_mend_stale_assignee");
 }

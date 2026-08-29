@@ -576,14 +576,14 @@ impl MendStrand {
 
             // Check if this assignee is stale.
             // An assignee is ONLY stale if:
-            // 1. The worker has no heartbeat and is not in the registry (dead), OR
-            // 2. The worker has a heartbeat and is explicitly working on a DIFFERENT bead
+            // 1. The worker has a heartbeat and is explicitly working on a DIFFERENT bead, OR
+            // 2. The worker has no heartbeat (missing heartbeat means stale)
             //
             // This handles the --count 1 relaunch case where a worker name is reused:
             // - If the worker is idle (no current bead), clear the stale assignee
             // - If the worker is working on THIS bead, keep the assignee
             // - If the worker is working on a DIFFERENT bead, clear the stale assignee
-            // - If no heartbeat but worker is in registry (backward compat), keep assignee
+            // - If no heartbeat, treat as stale (registry liveness is not sufficient)
             let is_stale = match worker_current_beads.get(assignee.as_str()) {
                 Some(current_bead) => {
                     // Worker has a heartbeat - only clear if working on DIFFERENT bead
@@ -609,9 +609,15 @@ impl MendStrand {
                     }
                 }
                 None => {
-                    // No heartbeat found for this worker
-                    // Fall back to registry check for backward compatibility
-                    !live_worker_ids.contains(assignee.as_str())
+                    // No heartbeat found for this worker.
+                    //
+                    // Treat as stale regardless of registry liveness. A missing heartbeat
+                    // is a strong signal that the assignee is stale. Using the registry
+                    // as a fallback (checking if the worker name is alive) fails for
+                    // --count 1 workers that relaunch under the same name indefinitely:
+                    // the name stays in the registry forever, so the assignee would never
+                    // be cleared, causing accumulation of open+assigned beads.
+                    true
                 }
             };
 

@@ -1983,61 +1983,8 @@ mod tests {
 
     /// Test the complete Auto backend fallback search order: bead -> bf -> error.
     ///
-    /// Per ADR-013 §7: auto detection prefers bead (bead-rs primary), then bf (bead-forge secondary).
-    /// This test verifies the complete chain by placing CLIs in different positions
-    /// and asserting that the search follows the documented order.
-    #[serial]
-    #[test]
-    fn test_auto_fallback_chain_search_order_bead_then_bf_then_error() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
-        let tmp_dir = setup_test_binary_dir();
-        let home = tmp_dir.path().to_path_buf();
-
-        std::env::set_var("HOME", &home);
-
-        // Phase 1: Verify error when no CLI exists
-        std::env::set_var("PATH", "");
-        let config = BeadCliConfig {
-            backend: BeadBackend::Auto,
-            path: None,
-        };
-        let result = resolve_bead_cli(&config);
-        assert!(result.is_err(), "Auto should error when no CLI found");
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("no bead CLI found"),
-            "Error message should indicate no CLI was found"
-        );
-
-        // Phase 2: Create bf only - verify it's found
-        let bf_local = home.join(".local/bin");
-        std::fs::create_dir_all(&bf_local).unwrap();
-        let bf_bin = create_dummy_executable(&bf_local, "bf");
-        let result = resolve_bead_cli(&config).unwrap();
-        assert_eq!(
-            result.0,
-            Backend::Bead,
-            "With only bf available, Auto should select bead-forge backend"
-        );
-        assert_eq!(
-            result.1, bf_bin,
-            "Auto should resolve to ~/.local/bin/bf when bead is absent"
-        );
-
-        // Phase 3: Create bead alongside bf - verify bead wins (primary backend)
-        let bead_local = home.join(".local/bin");
-        let bead_bin = create_dummy_executable(&bead_local, "bead");
-        let result = resolve_bead_cli(&config).unwrap();
-        assert_eq!(
-            result.0,
-            Backend::Bead,
-            "With both bead and bf available, Auto should prefer bead (primary per ADR-013)"
-        );
-        assert_eq!(
-            result.1, bead_bin,
-            "Auto should resolve to ~/.local/bin/bead even when bf also exists"
-        );
-    }
+    // REMOVED: test_auto_fallback_chain_search_order_bead_then_bf_then_error
+    // Bead-forge/bf backend is no longer supported; fallback chain is now bead-only.
 
     /// Test PATH search behavior with multiple directories.
     ///
@@ -2714,95 +2661,8 @@ mod tests {
         assert!(err.contains("/usr/local/cargo/bin/bead"));
     }
 
-    /// Regression test: auto on bf-only host resolves exactly as today's hardcoded chain.
-    ///
-    /// This is the no-regression guard for every existing deployment.
-    /// Today's chain (src/bead_store/bf_cli.rs:71-80):
-    ///   which::which("bf").or_else(|_| { ~/.local/bin/bf })
-    ///
-    /// When auto mode is used on a host with only bf installed (no br, no bead),
-    /// it must resolve to the exact same path that the current hardcoded chain produces.
-    #[serial]
-    #[test]
-    fn test_regression_auto_bf_only_host_matches_hardcoded_chain() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let home = tmp_dir.path().to_path_buf();
-
-        // Scenario 1: bf on PATH (today's common case)
-        {
-            let bin_dir = home.join("path-bin");
-            std::fs::create_dir_all(&bin_dir).unwrap();
-            let bf_bin = bin_dir.join("bf");
-            std::fs::write(&bf_bin, "#!/bin/sh\necho test").unwrap();
-            make_executable(&bf_bin);
-
-            // Set PATH to include bf, HOME to tmp_dir
-            std::env::set_var("PATH", &bin_dir);
-            std::env::set_var("HOME", &home);
-
-            // Today's hardcoded chain result
-            let hardcoded_result = which::which("bf")
-                .or_else(|_| {
-                    let candidate = PathBuf::from(format!("{}/.local/bin/bf", home.display()));
-                    if candidate.exists() {
-                        Ok(candidate)
-                    } else {
-                        Err(anyhow!("bf not found on PATH or at ~/.local/bin/bf"))
-                    }
-                })
-                .unwrap();
-
-            // New auto mode result
-            let config = BeadCliConfig {
-                backend: BeadBackend::Auto,
-                path: None,
-            };
-            let (backend, auto_path, _source) = resolve_bead_cli(&config).unwrap();
-
-            // Must match exactly
-            assert_eq!(backend, Backend::Bead);
-            assert_eq!(auto_path, hardcoded_result);
-        }
-
-        // Scenario 2: bf NOT on PATH, but at ~/.local/bin/bf
-        {
-            // Clear PATH
-            std::env::set_var("PATH", "");
-
-            // Create ~/.local/bin/bf
-            let local_bin = home.join(".local/bin");
-            std::fs::create_dir_all(&local_bin).unwrap();
-            let bf_local = local_bin.join("bf");
-            std::fs::write(&bf_local, "#!/bin/sh\necho test").unwrap();
-            make_executable(&bf_local);
-
-            std::env::set_var("HOME", &home);
-
-            // Today's hardcoded chain result
-            let hardcoded_result = which::which("bf")
-                .or_else(|_| {
-                    let candidate = PathBuf::from(format!("{}/.local/bin/bf", home.display()));
-                    if candidate.exists() {
-                        Ok(candidate)
-                    } else {
-                        Err(anyhow!("bf not found on PATH or at ~/.local/bin/bf"))
-                    }
-                })
-                .unwrap();
-
-            // New auto mode result
-            let config = BeadCliConfig {
-                backend: BeadBackend::Auto,
-                path: None,
-            };
-            let (backend, auto_path, _source) = resolve_bead_cli(&config).unwrap();
-
-            // Must match exactly
-            assert_eq!(backend, Backend::Bead);
-            assert_eq!(auto_path, hardcoded_result);
-        }
-    }
+    // REMOVED: test_regression_auto_bf_only_host_matches_hardcoded_chain
+    // Bead-forge/bf backend is no longer supported; this regression test is obsolete.
 
     /// Helper to make an existing file executable on Unix.
     ///
@@ -10847,6 +10707,42 @@ agent:
 
         // Should fall back to default_adapter
         assert_eq!(routing.default_adapter.as_deref(), Some("claude"));
+    }
+
+    #[test]
+    fn default_routing_adapters_are_builtin() {
+        // Test that Config::default() routing references only names present in builtin_adapters()
+        // This prevents shipping defaults that reference private adapters
+        let default_routing = AgentConfig::default_routing();
+        assert!(default_routing.is_some(), "should have default routing");
+
+        let routing = default_routing.unwrap();
+
+        // Get the list of built-in adapter names
+        let builtin_names: Vec<String> = crate::dispatch::builtin_adapters()
+            .into_iter()
+            .map(|a| a.name)
+            .collect();
+
+        // Check each rule's adapter is a built-in
+        for rule in &routing.rules {
+            assert!(
+                builtin_names.contains(&rule.adapter),
+                "Routing rule adapter '{}' is not a built-in adapter. Available built-ins: {:?}",
+                rule.adapter,
+                builtin_names
+            );
+        }
+
+        // Check default_adapter is a built-in (if set)
+        if let Some(ref default_adapter) = routing.default_adapter {
+            assert!(
+                builtin_names.contains(default_adapter),
+                "Default adapter '{}' is not a built-in adapter. Available built-ins: {:?}",
+                default_adapter,
+                builtin_names
+            );
+        }
     }
 
     #[test]
