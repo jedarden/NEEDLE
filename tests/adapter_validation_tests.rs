@@ -956,11 +956,36 @@ agent:
             stderr_output
         );
 
-        // Verify error message contains the adapter name
+        // Parse captured stderr to verify error message is helpful
+        // Assertion 1: Error message must contain the exact nonexistent adapter name
         assert!(
-            stderr_output.contains(nonexistent_adapter) || stderr_output.contains("not found"),
-            "error message should mention the nonexistent adapter or indicate not found. Got: {}",
+            stderr_output.contains(nonexistent_adapter),
+            "error message should mention the specific nonexistent adapter '{}'. \
+             This helps users identify which adapter in their configuration is invalid.\n\
+             Got: {}",
+            nonexistent_adapter,
             stderr_output
+        );
+
+        // Assertion 2: Error message should provide configuration guidance
+        // Look for helpful keywords that guide users to fix the configuration
+        let guidance_keywords = [
+            "configuration",
+            "config",
+            ".needle.yaml",
+            "available",
+            "valid",
+            "supported",
+        ];
+        let has_guidance = guidance_keywords
+            .iter()
+            .any(|keyword| stderr_output.contains(keyword));
+
+        assert!(
+            has_guidance,
+            "error message should provide configuration guidance to help users fix the issue. \
+             Expected one of: {:?}. Got: {}",
+            guidance_keywords, stderr_output
         );
     }
 }

@@ -47,7 +47,7 @@ fn test_p95_calculation_works() {
     let p95 = calculate_p95(&latencies);
     assert!(p95 > 0, "p95 should be positive");
     assert!(
-        p95 >= 250 && p95 <= 300,
+        (250..=300).contains(&p95),
         "p95 should be reasonable for the dataset"
     );
 }
@@ -59,7 +59,7 @@ fn test_p99_calculation_works() {
     let p99 = calculate_p99(&latencies);
     assert!(p99 > 0, "p99 should be positive");
     assert!(
-        p99 >= 290 && p99 <= 300,
+        (290..=300).contains(&p99),
         "p99 should be near max for the dataset"
     );
 }
