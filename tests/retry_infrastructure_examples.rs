@@ -10,6 +10,7 @@ use retry_test_helpers::*;
 use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Example 1: Basic retry with ETXTBSY error
@@ -67,9 +68,15 @@ fn example_etxtbsy_exhausts_max_attempts() -> Result<(), String> {
 
 #[test]
 fn example_non_etxtbsy_error_propagates_immediately() -> Result<(), String> {
+    let error_injection = ErrorInjection::new().with_io_error_on_attempt(
+        1,
+        io::ErrorKind::NotFound,
+        "file not found",
+    );
+
     let mock = MockRetryBehavior::new()
         .with_max_attempts(5)
-        .with_io_error_on_attempt(1, io::ErrorKind::NotFound, "file not found");
+        .with_error_injection(error_injection);
 
     let result = mock.run_sync()?;
 
@@ -82,9 +89,15 @@ fn example_non_etxtbsy_error_propagates_immediately() -> Result<(), String> {
 
 #[test]
 fn example_permission_denied_propagates_immediately() -> Result<(), String> {
+    let error_injection = ErrorInjection::new().with_io_error_on_attempt(
+        1,
+        io::ErrorKind::PermissionDenied,
+        "access denied",
+    );
+
     let mock = MockRetryBehavior::new()
         .with_max_attempts(5)
-        .with_io_error_on_attempt(1, io::ErrorKind::PermissionDenied, "access denied");
+        .with_error_injection(error_injection);
 
     let result = mock.run_sync()?;
 
@@ -143,10 +156,13 @@ fn example_exponential_backoff_caps_at_max() -> Result<(), String> {
 
 #[test]
 fn example_mixed_errors_then_success() -> Result<(), String> {
-    let mock = MockRetryBehavior::new()
-        .with_max_attempts(5)
+    let error_injection = ErrorInjection::new()
         .with_etxtbsy_on_attempt(1)
         .with_io_error_on_attempt(2, io::ErrorKind::PermissionDenied, "denied");
+
+    let mock = MockRetryBehavior::new()
+        .with_max_attempts(5)
+        .with_error_injection(error_injection);
 
     let result = mock.run_sync()?;
 
@@ -257,7 +273,7 @@ fn example_retry_with_attempt_counter() -> Result<(), String> {
     let attempts = Arc::new(AtomicUsize::new(0));
 
     // Create a mock that tracks attempts via side effects
-    let attempts_clone = Arc::clone(&attempts);
+    let _attempts_clone = Arc::clone(&attempts);
     let mock = MockRetryBehavior::new()
         .with_max_attempts(5)
         .with_etxtbsy_on_attempt(1)
@@ -400,10 +416,13 @@ fn example_binary_busy_scenario() -> Result<(), String> {
 #[test]
 fn example_transient_network_failure() -> Result<(), String> {
     // Simulate transient network issues that resolve after retries
+    let error_injection = ErrorInjection::new()
+        .with_io_error_on_attempt(1, io::ErrorKind::ConnectionReset, "connection reset")
+        .with_io_error_on_attempt(2, io::ErrorKind::ConnectionReset, "connection reset");
+
     let mock = MockRetryBehavior::new()
         .with_max_attempts(4)
-        .with_io_error_on_attempt(1, io::ErrorKind::ConnectionReset, "connection reset")
-        .with_io_error_on_attempt(2, io::ErrorKind::ConnectionReset, "connection reset")
+        .with_error_injection(error_injection)
         .with_success_value(b"HTTP 200 OK".to_vec());
 
     let result = mock.run_sync()?;

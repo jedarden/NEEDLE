@@ -2598,6 +2598,80 @@ impl Worker {
             &self.telemetry,
         );
 
+        // Verify claim status against live bead store before dispatch.
+        // This ensures the bead is still properly claimed by this worker and
+        // hasn't been released, reassigned, or modified by another process.
+        if let Some(ref bead) = self.current_bead {
+            if let Some(store) = self.dispatcher.bead_store() {
+                let bead_id = bead.id.clone();
+                let worker_id = self.qualified_id();
+
+                match store.claim_status(&bead_id).await {
+                    Ok(status) => {
+                        // Verify the bead is still in_progress and assigned to this worker.
+                        let is_valid_claim = status.status == crate::types::BeadStatus::InProgress
+                            && status.assignee.as_deref() == Some(&worker_id);
+
+                        if !is_valid_claim {
+                            // Bead is not properly claimed — either released, reassigned, or wrong assignee.
+                            let reason = if status.status != crate::types::BeadStatus::InProgress {
+                                format!("bead status is {:?}, not in_progress", status.status)
+                            } else {
+                                format!(
+                                    "bead assigned to {:?}, not this worker ({})",
+                                    status.assignee, worker_id
+                                )
+                            };
+
+                            tracing::warn!(
+                                bead_id = %bead_id.as_ref(),
+                                current_status = ?status.status,
+                                current_assignee = ?status.assignee,
+                                expected_worker = %worker_id,
+                                verification_result = "failed",
+                                reason = %reason,
+                                "claim verification failed at dispatch — bead not properly claimed"
+                            );
+
+                            self.telemetry.emit(EventKind::ClaimVerifyFailed {
+                                bead_id: bead_id.clone(),
+                                expected_actor: worker_id.clone(),
+                                actual_status: format!("{:?}", status.status),
+                                actual_assignee: status
+                                    .assignee
+                                    .unwrap_or_else(|| "none".to_string()),
+                            })?;
+
+                            bail!("claim verification failed: {}", reason);
+                        }
+
+                        tracing::debug!(
+                            bead_id = %bead_id.as_ref(),
+                            current_status = ?status.status,
+                            current_assignee = ?status.assignee,
+                            revision = ?status.revision,
+                            verification_result = "passed",
+                            "claim verification passed — dispatching agent"
+                        );
+
+                        self.telemetry.emit(EventKind::ClaimVerifySuccess {
+                            bead_id: bead_id.clone(),
+                            expected_actor: worker_id.clone(),
+                        })?;
+                    }
+                    Err(e) => {
+                        // Failed to query claim status — log but proceed with dispatch.
+                        // This may be a transient error (store temporarily unavailable).
+                        tracing::warn!(
+                            bead_id = %bead_id.as_ref(),
+                            error = %e,
+                            "failed to verify claim status against live store — proceeding with dispatch"
+                        );
+                    }
+                }
+            }
+        }
+
         self.set_state(WorkerState::Executing)?;
         Ok(())
     }
