@@ -1249,6 +1249,7 @@ fn run_worker(config: Config, worker_name: String, config_sources: SourceMap) ->
                     "status": "failed",
                     "error": error.to_string(),
                 }),
+                timestamp: chrono::Utc::now(),
                 level: "warn".to_string(),
                 bead_id: None,
             });
@@ -1299,7 +1300,7 @@ fn run_worker(config: Config, worker_name: String, config_sources: SourceMap) ->
                             "system still saturated after {}s wait: {}",
                             MAX_RESOURCE_WAIT_SECS, e
                         ),
-                    })?;
+                    }, chrono::Utc::now())?;
                     bail!(
                         "worker launch deferred {} times ({}s total wait), system still saturated: {}. Launch aborted — retry when load drops",
                         resource_wait_total / resource_retry_delay,
@@ -1320,7 +1321,7 @@ fn run_worker(config: Config, worker_name: String, config_sources: SourceMap) ->
                     deferred_count: resource_wait_total / resource_retry_delay + 1,
                     total_wait_secs: resource_wait_total + resource_retry_delay,
                     reason: format!("system saturated: {}", e),
-                })?;
+                }, chrono::Utc::now())?;
 
                 std::thread::sleep(std::time::Duration::from_secs(resource_retry_delay));
                 resource_wait_total += resource_retry_delay;
@@ -1348,7 +1349,7 @@ fn run_worker(config: Config, worker_name: String, config_sources: SourceMap) ->
         .saturating_sub(scratch_sweep_elapsed)
         .as_millis() as u64;
     if elapsed_ms > 60_000 {
-        telemetry.emit(EventKind::WorkerBootTimeout { elapsed_ms })?;
+        telemetry.emit(EventKind::WorkerBootTimeout { elapsed_ms }, chrono::Utc::now())?;
         bail!("boot exceeded 60 s ({elapsed_ms} ms), aborting");
     }
 
@@ -1406,12 +1407,15 @@ fn record_scratch_sweep_outcome(
         }
     };
 
-    if let Err(error) = telemetry.emit(EventKind::Log {
-        phase: "scratch_sweep".to_string(),
-        context,
-        level: level.to_string(),
-        bead_id: None,
-    }) {
+    if let Err(error) = telemetry.emit(
+        EventKind::Log {
+            phase: "scratch_sweep".to_string(),
+            context,
+            level: level.to_string(),
+            bead_id: None,
+        },
+        chrono::Utc::now(),
+    ) {
         tracing::warn!(error = %error, "failed to emit scratch sweep telemetry");
     }
 }
@@ -1428,14 +1432,14 @@ where
     eprintln!("NEEDLE worker boot: starting init step '{name}'...");
     tel.emit(EventKind::InitStepStarted {
         step: name.to_string(),
-    })?;
+    }, chrono::Utc::now())?;
     let t = Instant::now();
     let result = f();
     let elapsed = t.elapsed().as_millis() as u64;
     tel.emit(EventKind::InitStepCompleted {
         step: name.to_string(),
         duration_ms: elapsed,
-    })?;
+    }, chrono::Utc::now())?;
     eprintln!("NEEDLE worker boot: init step '{name}' completed in {elapsed}ms");
     // Force-flush so the step completion is visible before the next (potentially blocking) step.
     tel.force_flush(std::time::Duration::from_secs(1))?;

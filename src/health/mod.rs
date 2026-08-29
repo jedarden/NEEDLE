@@ -2692,6 +2692,9 @@ mod tests {
     /// 2. Creating a HomeGuard to isolate HOME to a temp directory
     /// 3. Starting a HealthMonitor and triggering a heartbeat
     /// 4. Asserting the heartbeat file appears in the temp directory (not real HOME)
+    ///
+    /// CRITICAL: This test does NOT set config.health.heartbeat_dir, ensuring
+    /// that resolve_heartbeat_dir() reads std::env::var("HOME") at runtime.
     #[tokio::test]
     async fn heartbeat_respects_isolated_home_directory() {
         // Step 1: Record the real HOME path before isolation
@@ -2712,12 +2715,12 @@ mod tests {
         let temp_heartbeat_dir = temp_home.join(".needle").join("state").join("heartbeats");
 
         // Step 3: Create a HealthMonitor with the isolated HOME
-        let dir = tempfile::tempdir().unwrap();
-        let hb_dir = dir.path().join("state").join("heartbeats");
-        std::fs::create_dir_all(&hb_dir).unwrap();
-
-        let mut config = test_config(&hb_dir);
+        // IMPORTANT: DO NOT set config.health.heartbeat_dir - leave it as None
+        // so that resolve_heartbeat_dir() reads std::env::var("HOME") at runtime
+        let mut config = Config::default();
         config.workspace.home = temp_home.clone();
+        config.health.heartbeat_interval_secs = 1;
+        config.health.heartbeat_ttl_secs = 5;
 
         let mut monitor = HealthMonitor::new(
             config,
