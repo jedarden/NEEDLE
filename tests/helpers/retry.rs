@@ -52,6 +52,22 @@ pub enum ErrorSpec {
     Etxtbsy,
     /// Generic IO error with kind and message
     Io(io::ErrorKind, String),
+    /// Connection refused error (ECONNREFUSED)
+    ConnectionRefused,
+    /// Connection timed out error (ETIMEDOUT)
+    TimedOut,
+    /// Network unreachable error (ENETUNREACH)
+    NetworkUnreachable,
+    /// Host unreachable error (EHOSTUNREACH)
+    HostUnreachable,
+    /// Broken pipe error (EPIPE)
+    BrokenPipe,
+    /// Connection reset by peer (ECONNRESET)
+    ConnectionReset,
+    /// Address in use error (EADDRINUSE)
+    AddressInUse,
+    /// Permission denied error (EACCES)
+    PermissionDenied,
 }
 
 impl ErrorInjection {
@@ -74,6 +90,42 @@ impl ErrorInjection {
         self
     }
 
+    /// Inject connection refused error on a specific attempt.
+    pub fn with_connection_refused_on_attempt(mut self, attempt: usize) -> Self {
+        self.errors_on_attempts.push((attempt, ErrorSpec::ConnectionRefused));
+        self
+    }
+
+    /// Inject timeout error on a specific attempt.
+    pub fn with_timed_out_on_attempt(mut self, attempt: usize) -> Self {
+        self.errors_on_attempts.push((attempt, ErrorSpec::TimedOut));
+        self
+    }
+
+    /// Inject network unreachable error on a specific attempt.
+    pub fn with_network_unreachable_on_attempt(mut self, attempt: usize) -> Self {
+        self.errors_on_attempts.push((attempt, ErrorSpec::NetworkUnreachable));
+        self
+    }
+
+    /// Inject broken pipe error on a specific attempt.
+    pub fn with_broken_pipe_on_attempt(mut self, attempt: usize) -> Self {
+        self.errors_on_attempts.push((attempt, ErrorSpec::BrokenPipe));
+        self
+    }
+
+    /// Inject connection reset error on a specific attempt.
+    pub fn with_connection_reset_on_attempt(mut self, attempt: usize) -> Self {
+        self.errors_on_attempts.push((attempt, ErrorSpec::ConnectionReset));
+        self
+    }
+
+    /// Inject permission denied error on a specific attempt.
+    pub fn with_permission_denied_on_attempt(mut self, attempt: usize) -> Self {
+        self.errors_on_attempts.push((attempt, ErrorSpec::PermissionDenied));
+        self
+    }
+
     /// Check if an error should be injected for the given attempt.
     pub fn should_error(&self, attempt: usize) -> Option<io::Error> {
         self.errors_on_attempts
@@ -82,6 +134,14 @@ impl ErrorInjection {
             .map(|(_, spec)| match spec {
                 ErrorSpec::Etxtbsy => io::Error::from_raw_os_error(26),
                 ErrorSpec::Io(kind, msg) => io::Error::new(*kind, msg.as_str()),
+                ErrorSpec::ConnectionRefused => io::Error::from_raw_os_error(111),
+                ErrorSpec::TimedOut => io::Error::from_raw_os_error(110),
+                ErrorSpec::NetworkUnreachable => io::Error::from_raw_os_error(101),
+                ErrorSpec::HostUnreachable => io::Error::from_raw_os_error(113),
+                ErrorSpec::BrokenPipe => io::Error::from_raw_os_error(32),
+                ErrorSpec::ConnectionReset => io::Error::from_raw_os_error(104),
+                ErrorSpec::AddressInUse => io::Error::from_raw_os_error(98),
+                ErrorSpec::PermissionDenied => io::Error::from_raw_os_error(13),
             })
     }
 }
@@ -214,6 +274,42 @@ impl MockRetryBehavior {
     /// Inject ETXTBSY error on a specific attempt.
     pub fn with_etxtbsy_on_attempt(mut self, attempt: usize) -> Self {
         self.error_injection = self.error_injection.with_etxtbsy_on_attempt(attempt);
+        self
+    }
+
+    /// Inject connection refused error on a specific attempt.
+    pub fn with_connection_refused_on_attempt(mut self, attempt: usize) -> Self {
+        self.error_injection = self.error_injection.with_connection_refused_on_attempt(attempt);
+        self
+    }
+
+    /// Inject timeout error on a specific attempt.
+    pub fn with_timed_out_on_attempt(mut self, attempt: usize) -> Self {
+        self.error_injection = self.error_injection.with_timed_out_on_attempt(attempt);
+        self
+    }
+
+    /// Inject network unreachable error on a specific attempt.
+    pub fn with_network_unreachable_on_attempt(mut self, attempt: usize) -> Self {
+        self.error_injection = self.error_injection.with_network_unreachable_on_attempt(attempt);
+        self
+    }
+
+    /// Inject broken pipe error on a specific attempt.
+    pub fn with_broken_pipe_on_attempt(mut self, attempt: usize) -> Self {
+        self.error_injection = self.error_injection.with_broken_pipe_on_attempt(attempt);
+        self
+    }
+
+    /// Inject connection reset error on a specific attempt.
+    pub fn with_connection_reset_on_attempt(mut self, attempt: usize) -> Self {
+        self.error_injection = self.error_injection.with_connection_reset_on_attempt(attempt);
+        self
+    }
+
+    /// Inject permission denied error on a specific attempt.
+    pub fn with_permission_denied_on_attempt(mut self, attempt: usize) -> Self {
+        self.error_injection = self.error_injection.with_permission_denied_on_attempt(attempt);
         self
     }
 

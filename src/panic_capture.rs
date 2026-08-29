@@ -86,7 +86,7 @@
 //! - ✅ Documented guarantees for idempotency and error handling
 
 use std::backtrace::Backtrace;
-use std::panic::{self, PanicHookInfo};
+use std::panic::{self, PanicInfo};
 use std::sync::Mutex;
 use std::sync::Once;
 use std::time::SystemTime;

@@ -116,6 +116,13 @@ pub struct HardDeadline {
     /// A value of `0` means no deadline is enforced even if `enabled` is `true`.
     /// The deadline is computed once at process spawn and never resets.
     pub duration_secs: u64,
+
+    /// Creation timestamp of this deadline.
+    ///
+    /// Records when the deadline was created. Used for validation and tracking
+    /// deadline lifetime. Automatically set to current time on creation.
+    #[serde(default = "chrono::Utc::now")]
+    pub created_at: DateTime<Utc>,
 }
 
 impl HardDeadline {
@@ -144,6 +151,7 @@ impl HardDeadline {
         Self {
             enabled,
             duration_secs,
+            created_at: Utc::now(),
         }
     }
 
@@ -161,6 +169,7 @@ impl HardDeadline {
         Self {
             enabled: false,
             duration_secs: 0,
+            created_at: Utc::now(),
         }
     }
 
@@ -183,6 +192,7 @@ impl HardDeadline {
         Self {
             enabled: true,
             duration_secs,
+            created_at: Utc::now(),
         }
     }
 
@@ -1212,6 +1222,180 @@ mod tests {
         assert_eq!(&*id, "needle-gob");
         // AsRef<str>
         let _: &str = id.as_ref();
+    }
+
+    #[test]
+    fn hard_deadline_construction() {
+        // Test basic construction with enabled flag and duration
+        let deadline = HardDeadline::new(true, 600);
+        assert!(deadline.enabled);
+        assert_eq!(deadline.duration_secs, 600);
+        assert!(deadline.is_active());
+
+        // Test disabled deadline
+        let disabled = HardDeadline::new(false, 600);
+        assert!(!disabled.enabled);
+        assert!(!disabled.is_active());
+
+        // Test zero duration is not active even when enabled
+        let zero_duration = HardDeadline::new(true, 0);
+        assert!(zero_duration.enabled);
+        assert_eq!(zero_duration.duration_secs, 0);
+        assert!(!zero_duration.is_active());
+    }
+
+    #[test]
+    fn hard_deadline_disabled_factory() {
+        let deadline = HardDeadline::disabled();
+        assert!(!deadline.enabled);
+        assert_eq!(deadline.duration_secs, 0);
+        assert!(!deadline.is_active());
+    }
+
+    #[test]
+    fn hard_deadline_with_duration_factory() {
+        let deadline = HardDeadline::with_duration(300);
+        assert!(deadline.enabled);
+        assert_eq!(deadline.duration_secs, 300);
+        assert!(deadline.is_active());
+    }
+
+    #[test]
+    fn hard_deadline_is_active() {
+        // Active when enabled and non-zero duration
+        assert!(HardDeadline::with_duration(60).is_active());
+        assert!(HardDeadline::new(true, 1).is_active());
+
+        // Not active when disabled
+        assert!(!HardDeadline::disabled().is_active());
+        assert!(!HardDeadline::new(false, 100).is_active());
+
+        // Not active when duration is zero
+        assert!(!HardDeadline::new(true, 0).is_active());
+    }
+
+    #[test]
+    fn hard_deadline_as_duration() {
+        // Returns Some(Duration) when active
+        let deadline = HardDeadline::with_duration(60);
+        assert_eq!(deadline.as_duration(), Some(Duration::from_secs(60)));
+
+        let deadline = HardDeadline::new(true, 300);
+        assert_eq!(deadline.as_duration(), Some(Duration::from_secs(300)));
+
+        // Returns None when not active
+        assert_eq!(HardDeadline::disabled().as_duration(), None);
+        assert_eq!(HardDeadline::new(false, 100).as_duration(), None);
+        assert_eq!(HardDeadline::new(true, 0).as_duration(), None);
+    }
+
+    #[test]
+    fn hard_deadline_default_is_disabled() {
+        let deadline = HardDeadline::default();
+        assert!(!deadline.enabled);
+        assert_eq!(deadline.duration_secs, 0);
+        assert!(!deadline.is_active());
+    }
+
+    #[test]
+    fn hard_deadline_has_creation_timestamp() {
+        let deadline = HardDeadline::with_duration(60);
+        // Verify created_at is set and is a reasonable timestamp
+        let now = Utc::now();
+        let time_diff = now.signed_duration_since(deadline.created_at);
+
+        // Should be created within the last second
+        assert!(time_diff.num_seconds() <= 1);
+        assert!(time_diff.num_seconds() >= 0);
+    }
+
+    #[test]
+    fn hard_deadline_display_enabled() {
+        let deadline = HardDeadline::with_duration(600);
+        assert_eq!(deadline.to_string(), "600s");
+
+        let deadline = HardDeadline::new(true, 0);
+        assert_eq!(deadline.to_string(), "0s");
+    }
+
+    #[test]
+    fn hard_deadline_display_disabled() {
+        let deadline = HardDeadline::disabled();
+        assert_eq!(deadline.to_string(), "disabled");
+
+        let deadline = HardDeadline::new(false, 600);
+        assert_eq!(deadline.to_string(), "disabled");
+    }
+
+    #[test]
+    fn hard_deadline_serde_serialization() {
+        let deadline = HardDeadline {
+            enabled: true,
+            duration_secs: 600,
+            created_at: DateTime::from_timestamp(0, 0).unwrap(),
+        };
+
+        let json = serde_json::to_string(&deadline).unwrap();
+        assert!(json.contains(r#""enabled":true"#));
+        assert!(json.contains(r#""duration_secs":600"#));
+        assert!(json.contains(r#""created_at":"1970-01-01T00:00:00Z""#));
+
+        let deserialized: HardDeadline = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.enabled, deadline.enabled);
+        assert_eq!(deserialized.duration_secs, deadline.duration_secs);
+        assert_eq!(deserialized.created_at, deadline.created_at);
+    }
+
+    #[test]
+    fn hard_deadline_serde_with_missing_created_at() {
+        // Deserialization should work with missing created_at field (uses default)
+        let json = r#"{"enabled":true,"duration_secs":300}"#;
+        let deadline: HardDeadline = serde_json::from_str(json).unwrap();
+        assert!(deadline.enabled);
+        assert_eq!(deadline.duration_secs, 300);
+        // created_at should be set to now by default
+        let now = Utc::now();
+        let time_diff = now.signed_duration_since(deadline.created_at);
+        assert!(time_diff.num_seconds() <= 1);
+    }
+
+    #[test]
+    fn hard_deadline_roundtrip_serialization() {
+        let original = HardDeadline::with_duration(120);
+
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: HardDeadline = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(restored.enabled, original.enabled);
+        assert_eq!(restored.duration_secs, original.duration_secs);
+        // created_at should be close (within 1 second to account for serialization time)
+        let time_diff = restored
+            .created_at
+            .signed_duration_since(original.created_at);
+        assert!(time_diff.num_seconds().abs() <= 1);
+    }
+
+    #[test]
+    fn hard_deadline_equality() {
+        let deadline1 = HardDeadline::with_duration(60);
+        let deadline2 = HardDeadline::with_duration(60);
+
+        // Different created_at timestamps mean they're not equal
+        assert_ne!(deadline1, deadline2);
+
+        // Manual construction with same fields should be equal
+        let timestamp = DateTime::from_timestamp(0, 0).unwrap();
+        let manual1 = HardDeadline {
+            enabled: true,
+            duration_secs: 60,
+            created_at: timestamp,
+        };
+        let manual2 = HardDeadline {
+            enabled: true,
+            duration_secs: 60,
+            created_at: timestamp,
+        };
+        assert_eq!(manual1, manual2);
     }
 
     #[test]

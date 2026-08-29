@@ -45,6 +45,22 @@ pub enum ErrorSpec {
     Etxtbsy,
     /// Generic IO error with kind and message
     Io(io::ErrorKind, String),
+    /// Connection refused error (ECONNREFUSED)
+    ConnectionRefused,
+    /// Connection timed out error (ETIMEDOUT)
+    TimedOut,
+    /// Network unreachable error (ENETUNREACH)
+    NetworkUnreachable,
+    /// Host unreachable error (EHOSTUNREACH)
+    HostUnreachable,
+    /// Broken pipe error (EPIPE)
+    BrokenPipe,
+    /// Connection reset by peer (ECONNRESET)
+    ConnectionReset,
+    /// Address in use error (EADDRINUSE)
+    AddressInUse,
+    /// Permission denied error (EACCES)
+    PermissionDenied,
 }
 
 impl ErrorSpec {
@@ -53,6 +69,14 @@ impl ErrorSpec {
         match self {
             ErrorSpec::Etxtbsy => io::Error::from_raw_os_error(26),
             ErrorSpec::Io(kind, msg) => io::Error::new(*kind, msg.as_str()),
+            ErrorSpec::ConnectionRefused => io::Error::from_raw_os_error(111), // ECONNREFUSED
+            ErrorSpec::TimedOut => io::Error::from_raw_os_error(110),          // ETIMEDOUT
+            ErrorSpec::NetworkUnreachable => io::Error::from_raw_os_error(101), // ENETUNREACH
+            ErrorSpec::HostUnreachable => io::Error::from_raw_os_error(113),   // EHOSTUNREACH
+            ErrorSpec::BrokenPipe => io::Error::from_raw_os_error(32),         // EPIPE
+            ErrorSpec::ConnectionReset => io::Error::from_raw_os_error(104),   // ECONNRESET
+            ErrorSpec::AddressInUse => io::Error::from_raw_os_error(98),       // EADDRINUSE
+            ErrorSpec::PermissionDenied => io::Error::from_raw_os_error(13),   // EACCES
         }
     }
 }
@@ -86,6 +110,61 @@ impl ErrorInjection {
     ) -> Self {
         self.errors_on_attempts
             .push((attempt, ErrorSpec::Io(kind, msg.to_string())));
+        self
+    }
+
+    /// Inject connection refused error on a specific attempt.
+    pub fn with_connection_refused_on_attempt(mut self, attempt: usize) -> Self {
+        self.errors_on_attempts
+            .push((attempt, ErrorSpec::ConnectionRefused));
+        self
+    }
+
+    /// Inject timeout error on a specific attempt.
+    pub fn with_timed_out_on_attempt(mut self, attempt: usize) -> Self {
+        self.errors_on_attempts.push((attempt, ErrorSpec::TimedOut));
+        self
+    }
+
+    /// Inject network unreachable error on a specific attempt.
+    pub fn with_network_unreachable_on_attempt(mut self, attempt: usize) -> Self {
+        self.errors_on_attempts
+            .push((attempt, ErrorSpec::NetworkUnreachable));
+        self
+    }
+
+    /// Inject host unreachable error on a specific attempt.
+    pub fn with_host_unreachable_on_attempt(mut self, attempt: usize) -> Self {
+        self.errors_on_attempts
+            .push((attempt, ErrorSpec::HostUnreachable));
+        self
+    }
+
+    /// Inject broken pipe error on a specific attempt.
+    pub fn with_broken_pipe_on_attempt(mut self, attempt: usize) -> Self {
+        self.errors_on_attempts
+            .push((attempt, ErrorSpec::BrokenPipe));
+        self
+    }
+
+    /// Inject connection reset error on a specific attempt.
+    pub fn with_connection_reset_on_attempt(mut self, attempt: usize) -> Self {
+        self.errors_on_attempts
+            .push((attempt, ErrorSpec::ConnectionReset));
+        self
+    }
+
+    /// Inject address in use error on a specific attempt.
+    pub fn with_address_in_use_on_attempt(mut self, attempt: usize) -> Self {
+        self.errors_on_attempts
+            .push((attempt, ErrorSpec::AddressInUse));
+        self
+    }
+
+    /// Inject permission denied error on a specific attempt.
+    pub fn with_permission_denied_on_attempt(mut self, attempt: usize) -> Self {
+        self.errors_on_attempts
+            .push((attempt, ErrorSpec::PermissionDenied));
         self
     }
 
@@ -267,6 +346,46 @@ impl MockRetryBehavior {
         self
     }
 
+    /// Inject connection refused error on a specific attempt.
+    pub fn with_connection_refused_on_attempt(self, attempt: usize) -> Self {
+        self.with_error_on_attempt(attempt, ErrorSpec::ConnectionRefused)
+    }
+
+    /// Inject timeout error on a specific attempt.
+    pub fn with_timed_out_on_attempt(self, attempt: usize) -> Self {
+        self.with_error_on_attempt(attempt, ErrorSpec::TimedOut)
+    }
+
+    /// Inject network unreachable error on a specific attempt.
+    pub fn with_network_unreachable_on_attempt(self, attempt: usize) -> Self {
+        self.with_error_on_attempt(attempt, ErrorSpec::NetworkUnreachable)
+    }
+
+    /// Inject host unreachable error on a specific attempt.
+    pub fn with_host_unreachable_on_attempt(self, attempt: usize) -> Self {
+        self.with_error_on_attempt(attempt, ErrorSpec::HostUnreachable)
+    }
+
+    /// Inject broken pipe error on a specific attempt.
+    pub fn with_broken_pipe_on_attempt(self, attempt: usize) -> Self {
+        self.with_error_on_attempt(attempt, ErrorSpec::BrokenPipe)
+    }
+
+    /// Inject connection reset error on a specific attempt.
+    pub fn with_connection_reset_on_attempt(self, attempt: usize) -> Self {
+        self.with_error_on_attempt(attempt, ErrorSpec::ConnectionReset)
+    }
+
+    /// Inject address in use error on a specific attempt.
+    pub fn with_address_in_use_on_attempt(self, attempt: usize) -> Self {
+        self.with_error_on_attempt(attempt, ErrorSpec::AddressInUse)
+    }
+
+    /// Inject permission denied error on a specific attempt.
+    pub fn with_permission_denied_on_attempt(self, attempt: usize) -> Self {
+        self.with_error_on_attempt(attempt, ErrorSpec::PermissionDenied)
+    }
+
     /// Set which attempts should succeed (default: first attempt only).
     pub fn with_success_on_attempts(mut self, attempts: Vec<usize>) -> Self {
         self.success_on_attempts = attempts;
@@ -401,6 +520,46 @@ pub fn io_error(kind: io::ErrorKind, msg: &str) -> io::Error {
     io::Error::new(kind, msg)
 }
 
+/// Create a connection refused error (ECONNREFUSED, errno 111).
+pub fn connection_refused_error() -> io::Error {
+    io::Error::from_raw_os_error(111)
+}
+
+/// Create a timeout error (ETIMEDOUT, errno 110).
+pub fn timed_out_error() -> io::Error {
+    io::Error::from_raw_os_error(110)
+}
+
+/// Create a network unreachable error (ENETUNREACH, errno 101).
+pub fn network_unreachable_error() -> io::Error {
+    io::Error::from_raw_os_error(101)
+}
+
+/// Create a host unreachable error (EHOSTUNREACH, errno 113).
+pub fn host_unreachable_error() -> io::Error {
+    io::Error::from_raw_os_error(113)
+}
+
+/// Create a broken pipe error (EPIPE, errno 32).
+pub fn broken_pipe_error() -> io::Error {
+    io::Error::from_raw_os_error(32)
+}
+
+/// Create a connection reset error (ECONNRESET, errno 104).
+pub fn connection_reset_error() -> io::Error {
+    io::Error::from_raw_os_error(104)
+}
+
+/// Create an address in use error (EADDRINUSE, errno 98).
+pub fn address_in_use_error() -> io::Error {
+    io::Error::from_raw_os_error(98)
+}
+
+/// Create a permission denied error (EACCES, errno 13).
+pub fn permission_denied_error() -> io::Error {
+    io::Error::from_raw_os_error(13)
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Assertion helpers
 // ──────────────────────────────────────────────────────────────────────────────
@@ -483,6 +642,169 @@ pub fn assert_retry_within_bounds(result: &RetryResult, max_attempts: usize) -> 
         ));
     }
     Ok(())
+}
+
+/// Assert that a retry result failed with connection refused error.
+pub fn assert_failed_connection_refused(result: &RetryResult) -> Result<(), String> {
+    if result.succeeded {
+        return Err(format!(
+            "Expected connection refused failure, but operation succeeded after {} attempts",
+            result.attempts
+        ));
+    }
+    let errno = result
+        .error
+        .as_ref()
+        .and_then(|e| e.raw_os_error())
+        .ok_or("Error has no raw OS error code")?;
+
+    if errno != 111 {
+        return Err(format!(
+            "Expected connection refused (errno 111), but got errno {}",
+            errno
+        ));
+    }
+    Ok(())
+}
+
+/// Assert that a retry result failed with timeout error.
+pub fn assert_failed_timed_out(result: &RetryResult) -> Result<(), String> {
+    if result.succeeded {
+        return Err(format!(
+            "Expected timeout failure, but operation succeeded after {} attempts",
+            result.attempts
+        ));
+    }
+    let errno = result
+        .error
+        .as_ref()
+        .and_then(|e| e.raw_os_error())
+        .ok_or("Error has no raw OS error code")?;
+
+    if errno != 110 {
+        return Err(format!(
+            "Expected timeout (errno 110), but got errno {}",
+            errno
+        ));
+    }
+    Ok(())
+}
+
+/// Assert that a retry result failed with network unreachable error.
+pub fn assert_failed_network_unreachable(result: &RetryResult) -> Result<(), String> {
+    if result.succeeded {
+        return Err(format!(
+            "Expected network unreachable failure, but operation succeeded after {} attempts",
+            result.attempts
+        ));
+    }
+    let errno = result
+        .error
+        .as_ref()
+        .and_then(|e| e.raw_os_error())
+        .ok_or("Error has no raw OS error code")?;
+
+    if errno != 101 {
+        return Err(format!(
+            "Expected network unreachable (errno 101), but got errno {}",
+            errno
+        ));
+    }
+    Ok(())
+}
+
+/// Assert that a retry result failed with broken pipe error.
+pub fn assert_failed_broken_pipe(result: &RetryResult) -> Result<(), String> {
+    if result.succeeded {
+        return Err(format!(
+            "Expected broken pipe failure, but operation succeeded after {} attempts",
+            result.attempts
+        ));
+    }
+    let errno = result
+        .error
+        .as_ref()
+        .and_then(|e| e.raw_os_error())
+        .ok_or("Error has no raw OS error code")?;
+
+    if errno != 32 {
+        return Err(format!(
+            "Expected broken pipe (errno 32), but got errno {}",
+            errno
+        ));
+    }
+    Ok(())
+}
+
+/// Assert that a retry result failed with connection reset error.
+pub fn assert_failed_connection_reset(result: &RetryResult) -> Result<(), String> {
+    if result.succeeded {
+        return Err(format!(
+            "Expected connection reset failure, but operation succeeded after {} attempts",
+            result.attempts
+        ));
+    }
+    let errno = result
+        .error
+        .as_ref()
+        .and_then(|e| e.raw_os_error())
+        .ok_or("Error has no raw OS error code")?;
+
+    if errno != 104 {
+        return Err(format!(
+            "Expected connection reset (errno 104), but got errno {}",
+            errno
+        ));
+    }
+    Ok(())
+}
+
+/// Assert that a retry result failed with permission denied error.
+pub fn assert_failed_permission_denied(result: &RetryResult) -> Result<(), String> {
+    if result.succeeded {
+        return Err(format!(
+            "Expected permission denied failure, but operation succeeded after {} attempts",
+            result.attempts
+        ));
+    }
+    let errno = result
+        .error
+        .as_ref()
+        .and_then(|e| e.raw_os_error())
+        .ok_or("Error has no raw OS error code")?;
+
+    if errno != 13 {
+        return Err(format!(
+            "Expected permission denied (errno 13), but got errno {}",
+            errno
+        ));
+    }
+    Ok(())
+}
+
+/// Check if an error is retryable (network errors that should trigger retry).
+pub fn is_retryable_error(error: &io::Error) -> bool {
+    // ETXTBSY is retryable (file busy)
+    if error.raw_os_error() == Some(26) {
+        return true;
+    }
+    // Connection refused might be temporary
+    if error.raw_os_error() == Some(111) {
+        return true;
+    }
+    // Timed out is retryable
+    if error.raw_os_error() == Some(110) {
+        return true;
+    }
+    // Network unreachable might be temporary
+    if error.raw_os_error() == Some(101) {
+        return true;
+    }
+    // Connection reset by peer is retryable
+    if error.raw_os_error() == Some(104) {
+        return true;
+    }
+    false
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -651,6 +973,241 @@ mod tests {
         let result = mock.run_async().await?;
 
         assert_succeeded_with_attempts(&result, 2)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_network_error_constructors() {
+        // Test that all network error constructors produce valid errors
+        assert!(connection_refused_error().raw_os_error() == Some(111));
+        assert!(timed_out_error().raw_os_error() == Some(110));
+        assert!(network_unreachable_error().raw_os_error() == Some(101));
+        assert!(host_unreachable_error().raw_os_error() == Some(113));
+        assert!(broken_pipe_error().raw_os_error() == Some(32));
+        assert!(connection_reset_error().raw_os_error() == Some(104));
+        assert!(address_in_use_error().raw_os_error() == Some(98));
+        assert!(permission_denied_error().raw_os_error() == Some(13));
+    }
+
+    #[test]
+    fn test_error_spec_to_error_conversion() {
+        // Test that all ErrorSpec variants convert to io::Error correctly
+        let specs = vec![
+            ErrorSpec::Etxtbsy,
+            ErrorSpec::ConnectionRefused,
+            ErrorSpec::TimedOut,
+            ErrorSpec::NetworkUnreachable,
+            ErrorSpec::HostUnreachable,
+            ErrorSpec::BrokenPipe,
+            ErrorSpec::ConnectionReset,
+            ErrorSpec::AddressInUse,
+            ErrorSpec::PermissionDenied,
+            ErrorSpec::Io(io::ErrorKind::NotFound, "test".to_string()),
+        ];
+
+        for spec in specs {
+            let error = spec.to_error();
+            // Verify the error is valid and has appropriate metadata
+            match spec {
+                ErrorSpec::Io(kind, _) => {
+                    assert_eq!(error.kind(), kind);
+                }
+                _ => {
+                    // OS errors should have a raw OS error code
+                    assert!(error.raw_os_error().is_some());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_connection_refused_retry() -> Result<(), String> {
+        let mock = MockRetryBehavior::new()
+            .with_max_attempts(3)
+            .with_connection_refused_on_attempt(1)
+            .with_success_on_attempts(vec![2]);
+
+        let result = mock.run_sync()?;
+
+        assert_succeeded_with_attempts(&result, 2)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_timeout_error_retry() -> Result<(), String> {
+        let mock = MockRetryBehavior::new()
+            .with_max_attempts(3)
+            .with_timed_out_on_attempt(1)
+            .with_success_on_attempts(vec![2]);
+
+        let result = mock.run_sync()?;
+
+        assert_succeeded_with_attempts(&result, 2)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_network_unreachable_retry() -> Result<(), String> {
+        let mock = MockRetryBehavior::new()
+            .with_max_attempts(3)
+            .with_network_unreachable_on_attempt(1)
+            .with_success_on_attempts(vec![2]);
+
+        let result = mock.run_sync()?;
+
+        assert_succeeded_with_attempts(&result, 2)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_connection_reset_retry() -> Result<(), String> {
+        let mock = MockRetryBehavior::new()
+            .with_max_attempts(3)
+            .with_connection_reset_on_attempt(1)
+            .with_success_on_attempts(vec![2]);
+
+        let result = mock.run_sync()?;
+
+        assert_succeeded_with_attempts(&result, 2)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_broken_pipe_fails_immediately() -> Result<(), String> {
+        let mock = MockRetryBehavior::new()
+            .with_max_attempts(5)
+            .with_broken_pipe_on_attempt(1);
+
+        let result = mock.run_sync()?;
+
+        assert_failed_broken_pipe(&result)?;
+        assert_eq!(result.attempts, 1); // Should not retry
+        Ok(())
+    }
+
+    #[test]
+    fn test_permission_denied_fails_immediately() -> Result<(), String> {
+        let mock = MockRetryBehavior::new()
+            .with_max_attempts(5)
+            .with_permission_denied_on_attempt(1);
+
+        let result = mock.run_sync()?;
+
+        assert_failed_permission_denied(&result)?;
+        assert_eq!(result.attempts, 1); // Should not retry
+        Ok(())
+    }
+
+    #[test]
+    fn test_mixed_error_injection() -> Result<(), String> {
+        // Test injecting different errors on different attempts
+        let mock = MockRetryBehavior::new()
+            .with_max_attempts(5)
+            .with_timed_out_on_attempt(1)
+            .with_connection_refused_on_attempt(2)
+            .with_success_on_attempts(vec![3]);
+
+        let result = mock.run_sync()?;
+
+        assert_succeeded_with_attempts(&result, 3)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_exponential_backoff_with_timeouts() -> Result<(), String> {
+        let mock = MockRetryBehavior::new()
+            .with_max_attempts(4)
+            .with_exponential_backoff(10, 100)
+            .with_timed_out_on_attempt(1)
+            .with_timed_out_on_attempt(2)
+            .with_success_on_attempts(vec![3]);
+
+        let start = Instant::now();
+        let result = mock.run_sync()?;
+        let elapsed = start.elapsed();
+
+        assert_succeeded_with_attempts(&result, 3)?;
+        // With exponential backoff: 10ms (attempt 1) + 20ms (attempt 2) = at least 30ms
+        assert!(elapsed >= Duration::from_millis(30));
+        Ok(())
+    }
+
+    #[test]
+    fn test_is_retryable_error() {
+        // Test retryable errors
+        assert!(is_retryable_error(&etxtbsy_error()));
+        assert!(is_retryable_error(&connection_refused_error()));
+        assert!(is_retryable_error(&timed_out_error()));
+        assert!(is_retryable_error(&network_unreachable_error()));
+        assert!(is_retryable_error(&connection_reset_error()));
+
+        // Test non-retryable errors
+        assert!(!is_retryable_error(&broken_pipe_error()));
+        assert!(!is_retryable_error(&permission_denied_error()));
+        assert!(!is_retryable_error(&address_in_use_error()));
+        assert!(!is_retryable_error(&host_unreachable_error()));
+        assert!(!is_retryable_error(&io_error(
+            io::ErrorKind::NotFound,
+            "not found"
+        )));
+    }
+
+    #[tokio::test]
+    async fn test_network_error_async_retry() -> Result<(), String> {
+        let mock = MockRetryBehavior::new()
+            .with_max_attempts(3)
+            .with_connection_refused_on_attempt(1)
+            .with_success_on_attempts(vec![2]);
+
+        let result = mock.run_async().await?;
+
+        assert_succeeded_with_attempts(&result, 2)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_error_injection_multiple_errors() {
+        let injection = ErrorInjection::new()
+            .with_etxtbsy_on_attempt(1)
+            .with_timed_out_on_attempt(2)
+            .with_connection_refused_on_attempt(3)
+            .with_broken_pipe_on_attempt(4);
+
+        assert!(injection.should_error(1).is_some());
+        assert!(injection.should_error(2).is_some());
+        assert!(injection.should_error(3).is_some());
+        assert!(injection.should_error(4).is_some());
+        assert!(injection.should_error(5).is_none());
+    }
+
+    #[test]
+    fn test_mock_retry_all_assertions() -> Result<(), String> {
+        // Test all new assertion helpers
+        let mut result = RetryResult {
+            attempts: 2,
+            succeeded: false,
+            elapsed: Duration::from_millis(100),
+            result: None,
+            error: Some(connection_refused_error()),
+        };
+
+        assert_failed_connection_refused(&result)?;
+
+        result.error = Some(timed_out_error());
+        assert_failed_timed_out(&result)?;
+
+        result.error = Some(network_unreachable_error());
+        assert_failed_network_unreachable(&result)?;
+
+        result.error = Some(broken_pipe_error());
+        assert_failed_broken_pipe(&result)?;
+
+        result.error = Some(connection_reset_error());
+        assert_failed_connection_reset(&result)?;
+
+        result.error = Some(permission_denied_error());
+        assert_failed_permission_denied(&result)?;
+
         Ok(())
     }
 }

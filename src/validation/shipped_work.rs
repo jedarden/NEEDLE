@@ -10,9 +10,14 @@
 //! - the bead's own `notes` field changed during this dispatch — i.e. the agent
 //!   recorded a bead note explaining why no code change was needed.
 //!
-//! With no snapshot the gate has no baseline and **fails open** — it cannot tell
-//! a commit made during the dispatch from one that predates it, and releasing on
-//! "don't know" would recreate the retry loop it exists to stop.
+//! With no snapshot the gate has no baseline and **fails closed** — it cannot tell
+//! a commit made during the dispatch from one that predates it, so the bead must
+//! be treated as a failure and the retry counter incremented. This prevents beads
+//! that close without shipped work (e.g., GitHub comments, external API calls) from
+//! looping forever: every closure that fails the shipped-work check increments the
+//! failure count, and after the threshold the bead is quarantined (set deferred)
+//! rather than reopened. See GitHub issue #16 (bead needle-0fbf5145 cycled 14 times
+//! posting identical comments).
 //!
 //! Deliberately does NOT accept a commit touching only `notes/`/`.beads/` as
 //! sufficient on its own: a prior incident (see docs/notes on ARMOR's
@@ -64,6 +69,10 @@ const TRIVIAL_PATH_PREFIXES: &[&str] = &["notes/", ".beads/", ".needle-predispat
 /// uncommitted working tree changes. The git commands it uses (`git rev-parse`,
 /// `git diff`, `git merge-base`) operate on commits only and ignore the
 /// working tree.
+///
+/// For beads labeled `deliverable:external`, the git check is skipped and
+/// the gate requires machine-checkable evidence: notes must have changed
+/// during the dispatch AND contain a line beginning with `evidence:`.
 pub async fn verify_shipped_work(
     post: &Bead,
     workspace: &Path,
@@ -76,7 +85,13 @@ pub async fn verify_shipped_work(
         .await
         .unwrap_or_default();
 
-    evaluate(workspace, snapshot.as_ref(), &post_notes).await
+    evaluate(
+        workspace,
+        snapshot.as_ref(),
+        &post_notes,
+        post.labels.contains(&"deliverable:external".to_string()),
+    )
+    .await
 }
 
 /// Gate logic with all external state passed in, so tests can exercise every
@@ -85,19 +100,34 @@ async fn evaluate(
     workspace: &Path,
     snapshot: Option<&predispatch::PreDispatch>,
     post_notes: &str,
+    is_external: bool,
 ) -> Result<GateResult> {
     // No baseline means the gate has no basis to judge this dispatch: it cannot
-    // tell a commit made during the dispatch from one that predates it. Fail
-    // OPEN. Releasing on "don't know" would re-release every closure whenever
-    // snapshot recording failed — the same unbounded retry loop this gate
-    // exists to stop, just triggered from the other side.
+    // tell a commit made during the dispatch from one that predates it. When
+    // a bead closes without a snapshot and without evidence of shipped work,
+    // we must FAIL to trigger the failure-quarantine circuit — otherwise the
+    // failure counter gets reset before the shipped-work check and the bead
+    // loops forever (GitHub issue #16: bead needle-0fbf5145 posted 18
+    // identical comments because every closure reset the count).
     let Some(snapshot) = snapshot else {
         tracing::debug!(
             workspace = %workspace.display(),
-            "no pre-dispatch snapshot — shipped-work gate passing without a verdict"
+            "no pre-dispatch snapshot — shipped-work gate failing to enforce quarantine"
         );
-        return Ok(GateResult::Pass);
+        return Ok(GateResult::Fail(
+            "no pre-dispatch snapshot recorded — cannot verify shipped work. \
+             This closure will be treated as a failure and increment the retry counter. \
+             Ensure the worker is recording predispatch snapshots, or record an explicit \
+             bead note explaining why no work was shipped."
+                .to_string(),
+        ));
     };
+
+    // For beads with deliverable:external, skip git check entirely and
+    // verify only that notes changed with an evidence: line.
+    if is_external {
+        return evaluate_external(snapshot, post_notes);
+    }
 
     if let Some(result) = check_commit(workspace, Some(snapshot)).await? {
         return Ok(result);
@@ -125,6 +155,59 @@ async fn evaluate(
          commit real work, or record an explanatory note with the configured bead backend"
             .to_string(),
     ))
+}
+
+/// Gate logic for beads labeled with deliverable:external.
+///
+/// These beads have non-commit deliverables (GitHub comments, external API calls,
+/// provisioning steps, verification tasks). The gate skips git verification
+/// and requires machine-checkable evidence in the bead notes.
+///
+/// PASS conditions:
+/// - Notes changed during dispatch (hash differs, or non-empty when snapshot hash is None)
+/// - Notes contain a line matching `^\s*evidence:\s*\S` (case-insensitive on "evidence")
+///
+/// FAIL otherwise, with a distinct failure reason for telemetry.
+fn evaluate_external(snapshot: &predispatch::PreDispatch, post_notes: &str) -> Result<GateResult> {
+    // Check if notes changed during the dispatch
+    let notes_changed = match snapshot.notes_hash.as_deref() {
+        Some(pre_hash) => hash_notes(post_notes) != pre_hash,
+        None => !post_notes.trim().is_empty(),
+    };
+
+    if !notes_changed {
+        return Ok(GateResult::Fail(
+            "deliverable:external bead closed without note update — \
+             run: <bead_cli> update <id> --notes \"evidence: <url or identifier>\" then close; \
+             close --reason alone does not count"
+                .to_string(),
+        ));
+    }
+
+    // Check for evidence: line (case-insensitive on "evidence")
+    let has_evidence = post_notes.lines().any(|line| {
+        let trimmed = line.trim();
+        if trimmed.to_lowercase().starts_with("evidence:") {
+            // Check there's non-whitespace after the colon
+            let after_colon = trimmed
+                .trim_start_matches("evidence:")
+                .trim_start_matches("EVIDENCE:");
+            !after_colon.is_empty() && after_colon.chars().any(|c| !c.is_whitespace())
+        } else {
+            false
+        }
+    });
+
+    if !has_evidence {
+        return Ok(GateResult::Fail(
+            "deliverable:external bead closed without evidence — \
+             run: <bead_cli> update <id> --notes \"evidence: <url or identifier>\" then close; \
+             close --reason alone does not count"
+                .to_string(),
+        ));
+    }
+
+    Ok(GateResult::Pass)
 }
 
 /// Checks the git side. Returns `Ok(None)` to mean "no verdict from git,
@@ -254,7 +337,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         init_repo(dir.path()).await;
         assert_eq!(
-            evaluate(dir.path(), None, "").await.unwrap(),
+            evaluate(dir.path(), None, "", false).await.unwrap(),
             GateResult::Pass
         );
     }
@@ -265,9 +348,14 @@ mod tests {
         let head = init_repo(dir.path()).await;
         let snap = snapshot(Some(&head), None);
         assert_eq!(
-            evaluate(dir.path(), Some(&snap), "already implemented in 4f2a1c")
-                .await
-                .unwrap(),
+            evaluate(
+                dir.path(),
+                Some(&snap),
+                "already implemented in 4f2a1c",
+                false
+            )
+            .await
+            .unwrap(),
             GateResult::Pass
         );
     }
@@ -278,7 +366,9 @@ mod tests {
         let head = init_repo(dir.path()).await;
         let snap = snapshot(Some(&head), None);
         assert!(matches!(
-            evaluate(dir.path(), Some(&snap), "   ").await.unwrap(),
+            evaluate(dir.path(), Some(&snap), "   ", false)
+                .await
+                .unwrap(),
             GateResult::Fail(_)
         ));
     }
@@ -288,9 +378,14 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let head = init_repo(dir.path()).await;
         let snap = snapshot(Some(&head), Some(""));
-        let result = evaluate(dir.path(), Some(&snap), "checked: no code change needed")
-            .await
-            .unwrap();
+        let result = evaluate(
+            dir.path(),
+            Some(&snap),
+            "checked: no code change needed",
+            false,
+        )
+        .await
+        .unwrap();
         assert_eq!(result, GateResult::Pass);
     }
 
@@ -302,7 +397,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let head = init_repo(dir.path()).await;
         let snap = snapshot(Some(&head), Some("pre-existing note"));
-        let result = evaluate(dir.path(), Some(&snap), "pre-existing note")
+        let result = evaluate(dir.path(), Some(&snap), "pre-existing note", false)
             .await
             .unwrap();
         assert!(
@@ -324,7 +419,7 @@ mod tests {
 
         let snap = snapshot(Some(&head), Some(""));
         assert_eq!(
-            evaluate(dir.path(), Some(&snap), "").await.unwrap(),
+            evaluate(dir.path(), Some(&snap), "", false).await.unwrap(),
             GateResult::Pass
         );
     }
@@ -338,7 +433,7 @@ mod tests {
         commit_files(dir.path(), &[("src.rs", "fn main() {}\n")], "unpushed");
 
         let snap = snapshot(Some(&head), Some(""));
-        match evaluate(dir.path(), Some(&snap), "").await.unwrap() {
+        match evaluate(dir.path(), Some(&snap), "", false).await.unwrap() {
             GateResult::Fail(reason) => assert!(reason.contains("not been pushed")),
             GateResult::Pass => panic!("expected Fail for unpushed commit"),
         }
@@ -359,7 +454,7 @@ mod tests {
 
         // Notes unchanged on the bead too — the exact ARMOR commit-storm shape.
         let snap = snapshot(Some(&head), Some(""));
-        match evaluate(dir.path(), Some(&snap), "").await.unwrap() {
+        match evaluate(dir.path(), Some(&snap), "", false).await.unwrap() {
             GateResult::Fail(_) => {}
             GateResult::Pass => panic!("a notes-only commit must not satisfy the gate on its own"),
         }
@@ -388,7 +483,7 @@ mod tests {
         git(dir.path(), &["push", "-q"]);
 
         let snap = snapshot(Some(&head), Some(""));
-        match evaluate(dir.path(), Some(&snap), "").await.unwrap() {
+        match evaluate(dir.path(), Some(&snap), "", false).await.unwrap() {
             GateResult::Fail(_) => {}
             GateResult::Pass => {
                 panic!("the marker file must not make a notes-only commit substantial")
@@ -411,7 +506,7 @@ mod tests {
 
         let snap = snapshot(Some(&head), Some(""));
         assert!(matches!(
-            evaluate(dir.path(), Some(&snap), "").await.unwrap(),
+            evaluate(dir.path(), Some(&snap), "", false).await.unwrap(),
             GateResult::Fail(_)
         ));
     }
@@ -423,7 +518,7 @@ mod tests {
         let snap = snapshot(Some(&head), Some(""));
         // HEAD == snapshot, notes changed -> pass via fallback.
         assert_eq!(
-            evaluate(dir.path(), Some(&snap), "investigated")
+            evaluate(dir.path(), Some(&snap), "investigated", false)
                 .await
                 .unwrap(),
             GateResult::Pass

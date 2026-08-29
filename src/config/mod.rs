@@ -61,7 +61,7 @@ pub struct RoutingRule {
     /// Examples: `"sonnet"`, `"opus"`, `"claude-sonnet-4-6"`, `"(claude-)?(sonnet|opus).*"`.
     pub match_model: String,
 
-    /// Adapter to use for matching models (e.g., `claude-print`, `claude-code-glm-4.7`).
+    /// Adapter to use for matching models (e.g., `claude`, `claude-sonnet`).
     pub adapter: String,
 }
 
@@ -188,7 +188,7 @@ pub struct AgentConfig {
     #[serde(default = "AgentConfig::default_timeout")]
     pub timeout: u64,
 
-    /// Directory containing adapter TOML files.
+    /// Directory containing adapter YAML files.
     #[serde(default = "AgentConfig::default_adapters_dir")]
     pub adapters_dir: PathBuf,
 
@@ -228,18 +228,17 @@ impl AgentConfig {
 
     /// Default routing rules for Anthropic subscription models.
     ///
-    /// Routers Anthropic Claude models (sonnet, opus, fable, haiku) to claude-print
-    /// to use subscription billing before the June 15, 2026 API credit transition.
-    /// All other models fall back to claude-code-glm-4.7.
+    /// Routes Anthropic Claude models (sonnet, opus, fable, haiku) to the built-in
+    /// `claude` adapter. All other models fall back to the same adapter.
     fn default_routing() -> Option<RoutingConfig> {
         Some(RoutingConfig {
             rules: vec![RoutingRule {
-                // Match Anthropic Claude models on subscription billing
+                // Match Anthropic Claude models
                 // Patterns: claude-sonnet-4-6, claude-opus-4-6, claude-fable-5, claude-haiku-4-5-20251001
                 match_model: "(claude-)?(sonnet|opus|fable|haiku).*".to_string(),
-                adapter: "claude-print".to_string(),
+                adapter: "claude".to_string(),
             }],
-            default_adapter: Some("claude-code-glm-4.7".to_string()),
+            default_adapter: Some("claude".to_string()),
             strict: false,
         })
     }
@@ -2203,6 +2202,46 @@ mod tests {
         assert_eq!(
             result.1, bf_local,
             "Should resolve to ~/.local/bin/bf when PATH is empty"
+        );
+    }
+
+    /// Test edge case: completely empty PATH with no fallback locations.
+    ///
+    /// Verifies that when PATH is empty and no fallback locations exist,
+    /// the Auto backend returns a meaningful error indicating CLI detection
+    /// failure, rather than panicking or returning an unclear "internal error".
+    #[serial]
+    #[test]
+    fn test_auto_backend_empty_path_no_fallback_returns_meaningful_error() {
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
+        let tmp_dir = setup_test_binary_dir();
+        let home = tmp_dir.path().to_path_buf();
+
+        // Set PATH to completely empty and HOME to an empty temp directory
+        std::env::set_var("PATH", "");
+        std::env::set_var("HOME", &home);
+
+        let config = BeadCliConfig {
+            backend: BeadBackend::Auto,
+            path: None,
+        };
+
+        let result = resolve_bead_cli(&config);
+        assert!(
+            result.is_err(),
+            "Auto backend should error when PATH is empty and no fallbacks exist"
+        );
+
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("no bead CLI found"),
+            "Error message should clearly indicate CLI detection failure, got: {}",
+            err
+        );
+        assert!(
+            err.contains("bead on PATH") || err.contains("PATH"),
+            "Error message should mention PATH search failure, got: {}",
+            err
         );
     }
 
@@ -10245,13 +10284,10 @@ worker:
 
         let rule = &routing.rules[0];
         assert_eq!(rule.match_model, "(claude-)?(sonnet|opus|fable|haiku).*");
-        assert_eq!(rule.adapter, "claude-print");
+        assert_eq!(rule.adapter, "claude");
 
-        // Default fallback should be claude-code-glm-4.7
-        assert_eq!(
-            routing.default_adapter.as_deref(),
-            Some("claude-code-glm-4.7")
-        );
+        // Default fallback should be claude
+        assert_eq!(routing.default_adapter.as_deref(), Some("claude"));
     }
 
     #[test]
@@ -10262,10 +10298,10 @@ agent:
   routing:
     rules:
       - match_model: "(claude-)?(sonnet|opus).*"
-        adapter: claude-print
+        adapter: claude-sonnet
       - match_model: "haiku.*"
-        adapter: claude-code-glm-4.7
-    default_adapter: claude-code-glm-4.7
+        adapter: claude
+    default_adapter: claude
 "#;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yaml");
@@ -10276,13 +10312,10 @@ agent:
         let routing = config.agent.routing.as_ref().unwrap();
         assert_eq!(routing.rules.len(), 2);
         assert_eq!(routing.rules[0].match_model, "(claude-)?(sonnet|opus).*");
-        assert_eq!(routing.rules[0].adapter, "claude-print");
+        assert_eq!(routing.rules[0].adapter, "claude-sonnet");
         assert_eq!(routing.rules[1].match_model, "haiku.*");
-        assert_eq!(routing.rules[1].adapter, "claude-code-glm-4.7");
-        assert_eq!(
-            routing.default_adapter.as_deref(),
-            Some("claude-code-glm-4.7")
-        );
+        assert_eq!(routing.rules[1].adapter, "claude");
+        assert_eq!(routing.default_adapter.as_deref(), Some("claude"));
     }
 
     #[test]
@@ -10355,14 +10388,14 @@ agent:
             rules: vec![
                 RoutingRule {
                     match_model: "(claude-)?sonnet.*".to_string(),
-                    adapter: "claude-print".to_string(),
+                    adapter: "claude-sonnet".to_string(),
                 },
                 RoutingRule {
                     match_model: "opus".to_string(),
                     adapter: "claude-opus".to_string(),
                 },
             ],
-            default_adapter: Some("claude-fallback".to_string()),
+            default_adapter: Some("claude".to_string()),
             strict: false,
         });
 
@@ -10650,7 +10683,7 @@ agent:
                     adapter: "sonnet-adapter".to_string(),
                 },
             ],
-            default_adapter: Some("claude-code-glm-4.7".to_string()),
+            default_adapter: Some("claude".to_string()),
             strict: false,
         });
 
@@ -10672,10 +10705,10 @@ agent:
   routing:
     rules:
       - match_model: "(claude-)?(sonnet|opus).*"
-        adapter: claude-print
+        adapter: claude-sonnet
       - match_model: "(claude-)?(fable|haiku).*"
-        adapter: claude-code-glm-4.7
-    default_adapter: claude-code-glm-4.7
+        adapter: claude
+    default_adapter: claude
 "#;
         std::fs::write(&path, yaml).unwrap();
 
@@ -10683,12 +10716,9 @@ agent:
         assert!(config.agent.routing.is_some());
         let routing = config.agent.routing.as_ref().unwrap();
         assert_eq!(routing.rules.len(), 2);
-        assert_eq!(routing.rules[0].adapter, "claude-print");
-        assert_eq!(routing.rules[1].adapter, "claude-code-glm-4.7");
-        assert_eq!(
-            routing.default_adapter.as_deref(),
-            Some("claude-code-glm-4.7")
-        );
+        assert_eq!(routing.rules[0].adapter, "claude-sonnet");
+        assert_eq!(routing.rules[1].adapter, "claude");
+        assert_eq!(routing.default_adapter.as_deref(), Some("claude"));
     }
 
     #[test]
@@ -10832,8 +10862,8 @@ agent:
     }
 
     #[test]
-    fn routing_default_anthropic_models_to_claude_print() {
-        // Test that default routing rules route Anthropic models to claude-print
+    fn routing_default_anthropic_models_to_claude() {
+        // Test that default routing rules route Anthropic models to claude
         let default_routing = AgentConfig::default_routing();
         assert!(default_routing.is_some());
 
@@ -10855,37 +10885,28 @@ agent:
         assert!(re.is_match("sonnet"), "should match short form");
         assert!(re.is_match("opus"), "should match short form");
 
-        // Verify the adapter is claude-print
-        assert_eq!(rule.adapter, "claude-print");
+        // Verify the adapter is claude
+        assert_eq!(rule.adapter, "claude");
 
         // Verify default fallback
-        assert_eq!(
-            routing.default_adapter.as_deref(),
-            Some("claude-code-glm-4.7")
-        );
+        assert_eq!(routing.default_adapter.as_deref(), Some("claude"));
     }
 
     #[test]
-    fn routing_glm_47_defaults_to_claude_code_glm_47() {
-        // Test that glm-4.7 models use claude-code-glm-4.7 adapter
+    fn routing_non_anthropic_models_use_default_adapter() {
+        // Test that non-Anthropic models fall back to the default adapter
         let default_routing = AgentConfig::default_routing();
         let routing = default_routing.unwrap();
 
-        // The default rule should NOT match glm models
+        // The default rule should NOT match non-Anthropic models
         let rule = &routing.rules[0];
         let re = regex::Regex::new(&rule.match_model).unwrap();
 
         assert!(!re.is_match("glm-4.7"), "should not match glm models");
-        assert!(
-            !re.is_match("claude-code-glm-4.7"),
-            "should not match adapter names"
-        );
+        assert!(!re.is_match("gpt-4"), "should not match OpenAI models");
 
         // Should fall back to default_adapter
-        assert_eq!(
-            routing.default_adapter.as_deref(),
-            Some("claude-code-glm-4.7")
-        );
+        assert_eq!(routing.default_adapter.as_deref(), Some("claude"));
     }
 
     #[test]
@@ -10906,6 +10927,41 @@ agent:
 
         // Note: The actual warning emission is tested in integration tests since it requires
         // capturing tracing output. The unit test verifies it doesn't cause validation errors.
+    }
+
+    #[test]
+    fn default_routing_uses_only_builtin_adapters() {
+        // Test that Config::default() routing references only names present in builtin_adapters()
+        use crate::dispatch::builtin_adapters;
+
+        let config = Config::default();
+        let routing = config
+            .agent
+            .routing
+            .as_ref()
+            .expect("default routing should be Some");
+
+        // Collect all built-in adapter names
+        let builtin_names: std::collections::HashSet<String> =
+            builtin_adapters().iter().map(|a| a.name.clone()).collect();
+
+        // Verify all adapter names in routing rules are built-in
+        for rule in &routing.rules {
+            assert!(
+                builtin_names.contains(&rule.adapter),
+                "Routing rule adapter '{}' is not a built-in adapter",
+                rule.adapter
+            );
+        }
+
+        // Verify default_adapter is a built-in adapter
+        if let Some(ref default_adapter) = routing.default_adapter {
+            assert!(
+                builtin_names.contains(default_adapter),
+                "Default adapter '{}' is not a built-in adapter",
+                default_adapter
+            );
+        }
     }
 
     #[test]

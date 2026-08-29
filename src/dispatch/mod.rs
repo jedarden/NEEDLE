@@ -2471,6 +2471,9 @@ pub fn test_agent(adapter_name: &str, config: &Config) -> Result<AgentTestResult
     // 8. Determine overall status.
     let status = if cli_path.is_none() {
         AgentTestStatus::Error
+    } else if !template_missing.is_empty() {
+        // Missing template executables is an ERROR, not just a warning
+        AgentTestStatus::Error
     } else if !errors.is_empty() {
         AgentTestStatus::Warning
     } else {
@@ -2655,7 +2658,10 @@ fn extract_executables_from_template(template: &str) -> Vec<String> {
         // Tokenize by whitespace (simple shell tokenization)
         let tokens = segment.split_whitespace().collect::<Vec<_>>();
 
-        for token in tokens {
+        // Take the first word as the command (skip arguments)
+        if let Some(first_word) = tokens.first() {
+            let token = *first_word;
+
             // Skip variable assignments (KEY=VALUE or KEY="VALUE")
             if token.contains('=') {
                 continue;
@@ -5728,5 +5734,57 @@ output_transform: "needle-transform-custom"
             has_unbuffer || has_script,
             "Should detect at least one missing executable"
         );
+    }
+
+    #[test]
+    fn check_template_executables_skips_builtins() {
+        // Test that shell builtins are not flagged as missing executables
+        let template = "cd /tmp && echo hello && export FOO=bar && ls";
+        let missing = check_template_executables(template);
+
+        // Should not report cd, echo, export as missing
+        assert!(!missing.iter().any(|m| m.contains("cd")));
+        assert!(!missing.iter().any(|m| m.contains("echo")));
+        assert!(!missing.iter().any(|m| m.contains("export")));
+
+        // ls should be present on all systems
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn check_template_executables_skips_variable_assignments() {
+        // Test that variable assignments (VAR=value) are skipped
+        let template = "FOO=1 BAR=2 ls && BAZ=3 cat file";
+        let missing = check_template_executables(template);
+
+        // Should not report FOO, BAR, BAZ as missing (they're variable assignments)
+        assert!(!missing.iter().any(|m| m.contains("FOO")));
+        assert!(!missing.iter().any(|m| m.contains("BAR")));
+        assert!(!missing.iter().any(|m| m.contains("BAZ")));
+
+        // ls and cat should be present on all systems
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn check_template_executables_complex_template() {
+        // Test a complex template with multiple operators and edge cases
+        let template = "cd {workspace} && VAR=value unbuffer my-agent < {prompt_file} || script log.txt; env OTHER=val grep pattern";
+        let missing = check_template_executables(template);
+
+        // Should skip cd, VAR=value, env OTHER=val, and {workspace}/{prompt_file} placeholders
+        assert!(!missing.iter().any(|m| m.contains("cd")));
+        assert!(!missing.iter().any(|m| m.contains("VAR")));
+        assert!(!missing.iter().any(|m| m.contains("env")));
+        assert!(!missing.iter().any(|m| m.contains("OTHER")));
+        assert!(!missing.iter().any(|m| m.contains("{workspace}")));
+        assert!(!missing.iter().any(|m| m.contains("{prompt_file}")));
+
+        // May report unbuffer and/or script as missing (not always installed)
+        let _has_unbuffer = missing.iter().any(|m| m.contains("unbuffer"));
+        let _has_script = missing.iter().any(|m| m.contains("script"));
+
+        // grep should be present on all systems
+        assert!(!missing.iter().any(|m| m.contains("grep")));
     }
 }

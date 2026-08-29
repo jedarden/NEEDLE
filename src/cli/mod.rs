@@ -2439,7 +2439,7 @@ agent:
   # Agent process timeout in seconds (0 = unlimited).
   timeout: 3600
 
-  # Directory containing adapter TOML files.
+  # Directory containing adapter YAML files.
   adapters_dir: {adapters_dir}
 
 # Worker fleet configuration.
@@ -4530,7 +4530,7 @@ fn doctor_check_adapter_template_executables(config: &Config) -> CheckResult {
             if missing.is_empty() {
                 CheckResult::pass("Adapter template executables", "all commands available")
             } else {
-                CheckResult::warn(
+                CheckResult::fail(
                     "Adapter template executables",
                     format!(
                         "{} executable(s) referenced in invoke_template not on PATH",
