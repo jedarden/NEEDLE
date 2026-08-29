@@ -326,13 +326,19 @@ fn test_error_injection_configuration() -> Result<(), String> {
         .with_io_error_on_attempt(2, io::ErrorKind::BrokenPipe, "pipe broken")
         .with_io_error_on_attempt(3, io::ErrorKind::ConnectionReset, "reset");
 
-    let error1 = injection.should_error(1).ok_or("Expected error on attempt 1")?;
+    let error1 = injection
+        .should_error(1)
+        .ok_or("Expected error on attempt 1")?;
     assert_eq!(error1.raw_os_error(), Some(26));
 
-    let error2 = injection.should_error(2).ok_or("Expected error on attempt 2")?;
+    let error2 = injection
+        .should_error(2)
+        .ok_or("Expected error on attempt 2")?;
     assert_eq!(error2.kind(), io::ErrorKind::BrokenPipe);
 
-    let error3 = injection.should_error(3).ok_or("Expected error on attempt 3")?;
+    let error3 = injection
+        .should_error(3)
+        .ok_or("Expected error on attempt 3")?;
     assert_eq!(error3.kind(), io::ErrorKind::ConnectionReset);
 
     assert!(injection.should_error(4).is_none());
