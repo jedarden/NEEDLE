@@ -8624,7 +8624,7 @@ mod config_tests {
         config.agent.default = String::new();
         let errors = ConfigLoader::validate(&config);
         assert!(
-            errors.iter().any(|e| e.field == "agent.default"),
+            errors.iter().any(|e| e.full_path == "agent.default"),
             "expected agent.default error, got: {:?}",
             errors
         );
@@ -8636,7 +8636,7 @@ mod config_tests {
         config.worker.max_workers = 0;
         let errors = ConfigLoader::validate(&config);
         assert!(
-            errors.iter().any(|e| e.field == "worker.max_workers"),
+            errors.iter().any(|e| e.full_path == "worker.max_workers"),
             "expected worker.max_workers error, got: {:?}",
             errors
         );

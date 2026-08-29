@@ -129,6 +129,7 @@ filetime = "0.2"
 criterion = "0.5"
 serial_test = "3"
 scopeguard = "1"
+os_pipe = "1"
 
 [[test]]
 name = "integration_spawn"

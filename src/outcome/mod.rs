@@ -486,13 +486,24 @@ impl OutcomeHandler {
                             tracing::warn!(
                                 bead_id = %bead.id,
                                 error = %e,
-                                "shipped-work check errored — failing open"
+                                "shipped-work check errored — failing open, NOT resetting failure count"
                             );
+                            // CRITICAL: Do NOT reset failure count on error.
+                            // A bead that closes repeatedly with errors (e.g., no snapshot,
+                            // verification failures) must accumulate failures and eventually
+                            // quarantine, not loop forever with a freshly-reset count each time.
+                            // See GitHub issue #16 (bead needle-0fbf5145 cycled 14 times).
                         }
                     }
                 } else {
-                    // Shipped-work enforcement disabled — reset failure count on closure.
-                    let _ = self.reset_failure_count(store, bead).await;
+                    // Shipped-work enforcement disabled — DO NOT reset failure count.
+                    // Only reset when shipped-work verification PASSES. A bead that closes
+                    // without verification must accumulate failures and quarantine, not loop
+                    // forever with a reset count on every closure.
+                    tracing::debug!(
+                        bead_id = %bead.id,
+                        "shipped-work enforcement disabled — leaving failure count as-is"
+                    );
                 }
 
                 // Dispatch is fully accounted for — drop its snapshot so the
