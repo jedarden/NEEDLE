@@ -2658,11 +2658,14 @@ fn extract_executables_from_template(template: &str) -> Vec<String> {
         // Tokenize by whitespace (simple shell tokenization)
         let tokens = segment.split_whitespace().collect::<Vec<_>>();
 
-        // Take the first word as the command (skip arguments)
-        if let Some(first_word) = tokens.first() {
-            let token = *first_word;
+        // Find the first actual command, skipping variable assignments (KEY=VALUE or KEY="VALUE")
+        let mut token_iter = tokens.iter().peekable();
+        let mut command = None;
 
-            // Skip variable assignments (KEY=VALUE or KEY="VALUE")
+        while let Some(token) = token_iter.next() {
+            let token = *token;
+
+            // Skip variable assignments at the start (KEY=VALUE or KEY="VALUE")
             if token.contains('=') {
                 continue;
             }
@@ -2677,27 +2680,70 @@ fn extract_executables_from_template(template: &str) -> Vec<String> {
                 continue;
             }
 
-            // Extract the base command (strip path prefix like "/usr/bin/git" -> "git")
-            let cmd_name = if token.contains('/') {
-                token.rsplit('/').next().unwrap_or(token)
-            } else {
-                token
-            };
+            // This is the actual command
+            command = Some(token);
+            break;
+        }
 
-            // Skip if empty or a shell builtin
-            if cmd_name.is_empty() || BUILTINS.contains(&cmd_name) {
-                continue;
-            }
+        let Some(token) = command else {
+            continue;
+        };
 
-            // Skip if it's a flag (starts with -)
-            if cmd_name.starts_with('-') {
-                continue;
-            }
+        // Extract the base command (strip path prefix like "/usr/bin/git" -> "git")
+        let cmd_name = if token.contains('/') {
+            token.rsplit('/').next().unwrap_or(token)
+        } else {
+            token
+        };
 
-            // Add if not already present
-            if !executables.contains(&cmd_name.to_string()) {
-                executables.push(cmd_name.to_string());
+        // Skip if empty or a shell builtin (but continue checking for commands after builtins like 'env')
+        if cmd_name.is_empty() || BUILTINS.contains(&cmd_name) {
+            // Special case: 'env' and 'export' are used to run commands with env vars
+            // Skip them and continue to find the actual command
+            if cmd_name == "env" || cmd_name == "export" {
+                // Continue searching in the same segment for the real command
+                while let Some(token) = token_iter.next() {
+                    let token = *token;
+
+                    // Skip variable assignments and placeholders
+                    if token.contains('=') || (token.starts_with('{') && token.ends_with('}')) {
+                        continue;
+                    }
+
+                    // Skip redirections
+                    if matches!(token, ">" | ">>" | "<" | "2>" | "2>>" | "&>" | "&>>") {
+                        continue;
+                    }
+
+                    // Found the actual command
+                    let actual_cmd = if token.contains('/') {
+                        token.rsplit('/').next().unwrap_or(token)
+                    } else {
+                        token
+                    };
+
+                    if !actual_cmd.is_empty()
+                        && !BUILTINS.contains(&actual_cmd)
+                        && !actual_cmd.starts_with('-')
+                    {
+                        if !executables.contains(&actual_cmd.to_string()) {
+                            executables.push(actual_cmd.to_string());
+                        }
+                    }
+                    break;
+                }
             }
+            continue;
+        }
+
+        // Skip if it's a flag (starts with -)
+        if cmd_name.starts_with('-') {
+            continue;
+        }
+
+        // Add if not already present
+        if !executables.contains(&cmd_name.to_string()) {
+            executables.push(cmd_name.to_string());
         }
     }
 
