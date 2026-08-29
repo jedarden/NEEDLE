@@ -3838,6 +3838,7 @@ fn config_dump(config: &Config) -> Vec<String> {
 // ──────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 enum CheckStatus {
     Pass,
     Warn,
@@ -3878,6 +3879,7 @@ impl CheckResult {
             detail: vec![],
         }
     }
+    #[allow(dead_code)]
     fn skip(name: impl Into<String>, msg: impl Into<String>) -> Self {
         CheckResult {
             name: name.into(),
