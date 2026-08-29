@@ -453,7 +453,7 @@ where
                     attempt = attempt + 1,
                     max_attempts = max_attempts,
                     function = "spawn_with_etxtbsy_retry",
-                    "Retry attempt {attempt}/{max_attempts} due to ETXTBSY"
+                    "Retry attempt {attempt}/{max_attempts} for {function} due to ETXTBSY"
                 );
                 tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
             }

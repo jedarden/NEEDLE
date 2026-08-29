@@ -7008,10 +7008,10 @@ impl std::error::Error for ConfigError {}
 pub fn validate_key_path(key_path: &str) -> Result<(), ConfigError> {
     // Empty path is invalid
     if key_path.is_empty() {
-        return Err(ConfigError {
-            field: key_path.to_string(),
-            message: "key path cannot be empty".to_string(),
-        });
+        return Err(ConfigError::new(
+            key_path.to_string(),
+            "key path cannot be empty".to_string(),
+        ));
     }
 
     // Split into segments
@@ -7019,11 +7019,11 @@ pub fn validate_key_path(key_path: &str) -> Result<(), ConfigError> {
 
     // Empty segments (e.g., ".." or ".foo") are invalid
     if segments.iter().any(|s| s.is_empty()) {
-        return Err(ConfigError {
-            field: key_path.to_string(),
-            message: "key path contains empty segment (consecutive dots or leading/trailing dot)"
+        return Err(ConfigError::new(
+            key_path.to_string(),
+            "key path contains empty segment (consecutive dots or leading/trailing dot)"
                 .to_string(),
-        });
+        ));
     }
 
     // Validate root segment against Config top-level fields
@@ -7052,14 +7052,10 @@ pub fn validate_key_path(key_path: &str) -> Result<(), ConfigError> {
     ];
 
     if !valid_top_level.contains(&root) {
-        return Err(ConfigError {
-            field: key_path.to_string(),
-            message: format!(
-                "unknown top-level field '{}'. Valid fields are: {}",
-                root,
-                valid_top_level.join(", ")
-            ),
-        });
+        return Err(ConfigError::unknown_field(
+            key_path.to_string(),
+            valid_top_level.map(|s| s.to_string()).to_vec(),
+        ));
     }
 
     // If only one segment, we're done
@@ -7102,14 +7098,12 @@ fn validate_post_push_ci_field(field: &str, key_path: &str) -> Result<(), Config
     if valid_fields.contains(&field) {
         Ok(())
     } else {
-        Err(ConfigError {
-            field: key_path.to_string(),
-            message: format!(
-                "unknown post_push_ci field '{}'. Valid fields are: {}",
-                field,
-                valid_fields.join(", ")
-            ),
-        })
+        Err(ConfigError::invalid_segment(
+            key_path.to_string(),
+            field.to_string(),
+            valid_fields.map(|s| s.to_string()).to_vec(),
+            "post_push_ci".to_string(),
+        ))
     }
 }
 
@@ -7144,14 +7138,12 @@ fn validate_worker_field(
     ];
 
     if !valid_fields.contains(&field) {
-        return Err(ConfigError {
-            field: key_path.to_string(),
-            message: format!(
-                "unknown worker field '{}'. Valid fields are: {}",
-                field,
-                valid_fields.join(", ")
-            ),
-        });
+        return Err(ConfigError::invalid_segment(
+            key_path.to_string(),
+            field.to_string(),
+            valid_fields.map(|s| s.to_string()).to_vec(),
+            "worker".to_string(),
+        ));
     }
 
     // Validate deeper nesting for known nested structs
@@ -7165,6 +7157,9 @@ fn validate_worker_field(
                     "worker field '{}' does not support nested access (attempted: '{}')",
                     field, third
                 ),
+                invalid_segment: Some(third.to_string()),
+                available_fields: Some(vec![]),
+                context: Some(format!("worker.{}", field)),
             }),
         }
     } else {
@@ -7177,14 +7172,12 @@ fn validate_scratch_sweep_field(field: &str, key_path: &str) -> Result<(), Confi
     let valid_fields = ["enabled", "ttl_hours"];
 
     if !valid_fields.contains(&field) {
-        return Err(ConfigError {
-            field: key_path.to_string(),
-            message: format!(
-                "unknown scratch_sweep field '{}'. Valid fields are: {}",
-                field,
-                valid_fields.join(", ")
-            ),
-        });
+        return Err(ConfigError::invalid_segment(
+            key_path.to_string(),
+            field.to_string(),
+            valid_fields.map(|s| s.to_string()).to_vec(),
+            "worker.scratch_sweep".to_string(),
+        ));
     }
 
     Ok(())
@@ -7199,14 +7192,12 @@ fn validate_agent_field(
     let valid_fields = ["default", "args", "timeout", "adapters_dir", "routing"];
 
     if !valid_fields.contains(&field) {
-        return Err(ConfigError {
-            field: key_path.to_string(),
-            message: format!(
-                "unknown agent field '{}'. Valid fields are: {}",
-                field,
-                valid_fields.join(", ")
-            ),
-        });
+        return Err(ConfigError::invalid_segment(
+            key_path.to_string(),
+            field.to_string(),
+            valid_fields.map(|s| s.to_string()).to_vec(),
+            "agent".to_string(),
+        ));
     }
 
     // Validate deeper nesting for known nested structs
@@ -7220,6 +7211,9 @@ fn validate_agent_field(
                     "agent field '{}' does not support nested access (attempted: '{}')",
                     field, third
                 ),
+                invalid_segment: Some(third.to_string()),
+                available_fields: Some(vec![]),
+                context: Some(format!("agent.{}", field)),
             }),
         }
     } else {
@@ -7232,14 +7226,12 @@ fn validate_routing_field(field: &str, key_path: &str) -> Result<(), ConfigError
     let valid_fields = ["rules", "default_adapter", "strict_mode"];
 
     if !valid_fields.contains(&field) {
-        return Err(ConfigError {
-            field: key_path.to_string(),
-            message: format!(
-                "unknown routing field '{}'. Valid fields are: {}",
-                field,
-                valid_fields.join(", ")
-            ),
-        });
+        return Err(ConfigError::invalid_segment(
+            key_path.to_string(),
+            field.to_string(),
+            valid_fields.map(|s| s.to_string()).to_vec(),
+            "agent.routing".to_string(),
+        ));
     }
 
     Ok(())
@@ -7250,14 +7242,12 @@ fn validate_workspace_field(field: &str, key_path: &str) -> Result<(), ConfigErr
     let valid_fields = ["default", "home", "labels"];
 
     if !valid_fields.contains(&field) {
-        return Err(ConfigError {
-            field: key_path.to_string(),
-            message: format!(
-                "unknown workspace field '{}'. Valid fields are: {}",
-                field,
-                valid_fields.join(", ")
-            ),
-        });
+        return Err(ConfigError::invalid_segment(
+            key_path.to_string(),
+            field.to_string(),
+            valid_fields.map(|s| s.to_string()).to_vec(),
+            "workspace".to_string(),
+        ));
     }
 
     Ok(())
@@ -7268,14 +7258,12 @@ fn validate_health_field(field: &str, key_path: &str) -> Result<(), ConfigError>
     let valid_fields = ["heartbeat_interval_secs", "heartbeat_ttl_secs"];
 
     if !valid_fields.contains(&field) {
-        return Err(ConfigError {
-            field: key_path.to_string(),
-            message: format!(
-                "unknown health field '{}'. Valid fields are: {}",
-                field,
-                valid_fields.join(", ")
-            ),
-        });
+        return Err(ConfigError::invalid_segment(
+            key_path.to_string(),
+            field.to_string(),
+            valid_fields.map(|s| s.to_string()).to_vec(),
+            "health".to_string(),
+        ));
     }
 
     Ok(())
@@ -7293,14 +7281,12 @@ fn validate_strands_field(
     ];
 
     if !valid_fields.contains(&field) {
-        return Err(ConfigError {
-            field: key_path.to_string(),
-            message: format!(
-                "unknown strands field '{}'. Valid fields are: {}",
-                field,
-                valid_fields.join(", ")
-            ),
-        });
+        return Err(ConfigError::invalid_segment(
+            key_path.to_string(),
+            field.to_string(),
+            valid_fields.map(|s| s.to_string()).to_vec(),
+            "strands".to_string(),
+        ));
     }
 
     // Validate deeper nesting for known strand configs
