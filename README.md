@@ -258,6 +258,11 @@ The `claude-interactive` plugin ships as a separate release asset. It wraps the 
 
 **How it works:** NEEDLE pipes subprocess stdio, which causes `claude` to detect a non-TTY and switch to API billing. `claude-interactive` creates an internal PTY so `claude` sees a real terminal, keeping it in interactive/subscription mode.
 
+**Prerequisites:**
+- Python 3.10 or later
+- `pyte` Python library (installed automatically by the installer, or manually via `pip install pyte`)
+- The `claude` CLI on PATH
+
 **Install:**
 
 ```bash
@@ -267,7 +272,7 @@ chmod +x claude-interactive-install.sh
 ./claude-interactive-install.sh
 ```
 
-**Requirements:** Python 3.10+, `pyte` (`pip install pyte`), and the `claude` CLI on PATH.
+**Note:** The installer will attempt to install `pyte` automatically. If your Python environment is externally managed (PEP 668, e.g., Debian 12, Ubuntu 23.04+, Homebrew Python), the installer will guide you through alternative installation methods.
 
 **Run:**
 
