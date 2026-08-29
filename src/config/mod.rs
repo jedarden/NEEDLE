@@ -43,7 +43,7 @@ use serde::{de::Visitor, Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::cost::{BudgetConfig, PricingConfig};
-use crate::types::{IdentifierScheme, IdleAction};
+use crate::types::{HardDeadline, IdentifierScheme, IdleAction};
 use crate::validation::GateConfig;
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -124,7 +124,7 @@ pub struct ProcessLimits {
     #[serde(default)]
     pub idle_timeout: Option<u64>,
 
-    /// Hard deadline - absolute wall-clock timeout from process start (None means disabled).
+    /// Hard deadline - absolute wall-clock timeout from process start.
     ///
     /// This is a **non-resettable, absolute timeout** that starts counting from
     /// the moment the agent process is spawned. Unlike `idle_timeout`, which is
@@ -147,27 +147,30 @@ pub struct ProcessLimits {
     /// - `hard_deadline`: Never reset, good for bounding total work time
     /// - Both can be active simultaneously; whichever fires first terminates the process
     ///
-    /// Set to `None` to disable the hard deadline (processes can run indefinitely
-    /// as long as they respect the idle_timeout, if set).
-    ///
     /// # Examples
     ///
     /// ```yaml
     /// # Disable hard deadline (no absolute time limit)
     /// process_limits:
-    ///     hard_deadline: null
+    ///     hard_deadline:
+    ///         enabled: false
+    ///         duration_secs: 0
     ///
     /// # 1 hour hard deadline (absolute upper bound)
     /// process_limits:
-    ///     hard_deadline: 3600s
+    ///     hard_deadline:
+    ///         enabled: true
+    ///         duration_secs: 3600
     ///
     /// # 30 minute hard deadline with 5 minute idle timeout
     /// process_limits:
-    ///     hard_deadline: 1800s
+    ///     hard_deadline:
+    ///         enabled: true
+    ///         duration_secs: 1800
     ///     idle_timeout: 300s
     /// ```
     #[serde(default)]
-    pub hard_deadline: Option<u64>,
+    pub hard_deadline: HardDeadline,
 }
 
 /// Agent (AI model CLI) configuration.
@@ -7311,14 +7314,14 @@ fn validate_strands_field(
 fn validate_mitosis_field(field: &str, key_path: &str) -> Result<(), ConfigError> {
     let valid_fields = ["timeout_triggered"];
     if !valid_fields.contains(&field) {
-        return Err(ConfigError {
-            field: key_path.to_string(),
-            message: format!(
+        return Err(ConfigError::new(
+            key_path.to_string(),
+            format!(
                 "unknown mitosis field '{}'. Valid fields are: {}",
                 field,
                 valid_fields.join(", ")
             ),
-        });
+        ));
     }
     Ok(())
 }
@@ -7327,14 +7330,14 @@ fn validate_mitosis_field(field: &str, key_path: &str) -> Result<(), ConfigError
 fn validate_explore_field(field: &str, key_path: &str) -> Result<(), ConfigError> {
     let valid_fields = ["workspace_root", "workspaces"];
     if !valid_fields.contains(&field) {
-        return Err(ConfigError {
-            field: key_path.to_string(),
-            message: format!(
+        return Err(ConfigError::new(
+            key_path.to_string(),
+            format!(
                 "unknown explore field '{}'. Valid fields are: {}",
                 field,
                 valid_fields.join(", ")
             ),
-        });
+        ));
     }
     Ok(())
 }
@@ -7343,14 +7346,14 @@ fn validate_explore_field(field: &str, key_path: &str) -> Result<(), ConfigError
 fn validate_weave_field(field: &str, key_path: &str) -> Result<(), ConfigError> {
     let valid_fields = ["exclude_workspaces", "max_stale_days"];
     if !valid_fields.contains(&field) {
-        return Err(ConfigError {
-            field: key_path.to_string(),
-            message: format!(
+        return Err(ConfigError::new(
+            key_path.to_string(),
+            format!(
                 "unknown weave field '{}'. Valid fields are: {}",
                 field,
                 valid_fields.join(", ")
             ),
-        });
+        ));
     }
     Ok(())
 }
@@ -7363,14 +7366,14 @@ fn validate_pulse_field(
 ) -> Result<(), ConfigError> {
     let valid_fields = ["scanners"];
     if !valid_fields.contains(&field) {
-        return Err(ConfigError {
-            field: key_path.to_string(),
-            message: format!(
+        return Err(ConfigError::new(
+            key_path.to_string(),
+            format!(
                 "unknown pulse field '{}'. Valid fields are: {}",
                 field,
                 valid_fields.join(", ")
             ),
-        });
+        ));
     }
 
     // Handle array indexing: scanners[0].command
@@ -7386,14 +7389,14 @@ fn validate_pulse_field(
 fn validate_learning_field(field: &str, key_path: &str) -> Result<(), ConfigError> {
     let valid_fields = ["global_learnings_file", "enabled"];
     if !valid_fields.contains(&field) {
-        return Err(ConfigError {
-            field: key_path.to_string(),
-            message: format!(
+        return Err(ConfigError::new(
+            key_path.to_string(),
+            format!(
                 "unknown learning field '{}'. Valid fields are: {}",
                 field,
                 valid_fields.join(", ")
             ),
-        });
+        ));
     }
     Ok(())
 }
@@ -7402,14 +7405,14 @@ fn validate_learning_field(field: &str, key_path: &str) -> Result<(), ConfigErro
 fn validate_splice_field(field: &str, key_path: &str) -> Result<(), ConfigError> {
     let valid_fields = ["report_workspace", "max_report_age_secs"];
     if !valid_fields.contains(&field) {
-        return Err(ConfigError {
-            field: key_path.to_string(),
-            message: format!(
+        return Err(ConfigError::new(
+            key_path.to_string(),
+            format!(
                 "unknown splice field '{}'. Valid fields are: {}",
                 field,
                 valid_fields.join(", ")
             ),
-        });
+        ));
     }
     Ok(())
 }
@@ -7418,14 +7421,14 @@ fn validate_splice_field(field: &str, key_path: &str) -> Result<(), ConfigError>
 fn validate_resolve_field(field: &str, key_path: &str) -> Result<(), ConfigError> {
     let valid_fields = ["conflict", "max_resolution_attempts"];
     if !valid_fields.contains(&field) {
-        return Err(ConfigError {
-            field: key_path.to_string(),
-            message: format!(
+        return Err(ConfigError::new(
+            key_path.to_string(),
+            format!(
                 "unknown resolve field '{}'. Valid fields are: {}",
                 field,
                 valid_fields.join(", ")
             ),
-        });
+        ));
     }
     Ok(())
 }
@@ -7438,14 +7441,14 @@ fn validate_telemetry_field(
 ) -> Result<(), ConfigError> {
     let valid_fields = ["file_sink", "stdout_sink", "otlp"];
     if !valid_fields.contains(&field) {
-        return Err(ConfigError {
-            field: key_path.to_string(),
-            message: format!(
+        return Err(ConfigError::new(
+            key_path.to_string(),
+            format!(
                 "unknown telemetry field '{}'. Valid fields are: {}",
                 field,
                 valid_fields.join(", ")
             ),
-        });
+        ));
     }
 
     // Validate deeper nesting for sink configs
@@ -7466,14 +7469,14 @@ fn validate_telemetry_field(
 fn validate_file_sink_field(field: &str, key_path: &str) -> Result<(), ConfigError> {
     let valid_fields = ["log_dir", "rotation", "truncation"];
     if !valid_fields.contains(&field) {
-        return Err(ConfigError {
-            field: key_path.to_string(),
-            message: format!(
+        return Err(ConfigError::new(
+            key_path.to_string(),
+            format!(
                 "unknown file_sink field '{}'. Valid fields are: {}",
                 field,
                 valid_fields.join(", ")
             ),
-        });
+        ));
     }
     Ok(())
 }
@@ -7482,14 +7485,14 @@ fn validate_file_sink_field(field: &str, key_path: &str) -> Result<(), ConfigErr
 fn validate_stdout_sink_field(field: &str, key_path: &str) -> Result<(), ConfigError> {
     let valid_fields = ["enabled", "truncation"];
     if !valid_fields.contains(&field) {
-        return Err(ConfigError {
-            field: key_path.to_string(),
-            message: format!(
+        return Err(ConfigError::new(
+            key_path.to_string(),
+            format!(
                 "unknown stdout_sink field '{}'. Valid fields are: {}",
                 field,
                 valid_fields.join(", ")
             ),
-        });
+        ));
     }
     Ok(())
 }
@@ -7498,14 +7501,14 @@ fn validate_stdout_sink_field(field: &str, key_path: &str) -> Result<(), ConfigE
 fn validate_otlp_field(field: &str, key_path: &str) -> Result<(), ConfigError> {
     let valid_fields = ["endpoint", "protocol", "signals"];
     if !valid_fields.contains(&field) {
-        return Err(ConfigError {
-            field: key_path.to_string(),
-            message: format!(
+        return Err(ConfigError::new(
+            key_path.to_string(),
+            format!(
                 "unknown otlp field '{}'. Valid fields are: {}",
                 field,
                 valid_fields.join(", ")
             ),
-        });
+        ));
     }
     Ok(())
 }
@@ -7514,14 +7517,14 @@ fn validate_otlp_field(field: &str, key_path: &str) -> Result<(), ConfigError> {
 fn validate_prompt_field(field: &str, key_path: &str) -> Result<(), ConfigError> {
     let valid_fields = ["context_files", "instructions", "templates"];
     if !valid_fields.contains(&field) {
-        return Err(ConfigError {
-            field: key_path.to_string(),
-            message: format!(
+        return Err(ConfigError::new(
+            key_path.to_string(),
+            format!(
                 "unknown prompt field '{}'. Valid fields are: {}",
                 field,
                 valid_fields.join(", ")
             ),
-        });
+        ));
     }
     Ok(())
 }
@@ -8102,47 +8105,47 @@ impl ConfigLoader {
         let mut errors = Vec::new();
 
         if config.agent.default.is_empty() {
-            errors.push(ConfigError {
-                field: "agent.default".to_string(),
-                message: "must not be empty".to_string(),
-            });
+            errors.push(ConfigError::new(
+                "agent.default".to_string(),
+                "must not be empty".to_string(),
+            ));
         }
 
         if config.worker.max_workers == 0 {
-            errors.push(ConfigError {
-                field: "worker.max_workers".to_string(),
-                message: "must be at least 1".to_string(),
-            });
+            errors.push(ConfigError::new(
+                "worker.max_workers".to_string(),
+                "must be at least 1".to_string(),
+            ));
         }
 
         if config.worker.max_workers > 50 {
-            errors.push(ConfigError {
-                field: "worker.max_workers".to_string(),
-                message: format!(
+            errors.push(ConfigError::new(
+                "worker.max_workers".to_string(),
+                format!(
                     "{} exceeds practical fleet limit of 50",
                     config.worker.max_workers
                 ),
-            });
+            ));
         }
 
         if config.post_push_ci.enabled {
             if config.post_push_ci.default_workflow.trim().is_empty() {
-                errors.push(ConfigError {
-                    field: "post_push_ci.default_workflow".to_string(),
-                    message: "must not be empty when post-push CI is enabled".to_string(),
-                });
+                errors.push(ConfigError::new(
+                    "post_push_ci.default_workflow".to_string(),
+                    "must not be empty when post-push CI is enabled".to_string(),
+                ));
             }
             if config.post_push_ci.timeout_secs == 0 {
-                errors.push(ConfigError {
-                    field: "post_push_ci.timeout_secs".to_string(),
-                    message: "must be at least 1 when post-push CI is enabled".to_string(),
-                });
+                errors.push(ConfigError::new(
+                    "post_push_ci.timeout_secs".to_string(),
+                    "must be at least 1 when post-push CI is enabled".to_string(),
+                ));
             }
             if config.post_push_ci.poll_interval_secs == 0 {
-                errors.push(ConfigError {
-                    field: "post_push_ci.poll_interval_secs".to_string(),
-                    message: "must be at least 1 when post-push CI is enabled".to_string(),
-                });
+                errors.push(ConfigError::new(
+                    "post_push_ci.poll_interval_secs".to_string(),
+                    "must be at least 1 when post-push CI is enabled".to_string(),
+                ));
             }
             if config.post_push_ci.result_url_template.is_none()
                 && (config.post_push_ci.repositories.is_empty()
@@ -8152,61 +8155,61 @@ impl ConfigLoader {
                         .values()
                         .any(|repo| repo.result_url_template.is_none()))
             {
-                errors.push(ConfigError {
-                    field: "post_push_ci.result_url_template".to_string(),
-                    message: "must be set globally or for every configured repository".to_string(),
-                });
+                errors.push(ConfigError::new(
+                    "post_push_ci.result_url_template".to_string(),
+                    "must be set globally or for every configured repository".to_string(),
+                ));
             }
             for (repository, repo) in &config.post_push_ci.repositories {
                 if let Some(workflow) = &repo.workflow {
                     if workflow.trim().is_empty() {
-                        errors.push(ConfigError {
-                            field: format!("post_push_ci.repositories[{repository}].workflow"),
-                            message: "must not be empty".to_string(),
-                        });
+                        errors.push(ConfigError::new(
+                            format!("post_push_ci.repositories[{repository}].workflow"),
+                            "must not be empty".to_string(),
+                        ));
                     }
                 }
             }
         }
 
         if config.worker.cpu_load_warn <= 0.0 || config.worker.cpu_load_warn > 1.0 {
-            errors.push(ConfigError {
-                field: "worker.cpu_load_warn".to_string(),
-                message: "must be in range (0.0, 1.0]".to_string(),
-            });
+            errors.push(ConfigError::new(
+                "worker.cpu_load_warn".to_string(),
+                "must be in range (0.0, 1.0]".to_string(),
+            ));
         }
 
         if config.worker.scratch_sweep.enabled && config.worker.scratch_sweep.ttl_hours == 0 {
-            errors.push(ConfigError {
-                field: "worker.scratch_sweep.ttl_hours".to_string(),
-                message: "must be at least 1 when scratch sweeping is enabled".to_string(),
-            });
+            errors.push(ConfigError::new(
+                "worker.scratch_sweep.ttl_hours".to_string(),
+                "must be at least 1 when scratch sweeping is enabled".to_string(),
+            ));
         }
 
         if config.health.heartbeat_ttl_secs < 3 * config.health.heartbeat_interval_secs {
-            errors.push(ConfigError {
-                field: "health.heartbeat_ttl_secs".to_string(),
-                message: format!(
+            errors.push(ConfigError::new(
+                "health.heartbeat_ttl_secs".to_string(),
+                format!(
                     "should be >= 3 * heartbeat_interval_secs ({}); detection may be unreliable",
                     3 * config.health.heartbeat_interval_secs
                 ),
-            });
+            ));
         }
 
         // Validate supervisor update check interval.
         if config.supervisor.update_check_interval_secs == 0 {
-            errors.push(ConfigError {
-                field: "supervisor.update_check_interval_secs".to_string(),
-                message: "must be at least 60 seconds".to_string(),
-            });
+            errors.push(ConfigError::new(
+                "supervisor.update_check_interval_secs".to_string(),
+                "must be at least 60 seconds".to_string(),
+            ));
         } else if config.supervisor.update_check_interval_secs < 60 {
-            errors.push(ConfigError {
-                field: "supervisor.update_check_interval_secs".to_string(),
-                message: format!(
+            errors.push(ConfigError::new(
+                "supervisor.update_check_interval_secs".to_string(),
+                format!(
                     "{} is too small; minimum is 60 seconds to avoid excessive polling",
                     config.supervisor.update_check_interval_secs
                 ),
-            });
+            ));
         }
 
         // Emit boot-time warnings for configuration issues that should be addressed
@@ -8218,17 +8221,17 @@ impl ConfigLoader {
             for (idx, rule) in routing.rules.iter().enumerate() {
                 // Validate that match_model is a valid regex.
                 if let Err(e) = regex::Regex::new(&rule.match_model) {
-                    errors.push(ConfigError {
-                        field: format!("agent.routing.rules[{}].match_model", idx),
-                        message: format!("invalid regex pattern '{}': {}", rule.match_model, e),
-                    });
+                    errors.push(ConfigError::new(
+                        format!("agent.routing.rules[{}].match_model", idx),
+                        format!("invalid regex pattern '{}': {}", rule.match_model, e),
+                    ));
                 }
                 // Validate that adapter is not empty.
                 if rule.adapter.is_empty() {
-                    errors.push(ConfigError {
-                        field: format!("agent.routing.rules[{}].adapter", idx),
-                        message: "must not be empty".to_string(),
-                    });
+                    errors.push(ConfigError::new(
+                        format!("agent.routing.rules[{}].adapter", idx),
+                        "must not be empty".to_string(),
+                    ));
                 }
             }
         }
@@ -8238,20 +8241,20 @@ impl ConfigLoader {
         if timeout_policy.enabled {
             // At least one timeout type must be qualified when enabled.
             if !timeout_policy.agent_wallclock_timeout && !timeout_policy.handler_timeout {
-                errors.push(ConfigError {
-                    field: "strands.mitosis.timeout_triggered".to_string(),
-                    message: "when enabled, at least one of agent_wallclock_timeout or handler_timeout must be true".to_string(),
-                });
+                errors.push(ConfigError::new(
+                    "strands.mitosis.timeout_triggered".to_string(),
+                    "when enabled, at least one of agent_wallclock_timeout or handler_timeout must be true".to_string(),
+                ));
             }
 
             // Validate min_elapsed_fraction range.
             if timeout_policy.min_elapsed_fraction < 0.0
                 || timeout_policy.min_elapsed_fraction > 1.0
             {
-                errors.push(ConfigError {
-                    field: "strands.mitosis.timeout_triggered.min_elapsed_fraction".to_string(),
-                    message: "must be in range [0.0, 1.0]".to_string(),
-                });
+                errors.push(ConfigError::new(
+                    "strands.mitosis.timeout_triggered.min_elapsed_fraction".to_string(),
+                    "must be in range [0.0, 1.0]".to_string(),
+                ));
             }
         }
 
@@ -10223,10 +10226,7 @@ worker:
 
     #[test]
     fn config_error_display_format() {
-        let err = ConfigError {
-            field: "agent.default".to_string(),
-            message: "must not be empty".to_string(),
-        };
+        let err = ConfigError::new("agent.default".to_string(), "must not be empty".to_string());
         assert_eq!(format!("{}", err), "agent.default: must not be empty");
     }
 

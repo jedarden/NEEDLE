@@ -1395,6 +1395,114 @@ mod tests {
     }
 
     #[test]
+    fn upgrade_poller_multiple_sequential_polls() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_for_checker = Arc::clone(&calls);
+        let checker: UpgradeCheckFn = Arc::new(move |_| {
+            calls_for_checker.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        let start = Instant::now();
+        let mut poller = UpgradePoller::with_checker(true, 10, checker);
+        let telemetry = Telemetry::new("upgrade-poller-sequential-test".to_string());
+
+        // First poll at t=0
+        assert!(poller.poll_at(&telemetry, start));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // Polls at t=1, t=5, t=9 should all be skipped
+        assert!(!poller.poll_at(&telemetry, start + Duration::from_secs(1)));
+        assert!(!poller.poll_at(&telemetry, start + Duration::from_secs(5)));
+        assert!(!poller.poll_at(&telemetry, start + Duration::from_secs(9)));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // Poll at t=10 should execute
+        assert!(poller.poll_at(&telemetry, start + Duration::from_secs(10)));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        // Poll at t=11 should be skipped
+        assert!(!poller.poll_at(&telemetry, start + Duration::from_secs(11)));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        // Poll at t=20 should execute
+        assert!(poller.poll_at(&telemetry, start + Duration::from_secs(20)));
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn upgrade_poller_boundary_conditions() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_for_checker = Arc::clone(&calls);
+        let checker: UpgradeCheckFn = Arc::new(move |_| {
+            calls_for_checker.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        let start = Instant::now();
+        let mut poller = UpgradePoller::with_checker(true, 5, checker);
+        let telemetry = Telemetry::new("upgrade-poller-boundary-test".to_string());
+
+        // First poll at t=0
+        assert!(poller.poll_at(&telemetry, start));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // Poll at exactly t=5 (interval boundary) should execute
+        assert!(poller.poll_at(&telemetry, start + Duration::from_secs(5)));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+
+        // Poll at t=10 (next boundary) should execute
+        assert!(poller.poll_at(&telemetry, start + Duration::from_secs(10)));
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn upgrade_poller_handles_checker_error_gracefully() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_for_checker = Arc::clone(&calls);
+        let checker: UpgradeCheckFn = Arc::new(move |_| {
+            calls_for_checker.fetch_add(1, Ordering::SeqCst);
+            Err(anyhow::anyhow!("simulated check failure"))
+        });
+        let start = Instant::now();
+        let mut poller = UpgradePoller::with_checker(true, 10, checker);
+        let telemetry = Telemetry::new("upgrade-poller-error-test".to_string());
+
+        // Poll should return true (check was attempted) even though it failed
+        assert!(poller.poll_at(&telemetry, start));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // Next poll should still respect interval even after error
+        assert!(!poller.poll_at(&telemetry, start + Duration::from_secs(5)));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        // After interval, should retry
+        assert!(poller.poll_at(&telemetry, start + Duration::from_secs(10)));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn upgrade_poller_one_second_interval() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_for_checker = Arc::clone(&calls);
+        let checker: UpgradeCheckFn = Arc::new(move |_| {
+            calls_for_checker.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        let start = Instant::now();
+        let mut poller = UpgradePoller::with_checker(true, 1, checker);
+        let telemetry = Telemetry::new("upgrade-poller-one-sec-test".to_string());
+
+        // Test with 1-second interval (minimum practical interval)
+        assert!(poller.poll_at(&telemetry, start));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        assert!(!poller.poll_at(&telemetry, start + Duration::from_millis(999)));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        assert!(poller.poll_at(&telemetry, start + Duration::from_secs(1)));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
     fn supervisor_config_deserialize_from_yaml() {
         let yaml_content = r#"
 workspace: /tmp/test-workspace

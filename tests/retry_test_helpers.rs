@@ -212,6 +212,7 @@ impl MockRetryBehavior {
     }
 
     /// Set the retry configuration.
+    #[allow(dead_code)]
     pub fn with_config(mut self, config: RetryConfig) -> Self {
         self.config = config;
         self
@@ -253,6 +254,7 @@ impl MockRetryBehavior {
     }
 
     /// Inject a generic IO error on a specific attempt.
+    #[allow(dead_code)]
     pub fn with_io_error_on_attempt(
         mut self,
         attempt: usize,
@@ -394,6 +396,7 @@ pub fn etxtbsy_error() -> io::Error {
 }
 
 /// Create an error of the given kind with a message.
+#[allow(dead_code)]
 pub fn io_error(kind: io::ErrorKind, msg: &str) -> io::Error {
     io::Error::new(kind, msg)
 }

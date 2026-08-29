@@ -11,9 +11,7 @@
 //! 5. Verify the verification and spawn happen in the same atomic operation
 
 use std::sync::Arc;
-use std::time::Duration;
 use tempfile::TempDir;
-use tokio::time::sleep;
 
 use needle::bead_store::{BeadStore, Filters};
 use needle::claim::Claimer;
