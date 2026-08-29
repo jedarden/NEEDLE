@@ -239,7 +239,31 @@ fn verify_backend_identity(
     Ok(())
 }
 
+/// Derive the expected backend name from the binary filename.
+///
+/// Maps binary names to their corresponding backend names:
+/// - "bead" -> "bead-rs"
+/// - "bf" -> "bead-forge"
+/// - Other names are returned as-is (for extensibility)
+fn derive_expected_backend_from_filename(binary: &Path) -> String {
+    binary
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|filename| {
+            match filename {
+                "bead" => "bead-rs",
+                "bf" => "bead-forge",
+                _ => filename, // Return as-is for unknown binaries
+            }
+        })
+        .unwrap_or("unknown")
+        .to_string()
+}
+
 fn verify_bead_rs_capabilities(binary: &Path, workspace: &Path) -> Result<()> {
+    // Derive expected backend from binary filename BEFORE probing capabilities
+    let expected_backend = derive_expected_backend_from_filename(binary);
+
     let output = spawn_with_etxtbsy_retry_sync(
         || {
             std::process::Command::new(binary)
@@ -266,20 +290,51 @@ fn verify_bead_rs_capabilities(binary: &Path, workspace: &Path) -> Result<()> {
     }
     let capabilities: serde_json::Value = serde_json::from_slice(&output.stdout)
         .with_context(|| format!("invalid bead-rs capability JSON from {}", binary.display()))?;
-    if capabilities
+
+    // Extract actual backend from capabilities response
+    let actual_backend = capabilities
         .get("implementation")
         .and_then(|value| value.as_str())
-        != Some("bead-rs")
-        || capabilities
-            .get("atomic_claim")
-            .and_then(|value| value.as_bool())
-            != Some(true)
+        .unwrap_or("unknown");
+
+    // Compare actual vs expected backend identity
+    if actual_backend != expected_backend {
+        tracing::error!(
+            workspace = %workspace.display(),
+            binary = %binary.display(),
+            expected_backend = %expected_backend,
+            actual_backend = %actual_backend,
+            "backend identity verification failed: mismatch between expected and actual implementation"
+        );
+        bail!(
+            "backend identity mismatch for workspace {}: binary '{}' implies backend '{}', but capabilities reported implementation '{}'",
+            workspace.display(),
+            binary.display(),
+            expected_backend,
+            actual_backend
+        );
+    }
+
+    tracing::info!(
+        workspace = %workspace.display(),
+        binary = %binary.display(),
+        backend = %actual_backend,
+        expected_backend = %expected_backend,
+        "backend identity verification passed: actual matches expected"
+    );
+
+    // Verify atomic_claim requirement
+    if capabilities
+        .get("atomic_claim")
+        .and_then(|value| value.as_bool())
+        != Some(true)
     {
         bail!(
-            "bead-rs capability mismatch for workspace {}: expected implementation=bead-rs and atomic_claim=true",
+            "bead-rs capability mismatch for workspace {}: expected atomic_claim=true",
             workspace.display()
         );
     }
+    // Verify all required statuses are present
     for status in ["open", "in_progress", "deferred", "closed"] {
         let present = capabilities["statuses"]
             .as_array()
@@ -289,6 +344,20 @@ fn verify_bead_rs_capabilities(binary: &Path, workspace: &Path) -> Result<()> {
                 "bead-rs capability mismatch for workspace {}: missing status {status}",
                 workspace.display()
             );
+        }
+    }
+
+    // Reject unexpected statuses like 'blocked' (a derived presentation status, not stored)
+    if let Some(statuses) = capabilities["statuses"].as_array() {
+        for status in statuses {
+            if let Some(status_str) = status.as_str() {
+                if !["open", "in_progress", "deferred", "closed"].contains(&status_str) {
+                    bail!(
+                        "bead-rs capability mismatch for workspace {}: unexpected status '{status_str}' in capabilities (only open, in_progress, deferred, and closed are valid stored statuses)",
+                        workspace.display()
+                    );
+                }
+            }
         }
     }
     for schema_ref in [
@@ -304,6 +373,17 @@ fn verify_bead_rs_capabilities(binary: &Path, workspace: &Path) -> Result<()> {
         if !present {
             bail!(
                 "bead-rs capability mismatch for workspace {}: missing schema {schema_ref}",
+                workspace.display()
+            );
+        }
+    }
+    for command in ["ref", "data", "query"] {
+        let present = capabilities["commands"]
+            .as_array()
+            .is_some_and(|values| values.iter().any(|value| value == command));
+        if !present {
+            bail!(
+                "bead-rs capability mismatch for workspace {}: missing command {command}",
                 workspace.display()
             );
         }
@@ -2953,9 +3033,9 @@ mod tests {
         let bead_rs = workspace.path().join("bead-rs-fixture");
         std::fs::write(
             &bead_rs,
-            r#"#!/bin/bash
+            r#"#!/usr/bin/env bash
 if [ "$1" = "capabilities" ]; then
-  printf '{"implementation":"bead-rs","atomic_claim":true,"statuses":["open","in_progress","deferred","closed"],"schemas":[{"schema_ref":"urn:bead-rs:schema:issue:native-v1"}]}'
+  printf '{"implementation":"bead-rs","atomic_claim":true,"statuses":["open","in_progress","deferred","closed"],"schemas":[{"schema_ref":"urn:bead-rs:schema:issue:native-v1"}],"commands":["ref","data","query"]}'
 else
   echo "bead 0.1.1"
 fi
@@ -2988,7 +3068,7 @@ fi
         let wrong_binary = workspace.path().join("wrong-backend-fixture");
         std::fs::write(
             &wrong_binary,
-            r#"#!/bin/bash
+            r#"#!/usr/bin/env bash
 echo "bf 0.4.1"
 "#,
         )
@@ -3024,7 +3104,7 @@ echo "bf 0.4.1"
         let failing_binary = workspace.path().join("failing-fixture");
         std::fs::write(
             &failing_binary,
-            r#"#!/bin/bash
+            r#"#!/usr/bin/env bash
 echo "Error: something went wrong" >&2
 exit 1
 "#,
@@ -3085,9 +3165,9 @@ exit 1
         let bead_rs = workspace.path().join("bead-rs-caps-fixture");
         std::fs::write(
             &bead_rs,
-            r#"#!/bin/bash
+            r#"#!/usr/bin/env bash
 if [ "$1" = "capabilities" ]; then
-  printf '{"implementation":"bead-rs","atomic_claim":true,"statuses":["open","in_progress","deferred","closed"],"schemas":[{"schema_ref":"urn:bead-rs:schema:issue:native-v1"},{"schema_ref":"urn:bead-rs:schema:event:native-v1"},{"schema_ref":"urn:bead-rs:schema:field-guide:native-v1"}]}'
+  printf '{"implementation":"bead-rs","atomic_claim":true,"statuses":["open","in_progress","deferred","closed"],"schemas":[{"schema_ref":"urn:bead-rs:schema:issue:native-v1"},{"schema_ref":"urn:bead-rs:schema:event:native-v1"},{"schema_ref":"urn:bead-rs:schema:field-guide:native-v1"}],"commands":["ref","data","query"]}'
 else
   echo "bead 0.1.1"
 fi
@@ -3119,7 +3199,7 @@ fi
         let incomplete_caps = workspace.path().join("incomplete-caps-fixture");
         std::fs::write(
             &incomplete_caps,
-            r#"#!/bin/bash
+            r#"#!/usr/bin/env bash
 if [ "$1" = "capabilities" ]; then
   printf '{"implementation":"bead-rs","atomic_claim":false,"statuses":["open","in_progress"],"schemas":[]}'
 else
@@ -3155,7 +3235,7 @@ fi
         let bf_binary = workspace.path().join("bf-fixture");
         std::fs::write(
             &bf_binary,
-            r#"#!/bin/bash
+            r#"#!/usr/bin/env bash
 echo "bf 0.4.1"
 "#,
         )
@@ -3179,7 +3259,7 @@ echo "bf 0.4.1"
         let bead_binary = workspace.path().join("bead-fixture");
         std::fs::write(
             &bead_binary,
-            r#"#!/bin/bash
+            r#"#!/usr/bin/env bash
 echo "bead 0.1.1"
 "#,
         )
@@ -3203,7 +3283,7 @@ echo "bead 0.1.1"
         let custom_binary = workspace.path().join("custom-fixture");
         std::fs::write(
             &custom_binary,
-            r#"#!/bin/bash
+            r#"#!/usr/bin/env bash
 if [ "$1" = "version" ]; then
   echo "my-backend 2.0.0"
 else
@@ -3247,7 +3327,7 @@ fi
         let failing_binary = workspace.path().join("failing-fixture");
         std::fs::write(
             &failing_binary,
-            r#"#!/bin/bash
+            r#"#!/usr/bin/env bash
 echo "Error: something went wrong" >&2
 exit 1
 "#,
@@ -3277,7 +3357,7 @@ exit 1
         let empty_binary = workspace.path().join("empty-fixture");
         std::fs::write(
             &empty_binary,
-            r#"#!/bin/bash
+            r#"#!/usr/bin/env bash
 # Output nothing
 "#,
         )
@@ -3318,7 +3398,7 @@ exit 1
             std::fs::write(
                 &binary,
                 format!(
-                    r#"#!/bin/bash
+                    r#"#!/usr/bin/env bash
 echo "{}"
 "#,
                     output
@@ -3349,7 +3429,7 @@ echo "{}"
         let binary = workspace.path().join("stderr-fixture");
         std::fs::write(
             &binary,
-            r#"#!/bin/bash
+            r#"#!/usr/bin/env bash
 echo "bead 0.1.1" >&2
 "#,
         )
@@ -3373,7 +3453,7 @@ echo "bead 0.1.1" >&2
         let binary = workspace.path().join("mixed-fixture");
         std::fs::write(
             &binary,
-            r#"#!/bin/bash
+            r#"#!/usr/bin/env bash
 echo "Warning: deprecated" >&2
 echo "bead 0.1.1"
 echo "Info: something else"
@@ -3399,7 +3479,7 @@ echo "Info: something else"
         let binary = workspace.path().join("whitespace-fixture");
         std::fs::write(
             &binary,
-            r#"#!/bin/bash
+            r#"#!/usr/bin/env bash
 echo "   bead 0.1.1"
 "#,
         )
@@ -3427,28 +3507,26 @@ echo "   bead 0.1.1"
         let bead_rs = workspace.path().join("bead-rs-with-blocked");
         std::fs::write(
             &bead_rs,
-            r#"#!/bin/bash
-if [ "$1" = "capabilities" ]; then
-  printf '{"implementation":"bead-rs","atomic_claim":true,"statuses":["open","in_progress","deferred","closed","blocked"],"schemas":[{"schema_ref":"urn:bead-rs:schema:issue:native-v1"},{"schema_ref":"urn:bead-rs:schema:event:native-v1"},{"schema_ref":"urn:bead-rs:schema:field-guide:native-v1"}]}'
-else
-  echo "bead 0.1.1"
-fi
-	"#,
+            "#!/bin/sh\nif [ \"$1\" = \"capabilities\" ]; then\n  printf '{\"implementation\":\"bead-rs\",\"atomic_claim\":true,\"statuses\":[\"open\",\"in_progress\",\"deferred\",\"closed\",\"blocked\"],\"schemas\":[{\"schema_ref\":\"urn:bead-rs:schema:issue:native-v1\"},{\"schema_ref\":\"urn:bead-rs:schema:event:native-v1\"},{\"schema_ref\":\"urn:bead-rs:schema:field-guide:native-v1\"}],\"commands\":[\"ref\",\"data\",\"query\"]}'\nelse\n  echo 'bead 0.1.1'\nfi\n",
         )
         .unwrap();
         let mut perm = std::fs::metadata(&bead_rs).unwrap().permissions();
         perm.set_mode(0o755);
         std::fs::set_permissions(&bead_rs, perm).unwrap();
 
-        // Test that capabilities with 'blocked' status are accepted (it's not in our expected list, but having extra statuses shouldn't fail)
+        // Test that capabilities with 'blocked' status are rejected
         let result = verify_bead_rs_capabilities(&bead_rs, workspace.path());
 
-        // This should succeed because we only check for the presence of required statuses,
-        // not the absence of extra ones
+        // This should fail because 'blocked' is a derived presentation status, not a stored status
         assert!(
-            result.is_ok(),
-            "verify_bead_rs_capabilities should accept binary with 'blocked' status (we only check required statuses are present), got: {:?}",
-            result
+            result.is_err(),
+            "verify_bead_rs_capabilities should reject binary with 'blocked' status (blocked is not a valid stored status)"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("unexpected status"),
+            "error message should mention unexpected status, got: {}",
+            err_msg
         );
     }
 
@@ -3463,9 +3541,9 @@ fi
         let bead_rs = workspace.path().join("bead-rs-missing-deferred");
         std::fs::write(
             &bead_rs,
-            r#"#!/bin/bash
+            r#"#!/usr/bin/env bash
 if [ "$1" = "capabilities" ]; then
-  printf '{"implementation":"bead-rs","atomic_claim":true,"statuses":["open","in_progress","closed"],"schemas":[{"schema_ref":"urn:bead-rs:schema:issue:native-v1"},{"schema_ref":"urn:bead-rs:schema:event:native-v1"},{"schema_ref":"urn:bead-rs:schema:field-guide:native-v1"}]}'
+  printf '{"implementation":"bead-rs","atomic_claim":true,"statuses":["open","in_progress","closed"],"schemas":[{"schema_ref":"urn:bead-rs:schema:issue:native-v1"},{"schema_ref":"urn:bead-rs:schema:event:native-v1"},{"schema_ref":"urn:bead-rs:schema:field-guide:native-v1"}],"commands":["ref","data","query"]}'
 else
   echo "bead 0.1.1"
 fi
@@ -3499,9 +3577,9 @@ fi
         let bead_rs = workspace.path().join("bead-rs-missing-event-schema");
         std::fs::write(
             &bead_rs,
-            r#"#!/bin/bash
+            r#"#!/usr/bin/env bash
 if [ "$1" = "capabilities" ]; then
-  printf '{"implementation":"bead-rs","atomic_claim":true,"statuses":["open","in_progress","deferred","closed"],"schemas":[{"schema_ref":"urn:bead-rs:schema:issue:native-v1"},{"schema_ref":"urn:bead-rs:schema:field-guide:native-v1"}]}'
+  printf '{"implementation":"bead-rs","atomic_claim":true,"statuses":["open","in_progress","deferred","closed"],"schemas":[{"schema_ref":"urn:bead-rs:schema:issue:native-v1"},{"schema_ref":"urn:bead-rs:schema:field-guide:native-v1"}],"commands":["ref","data","query"]}'
 else
   echo "bead 0.1.1"
 fi
@@ -3546,9 +3624,9 @@ fi
             std::fs::write(
                 &bead_rs,
                 format!(
-                    r#"#!/bin/bash
+                    r#"#!/usr/bin/env bash
 if [ "$1" = "capabilities" ]; then
-  printf '{{"implementation":"bead-rs","atomic_claim":true,"statuses":["open","in_progress","deferred","closed"],"schemas":[{{"schema_ref":"{}"}}]}}'
+  printf '{{"implementation":"bead-rs","atomic_claim":true,"statuses":["open","in_progress","deferred","closed"],"schemas":[{{"schema_ref":"{}"}}],"commands":["ref","data","query"]}}'
 else
   echo "bead 0.1.1"
 fi
@@ -3574,9 +3652,9 @@ fi
         let bead_rs_complete = workspace.path().join("bead-rs-complete");
         std::fs::write(
             &bead_rs_complete,
-            r#"#!/bin/bash
+            r#"#!/usr/bin/env bash
 if [ "$1" = "capabilities" ]; then
-  printf '{"implementation":"bead-rs","atomic_claim":true,"statuses":["open","in_progress","deferred","closed"],"schemas":[{"schema_ref":"urn:bead-rs:schema:issue:native-v1"},{"schema_ref":"urn:bead-rs:schema:event:native-v1"},{"schema_ref":"urn:bead-rs:schema:field-guide:native-v1"}]}'
+  printf '{"implementation":"bead-rs","atomic_claim":true,"statuses":["open","in_progress","deferred","closed"],"schemas":[{"schema_ref":"urn:bead-rs:schema:issue:native-v1"},{"schema_ref":"urn:bead-rs:schema:event:native-v1"},{"schema_ref":"urn:bead-rs:schema:field-guide:native-v1"}],"commands":["ref","data","query"]}'
 else
   echo "bead 0.1.1"
 fi
@@ -3606,9 +3684,9 @@ fi
         let wrong_impl = workspace.path().join("wrong-implementation");
         std::fs::write(
             &wrong_impl,
-            r#"#!/bin/bash
+            r#"#!/usr/bin/env bash
 if [ "$1" = "capabilities" ]; then
-  printf '{"implementation":"bead-forge","atomic_claim":true,"statuses":["open","in_progress","deferred","closed"],"schemas":[{"schema_ref":"urn:bead-rs:schema:issue:native-v1"},{"schema_ref":"urn:bead-rs:schema:event:native-v1"},{"schema_ref":"urn:bead-rs:schema:field-guide:native-v1"}]}'
+  printf '{"implementation":"bead-forge","atomic_claim":true,"statuses":["open","in_progress","deferred","closed"],"schemas":[{"schema_ref":"urn:bead-rs:schema:issue:native-v1"},{"schema_ref":"urn:bead-rs:schema:event:native-v1"},{"schema_ref":"urn:bead-rs:schema:field-guide:native-v1"}],"commands":["ref","data","query"]}'
 else
   echo "bead 0.1.1"
 fi
@@ -3641,9 +3719,9 @@ fi
         let no_atomic = workspace.path().join("no-atomic-claim");
         std::fs::write(
             &no_atomic,
-            r#"#!/bin/bash
+            r#"#!/usr/bin/env bash
 if [ "$1" = "capabilities" ]; then
-  printf '{"implementation":"bead-rs","atomic_claim":false,"statuses":["open","in_progress","deferred","closed"],"schemas":[{"schema_ref":"urn:bead-rs:schema:issue:native-v1"},{"schema_ref":"urn:bead-rs:schema:event:native-v1"},{"schema_ref":"urn:bead-rs:schema:field-guide:native-v1"}]}'
+  printf '{"implementation":"bead-rs","atomic_claim":false,"statuses":["open","in_progress","deferred","closed"],"schemas":[{"schema_ref":"urn:bead-rs:schema:issue:native-v1"},{"schema_ref":"urn:bead-rs:schema:event:native-v1"},{"schema_ref":"urn:bead-rs:schema:field-guide:native-v1"}],"commands":["ref","data","query"]}'
 else
   echo "bead 0.1.1"
 fi
@@ -3676,7 +3754,7 @@ fi
         let invalid_json = workspace.path().join("invalid-json");
         std::fs::write(
             &invalid_json,
-            r#"#!/bin/bash
+            r#"#!/usr/bin/env bash
 if [ "$1" = "capabilities" ]; then
   printf '{this is not valid json}'
 else
@@ -3713,10 +3791,10 @@ fi
         std::fs::write(
             &logging_binary,
             format!(
-                r#"#!/bin/bash
+                r#"#!/usr/bin/env bash
 if [ "$1" = "capabilities" ]; then
   echo "capabilities --profile native-v1" >> "{}"
-  printf '{{"implementation":"bead-rs","atomic_claim":true,"statuses":["open","in_progress","deferred","closed"],"schemas":[{{"schema_ref":"urn:bead-rs:schema:issue:native-v1"}},{{"schema_ref":"urn:bead-rs:schema:event:native-v1"}},{{"schema_ref":"urn:bead-rs:schema:field-guide:native-v1"}}]}}'
+  printf '{{"implementation":"bead-rs","atomic_claim":true,"statuses":["open","in_progress","deferred","closed"],"schemas":[{{"schema_ref":"urn:bead-rs:schema:issue:native-v1"}},{{"schema_ref":"urn:bead-rs:schema:event:native-v1"}},{{"schema_ref":"urn:bead-rs:schema:field-guide:native-v1"}}],"commands":["ref","data","query"]}}'
 else
   echo "bead 0.1.1"
 fi
@@ -3738,6 +3816,126 @@ fi
             log_contents.contains("capabilities --profile native-v1"),
             "Expected to find 'capabilities --profile native-v1' in invocation log, got: {}",
             log_contents
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_bead_rs_capabilities_detects_backend_identity_mismatch() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir().unwrap();
+
+        // Create a binary named "bead" (implies bead-rs) but reports wrong implementation
+        let mismatched_binary = workspace.path().join("bead");
+        std::fs::write(
+            &mismatched_binary,
+            r#"#!/usr/bin/env bash
+if [ "$1" = "capabilities" ]; then
+  # Binary is named "bead" but reports "bead-forge" implementation
+  printf '{"implementation":"bead-forge","atomic_claim":true,"statuses":["open","in_progress","deferred","closed"],"schemas":[{"schema_ref":"urn:bead-rs:schema:issue:native-v1"},{"schema_ref":"urn:bead-rs:schema:event:native-v1"},{"schema_ref":"urn:bead-rs:schema:field-guide:native-v1"}],"commands":["ref","data","query"]}'
+else
+  echo "bead 0.1.1"
+fi
+"#,
+        )
+        .unwrap();
+        let mut perm = std::fs::metadata(&mismatched_binary).unwrap().permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&mismatched_binary, perm).unwrap();
+
+        // Test that backend identity mismatch is detected and reported
+        let result = verify_bead_rs_capabilities(&mismatched_binary, workspace.path());
+
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("backend identity mismatch")
+                || err_msg.contains("implies backend")
+                || err_msg.contains("implementation"),
+            "Error should mention backend identity mismatch, got: {}",
+            err_msg
+        );
+        assert!(
+            err_msg.contains("bead-rs") && err_msg.contains("bead-forge"),
+            "Error should mention both expected (bead-rs) and actual (bead-forge) backends, got: {}",
+            err_msg
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_bead_rs_capabilities_accepts_matching_backend_identity() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir().unwrap();
+
+        // Create a binary named "bead" that correctly reports "bead-rs" implementation
+        let matching_binary = workspace.path().join("bead");
+        std::fs::write(
+            &matching_binary,
+            r#"#!/usr/bin/env bash
+if [ "$1" = "capabilities" ]; then
+  # Binary is named "bead" and correctly reports "bead-rs" implementation
+  printf '{"implementation":"bead-rs","atomic_claim":true,"statuses":["open","in_progress","deferred","closed"],"schemas":[{"schema_ref":"urn:bead-rs:schema:issue:native-v1"},{"schema_ref":"urn:bead-rs:schema:event:native-v1"},{"schema_ref":"urn:bead-rs:schema:field-guide-native-v1"}],"commands":["ref","data","query"]}'
+else
+  echo "bead 0.1.1"
+fi
+"#,
+        )
+        .unwrap();
+        let mut perm = std::fs::metadata(&matching_binary).unwrap().permissions();
+        perm.set_mode(0o755);
+        std::fs::set_permissions(&matching_binary, perm).unwrap();
+
+        // Test that matching backend identity is accepted
+        let result = verify_bead_rs_capabilities(&matching_binary, workspace.path());
+
+        // Note: This should fail due to the schema typo ("field-guide-native-v1" vs "field-guide:native-v1")
+        // but NOT due to backend identity mismatch
+        if let Err(err) = result {
+            let err_msg = err.to_string();
+            assert!(
+                !err_msg.contains("backend identity mismatch"),
+                "Error should NOT mention backend identity mismatch when identities match, got: {}",
+                err_msg
+            );
+        }
+    }
+
+    #[test]
+    fn derive_expected_backend_from_filename_maps_common_binaries() {
+        use std::path::Path;
+
+        // Test "bead" -> "bead-rs"
+        let bead_path = Path::new("/usr/local/bin/bead");
+        assert_eq!(derive_expected_backend_from_filename(bead_path), "bead-rs");
+
+        // Test "bf" -> "bead-forge"
+        let bf_path = Path::new("/usr/local/bin/bf");
+        assert_eq!(derive_expected_backend_from_filename(bf_path), "bead-forge");
+
+        // Test unknown binary returns as-is
+        let unknown_path = Path::new("/usr/local/bin/unknown-bead-cli");
+        assert_eq!(
+            derive_expected_backend_from_filename(unknown_path),
+            "unknown-bead-cli"
+        );
+    }
+
+    #[test]
+    fn derive_expected_backend_from_filename_handles_paths_without_filename() {
+        use std::path::Path;
+
+        // Test path without filename returns "unknown"
+        let empty_path = Path::new("/");
+        assert_eq!(derive_expected_backend_from_filename(empty_path), "unknown");
+
+        // Test path with trailing slash
+        let trailing_path = Path::new("/usr/local/bin/");
+        assert_eq!(
+            derive_expected_backend_from_filename(trailing_path),
+            "unknown"
         );
     }
 }
