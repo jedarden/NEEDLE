@@ -2442,6 +2442,15 @@ agent:
   # Directory containing adapter YAML files.
   adapters_dir: {adapters_dir}
 
+  # Model-to-adapter routing rules.
+  routing:
+    # Rules are evaluated in order; first match wins.
+    rules:
+      - match_model: "(claude-)?(sonnet|opus|fable|haiku).*"
+        adapter: claude         # Built-in adapter for Anthropic models
+    default_adapter: claude     # Fallback for non-matching models
+    strict: false                # If true, fail when no rule matches
+
 # Worker fleet configuration.
 worker:
   # Maximum number of concurrent workers.
@@ -2856,7 +2865,7 @@ fn cmd_bead_backend(name: &str, workspace: &Path) -> Result<()> {
         backend,
         path: None,
     };
-    let (_, binary) = crate::config::resolve_bead_cli(&config)?;
+    let (_, binary, _source) = crate::config::resolve_bead_cli(&config)?;
     crate::bead_store::open_configured(&config, workspace.clone(), None, None, None)?;
     let descriptor = crate::bead_store::builtin_bead_backends()
         .into_iter()
@@ -4211,7 +4220,7 @@ fn doctor_check_bead_store(
 }
 
 fn doctor_check_bead_backend(config: &Config) -> CheckResult {
-    let (backend, path) = match crate::config::resolve_bead_cli(&config.bead_cli) {
+    let (backend, path, source) = match crate::config::resolve_bead_cli(&config.bead_cli) {
         Ok(resolved) => resolved,
         Err(error) => {
             return CheckResult::fail(
@@ -4229,18 +4238,18 @@ fn doctor_check_bead_backend(config: &Config) -> CheckResult {
     else {
         return CheckResult::fail("Bead backend", format!("descriptor {name} is missing"));
     };
-    let mut detail = vec![format!("verified against: {}", descriptor.verified_against)];
+    let mut detail = vec![
+        format!("CLI path: {}", path.display()),
+        format!("source: {}", source),
+        format!("verified against: {}", descriptor.verified_against),
+    ];
     if !descriptor.capabilities.transactional_batch {
         detail.push("capability gap: split/mitosis is sequential, not atomic".to_string());
     }
     if !descriptor.capabilities.velocity_metadata {
         detail.push("capability gap: claim omits model/harness velocity metadata".to_string());
     }
-    CheckResult::pass(
-        "Bead backend",
-        format!("{} at {}", descriptor.name, path.display()),
-    )
-    .with_detail(detail)
+    CheckResult::pass("Bead CLI Backend", descriptor.name).with_detail(detail)
 }
 
 fn doctor_run_bead_store_checks(

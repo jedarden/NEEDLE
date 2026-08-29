@@ -57,12 +57,13 @@ pub fn open_configured(
         );
     }
 
-    let (backend, binary) = crate::config::resolve_bead_cli(config).with_context(|| {
-        format!(
-            "failed to resolve bead_cli.backend for workspace {}",
-            workspace.display()
-        )
-    })?;
+    let (backend, binary, _source) =
+        crate::config::resolve_bead_cli(config).with_context(|| {
+            format!(
+                "failed to resolve bead_cli.backend for workspace {}",
+                workspace.display()
+            )
+        })?;
     verify_backend_identity(&backend, &binary, &workspace)?;
     if backend == crate::config::Backend::Bead {
         verify_bead_rs_capabilities(&binary, &workspace)?;

@@ -764,6 +764,27 @@ impl std::fmt::Display for Backend {
     }
 }
 
+/// Source of backend resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BackendSource {
+    /// Backend explicitly configured in .needle.yaml
+    Config,
+    /// Backend auto-detected via PATH probing
+    AutoDetected,
+    /// Backend resolved from explicit path in config
+    ExplicitPath,
+}
+
+impl std::fmt::Display for BackendSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BackendSource::Config => write!(f, "config file"),
+            BackendSource::AutoDetected => write!(f, "auto-detected"),
+            BackendSource::ExplicitPath => write!(f, "explicit path"),
+        }
+    }
+}
+
 /// Unified backend detection result.
 ///
 /// Contains both the backend name as a string and the resolved CLI path.
@@ -862,7 +883,7 @@ pub fn detect_backend_unified(workspace_root: &Path) -> Result<BackendDetection>
 ///
 /// Returns an error if no matching binary is found. The error message lists
 /// all attempted paths.
-pub fn resolve_bead_cli(config: &BeadCliConfig) -> Result<(Backend, PathBuf)> {
+pub fn resolve_bead_cli(config: &BeadCliConfig) -> Result<(Backend, PathBuf, BackendSource)> {
     // If an explicit path is set, the configured backend remains authoritative.
     // Inferring the dialect from an arbitrary filename would make renamed or
     // wrapper binaries silently select the wrong command grammar.
@@ -872,7 +893,7 @@ pub fn resolve_bead_cli(config: &BeadCliConfig) -> Result<(Backend, PathBuf)> {
                 BeadBackend::Bead | BeadBackend::Br => Backend::Bead,
                 BeadBackend::Auto => detect_backend_from_path(path)?,
             };
-            return Ok((backend, path.clone()));
+            return Ok((backend, path.clone(), BackendSource::ExplicitPath));
         } else {
             bail!("explicit bead CLI path does not exist: {}", path.display());
         }
@@ -903,7 +924,7 @@ pub fn resolve_bead_cli(config: &BeadCliConfig) -> Result<(Backend, PathBuf)> {
                 .context(
                     "bead CLI not found (checked PATH, ~/.local/bin/bead, /usr/local/cargo/bin/bead)",
                 )?;
-            Ok((Backend::Bead, path))
+            Ok((Backend::Bead, path, BackendSource::Config))
         }
         BeadBackend::Auto => {
             // Auto is diagnostics-only; explicit workspace binding remains
@@ -912,15 +933,15 @@ pub fn resolve_bead_cli(config: &BeadCliConfig) -> Result<(Backend, PathBuf)> {
             // Auto detection only tries bead-rs
             // Try bead first
             if let Ok(path) = find_on_path("bead") {
-                return Ok((Backend::Bead, path));
+                return Ok((Backend::Bead, path, BackendSource::AutoDetected));
             }
             let bead_local = PathBuf::from(format!("{home}/.local/bin/bead"));
             if is_executable(&bead_local) {
-                return Ok((Backend::Bead, bead_local));
+                return Ok((Backend::Bead, bead_local, BackendSource::AutoDetected));
             }
             let bead_cargo = PathBuf::from("/usr/local/cargo/bin/bead");
             if is_executable(&bead_cargo) {
-                return Ok((Backend::Bead, bead_cargo));
+                return Ok((Backend::Bead, bead_cargo, BackendSource::AutoDetected));
             }
 
             // Nothing found
@@ -1414,7 +1435,7 @@ mod tests {
             path: Some(bf_bin.clone()),
         };
 
-        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        let (backend, path, _source) = resolve_bead_cli(&config).unwrap();
         assert_eq!(backend, Backend::Bead);
         assert_eq!(path, bf_bin);
     }
@@ -1431,7 +1452,7 @@ mod tests {
             path: Some(bead_bin.clone()),
         };
 
-        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        let (backend, path, _source) = resolve_bead_cli(&config).unwrap();
         assert_eq!(backend, Backend::Bead);
         assert_eq!(path, bead_bin);
     }
@@ -1448,7 +1469,7 @@ mod tests {
             path: Some(custom_bin.clone()),
         };
 
-        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        let (backend, path, _source) = resolve_bead_cli(&config).unwrap();
         assert_eq!(backend, Backend::Bead); // Detected from filename
         assert_eq!(path, custom_bin);
     }
@@ -1496,7 +1517,7 @@ mod tests {
             path: Some(PathBuf::from("./bead")),
         };
 
-        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        let (backend, path, _source) = resolve_bead_cli(&config).unwrap();
         assert_eq!(backend, Backend::Bead);
         // Path should be exactly what was passed (not canonicalized)
         assert_eq!(path, PathBuf::from("./bead"));
@@ -1517,7 +1538,7 @@ mod tests {
             path: Some(bf_bin.clone()),
         };
 
-        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        let (backend, path, _source) = resolve_bead_cli(&config).unwrap();
         assert_eq!(backend, Backend::Bead);
         assert_eq!(path, bf_bin);
         assert!(path.is_absolute());
@@ -1539,7 +1560,7 @@ mod tests {
             path: Some(symlink_bead.clone()),
         };
 
-        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        let (backend, path, _source) = resolve_bead_cli(&config).unwrap();
         assert_eq!(backend, Backend::Bead);
         assert_eq!(path, symlink_bead);
         assert!(path.exists());
@@ -1558,7 +1579,7 @@ mod tests {
             path: Some(custom_bf.clone()),
         };
 
-        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        let (backend, path, _source) = resolve_bead_cli(&config).unwrap();
         assert_eq!(backend, Backend::Bead);
         assert_eq!(path, custom_bf);
     }
@@ -1575,7 +1596,7 @@ mod tests {
             path: Some(custom_bead.clone()),
         };
 
-        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        let (backend, path, _source) = resolve_bead_cli(&config).unwrap();
         assert_eq!(backend, Backend::Bead);
         assert_eq!(path, custom_bead);
     }
@@ -1592,7 +1613,7 @@ mod tests {
             path: Some(custom_br.clone()),
         };
 
-        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        let (backend, path, _source) = resolve_bead_cli(&config).unwrap();
         // Br backend should map to Backend::Bead
         assert_eq!(backend, Backend::Bead);
         assert_eq!(path, custom_br);
@@ -1610,7 +1631,7 @@ mod tests {
             path: Some(bf_binary.clone()),
         };
 
-        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        let (backend, path, _source) = resolve_bead_cli(&config).unwrap();
         // Auto backend with explicit path should detect from filename
         assert_eq!(backend, Backend::Bead);
         assert_eq!(path, bf_binary);
@@ -1628,7 +1649,7 @@ mod tests {
             path: Some(custom_binary.clone()),
         };
 
-        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        let (backend, path, _source) = resolve_bead_cli(&config).unwrap();
         // Auto backend should detect non-bf names as Bead
         assert_eq!(backend, Backend::Bead);
         assert_eq!(path, custom_binary);
@@ -1660,39 +1681,14 @@ mod tests {
             path: None,
         };
 
-        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        let (backend, path, _source) = resolve_bead_cli(&config).unwrap();
         // Per ADR-013: auto detection prefers bead, then bf
         assert_eq!(backend, Backend::Bead);
         assert_eq!(path, bead_bin);
     }
 
-    #[serial]
-    #[test]
-    fn test_resolve_bead_cli_auto_fallback_to_bf() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let home = tmp_dir.path().to_path_buf();
-
-        // Create ~/.local/bin/bf (no bead available)
-        let bin_dir = home.join(".local/bin");
-        std::fs::create_dir_all(&bin_dir).unwrap();
-        let bf_bin = bin_dir.join("bf");
-        std::fs::write(&bf_bin, "#!/bin/sh\necho test").unwrap();
-        make_executable(&bf_bin);
-
-        // Set HOME to tmp_dir
-        std::env::set_var("HOME", &home);
-        std::env::set_var("PATH", "");
-
-        let config = BeadCliConfig {
-            backend: BeadBackend::Auto,
-            path: None,
-        };
-
-        let (backend, path) = resolve_bead_cli(&config).unwrap();
-        assert_eq!(backend, Backend::Bead);
-        assert_eq!(path, bf_bin);
-    }
+    // REMOVED: test_resolve_bead_cli_auto_fallback_to_bf
+    // Bead-forge/bf backend is no longer supported; this test tested obsolete fallback behavior.
 
     #[test]
     fn test_resolve_bead_cli_br_backend() {
@@ -1706,7 +1702,7 @@ mod tests {
             path: Some(br_bin.clone()),
         };
 
-        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        let (backend, path, _source) = resolve_bead_cli(&config).unwrap();
         assert_eq!(backend, Backend::Bead);
         assert_eq!(path, br_bin);
     }
@@ -1737,7 +1733,7 @@ mod tests {
             path: None,
         };
 
-        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        let (backend, path, _source) = resolve_bead_cli(&config).unwrap();
         assert_eq!(backend, Backend::Bead);
         assert_eq!(path, bead_bin);
     }
@@ -1765,7 +1761,7 @@ mod tests {
             path: None,
         };
 
-        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        let (backend, path, _source) = resolve_bead_cli(&config).unwrap();
         assert_eq!(backend, Backend::Bead);
         assert_eq!(path, bead_bin);
     }
@@ -1794,113 +1790,17 @@ mod tests {
         assert!(err.contains("no bead CLI found"));
     }
 
-    #[serial]
-    #[test]
-    fn test_resolve_bead_cli_bf_backend_not_found() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let home = tmp_dir.path().to_path_buf();
+    // REMOVED: test_resolve_bead_cli_bf_backend_not_found
+    // Bead-forge/bf backend is no longer supported; this error path doesn't exist.
 
-        // Set HOME to empty tmp_dir (no bf binary)
-        std::env::set_var("HOME", &home);
+    // REMOVED: test_resolve_bead_cli_bf_backend_finds_on_path
+    // Bead-forge/bf backend is no longer supported.
 
-        // Clear PATH to prevent finding system binaries
-        std::env::set_var("PATH", "");
+    // REMOVED: test_resolve_bead_cli_bf_backend_falls_back_to_local_bin
+    // Bead-forge/bf backend is no longer supported.
 
-        let config = BeadCliConfig {
-            backend: BeadBackend::Bead,
-            path: None,
-        };
-
-        let result = resolve_bead_cli(&config);
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("bf CLI not found"));
-    }
-
-    #[serial]
-    #[test]
-    fn test_resolve_bead_cli_bf_backend_finds_on_path() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let home = tmp_dir.path().to_path_buf();
-
-        // Create bf binary on a custom PATH
-        let bin_dir = home.join("path-bin");
-        std::fs::create_dir_all(&bin_dir).unwrap();
-        let bf_bin = bin_dir.join("bf");
-        std::fs::write(&bf_bin, "#!/bin/sh\necho test").unwrap();
-        make_executable(&bf_bin);
-
-        // Set PATH to include bf, HOME to tmp_dir
-        std::env::set_var("PATH", &bin_dir);
-        std::env::set_var("HOME", &home);
-
-        let config = BeadCliConfig {
-            backend: BeadBackend::Bead,
-            path: None,
-        };
-
-        let (backend, path) = resolve_bead_cli(&config).unwrap();
-        assert_eq!(backend, Backend::Bead);
-        assert_eq!(path, bf_bin);
-    }
-
-    #[serial]
-    #[test]
-    fn test_resolve_bead_cli_bf_backend_falls_back_to_local_bin() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let home = tmp_dir.path().to_path_buf();
-
-        // Clear PATH to prevent finding bf on PATH
-        std::env::set_var("PATH", "");
-        std::env::set_var("HOME", &home);
-
-        // Create ~/.local/bin/bf
-        let local_bin = home.join(".local/bin");
-        std::fs::create_dir_all(&local_bin).unwrap();
-        let bf_local = local_bin.join("bf");
-        std::fs::write(&bf_local, "#!/bin/sh\necho test").unwrap();
-        make_executable(&bf_local);
-
-        let config = BeadCliConfig {
-            backend: BeadBackend::Bead,
-            path: None,
-        };
-
-        let (backend, path) = resolve_bead_cli(&config).unwrap();
-        assert_eq!(backend, Backend::Bead);
-        assert_eq!(path, bf_local);
-    }
-
-    #[serial]
-    #[test]
-    fn test_resolve_bead_cli_bf_backend_returns_bf_variant() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let home = tmp_dir.path().to_path_buf();
-
-        // Create bf binary on PATH
-        let bin_dir = home.join("path-bin");
-        std::fs::create_dir_all(&bin_dir).unwrap();
-        let bf_bin = bin_dir.join("bf");
-        std::fs::write(&bf_bin, "#!/bin/sh\necho test").unwrap();
-        make_executable(&bf_bin);
-
-        std::env::set_var("PATH", &bin_dir);
-        std::env::set_var("HOME", &home);
-
-        let config = BeadCliConfig {
-            backend: BeadBackend::Bead,
-            path: None,
-        };
-
-        let (backend, path) = resolve_bead_cli(&config).unwrap();
-        // Verify Backend::Bead variant is returned
-        assert!(matches!(backend, Backend::Bead));
-        assert_eq!(path, bf_bin);
-    }
+    // REMOVED: test_resolve_bead_cli_bf_backend_returns_bf_variant
+    // Bead-forge/bf backend is no longer supported.
 
     #[serial]
     #[test]
@@ -2585,7 +2485,7 @@ mod tests {
             path: None,
         };
 
-        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        let (backend, path, _source) = resolve_bead_cli(&config).unwrap();
         assert_eq!(backend, Backend::Bead);
         assert_eq!(path, bead_bin);
     }
@@ -2613,7 +2513,7 @@ mod tests {
             path: None,
         };
 
-        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        let (backend, path, _source) = resolve_bead_cli(&config).unwrap();
         assert_eq!(backend, Backend::Bead);
         assert_eq!(path, bead_local);
     }
@@ -2702,7 +2602,7 @@ mod tests {
             path: None,
         };
 
-        let (backend, _path) = resolve_bead_cli(&config).unwrap();
+        let (backend, _path, _source) = resolve_bead_cli(&config).unwrap();
         // Verify Backend::Bead variant is returned
         assert!(matches!(backend, Backend::Bead));
     }
@@ -2730,7 +2630,7 @@ mod tests {
             path: None,
         };
 
-        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        let (backend, path, _source) = resolve_bead_cli(&config).unwrap();
         assert_eq!(backend, Backend::Bead);
         assert_eq!(path, bead_bin);
     }
@@ -2758,7 +2658,7 @@ mod tests {
             path: None,
         };
 
-        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        let (backend, path, _source) = resolve_bead_cli(&config).unwrap();
         assert_eq!(backend, Backend::Bead);
         assert_eq!(path, bead_local);
     }
@@ -2858,7 +2758,7 @@ mod tests {
                 backend: BeadBackend::Auto,
                 path: None,
             };
-            let (backend, auto_path) = resolve_bead_cli(&config).unwrap();
+            let (backend, auto_path, _source) = resolve_bead_cli(&config).unwrap();
 
             // Must match exactly
             assert_eq!(backend, Backend::Bead);
@@ -2896,7 +2796,7 @@ mod tests {
                 backend: BeadBackend::Auto,
                 path: None,
             };
-            let (backend, auto_path) = resolve_bead_cli(&config).unwrap();
+            let (backend, auto_path, _source) = resolve_bead_cli(&config).unwrap();
 
             // Must match exactly
             assert_eq!(backend, Backend::Bead);
@@ -3922,7 +3822,7 @@ path: /path/to/./bf
             path: None,
         };
 
-        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        let (backend, path, _source) = resolve_bead_cli(&config).unwrap();
         assert_eq!(
             backend,
             Backend::Bead,
@@ -3954,7 +3854,7 @@ path: /path/to/./bf
             path: None,
         };
 
-        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        let (backend, path, _source) = resolve_bead_cli(&config).unwrap();
         assert_eq!(
             backend,
             Backend::Bead,
@@ -4000,69 +3900,11 @@ path: /path/to/./bf
         );
     }
 
-    #[serial]
-    #[test]
-    fn test_resolve_bead_cli_auto_finds_bf_on_path() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let home = tmp_dir.path().to_path_buf();
+    // REMOVED: test_resolve_bead_cli_auto_finds_bf_on_path
+    // Bead-forge/bf backend is no longer supported; Auto no longer falls back to bf.
 
-        // Create bf binary on a custom PATH (no bead available)
-        let bin_dir = home.join("path-bin");
-        std::fs::create_dir_all(&bin_dir).unwrap();
-        let bf_bin = bin_dir.join("bf");
-        std::fs::write(&bf_bin, "#!/bin/sh\necho test").unwrap();
-        make_executable(&bf_bin);
-
-        // Set PATH to include bf, HOME to tmp_dir (no local binaries)
-        std::env::set_var("PATH", &bin_dir);
-        std::env::set_var("HOME", &home);
-
-        let config = BeadCliConfig {
-            backend: BeadBackend::Auto,
-            path: None,
-        };
-
-        let (backend, path) = resolve_bead_cli(&config).unwrap();
-        assert_eq!(
-            backend,
-            Backend::Bead,
-            "Auto should return Backend::Bead when only bf found on PATH"
-        );
-        assert_eq!(path, bf_bin, "Should return the PATH bf binary");
-    }
-
-    #[serial]
-    #[test]
-    fn test_resolve_bead_cli_auto_finds_bf_in_local_bin() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let home = tmp_dir.path().to_path_buf();
-
-        // Clear PATH to prevent finding binaries on PATH
-        std::env::set_var("PATH", "");
-        std::env::set_var("HOME", &home);
-
-        // Create ~/.local/bin/bf (no bead available anywhere)
-        let local_bin = home.join(".local/bin");
-        std::fs::create_dir_all(&local_bin).unwrap();
-        let bf_local = local_bin.join("bf");
-        std::fs::write(&bf_local, "#!/bin/sh\necho test").unwrap();
-        make_executable(&bf_local);
-
-        let config = BeadCliConfig {
-            backend: BeadBackend::Auto,
-            path: None,
-        };
-
-        let (backend, path) = resolve_bead_cli(&config).unwrap();
-        assert_eq!(
-            backend,
-            Backend::Bead,
-            "Auto should return Backend::Bead when only bf found in ~/.local/bin"
-        );
-        assert_eq!(path, bf_local, "Should return the ~/.local/bin/bf binary");
-    }
+    // REMOVED: test_resolve_bead_cli_auto_finds_bf_in_local_bin
+    // Bead-forge/bf backend is no longer supported; Auto no longer falls back to bf.
 
     #[serial]
     #[test]
@@ -4095,7 +3937,7 @@ path: /path/to/./bf
             path: None,
         };
 
-        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        let (backend, path, _source) = resolve_bead_cli(&config).unwrap();
         assert_eq!(backend, Backend::Bead, "PATH bead should take precedence");
         assert_eq!(
             path, bead_path,
@@ -4111,7 +3953,7 @@ path: /path/to/./bf
         make_executable(&bf_path);
         std::env::set_var("PATH", &path_bin);
 
-        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        let (backend, path, _source) = resolve_bead_cli(&config).unwrap();
         assert_eq!(
             backend,
             Backend::Bead,
@@ -4125,7 +3967,7 @@ path: /path/to/./bf
         // Test 3: PATH bf is preferred over ~/.local/bin/bf
         std::fs::remove_file(&bead_local).unwrap();
 
-        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        let (backend, path, _source) = resolve_bead_cli(&config).unwrap();
         assert_eq!(
             backend,
             Backend::Bead,
@@ -4136,7 +3978,7 @@ path: /path/to/./bf
         // Test 4: ~/.local/bin/bf is the final fallback
         std::env::set_var("PATH", "");
 
-        let (backend, path) = resolve_bead_cli(&config).unwrap();
+        let (backend, path, _source) = resolve_bead_cli(&config).unwrap();
         assert_eq!(
             backend,
             Backend::Bead,
