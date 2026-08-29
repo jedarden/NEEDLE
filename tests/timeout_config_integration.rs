@@ -36,9 +36,15 @@ fn create_temp_config(yaml_content: &str) -> (TempDir, PathBuf) {
 }
 
 /// Load config from YAML string and return the parsed Config.
+///
+/// This variant drops the TempDir immediately, which is safe for Config structs
+/// that don't hold file handles or paths to the temp directory.
 fn load_config_from_yaml(yaml_content: &str) -> Config {
-    let (_temp_dir, config_path) = create_temp_config(yaml_content);
-    ConfigLoader::load_from_path(&config_path).expect("failed to load config")
+    let (temp_dir, config_path) = create_temp_config(yaml_content);
+    let config = ConfigLoader::load_from_path(&config_path).expect("failed to load config");
+    // Explicitly drop temp_dir after config is loaded to ensure cleanup
+    drop(temp_dir);
+    config
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -672,7 +678,7 @@ agent:
   timeout: 2400
 "#;
 
-    let (_temp_dir, config_path) = create_temp_config(yaml);
+    let (temp_dir, config_path) = create_temp_config(yaml);
 
     // Load as workspace override
     let mut config = Config::default();
@@ -692,6 +698,9 @@ agent:
         config.agent.timeout, 2400,
         "workspace config should override agent timeout"
     );
+
+    // Explicitly drop temp_dir after all uses of config_path
+    drop(temp_dir);
 }
 
 #[test]
@@ -702,7 +711,7 @@ agent:
   default: opus
 "#;
 
-    let (_temp_dir, config_path) = create_temp_config(yaml);
+    let (temp_dir, config_path) = create_temp_config(yaml);
 
     let mut config = Config::default();
     let overrides = ConfigLoader::load_workspace(config_path.parent().unwrap())
@@ -721,6 +730,9 @@ agent:
         config.agent.timeout, 3600,
         "workspace config without timeout should preserve global default"
     );
+
+    // Explicitly drop temp_dir after all uses of config_path
+    drop(temp_dir);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
