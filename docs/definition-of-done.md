@@ -145,6 +145,80 @@ bf close <test-bead> --reason "test gate"
 # Check that gate ran and accepted/rejected the commit
 ```
 
+## Strand CI Coverage Requirements
+
+All core NEEDLE strands must have integration test coverage that executes in CI. The needle-ci workflow validates strand functionality through 4 integration test targets:
+
+| Test Target | Strands Covered | Test File |
+|-------------|----------------|-----------|
+| `integration_tests.rs` | Pluck, Splice, Knot, Reflect | `tests/integration_tests.rs` |
+| `p2_integration_tests.rs` | Mend, Explore | `tests/p2_integration_tests.rs` |
+| `p3_integration_tests.rs` | Weave, Unravel, Pulse, Reflect | `tests/p3_integration_tests.rs` |
+| `real_br_integration_tests.rs` | All strands (real bead-rs backend) | `tests/real_br_integration_tests.rs` |
+
+### All 9 Core Strands Coverage
+
+✅ **All core strands have CI coverage:**
+- **Pluck**: Claims beads from ready frontier (integration_tests.rs)
+- **Mend**: Cleans stale claims/orphaned locks (p2_integration_tests.rs)
+- **Explore**: Discovers work across workspaces (p2_integration_tests.rs)
+- **Weave**: Gap analysis and bead creation (p3_integration_tests.rs)
+- **Unravel**: Alternatives for HUMAN-blocked beads (p3_integration_tests.rs)
+- **Pulse**: Codebase health scans (p3_integration_tests.rs)
+- **Reflect**: Telemetry reflection (integration_tests.rs, p3_integration_tests.rs)
+- **Splice**: Adapter system integration (integration_tests.rs, p3_integration_tests.rs)
+- **Knot**: Exhaustion handling (integration_tests.rs, p3_integration_tests.rs)
+
+### Strand Coverage Verification
+
+To verify strand CI coverage is complete:
+
+```bash
+# Run all strand integration tests locally
+./scripts/definition-of-done.sh --slow
+
+# Check specific strand test suites
+cargo test --test integration_tests    # Pluck, basic outcomes
+cargo test --test p2_integration_tests # Mend, Explore
+cargo test --test p3_integration_tests # Weave, Unravel, Pulse, Reflect, Splice, Knot
+cargo test --test real_br_integration_tests # Real bead-rs backend
+```
+
+### Coverage Gap Analysis
+
+As of 2026-08-28, the needle-ci workflow executes **4 out of 65 total test files**. While all core strand functionality is tested, **61 specialized test files** are not executed in CI:
+
+- **Adapter & Routing tests** (11 files) - Model routing, telemetry, validation
+- **Telemetry & Observability** (9 files) - OTLP transport, field verification
+- **Bead Store & Backend** (8 files) - CLI arguments, rehydration
+- **Process Management** (10 files) - Timeouts, heartbeat edge cases
+- **Error Handling** (7 files) - Double dispatch, starvation, ETXTBSY retry
+- **Configuration** (6 files) - Loading, validation, fixtures
+- **Infrastructure** (10 files) - Integration spawn, CLI helpers
+
+**Risk Assessment**: Medium - Core strand delivery is well-tested, but edge cases in adapters, telemetry, and error recovery are not automatically validated.
+
+See `docs/coverage-gap.md` for detailed analysis and recommendations.
+
+### Strand CI Status
+
+**Current Status**: ✅ Active
+- All 9 core strands have behavioral integration tests running in CI
+- Strand waterfall tested: Pluck → Mend → Explore → Knot
+- Multi-worker fleet scenarios validated (concurrent claiming, crash recovery)
+- Real bead-rs backend integration tested
+
+**Known Issues**: As of 2026-08-29, recent needle-ci runs are failing on the verify step due to:
+- Fast lane failures: cargo fmt, clippy, check
+- Slow lane failures: All test targets
+
+**Root Cause Analysis Required**: Investigation needed to determine if failures are due to:
+1. Uncommitted changes in working tree
+2. Genuine regressions in main branch
+3. CI environment issues
+
+**Action**: Verify with clean working tree and investigate specific failure causes.
+
 ## Bypass Analysis
 
 Monitor `.beads/bypasses.jsonl` to understand:
