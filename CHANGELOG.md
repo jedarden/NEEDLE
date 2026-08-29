@@ -4,6 +4,13 @@ All notable changes to NEEDLE are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Built-in `claude-sonnet` and `claude-opus` adapters no longer use `unbuffer`, which masked
+  exit codes and introduced an undocumented dependency. Direct `claude -p` invocation now
+  propagates exit codes correctly, ensuring authentication failures and other errors result
+  in Failure outcomes rather than silent Success. [#17](https://github.com/jedarden/NEEDLE/issues/17)
+
 ## [0.3.1] - 2026-08-15
 
 Patch release completing the fleet cutover introduced in 0.3.0 and hardening

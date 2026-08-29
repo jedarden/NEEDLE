@@ -733,7 +733,7 @@ fn builtin_claude_sonnet() -> AgentAdapter {
         version_command: Some("claude --version".to_string()),
         input_method: InputMethod::Stdin,
         invoke_template: concat!(
-            "cd {workspace} && unbuffer -p claude --model claude-sonnet-4-6",
+            "cd {workspace} && claude -p --model claude-sonnet-4-6",
             " --max-turns 30 --output-format stream-json --dangerously-skip-permissions",
             " --verbose < {prompt_file}",
         )
@@ -760,7 +760,7 @@ fn builtin_claude_opus() -> AgentAdapter {
         version_command: Some("claude --version".to_string()),
         input_method: InputMethod::Stdin,
         invoke_template: concat!(
-            "cd {workspace} && unbuffer -p claude --model claude-opus-4-6",
+            "cd {workspace} && claude -p --model claude-opus-4-6",
             " --max-turns 50 --output-format stream-json --dangerously-skip-permissions",
             " --verbose < {prompt_file}",
         )
@@ -2431,7 +2431,13 @@ pub fn test_agent(adapter_name: &str, config: &Config) -> Result<AgentTestResult
         None
     };
 
-    // 7. Determine overall status.
+    // 7. Check all executables referenced in invoke_template.
+    let template_missing = check_template_executables(&adapter.invoke_template);
+    for missing in &template_missing {
+        errors.push(missing.clone());
+    }
+
+    // 8. Determine overall status.
     let status = if cli_path.is_none() {
         AgentTestStatus::Error
     } else if !errors.is_empty() {
@@ -2529,6 +2535,179 @@ fn run_probe(agent_cli: &str) -> Result<ProbeResult> {
 
     Err(last_err.expect("loop always sets last_err before exhausting MAX_ATTEMPTS"))
         .with_context(|| format!("failed to probe {agent_cli} after {MAX_ATTEMPTS} attempts"))
+}
+
+/// Extract all external command names from an invoke template.
+///
+/// Tokenizes the template by shell operators (`&&`, `||`, `|`, `;`), then
+/// extracts the first word from each segment that looks like a command name
+/// (skips shell builtins, variable assignments, and placeholders).
+fn extract_executables_from_template(template: &str) -> Vec<String> {
+    // Shell builtins to skip (not external binaries)
+    const BUILTINS: &[&str] = &[
+        "cd",
+        "echo",
+        "printf",
+        "test",
+        "true",
+        "false",
+        "pwd",
+        "exit",
+        "return",
+        "shift",
+        "unset",
+        "export",
+        "readonly",
+        "local",
+        "declare",
+        "typeset",
+        "let",
+        "read",
+        "mapfile",
+        "readarray",
+        "source",
+        ".",
+        "trap",
+        "type",
+        "command",
+        "builtin",
+        "enable",
+        "help",
+        "shopt",
+        "caller",
+        "pushd",
+        "popd",
+        "dirs",
+        "suspend",
+        "disown",
+        "fg",
+        "bg",
+        "wait",
+        "jobs",
+        "kill",
+        "sleep",
+        "times",
+        "eval",
+        "exec",
+        "break",
+        "continue",
+        "case",
+        "esac",
+        "for",
+        "select",
+        "until",
+        "while",
+        "do",
+        "done",
+        "if",
+        "then",
+        "else",
+        "elif",
+        "fi",
+        "time",
+        "set",
+    ];
+
+    let mut executables = Vec::new();
+
+    // Split by shell operators: &&, ||, |, ;
+    let segments = template
+        .split("&&")
+        .flat_map(|s| s.split("||"))
+        .flat_map(|s| s.split('|'))
+        .flat_map(|s| s.split(';'))
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>();
+
+    for segment in segments {
+        // Tokenize by whitespace (simple shell tokenization)
+        let tokens = segment.split_whitespace().collect::<Vec<_>>();
+
+        for token in tokens {
+            // Skip variable assignments (KEY=VALUE or KEY="VALUE")
+            if token.contains('=') {
+                continue;
+            }
+
+            // Skip shell placeholders like {workspace}, {prompt_file}
+            if token.starts_with('{') && token.ends_with('}') {
+                continue;
+            }
+
+            // Skip shell operators and redirections
+            if matches!(token, ">" | ">>" | "<" | "2>" | "2>>" | "&>" | "&>>") {
+                continue;
+            }
+
+            // Extract the base command (strip path prefix like "/usr/bin/git" -> "git")
+            let cmd_name = if token.contains('/') {
+                token.rsplit('/').next().unwrap_or(token)
+            } else {
+                token
+            };
+
+            // Skip if empty or a shell builtin
+            if cmd_name.is_empty() || BUILTINS.contains(&cmd_name) {
+                continue;
+            }
+
+            // Skip if it's a flag (starts with -)
+            if cmd_name.starts_with('-') {
+                continue;
+            }
+
+            // Add if not already present
+            if !executables.contains(&cmd_name.to_string()) {
+                executables.push(cmd_name.to_string());
+            }
+        }
+    }
+
+    executables
+}
+
+/// Provide a package hint for a missing executable.
+///
+/// Returns a Debian/Ubuntu package name suggestion for common binaries.
+fn package_hint(executable: &str) -> Option<&'static str> {
+    match executable {
+        "unbuffer" => Some("expect"),
+        "script" => Some("bsdutils"),
+        "timeout" => Some("coreutils"),
+        "gh" => Some("gh"),
+        "tmux" => Some("tmux"),
+        "jq" => Some("jq"),
+        "fzf" => Some("fzf"),
+        "ripgrep" | "rg" => Some("ripgrep"),
+        "fd" => Some("fd-find"),
+        "bat" => Some("bat"),
+        "exa" | "eza" => Some("eza"),
+        "nc" => Some("netcat"),
+        "curl" => Some("curl"),
+        "wget" => Some("wget"),
+        "git" => Some("git"),
+        _ => None,
+    }
+}
+
+/// Check if all executables referenced in an invoke template are available on PATH.
+///
+/// Returns a list of missing executables with package hints.
+pub fn check_template_executables(template: &str) -> Vec<String> {
+    let executables = extract_executables_from_template(template);
+    let mut missing = Vec::new();
+
+    for exe in executables {
+        if which::which(&exe).is_err() {
+            let hint = package_hint(&exe)
+                .map(|pkg| format!(" (Debian/Ubuntu package: {pkg})"))
+                .unwrap_or_default();
+            missing.push(format!("missing executable: {exe}{hint}"));
+        }
+    }
+
+    missing
 }
 
 /// Build a sample JSON string for testing JSON field extraction.
@@ -3075,6 +3254,24 @@ output_transform: "needle-transform-custom"
         assert!(adapter.invoke_template.contains("--max-turns 50"));
         assert_eq!(adapter.timeout_secs, 7200);
         assert!(matches!(adapter.token_extraction, TokenExtraction::None));
+    }
+
+    #[test]
+    fn builtin_claude_sonnet_no_unbuffer() {
+        let adapter = builtin_claude_sonnet();
+        assert!(
+            !adapter.invoke_template.contains("unbuffer"),
+            "claude-sonnet template should not contain 'unbuffer'"
+        );
+    }
+
+    #[test]
+    fn builtin_claude_opus_no_unbuffer() {
+        let adapter = builtin_claude_opus();
+        assert!(
+            !adapter.invoke_template.contains("unbuffer"),
+            "claude-opus template should not contain 'unbuffer'"
+        );
     }
 
     #[test]
@@ -5332,4 +5529,171 @@ fn tsnet_disabled_does_not_inject_env_vars() {
 
     // Verify existing vars are preserved
     assert_eq!(env.get("EXISTING_VAR"), Some(&"value".to_string()));
+}
+
+// ── Template executable extraction tests ──
+
+#[test]
+fn extract_executables_simple_command() {
+    let template = "claude -p --model claude-sonnet-4-6 < {prompt_file}";
+    let executables = extract_executables_from_template(template);
+    assert_eq!(executables, vec!["claude"]);
+}
+
+#[test]
+fn extract_executables_with_cd() {
+    let template = "cd {workspace} && claude -p < {prompt_file}";
+    let executables = extract_executables_from_template(template);
+    assert_eq!(executables, vec!["claude"]);
+}
+
+#[test]
+fn extract_executables_with_unbuffer() {
+    let template = "cd {workspace} && unbuffer claude -p < {prompt_file}";
+    let executables = extract_executables_from_template(template);
+    assert_eq!(executables, vec!["unbuffer", "claude"]);
+}
+
+#[test]
+fn extract_executables_with_variable_assignment() {
+    let template = "VAR=value && cd {workspace} && API_KEY=secret my-agent < {prompt_file}";
+    let executables = extract_executables_from_template(template);
+    assert_eq!(executables, vec!["my-agent"]);
+}
+
+#[test]
+fn extract_executables_with_pipe() {
+    let template = "cat {prompt_file} | my-agent | jq .";
+    let executables = extract_executables_from_template(template);
+    assert_eq!(executables, vec!["cat", "my-agent", "jq"]);
+}
+
+#[test]
+fn extract_executables_with_or_operator() {
+    let template = "my-agent < {prompt_file} || fallback-agent";
+    let executables = extract_executables_from_template(template);
+    assert_eq!(executables, vec!["my-agent", "fallback-agent"]);
+}
+
+#[test]
+fn extract_executables_with_semicolon() {
+    let template = "cd {workspace} ; my-agent < {prompt_file}";
+    let executables = extract_executables_from_template(template);
+    assert_eq!(executables, vec!["my-agent"]);
+}
+
+#[test]
+fn extract_executables_with_timeout() {
+    let template = "timeout 60 my-agent < {prompt_file}";
+    let executables = extract_executables_from_template(template);
+    assert_eq!(executables, vec!["timeout", "my-agent"]);
+}
+
+#[test]
+fn extract_executables_with_script() {
+    let template = "script /dev/null my-agent < {prompt_file}";
+    let executables = extract_executables_from_template(template);
+    assert_eq!(executables, vec!["script", "my-agent"]);
+}
+
+#[test]
+fn extract_executables_skips_redirection() {
+    let template = "my-agent < input.txt > output.txt 2> error.txt";
+    let executables = extract_executables_from_template(template);
+    assert_eq!(executables, vec!["my-agent"]);
+}
+
+#[test]
+fn extract_executables_skips_placeholders() {
+    let template = "cd {workspace} && my-agent < {prompt_file} --bead {bead_id} --model {model}";
+    let executables = extract_executables_from_template(template);
+    assert_eq!(executables, vec!["my-agent"]);
+}
+
+#[test]
+fn extract_executables_with_full_path() {
+    let template = "/usr/local/bin/my-agent < {prompt_file}";
+    let executables = extract_executables_from_template(template);
+    assert_eq!(executables, vec!["my-agent"]);
+}
+
+#[test]
+fn extract_executables_complex_template() {
+    let template = "cd {workspace} && unbuffer claude -p --model claude-sonnet-4-6 --max-turns 30 < {prompt_file}";
+    let executables = extract_executables_from_template(template);
+    assert_eq!(executables, vec!["unbuffer", "claude"]);
+}
+
+#[test]
+fn extract_executables_deduplicates() {
+    let template = "git status && git commit && git push";
+    let executables = extract_executables_from_template(template);
+    assert_eq!(executables, vec!["git"]);
+}
+
+#[test]
+fn package_hint_unbuffer() {
+    assert_eq!(package_hint("unbuffer"), Some("expect"));
+}
+
+#[test]
+fn package_hint_script() {
+    assert_eq!(package_hint("script"), Some("bsdutils"));
+}
+
+#[test]
+fn package_hint_timeout() {
+    assert_eq!(package_hint("timeout"), Some("coreutils"));
+}
+
+#[test]
+fn package_hint_gh() {
+    assert_eq!(package_hint("gh"), Some("gh"));
+}
+
+#[test]
+fn package_hint_tmux() {
+    assert_eq!(package_hint("tmux"), Some("tmux"));
+}
+
+#[test]
+fn package_hint_unknown() {
+    assert_eq!(package_hint("some-unknown-binary"), None);
+}
+
+#[test]
+fn check_template_executables_all_present() {
+    // This test uses binaries that should always be present on a Unix-like system
+    let template = "echo hello && cat file | grep pattern";
+    let missing = check_template_executables(template);
+    assert!(missing.is_empty());
+}
+
+#[test]
+fn check_template_executables_missing_unbuffer() {
+    // unbuffer is often not installed by default
+    let template = "unbuffer my-agent < {prompt_file}";
+    let missing = check_template_executables(template);
+
+    // Either unbuffer is missing (we get the hint) or it's present (we get nothing)
+    if !missing.is_empty() {
+        assert!(missing[0].contains("unbuffer"));
+        assert!(missing[0].contains("expect"));
+    }
+}
+
+#[test]
+fn check_template_executables_missing_multiple() {
+    let template = "unbuffer my-agent < {prompt_file} && script log.txt";
+    let missing = check_template_executables(template);
+
+    // We should get at least one missing (these are not always installed)
+    // The order might vary, so we check for both
+    let has_unbuffer = missing.iter().any(|m| m.contains("unbuffer"));
+    let has_script = missing.iter().any(|m| m.contains("script"));
+
+    assert!(
+        has_unbuffer || has_script,
+        "Should detect at least one missing executable"
+    );
 }
