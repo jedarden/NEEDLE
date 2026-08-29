@@ -86,7 +86,7 @@ pub type WorkerId = String;
 pub type Priority = u8;
 
 // ──────────────────────────────────────────────────────────────────────────────
-// HardDeadline type alias
+// HardDeadline
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// Hard deadline - absolute wall-clock timeout from process start (in seconds).
@@ -101,9 +101,143 @@ pub type Priority = u8;
 /// - **Non-resettable**: Cannot be extended or reset by any process behavior
 /// - **Strict**: Process termination occurs immediately when deadline is reached
 /// - **Independent**: Operates separately from idle timeout detection
-///
-/// Represented as `u64` seconds. A value of `0` means no deadline is enforced.
-pub type HardDeadline = u64;
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HardDeadline {
+    /// Whether the hard deadline is enabled.
+    ///
+    /// When `false`, no hard deadline is enforced regardless of the duration value.
+    /// When `true`, the process must terminate before `duration` seconds elapse
+    /// from process spawn time.
+    pub enabled: bool,
+
+    /// The hard deadline duration in seconds.
+    ///
+    /// This is the absolute maximum execution time allowed for a process.
+    /// A value of `0` means no deadline is enforced even if `enabled` is `true`.
+    /// The deadline is computed once at process spawn and never resets.
+    pub duration_secs: u64,
+}
+
+impl HardDeadline {
+    /// Create a new `HardDeadline` with the given enabled flag and duration.
+    ///
+    /// # Arguments
+    ///
+    /// * `enabled` - Whether the deadline is enforced
+    /// * `duration_secs` - Maximum execution time in seconds (0 = no deadline)
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use needle::types::HardDeadline;
+    ///
+    /// // Enabled 10-minute hard deadline
+    /// let deadline = HardDeadline::new(true, 600);
+    /// assert!(deadline.enabled);
+    /// assert_eq!(deadline.duration_secs, 600);
+    ///
+    /// // Disabled hard deadline
+    /// let no_deadline = HardDeadline::new(false, 600);
+    /// assert!(!no_deadline.enabled);
+    /// ```
+    pub fn new(enabled: bool, duration_secs: u64) -> Self {
+        Self {
+            enabled,
+            duration_secs,
+        }
+    }
+
+    /// Create a disabled hard deadline (no timeout enforced).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use needle::types::HardDeadline;
+    ///
+    /// let deadline = HardDeadline::disabled();
+    /// assert!(!deadline.enabled);
+    /// ```
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            duration_secs: 0,
+        }
+    }
+
+    /// Create an enabled hard deadline with the specified duration.
+    ///
+    /// # Arguments
+    ///
+    /// * `duration_secs` - Maximum execution time in seconds
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use needle::types::HardDeadline;
+    ///
+    /// let deadline = HardDeadline::with_duration(300);
+    /// assert!(deadline.enabled);
+    /// assert_eq!(deadline.duration_secs, 300);
+    /// ```
+    pub fn with_duration(duration_secs: u64) -> Self {
+        Self {
+            enabled: true,
+            duration_secs,
+        }
+    }
+
+    /// Returns `true` if the hard deadline is enabled and has a non-zero duration.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use needle::types::HardDeadline;
+    ///
+    /// assert!(HardDeadline::with_duration(60).is_active());
+    /// assert!(!HardDeadline::disabled().is_active());
+    /// assert!(!HardDeadline::new(true, 0).is_active());
+    /// ```
+    pub fn is_active(&self) -> bool {
+        self.enabled && self.duration_secs > 0
+    }
+
+    /// Get the deadline duration as a `std::time::Duration`.
+    ///
+    /// Returns `None` if the deadline is not active (disabled or zero duration).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use needle::types::HardDeadline;
+    /// use std::time::Duration;
+    ///
+    /// assert_eq!(HardDeadline::with_duration(60).as_duration(), Some(Duration::from_secs(60)));
+    /// assert_eq!(HardDeadline::disabled().as_duration(), None);
+    /// ```
+    pub fn as_duration(&self) -> Option<Duration> {
+        if self.is_active() {
+            Some(Duration::from_secs(self.duration_secs))
+        } else {
+            None
+        }
+    }
+}
+
+impl Default for HardDeadline {
+    fn default() -> Self {
+        Self::disabled()
+    }
+}
+
+impl fmt::Display for HardDeadline {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.enabled {
+            write!(f, "{}s", self.duration_secs)
+        } else {
+            write!(f, "disabled")
+        }
+    }
+}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // BeadStatus
@@ -3272,7 +3406,10 @@ test foo ... ok"#;
 
         // timeout=301 (>300), retry_count=3 (>2), body_size=201 (>200)
         let decision = decompose_bead_decision(&bead, 301, 3, None);
-        assert!(decision.is_split(), "Should split when all criteria exceed thresholds");
+        assert!(
+            decision.is_split(),
+            "Should split when all criteria exceed thresholds"
+        );
     }
 
     #[test]
@@ -3382,7 +3519,10 @@ test foo ... ok"#;
 
         // Split decision should have empty proposals (caller must populate)
         let proposals = decision.proposals().unwrap();
-        assert!(proposals.is_empty(), "Initial split decision should have empty proposals");
+        assert!(
+            proposals.is_empty(),
+            "Initial split decision should have empty proposals"
+        );
     }
 }
 
