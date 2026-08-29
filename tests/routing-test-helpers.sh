@@ -30,7 +30,7 @@ readonly NC='\033[0m' # No Color
 
 # Test directories and prefixes
 readonly TEST_BEAD_PREFIX="route-test"
-readonly TEST_WORKSPACE_ROOT="${TEST_WORKSPACE_ROOT:-/tmp/needle-routing-tests}"
+readonly TEST_WORKSPACE_ROOT="${TEST_WORKSPACE_ROOT:-/tmp/needle-routing-tests-$$}"
 readonly TEST_TIMEOUT_SECS="${TEST_TIMEOUT_SECS:-600}"
 
 # Bead statuses
@@ -129,7 +129,7 @@ setup_test_workspace() {
         git -C "$workspace_dir" config user.email "needle-test@invalid"
         echo "# Routing test workspace: $test_name" > "$workspace_dir/README.md"
         git -C "$workspace_dir" add README.md
-        git -C "$workspace_dir" commit -q -m "Initial commit for routing test"
+        git -C "$workspace_dir" commit -q -m "Initial commit for routing test" README.md
     fi
 
     # Initialize bead store if not already
@@ -567,13 +567,13 @@ run_worker_for_bead() {
 
     local output_log="/tmp/needle-worker-$bead_id-$$-log.txt"
 
-    # Run needle worker with timeout
+    # Run needle run with timeout and correct parameters
     timeout "$timeout_secs" \
-        needle worker \
+        needle run \
             --workspace "$workspace_dir" \
-            --once \
-            --bead "$bead_id" \
-            --model "$model" \
+            --agent "$model" \
+            --identifier "test-$bead_id" \
+            --timeout 600 \
         2>&1 | tee "$output_log"
 
     local exit_code=$?
