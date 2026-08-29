@@ -1891,6 +1891,55 @@ All events share a common envelope:
 | `outcome.classified` | Exit code mapped to outcome | `outcome` (`success`, `failure`, `timeout`, `crash`, `agent_not_found`, `interrupted`), `exit_code` |
 | `outcome.handled` | Handler executed | `outcome`, `action` (`released`, `deferred`, `alerted`, `none`) |
 
+#### Verification Gates Judge Committed State
+
+**Status:** Accepted — See [ADR-020](../adr/020-verification-gates-judge-committed-state.md) for full rationale and implementation details.
+
+**Core Principle:** Verification gates MUST evaluate committed git state, not uncommitted working tree files.
+
+**Architecture:**
+- **Clean extraction:** Before running gates, NEEDLE extracts HEAD using `git archive HEAD | tar -x -C <tmp>` into a per-dispatch temp directory
+- **Execution modes:** `GateConfig::Command` gains a `run_in` field:
+  - `clean` (default): Run in the extracted committed state
+  - `workspace`: Run in the shared checkout (for gates that must see uncommitted state, e.g., build cache validation)
+- **Lifecycle:** Temp directories are removed on success, retained on failure for diagnosis
+- **Shipped-work check:** Already operates on git commits only (no extraction needed)
+
+**Why this is necessary:**
+1. **Reproducibility:** Committed state is the only durable artifact that replicates across environments
+2. **CI parity:** Gates should pass/fail the same in NEEDLE as they would in CI or on a fresh clone
+3. **Shared checkout safety:** Multiple workers sharing a workspace can verify independently without interference
+4. **False positive prevention:** Prevents gates from passing locally against uncommitted files but failing on committed code
+
+**Relationship to ADR-015 (No Worktrees Policy):**
+ADR-015 explicitly rejected per-worker git worktrees to avoid disk/build-cache explosion and merge-back complexity. Clean extraction provides isolation at verification time without worktree overhead:
+- Lightweight temp directories (deleted on success)
+- No git management overhead
+- Simple, clear lifecycle
+
+**Configuration Example:**
+```yaml
+gates:
+  - type: command
+    commands:
+      - cargo test
+      - cargo clippy -- -D warnings
+    run_in: clean  # Default, can be omitted
+
+  - type: command
+    commands:
+      - make build-check
+    run_in: workspace  # For gates that must see build cache
+```
+
+**Failure Handling and Uncommitted-Dependency Detection:**
+When a clean-extraction gate fails that would have passed in workspace mode:
+1. The extraction is retained (not deleted) for diagnosis
+2. The bead receives label `uncommitted-dependency` (planned enhancement)
+3. The reopen reason includes the workspace diff for context
+
+This makes the shared-checkout failure mode (which ADR-015 accepts as operational risk) detectable and actionable.
+
 ### Health
 
 | Event Type | Emitted When | Data Fields |
