@@ -4,6 +4,8 @@
 //! retry logic in your own code. All functions return Results to avoid
 //! expect() and unwrap() in test code.
 
+mod retry_test_helpers;
+
 use retry_test_helpers::*;
 use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};

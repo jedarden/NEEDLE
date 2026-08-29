@@ -1082,14 +1082,101 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
-    /// Delegates to the single crate-wide env lock so that `HOME`/`PATH`
-    /// mutation here excludes — and is excluded by — every other test that
-    /// touches the process environment.
-    fn isolate_bead_cli_env() -> (
+    /// Isolate the bead CLI environment for testing.
+    ///
+    /// This function sets up a hermetic test environment by:
+    /// 1. Creating a temporary directory for test binaries
+    /// 2. Isolating PATH to prevent interference with system CLIs
+    /// 3. Returning a cleanup handle (RAII guard) that restores the environment on drop
+    ///
+    /// # Returns
+    ///
+    /// A tuple of:
+    /// - `MutexGuard<'static, ()>`: The crate-wide environment lock
+    /// - `EnvGuard`: RAII guard that restores PATH when dropped
+    /// - `PathBuf`: Path to the temporary directory for test binaries
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use needle::config::tests::isolate_bead_cli_env;
+    ///
+    /// let (_lock, _guard, tmp_dir) = isolate_bead_cli_env();
+    /// // Create test binaries in tmp_dir
+    /// // They are automatically cleaned up when the guard is dropped
+    /// ```
+    pub fn isolate_bead_cli_env() -> (
         std::sync::MutexGuard<'static, ()>,
         crate::util::test_env::EnvGuard,
+        tempfile::TempDir,
     ) {
-        crate::util::test_env::isolate_env()
+        let (lock, guard) = crate::util::test_env::isolate_env();
+        let tmp_dir = tempfile::tempdir().expect("failed to create temp dir for test binaries");
+
+        // Set PATH to only the temp directory, preventing interference from system CLIs
+        std::env::set_var(
+            "PATH",
+            tmp_dir
+                .path()
+                .to_str()
+                .expect("temp dir path is valid UTF-8"),
+        );
+
+        (lock, guard, tmp_dir)
+    }
+
+    /// Create a dummy executable file with proper permissions.
+    ///
+    /// This function creates an executable shell script in a temporary directory
+    /// with the execute permission bit set (chmod +x).
+    ///
+    /// # Arguments
+    ///
+    /// * `dir` - The directory where the executable will be created
+    /// * `name` - The name of the executable file
+    /// * `content` - Optional content for the script. If `None`, a simple
+    ///   echo script is created.
+    ///
+    /// # Returns
+    ///
+    /// The full path to the created executable.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use needle::config::tests::create_test_executable;
+    /// use std::path::PathBuf;
+    ///
+    /// let tmp_dir = tempfile::tempdir().unwrap();
+    /// let fake_bead = create_test_executable(tmp_dir.path(), "bead", None);
+    ///
+    /// // With custom content
+    /// let custom_cli = create_test_executable(
+    ///     tmp_dir.path(),
+    ///     "my-cli",
+    ///     Some("#!/bin/sh\necho 'custom output'")
+    /// );
+    /// ```
+    pub fn create_test_executable(
+        dir: &std::path::Path,
+        name: &str,
+        content: Option<&str>,
+    ) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let executable_path = dir.join(name);
+        let script_content = content.unwrap_or("#!/bin/sh\necho 'test executable'");
+
+        std::fs::write(&executable_path, script_content).expect("failed to write executable file");
+
+        let mut perms = std::fs::metadata(&executable_path)
+            .expect("failed to read executable metadata")
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&executable_path, perms)
+            .expect("failed to set executable permissions");
+
+        executable_path
     }
 
     #[test]
@@ -1510,7 +1597,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_resolve_bead_cli_auto_precedence_bead_first() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -1542,7 +1629,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_resolve_bead_cli_auto_fallback_to_bf() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -1587,7 +1674,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_resolve_bead_cli_auto_ignores_deprecated_br() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -1618,7 +1705,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_resolve_bead_cli_auto_precedence_bead_third() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -1646,7 +1733,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_resolve_bead_cli_auto_no_binary_error() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -1670,7 +1757,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_resolve_bead_cli_bf_backend_not_found() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -1694,7 +1781,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_resolve_bead_cli_bf_backend_finds_on_path() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -1722,7 +1809,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_resolve_bead_cli_bf_backend_falls_back_to_local_bin() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -1750,7 +1837,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_resolve_bead_cli_bf_backend_returns_bf_variant() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -1778,7 +1865,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_resolve_bead_cli_auto_error_no_cli_found() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -1826,7 +1913,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_resolve_bead_cli_auto_error_cli_without_execute_permission() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -1862,7 +1949,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_resolve_bead_cli_auto_error_nonexistent_path_directories() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -1906,7 +1993,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_auto_fallback_chain_search_order_bead_then_bf_then_error() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = setup_test_binary_dir();
         let home = tmp_dir.path().to_path_buf();
 
@@ -1966,7 +2053,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_auto_fallback_chain_path_search_primary_beats_secondary() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = setup_test_binary_dir();
 
         // Create two bin directories on PATH
@@ -2041,7 +2128,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_auto_fallback_chain_exhaustive_stops_at_first_match() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = setup_test_binary_dir();
         let home = tmp_dir.path().to_path_buf();
 
@@ -2084,7 +2171,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_auto_fallback_chain_empty_path_falls_back_to_home() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = setup_test_binary_dir();
         let home = tmp_dir.path().to_path_buf();
 
@@ -2122,7 +2209,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_auto_fallback_chain_cargo_bin_location() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = setup_test_binary_dir();
         let home = tmp_dir.path().to_path_buf();
 
@@ -2163,7 +2250,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_auto_fallback_chain_nonexistent_path_continues_to_fallback() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = setup_test_binary_dir();
         let home = tmp_dir.path().to_path_buf();
 
@@ -2204,7 +2291,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_auto_fallback_chain_symlinked_cli_resolved_correctly() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = setup_test_binary_dir();
         let home = tmp_dir.path().to_path_buf();
 
@@ -2268,7 +2355,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_auto_fallback_chain_comprehensive_order_adr013_compliant() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = setup_test_binary_dir();
         let home = tmp_dir.path().to_path_buf();
 
@@ -2342,7 +2429,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_resolve_bead_cli_bead_backend_finds_on_path() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -2370,7 +2457,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_resolve_bead_cli_bead_backend_falls_back_to_local_bin() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -2398,7 +2485,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_resolve_bead_cli_bead_backend_falls_back_to_cargo_bin() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -2435,7 +2522,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_resolve_bead_cli_bead_backend_not_found_error() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -2460,7 +2547,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_resolve_bead_cli_bead_backend_returns_bead_variant() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -2487,7 +2574,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_resolve_bead_cli_br_backend_finds_on_path() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -2515,7 +2602,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_resolve_bead_cli_br_backend_falls_back_to_local_bin() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -2543,7 +2630,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_resolve_bead_cli_br_backend_falls_back_to_cargo_bin() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -2569,7 +2656,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_resolve_bead_cli_br_backend_not_found_error() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -2602,7 +2689,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_regression_auto_bf_only_host_matches_hardcoded_chain() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -2681,7 +2768,10 @@ mod tests {
         }
     }
 
-    /// Helper to make a file executable on Unix
+    /// Helper to make an existing file executable on Unix.
+    ///
+    /// This is used when a file has already been created with content
+    /// and just needs the executable permission bit set.
     fn make_executable(path: &Path) {
         #[cfg(unix)]
         {
@@ -3034,7 +3124,7 @@ path: ./local/bin/bf
     #[serial]
     #[test]
     fn test_resolve_bead_cli_error_when_no_binary_found() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -3138,7 +3228,7 @@ path: /path with spaces/to/bead
     #[serial]
     #[test]
     fn test_detect_bead_backend_config_set_to_bead() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let ws_root = tmp_dir.path();
 
@@ -3168,7 +3258,7 @@ path: /path with spaces/to/bead
     #[serial]
     #[test]
     fn test_detect_bead_backend_config_set_to_bf() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let ws_root = tmp_dir.path();
 
@@ -3194,7 +3284,7 @@ path: /path with spaces/to/bead
     #[serial]
     #[test]
     fn test_detect_bead_backend_config_set_to_auto_detects_bead() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let ws_root = tmp_dir.path();
 
@@ -3223,7 +3313,7 @@ path: /path with spaces/to/bead
     #[serial]
     #[test]
     fn test_detect_bead_backend_auto_falls_back_to_bf_when_bead_missing() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let ws_root = tmp_dir.path();
 
@@ -3249,7 +3339,7 @@ path: /path with spaces/to/bead
     #[serial]
     #[test]
     fn test_detect_bead_backend_auto_falls_back_to_br() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let ws_root = tmp_dir.path();
 
@@ -3275,7 +3365,7 @@ path: /path with spaces/to/bead
     #[serial]
     #[test]
     fn test_detect_bead_backend_no_config_detects_bead() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let ws_root = tmp_dir.path();
 
@@ -3301,7 +3391,7 @@ path: /path with spaces/to/bead
     #[serial]
     #[test]
     fn test_detect_bead_backend_none_available_returns_error() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let ws_root = tmp_dir.path();
 
@@ -3322,7 +3412,7 @@ path: /path with spaces/to/bead
     #[serial]
     #[test]
     fn test_detect_bead_backend_config_invalid_backend_value() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let ws_root = tmp_dir.path();
 
@@ -3342,7 +3432,7 @@ path: /path with spaces/to/bead
     #[serial]
     #[test]
     fn test_detect_bead_backend_config_uses_bead_alias() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let ws_root = tmp_dir.path();
 
@@ -3371,7 +3461,7 @@ path: /path with spaces/to/bead
     #[serial]
     #[test]
     fn test_detect_bead_backend_config_uses_bf_alias() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let ws_root = tmp_dir.path();
 
@@ -3397,7 +3487,7 @@ path: /path with spaces/to/bead
     #[serial]
     #[test]
     fn test_detect_bead_backend_config_br_backend() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let ws_root = tmp_dir.path();
 
@@ -3676,7 +3766,7 @@ path: /path/to/./bf
     #[serial]
     #[test]
     fn test_resolve_bead_cli_auto_finds_bead_on_path() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -3708,7 +3798,7 @@ path: /path/to/./bf
     #[serial]
     #[test]
     fn test_resolve_bead_cli_auto_finds_bead_in_local_bin() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -3743,7 +3833,7 @@ path: /path/to/./bf
     #[serial]
     #[test]
     fn test_resolve_bead_cli_auto_finds_bead_in_cargo_bin() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -3777,7 +3867,7 @@ path: /path/to/./bf
     #[serial]
     #[test]
     fn test_resolve_bead_cli_auto_finds_bf_on_path() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -3809,7 +3899,7 @@ path: /path/to/./bf
     #[serial]
     #[test]
     fn test_resolve_bead_cli_auto_finds_bf_in_local_bin() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -3841,7 +3931,7 @@ path: /path/to/./bf
     #[serial]
     #[test]
     fn test_resolve_bead_cli_auto_complete_fallback_chain() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -3922,7 +4012,7 @@ path: /path/to/./bf
     #[serial]
     #[test]
     fn test_resolve_bead_cli_auto_error_neither_cli_found() {
-        let (_lock, _env) = isolate_bead_cli_env();
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -8355,6 +8445,7 @@ fn expand_tilde_option(path: &Option<PathBuf>) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod config_tests {
+    use super::tests::{create_test_executable, isolate_bead_cli_env};
     use super::*;
 
     /// Delegates to the single crate-wide env lock. A module-private lock
@@ -12424,6 +12515,58 @@ resource_attributes:
     }
 
     #[test]
+    fn valid_agent_routing_fields_pass() {
+        let valid_fields = [
+            "agent.routing.rules",
+            "agent.routing.default_adapter",
+            "agent.routing.strict_mode",
+        ];
+
+        for field in valid_fields {
+            assert!(
+                validate_key_path(field).is_ok(),
+                "agent routing field '{}' should be valid",
+                field
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_agent_routing_field_fails() {
+        let result = validate_key_path("agent.routing.unknown_field");
+        assert!(result.is_err(), "unknown agent routing field should fail");
+
+        let err = result.unwrap_err();
+        assert_eq!(err.field, "agent.routing.unknown_field");
+        assert!(err.message.contains("unknown routing field"));
+        assert!(err.message.contains("Valid fields are:"));
+    }
+
+    #[test]
+    fn invalid_scratch_sweep_field_fails() {
+        let result = validate_key_path("worker.scratch_sweep.unknown_field");
+        assert!(result.is_err(), "unknown scratch_sweep field should fail");
+
+        let err = result.unwrap_err();
+        assert_eq!(err.field, "worker.scratch_sweep.unknown_field");
+        assert!(err.message.contains("unknown scratch_sweep field"));
+        assert!(err.message.contains("Valid fields are:"));
+    }
+
+    #[test]
+    fn nested_access_on_non_struct_field_fails() {
+        // Test that trying to access nested fields on a non-struct field fails
+        let result = validate_key_path("worker.max_workers.setting");
+        assert!(
+            result.is_err(),
+            "nested access on non-struct field should fail"
+        );
+
+        let err = result.unwrap_err();
+        assert!(err.message.contains("does not support nested access"));
+    }
+
+    #[test]
     fn valid_workspace_fields_pass() {
         let valid_fields = ["workspace.default", "workspace.home", "workspace.labels"];
 
@@ -13554,5 +13697,232 @@ agent:
 
         assert_eq!(deserialized.backend, BeadBackend::Auto);
         assert!(deserialized.path.is_none());
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // Test infrastructure helper tests
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_isolate_bead_cli_env_creates_temp_dir() {
+        let (_lock, _guard, tmp_dir) = isolate_bead_cli_env();
+
+        // Verify temp directory exists
+        assert!(tmp_dir.path().exists(), "temp directory should exist");
+
+        // Verify temp directory is a directory
+        assert!(tmp_dir.path().is_dir(), "temp path should be a directory");
+    }
+
+    #[test]
+    fn test_isolate_bead_cli_env_isolates_path() {
+        let (_lock, _guard, tmp_dir) = isolate_bead_cli_env();
+
+        // Verify PATH contains only the temp directory
+        let path_var = std::env::var("PATH").expect("PATH should be set");
+
+        assert!(
+            path_var.contains(tmp_dir.path().to_str().unwrap()),
+            "PATH should contain temp directory"
+        );
+
+        // Verify PATH doesn't contain system directories (it should only have the temp dir)
+        let path_entries: Vec<&str> = path_var.split(':').collect();
+        assert_eq!(
+            path_entries.len(),
+            1,
+            "PATH should contain exactly one entry (the temp dir)"
+        );
+    }
+
+    #[test]
+    fn test_isolate_bead_cli_env_temp_dir_is_empty() {
+        let (_lock, _guard, tmp_dir) = isolate_bead_cli_env();
+
+        // Verify temp directory starts empty
+        let entries =
+            std::fs::read_dir(tmp_dir.path()).expect("should be able to read temp directory");
+
+        let count = entries.count();
+        assert_eq!(
+            count, 0,
+            "temp directory should start empty, found {} entries",
+            count
+        );
+    }
+
+    #[test]
+    fn test_isolate_bead_cli_env_multiple_calls_create_different_dirs() {
+        let (_lock1, _guard1, tmp_dir1) = isolate_bead_cli_env();
+        let (_lock2, _guard2, tmp_dir2) = isolate_bead_cli_env();
+
+        // Each call should create a different temp directory
+        assert_ne!(
+            tmp_dir1.path(),
+            tmp_dir2.path(),
+            "each isolate_bead_cli_env call should create a different temp directory"
+        );
+    }
+
+    #[test]
+    fn test_create_test_executable_creates_file() {
+        let (_lock, _guard, tmp_dir) = isolate_bead_cli_env();
+
+        let executable = create_test_executable(tmp_dir.path(), "test-exec", None);
+
+        // Verify file was created
+        assert!(executable.exists(), "executable file should exist");
+
+        // Verify it has the correct name
+        assert_eq!(
+            executable.file_name().unwrap(),
+            "test-exec",
+            "executable should have the correct name"
+        );
+
+        // Verify it's in the temp directory
+        assert!(
+            executable.starts_with(tmp_dir.path()),
+            "executable should be in the temp directory"
+        );
+    }
+
+    #[test]
+    fn test_create_test_executable_sets_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_lock, _guard, tmp_dir) = isolate_bead_cli_env();
+
+        let executable = create_test_executable(tmp_dir.path(), "test-perms", None);
+
+        // Verify executable permissions
+        let metadata = std::fs::metadata(&executable).expect("should be able to read metadata");
+        let perms = metadata.permissions();
+        let mode = perms.mode();
+
+        // Verify execute bit is set (0o755 = rwxr-xr-x)
+        assert_eq!(
+            mode & 0o111,
+            0o111,
+            "executable should have execute permissions set"
+        );
+    }
+
+    #[test]
+    fn test_create_test_executable_with_default_content() {
+        let (_lock, _guard, tmp_dir) = isolate_bead_cli_env();
+
+        let executable = create_test_executable(tmp_dir.path(), "test-default", None);
+
+        // Read the file content
+        let content =
+            std::fs::read_to_string(&executable).expect("should be able to read executable");
+
+        // Verify it has the default content
+        assert_eq!(
+            content, "#!/bin/sh\necho 'test executable'",
+            "executable should have default content"
+        );
+    }
+
+    #[test]
+    fn test_create_test_executable_with_custom_content() {
+        let (_lock, _guard, tmp_dir) = isolate_bead_cli_env();
+
+        let custom_script = "#!/bin/sh\necho 'custom output'";
+        let executable = create_test_executable(tmp_dir.path(), "test-custom", Some(custom_script));
+
+        // Read the file content
+        let content =
+            std::fs::read_to_string(&executable).expect("should be able to read executable");
+
+        // Verify it has the custom content
+        assert_eq!(
+            content, custom_script,
+            "executable should have custom content"
+        );
+    }
+
+    #[test]
+    fn test_create_test_executable_multiple_executables() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (_lock, _guard, tmp_dir) = isolate_bead_cli_env();
+
+        // Create multiple executables
+        let exec1 = create_test_executable(tmp_dir.path(), "cli1", Some("#!/bin/sh\necho 'one'"));
+        let exec2 = create_test_executable(tmp_dir.path(), "cli2", Some("#!/bin/sh\necho 'two'"));
+        let exec3 = create_test_executable(tmp_dir.path(), "cli3", Some("#!/bin/sh\necho 'three'"));
+
+        // Verify all files exist
+        assert!(exec1.exists(), "first executable should exist");
+        assert!(exec2.exists(), "second executable should exist");
+        assert!(exec3.exists(), "third executable should exist");
+
+        // Verify all have execute permissions
+        for exec in [&exec1, &exec2, &exec3] {
+            let metadata = std::fs::metadata(exec).expect("should be able to read metadata");
+            let perms = metadata.permissions();
+            let mode = perms.mode();
+            assert_eq!(
+                mode & 0o111,
+                0o111,
+                "executable should have execute permissions set"
+            );
+        }
+
+        // Verify each has the correct content
+        assert_eq!(
+            std::fs::read_to_string(&exec1).unwrap(),
+            "#!/bin/sh\necho 'one'"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&exec2).unwrap(),
+            "#!/bin/sh\necho 'two'"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&exec3).unwrap(),
+            "#!/bin/sh\necho 'three'"
+        );
+    }
+
+    #[test]
+    fn test_create_test_executable_path_return_value() {
+        let (_lock, _guard, tmp_dir) = isolate_bead_cli_env();
+
+        let executable = create_test_executable(tmp_dir.path(), "my-test-cli", None);
+
+        // Verify the returned path is absolute
+        assert!(executable.is_absolute(), "returned path should be absolute");
+
+        // Verify the path ends with the expected filename
+        assert!(
+            executable.ends_with("my-test-cli"),
+            "returned path should end with the executable name"
+        );
+    }
+
+    #[test]
+    fn test_create_test_executable_with_multiline_content() {
+        let (_lock, _guard, tmp_dir) = isolate_bead_cli_env();
+
+        let multiline_content = r#"#!/bin/sh
+# This is a multi-line script
+echo "line 1"
+echo "line 2"
+exit 0
+"#;
+
+        let executable =
+            create_test_executable(tmp_dir.path(), "test-multiline", Some(multiline_content));
+
+        // Verify the content was written correctly
+        let content =
+            std::fs::read_to_string(&executable).expect("should be able to read executable");
+
+        assert_eq!(
+            content, multiline_content,
+            "executable should preserve multiline content exactly"
+        );
     }
 }

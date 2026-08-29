@@ -31,11 +31,30 @@ use tokio::time::{Duration, Instant};
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// Error injection configuration for testing retry behavior.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ErrorInjection {
     /// Errors to inject on specific attempts (1-indexed).
-    /// Maps attempt number -> error to return.
-    pub errors_on_attempts: Vec<(usize, io::Error)>,
+    /// Stores error specs that can be converted to io::Error when needed.
+    pub errors_on_attempts: Vec<(usize, ErrorSpec)>,
+}
+
+/// Specification for creating an io::Error on demand.
+#[derive(Debug, Clone)]
+pub enum ErrorSpec {
+    /// ETXTBSY error (errno 26)
+    Etxtbsy,
+    /// Generic IO error with kind and message
+    Io(io::ErrorKind, String),
+}
+
+impl ErrorSpec {
+    /// Convert the spec to an actual io::Error.
+    pub fn to_error(&self) -> io::Error {
+        match self {
+            ErrorSpec::Etxtbsy => io::Error::from_raw_os_error(26),
+            ErrorSpec::Io(kind, msg) => io::Error::new(kind.clone(), msg.as_str()),
+        }
+    }
 }
 
 impl ErrorInjection {
@@ -46,28 +65,36 @@ impl ErrorInjection {
         }
     }
 
-    /// Inject an error on a specific attempt (1-indexed).
-    pub fn with_error_on_attempt(mut self, attempt: usize, error: io::Error) -> Self {
-        self.errors_on_attempts.push((attempt, error));
+    /// Inject an error spec on a specific attempt (1-indexed).
+    pub fn with_error_on_attempt(mut self, attempt: usize, spec: ErrorSpec) -> Self {
+        self.errors_on_attempts.push((attempt, spec));
         self
     }
 
     /// Inject ETXTBSY error on a specific attempt.
-    pub fn with_etxtbsy_on_attempt(self, attempt: usize) -> Self {
-        self.with_error_on_attempt(attempt, etxtbsy_error())
+    pub fn with_etxtbsy_on_attempt(mut self, attempt: usize) -> Self {
+        self.errors_on_attempts.push((attempt, ErrorSpec::Etxtbsy));
+        self
     }
 
     /// Inject a generic IO error on a specific attempt.
-    pub fn with_io_error_on_attempt(self, attempt: usize, kind: io::ErrorKind, msg: &str) -> Self {
-        self.with_error_on_attempt(attempt, io::Error::new(kind, msg))
+    pub fn with_io_error_on_attempt(
+        mut self,
+        attempt: usize,
+        kind: io::ErrorKind,
+        msg: &str,
+    ) -> Self {
+        self.errors_on_attempts
+            .push((attempt, ErrorSpec::Io(kind, msg.to_string())));
+        self
     }
 
     /// Check if an error should be injected for the given attempt.
-    pub fn should_error(&self, attempt: usize) -> Option<&io::Error> {
+    pub fn should_error(&self, attempt: usize) -> Option<io::Error> {
         self.errors_on_attempts
             .iter()
             .find(|(att, _)| *att == attempt)
-            .map(|(_, err)| err)
+            .map(|(_, spec)| spec.to_error())
     }
 }
 
@@ -257,7 +284,7 @@ impl MockRetryBehavior {
                     continue;
                 } else {
                     // Non-retryable error or max attempts exhausted
-                    error = Some(injected_error.clone());
+                    error = Some(injected_error);
                     break;
                 }
             }
@@ -307,7 +334,7 @@ impl MockRetryBehavior {
                     continue;
                 } else {
                     // Non-retryable error or max attempts exhausted
-                    error = Some(injected_error.clone());
+                    error = Some(injected_error);
                     break;
                 }
             }
