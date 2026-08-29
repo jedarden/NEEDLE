@@ -85,9 +85,8 @@
 //! - ✅ Clear explanation of why panic-free behavior is critical
 //! - ✅ Documented guarantees for idempotency and error handling
 
-#[allow(deprecated)]
 use std::backtrace::Backtrace;
-use std::panic::{self, PanicInfo};
+use std::panic::{self, PanicHookInfo};
 use std::sync::Mutex;
 use std::sync::Once;
 use std::time::SystemTime;
