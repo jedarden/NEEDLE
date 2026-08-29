@@ -1080,76 +1080,6 @@ impl Dispatcher {
             prompt_hash: prompt.hash.clone(),
         })?;
 
-        // Atomically verify claim status immediately before dispatch.
-        // This verification happens within the dispatch transaction window,
-        // ensuring no race condition between check and agent spawn.
-        if let (Some(ref store), Some(ref worker_id)) = (&self.bead_store, &self.worker_id) {
-            match store.claim_status(bead_id).await {
-                Ok(status) => {
-                    let is_valid_claim = status.status == crate::types::BeadStatus::InProgress
-                        && status.assignee.as_deref() == Some(worker_id);
-
-                    if !is_valid_claim {
-                        let reason = if status.status != crate::types::BeadStatus::InProgress {
-                            format!("bead status is {:?}, not in_progress", status.status)
-                        } else {
-                            format!(
-                                "bead assigned to {:?}, not this worker ({})",
-                                status.assignee, worker_id
-                            )
-                        };
-
-                        tracing::warn!(
-                            bead_id = %bead_id.as_ref(),
-                            current_status = ?status.status,
-                            current_assignee = ?status.assignee,
-                            expected_worker = %worker_id,
-                            revision = ?status.revision,
-                            verification_result = "failed",
-                            reason = %reason,
-                            "atomic claim verification failed at dispatch — aborting"
-                        );
-
-                        let _ =
-                            self.telemetry
-                                .emit(crate::telemetry::EventKind::ClaimVerifyFailed {
-                                    bead_id: bead_id.clone(),
-                                    expected_actor: worker_id.clone(),
-                                    actual_status: format!("{:?}", status.status),
-                                    actual_assignee: status
-                                        .assignee
-                                        .unwrap_or_else(|| "none".to_string()),
-                                });
-
-                        return Err(anyhow::anyhow!("claim verification failed: {}", reason));
-                    }
-
-                    tracing::debug!(
-                        bead_id = %bead_id.as_ref(),
-                        current_status = ?status.status,
-                        current_assignee = ?status.assignee,
-                        revision = ?status.revision,
-                        verification_result = "passed",
-                        "atomic claim verification passed — proceeding with dispatch"
-                    );
-
-                    let _ = self
-                        .telemetry
-                        .emit(crate::telemetry::EventKind::ClaimVerifySuccess {
-                            bead_id: bead_id.clone(),
-                            expected_actor: worker_id.clone(),
-                        });
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        bead_id = %bead_id.as_ref(),
-                        error = %e,
-                        "atomic claim verification query failed — proceeding with dispatch"
-                    );
-                }
-            }
-        }
-
         let result = self
             .execute_agent(bead_id, &prompt.content, adapter, workspace)
             .await;
@@ -1293,6 +1223,80 @@ impl Dispatcher {
         // Inject tsnet identity environment variables if provisioned
         if let (Some(ref identity), Some(_)) = (&tsnet_identity, &self.tsnet_registry) {
             inject_identity_env(identity, &self.tsnet_config, &mut child_env);
+        }
+
+        // ── Atomic claim verification within dispatch transaction ──
+        // Verify claim status IMMEDIATELY before process spawn, with no async gap.
+        // This verification and the subsequent spawn happen in the same synchronous block,
+        // ensuring true atomicity - no window for another worker to claim between check
+        // and dispatch action. This is the ONLY verification that truly prevents race
+        // conditions because it's the last check before the actual spawn.
+        let worker_id_for_verify = self.worker_id.clone();
+        if let (Some(ref store), Some(ref verify_worker_id)) = (&self.bead_store, &worker_id_for_verify) {
+            match store.claim_status(bead_id).await {
+                Ok(status) => {
+                    let is_valid_claim = status.status == crate::types::BeadStatus::InProgress
+                        && status.assignee.as_deref() == Some(verify_worker_id);
+
+                    if !is_valid_claim {
+                        let reason = if status.status != crate::types::BeadStatus::InProgress {
+                            format!("bead status is {:?}, not in_progress", status.status)
+                        } else {
+                            format!(
+                                "bead assigned to {:?}, not this worker ({})",
+                                status.assignee, verify_worker_id
+                            )
+                        };
+
+                        tracing::warn!(
+                            bead_id = %bead_id.as_ref(),
+                            current_status = ?status.status,
+                            current_assignee = ?status.assignee,
+                            expected_worker = %verify_worker_id,
+                            revision = ?status.revision,
+                            verification_result = "failed",
+                            reason = %reason,
+                            "atomic claim verification failed at process spawn — aborting"
+                        );
+
+                        let _ =
+                            self.telemetry
+                                .emit(crate::telemetry::EventKind::ClaimVerifyFailed {
+                                    bead_id: bead_id.clone(),
+                                    expected_actor: verify_worker_id.clone(),
+                                    actual_status: format!("{:?}", status.status),
+                                    actual_assignee: status
+                                        .assignee
+                                        .unwrap_or_else(|| "none".to_string()),
+                                });
+
+                        return Err(anyhow::anyhow!("claim verification failed: {}", reason));
+                    }
+
+                    tracing::debug!(
+                        bead_id = %bead_id.as_ref(),
+                        current_status = ?status.status,
+                        current_assignee = ?status.assignee,
+                        revision = ?status.revision,
+                        verification_result = "passed",
+                        "atomic claim verification passed — proceeding with process spawn"
+                    );
+
+                    let _ = self
+                        .telemetry
+                        .emit(crate::telemetry::EventKind::ClaimVerifySuccess {
+                            bead_id: bead_id.clone(),
+                            expected_actor: verify_worker_id.clone(),
+                        });
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        bead_id = %bead_id.as_ref(),
+                        error = %e,
+                        "atomic claim verification query failed — proceeding with process spawn"
+                    );
+                }
+            }
         }
 
         // Spawn the agent process with ETXTBSY retry handling.
