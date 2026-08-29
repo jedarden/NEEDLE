@@ -11,6 +11,7 @@ use needle::supervisor::{SupervisorConfig, UpgradePoller};
 use needle::telemetry::Telemetry;
 use std::time::{Duration, Instant};
 
+#[allow(dead_code)]
 mod helpers;
 
 // Import polling test helpers

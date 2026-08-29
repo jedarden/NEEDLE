@@ -42,14 +42,14 @@ fn upgrade_interval_validation_matches_documented_minimum() {
     config.supervisor.update_check_interval_secs = 59;
     let errors = needle::config::ConfigLoader::validate(&config);
     assert!(errors.iter().any(|error| {
-        error.field == "supervisor.update_check_interval_secs"
+        error.full_path == "supervisor.update_check_interval_secs"
             && error.message.contains("minimum is 60 seconds")
     }));
 
     config.supervisor.update_check_interval_secs = 60;
     assert!(!needle::config::ConfigLoader::validate(&config)
         .iter()
-        .any(|error| error.field == "supervisor.update_check_interval_secs"));
+        .any(|error| error.full_path == "supervisor.update_check_interval_secs"));
 }
 
 #[test]

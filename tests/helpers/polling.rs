@@ -300,8 +300,8 @@ pub fn expected_poll_count(duration: Duration, interval: Duration, immediate_fir
     let secs = duration.as_secs();
     let interval_secs = interval.as_secs();
 
-    if interval_secs > 0 {
-        count += (secs / interval_secs) as usize;
+    if let Some(interval_count) = secs.checked_div(interval_secs) {
+        count += interval_count as usize;
     }
 
     count
@@ -454,16 +454,34 @@ mod tests {
 
     #[test]
     fn test_nth_poll_time_immediate() {
-        assert_eq!(nth_poll_time(1, Duration::from_secs(10), true), Some(Duration::ZERO));
-        assert_eq!(nth_poll_time(2, Duration::from_secs(10), true), Some(Duration::from_secs(10)));
-        assert_eq!(nth_poll_time(3, Duration::from_secs(10), true), Some(Duration::from_secs(20)));
+        assert_eq!(
+            nth_poll_time(1, Duration::from_secs(10), true),
+            Some(Duration::ZERO)
+        );
+        assert_eq!(
+            nth_poll_time(2, Duration::from_secs(10), true),
+            Some(Duration::from_secs(10))
+        );
+        assert_eq!(
+            nth_poll_time(3, Duration::from_secs(10), true),
+            Some(Duration::from_secs(20))
+        );
     }
 
     #[test]
     fn test_nth_poll_time_no_immediate() {
-        assert_eq!(nth_poll_time(1, Duration::from_secs(10), false), Some(Duration::from_secs(10)));
-        assert_eq!(nth_poll_time(2, Duration::from_secs(10), false), Some(Duration::from_secs(20)));
-        assert_eq!(nth_poll_time(3, Duration::from_secs(10), false), Some(Duration::from_secs(30)));
+        assert_eq!(
+            nth_poll_time(1, Duration::from_secs(10), false),
+            Some(Duration::from_secs(10))
+        );
+        assert_eq!(
+            nth_poll_time(2, Duration::from_secs(10), false),
+            Some(Duration::from_secs(20))
+        );
+        assert_eq!(
+            nth_poll_time(3, Duration::from_secs(10), false),
+            Some(Duration::from_secs(30))
+        );
     }
 
     #[tokio::test]
@@ -484,14 +502,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_poller_disabled() {
-        let mut poller = MockPoller::new()
-            .with_enabled(false)
-            .with_interval_secs(10);
+        let mut poller = MockPoller::new().with_enabled(false).with_interval_secs(10);
 
-        let result = poller.run_with_manual_clock(vec![
-            Duration::ZERO,
-            Duration::from_secs(10),
-        ]);
+        let result = poller.run_with_manual_clock(vec![Duration::ZERO, Duration::from_secs(10)]);
 
         assert_eq!(result.poll_count, 0);
         assert!(!result.enabled);
@@ -504,7 +517,11 @@ mod tests {
             last_poll_at: Duration::from_secs(20),
             total_elapsed: Duration::from_secs(20),
             enabled: true,
-            poll_times: vec![Duration::ZERO, Duration::from_secs(10), Duration::from_secs(20)],
+            poll_times: vec![
+                Duration::ZERO,
+                Duration::from_secs(10),
+                Duration::from_secs(20),
+            ],
         };
 
         assert!(assert_poll_count(&result, 3).is_ok());
@@ -530,7 +547,11 @@ mod tests {
             last_poll_at: Duration::from_secs(20),
             total_elapsed: Duration::from_secs(20),
             enabled: true,
-            poll_times: vec![Duration::ZERO, Duration::from_secs(10), Duration::from_secs(20)],
+            poll_times: vec![
+                Duration::ZERO,
+                Duration::from_secs(10),
+                Duration::from_secs(20),
+            ],
         };
 
         assert!(assert_even_spacing(&result, Duration::from_secs(10)).is_ok());
@@ -543,7 +564,11 @@ mod tests {
             last_poll_at: Duration::from_secs(25),
             total_elapsed: Duration::from_secs(25),
             enabled: true,
-            poll_times: vec![Duration::ZERO, Duration::from_secs(10), Duration::from_secs(25)],
+            poll_times: vec![
+                Duration::ZERO,
+                Duration::from_secs(10),
+                Duration::from_secs(25),
+            ],
         };
 
         assert!(assert_even_spacing(&result, Duration::from_secs(10)).is_err());
