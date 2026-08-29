@@ -351,6 +351,40 @@ that has since changed hands.
 Resolve is advisory: NEEDLE owns validation and all bead mutations. The
 resolver must not edit files, commit, push, or mutate bead state.
 
+**Non-commit deliverables — decided 2026-08-29.** A bead's deliverable may be
+something other than a commit: a GitHub comment, an external API call, a
+provisioning step, a verification. Such beads are permitted, and they are
+declared, never inferred:
+
+- **Declaration is the label `deliverable:external`** on the bead
+  (`bead create --label deliverable:external`, or `bead label add <id>
+  deliverable:external` mid-dispatch). *Because* the implicit notes-hash
+  fallback was invisible in practice: 14 consecutive dispatches of
+  `needle-0fbf5145` closed with `--reason` only, the gate reopened it each
+  time, and every reopen repeated the side effect (18 comments on GitHub #16).
+- **Gate for labeled beads:** the git check is skipped; the gate PASSES iff the
+  bead's notes changed during the dispatch **and** contain a line beginning
+  `evidence:` (a URL, an identifier, or command output proving the effect).
+  `close --reason` alone never satisfies it, and a commit is neither necessary
+  nor sufficient. *Because* an unattended retry loop must be decided by a
+  machine-checkable artifact, not prose.
+- **Gate for unlabeled beads is unchanged:** a substantial commit, or the
+  existing changed-note fallback for verification-only / already-done /
+  blocked outcomes.
+- **Prompt:** a labeled bead gets a dedicated block — check whether the effect
+  already exists before acting (idempotency), act once, record `evidence:` with
+  `bead update --notes`, then close. The default block tells an agent whose
+  work turned out to be external to add the label rather than close without it.
+  *Because* the label is the contract the gate reads; an agent that discovers
+  the shape of the work mid-dispatch must be able to opt into it.
+- **The reopen bound applies regardless of label:** a shipped-work failure
+  counts toward the existing quarantine threshold and quarantine sets the bead
+  `deferred` with a note (needle-b39fe1b6). *Because* a labeled bead whose
+  agent never records evidence still loops, and its side effect repeats every
+  cycle.
+- **Exposure:** documented in `docs/configuration.md` and in the AGENTS.md
+  section `needle init --backend` writes into a user's repo (needle-553bcb95).
+
 **Transitions:**
 | Condition | Next State |
 |-----------|-----------|
