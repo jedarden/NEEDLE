@@ -6914,8 +6914,8 @@ pub fn validate_key_path(key_path: &str) -> Result<(), ConfigError> {
     // Validate nested segments based on the parent config type
     let second = segments[1];
     match root {
-        "worker" => validate_worker_field(second, key_path),
-        "agent" => validate_agent_field(second, key_path),
+        "worker" => validate_worker_field(second, &segments[2..], key_path),
+        "agent" => validate_agent_field(second, &segments[2..], key_path),
         "workspace" => validate_workspace_field(second, key_path),
         "health" => validate_health_field(second, key_path),
         "strands" => validate_strands_field(second, &segments[2..], key_path),
@@ -6957,8 +6957,12 @@ fn validate_post_push_ci_field(field: &str, key_path: &str) -> Result<(), Config
     }
 }
 
-/// Validate WorkerConfig field names.
-fn validate_worker_field(field: &str, key_path: &str) -> Result<(), ConfigError> {
+/// Validate WorkerConfig field names with deeper nesting support.
+fn validate_worker_field(
+    field: &str,
+    remaining: &[&str],
+    key_path: &str,
+) -> Result<(), ConfigError> {
     let valid_fields = [
         "max_workers",
         "launch_stagger_seconds",
@@ -6979,6 +6983,8 @@ fn validate_worker_field(field: &str, key_path: &str) -> Result<(), ConfigError>
         "config_reload_check_interval_secs",
         "scratch_sweep",
         "worker_binary_path",
+        "allow_exit_without_supervisor",
+        "freshness_check_interval_secs",
     ];
 
     if !valid_fields.contains(&field) {
@@ -6992,11 +6998,48 @@ fn validate_worker_field(field: &str, key_path: &str) -> Result<(), ConfigError>
         });
     }
 
+    // Validate deeper nesting for known nested structs
+    if !remaining.is_empty() {
+        let third = remaining[0];
+        match field {
+            "scratch_sweep" => validate_scratch_sweep_field(third, key_path),
+            _ => Err(ConfigError {
+                field: key_path.to_string(),
+                message: format!(
+                    "worker field '{}' does not support nested access (attempted: '{}')",
+                    field, third
+                ),
+            }),
+        }
+    } else {
+        Ok(())
+    }
+}
+
+/// Validate ScratchSweepConfig field names.
+fn validate_scratch_sweep_field(field: &str, key_path: &str) -> Result<(), ConfigError> {
+    let valid_fields = ["enabled", "ttl_hours"];
+
+    if !valid_fields.contains(&field) {
+        return Err(ConfigError {
+            field: key_path.to_string(),
+            message: format!(
+                "unknown scratch_sweep field '{}'. Valid fields are: {}",
+                field,
+                valid_fields.join(", ")
+            ),
+        });
+    }
+
     Ok(())
 }
 
-/// Validate AgentConfig field names.
-fn validate_agent_field(field: &str, key_path: &str) -> Result<(), ConfigError> {
+/// Validate AgentConfig field names with deeper nesting support.
+fn validate_agent_field(
+    field: &str,
+    remaining: &[&str],
+    key_path: &str,
+) -> Result<(), ConfigError> {
     let valid_fields = ["default", "args", "timeout", "adapters_dir", "routing"];
 
     if !valid_fields.contains(&field) {
@@ -7004,6 +7047,39 @@ fn validate_agent_field(field: &str, key_path: &str) -> Result<(), ConfigError> 
             field: key_path.to_string(),
             message: format!(
                 "unknown agent field '{}'. Valid fields are: {}",
+                field,
+                valid_fields.join(", ")
+            ),
+        });
+    }
+
+    // Validate deeper nesting for known nested structs
+    if !remaining.is_empty() {
+        let third = remaining[0];
+        match field {
+            "routing" => validate_routing_field(third, key_path),
+            _ => Err(ConfigError {
+                field: key_path.to_string(),
+                message: format!(
+                    "agent field '{}' does not support nested access (attempted: '{}')",
+                    field, third
+                ),
+            }),
+        }
+    } else {
+        Ok(())
+    }
+}
+
+/// Validate RoutingConfig field names.
+fn validate_routing_field(field: &str, key_path: &str) -> Result<(), ConfigError> {
+    let valid_fields = ["rules", "default_adapter", "strict_mode"];
+
+    if !valid_fields.contains(&field) {
+        return Err(ConfigError {
+            field: key_path.to_string(),
+            message: format!(
+                "unknown routing field '{}'. Valid fields are: {}",
                 field,
                 valid_fields.join(", ")
             ),
