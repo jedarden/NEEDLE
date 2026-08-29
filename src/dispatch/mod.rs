@@ -4,6 +4,106 @@
 //! adapter file. It renders an invoke template, starts a process, waits (with
 //! timeout enforcement), and captures the raw result.
 //!
+//! # Timeout Enforcement
+//!
+//! NEEDLE enforces timeout limits on agent execution to prevent runaway processes.
+//! Two timeout modes are supported:
+//!
+//! ## Hard Deadline (Absolute, Non-Resettable)
+//!
+//! The **hard deadline** is an absolute upper bound on total execution time.
+//! Once a process is spawned, the deadline is set to `spawn_time + hard_timeout_secs`
+//! and **never changes**, regardless of agent activity.
+//!
+//! ### Key Characteristics
+//!
+//! - **Absolute**: Computed once at spawn time from `Instant::now()`
+//! - **Non-resettable**: No mechanism extends or modifies the deadline after creation
+//! - **Activity-independent**: Fires even if the agent is producing output
+//! - **Strict enforcement**: Process is killed via `SIGKILL` when deadline expires
+//!
+//! ### Example Behavior
+//!
+//! ```text
+//! hard_timeout_secs = 5
+//!
+//! Timeline:
+//! t=0s:  Process spawns, hard deadline set to t=5s
+//! t=1s:  Agent produces output (deadline remains t=5s)
+//! t=2s:  Agent produces output (deadline remains t=5s)
+//! t=3s:  Agent produces output (deadline remains t=5s)
+//! t=5s:  HARD DEADLINE EXPIRES → Process killed
+//! ```
+//!
+//! Even though the agent was actively producing output, the hard deadline fires
+//! at t=5s regardless. This prevents agents from running indefinitely even
+//! when making "progress."
+//!
+//! ### When to Use Hard Deadline
+//!
+//! - Set strict upper bounds for expensive operations (e.g., model training, large file processing)
+//! - Prevent runaway agents that produce output but never terminate
+//! - Enforce service-level agreements on total execution time
+//! - Complement idle timeout with a maximum wall-clock limit
+//!
+//! ## Idle Deadline (Resettable, Activity-Dependent)
+//!
+//! The **idle deadline** fires when no stdout/stderr activity occurs for the
+//! configured duration. Unlike hard deadline, idle deadline **resets** on each
+//! output byte, allowing long-running agents that stay active.
+//!
+//! ### Key Characteristics
+//!
+//! - **Resettable**: Deadline resets to `now + idle_timeout_secs` on each output byte
+//! - **Activity-dependent**: Only fires if the agent is silent for the full duration
+//! - **Permissive**: Allows indefinite execution as long as agent produces output
+//!
+//! ### Example Behavior
+//!
+//! ```text
+//! idle_timeout_secs = 10
+//!
+//! Timeline:
+//! t=0s:   Process spawns, idle deadline set to t=10s
+//! t=5s:   Agent produces output → idle deadline resets to t=15s
+//! t=12s:  Agent produces output → idle deadline resets to t=22s
+//! t=30s:  Agent goes silent...
+//! t=40s:  IDLE DEADLINE EXPIRES (10s of silence) → Process killed
+//! ```
+//!
+//! The agent ran for 40 seconds total because it kept producing output, resetting
+//! the idle deadline each time. Once it went silent, the idle timeout fired after
+//! 10 seconds of no activity.
+//!
+//! ### When to Use Idle Deadline
+//!
+//! - Allow long-running agents that make continuous progress
+//! - Detect hung or stalled agents (no output for an extended period)
+//! - Support streaming agents that produce incremental results
+//!
+//! ## Using Both Timeouts Together
+//!
+//! Hard and idle timeouts can be configured simultaneously:
+//!
+//! ```yaml
+//! adapters:
+//!   - name: claude-sonnet
+//!     invoke_template: "claude {prompt_file}"
+//!     idle_timeout_secs: 300   # 5 minutes of silence
+//!     hard_timeout_secs: 3600 # 1 hour absolute limit
+//! ```
+//!
+//! In this configuration:
+//! - If the agent produces output continuously, it runs until the 1-hour hard deadline
+//! - If the agent goes silent for 5 minutes, the idle deadline fires first
+//! - The first deadline to expire kills the process
+//!
+//! ## Timeout Exit Codes and Telemetry
+//!
+//! When a timeout fires, the process is killed with exit code **124** (GNU timeout convention).
+//! The structured [`TimeoutReason`] enum captures which deadline fired and its configuration,
+//! emitted in telemetry and available in [`ExecutionResult`].
+//!
 //! Depends on: `types`, `config`, `telemetry`, `prompt`, `trace`.
 
 use std::collections::HashMap;
@@ -193,14 +293,15 @@ impl Clone for HardDeadlineTimer {
 
 /// State tracking for a running agent process observation.
 ///
-/// Tracks deadline state for idle timeout detection. Reset logic will be added
-/// in a follow-up task.
+/// Tracks idle deadline state for timeout detection. The idle deadline
+/// resets on each stdout/stderr activity event (see module-level docs).
 #[derive(Debug, Clone)]
 pub struct ProcessObservation {
     /// Idle deadline: when the process will be terminated if no activity occurs.
     ///
     /// `None` when idle timeout is disabled. `Some(deadline)` when idle timeout
-    /// is active. This is the state field only — reset logic will be added later.
+    /// is active. This deadline is reset to `now + idle_timeout_secs` on each
+    /// output byte from the agent process.
     pub idle_deadline: Option<tokio::time::Instant>,
 }
 
@@ -434,18 +535,25 @@ pub struct AgentAdapter {
     /// Timeout in seconds (0 = use global config timeout).
     #[serde(default)]
     pub timeout_secs: u64,
-    /// Idle timeout in seconds (0 = no idle deadline).
+    /// Idle timeout in seconds (0 = disables idle deadline).
     ///
-    /// When implemented, will kill the agent if no stdout/stderr activity
-    /// is detected for this duration. This is a data-model-only field;
-    /// validation and enforcement logic will be added in a follow-up.
+    /// Kills the agent if no stdout/stderr activity occurs for this duration.
+    /// The idle deadline **resets** on each output byte, allowing long-running
+    /// agents that stay active. Set to 0 to disable idle timeout enforcement.
+    ///
+    /// See the [module-level documentation](self) for details on timeout behavior
+    /// and comparison with hard deadline.
     #[serde(default)]
     pub idle_timeout_secs: u64,
-    /// Hard timeout in seconds (0 = no hard deadline).
+    /// Hard timeout in seconds (0 = disables hard deadline).
     ///
-    /// When implemented, will enforce an absolute maximum execution time
-    /// regardless of agent activity. This is a data-model-only field;
-    /// enforcement logic will be added in a follow-up.
+    /// Enforces an **absolute maximum execution time** from process spawn,
+    /// regardless of agent activity. The hard deadline is computed once at
+    /// spawn time and **never resets**, even if the agent produces output.
+    /// Set to 0 to disable hard deadline enforcement.
+    ///
+    /// See the [module-level documentation](self) for details on timeout behavior
+    /// and comparison with idle deadline.
     #[serde(default)]
     pub hard_timeout_secs: u64,
     /// AI provider name (informational).
@@ -1232,7 +1340,9 @@ impl Dispatcher {
         // and dispatch action. This is the ONLY verification that truly prevents race
         // conditions because it's the last check before the actual spawn.
         let worker_id_for_verify = self.worker_id.clone();
-        if let (Some(ref store), Some(ref verify_worker_id)) = (&self.bead_store, &worker_id_for_verify) {
+        if let (Some(ref store), Some(ref verify_worker_id)) =
+            (&self.bead_store, &worker_id_for_verify)
+        {
             match store.claim_status(bead_id).await {
                 Ok(status) => {
                     let is_valid_claim = status.status == crate::types::BeadStatus::InProgress
