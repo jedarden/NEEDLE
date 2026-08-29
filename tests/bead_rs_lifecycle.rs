@@ -195,3 +195,71 @@ fn needle_claims_closes_and_restores_a_bead_rs_workspace() {
     assert!(restored.contains("\"status\":\"closed\""));
     assert!(restored.contains(&format!("\"blocker\":\"{blocker}\"")));
 }
+
+#[test]
+#[ignore = "release gate requiring a real bead-rs binary; set BEAD_RS_BIN"]
+fn sync_flush_only_rejects_profile_flag() {
+    let source_binary = std::env::var_os("BEAD_RS_BIN")
+        .map(PathBuf::from)
+        .expect("BEAD_RS_BIN must name the pinned real bead-rs binary");
+    assert!(source_binary.is_file(), "BEAD_RS_BIN does not exist");
+
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    let bead = root.path().join("bin").join("bead");
+    fs::copy(&source_binary, &bead).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&bead).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&bead, permissions).unwrap();
+    }
+
+    // Initialize a bead-rs workspace
+    run(bead_command(&bead, &workspace).args(["init", "--prefix", "test"]));
+
+    // Test 1: --profile is rejected on default forensic path (no --output)
+    let output = bead_command(&bead, &workspace)
+        .args(["sync", "flush-only", "--profile", "native-v1"])
+        .output()
+        .expect("failed to execute bead command");
+    assert!(
+        !output.status.success(),
+        "flush-only with --profile should fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unexpected argument") || stderr.contains("--profile"),
+        "stderr should reject --profile: {}",
+        stderr
+    );
+
+    // Test 2: --profile is rejected when using --output
+    let output = bead_command(&bead, &workspace)
+        .args([
+            "sync",
+            "flush-only",
+            "--output",
+            root.path().join("test.jsonl").to_str().unwrap(),
+            "--profile",
+            "native-v1",
+        ])
+        .output()
+        .expect("failed to execute bead command");
+    assert!(
+        !output.status.success(),
+        "flush-only with --output and --profile should fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unexpected argument") || stderr.contains("--profile"),
+        "stderr should reject --profile: {}",
+        stderr
+    );
+
+    // Test 3: flush-only works correctly without --profile
+    run(bead_command(&bead, &workspace).args(["sync", "flush-only"]));
+}

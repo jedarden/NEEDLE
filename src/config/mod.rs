@@ -12,6 +12,7 @@
 //!
 //! Leaf module — depends only on `types`.
 
+pub mod key_path;
 pub mod tiers;
 
 pub use crate::config::tiers::ReloadTier;

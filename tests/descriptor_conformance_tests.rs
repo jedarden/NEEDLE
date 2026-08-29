@@ -170,7 +170,7 @@ async fn claim_auto_operation_is_atomic() {
     //! Verify claim_auto operations are atomic by default.
     //!
     //! This is critical for preventing duplicate dispatch in the ready loop.
-    let root = tempfile::tempdir().unwrap();
+    let _root = tempfile::tempdir().unwrap();
     let backend = builtin_bead_backends()
         .into_iter()
         .find(|backend| backend.name == "bead-rs")

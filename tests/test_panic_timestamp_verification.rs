@@ -7,63 +7,7 @@
 //! - Log format is readable and useful for debugging
 //! - Timestamp values are consistent across capture, logging, and telemetry
 
-use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
-
-// ═════════════════════════════════════════════════════════════════════════════
-// Test Infrastructure
-// ═════════════════════════════════════════════════════════════════════════════
-
-/// In-memory telemetry collector for capturing tracing events
-struct TelemetryCollector {
-    events: Arc<Mutex<Vec<MockTelemetryEvent>>>,
-}
-
-impl TelemetryCollector {
-    fn new() -> (Self, Arc<Mutex<Vec<MockTelemetryEvent>>>) {
-        let events = Arc::new(Mutex::new(Vec::new()));
-        (
-            TelemetryCollector {
-                events: events.clone(),
-            },
-            events,
-        )
-    }
-}
-
-/// Mock telemetry event for testing
-#[derive(Debug, Clone)]
-struct MockTelemetryEvent {
-    message: String,
-    fields: Vec<(String, String)>,
-}
-
-impl TelemetryCollector {
-    /// Extract timestamp from collected events
-    fn extract_timestamp(&self, event_message: &str) -> Option<String> {
-        let events = self.events.lock().unwrap();
-        events
-            .iter()
-            .find(|e| e.message.contains(event_message))
-            .and_then(|e| e.fields.iter().find(|(k, _)| k == "timestamp"))
-            .map(|(_, v)| v.clone())
-    }
-
-    /// Verify timestamp format is readable
-    fn verify_timestamp_format(&self, event_message: &str) -> bool {
-        if let Some(timestamp_str) = self.extract_timestamp(event_message) {
-            // SystemTime's Debug format should be readable
-            // Format: SystemTime { intervals: ... } or similar
-            !timestamp_str.is_empty() && timestamp_str.len() > 10
-        } else {
-            false
-        }
-    }
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-// Timestamp Capture Tests
-// ═════════════════════════════════════════════════════════════════════════════
 
 #[test]
 fn test_system_time_capture_produces_valid_value() {
