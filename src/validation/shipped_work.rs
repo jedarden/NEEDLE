@@ -524,4 +524,152 @@ mod tests {
             GateResult::Pass
         );
     }
+
+    // ── deliverable:external tests ──
+
+    /// Labeled bead with evidence line and changed notes passes.
+    #[tokio::test]
+    async fn external_labeled_with_evidence_and_changed_notes_passes() {
+        let dir = TempDir::new().unwrap();
+        let head = init_repo(dir.path()).await;
+        let snap = snapshot(Some(&head), Some("previous note"));
+        assert_eq!(
+            evaluate(
+                dir.path(),
+                Some(&snap),
+                "evidence: https://github.com/example/repo/issues/16#comment-123",
+                true
+            )
+            .await
+            .unwrap(),
+            GateResult::Pass
+        );
+    }
+
+    /// Labeled bead with changed notes but no evidence: line fails.
+    #[tokio::test]
+    async fn external_labeled_without_evidence_line_fails() {
+        let dir = TempDir::new().unwrap();
+        let head = init_repo(dir.path()).await;
+        let snap = snapshot(Some(&head), Some("previous note"));
+        match evaluate(
+            dir.path(),
+            Some(&snap),
+            "posted comment to GitHub issue #16",
+            true,
+        )
+        .await
+        .unwrap()
+        {
+            GateResult::Fail(reason) => {
+                assert!(reason.contains("without evidence"));
+            }
+            GateResult::Pass => panic!("expected Fail for missing evidence: line"),
+        }
+    }
+
+    /// Labeled bead with a real commit but no evidence: line fails.
+    #[tokio::test]
+    async fn external_labeled_with_commit_but_no_evidence_fails() {
+        let dir = TempDir::new().unwrap();
+        let bare = TempDir::new().unwrap();
+        let head = init_repo(dir.path()).await;
+        push_upstream(dir.path(), bare.path()).await;
+        commit_files(dir.path(), &[("src.rs", "fn main() {}\n")], "real work");
+        git(dir.path(), &["push", "-q"]);
+
+        let snap = snapshot(Some(&head), Some(""));
+        match evaluate(dir.path(), Some(&snap), "implemented the feature", true)
+            .await
+            .unwrap()
+        {
+            GateResult::Fail(reason) => {
+                assert!(reason.contains("without evidence"));
+            }
+            GateResult::Pass => {
+                panic!("expected Fail for commit without evidence: line in notes")
+            }
+        }
+    }
+
+    /// Labeled bead with snapshot hash None (notes unreadable at dispatch) and
+    /// evidence: line passes.
+    #[tokio::test]
+    async fn external_labeled_with_no_snapshot_hash_and_evidence_passes() {
+        let dir = TempDir::new().unwrap();
+        let head = init_repo(dir.path()).await;
+        let snap = snapshot(Some(&head), None); // notes_hash = None
+        assert_eq!(
+            evaluate(
+                dir.path(),
+                Some(&snap),
+                "evidence: provisioning succeeded, ID: prov-abc123",
+                true
+            )
+            .await
+            .unwrap(),
+            GateResult::Pass
+        );
+    }
+
+    /// Labeled bead without note update fails.
+    #[tokio::test]
+    async fn external_labeled_without_note_change_fails() {
+        let dir = TempDir::new().unwrap();
+        let head = init_repo(dir.path()).await;
+        let pre_notes = "evidence: https://example.com/provisioning/prov-abc123";
+        let snap = snapshot(Some(&head), Some(pre_notes));
+        match evaluate(dir.path(), Some(&snap), pre_notes, true)
+            .await
+            .unwrap()
+        {
+            GateResult::Fail(reason) => {
+                assert!(reason.contains("without note update"));
+            }
+            GateResult::Pass => panic!("expected Fail when notes didn't change"),
+        }
+    }
+
+    /// Unlabeled beads work exactly as before - git check still applies.
+    #[tokio::test]
+    async fn unlabeled_bead_git_check_still_applies() {
+        let dir = TempDir::new().unwrap();
+        let bare = TempDir::new().unwrap();
+        let head = init_repo(dir.path()).await;
+        push_upstream(dir.path(), bare.path()).await;
+        commit_files(dir.path(), &[("src.rs", "fn main() {}\n")], "real work");
+        git(dir.path(), &["push", "-q"]);
+
+        let snap = snapshot(Some(&head), Some(""));
+        // Unlabeled bead should still pass via git commit
+        assert_eq!(
+            evaluate(dir.path(), Some(&snap), "", false).await.unwrap(),
+            GateResult::Pass
+        );
+    }
+
+    /// Evidence: line is case-insensitive on "evidence" keyword.
+    #[tokio::test]
+    async fn external_evidence_keyword_case_insensitive() {
+        let dir = TempDir::new().unwrap();
+        let head = init_repo(dir.path()).await;
+        let snap = snapshot(Some(&head), Some("previous note"));
+
+        // Test various case combinations
+        for notes in &[
+            "EVIDENCE: https://example.com",
+            "Evidence: https://example.com",
+            "eViDeNcE: https://example.com",
+            "evidence: https://example.com",
+        ] {
+            assert_eq!(
+                evaluate(dir.path(), Some(&snap), notes, true)
+                    .await
+                    .unwrap(),
+                GateResult::Pass,
+                "case variation should pass: {}",
+                notes
+            );
+        }
+    }
 }
