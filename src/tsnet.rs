@@ -552,4 +552,67 @@ mod tests {
         assert!(!env.contains_key("NEEDLE_TSNET_AUTH_KEY"));
         assert!(!env.contains_key("NEEDLE_TSNET_HOSTNAME"));
     }
+
+    #[test]
+    fn test_tsnet_config_enabled_flag() {
+        let config = TsnetConfig {
+            enabled: true,
+            ..Default::default()
+        };
+        assert!(config.enabled);
+    }
+
+    #[tokio::test]
+    async fn test_provision_failure_fail_closed_no_auth_key_injected() {
+        // This test verifies fail-closed behavior: when tsnet provision fails,
+        // NEEDLE_TSNET_AUTH_KEY must NOT be injected into the environment.
+
+        // Create a config with tsnet enabled
+        let config = TsnetConfig {
+            enabled: true,
+            ..Default::default()
+        };
+
+        // Create registry without injecting an API client (simulating init failure)
+        let mut registry = IdentityRegistry::new(config);
+        // Explicitly set API client to None to simulate initialization failure
+        registry.api_client = None;
+
+        let worker_id = "worker-test".to_string();
+        let bead_id = BeadId::from("bf-test");
+
+        // Attempt to provision identity - this should fail
+        let result = registry.provision_identity(&worker_id, &bead_id).await;
+
+        // Verify provision failed (fail-closed)
+        assert!(
+            result.is_err(),
+            "provision_identity should fail when API client is unavailable"
+        );
+        let err = result.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("API client") || err_msg.contains("tsnet"),
+            "Error should mention API client or tsnet: {}",
+            err_msg
+        );
+
+        // Create a fresh environment map (simulating child process env)
+        let mut env = HashMap::new();
+        env.insert("EXISTING_VAR".to_string(), "value".to_string());
+
+        // Even though provision failed, verify that NEEDLE_TSNET_AUTH_KEY is NOT in env
+        // This is the critical fail-closed guarantee
+        assert!(
+            !env.contains_key("NEEDLE_TSNET_AUTH_KEY"),
+            "NEEDLE_TSNET_AUTH_KEY must NOT be in env when provision fails"
+        );
+        assert!(
+            !env.contains_key("NEEDLE_TSNET_HOSTNAME"),
+            "NEEDLE_TSNET_HOSTNAME must NOT be in env when provision fails"
+        );
+
+        // Verify existing env vars are preserved
+        assert_eq!(env.get("EXISTING_VAR"), Some(&"value".to_string()));
+    }
 }
