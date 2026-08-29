@@ -4390,17 +4390,19 @@ fn doctor_check_peers(heartbeat_dir: &Path, ttl_secs: u64) -> CheckResult {
 fn doctor_check_agent_binary(config: &Config) -> CheckResult {
     let agent = &config.agent.default;
 
-    // Check if the bead backend is available. If not, skip this check since we
-    // cannot meaningfully verify the agent without a functioning backend.
-    let bead_backend_available = crate::config::resolve_bead_cli(&config.bead_cli).is_ok();
-    if !bead_backend_available {
-        return CheckResult::skip("Agent binary", "skipped (bead backend unavailable)");
-    }
-
-    // Check the agent binary itself
+    // Always check the agent binary itself - this check is independent of the bead backend
     match which::which(agent) {
         Ok(path) => CheckResult::pass("Agent binary", format!("{} at {}", agent, path.display())),
-        Err(_) => CheckResult::fail("Agent binary", format!("{} not found on PATH", agent)),
+        Err(_) => CheckResult::fail(
+            "Agent binary",
+            format!(
+                "{} not found on PATH (checked: {})",
+                agent,
+                std::env::var("PATH")
+                    .unwrap_or_else(|_| "<empty>".to_string())
+                    .replace(":", ", ")
+            ),
+        ),
     }
 }
 
@@ -7910,25 +7912,13 @@ mod tests {
         config.agent.default = "ls".to_string(); // Use 'ls' as it's always available
         config.bead_cli.backend = crate::config::BeadBackend::Bead;
 
-        // Mock that the bead backend resolves successfully
-        // (we can't actually test bead backend resolution here without a real bead binary)
         let result = doctor_check_agent_binary(&config);
 
-        // Since we can't mock the bead backend resolution, we expect this to skip
-        // or pass depending on whether 'bead' is on PATH
-        match result.status {
-            CheckStatus::Pass => {
-                // If bead is on PATH and ls is on PATH, we should get a pass
-                assert!(result.message.contains("ls"));
-            }
-            CheckStatus::Skip => {
-                // If bead is not on PATH, we should get a skip
-                assert!(result.message.contains("bead backend unavailable"));
-            }
-            _ => {
-                panic!("Expected Pass or Skip, got {:?}", result.status);
-            }
-        }
+        // The function now ALWAYS checks the agent binary, regardless of bead backend
+        // 'ls' should be found on any Unix system
+        assert_eq!(result.status, CheckStatus::Pass);
+        assert!(result.message.contains("ls"));
+        assert!(result.message.contains("at"));
     }
 
     #[test]
@@ -7940,40 +7930,30 @@ mod tests {
 
         let result = doctor_check_agent_binary(&config);
 
-        // Since the bead backend will fail to resolve, we expect a skip
-        // (the function should skip if bead backend is unavailable)
-        if result.status == CheckStatus::Skip {
-            assert!(result.message.contains("bead backend unavailable"));
-        } else {
-            // If somehow the bead backend resolves, then we should fail on the agent
-            assert_eq!(result.status, CheckStatus::Fail);
-            assert!(result.message.contains("not found on PATH"));
-        }
+        // The function now ALWAYS checks the agent binary, regardless of bead backend
+        // Should fail because the agent binary doesn't exist
+        assert_eq!(result.status, CheckStatus::Fail);
+        assert!(result.message.contains("not found on PATH"));
+        assert!(result
+            .message
+            .contains("this-binary-definitely-does-not-exist-12345"));
     }
 
     #[test]
     fn doctor_check_agent_binary_with_backend_unavailable() {
-        // Test when the bead backend is unavailable - should skip, not fail
+        // Test when the bead backend is unavailable but agent is present
+        // This should PASS because the agent check is independent of the bead backend
         let mut config = Config::default();
         config.agent.default = "ls".to_string();
         config.bead_cli.backend = crate::config::BeadBackend::Bead;
 
         let result = doctor_check_agent_binary(&config);
 
-        // Without a real bead backend on PATH, this should skip
-        // (the function should not FAIL with "Agent binary" label when the issue
-        // is actually the bead backend)
-        if result.status == CheckStatus::Skip {
-            assert!(result.message.contains("bead backend unavailable"));
-        } else if result.status == CheckStatus::Pass {
-            // If bead is actually available on the test system, pass is ok
-            assert!(result.message.contains("ls"));
-        } else {
-            panic!(
-                "Expected Skip or Pass, got {:?}: {}",
-                result.status, result.message
-            );
-        }
+        // Should PASS because 'ls' is available, even if bead backend is not
+        // The agent check is now independent of the bead backend
+        assert_eq!(result.status, CheckStatus::Pass);
+        assert!(result.message.contains("ls"));
+        assert!(result.message.contains("at"));
     }
 
     #[test]
@@ -7985,20 +7965,27 @@ mod tests {
 
         let result = doctor_check_agent_binary(&config);
 
-        // Check that if we pass, we include the path
-        if result.status == CheckStatus::Pass {
-            // Should include the agent name
-            assert!(result.message.contains("ls"));
-            // Should indicate it was found
-            assert!(result.message.contains("at"));
-        } else if result.status == CheckStatus::Skip {
-            // Acceptable if bead backend is unavailable
-            assert!(result.message.contains("bead backend unavailable"));
-        } else {
-            panic!(
-                "Expected Pass or Skip, got {:?}: {}",
-                result.status, result.message
-            );
-        }
+        // Should always pass now (independent of bead backend)
+        assert_eq!(result.status, CheckStatus::Pass);
+        // Should include the agent name
+        assert!(result.message.contains("ls"));
+        // Should indicate it was found
+        assert!(result.message.contains("at"));
+    }
+
+    #[test]
+    fn doctor_check_agent_binary_fails_with_missing_agent_even_if_backend_missing() {
+        // Test that when both agent and backend are missing, we get FAIL about the agent
+        // (not SKIP about the backend)
+        let mut config = Config::default();
+        config.agent.default = "nonexistent-agent-xyz".to_string();
+        config.bead_cli.backend = crate::config::BeadBackend::Bead;
+
+        let result = doctor_check_agent_binary(&config);
+
+        // Should FAIL because the agent is missing, regardless of bead backend status
+        assert_eq!(result.status, CheckStatus::Fail);
+        assert!(result.message.contains("nonexistent-agent-xyz"));
+        assert!(result.message.contains("not found on PATH"));
     }
 }

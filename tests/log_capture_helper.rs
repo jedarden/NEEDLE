@@ -451,6 +451,7 @@ pub fn assert_no_error_logs(logs: &CapturedLogs) {
 /// # Panics
 ///
 /// Panics if any WARN log is found.
+#[allow(dead_code)]
 pub fn assert_no_warn_logs(logs: &CapturedLogs) {
     assert_log_not_contains(logs, "WARN");
 }

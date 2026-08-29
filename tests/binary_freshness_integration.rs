@@ -4,7 +4,6 @@
 //! binary changes and gracefully rotates workers onto the new version.
 
 use std::fs;
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use needle::supervisor::{BinaryFreshnessChecker, FreshnessCheck};
@@ -74,7 +73,7 @@ fn test_binary_freshness_rate_limiting() {
         let check_time = now + Duration::from_secs(i);
         let result = checker
             .poll_at(check_time)
-            .expect(&format!("check {} failed", i));
+            .unwrap_or_else(|_| panic!("check {} failed", i));
         assert!(
             result.is_none(),
             "check at {}s should be skipped (rate limit)",
@@ -119,7 +118,7 @@ fn test_binary_freshness_multiple_changes() {
     let now = Instant::now();
 
     // Version sequence: v1 -> v2 -> v3 -> v4
-    let versions = vec!["v1", "v2", "v3", "v4"];
+    let versions = ["v1", "v2", "v3", "v4"];
 
     for (i, version) in versions.iter().enumerate() {
         // Write version
@@ -129,7 +128,7 @@ fn test_binary_freshness_multiple_changes() {
         let check_time = now + Duration::from_secs(i as u64);
         let result = checker
             .poll_at(check_time)
-            .expect(&format!("check for version {} failed", i));
+            .unwrap_or_else(|_| panic!("check for version {} failed", i));
 
         assert!(result.is_some(), "check should return result");
 
@@ -162,7 +161,7 @@ fn test_binary_freshness_persistence_across_polls() {
         let check_time = now + Duration::from_secs(i);
         let result = checker
             .poll_at(check_time)
-            .expect(&format!("poll {} failed", i));
+            .unwrap_or_else(|_| panic!("poll {} failed", i));
 
         assert!(result.is_some(), "poll should return result");
 
@@ -195,7 +194,7 @@ fn test_binary_freshness_large_binary() {
     let binary_path = temp_dir.path().join("large-binary");
 
     // Create a larger binary (1MB of data)
-    let large_data = vec![0xAB as u8; 1024 * 1024];
+    let large_data = vec![0xAB_u8; 1024 * 1024];
     fs::write(&binary_path, large_data).expect("failed to write large binary");
 
     let mut checker = BinaryFreshnessChecker::new(binary_path.clone(), 1);

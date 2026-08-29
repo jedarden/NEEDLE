@@ -376,6 +376,14 @@ If you want to run NEEDLE in your own workflow, open an issue and I'll help.
 
 ---
 
+## 📚 Documentation
+
+- **[Binary Freshness Verification](docs/binary-freshness-verification.md)** — Guide for verifying automatic worker rotation when new binaries are deployed
+- **[Plan](docs/plan/plan.md)** — Complete project architecture and implementation plan
+- **[Integration Tests](tests/)** — Comprehensive test suite demonstrating all core functionality
+
+---
+
 ## 🔗 Related Projects
 
 - **[claude-governor](https://github.com/jedarden/claude-governor)** — caps API spend and enforces weekly Anthropic quotas across NEEDLE worker fleets
