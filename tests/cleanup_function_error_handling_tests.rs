@@ -283,7 +283,7 @@ mod panic_recovery_cleanup_tests {
             let mut perms = fs::metadata(&file)
                 .expect("failed to get metadata")
                 .permissions();
-            perms.set_readonly(true);
+            perms.set_mode(0o444); // Read-only
             fs::set_permissions(&file, perms).expect("failed to set readonly");
         }
 
@@ -319,7 +319,7 @@ mod panic_recovery_cleanup_tests {
             let mut perms = fs::metadata(&readonly_file)
                 .expect("failed to get metadata")
                 .permissions();
-            perms.set_readonly(true);
+            perms.set_mode(0o444); // Read-only
             fs::set_permissions(&readonly_file, perms).expect("failed to set readonly");
         }
 
@@ -798,7 +798,7 @@ mod resource_state_cleanup_tests {
             let mut perms = fs::metadata(&readonly_file)
                 .expect("failed to get metadata")
                 .permissions();
-            perms.set_readonly(true);
+            perms.set_mode(0o444); // Read-only
             fs::set_permissions(&readonly_file, perms).expect("failed to set readonly");
         }
 
@@ -817,10 +817,11 @@ mod resource_state_cleanup_tests {
         {
             // On Unix, cleanup might fail due to readonly file
             // Fix permissions and try again
+            use std::os::unix::fs::PermissionsExt;
             let mut perms = fs::metadata(&readonly_file)
                 .expect("failed to get metadata")
                 .permissions();
-            perms.set_readonly(false);
+            perms.set_mode(0o644); // Read-write
             let _ = fs::set_permissions(&readonly_file, perms);
 
             let cleanup_result = needle::checkpoint_utils::cleanup_directory(&test_dir);

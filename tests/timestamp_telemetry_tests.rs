@@ -56,11 +56,19 @@ fn verify_timestamp_format(timestamp: &DateTime<Utc>) -> anyhow::Result<()> {
     let parsed = chrono::DateTime::parse_from_rfc3339(&formatted)
         .map_err(|e| anyhow::anyhow!("Failed to parse timestamp: {}", e))?;
 
-    // Verify timezone is UTC
+    // Verify timezone is UTC by checking it ends with 'Z'
+    assert!(
+        formatted.ends_with('Z'),
+        "Timestamp should end with 'Z' to indicate UTC timezone, got: {}",
+        formatted
+    );
+
+    // Verify the parsed timestamp is in UTC
+    let utc_timestamp = parsed.with_timezone(&Utc);
     assert_eq!(
-        parsed.offset(),
-        &chrono::offset::Utc,
-        "Timestamp should be in UTC timezone"
+        parsed.timestamp(),
+        utc_timestamp.timestamp(),
+        "Parsed timestamp should match UTC timestamp"
     );
 
     // Verify millisecond precision (3 decimal places after seconds)
@@ -236,10 +244,23 @@ async fn timestamp_survives_serialization() {
     );
 
     // Verify the timestamp in JSON is ISO 8601 format
-    let timestamp_str = event.timestamp.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
-    assert!(
-        json.contains(&timestamp_str),
-        "JSON should contain timestamp in ISO 8601 format"
+    // (serde_json serializes DateTime<Utc> as RFC3339 string)
+    let json_value: serde_json::Value = serde_json::from_str(&json).expect("should parse JSON");
+    let json_timestamp = json_value["timestamp"]
+        .as_str()
+        .expect("timestamp should be a string in JSON");
+
+    // Verify it can be parsed back to a DateTime
+    let parsed_timestamp = chrono::DateTime::parse_from_rfc3339(json_timestamp).expect(&format!(
+        "JSON timestamp should be valid ISO 8601: {}",
+        json_timestamp
+    ));
+
+    // Verify the parsed timestamp equals the original
+    assert_eq!(
+        parsed_timestamp.with_timezone(&Utc),
+        original_timestamp,
+        "JSON timestamp should equal original timestamp"
     );
 }
 
@@ -325,11 +346,19 @@ async fn timestamp_appears_correctly_in_file_sink() {
             timestamp_str
         ));
 
-        // Verify timezone is UTC
+        // Verify timezone is UTC by checking it ends with 'Z'
+        assert!(
+            timestamp_str.ends_with('Z'),
+            "File sink timestamp should end with 'Z' to indicate UTC timezone, got: {}",
+            timestamp_str
+        );
+
+        // Verify the parsed timestamp is in UTC
+        let utc_timestamp = parsed.with_timezone(&Utc);
         assert_eq!(
-            parsed.offset(),
-            &chrono::offset::Utc,
-            "File sink timestamp should be in UTC"
+            parsed.timestamp(),
+            utc_timestamp.timestamp(),
+            "File sink parsed timestamp should match UTC timestamp"
         );
     }
 }
