@@ -1,0 +1,33 @@
+version: "1.0"
+
+fast_lane:
+  - name: "Passing check"
+    command: "echo"
+    args: ["success"]
+    timeout: 10
+
+  - name: "Failing check with stderr"
+    command: "bash"
+    args: ["-c", "echo 'This is stdout' && echo 'This is stderr' >&2 && exit 1"]
+    timeout: 10
+
+  - name: "Failing check with stdout"
+    command: "bash"
+    args: ["-c", "echo 'Error output to stdout' && exit 2"]
+    timeout: 10
+
+  - name: "Another passing check"
+    command: "true"
+    args: []
+    timeout: 10
+
+  - name: "Check that times out"
+    command: "sleep"
+    args: ["5"]
+    timeout: 1
+
+slow_lane:
+  - name: "Slow passing check"
+    command: "sleep"
+    args: ["0.1"]
+    timeout: 10

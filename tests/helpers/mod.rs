@@ -2,4 +2,5 @@
 //!
 //! This module contains reusable test helpers for NEEDLE testing.
 
+pub mod polling;
 pub mod retry;

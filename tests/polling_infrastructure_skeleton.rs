@@ -11,9 +11,10 @@ use needle::supervisor::{SupervisorConfig, UpgradePoller};
 use needle::telemetry::Telemetry;
 use std::time::{Duration, Instant};
 
+mod helpers;
+
 // Import polling test helpers
-// TODO: Fix module path for polling helpers
-// use tests::helpers::polling::*;
+use helpers::polling::*;
 
 /// Placeholder: Test basic poll interval configuration.
 #[test]
@@ -72,6 +73,7 @@ fn test_placeholder_disabled_poller() {
 
 /// Placeholder: Test mock clock functionality.
 #[tokio::test]
+#[ignore = "requires unimplemented mock clock infrastructure"]
 async fn test_placeholder_mock_clock() {
     // TODO: Implement mock clock test
     // This test should verify that the mock clock can control time in tests
@@ -86,6 +88,7 @@ async fn test_placeholder_mock_clock() {
 
 /// Placeholder: Test mock poller with manual clock.
 #[tokio::test]
+#[ignore = "requires unimplemented mock poller infrastructure"]
 async fn test_placeholder_mock_poller_manual() {
     // TODO: Implement manual clock poller test
     // This test should verify poller behavior with precise time control
@@ -107,6 +110,7 @@ async fn test_placeholder_mock_poller_manual() {
 
 /// Placeholder: Test expected poll count calculation.
 #[test]
+#[ignore = "requires unimplemented poll count calculation infrastructure"]
 fn test_placeholder_expected_poll_count() {
     // TODO: Implement expected poll count test
     // This test should verify poll count calculations for various scenarios
@@ -122,6 +126,7 @@ fn test_placeholder_expected_poll_count() {
 
 /// Placeholder: Test nth poll time calculation.
 #[test]
+#[ignore = "requires unimplemented nth poll time infrastructure"]
 fn test_placeholder_nth_poll_time() {
     // TODO: Implement nth poll time test
     // This test should verify calculations for poll time positions
@@ -170,6 +175,7 @@ fn test_placeholder_interval_constants() {
 
 /// Placeholder: Test assertion helpers.
 #[test]
+#[ignore = "requires unimplemented assertion helper infrastructure"]
 fn test_placeholder_assertion_helpers() {
     // TODO: Implement assertion helpers test
     // This test should verify that polling assertion helpers work correctly
@@ -197,6 +203,7 @@ fn test_placeholder_assertion_helpers() {
 
 /// Placeholder: Test poll interval configuration clamping.
 #[test]
+#[ignore = "requires unimplemented poll interval configuration infrastructure"]
 fn test_placeholder_interval_clamping() {
     // TODO: Implement interval clamping test
     // This test should verify that intervals below minimum are clamped correctly

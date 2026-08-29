@@ -38,6 +38,8 @@ declare -a PASSED_NAMES=()
 declare -a FAILED_NAMES=()
 declare -a FAILED_EXIT_CODES=()
 declare -a FAILED_OUTPUTS=()
+declare -a FAILED_STDOUTS=()
+declare -a FAILED_STDERRS=()
 
 # Global counters
 TOTAL_PASSED=0
@@ -332,9 +334,15 @@ execute_check() {
   # Use bash -c to properly handle environment variables and command arguments
   local cmd="$env_setup $command $args"
   local exit_code
+  local captured_stdout
+  local captured_stderr
 
   # Run with timeout, capturing output
   timeout "$timeout" bash -c "$cmd" </dev/null >"$stdout_file" 2>"$stderr_file" || exit_code=$?
+
+  # Capture output before temp files are cleaned up
+  captured_stdout=$(cat "$stdout_file")
+  captured_stderr=$(cat "$stderr_file")
 
   # timeout command returns 124 on timeout
   if [[ ${exit_code:-0} -eq 124 ]]; then
@@ -342,23 +350,25 @@ execute_check() {
     FAILED_CHECKS+=("$name")
     FAILED_NAMES+=("$name")
     FAILED_EXIT_CODES+=("124")
-    FAILED_OUTPUTS+=("Timeout after ${timeout}s")
+
+    # Store both stdout and stderr for timeout failures
+    local combined_output="STDOUT:\n$captured_stdout\nSTDERR:\n$captured_stderr"
+    FAILED_OUTPUTS+=("$combined_output")
+    FAILED_STDOUTS+=("$captured_stdout")
+    FAILED_STDERRS+=("$captured_stderr")
     TOTAL_FAILED=$((TOTAL_FAILED + 1))
 
     if [[ "$VERBOSE" == "true" ]]; then
       echo "=== Output (captured before timeout) ==="
-      cat "$stdout_file"
+      echo "$captured_stdout"
       echo "=== Errors ==="
-      cat "$stderr_file"
+      echo "$captured_stderr"
     fi
     return 1
   fi
 
   # Check exit code
   if [[ ${exit_code:-0} -ne 0 ]]; then
-    local output
-    output=$(cat "$stderr_file")
-
     if [[ "$allow_failure" == "true" ]]; then
       log_warn "⚠ $name failed (exit code: ${exit_code}) but failure is allowed"
       PASSED_CHECKS+=("$name")
@@ -370,14 +380,18 @@ execute_check() {
       FAILED_CHECKS+=("$name")
       FAILED_NAMES+=("$name")
       FAILED_EXIT_CODES+=("$exit_code")
-      FAILED_OUTPUTS+=("$output")
+
+      # Store both stdout and stderr separately for better debugging
+      FAILED_OUTPUTS+=("STDOUT:\n$captured_stdout\nSTDERR:\n$captured_stderr")
+      FAILED_STDOUTS+=("$captured_stdout")
+      FAILED_STDERRS+=("$captured_stderr")
       TOTAL_FAILED=$((TOTAL_FAILED + 1))
 
       if [[ "$VERBOSE" == "true" ]]; then
         echo "=== Output ==="
-        cat "$stdout_file"
+        echo "$captured_stdout"
         echo "=== Errors ==="
-        cat "$stderr_file"
+        echo "$captured_stderr"
       fi
     fi
     return 1
@@ -390,7 +404,7 @@ execute_check() {
 
   if [[ "$VERBOSE" == "true" ]]; then
     echo "=== Output ==="
-    cat "$stdout_file"
+    echo "$captured_stdout"
   fi
 
   return 0
@@ -471,20 +485,38 @@ generate_report() {
 
   if [[ $total_failed -gt 0 ]]; then
     echo "Failed checks:"
+    echo ""
     for i in $(seq 0 $(($total_failed - 1))); do
       local name="${FAILED_NAMES[$i]}"
       local exit_code="${FAILED_EXIT_CODES[$i]}"
-      echo "  - $name: exit code $exit_code"
+      local stdout="${FAILED_STDOUTS[$i]:-}"
+      local stderr="${FAILED_STDERRS[$i]:-}"
 
-      if [[ "$VERBOSE" == "true" ]]; then
-        local output="${FAILED_OUTPUTS[$i]}"
-        if [[ -n "$output" ]]; then
-          echo "    Output: $output"
-        fi
+      echo "  [$((i+1))] $name"
+      echo "      Exit code: $exit_code"
+
+      # Always show stderr if present
+      if [[ -n "$stderr" ]]; then
+        echo "      Stderr:"
+        echo "$stderr" | sed 's/^/      | /'
       fi
+
+      # Show stdout if present and in verbose mode
+      if [[ -n "$stdout" && "$VERBOSE" == "true" ]]; then
+        echo "      Stdout:"
+        echo "$stdout" | sed 's/^/      | /'
+      elif [[ -n "$stdout" ]]; then
+        # Show first line of stdout in non-verbose mode
+        local first_line
+        first_line=$(echo "$stdout" | head -n 1)
+        echo "      Stdout (first line): $first_line"
+        echo "      (Use --verbose to see full output)"
+      fi
+      echo ""
     done
-    echo ""
+
     echo -e "${RED}❌ Verification failed${RESET}"
+    echo "Total failures: $total_failed out of $total_checks checks"
     return 1
   else
     echo -e "${GREEN}✓ All checks passed${RESET}"
@@ -516,7 +548,7 @@ generate_json_report() {
   done
   json_output+="],"
 
-  # Add failed checks with details
+  # Add failed checks with full details
   json_output+="\"failed_checks\":["
   first=true
   for i in $(seq 0 $((TOTAL_FAILED - 1))); do
@@ -528,7 +560,9 @@ generate_json_report() {
     json_output+="{"
     json_output+="\"name\":\"${FAILED_NAMES[$i]}\","
     json_output+="\"exit_code\":${FAILED_EXIT_CODES[$i]},"
-    json_output+="\"output\":$(echo "${FAILED_OUTPUTS[$i]}" | jq -Rs .)"
+    json_output+="\"stdout\":$(echo "${FAILED_STDOUTS[$i]:-}" | jq -Rs .),"
+    json_output+="\"stderr\":$(echo "${FAILED_STDERRS[$i]:-}" | jq -Rs .),"
+    json_output+="\"output\":$(echo "${FAILED_OUTPUTS[$i]:-}" | jq -Rs .)"
     json_output+="}"
   done
   json_output+="]"
