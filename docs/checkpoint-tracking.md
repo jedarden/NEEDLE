@@ -55,6 +55,17 @@ bead doctor
 
 A healthy checkpoint should not report missing root objects.
 
+## CI Integration
+
+The needle-ci workflow automatically commits checkpoint changes after running tests. This ensures that checkpoint modifications made during test execution are properly committed with their active root objects.
+
+**Workflow behavior:**
+1. Tests run via `definition-of-done.sh --all` (which may flush checkpoints)
+2. If checkpoint files were modified, the workflow uses `scripts/commit-checkpoint.sh` to commit them with proper active root objects
+3. The commit is pushed back to the repository
+
+This automation prevents the "missing active root object" error that can occur when checkpoint changes are committed manually without including the referenced objects.
+
 ## Fresh Clone Recovery
 
 If a fresh clone has an unrecoverable checkpoint (missing root objects), the monolith view (`forensic.jsonl`) can still be used for recovery:
