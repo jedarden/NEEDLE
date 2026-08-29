@@ -6,16 +6,20 @@
 #
 # To bypass this hook (NOT RECOMMENDED), use:
 #   git commit --no-verify -m "..."
-# This will be recorded in .beads/bypasses.jsonl
+# This will be recorded in .beads/bypasses.jsonl by the post-commit hook.
 
 set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
+# shellcheck source=../scripts/bypass-detection.sh
+source "$repo_root/scripts/bypass-detection.sh"
+
 echo "=== Running Definition of Done (fast lane) ==="
 
 # Run the fast lane checks with bypass counting
+export NEEDLE_PRE_COMMIT=1
 if ! scripts/definition-of-done.sh --fast --count-bypass; then
   echo ""
   echo "❌ Pre-commit check failed"
@@ -29,4 +33,9 @@ if ! scripts/definition-of-done.sh --fast --count-bypass; then
 fi
 
 echo "=== Running checkpoint verification ==="
-"$repo_root/scripts/checkpoint-publish.sh" verify-index
+if ! "$repo_root/scripts/checkpoint-publish.sh" verify-index; then
+  # Do not leave an environment-bypass marker behind if this later hook check
+  # prevents the commit from being created.
+  needle_clear_index_state
+  exit 1
+fi

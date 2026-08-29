@@ -72,6 +72,8 @@ target/criterion/
 # positive on incidental bytes inside one of the binaries (alert #18,
 # resolved 2026-08-22). The durable record is .beads/checkpoint/.
 .beads/traces/
+.beads/bypasses.jsonl.lock
+.beads/bypasses.jsonl.lock.d
 
 # `cargo install --root .needle-install` output — compiled binaries, never
 # source. Same commit as above tracked these; see .beads/traces/ note.

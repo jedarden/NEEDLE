@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Record commits whose pre-commit verification was skipped.
+
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+cd "$repo_root"
+export REPO_ROOT="$repo_root"
+
+# post-commit runs after the commit exists, allowing the logger to include its
+# final SHA.  Logging failures must not turn an already-created commit into a
+# reported Git failure.
+# shellcheck source=../scripts/bypass-detection.sh
+source "$repo_root/scripts/bypass-detection.sh"
+needle_process_post_commit || true
+exit 0

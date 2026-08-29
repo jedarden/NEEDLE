@@ -21,7 +21,8 @@
 #   --fast          Run fast lane only (default for NEEDLE gate)
 #   --slow          Run slow lane only (tests)
 #   --all           Run both lanes (default for CI)
-#   --count-bypass   Record invocation to bypass log (for pre-commit hook)
+#   --count-bypass   Track the pre-commit result so post-commit can detect
+#                    commits made with --no-verify
 
 set -euo pipefail
 
@@ -33,6 +34,7 @@ cd "$REPO_ROOT"
 # Default to fast lane
 LANE="fast"
 COUNT_BYPASS=false
+NEEDLE_BYPASS_ARGUMENT=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -53,19 +55,45 @@ while [[ $# -gt 0 ]]; do
       COUNT_BYPASS=true
       shift
       ;;
+    --no-verify)
+      NEEDLE_BYPASS_ARGUMENT="--no-verify"
+      shift
+      ;;
     *)
       echo "Error: Unknown argument: $1" >&2
-      echo "Usage: $0 [--fast|--slow|--all] [--count-bypass]" >&2
+      echo "Usage: $0 [--fast|--slow|--all] [--count-bypass] [--no-verify]" >&2
       exit 1
       ;;
   esac
 done
 
-# Bypass counting
-BYPASS_LOG="${REPO_ROOT}/.beads/bypasses.jsonl"
-if [[ "$COUNT_BYPASS" == "true" ]]; then
-  mkdir -p "$(dirname "$BYPASS_LOG")"
-  echo "{\"timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"lane\":\"$LANE\",\"pwd\":\"$(pwd -P)\"}" >> "$BYPASS_LOG"
+# Bypass detection.  A pre-commit invocation writes a marker keyed by the
+# candidate tree; post-commit attaches the final commit SHA.  A direct script
+# invocation has no future commit to attach, so it is logged immediately.
+source "$SCRIPT_DIR/bypass-detection.sh"
+BYPASS_PATTERN=""
+if [[ -n "$NEEDLE_BYPASS_ARGUMENT" ]]; then
+  BYPASS_PATTERN="$NEEDLE_BYPASS_ARGUMENT"
+elif needle_bypass_requested; then
+  BYPASS_PATTERN="$(needle_bypass_pattern)"
+fi
+
+if [[ -n "$BYPASS_PATTERN" ]]; then
+  BYPASS_LANES="$(needle_lanes_csv "$LANE")"
+  needle_warn_bypass "$BYPASS_PATTERN" "$BYPASS_LANES"
+  if [[ "${NEEDLE_PRE_COMMIT:-}" == 1 ]]; then
+    if ! needle_mark_bypass "$BYPASS_LANES" "$BYPASS_PATTERN"; then
+      echo "ERROR: Could not record the pending verification bypass." >&2
+      exit 1
+    fi
+  else
+    bypass_record="$(needle_json_event "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(needle_current_commit)" "$BYPASS_LANES" "$BYPASS_PATTERN" "Verification was explicitly skipped" "$(pwd -P)")"
+    if ! needle_append_bypass_event "$bypass_record"; then
+      echo "ERROR: Could not record the verification bypass." >&2
+      exit 1
+    fi
+  fi
+  exit 0
 fi
 
 # Failure tracking
@@ -226,5 +254,11 @@ if [[ ${#FAILURES[@]} -gt 0 ]]; then
   exit 1
 else
   echo "✓ Definition of Done"
+  if [[ "$COUNT_BYPASS" == "true" && "${NEEDLE_PRE_COMMIT:-}" == 1 ]]; then
+    if ! needle_mark_verified "$LANE"; then
+      echo "ERROR: Could not record the verification result for post-commit tracking." >&2
+      exit 1
+    fi
+  fi
   exit 0
 fi
