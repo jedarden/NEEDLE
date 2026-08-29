@@ -808,6 +808,217 @@ pub fn is_retryable_error(error: &io::Error) -> bool {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Predefined retry configurations
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Fast-fail configuration: minimal retries, short backoff for quick failure detection.
+pub fn fast_fail_config() -> RetryConfig {
+    RetryConfig::new().with_max_attempts(2).with_backoff_ms(10)
+}
+
+/// Long-retry configuration: many retries with exponential backoff for resilient operations.
+pub fn long_retry_config() -> RetryConfig {
+    RetryConfig::new()
+        .with_max_attempts(10)
+        .with_exponential_backoff(50, 5000)
+}
+
+/// Aggressive retry configuration: frequent retries with minimal backoff.
+pub fn aggressive_retry_config() -> RetryConfig {
+    RetryConfig::new().with_max_attempts(20).with_backoff_ms(5)
+}
+
+/// Conservative retry configuration: few retries with long delays.
+pub fn conservative_retry_config() -> RetryConfig {
+    RetryConfig::new().with_max_attempts(3).with_backoff_ms(500)
+}
+
+/// Test configuration: minimal delays for fast test execution.
+pub fn test_fast_config() -> RetryConfig {
+    RetryConfig::new().with_max_attempts(3).with_backoff_ms(1)
+}
+
+/// No retry configuration: single attempt only.
+pub fn no_retry_config() -> RetryConfig {
+    RetryConfig::new().with_max_attempts(1).with_backoff_ms(0)
+}
+
+/// Production-like configuration: balanced retries for real workloads.
+pub fn production_config() -> RetryConfig {
+    RetryConfig::new()
+        .with_max_attempts(5)
+        .with_exponential_backoff(100, 1000)
+}
+
+/// Network operation configuration: retries for transient network failures.
+pub fn network_retry_config() -> RetryConfig {
+    RetryConfig::new()
+        .with_max_attempts(7)
+        .with_exponential_backoff(200, 10000)
+}
+
+/// Binary busy configuration: retries for ETXTBSY (binary busy) scenarios.
+pub fn binary_busy_config() -> RetryConfig {
+    RetryConfig::new().with_max_attempts(8).with_backoff_ms(20)
+}
+
+/// CI poll configuration: optimized for CI reconciliation polling.
+pub fn ci_poll_config() -> RetryConfig {
+    RetryConfig::new()
+        .with_max_attempts(6)
+        .with_exponential_backoff(30, 300)
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Predefined mock retry behaviors
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Create a mock retry behavior with fast-fail configuration.
+pub fn fast_fail_mock() -> MockRetryBehavior {
+    MockRetryBehavior::new().with_config(fast_fail_config())
+}
+
+/// Create a mock retry behavior with long-retry configuration.
+pub fn long_retry_mock() -> MockRetryBehavior {
+    MockRetryBehavior::new().with_config(long_retry_config())
+}
+
+/// Create a mock retry behavior with aggressive retry configuration.
+pub fn aggressive_retry_mock() -> MockRetryBehavior {
+    MockRetryBehavior::new().with_config(aggressive_retry_config())
+}
+
+/// Create a mock retry behavior with conservative retry configuration.
+pub fn conservative_retry_mock() -> MockRetryBehavior {
+    MockRetryBehavior::new().with_config(conservative_retry_config())
+}
+
+/// Create a mock retry behavior optimized for fast tests.
+pub fn test_fast_mock() -> MockRetryBehavior {
+    MockRetryBehavior::new().with_config(test_fast_config())
+}
+
+/// Create a mock retry behavior with no retry (single attempt).
+pub fn no_retry_mock() -> MockRetryBehavior {
+    MockRetryBehavior::new().with_config(no_retry_config())
+}
+
+/// Create a mock retry behavior with production-like configuration.
+pub fn production_mock() -> MockRetryBehavior {
+    MockRetryBehavior::new().with_config(production_config())
+}
+
+/// Create a mock retry behavior for network operations.
+pub fn network_retry_mock() -> MockRetryBehavior {
+    MockRetryBehavior::new().with_config(network_retry_config())
+}
+
+/// Create a mock retry behavior for binary busy scenarios.
+pub fn binary_busy_mock() -> MockRetryBehavior {
+    MockRetryBehavior::new().with_config(binary_busy_config())
+}
+
+/// Create a mock retry behavior for CI polling scenarios.
+pub fn ci_poll_mock() -> MockRetryBehavior {
+    MockRetryBehavior::new().with_config(ci_poll_config())
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Common retry scenario fixtures
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Scenario: Single transient ETXTBSY error, then success.
+pub fn scenario_single_etxtbsy_then_success() -> MockRetryBehavior {
+    binary_busy_mock().with_etxtbsy_on_attempt(1)
+}
+
+/// Scenario: Multiple transient ETXTBSY errors, then success.
+pub fn scenario_multiple_etxtbsy_then_success() -> MockRetryBehavior {
+    binary_busy_mock()
+        .with_etxtbsy_on_attempt(1)
+        .with_etxtbsy_on_attempt(2)
+        .with_etxtbsy_on_attempt(3)
+}
+
+/// Scenario: ETXTBSY errors exhaust retries.
+pub fn scenario_etxtbsy_exhausted() -> MockRetryBehavior {
+    binary_busy_mock()
+        .with_etxtbsy_on_attempt(1)
+        .with_etxtbsy_on_attempt(2)
+        .with_etxtbsy_on_attempt(3)
+        .with_etxtbsy_on_attempt(4)
+        .with_etxtbsy_on_attempt(5)
+        .with_etxtbsy_on_attempt(6)
+        .with_etxtbsy_on_attempt(7)
+        .with_etxtbsy_on_attempt(8)
+}
+
+/// Scenario: Connection refused error, then success.
+pub fn scenario_connection_refused_then_success() -> MockRetryBehavior {
+    network_retry_mock().with_connection_refused_on_attempt(1)
+}
+
+/// Scenario: Timeout error, then success.
+pub fn scenario_timeout_then_success() -> MockRetryBehavior {
+    network_retry_mock().with_timed_out_on_attempt(1)
+}
+
+/// Scenario: Multiple network errors, then success.
+pub fn scenario_multiple_network_errors_then_success() -> MockRetryBehavior {
+    network_retry_mock()
+        .with_connection_refused_on_attempt(1)
+        .with_timed_out_on_attempt(2)
+}
+
+/// Scenario: Immediate success (no errors).
+pub fn scenario_immediate_success() -> MockRetryBehavior {
+    test_fast_mock()
+}
+
+/// Scenario: Non-retryable error fails immediately.
+pub fn scenario_non_retryable_error() -> MockRetryBehavior {
+    fast_fail_mock().with_permission_denied_on_attempt(1)
+}
+
+/// Scenario: Exponential backoff with multiple retries.
+pub fn scenario_exponential_backoff_multiple_retries() -> MockRetryBehavior {
+    production_mock()
+        .with_connection_refused_on_attempt(1)
+        .with_connection_refused_on_attempt(2)
+        .with_connection_refused_on_attempt(3)
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// CI-specific retry configuration fixtures
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// CI retry configuration matching default PostPushCiConfig settings.
+pub fn ci_default_retry_config() -> RetryConfig {
+    RetryConfig::new()
+        .with_max_attempts(5)
+        .with_exponential_backoff(30, 300)
+}
+
+/// CI retry configuration for quick-fail environments (development).
+pub fn ci_dev_retry_config() -> RetryConfig {
+    RetryConfig::new().with_max_attempts(2).with_backoff_ms(50)
+}
+
+/// CI retry configuration for patient environments (production).
+pub fn ci_prod_retry_config() -> RetryConfig {
+    RetryConfig::new()
+        .with_max_attempts(10)
+        .with_exponential_backoff(60, 600)
+}
+
+/// CI retry configuration for high-latency environments.
+pub fn ci_high_latency_retry_config() -> RetryConfig {
+    RetryConfig::new()
+        .with_max_attempts(15)
+        .with_exponential_backoff(100, 2000)
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Test fixtures
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -1209,5 +1420,289 @@ mod tests {
         assert_failed_permission_denied(&result)?;
 
         Ok(())
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // Tests for predefined configurations
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_fast_fail_config() {
+        let config = fast_fail_config();
+        assert_eq!(config.max_attempts, 2);
+        assert_eq!(config.backoff_ms, 10);
+        assert!(!config.exponential_backoff);
+    }
+
+    #[test]
+    fn test_long_retry_config() {
+        let config = long_retry_config();
+        assert_eq!(config.max_attempts, 10);
+        assert!(config.exponential_backoff);
+        assert_eq!(config.exponential_initial_ms, 50);
+        assert_eq!(config.exponential_max_ms, 5000);
+    }
+
+    #[test]
+    fn test_aggressive_retry_config() {
+        let config = aggressive_retry_config();
+        assert_eq!(config.max_attempts, 20);
+        assert_eq!(config.backoff_ms, 5);
+        assert!(!config.exponential_backoff);
+    }
+
+    #[test]
+    fn test_conservative_retry_config() {
+        let config = conservative_retry_config();
+        assert_eq!(config.max_attempts, 3);
+        assert_eq!(config.backoff_ms, 500);
+        assert!(!config.exponential_backoff);
+    }
+
+    #[test]
+    fn test_test_fast_config() {
+        let config = test_fast_config();
+        assert_eq!(config.max_attempts, 3);
+        assert_eq!(config.backoff_ms, 1);
+        assert!(!config.exponential_backoff);
+    }
+
+    #[test]
+    fn test_no_retry_config() {
+        let config = no_retry_config();
+        assert_eq!(config.max_attempts, 1);
+        assert_eq!(config.backoff_ms, 0);
+        assert!(!config.exponential_backoff);
+    }
+
+    #[test]
+    fn test_production_config() {
+        let config = production_config();
+        assert_eq!(config.max_attempts, 5);
+        assert!(config.exponential_backoff);
+        assert_eq!(config.exponential_initial_ms, 100);
+        assert_eq!(config.exponential_max_ms, 1000);
+    }
+
+    #[test]
+    fn test_network_retry_config() {
+        let config = network_retry_config();
+        assert_eq!(config.max_attempts, 7);
+        assert!(config.exponential_backoff);
+        assert_eq!(config.exponential_initial_ms, 200);
+        assert_eq!(config.exponential_max_ms, 10000);
+    }
+
+    #[test]
+    fn test_binary_busy_config() {
+        let config = binary_busy_config();
+        assert_eq!(config.max_attempts, 8);
+        assert_eq!(config.backoff_ms, 20);
+        assert!(!config.exponential_backoff);
+    }
+
+    #[test]
+    fn test_ci_poll_config() {
+        let config = ci_poll_config();
+        assert_eq!(config.max_attempts, 6);
+        assert!(config.exponential_backoff);
+        assert_eq!(config.exponential_initial_ms, 30);
+        assert_eq!(config.exponential_max_ms, 300);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // Tests for predefined mock behaviors
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_fast_fail_mock() {
+        let mock = fast_fail_mock();
+        assert_eq!(mock.config.max_attempts, 2);
+        assert_eq!(mock.config.backoff_ms, 10);
+    }
+
+    #[test]
+    fn test_long_retry_mock() {
+        let mock = long_retry_mock();
+        assert_eq!(mock.config.max_attempts, 10);
+        assert!(mock.config.exponential_backoff);
+    }
+
+    #[test]
+    fn test_aggressive_retry_mock() {
+        let mock = aggressive_retry_mock();
+        assert_eq!(mock.config.max_attempts, 20);
+        assert_eq!(mock.config.backoff_ms, 5);
+    }
+
+    #[test]
+    fn test_test_fast_mock() {
+        let mock = test_fast_mock();
+        assert_eq!(mock.config.max_attempts, 3);
+        assert_eq!(mock.config.backoff_ms, 1);
+    }
+
+    #[test]
+    fn test_no_retry_mock() {
+        let mock = no_retry_mock();
+        assert_eq!(mock.config.max_attempts, 1);
+        assert_eq!(mock.config.backoff_ms, 0);
+    }
+
+    #[test]
+    fn test_production_mock() {
+        let mock = production_mock();
+        assert_eq!(mock.config.max_attempts, 5);
+        assert!(mock.config.exponential_backoff);
+    }
+
+    #[test]
+    fn test_network_retry_mock() {
+        let mock = network_retry_mock();
+        assert_eq!(mock.config.max_attempts, 7);
+        assert!(mock.config.exponential_backoff);
+    }
+
+    #[test]
+    fn test_binary_busy_mock() {
+        let mock = binary_busy_mock();
+        assert_eq!(mock.config.max_attempts, 8);
+        assert_eq!(mock.config.backoff_ms, 20);
+    }
+
+    #[test]
+    fn test_ci_poll_mock() {
+        let mock = ci_poll_mock();
+        assert_eq!(mock.config.max_attempts, 6);
+        assert!(mock.config.exponential_backoff);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // Tests for predefined scenarios
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_scenario_single_etxtbsy_then_success() -> Result<(), String> {
+        let mock = scenario_single_etxtbsy_then_success();
+        let result = mock.run_sync()?;
+
+        assert_succeeded_with_attempts(&result, 2)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_scenario_multiple_etxtbsy_then_success() -> Result<(), String> {
+        let mock = scenario_multiple_etxtbsy_then_success();
+        let result = mock.run_sync()?;
+
+        assert_succeeded_with_attempts(&result, 4)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_scenario_etxtbsy_exhausted() -> Result<(), String> {
+        let mock = scenario_etxtbsy_exhausted();
+        let result = mock.run_sync()?;
+
+        assert_failed_etxtbsy(&result)?;
+        assert_eq!(result.attempts, 8);
+        Ok(())
+    }
+
+    #[test]
+    fn test_scenario_connection_refused_then_success() -> Result<(), String> {
+        let mock = scenario_connection_refused_then_success();
+        let result = mock.run_sync()?;
+
+        assert_succeeded_with_attempts(&result, 2)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_scenario_timeout_then_success() -> Result<(), String> {
+        let mock = scenario_timeout_then_success();
+        let result = mock.run_sync()?;
+
+        assert_succeeded_with_attempts(&result, 2)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_scenario_multiple_network_errors_then_success() -> Result<(), String> {
+        let mock = scenario_multiple_network_errors_then_success();
+        let result = mock.run_sync()?;
+
+        assert_succeeded_with_attempts(&result, 3)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_scenario_immediate_success() -> Result<(), String> {
+        let mock = scenario_immediate_success();
+        let result = mock.run_sync()?;
+
+        assert_succeeded_with_attempts(&result, 1)?;
+        assert!(result.elapsed.as_millis() < 10);
+        Ok(())
+    }
+
+    #[test]
+    fn test_scenario_non_retryable_error() -> Result<(), String> {
+        let mock = scenario_non_retryable_error();
+        let result = mock.run_sync()?;
+
+        assert_failed_permission_denied(&result)?;
+        assert_eq!(result.attempts, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn test_scenario_exponential_backoff_multiple_retries() -> Result<(), String> {
+        let mock = scenario_exponential_backoff_multiple_retries();
+        let result = mock.run_sync()?;
+
+        assert_succeeded_with_attempts(&result, 4)?;
+        // Should have exponential backoff delays: 100ms + 200ms + 400ms = 700ms minimum
+        assert!(result.elapsed.as_millis() >= 700);
+        Ok(())
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────
+    // Tests for CI-specific configurations
+    // ──────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_ci_default_retry_config() {
+        let config = ci_default_retry_config();
+        assert_eq!(config.max_attempts, 5);
+        assert!(config.exponential_backoff);
+        assert_eq!(config.exponential_initial_ms, 30);
+        assert_eq!(config.exponential_max_ms, 300);
+    }
+
+    #[test]
+    fn test_ci_dev_retry_config() {
+        let config = ci_dev_retry_config();
+        assert_eq!(config.max_attempts, 2);
+        assert_eq!(config.backoff_ms, 50);
+        assert!(!config.exponential_backoff);
+    }
+
+    #[test]
+    fn test_ci_prod_retry_config() {
+        let config = ci_prod_retry_config();
+        assert_eq!(config.max_attempts, 10);
+        assert!(config.exponential_backoff);
+        assert_eq!(config.exponential_initial_ms, 60);
+        assert_eq!(config.exponential_max_ms, 600);
+    }
+
+    #[test]
+    fn test_ci_high_latency_retry_config() {
+        let config = ci_high_latency_retry_config();
+        assert_eq!(config.max_attempts, 15);
+        assert!(config.exponential_backoff);
+        assert_eq!(config.exponential_initial_ms, 100);
+        assert_eq!(config.exponential_max_ms, 2000);
     }
 }
