@@ -627,8 +627,11 @@ CURLEOF
     # Should contain the error message about no prebuilt binary
     assert_contains "$output" "No prebuilt binary for needle-aarch64-unknown-linux-gnu in v0.5.0" "error message includes arch-os and version"
 
+    # Should list available prebuilt targets
+    assert_contains "$output" "Prebuilt targets: x86_64-unknown-linux-gnu" "error message lists available targets"
+
     # Should mention building from source
-    assert_contains "$output" "cargo install --git https://github.com/jedarden/NEEDLE" "error message mentions cargo install"
+    assert_contains "$output" "Build from source: cargo install --git https://github.com/jedarden/NEEDLE" "error message mentions cargo install"
 
     teardown
 }

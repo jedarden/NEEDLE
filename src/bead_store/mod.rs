@@ -3883,7 +3883,7 @@ fi
             r#"#!/usr/bin/env bash
 if [ "$1" = "capabilities" ]; then
   # Binary is named "bead" and correctly reports "bead-rs" implementation
-  printf '{"implementation":"bead-rs","atomic_claim":true,"statuses":["open","in_progress","deferred","closed"],"schemas":[{"schema_ref":"urn:bead-rs:schema:issue:native-v1"},{"schema_ref":"urn:bead-rs:schema:event:native-v1"},{"schema_ref":"urn:bead-rs:schema:field-guide-native-v1"}],"commands":["ref","data","query"]}'
+  printf '{"implementation":"bead-rs","atomic_claim":true,"statuses":["open","in_progress","deferred","closed"],"schemas":[{"schema_ref":"urn:bead-rs:schema:issue:native-v1"},{"schema_ref":"urn:bead-rs:schema:event:native-v1"},{"schema_ref":"urn:bead-rs:schema:field-guide:native-v1"}],"commands":["ref","data","query"]}'
 else
   echo "bead 0.1.1"
 fi
@@ -3897,16 +3897,13 @@ fi
         // Test that matching backend identity is accepted
         let result = verify_bead_rs_capabilities(&matching_binary, workspace.path());
 
-        // Note: This should fail due to the schema typo ("field-guide-native-v1" vs "field-guide:native-v1")
-        // but NOT due to backend identity mismatch
-        if let Err(err) = result {
-            let err_msg = err.to_string();
-            assert!(
-                !err_msg.contains("backend identity mismatch"),
-                "Error should NOT mention backend identity mismatch when identities match, got: {}",
-                err_msg
-            );
-        }
+        // With the correct schema reference, this should succeed since all required schemas are present
+        // and the backend identity matches (binary named "bead" reports "bead-rs" implementation)
+        assert!(
+            result.is_ok(),
+            "verify_bead_rs_capabilities should succeed when backend identity matches and all required schemas are present, got: {:?}",
+            result
+        );
     }
 
     #[test]

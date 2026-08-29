@@ -239,8 +239,8 @@ check_asset_available() {
     if ! echo "$asset_list" | grep -qxF "$asset_name"; then
         cat >&2 <<EOF
 No prebuilt binary for ${asset_name} in ${version}.
-Build from source instead: cargo install --git https://github.com/jedarden/NEEDLE
-(toolchain pinned in rust-toolchain.toml)
+Prebuilt targets: x86_64-unknown-linux-gnu.
+Build from source: cargo install --git https://github.com/jedarden/NEEDLE
 EOF
         return 1
     fi
