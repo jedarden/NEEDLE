@@ -3074,6 +3074,316 @@ test foo ... ok"#;
             .unwrap()
             .contains("already a child"));
     }
+
+    #[test]
+    fn decompose_bead_decision_timeout_exactly_at_threshold() {
+        let bead = make_test_bead(
+            "This is a substantial bead body that exceeds 200 characters. "
+                .repeat(4)
+                .as_str(),
+            None,
+            vec![],
+        );
+        // Timeout exactly at threshold (300s) with sufficient retries
+        let decision = decompose_bead_decision(&bead, 300, 3, None);
+        assert!(
+            decision.is_split(),
+            "Should split when timeout equals threshold"
+        );
+    }
+
+    #[test]
+    fn decompose_bead_decision_timeout_one_second_above_threshold() {
+        let bead = make_test_bead(
+            "This is a substantial bead body that exceeds 200 characters. "
+                .repeat(4)
+                .as_str(),
+            None,
+            vec![],
+        );
+        // Timeout one second above threshold (301s)
+        let decision = decompose_bead_decision(&bead, 301, 3, None);
+        assert!(
+            decision.is_split(),
+            "Should split when timeout exceeds threshold by 1s"
+        );
+    }
+
+    #[test]
+    fn decompose_bead_decision_timeout_one_second_below_threshold() {
+        let bead = make_test_bead(
+            "This is a substantial bead body that exceeds 200 characters. "
+                .repeat(4)
+                .as_str(),
+            None,
+            vec![],
+        );
+        // Timeout one second below threshold (299s)
+        let decision = decompose_bead_decision(&bead, 299, 3, None);
+        assert!(decision.is_refuse());
+        assert!(decision
+            .refusal_reason()
+            .unwrap()
+            .contains("timeout too short"));
+    }
+
+    #[test]
+    fn decompose_bead_decision_retry_exactly_at_threshold() {
+        let bead = make_test_bead(
+            "This is a substantial bead body that exceeds 200 characters. "
+                .repeat(4)
+                .as_str(),
+            None,
+            vec![],
+        );
+        // Retry count exactly at threshold (2)
+        let decision = decompose_bead_decision(&bead, 600, 2, None);
+        assert!(
+            decision.is_split(),
+            "Should split when retry_count equals threshold"
+        );
+    }
+
+    #[test]
+    fn decompose_bead_decision_retry_one_above_threshold() {
+        let bead = make_test_bead(
+            "This is a substantial bead body that exceeds 200 characters. "
+                .repeat(4)
+                .as_str(),
+            None,
+            vec![],
+        );
+        // Retry count one above threshold (3)
+        let decision = decompose_bead_decision(&bead, 600, 3, None);
+        assert!(
+            decision.is_split(),
+            "Should split when retry_count exceeds threshold"
+        );
+    }
+
+    #[test]
+    fn decompose_bead_decision_retry_one_below_threshold() {
+        let bead = make_test_bead(
+            "This is a substantial bead body that exceeds 200 characters. "
+                .repeat(4)
+                .as_str(),
+            None,
+            vec![],
+        );
+        // Retry count one below threshold (1)
+        let decision = decompose_bead_decision(&bead, 600, 1, None);
+        assert!(decision.is_refuse());
+        assert!(decision
+            .refusal_reason()
+            .unwrap()
+            .contains("insufficient retries"));
+    }
+
+    #[test]
+    fn decompose_bead_decision_body_size_exactly_at_threshold() {
+        // Create a body that is exactly 200 characters
+        let body = "a".repeat(200);
+        let bead = make_test_bead(&body, None, vec![]);
+
+        let decision = decompose_bead_decision(&bead, 600, 3, None);
+        assert!(
+            decision.is_split(),
+            "Should split when body size equals threshold"
+        );
+    }
+
+    #[test]
+    fn decompose_bead_decision_body_size_one_above_threshold() {
+        // Create a body that is 201 characters
+        let body = "a".repeat(201);
+        let bead = make_test_bead(&body, None, vec![]);
+
+        let decision = decompose_bead_decision(&bead, 600, 3, None);
+        assert!(
+            decision.is_split(),
+            "Should split when body size exceeds threshold by 1"
+        );
+    }
+
+    #[test]
+    fn decompose_bead_decision_body_size_one_below_threshold() {
+        // Create a body that is 199 characters
+        let body = "a".repeat(199);
+        let bead = make_test_bead(&body, None, vec![]);
+
+        let decision = decompose_bead_decision(&bead, 600, 3, None);
+        assert!(decision.is_refuse());
+        assert!(decision.refusal_reason().unwrap().contains("too small"));
+    }
+
+    #[test]
+    fn decompose_bead_decision_decomposition_child_label() {
+        let bead = make_test_bead(
+            "This is a substantial bead body that exceeds 200 characters. "
+                .repeat(4)
+                .as_str(),
+            None,
+            vec!["decomposition-child"],
+        );
+        let decision = decompose_bead_decision(&bead, 600, 3, None);
+        assert!(decision.is_refuse());
+        assert!(decision
+            .refusal_reason()
+            .unwrap()
+            .contains("already a child"));
+    }
+
+    #[test]
+    fn decompose_bead_decision_both_child_labels_present() {
+        let bead = make_test_bead(
+            "This is a substantial bead body that exceeds 200 characters. "
+                .repeat(4)
+                .as_str(),
+            None,
+            vec!["mitosis-child", "decomposition-child"],
+        );
+        let decision = decompose_bead_decision(&bead, 600, 3, None);
+        assert!(decision.is_refuse());
+        assert!(decision
+            .refusal_reason()
+            .unwrap()
+            .contains("already a child"));
+    }
+
+    #[test]
+    fn decompose_bead_decision_all_criteria_at_exact_boundaries() {
+        // All criteria exactly at their minimum thresholds
+        let body = "a".repeat(200);
+        let bead = make_test_bead(&body, None, vec![]);
+
+        // timeout=300 (exact), retry_count=2 (exact), body_size=200 (exact)
+        let decision = decompose_bead_decision(&bead, 300, 2, None);
+        assert!(
+            decision.is_split(),
+            "Should split when all criteria are exactly at thresholds"
+        );
+    }
+
+    #[test]
+    fn decompose_bead_decision_all_criteria_one_above_thresholds() {
+        // All criteria one unit above minimum thresholds
+        let body = "a".repeat(201);
+        let bead = make_test_bead(&body, None, vec![]);
+
+        // timeout=301 (>300), retry_count=3 (>2), body_size=201 (>200)
+        let decision = decompose_bead_decision(&bead, 301, 3, None);
+        assert!(decision.is_split(), "Should split when all criteria exceed thresholds");
+    }
+
+    #[test]
+    fn decompose_bead_decision_all_criteria_one_below_thresholds() {
+        // All criteria one unit below minimum thresholds
+        let body = "a".repeat(199);
+        let bead = make_test_bead(&body, None, vec![]);
+
+        // timeout=299 (<300) should fail first
+        let decision = decompose_bead_decision(&bead, 299, 1, None);
+        assert!(decision.is_refuse());
+        // Should fail on timeout check (first threshold check)
+        assert!(decision
+            .refusal_reason()
+            .unwrap()
+            .contains("timeout too short"));
+    }
+
+    #[test]
+    fn decompose_bead_decision_zero_retries() {
+        let bead = make_test_bead(
+            "This is a substantial bead body that exceeds 200 characters. "
+                .repeat(4)
+                .as_str(),
+            None,
+            vec![],
+        );
+
+        // Zero retries should definitely refuse
+        let decision = decompose_bead_decision(&bead, 600, 0, None);
+        assert!(decision.is_refuse());
+        assert!(decision
+            .refusal_reason()
+            .unwrap()
+            .contains("insufficient retries"));
+    }
+
+    #[test]
+    fn decompose_bead_decision_zero_timeout() {
+        let bead = make_test_bead(
+            "This is a substantial bead body that exceeds 200 characters. "
+                .repeat(4)
+                .as_str(),
+            None,
+            vec![],
+        );
+
+        // Zero timeout should definitely refuse
+        let decision = decompose_bead_decision(&bead, 0, 3, None);
+        assert!(decision.is_refuse());
+        assert!(decision
+            .refusal_reason()
+            .unwrap()
+            .contains("timeout too short"));
+    }
+
+    #[test]
+    fn decompose_bead_decision_large_timeout_insufficient_retries() {
+        let bead = make_test_bead(
+            "This is a substantial bead body that exceeds 200 characters. "
+                .repeat(4)
+                .as_str(),
+            None,
+            vec![],
+        );
+
+        // Even with very large timeout, insufficient retries should refuse
+        let decision = decompose_bead_decision(&bead, 3600, 1, None);
+        assert!(decision.is_refuse());
+        assert!(decision
+            .refusal_reason()
+            .unwrap()
+            .contains("insufficient retries"));
+    }
+
+    #[test]
+    fn decompose_bead_decision_many_retries_short_timeout() {
+        let bead = make_test_bead(
+            "This is a substantial bead body that exceeds 200 characters. "
+                .repeat(4)
+                .as_str(),
+            None,
+            vec![],
+        );
+
+        // Even with many retries, short timeout should refuse
+        let decision = decompose_bead_decision(&bead, 10, 100, None);
+        assert!(decision.is_refuse());
+        assert!(decision
+            .refusal_reason()
+            .unwrap()
+            .contains("timeout too short"));
+    }
+
+    #[test]
+    fn decompose_bead_decision_split_returns_empty_proposals() {
+        let bead = make_test_bead(
+            "This is a substantial bead body that exceeds 200 characters. "
+                .repeat(4)
+                .as_str(),
+            None,
+            vec![],
+        );
+
+        let decision = decompose_bead_decision(&bead, 600, 3, None);
+        assert!(decision.is_split());
+
+        // Split decision should have empty proposals (caller must populate)
+        let proposals = decision.proposals().unwrap();
+        assert!(proposals.is_empty(), "Initial split decision should have empty proposals");
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
