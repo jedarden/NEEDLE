@@ -1,0 +1,56 @@
+# Verification Runner Configuration
+# This file defines the verification checks executed by scripts/verification-runner.sh
+#
+# See docs/verification-runner.md for full configuration reference
+
+version: "1.0"
+
+description: |
+  NEEDLE project definition-of-done checks.
+  This configuration defines both fast (seconds) and slow (minutes) verification lanes.
+
+# Fast lane: Quick checks that run locally under cgroup (seconds)
+fast_lane:
+  - name: "Format check"
+    command: "cargo"
+    args: ["fmt", "--check"]
+    timeout: 30
+    description: "Verify Rust code formatting"
+
+  - name: "Clippy linting"
+    command: "cargo"
+    args: ["clippy", "--all-targets", "--", "-D", "warnings"]
+    timeout: 60
+    description: "Run Clippy with warnings as errors"
+
+  - name: "Cargo check"
+    command: "cargo"
+    args: ["check"]
+    timeout: 120
+    description: "Quick compilation check without tests"
+
+# Slow lane: Full test suite (minutes)
+slow_lane:
+  - name: "Build test targets"
+    command: "cargo"
+    args: ["test", "--no-run", "--lib", "--test", "integration_tests"]
+    timeout: 1800
+    description: "Compile all test targets before running them"
+
+  - name: "Unit tests"
+    command: "timeout"
+    args: ["--kill-after=30", "900", "cargo", "test", "--lib"]
+    timeout: 960
+    description: "Run library unit tests with timeout protection"
+
+  - name: "Integration tests"
+    command: "timeout"
+    args: ["--kill-after=30", "900", "cargo", "test", "--test", "integration_tests"]
+    timeout: 960
+    description: "Run core integration tests with timeout protection"
+
+  - name: "Installer tests"
+    command: "bash"
+    args: ["tests/installer/run.sh"]
+    timeout: 60
+    description: "Shell-level installer regression tests"

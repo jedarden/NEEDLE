@@ -173,6 +173,42 @@ pub struct ProcessLimits {
     pub hard_deadline: HardDeadline,
 }
 
+impl ProcessLimits {
+    /// Validate the process limits configuration.
+    ///
+    /// Returns an error if:
+    /// - `hard_deadline.enabled` is true but `duration_secs` is 0
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use needle::config::ProcessLimits;
+    /// use needle::types::HardDeadline;
+    ///
+    /// // Valid: enabled with positive duration
+    /// let limits = ProcessLimits {
+    ///     idle_timeout: Some(300),
+    ///     hard_deadline: HardDeadline::with_duration(600),
+    /// };
+    /// assert!(limits.validate().is_ok());
+    ///
+    /// // Invalid: enabled with zero duration
+    /// let limits = ProcessLimits {
+    ///     idle_timeout: Some(300),
+    ///     hard_deadline: HardDeadline::new(true, 0),
+    /// };
+    /// assert!(limits.validate().is_err());
+    /// ```
+    pub fn validate(&self) -> Result<(), String> {
+        // If hard deadline is enabled, duration must be positive
+        if self.hard_deadline.enabled && self.hard_deadline.duration_secs == 0 {
+            return Err("hard_deadline is enabled but duration_secs is 0".to_string());
+        }
+
+        Ok(())
+    }
+}
+
 /// Agent (AI model CLI) configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentConfig {
@@ -1986,7 +2022,7 @@ mod tests {
 
         // Set environment
         std::env::set_var("HOME", &home);
-        std::env::set_var("PATH", &path_dir.to_str().unwrap());
+        std::env::set_var("PATH", path_dir.to_str().unwrap());
 
         let config = BeadCliConfig {
             backend: BeadBackend::Auto,
@@ -9361,7 +9397,7 @@ mod config_tests {
         config.worker.max_workers = 51;
         let errors = ConfigLoader::validate(&config);
         assert!(
-            errors.iter().any(|e| e.field == "worker.max_workers"
+            errors.iter().any(|e| e.full_path == "worker.max_workers"
                 && e.message.contains("exceeds practical fleet limit")),
             "expected fleet limit error, got: {:?}",
             errors
@@ -9374,7 +9410,7 @@ mod config_tests {
         config.worker.cpu_load_warn = 0.0;
         let errors = ConfigLoader::validate(&config);
         assert!(
-            errors.iter().any(|e| e.field == "worker.cpu_load_warn"),
+            errors.iter().any(|e| e.full_path == "worker.cpu_load_warn"),
             "expected cpu_load_warn error, got: {:?}",
             errors
         );
@@ -9386,7 +9422,7 @@ mod config_tests {
         config.worker.cpu_load_warn = -0.5;
         let errors = ConfigLoader::validate(&config);
         assert!(
-            errors.iter().any(|e| e.field == "worker.cpu_load_warn"),
+            errors.iter().any(|e| e.full_path == "worker.cpu_load_warn"),
             "expected cpu_load_warn error, got: {:?}",
             errors
         );
@@ -9398,7 +9434,7 @@ mod config_tests {
         config.worker.cpu_load_warn = 1.1;
         let errors = ConfigLoader::validate(&config);
         assert!(
-            errors.iter().any(|e| e.field == "worker.cpu_load_warn"),
+            errors.iter().any(|e| e.full_path == "worker.cpu_load_warn"),
             "expected cpu_load_warn error, got: {:?}",
             errors
         );
@@ -9410,7 +9446,7 @@ mod config_tests {
         config.worker.cpu_load_warn = 1.0;
         let errors = ConfigLoader::validate(&config);
         assert!(
-            !errors.iter().any(|e| e.field == "worker.cpu_load_warn"),
+            !errors.iter().any(|e| e.full_path == "worker.cpu_load_warn"),
             "cpu_load_warn=1.0 should be valid, got: {:?}",
             errors
         );
@@ -9423,8 +9459,10 @@ mod config_tests {
         config.health.heartbeat_ttl_secs = 60; // < 3*30=90
         let errors = ConfigLoader::validate(&config);
         assert!(
-            errors.iter().any(|e| e.field == "health.heartbeat_ttl_secs"
-                && e.message.contains("detection may be unreliable")),
+            errors
+                .iter()
+                .any(|e| e.full_path == "health.heartbeat_ttl_secs"
+                    && e.message.contains("detection may be unreliable")),
             "expected heartbeat_ttl warning, got: {:?}",
             errors
         );
@@ -9439,7 +9477,7 @@ mod config_tests {
         assert!(
             !errors
                 .iter()
-                .any(|e| e.field == "health.heartbeat_ttl_secs"),
+                .any(|e| e.full_path == "health.heartbeat_ttl_secs"),
             "heartbeat_ttl=3*interval should be valid, got: {:?}",
             errors
         );
@@ -10407,7 +10445,7 @@ agent:
         assert!(
             errors
                 .iter()
-                .any(|e| e.field == "agent.routing.rules[0].match_model"),
+                .any(|e| e.full_path == "agent.routing.rules[0].match_model"),
             "expected regex validation error, got: {:?}",
             errors
         );
@@ -10429,7 +10467,7 @@ agent:
         assert!(
             errors
                 .iter()
-                .any(|e| e.field == "agent.routing.rules[0].adapter"),
+                .any(|e| e.full_path == "agent.routing.rules[0].adapter"),
             "expected empty adapter error, got: {:?}",
             errors
         );
@@ -10455,7 +10493,9 @@ agent:
 
         let errors = ConfigLoader::validate(&config);
         assert!(
-            !errors.iter().any(|e| e.field.starts_with("agent.routing")),
+            !errors
+                .iter()
+                .any(|e| e.full_path.starts_with("agent.routing")),
             "routing config should be valid, but got errors: {:?}",
             errors
         );
@@ -10595,7 +10635,7 @@ agent:
         let errors = ConfigLoader::validate(&config);
         let routing_errors: Vec<_> = errors
             .iter()
-            .filter(|e| e.field.starts_with("agent.routing"))
+            .filter(|e| e.full_path.starts_with("agent.routing"))
             .collect();
 
         assert!(
@@ -10685,7 +10725,9 @@ agent:
 
         let errors = ConfigLoader::validate(&config);
         assert!(
-            !errors.iter().any(|e| e.field.starts_with("agent.routing")),
+            !errors
+                .iter()
+                .any(|e| e.full_path.starts_with("agent.routing")),
             "bare alias patterns should be valid, got: {:?}",
             errors
         );
@@ -10716,7 +10758,9 @@ agent:
 
         let errors = ConfigLoader::validate(&config);
         assert!(
-            !errors.iter().any(|e| e.field.starts_with("agent.routing")),
+            !errors
+                .iter()
+                .any(|e| e.full_path.starts_with("agent.routing")),
             "full model ID patterns should be valid, got: {:?}",
             errors
         );
@@ -10743,7 +10787,9 @@ agent:
 
         let errors = ConfigLoader::validate(&config);
         assert!(
-            !errors.iter().any(|e| e.field.starts_with("agent.routing")),
+            !errors
+                .iter()
+                .any(|e| e.full_path.starts_with("agent.routing")),
             "wildcard patterns should be valid, got: {:?}",
             errors
         );
@@ -11117,12 +11163,12 @@ agent:
         config.worker.scratch_sweep.ttl_hours = 0;
         assert!(ConfigLoader::validate(&config)
             .iter()
-            .any(|error| error.field == "worker.scratch_sweep.ttl_hours"));
+            .any(|error| error.full_path == "worker.scratch_sweep.ttl_hours"));
 
         config.worker.scratch_sweep.enabled = false;
         assert!(!ConfigLoader::validate(&config)
             .iter()
-            .any(|error| error.field == "worker.scratch_sweep.ttl_hours"));
+            .any(|error| error.full_path == "worker.scratch_sweep.ttl_hours"));
     }
 
     // ── worker.worker_binary_path (GitHub issue jedarden/NEEDLE#11) ──
@@ -11215,7 +11261,7 @@ agent:
         assert!(
             !errors
                 .iter()
-                .any(|e| e.field == "worker.worker_binary_path"),
+                .any(|e| e.full_path == "worker.worker_binary_path"),
             "worker_binary_path should not be validated during config load, got errors: {:?}",
             errors
         );
@@ -11378,7 +11424,7 @@ agent:
         assert!(
             errors
                 .iter()
-                .any(|e| e.field == "strands.mitosis.timeout_triggered"
+                .any(|e| e.full_path == "strands.mitosis.timeout_triggered"
                     && e.message.contains(
                         "at least one of agent_wallclock_timeout or handler_timeout must be true"
                     )),
@@ -11404,7 +11450,7 @@ agent:
 
         let errors = ConfigLoader::validate(&config);
         assert!(
-            errors.iter().any(|e| e.field
+            errors.iter().any(|e| e.full_path
                 == "strands.mitosis.timeout_triggered.min_elapsed_fraction"
                 && e.message.contains("must be in range [0.0, 1.0]")),
             "expected validation error for min_elapsed_fraction > 1.0, got: {:?}",
@@ -11429,7 +11475,7 @@ agent:
 
         let errors = ConfigLoader::validate(&config);
         assert!(
-            errors.iter().any(|e| e.field
+            errors.iter().any(|e| e.full_path
                 == "strands.mitosis.timeout_triggered.min_elapsed_fraction"
                 && e.message.contains("must be in range [0.0, 1.0]")),
             "expected validation error for min_elapsed_fraction < 0.0, got: {:?}",
@@ -11456,7 +11502,7 @@ agent:
         assert!(
             !errors
                 .iter()
-                .any(|e| e.field.starts_with("strands.mitosis.timeout_triggered")),
+                .any(|e| e.full_path.starts_with("strands.mitosis.timeout_triggered")),
             "expected no validation errors for valid timeout-triggered policy, got: {:?}",
             errors
         );

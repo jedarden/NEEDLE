@@ -86,7 +86,7 @@
 //! - ✅ Documented guarantees for idempotency and error handling
 
 use std::backtrace::Backtrace;
-use std::panic::{self, PanicInfo};
+use std::panic::{self, PanicHookInfo};
 use std::sync::Mutex;
 use std::sync::Once;
 use std::time::SystemTime;
@@ -166,7 +166,7 @@ fn set_full_backtrace_env() {
 /// - Stores the backtrace in memory for later retrieval
 /// - Formats the output consistently for parsing
 #[allow(deprecated)]
-fn panic_hook(info: &PanicInfo) {
+fn panic_hook(info: &PanicHookInfo) {
     // Get panic location
     let location = info.location().unwrap_or_else(|| {
         // Fallback for cases where location isn't available
@@ -444,7 +444,7 @@ mod tests {
         // Verify the backtrace was captured (it exists)
         // Note: We can't inspect frames without unstable APIs, but we can verify it exists
         assert!(
-            !format!("{}", captured.backtrace).is_empty(),
+            !captured.backtrace.to_string().is_empty(),
             "Backtrace should be captured and displayable"
         );
 
@@ -526,7 +526,7 @@ mod tests {
         // Verify the backtrace has a reasonable number of frames
         // Note: Without unstable .frames() API, we can't count frames directly,
         // but we can verify the backtrace is substantial by checking its string representation
-        let backtrace_str = format!("{}", captured.backtrace);
+        let backtrace_str = captured.backtrace.to_string();
         let frame_count = backtrace_str.lines().count();
         assert!(
             frame_count > 1,
@@ -562,7 +562,7 @@ mod tests {
         assert!(captured.column > 0);
         // Verify backtrace was captured by checking it's displayable
         assert!(
-            !format!("{}", captured.backtrace).is_empty(),
+            !captured.backtrace.to_string().is_empty(),
             "Backtrace should be captured and displayable"
         );
 

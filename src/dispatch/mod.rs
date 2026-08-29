@@ -2662,7 +2662,7 @@ fn extract_executables_from_template(template: &str) -> Vec<String> {
         let mut token_iter = tokens.iter().peekable();
         let mut command = None;
 
-        while let Some(token) = token_iter.next() {
+        for token in token_iter.by_ref() {
             let token = *token;
 
             // Skip variable assignments at the start (KEY=VALUE or KEY="VALUE")
@@ -2702,7 +2702,7 @@ fn extract_executables_from_template(template: &str) -> Vec<String> {
             // Skip them and continue to find the actual command
             if cmd_name == "env" || cmd_name == "export" {
                 // Continue searching in the same segment for the real command
-                while let Some(token) = token_iter.next() {
+                for token in token_iter {
                     let token = *token;
 
                     // Skip variable assignments and placeholders
@@ -2725,10 +2725,9 @@ fn extract_executables_from_template(template: &str) -> Vec<String> {
                     if !actual_cmd.is_empty()
                         && !BUILTINS.contains(&actual_cmd)
                         && !actual_cmd.starts_with('-')
+                        && !executables.contains(&actual_cmd.to_string())
                     {
-                        if !executables.contains(&actual_cmd.to_string()) {
-                            executables.push(actual_cmd.to_string());
-                        }
+                        executables.push(actual_cmd.to_string());
                     }
                     break;
                 }
