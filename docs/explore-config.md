@@ -2,6 +2,103 @@
 
 This document describes the `ExploreConfig` struct, its fields, default values, and initialization behavior in the NEEDLE project.
 
+## Schema Reference
+
+### Quick Reference Table
+
+| Field | Type | Required | Default | Validation |
+|-------|------|----------|---------|------------|
+| `enabled` | `bool` | No | `true` | Boolean flag |
+| `workspaces` | `Vec<PathBuf>` | No | `[]` (empty) | Paths to workspace directories |
+| `workspace_root` | `PathBuf` | No | `$HOME` (via `dirs_or_home("")`) | Must be valid directory path |
+| `rediscovery_cycles` | `u32` | No | `60` | 0 = disabled, otherwise N cycles |
+| `starvation_threshold_minutes` | `u64` | No | `15` | 0 = disabled, otherwise minutes |
+| `scan_interval_cycles` | `u32` | No | `1` | Must be ≥ 1 |
+| `max_scan_interval_cycles` | `u32` | No | `8` | Must be ≥ `scan_interval_cycles` |
+
+### Type Definitions
+
+```rust
+pub struct ExploreConfig {
+    /// Whether the Explore strand is enabled.
+    pub enabled: bool,
+
+    /// Pin/exception list for restricting a worker to specific workspaces.
+    pub workspaces: Vec<PathBuf>,
+
+    /// Root path for workspace auto-discovery (when workspaces is empty).
+    pub workspace_root: PathBuf,
+
+    /// Re-run workspace discovery every N cycles (0 = disabled).
+    pub rediscovery_cycles: u32,
+
+    /// Starvation alarm threshold in minutes (0 = disabled).
+    pub starvation_threshold_minutes: u64,
+
+    /// Minimum number of selection cycles between Explore scans.
+    pub scan_interval_cycles: u32,
+
+    /// Maximum number of selection cycles between Explore scans after adaptive backoff.
+    pub max_scan_interval_cycles: u32,
+}
+```
+
+### Field Constraints
+
+**Configuration Mode Constraint:**
+- **Auto-Discovery Mode** (default): `workspaces` is empty → `workspace_root` is used for recursive discovery
+- **Pinned Mode** (exception): `workspaces` is non-empty → Only explicit paths are scanned, `workspace_root` is ignored
+
+**Adaptive Backoff Constraint:**
+- `max_scan_interval_cycles` must be ≥ `scan_interval_cycles`
+- Empty scans double interval: 1 → 2 → 4 → 8 → 8 (capped at max)
+- Finding a candidate resets to `scan_interval_cycles`
+
+**Rediscovery Constraint:**
+- When `rediscovery_cycles` > 0: Workspace list refreshes every N cycles
+- When `rediscovery_cycles` = 0: Periodic re-discovery is disabled
+- When `workspaces` is non-empty: Re-discovery is skipped regardless of `rediscovery_cycles`
+
+### Default Value Resolution
+
+All fields use serde defaults:
+
+```rust
+#[serde(default = "ExploreConfig::default_enabled")]
+pub enabled: bool,                     // → true
+
+#[serde(default)]
+pub workspaces: Vec<PathBuf>,         // → Vec::new()
+
+#[serde(default = "ExploreConfig::default_workspace_root")]
+pub workspace_root: PathBuf,          // → dirs_or_home("")
+
+#[serde(default = "ExploreConfig::default_rediscovery_cycles")]
+pub rediscovery_cycles: u32,           // → 60
+
+#[serde(default = "ExploreConfig::default_starvation_threshold_minutes")]
+pub starvation_threshold_minutes: u64,// → 15
+
+#[serde(default = "ExploreConfig::default_scan_interval_cycles")]
+pub scan_interval_cycles: u32,        // → 1
+
+#[serde(default = "ExploreConfig::default_max_scan_interval_cycles")]
+pub max_scan_interval_cycles: u32,    // → 8
+```
+
+**Helper function:**
+```rust
+fn dirs_or_home(relative: &str) -> PathBuf {
+    if let Some(home) = std::env::var_os("HOME") {
+        PathBuf::from(home).join(relative)
+    } else {
+        PathBuf::from("/tmp").join(relative)
+    }
+}
+```
+
+---
+
 ## Overview
 
 `ExploreConfig` is a configuration structure that controls the **Explore strand** behavior in NEEDLE workers. The Explore strand is responsible for discovering beads in multiple workspaces when the home workspace has no work available.
