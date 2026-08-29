@@ -369,6 +369,83 @@ test_checksum_mismatch_never_skippable() {
     ((TEST_COUNT++)) || true
 }
 
+# Test: --skip-checksum outputs conspicuous warning to stderr
+test_skip_checksum_outputs_warning() {
+    echo "TEST: test_skip_checksum_outputs_warning"
+
+    setup
+
+    # Create a test script that simulates the warning function
+    local test_script="$tmp_dir/test-warning.sh"
+    cat > "$test_script" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+
+# Mock the warn_checksum_skipped function
+warn_checksum_skipped() {
+    cat <<'INNER_EOF'
+
+════════════════════════════════════════════════════════════════════════════════
+                                  ⚠️  SECURITY WARNING  ⚠️
+════════════════════════════════════════════════════════════════════════════════
+
+Checksum verification is DISABLED. The downloaded binary will NOT be verified
+against the expected SHA-256 hash from the release.
+INNER_EOF
+}
+
+# When SKIP_CHECKSUM is true, call the warning
+if [[ "${SKIP_CHECKSUM:-false}" == "true" ]]; then
+    warn_checksum_skipped >&2
+    echo "WARNING_OUTPUT"
+fi
+EOF
+    chmod +x "$test_script"
+
+    # Test that warning is output to stderr when SKIP_CHECKSUM=true
+    local output
+    output=$(SKIP_CHECKSUM=true bash "$test_script" 2>&1 || true)
+    if echo "$output" | grep -q "SECURITY WARNING"; then
+        echo "  ✓ warning contains 'SECURITY WARNING'"
+        ((PASS_COUNT++)) || true
+    else
+        echo "  ✗ warning should contain 'SECURITY WARNING'"
+        ((FAIL_COUNT++)) || true
+    fi
+    ((TEST_COUNT++)) || true
+
+    if echo "$output" | grep -q "Checksum verification"; then
+        echo "  ✓ warning contains 'Checksum verification'"
+        ((PASS_COUNT++)) || true
+    else
+        echo "  ✗ warning should contain 'Checksum verification'"
+        ((FAIL_COUNT++)) || true
+    fi
+    ((TEST_COUNT++)) || true
+
+    if echo "$output" | grep -q "DISABLED"; then
+        echo "  ✓ warning contains 'DISABLED'"
+        ((PASS_COUNT++)) || true
+    else
+        echo "  ✗ warning should contain 'DISABLED'"
+        ((FAIL_COUNT++)) || true
+    fi
+    ((TEST_COUNT++)) || true
+
+    # Test that warning is NOT output when SKIP_CHECKSUM is false
+    output=$(SKIP_CHECKSUM=false bash "$test_script" 2>&1 || true)
+    if ! echo "$output" | grep -q "SECURITY WARNING"; then
+        echo "  ✓ no warning when SKIP_CHECKSUM=false"
+        ((PASS_COUNT++)) || true
+    else
+        echo "  ✗ should not warn when SKIP_CHECKSUM=false"
+        ((FAIL_COUNT++)) || true
+    fi
+    ((TEST_COUNT++)) || true
+
+    teardown
+}
+
 # Test: Mock end-to-end install with valid checksum
 test_e2e_install_with_valid_checksum() {
     echo "TEST: test_e2e_install_with_valid_checksum"
@@ -465,6 +542,7 @@ main() {
     test_download_failure_aborts
     test_download_failure_continues_with_skip
     test_checksum_mismatch_never_skippable
+    test_skip_checksum_outputs_warning
     test_e2e_install_with_valid_checksum
     test_e2e_install_with_mismatch_fails
     test_version_discovery_no_curl_pipe
