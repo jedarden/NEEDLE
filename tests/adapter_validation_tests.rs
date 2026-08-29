@@ -870,4 +870,15 @@ agent:
         // sequence in worker/mod.rs where resolve_adapter() is called before
         // the main loop begins.
     }
+
+    #[test]
+    fn test_nonexistent_adapter_failure() {
+        // TODO: Implement test for nonexistent adapter failure
+        // This test skeleton will be filled in with actual assertions in a follow-up task
+        //
+        // Expected behavior:
+        // - Worker should fail to start when configured with a nonexistent adapter
+        // - Error message should indicate the adapter was not found
+        // - Error message should provide guidance on how to fix the issue
+    }
 }
