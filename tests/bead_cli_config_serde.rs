@@ -298,3 +298,39 @@ fn test_all_backend_variants_deserializable() {
         assert_eq!(config.backend, expected_backend);
     }
 }
+
+#[test]
+fn test_round_trip_all_backend_path_combinations() {
+    // Comprehensive round-trip test covering all backend variants with both path states
+    let test_cases = vec![
+        // Auto backend
+        (BeadBackend::Auto, None, "auto with no path"),
+        (BeadBackend::Auto, Some(PathBuf::from("/usr/local/bin/bf")), "auto with path"),
+        // Br backend
+        (BeadBackend::Br, None, "br with no path"),
+        (BeadBackend::Br, Some(PathBuf::from("/opt/bin/bf")), "br with path"),
+        // Bead backend
+        (BeadBackend::Bead, None, "bead with no path"),
+        (BeadBackend::Bead, Some(PathBuf::from("/usr/local/bin/bead")), "bead with path"),
+    ];
+
+    for (backend, path, description) in test_cases {
+        let original = BeadCliConfig {
+            backend: backend.clone(),
+            path: path.clone(),
+        };
+
+        // Serialize
+        let json = serde_json::to_string(&original).unwrap();
+
+        // Deserialize
+        let deserialized: BeadCliConfig = serde_json::from_str(&json).unwrap();
+
+        // Verify all fields are preserved
+        assert_eq!(deserialized.backend, original.backend, "{}: backend mismatch", description);
+        assert_eq!(deserialized.path, original.path, "{}: path mismatch", description);
+
+        // Verify full equality
+        assert_eq!(original, deserialized, "{}: full config mismatch", description);
+    }
+}
