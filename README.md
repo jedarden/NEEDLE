@@ -4,6 +4,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-toolchain-orange.svg)](rust-toolchain.toml)
+[![iad-ci](https://img.shields.io/github/checks-status/jedarden/NEEDLE/main?label=iad-ci)](docs/post-push-ci.md)
 [![Version](https://img.shields.io/github/v/release/jedarden/NEEDLE)](https://github.com/jedarden/NEEDLE/releases/latest)
 
 **N**avigates **E**very **E**nqueued **D**eliverable, **L**ogs **E**ffort
