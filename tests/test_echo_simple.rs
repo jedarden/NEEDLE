@@ -1,13 +1,11 @@
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 use tokio::time::{timeout, Duration};
 
 #[tokio::test]
 async fn test_echo_agent_simple() {
     // Simplified test to isolate the hanging issue
     let invoke_template = "echo done";
-    let workspace = PathBuf::from(".");
+    let _workspace = PathBuf::from(".");
     let prompt_file = PathBuf::from("/tmp/test_prompt.txt");
 
     // Write a simple prompt
@@ -21,7 +19,7 @@ async fn test_echo_agent_simple() {
     // Spawn the process like the dispatcher does
     let mut child = tokio::process::Command::new("bash")
         .arg("-c")
-        .arg(&rendered)
+        .arg(rendered)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()

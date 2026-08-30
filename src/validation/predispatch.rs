@@ -572,4 +572,270 @@ mod tests {
         assert!(!*show_called.read().await);
         assert_eq!(*show_called_id.read().await, None);
     }
+
+    #[tokio::test]
+    async fn capture_dirty_files_in_git_repo() {
+        let ws = TempDir::new().unwrap();
+        let workspace = ws.path();
+
+        // Initialize a git repo
+        tokio::process::Command::new("git")
+            .args(["init"])
+            .current_dir(workspace)
+            .output()
+            .await
+            .expect("git init failed");
+
+        tokio::process::Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(workspace)
+            .output()
+            .await
+            .expect("git config failed");
+
+        tokio::process::Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(workspace)
+            .output()
+            .await
+            .expect("git config failed");
+
+        // Create and commit an initial file
+        let initial_file = workspace.join("initial.txt");
+        tokio::fs::write(&initial_file, b"initial content")
+            .await
+            .unwrap();
+
+        tokio::process::Command::new("git")
+            .args(["add", "initial.txt"])
+            .current_dir(workspace)
+            .output()
+            .await
+            .expect("git add failed");
+
+        tokio::process::Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(workspace)
+            .output()
+            .await
+            .expect("git commit failed");
+
+        // Modify the committed file to create a dirty file
+        tokio::fs::write(&initial_file, b"modified content")
+            .await
+            .unwrap();
+
+        // Create an untracked file
+        let untracked_file = workspace.join("untracked.txt");
+        tokio::fs::write(&untracked_file, b"untracked content")
+            .await
+            .unwrap();
+
+        // Create a .beads file (should be filtered out)
+        let beads_file = workspace.join(".beads/test.json");
+        tokio::fs::create_dir_all(workspace.join(".beads"))
+            .await
+            .unwrap();
+        tokio::fs::write(&beads_file, b"beads data").await.unwrap();
+
+        // Capture dirty files
+        let dirty_files = capture_dirty_files(workspace).await;
+
+        assert!(dirty_files.is_some(), "capture_dirty_files should succeed");
+
+        let files = dirty_files.unwrap();
+        assert!(!files.is_empty(), "should capture dirty files");
+
+        // Check that initial.txt (modified) and untracked.txt are captured
+        let modified_entry = files.iter().find(|f| f.path == "initial.txt");
+        let untracked_entry = files.iter().find(|f| f.path == "untracked.txt");
+
+        assert!(
+            modified_entry.is_some(),
+            "should capture initial.txt (modified)"
+        );
+        assert!(untracked_entry.is_some(), "should capture untracked.txt");
+
+        // Check that .beads files are filtered out
+        assert!(
+            !files.iter().any(|f| f.path.starts_with(".beads/")),
+            "should not capture .beads/ files"
+        );
+
+        // Verify blob hashes are non-empty and valid hex
+        for entry in &files {
+            assert!(!entry.blob_hash.is_empty(), "blob hash should not be empty");
+            assert!(
+                entry.blob_hash.len() == 40,
+                "git blob hash should be 40 chars"
+            );
+            assert!(
+                entry.blob_hash.chars().all(|c| c.is_ascii_hexdigit()),
+                "blob hash should be hex"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn capture_dirty_files_returns_empty_when_no_dirty_files() {
+        let ws = TempDir::new().unwrap();
+        let workspace = ws.path();
+
+        // Initialize a git repo
+        tokio::process::Command::new("git")
+            .args(["init"])
+            .current_dir(workspace)
+            .output()
+            .await
+            .expect("git init failed");
+
+        tokio::process::Command::new("git")
+            .args(["config", "user.email", "test@example.com"])
+            .current_dir(workspace)
+            .output()
+            .await
+            .expect("git config failed");
+
+        tokio::process::Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(workspace)
+            .output()
+            .await
+            .expect("git config failed");
+
+        // Create and commit a file
+        let file = workspace.join("clean.txt");
+        tokio::fs::write(&file, b"clean content").await.unwrap();
+
+        tokio::process::Command::new("git")
+            .args(["add", "clean.txt"])
+            .current_dir(workspace)
+            .output()
+            .await
+            .expect("git add failed");
+
+        tokio::process::Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(workspace)
+            .output()
+            .await
+            .expect("git commit failed");
+
+        // Capture dirty files (should be empty)
+        let dirty_files = capture_dirty_files(workspace).await;
+
+        assert!(dirty_files.is_some(), "capture_dirty_files should succeed");
+        assert!(
+            dirty_files.unwrap().is_empty(),
+            "should return empty vec when no dirty files"
+        );
+    }
+
+    #[tokio::test]
+    async fn capture_dirty_files_returns_none_for_non_git_repo() {
+        let ws = TempDir::new().unwrap();
+        let workspace = ws.path();
+
+        // Don't initialize git - just create a file
+        let file = workspace.join("file.txt");
+        tokio::fs::write(&file, b"content").await.unwrap();
+
+        // Capture dirty files (should return None)
+        let dirty_files = capture_dirty_files(workspace).await;
+
+        assert!(dirty_files.is_none(), "should return None for non-git repo");
+    }
+
+    #[tokio::test]
+    async fn git_hash_object_returns_correct_hash() {
+        let ws = TempDir::new().unwrap();
+        let workspace = ws.path();
+
+        // Initialize a git repo
+        tokio::process::Command::new("git")
+            .args(["init"])
+            .current_dir(workspace)
+            .output()
+            .await
+            .expect("git init failed");
+
+        // Create a test file with known content
+        let file = workspace.join("test.txt");
+        tokio::fs::write(&file, b"hello world").await.unwrap();
+
+        // Get the hash via our function
+        let hash = git_hash_object(workspace, "test.txt").await;
+
+        assert!(hash.is_some(), "git_hash_object should succeed");
+
+        let hash_value = hash.unwrap();
+        assert_eq!(hash_value.len(), 40, "git hash should be 40 chars");
+        assert!(
+            hash_value.chars().all(|c| c.is_ascii_hexdigit()),
+            "hash should be hex"
+        );
+
+        // Verify it matches git hash-object output
+        let output = tokio::process::Command::new("git")
+            .args(["hash-object", "test.txt"])
+            .current_dir(workspace)
+            .output()
+            .await
+            .expect("git hash-object failed");
+
+        let expected_hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        assert_eq!(
+            hash_value, expected_hash,
+            "hash should match git hash-object output"
+        );
+    }
+
+    #[tokio::test]
+    async fn git_hash_object_returns_none_for_missing_file() {
+        let ws = TempDir::new().unwrap();
+        let workspace = ws.path();
+
+        // Initialize a git repo
+        tokio::process::Command::new("git")
+            .args(["init"])
+            .current_dir(workspace)
+            .output()
+            .await
+            .expect("git init failed");
+
+        // Try to hash a non-existent file
+        let hash = git_hash_object(workspace, "nonexistent.txt").await;
+
+        assert!(hash.is_none(), "should return None for missing file");
+    }
+
+    #[tokio::test]
+    async fn snapshot_with_dirty_files_roundtrips() {
+        let root = TempDir::new().unwrap();
+        let ws = TempDir::new().unwrap();
+        let bead: BeadId = "bf-dirty".into();
+
+        let snapshot = PreDispatch {
+            head_sha: Some("deadbeef".to_string()),
+            notes_hash: Some(hash_notes("investigated and fixed")),
+            dirty_files: vec![
+                DirtyFile {
+                    path: "src/main.rs".to_string(),
+                    blob_hash: "abc123def456".to_string(),
+                },
+                DirtyFile {
+                    path: "tests/test.rs".to_string(),
+                    blob_hash: "789xyz012".to_string(),
+                },
+            ],
+        };
+
+        write_at(root.path(), ws.path(), &bead, &snapshot).await;
+
+        let loaded = load_at(root.path(), ws.path(), &bead).await.unwrap();
+        assert_eq!(loaded, snapshot);
+        assert_eq!(loaded.dirty_files.len(), 2);
+        assert_eq!(loaded.dirty_files[0].path, "src/main.rs");
+        assert_eq!(loaded.dirty_files[0].blob_hash, "abc123def456");
+    }
 }

@@ -5,14 +5,13 @@
 //! - A third alert after closing it within 24h yields none
 //! - A different cause yields a second bead
 
+use anyhow::{bail, Result};
 use chrono::Utc;
 use needle::fingerprint::{
     check_alert_deduplication, compute_fingerprint, AlertDeduplication, AlertKind,
 };
 use needle::types::{Bead, BeadId, BeadStatus};
 use std::path::PathBuf;
-use std::time::Duration;
-use tokio::time::sleep;
 
 /// In-memory bead store for testing alert deduplication.
 struct TestBeadStore {
@@ -39,74 +38,55 @@ impl TestBeadStore {
 
 #[async_trait::async_trait]
 impl needle::bead_store::BeadStore for TestBeadStore {
-    async fn list_all(&self) -> needle::anyhow::Result<Vec<needle::types::Bead>> {
+    async fn list_all(&self) -> Result<Vec<Bead>> {
         Ok(self.beads.clone())
     }
 
-    async fn ready(
-        &self,
-        _filters: &needle::bead_store::Filters,
-    ) -> needle::anyhow::Result<Vec<needle::types::Bead>> {
+    async fn ready(&self, _filters: &needle::bead_store::Filters) -> Result<Vec<Bead>> {
         Ok(vec![])
     }
 
-    async fn show(
-        &self,
-        _id: &needle::types::BeadId,
-    ) -> needle::anyhow::Result<needle::types::Bead> {
-        needle::anyhow::bail!("not implemented")
+    async fn show(&self, _id: &needle::types::BeadId) -> Result<Bead> {
+        bail!("not implemented")
     }
 
     async fn claim(
         &self,
         _id: &needle::types::BeadId,
         _actor: &str,
-    ) -> needle::anyhow::Result<needle::types::ClaimResult> {
-        needle::anyhow::bail!("not implemented")
+    ) -> Result<needle::types::ClaimResult> {
+        bail!("not implemented")
     }
 
-    async fn release(&self, _id: &needle::types::BeadId) -> needle::anyhow::Result<()> {
+    async fn release(&self, _id: &needle::types::BeadId) -> Result<()> {
         Ok(())
     }
 
-    async fn block(&self, _id: &needle::types::BeadId) -> needle::anyhow::Result<()> {
+    async fn block(&self, _id: &needle::types::BeadId) -> Result<()> {
         Ok(())
     }
 
-    async fn flush(&self) -> needle::anyhow::Result<()> {
+    async fn flush(&self) -> Result<()> {
         Ok(())
     }
 
-    async fn reopen(&self, _id: &needle::types::BeadId) -> needle::anyhow::Result<()> {
+    async fn reopen(&self, _id: &needle::types::BeadId) -> Result<()> {
         Ok(())
     }
 
-    async fn labels(&self, _id: &needle::types::BeadId) -> needle::anyhow::Result<Vec<String>> {
+    async fn labels(&self, _id: &needle::types::BeadId) -> Result<Vec<String>> {
         Ok(vec![])
     }
 
-    async fn add_label(
-        &self,
-        _id: &needle::types::BeadId,
-        _label: &str,
-    ) -> needle::anyhow::Result<()> {
+    async fn add_label(&self, _id: &needle::types::BeadId, _label: &str) -> Result<()> {
         Ok(())
     }
 
-    async fn remove_label(
-        &self,
-        _id: &needle::types::BeadId,
-        _label: &str,
-    ) -> needle::anyhow::Result<()> {
+    async fn remove_label(&self, _id: &needle::types::BeadId, _label: &str) -> Result<()> {
         Ok(())
     }
 
-    async fn create_bead(
-        &self,
-        title: &str,
-        body: &str,
-        labels: &[&str],
-    ) -> needle::anyhow::Result<needle::types::BeadId> {
+    async fn create_bead(&self, title: &str, body: &str, labels: &[&str]) -> Result<BeadId> {
         self.create_count
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
@@ -131,15 +111,15 @@ impl needle::bead_store::BeadStore for TestBeadStore {
         Ok(bead.id.clone())
     }
 
-    async fn doctor_repair(&self) -> needle::anyhow::Result<needle::bead_store::RepairReport> {
+    async fn doctor_repair(&self) -> Result<needle::bead_store::RepairReport> {
         Ok(needle::bead_store::RepairReport::default())
     }
 
-    async fn doctor_check(&self) -> needle::anyhow::Result<needle::bead_store::RepairReport> {
+    async fn doctor_check(&self) -> Result<needle::bead_store::RepairReport> {
         Ok(needle::bead_store::RepairReport::default())
     }
 
-    async fn full_rebuild(&self) -> needle::anyhow::Result<()> {
+    async fn full_rebuild(&self) -> Result<()> {
         Ok(())
     }
 
@@ -147,7 +127,7 @@ impl needle::bead_store::BeadStore for TestBeadStore {
         &self,
         _blocker_id: &needle::types::BeadId,
         _blocked_id: &needle::types::BeadId,
-    ) -> needle::anyhow::Result<()> {
+    ) -> Result<()> {
         Ok(())
     }
 
@@ -155,15 +135,15 @@ impl needle::bead_store::BeadStore for TestBeadStore {
         &self,
         _blocked_id: &needle::types::BeadId,
         _blocker_id: &needle::types::BeadId,
-    ) -> needle::anyhow::Result<()> {
+    ) -> Result<()> {
         Ok(())
     }
 
-    async fn clear_assignee(&self, _id: &needle::types::BeadId) -> needle::anyhow::Result<()> {
+    async fn clear_assignee(&self, _id: &needle::types::BeadId) -> Result<()> {
         Ok(())
     }
 
-    async fn claim_auto(&self, _actor: &str) -> needle::anyhow::Result<needle::types::ClaimResult> {
+    async fn claim_auto(&self, _actor: &str) -> Result<needle::types::ClaimResult> {
         Ok(needle::types::ClaimResult::NotClaimable {
             reason: "not implemented".to_string(),
         })
@@ -297,7 +277,7 @@ async fn test_fingerprint_collisions() {
     // Test that different inputs don't accidentally collide
     let workspace = "/home/coding/test";
 
-    let fingerprints = vec![
+    let fingerprints = [
         compute_fingerprint(workspace, &AlertKind::KnotStarvation, "cause1"),
         compute_fingerprint(workspace, &AlertKind::KnotStarvation, "cause2"),
         compute_fingerprint(workspace, &AlertKind::PluckStarvation, "cause1"),

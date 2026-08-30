@@ -1323,7 +1323,9 @@ impl EventKind {
             | EventKind::ReflectDecisionExtracted { bead_id, .. }
             | EventKind::ReflectAdrCreated { bead_id, .. }
             | EventKind::SplitSkipped { bead_id, .. }
-            | EventKind::AgentTimeout { bead_id, .. } => Some(bead_id.clone()),
+            | EventKind::AgentTimeout { bead_id, .. }
+            | EventKind::AuditBeadClosedAsVerification { bead_id, .. }
+            | EventKind::AuditBeadDeferredOverBudget { bead_id, .. } => Some(bead_id.clone()),
             EventKind::MitosisSplit { parent_id, .. }
             | EventKind::MitosisSkipped { parent_id, .. } => Some(parent_id.clone()),
             EventKind::MitosisOutOfScope { bead_id } => Some(bead_id.clone()),
@@ -1445,9 +1447,6 @@ impl EventKind {
             EventKind::UpgradeCheckFailed { .. } => None,
             EventKind::PluckOrderingDegraded { .. } => None,
             EventKind::MendCycleBroken { .. } => None,
-            EventKind::AuditBeadClosedAsVerification { .. } => None,
-            EventKind::AuditBeadDeferredOverBudget { .. } => None,
-            EventKind::GenerationRatio { .. } => None,
         }
     }
 
@@ -2875,19 +2874,6 @@ impl EventKind {
                 "blocked_id": blocked_id,
                 "blocker_id": blocker_id,
                 "cycle_len": cycle_len,
-            }),
-            EventKind::AuditBeadClosedAsVerification { bead_id, parent_id } => serde_json::json!({
-                "bead_id": bead_id,
-                "parent_id": parent_id,
-            }),
-            EventKind::AuditBeadDeferredOverBudget {
-                bead_id,
-                position,
-                budget,
-            } => serde_json::json!({
-                "bead_id": bead_id,
-                "position": position,
-                "budget": budget,
             }),
         }
     }

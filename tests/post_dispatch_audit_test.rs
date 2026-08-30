@@ -373,7 +373,7 @@ async fn verification_beads_are_closed_and_folded_into_parent() {
     let body = updated_parent.body.as_deref().unwrap();
     assert!(body.contains("## folded: Verify the endpoint works"));
     assert!(body.contains("Check that"));
-    assert!(body.contains(&parent_id.as_ref()));
+    assert!(body.contains(parent_id.as_ref()));
 
     println!("✅ Test passed: verification beads are closed and folded into parent");
 }
