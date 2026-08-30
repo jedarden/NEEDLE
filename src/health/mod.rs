@@ -1459,12 +1459,11 @@ mod tests {
         // HOME/PATH-mutating test uses, or the value another test set is the
         // one this test's HealthMonitor resolves against (seen as two
         // different tempdirs in the same assertion).
-        let (lock, env_guard) = crate::util::test_env::isolate_env();
+        let env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", home);
         HomeGuard {
             _temp_dir: None,
             _env_guard: env_guard,
-            _lock: lock,
         }
     }
 
@@ -1472,7 +1471,6 @@ mod tests {
     struct HomeGuard {
         _temp_dir: Option<tempfile::TempDir>,
         _env_guard: crate::util::test_env::EnvGuard,
-        _lock: std::sync::MutexGuard<'static, ()>,
     }
 
     fn test_config(heartbeat_dir: &Path) -> Config {

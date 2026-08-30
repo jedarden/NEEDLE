@@ -862,9 +862,22 @@ pub(crate) mod test_env {
         "NEEDLE_HEARTBEATS",
     ];
 
-    /// Restores every guarded variable to its captured value when dropped.
+    /// Restores every guarded variable to its captured value when dropped,
+    /// and only then releases the lock.
+    ///
+    /// The lock lives INSIDE this guard on purpose. It used to be returned
+    /// beside it as `(MutexGuard, EnvGuard)`, and a tuple drops its elements
+    /// in declaration order — so the mutex was released *before* the
+    /// environment was restored. The next test could take the lock, set its
+    /// own `HOME`, and then have the previous test's restore land on top of
+    /// it. That is a race no caller can avoid, and it produced exactly the
+    /// class of failure this module exists to prevent (observed 2026-08-30:
+    /// `expand_tilde_path_needle_d_directory` read the real `HOME` one run in
+    /// three). `Drop::drop` runs before a struct's fields drop, so restoring
+    /// here and holding `_lock` as a field gives the correct order.
     pub(crate) struct EnvGuard {
         saved: Vec<(&'static str, Option<OsString>)>,
+        _lock: MutexGuard<'static, ()>,
     }
 
     impl Drop for EnvGuard {
@@ -912,20 +925,21 @@ pub(crate) mod test_env {
 
     /// Acquire the environment lock and capture `HOME`/`PATH` for restoration.
     ///
-    /// Hold the returned tuple for the whole test body; dropping it releases
-    /// the lock and restores the environment. The lock is intentionally
-    /// poison-tolerant: a panicking test must not wedge every later test.
-    pub(crate) fn isolate_env() -> (MutexGuard<'static, ()>, EnvGuard) {
+    /// Hold the returned guard for the whole test body; dropping it restores
+    /// the environment and then releases the lock, in that order. The lock is
+    /// intentionally poison-tolerant: a panicking test must not wedge every
+    /// later test.
+    pub(crate) fn isolate_env() -> EnvGuard {
         let lock = ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let guard = EnvGuard {
+        EnvGuard {
             saved: GUARDED_VARS
                 .iter()
                 .map(|&key| (key, std::env::var_os(key)))
                 .collect(),
-        };
-        (lock, guard)
+            _lock: lock,
+        }
     }
 }
 
@@ -1016,7 +1030,7 @@ mod tests {
 
     #[test]
     fn test_expand_tilde_with_home() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         // Set a known HOME value for testing
         env::set_var("HOME", "/home/testuser");
 
@@ -1033,7 +1047,7 @@ mod tests {
 
     #[test]
     fn test_expand_tilde_without_home() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         // Remove HOME for this test
         env::remove_var("HOME");
 
@@ -1044,7 +1058,7 @@ mod tests {
 
     #[test]
     fn test_expand_tilde_trailing_slash_in_home() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         // Test that trailing slashes in HOME are handled correctly
         env::set_var("HOME", "/home/testuser/");
 
@@ -1054,7 +1068,7 @@ mod tests {
 
     #[test]
     fn test_expand_tilde_preserves_double_slash() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         env::set_var("HOME", "/home/testuser");
 
         // If the user types "~//foo", we preserve the double slash (it's their input)
@@ -1063,7 +1077,7 @@ mod tests {
 
     #[test]
     fn test_get_home_or_default() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         env::set_var("HOME", "/home/test");
         assert_eq!(get_home_or_default("fallback"), "/home/test");
 
@@ -1073,7 +1087,7 @@ mod tests {
 
     #[test]
     fn test_expand_tilde_multi_level_paths() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         env::set_var("HOME", "/home/testuser");
 
         // Test single level
@@ -1106,7 +1120,7 @@ mod tests {
 
     #[test]
     fn test_expand_tilde_normal_cases() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         env::set_var("HOME", "/home/testuser");
 
         // Basic tilde expansion
@@ -1130,7 +1144,7 @@ mod tests {
 
     #[test]
     fn test_expand_tilde_edge_case_tilde_without_slash() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         env::set_var("HOME", "/home/testuser");
 
         // "~foo" should not be expanded (not a home path pattern)
@@ -1148,7 +1162,7 @@ mod tests {
 
     #[test]
     fn test_expand_tilde_edge_case_multiple_tildes() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         env::set_var("HOME", "/home/testuser");
 
         // Any path starting with "~/" is expanded, regardless of tildes elsewhere
@@ -1167,7 +1181,7 @@ mod tests {
 
     #[test]
     fn test_expand_tilde_edge_case_empty_and_whitespace() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         env::set_var("HOME", "/home/testuser");
 
         // Empty string
@@ -1180,7 +1194,7 @@ mod tests {
 
     #[test]
     fn test_expand_tilde_edge_case_no_home_with_tilde_variants() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         env::remove_var("HOME");
 
         // Without HOME, all tilde variants are returned unchanged
@@ -1197,7 +1211,7 @@ mod tests {
     /// when HOME is not set. This is the core fix for the bare tilde expansion issue.
     #[test]
     fn test_bare_tilde_expansion() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         // With HOME set, bare tilde should expand to HOME
         env::set_var("HOME", "/home/testuser");
         assert_eq!(expand_tilde("~"), "/home/testuser");
@@ -1212,7 +1226,7 @@ mod tests {
     /// This is one of the acceptance criteria: verify "/abs/path" returns unchanged.
     #[test]
     fn test_absolute_paths_unchanged() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         env::set_var("HOME", "/home/testuser");
 
         // Absolute paths should pass through unchanged
@@ -1229,7 +1243,7 @@ mod tests {
     /// remain unchanged.
     #[test]
     fn test_relative_paths_unchanged() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         env::set_var("HOME", "/home/testuser");
 
         // Relative paths should pass through unchanged
@@ -1249,7 +1263,7 @@ mod tests {
     /// where tilde paths return unchanged.
     #[test]
     fn test_missing_home_fallback() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         // Explicitly remove HOME to test fallback behavior
         env::remove_var("HOME");
 
@@ -1269,7 +1283,7 @@ mod tests {
     /// manipulation. Each test should set up its own HOME state.
     #[test]
     fn test_home_isolation() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         // Set HOME to a specific value
         env::set_var("HOME", "/home/testuser");
         assert_eq!(expand_tilde("~/test"), "/home/testuser/test");
@@ -2283,7 +2297,7 @@ echo "Warning: deprecated flag" >&2
     fn test_probe_bead_cli_with_bead_available() {
         use std::os::unix::fs::PermissionsExt;
 
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
 
         // Create a temporary directory and fake bead binary
         let tmp_dir = tempfile::tempdir().unwrap();
@@ -2323,7 +2337,7 @@ echo "bead 0.1.3"
     fn test_probe_bead_cli_with_bf_available() {
         use std::os::unix::fs::PermissionsExt;
 
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
 
         // Create a temporary directory and fake bf binary (no bead)
         let tmp_dir = tempfile::tempdir().unwrap();
@@ -2369,7 +2383,7 @@ echo "bf 0.4.1"
     fn test_probe_bead_cli_with_br_available() {
         use std::os::unix::fs::PermissionsExt;
 
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
 
         // Create a temporary directory and fake br binary (no bead, no bf)
         let tmp_dir = tempfile::tempdir().unwrap();
@@ -2410,7 +2424,7 @@ echo "br (deprecated)"
     #[serial]
     #[test]
     fn test_probe_bead_cli_with_none_available() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
 
         // Create an empty temporary directory
         let tmp_dir = tempfile::tempdir().unwrap();
@@ -2433,7 +2447,7 @@ echo "br (deprecated)"
     fn test_probe_bead_cli_priority_order() {
         use std::os::unix::fs::PermissionsExt;
 
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
 
         // Create a temporary directory with all three CLIs
         let tmp_dir = tempfile::tempdir().unwrap();
@@ -2496,7 +2510,7 @@ echo "br (deprecated)"
     fn test_probe_bead_cli_bf_priority_over_br() {
         use std::os::unix::fs::PermissionsExt;
 
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
 
         // Create a temporary directory with bf and br (no bead)
         let tmp_dir = tempfile::tempdir().unwrap();
@@ -2546,7 +2560,7 @@ echo "br (deprecated)"
     fn test_resolve_command_in_path_with_which() {
         use std::os::unix::fs::PermissionsExt;
 
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
 
         // Create a temporary directory and fake binary
         let tmp_dir = tempfile::tempdir().unwrap();
@@ -2576,7 +2590,7 @@ echo "test output"
 
     #[test]
     fn test_resolve_command_in_path_not_found() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
 
         // Try to resolve a non-existent command
         let result = resolve_command_in_path("nonexistent-binary-xyz123");
@@ -2627,7 +2641,7 @@ echo "test output"
     fn test_probe_bead_cli_path_with_spaces() {
         use std::os::unix::fs::PermissionsExt;
 
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
 
         // Create a temp directory with spaces in the name
         let tmp_dir = tempfile::tempdir().unwrap();
@@ -2667,7 +2681,7 @@ echo "bead 0.1.3"
     fn test_probe_bead_cli_with_successful_verification() {
         use std::os::unix::fs::PermissionsExt;
 
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
 
         let tmp_dir = tempfile::tempdir().unwrap();
         let fake_bead = tmp_dir.path().join("bead");
@@ -2703,7 +2717,7 @@ echo "bead 0.26.0"
     fn test_probe_bead_cli_rejects_backend_mismatch() {
         use std::os::unix::fs::PermissionsExt;
 
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
 
         let tmp_dir = tempfile::tempdir().unwrap();
 
@@ -2757,7 +2771,7 @@ echo "bf 0.4.1"
     fn test_probe_bead_cli_rejects_bead_named_as_bf() {
         use std::os::unix::fs::PermissionsExt;
 
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
 
         let tmp_dir = tempfile::tempdir().unwrap();
 
@@ -2791,7 +2805,7 @@ echo "bead 0.26.0"
     fn test_probe_bead_cli_verifies_all_candidates_in_priority() {
         use std::os::unix::fs::PermissionsExt;
 
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
 
         let tmp_dir = tempfile::tempdir().unwrap();
 
@@ -2842,7 +2856,7 @@ echo "bf 0.4.1"
     fn test_probe_bead_cli_handles_bead_rust_variant() {
         use std::os::unix::fs::PermissionsExt;
 
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
 
         let tmp_dir = tempfile::tempdir().unwrap();
         let fake_bead = tmp_dir.path().join("bead");
@@ -2883,7 +2897,7 @@ echo "beads-rust 0.26.0"
         use crate::config::BeadBackend;
         use std::os::unix::fs::PermissionsExt;
 
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
 
         let tmp_dir = tempfile::tempdir().unwrap();
         let fake_bead = tmp_dir.path().join("my-custom-bead");
@@ -2915,7 +2929,7 @@ echo "bead 0.26.0"
         use crate::config::BeadBackend;
         use std::os::unix::fs::PermissionsExt;
 
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
 
         let tmp_dir = tempfile::tempdir().unwrap();
         let fake_bead = tmp_dir.path().join("bead");
@@ -2952,7 +2966,7 @@ echo "bead 0.26.0"
         use crate::config::BeadBackend;
         use std::os::unix::fs::PermissionsExt;
 
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
 
         let tmp_dir = tempfile::tempdir().unwrap();
         let fake_br = tmp_dir.path().join("br");
@@ -2986,7 +3000,7 @@ echo "br (deprecated)"
         use crate::config::BeadBackend;
         use std::os::unix::fs::PermissionsExt;
 
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
 
         let tmp_dir = tempfile::tempdir().unwrap();
         let fake_bead = tmp_dir.path().join("bead");
@@ -3020,7 +3034,7 @@ echo "bead 0.26.0"
         use crate::config::BeadBackend;
         use std::os::unix::fs::PermissionsExt;
 
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
 
         let tmp_dir = tempfile::tempdir().unwrap();
         let fake_bf = tmp_dir.path().join("bf");
@@ -3057,7 +3071,7 @@ echo "bf 0.4.1"
         use crate::config::BeadBackend;
         use std::os::unix::fs::PermissionsExt;
 
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
 
         let tmp_dir = tempfile::tempdir().unwrap();
         let fake_br = tmp_dir.path().join("br");
@@ -3090,7 +3104,7 @@ echo "br (deprecated)"
     fn test_detect_bead_cli_backend_none_available() {
         use crate::config::BeadBackend;
 
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
 
         let tmp_dir = tempfile::tempdir().unwrap();
         set_hermetic_probe_path(tmp_dir.path());
@@ -3107,7 +3121,7 @@ echo "br (deprecated)"
         use crate::config::BeadBackend;
         use std::os::unix::fs::PermissionsExt;
 
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
 
         let tmp_dir = tempfile::tempdir().unwrap();
         let fake_br = tmp_dir.path().join("br");
@@ -3141,7 +3155,7 @@ echo "br (deprecated)"
         use crate::config::BeadBackend;
         use std::os::unix::fs::PermissionsExt;
 
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
 
         let tmp_dir = tempfile::tempdir().unwrap();
         let fake_bead = tmp_dir.path().join("bead");
@@ -3175,7 +3189,7 @@ echo "bead 0.26.0"
         use crate::config::BeadBackend;
         use std::os::unix::fs::PermissionsExt;
 
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
 
         let tmp_dir = tempfile::tempdir().unwrap();
 
@@ -3218,7 +3232,7 @@ echo "{}"
         use crate::config::BeadBackend;
         use std::os::unix::fs::PermissionsExt;
 
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
 
         let tmp_dir = tempfile::tempdir().unwrap();
         let fake_bead = tmp_dir.path().join("bead");

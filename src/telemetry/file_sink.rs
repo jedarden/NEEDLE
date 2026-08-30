@@ -477,14 +477,11 @@ mod tests {
     /// Holds the process-wide env lock plus the restore guard for HOME/PATH.
     struct EnvLock {
         _env_guard: crate::util::test_env::EnvGuard,
-        _lock: std::sync::MutexGuard<'static, ()>,
     }
 
     fn home_lock() -> EnvLock {
-        let (lock, env_guard) = crate::util::test_env::isolate_env();
         EnvLock {
-            _env_guard: env_guard,
-            _lock: lock,
+            _env_guard: crate::util::test_env::isolate_env(),
         }
     }
 

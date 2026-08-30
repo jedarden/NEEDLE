@@ -232,20 +232,16 @@ mod tests {
     /// pin HOME reads and writes the real fleet's state — and races every
     /// other test that swaps HOME (observed: test_is_degraded and
     /// test_state_clear failing only under parallel execution).
-    fn isolated_home() -> (
-        std::sync::MutexGuard<'static, ()>,
-        crate::util::test_env::EnvGuard,
-        TempDir,
-    ) {
-        let (lock, env_guard) = crate::util::test_env::isolate_env();
+    fn isolated_home() -> (crate::util::test_env::EnvGuard, TempDir) {
+        let env_guard = crate::util::test_env::isolate_env();
         let home = TempDir::new().unwrap();
         std::env::set_var("HOME", home.path());
-        (lock, env_guard, home)
+        (env_guard, home)
     }
 
     #[test]
     fn test_state_increment_no_degradation() {
-        let (_lock, _env_guard, _home) = isolated_home();
+        let (_env_guard, _home) = isolated_home();
         let temp_dir = TempDir::new().unwrap();
         let workspace = temp_dir.path();
 
@@ -263,7 +259,7 @@ mod tests {
 
     #[test]
     fn test_state_clear() {
-        let (_lock, _env_guard, _home) = isolated_home();
+        let (_env_guard, _home) = isolated_home();
         let temp_dir = TempDir::new().unwrap();
         let workspace = temp_dir.path();
 
@@ -289,7 +285,7 @@ mod tests {
 
     #[test]
     fn test_is_degraded() {
-        let (_lock, _env_guard, _home) = isolated_home();
+        let (_env_guard, _home) = isolated_home();
         let temp_dir = TempDir::new().unwrap();
         let workspace = temp_dir.path();
 

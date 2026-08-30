@@ -746,7 +746,7 @@ mod tests {
     async fn skips_trailer_injection_when_head_already_pushed() {
         use super::inject_bead_id_trailer;
 
-        let (setup_env_lock, setup_env_guard) = crate::util::test_env::isolate_env();
+        let setup_env_guard = crate::util::test_env::isolate_env();
 
         // Regression test for needle-9c8640b7: when HEAD is already pushed to
         // a remote, inject_bead_id_trailer should skip the amend to avoid
@@ -808,14 +808,13 @@ mod tests {
         );
 
         drop(setup_env_guard);
-        drop(setup_env_lock);
 
         // Try to inject the trailer - should skip because HEAD is pushed
         inject_bead_id_trailer(&repo_path, &bead_id, &base_head)
             .await
             .unwrap();
 
-        let (_verify_env_lock, _verify_env_guard) = crate::util::test_env::isolate_env();
+        let _verify_env_guard = crate::util::test_env::isolate_env();
 
         // Verify HEAD SHA is unchanged (no amend occurred)
         let head_after_injection = run_git(&repo_path, &["rev-parse", "HEAD"]);
@@ -926,7 +925,7 @@ mod tests {
         use super::validate_commit;
         use crate::validation::predispatch::{self, DirtyFile, PreDispatch};
 
-        let (setup_env_lock, setup_env_guard) = crate::util::test_env::isolate_env();
+        let setup_env_guard = crate::util::test_env::isolate_env();
 
         // Test that validate_commit rejects commits that include a foreign dirty file
         // (file was dirty before dispatch and agent hasn't modified it)
@@ -972,8 +971,9 @@ mod tests {
         // Stage the same dirty content (agent hasn't modified it)
         run_git(&repo_path, &["add", "foreign.txt"]);
 
-        // Drop the lock before await
-        drop(setup_env_lock);
+        // Drop the env guard (restores env, then releases the lock) before await
+
+        drop(setup_env_guard);
 
         // Validate the commit - should reject
         let result = validate_commit(&repo_path, &bead_id).await;
@@ -993,8 +993,6 @@ mod tests {
             "error message should explain the problem: {}",
             error_msg
         );
-
-        drop(setup_env_guard);
     }
 
     #[serial]
@@ -1003,7 +1001,7 @@ mod tests {
         use super::validate_commit;
         use crate::validation::predispatch::{self, DirtyFile, PreDispatch};
 
-        let (setup_env_lock, setup_env_guard) = crate::util::test_env::isolate_env();
+        let setup_env_guard = crate::util::test_env::isolate_env();
 
         // Test that validate_commit allows commits where the agent modified
         // a file that was dirty at dispatch
@@ -1046,8 +1044,9 @@ mod tests {
         fs::write(&file, "agent's modification").unwrap();
         run_git(&repo_path, &["add", "shared.txt"]);
 
-        // Drop the lock before await
-        drop(setup_env_lock);
+        // Drop the env guard (restores env, then releases the lock) before await
+
+        drop(setup_env_guard);
 
         // Validate the commit - should allow (agent modified it)
         let result = validate_commit(&repo_path, &bead_id).await;
@@ -1057,8 +1056,6 @@ mod tests {
             "commit should be allowed when agent modified the dirty file: {:?}",
             result
         );
-
-        drop(setup_env_guard);
     }
 
     #[serial]
@@ -1067,7 +1064,7 @@ mod tests {
         use super::validate_commit;
         use crate::validation::predispatch::{self, PreDispatch};
 
-        let (setup_env_lock, setup_env_guard) = crate::util::test_env::isolate_env();
+        let setup_env_guard = crate::util::test_env::isolate_env();
 
         // Test that validate_commit allows commits of files that were clean
         // (not dirty) at dispatch time
@@ -1099,8 +1096,9 @@ mod tests {
         fs::write(&file, "new content").unwrap();
         run_git(&repo_path, &["add", "new_file.txt"]);
 
-        // Drop the lock before await
-        drop(setup_env_lock);
+        // Drop the env guard (restores env, then releases the lock) before await
+
+        drop(setup_env_guard);
 
         // Validate the commit - should allow (file was clean at dispatch)
         let result = validate_commit(&repo_path, &bead_id).await;
@@ -1110,8 +1108,6 @@ mod tests {
             "commit should be allowed for clean files: {:?}",
             result
         );
-
-        drop(setup_env_guard);
     }
 
     #[serial]
@@ -1120,7 +1116,7 @@ mod tests {
         use super::validate_commit;
         use crate::validation::predispatch::{self, PreDispatch};
 
-        let (setup_env_lock, setup_env_guard) = crate::util::test_env::isolate_env();
+        let setup_env_guard = crate::util::test_env::isolate_env();
 
         // Test that .beads/ and .needle-predispatch-sha are always allowed
         // regardless of predispatch state
@@ -1155,8 +1151,9 @@ mod tests {
         // Stage .beads/test.json (should be allowed)
         run_git(&repo_path, &["add", ".beads/test.json"]);
 
-        // Drop the lock before await
-        drop(setup_env_lock);
+        // Drop the env guard (restores env, then releases the lock) before await
+
+        drop(setup_env_guard);
 
         let result = validate_commit(&repo_path, &bead_id).await;
 
@@ -1165,8 +1162,6 @@ mod tests {
             ".beads/ paths should always be allowed: {:?}",
             result
         );
-
-        drop(setup_env_guard);
     }
 
     #[serial]
@@ -1174,7 +1169,7 @@ mod tests {
     async fn validate_commit_returns_ok_when_no_snapshot() {
         use super::validate_commit;
 
-        let (setup_env_lock, setup_env_guard) = crate::util::test_env::isolate_env();
+        let setup_env_guard = crate::util::test_env::isolate_env();
 
         // Test that validate_commit returns Ok when there's no predispatch snapshot
         // (conservative fallback path)
@@ -1193,8 +1188,9 @@ mod tests {
         fs::write(&file, "content").unwrap();
         run_git(&repo_path, &["add", "test.txt"]);
 
-        // Drop the lock before await
-        drop(setup_env_lock);
+        // Drop the env guard (restores env, then releases the lock) before await
+
+        drop(setup_env_guard);
 
         // No snapshot exists - should fall back to allowing the commit
         let result = validate_commit(&repo_path, &bead_id).await;
@@ -1204,7 +1200,5 @@ mod tests {
             "should return Ok when no snapshot exists (fallback): {:?}",
             result
         );
-
-        drop(setup_env_guard);
     }
 }

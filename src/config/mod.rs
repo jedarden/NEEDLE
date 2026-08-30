@@ -1162,15 +1162,10 @@ pub fn detect_bead_backend(workspace_root: &Path) -> Result<(Backend, PathBuf)> 
 /// # Returns
 ///
 /// A tuple of:
-/// - `MutexGuard<'static, ()>`: The crate-wide environment lock
-/// - `EnvGuard`: RAII guard that restores PATH when dropped
-/// - `PathBuf`: Path to the temporary directory for test binaries
-pub(crate) fn isolate_bead_cli_env() -> (
-    std::sync::MutexGuard<'static, ()>,
-    crate::util::test_env::EnvGuard,
-    tempfile::TempDir,
-) {
-    let (lock, guard) = crate::util::test_env::isolate_env();
+/// - `EnvGuard`: holds the crate-wide env lock and restores PATH when dropped
+/// - `TempDir`: the temporary directory for test binaries
+pub(crate) fn isolate_bead_cli_env() -> (crate::util::test_env::EnvGuard, tempfile::TempDir) {
+    let guard = crate::util::test_env::isolate_env();
     let tmp_dir = tempfile::tempdir().expect("failed to create temp dir for test binaries");
 
     // Set PATH to only the temp directory, preventing interference from system CLIs
@@ -1182,7 +1177,7 @@ pub(crate) fn isolate_bead_cli_env() -> (
             .expect("temp dir path is valid UTF-8"),
     );
 
-    (lock, guard, tmp_dir)
+    (guard, tmp_dir)
 }
 
 #[cfg(test)]
@@ -1625,7 +1620,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_resolve_bead_cli_auto_ignores_deprecated_br() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
+        let (_env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -1656,7 +1651,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_resolve_bead_cli_auto_precedence_bead_third() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
+        let (_env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -1684,7 +1679,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_resolve_bead_cli_auto_no_binary_error() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
+        let (_env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -1720,7 +1715,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_resolve_bead_cli_auto_error_cli_without_execute_permission() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
+        let (_env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -1756,7 +1751,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_resolve_bead_cli_auto_error_bead_non_executable() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
+        let (_env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -1802,7 +1797,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_resolve_bead_cli_auto_error_nonexistent_path_directories() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
+        let (_env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -1851,7 +1846,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_auto_fallback_chain_exhaustive_stops_at_first_match() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
+        let (_env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = setup_test_binary_dir();
         let home = tmp_dir.path().to_path_buf();
 
@@ -1895,7 +1890,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_auto_backend_empty_path_no_fallback_returns_meaningful_error() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
+        let (_env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = setup_test_binary_dir();
         let home = tmp_dir.path().to_path_buf();
 
@@ -1935,7 +1930,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_auto_fallback_chain_cargo_bin_location() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
+        let (_env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = setup_test_binary_dir();
         let home = tmp_dir.path().to_path_buf();
 
@@ -1976,7 +1971,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_auto_fallback_chain_nonexistent_path_continues_to_fallback() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
+        let (_env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = setup_test_binary_dir();
         let home = tmp_dir.path().to_path_buf();
 
@@ -2017,7 +2012,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_auto_fallback_chain_symlinked_cli_resolved_correctly() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
+        let (_env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = setup_test_binary_dir();
         let home = tmp_dir.path().to_path_buf();
 
@@ -2073,7 +2068,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_resolve_bead_cli_bead_backend_finds_on_path() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
+        let (_env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -2101,7 +2096,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_resolve_bead_cli_bead_backend_falls_back_to_local_bin() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
+        let (_env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -2129,7 +2124,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_resolve_bead_cli_bead_backend_falls_back_to_cargo_bin() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
+        let (_env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -2166,7 +2161,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_resolve_bead_cli_bead_backend_not_found_error() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
+        let (_env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -2191,7 +2186,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_resolve_bead_cli_bead_backend_returns_bead_variant() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
+        let (_env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -2218,7 +2213,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_resolve_bead_cli_br_backend_finds_on_path() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
+        let (_env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -2246,7 +2241,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_resolve_bead_cli_br_backend_falls_back_to_local_bin() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
+        let (_env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -2274,7 +2269,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_resolve_bead_cli_br_backend_falls_back_to_cargo_bin() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
+        let (_env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -2300,7 +2295,7 @@ mod tests {
     #[serial]
     #[test]
     fn test_resolve_bead_cli_br_backend_not_found_error() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
+        let (_env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -2657,7 +2652,7 @@ path: ./local/bin/bead
     #[serial]
     #[test]
     fn test_resolve_bead_cli_error_when_no_binary_found() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
+        let (_env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -2761,7 +2756,7 @@ path: /path with spaces/to/bead
     #[serial]
     #[test]
     fn test_detect_bead_backend_config_set_to_bead() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
+        let (_env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let ws_root = tmp_dir.path();
 
@@ -2791,7 +2786,7 @@ path: /path with spaces/to/bead
     #[serial]
     #[test]
     fn test_detect_bead_backend_config_set_to_auto_detects_bead() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
+        let (_env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let ws_root = tmp_dir.path();
 
@@ -2823,7 +2818,7 @@ path: /path with spaces/to/bead
     #[serial]
     #[test]
     fn test_detect_bead_backend_auto_falls_back_to_br() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
+        let (_env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let ws_root = tmp_dir.path();
 
@@ -2849,7 +2844,7 @@ path: /path with spaces/to/bead
     #[serial]
     #[test]
     fn test_detect_bead_backend_no_config_detects_bead() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
+        let (_env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let ws_root = tmp_dir.path();
 
@@ -2875,7 +2870,7 @@ path: /path with spaces/to/bead
     #[serial]
     #[test]
     fn test_detect_bead_backend_none_available_returns_error() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
+        let (_env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let ws_root = tmp_dir.path();
 
@@ -2896,7 +2891,7 @@ path: /path with spaces/to/bead
     #[serial]
     #[test]
     fn test_detect_bead_backend_config_invalid_backend_value() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
+        let (_env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let ws_root = tmp_dir.path();
 
@@ -2916,7 +2911,7 @@ path: /path with spaces/to/bead
     #[serial]
     #[test]
     fn test_detect_bead_backend_config_uses_bead_alias() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
+        let (_env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let ws_root = tmp_dir.path();
 
@@ -2948,7 +2943,7 @@ path: /path with spaces/to/bead
     #[serial]
     #[test]
     fn test_detect_bead_backend_config_br_backend() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
+        let (_env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let ws_root = tmp_dir.path();
 
@@ -3223,7 +3218,7 @@ path: /path/to/./bead
     #[serial]
     #[test]
     fn test_resolve_bead_cli_auto_finds_bead_on_path() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
+        let (_env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -3255,7 +3250,7 @@ path: /path/to/./bead
     #[serial]
     #[test]
     fn test_resolve_bead_cli_auto_finds_bead_in_local_bin() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
+        let (_env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -3290,7 +3285,7 @@ path: /path/to/./bead
     #[serial]
     #[test]
     fn test_resolve_bead_cli_auto_finds_bead_in_cargo_bin() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
+        let (_env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -3330,7 +3325,7 @@ path: /path/to/./bead
     #[serial]
     #[test]
     fn test_resolve_bead_cli_auto_error_neither_cli_found() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
+        let (_env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
@@ -3924,6 +3919,48 @@ impl ExploreConfig {
     }
 
     fn default_stuck_threshold_secs() -> u64 {
+        300
+    }
+}
+
+/// Fleet backlog replenishment policy for work-generating strands.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GenerationConfig {
+    /// Enable low-water generation after Pluck and Explore find no eligible work.
+    #[serde(default = "GenerationConfig::default_enabled")]
+    pub enabled: bool,
+
+    /// Minimum eligible-ready reserve below which generators may bypass their
+    /// ordinary cooldown. A value of zero disables low-water overrides.
+    #[serde(default = "GenerationConfig::default_low_water_reserve")]
+    pub low_water_reserve: usize,
+
+    /// Duration of the workspace-plus-strand generation lease. The lease also
+    /// bounds retry frequency after a generator finds no new work.
+    #[serde(default = "GenerationConfig::default_lease_ttl_secs")]
+    pub lease_ttl_secs: u64,
+}
+
+impl Default for GenerationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+            low_water_reserve: Self::default_low_water_reserve(),
+            lease_ttl_secs: Self::default_lease_ttl_secs(),
+        }
+    }
+}
+
+impl GenerationConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+
+    fn default_low_water_reserve() -> usize {
+        2
+    }
+
+    fn default_lease_ttl_secs() -> u64 {
         300
     }
 }
@@ -4555,6 +4592,8 @@ pub struct StrandsConfig {
     pub mend: MendConfig,
     #[serde(default)]
     pub explore: ExploreConfig,
+    #[serde(default)]
+    pub generation: GenerationConfig,
     #[serde(default)]
     pub knot: KnotConfig,
     #[serde(default)]
@@ -5840,7 +5879,7 @@ pub type SourceMap = BTreeMap<String, ConfigSource>;
 ///
 /// Only these sections are allowed at the workspace level:
 /// - `agent.default`, `agent.timeout`
-/// - `strands` (weave, pulse, unravel)
+/// - `strands` (generation, weave, pulse, unravel)
 /// - `prompt.*`
 /// - `verification` (legacy) or `gates` (new pluggable system)
 ///
@@ -5887,6 +5926,8 @@ pub struct WorkspaceAgentOverrides {
 /// Strand fields overridable at the workspace level.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct WorkspaceStrandsOverrides {
+    #[serde(default)]
+    pub generation: Option<GenerationConfig>,
     #[serde(default)]
     pub weave: Option<serde_yaml::Value>,
     #[serde(default)]
@@ -6665,7 +6706,15 @@ fn validate_strands_field(
     key_path: &str,
 ) -> Result<(), ConfigError> {
     let valid_fields = [
-        "mitosis", "explore", "weave", "unravel", "pulse", "reflect", "learning", "splice",
+        "mitosis",
+        "explore",
+        "generation",
+        "weave",
+        "unravel",
+        "pulse",
+        "reflect",
+        "learning",
+        "splice",
         "resolve",
     ];
 
@@ -6684,6 +6733,7 @@ fn validate_strands_field(
         match field {
             "mitosis" => validate_mitosis_field(third, key_path),
             "explore" => validate_explore_field(third, key_path),
+            "generation" => validate_generation_field(third, key_path),
             "weave" => validate_weave_field(third, key_path),
             "pulse" => validate_pulse_field(third, &remaining[1..], key_path),
             "learning" => validate_learning_field(third, key_path),
@@ -6693,6 +6743,20 @@ fn validate_strands_field(
         }
     } else {
         Ok(())
+    }
+}
+
+fn validate_generation_field(field: &str, key_path: &str) -> Result<(), ConfigError> {
+    let valid_fields = ["enabled", "low_water_reserve", "lease_ttl_secs"];
+    if valid_fields.contains(&field) {
+        Ok(())
+    } else {
+        Err(ConfigError::invalid_segment(
+            key_path.to_string(),
+            field.to_string(),
+            valid_fields.map(str::to_string).to_vec(),
+            "strands.generation".to_string(),
+        ))
     }
 }
 
@@ -7062,6 +7126,10 @@ impl ConfigLoader {
         }
 
         if let Some(ref strands) = overrides.strands {
+            if let Some(ref generation) = strands.generation {
+                config.strands.generation = generation.clone();
+                sources.insert("strands.generation".to_string(), source.clone());
+            }
             if let Some(ref weave_val) = strands.weave {
                 if let Ok(weave_cfg) = serde_yaml::from_value::<WeaveConfig>(weave_val.clone()) {
                     config.strands.weave = weave_cfg;
@@ -7516,6 +7584,16 @@ impl ConfigLoader {
             ));
         }
 
+        if config.strands.generation.enabled
+            && config.strands.generation.low_water_reserve > 0
+            && config.strands.generation.lease_ttl_secs == 0
+        {
+            errors.push(ConfigError::new(
+                "strands.generation.lease_ttl_secs".to_string(),
+                "must be at least 1 when low-water generation is enabled".to_string(),
+            ));
+        }
+
         if config.post_push_ci.enabled {
             if config.post_push_ci.default_workflow.trim().is_empty() {
                 errors.push(ConfigError::new(
@@ -7896,10 +7974,7 @@ mod config_tests {
     /// Delegates to the single crate-wide env lock. A module-private lock
     /// would not exclude the `HOME` mutations performed by other modules'
     /// tests, which is what made these tests order-dependent.
-    fn lock_supervisor_env() -> (
-        std::sync::MutexGuard<'static, ()>,
-        crate::util::test_env::EnvGuard,
-    ) {
+    fn lock_supervisor_env() -> crate::util::test_env::EnvGuard {
         crate::util::test_env::isolate_env()
     }
 
@@ -7979,7 +8054,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_str_with_tilde_slash() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde_str("~/docs");
         assert_eq!(result, "/home/testuser/docs");
@@ -7988,7 +8063,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_str_bare_tilde() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde_str("~");
         assert_eq!(result, "/home/testuser");
@@ -7997,7 +8072,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_str_absolute_path_unchanged() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde_str("/tmp/file.txt");
         assert_eq!(result, "/tmp/file.txt");
@@ -8006,7 +8081,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_str_relative_path_unchanged() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde_str("relative/path");
         assert_eq!(result, "relative/path");
@@ -8015,7 +8090,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_str_empty_string() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde_str("");
         assert_eq!(result, "");
@@ -8024,7 +8099,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_str_missing_home_returns_original() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::remove_var("HOME");
         let result = expand_tilde_str("~/docs");
         assert_eq!(result, "~/docs");
@@ -8032,7 +8107,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_str_missing_home_bare_tilde() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::remove_var("HOME");
         let result = expand_tilde_str("~");
         assert_eq!(result, "~");
@@ -8040,7 +8115,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_str_nested_path() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde_str("~/docs/notes/file.md");
         assert_eq!(result, "/home/testuser/docs/notes/file.md");
@@ -8049,7 +8124,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_str_with_spaces() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/test user");
         let result = expand_tilde_str("~/my docs");
         assert_eq!(result, "/home/test user/my docs");
@@ -8058,7 +8133,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_str_tilde_in_middle_unchanged() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde_str("/path/~user/docs");
         assert_eq!(result, "/path/~user/docs");
@@ -8067,7 +8142,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_str_tilde_user_prefix_unchanged() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde_str("~otheruser/docs");
         assert_eq!(result, "~otheruser/docs");
@@ -8076,7 +8151,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_str_no_panic_on_missing_home() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::remove_var("HOME");
         // This should not panic
         let result = expand_tilde_str("~/any/path");
@@ -8085,7 +8160,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_str_tilde_slash_only() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde_str("~/");
         assert_eq!(result, "/home/testuser");
@@ -8094,7 +8169,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_path_tilde_slash_only() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde(Path::new("~/"));
         assert_eq!(result, PathBuf::from("/home/testuser"));
@@ -8103,7 +8178,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_str_tilde_with_parent_directory_reference() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde_str("~/../");
         assert_eq!(result, "/home/testuser/../");
@@ -8112,7 +8187,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_path_tilde_with_parent_directory_reference() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde(Path::new("~/../"));
         assert_eq!(result, PathBuf::from("/home/testuser/../"));
@@ -8121,7 +8196,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_str_needle_config_path() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde_str("~/.needle");
         assert_eq!(result, "/home/testuser/.needle");
@@ -8130,7 +8205,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_str_needle_d_directory() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde_str("~/.needle.d/");
         assert_eq!(result, "/home/testuser/.needle.d/");
@@ -8139,7 +8214,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_str_needle_d_config_path() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde_str("~/.needle.d/config.yaml");
         assert_eq!(result, "/home/testuser/.needle.d/config.yaml");
@@ -8148,7 +8223,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_str_needle_d_nested_path() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde_str("~/.needle.d/subdir/file.md");
         assert_eq!(result, "/home/testuser/.needle.d/subdir/file.md");
@@ -8157,7 +8232,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_path_needle_d_directory() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde(&PathBuf::from("~/.needle.d/"));
         assert_eq!(result, PathBuf::from("/home/testuser/.needle.d/"));
@@ -8166,7 +8241,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_path_needle_d_config_path() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde(&PathBuf::from("~/.needle.d/config.yaml"));
         assert_eq!(
@@ -8178,7 +8253,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_str_multiple_tildes_only_first_expanded() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         // Only the leading tilde should be expanded
         let result = expand_tilde_str("~/.needle.d:~/backup");
@@ -8188,7 +8263,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_str_tilde_at_end_unchanged() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         // Tilde at the end should not be expanded
         let result = expand_tilde_str("/path/~");
@@ -8198,7 +8273,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_str_tilde_positions_comprehensive() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
 
         // Start: should expand
@@ -8224,7 +8299,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_str_consecutive_tildes_only_leading_set_expanded() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         // Consecutive tildes - only treat as leading if exactly ~ or ~/
         assert_eq!(expand_tilde_str("~/~docs"), "/home/testuser/~docs");
@@ -8233,7 +8308,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_path_multiple_tildes_only_first_expanded() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         // PathBuf version: only the leading tilde should be expanded
         let result = expand_tilde(&PathBuf::from("~/.needle.d:~/backup"));
@@ -8243,7 +8318,7 @@ mod config_tests {
 
     #[test]
     fn expand_tilde_path_tilde_at_end_unchanged() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         // PathBuf version: tilde at the end should not be expanded
         let result = expand_tilde(&PathBuf::from("/path/~"));
@@ -8778,7 +8853,7 @@ mod config_tests {
 
     #[test]
     fn load_invalid_yaml_returns_error() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yaml");
         std::fs::write(&path, "invalid: [yaml: broken: {{{").unwrap();
@@ -9089,6 +9164,25 @@ strands:
     }
 
     #[test]
+    fn workspace_config_overrides_low_water_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".needle.yaml"),
+            "strands:\n  generation:\n    enabled: true\n    low_water_reserve: 4\n    lease_ttl_secs: 600\n",
+        )
+        .unwrap();
+
+        let overrides = ConfigLoader::load_workspace(dir.path()).unwrap().unwrap();
+        let mut config = Config::default();
+        let mut sources = SourceMap::new();
+        ConfigLoader::apply_workspace(&mut config, &overrides, dir.path(), &mut sources);
+
+        assert_eq!(config.strands.generation.low_water_reserve, 4);
+        assert_eq!(config.strands.generation.lease_ttl_secs, 600);
+        assert!(sources.contains_key("strands.generation"));
+    }
+
+    #[test]
     fn workspace_config_overrides_strands_pulse() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -9193,6 +9287,14 @@ strands:
         assert_eq!(config.alert_cooldown_minutes, 60);
         assert_eq!(config.exhaustion_threshold, 3);
         assert!(config.alert_destination.is_none());
+    }
+
+    #[test]
+    fn default_generation_config_values() {
+        let config = GenerationConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.low_water_reserve, 2);
+        assert_eq!(config.lease_ttl_secs, 300);
     }
 
     #[test]
@@ -9425,7 +9527,7 @@ worker:
 
     #[test]
     fn supervisor_config_from_env_defaults() {
-        let (_env_lock, _env_guard) = lock_supervisor_env();
+        let _env_guard = lock_supervisor_env();
         // Ensure no env vars are set
         std::env::remove_var("SUPERVISOR_HEARTBEAT_PATH");
         std::env::remove_var("SUPERVISOR_SOCKET_PATH");
@@ -9437,7 +9539,7 @@ worker:
 
     #[test]
     fn supervisor_config_from_env_heartbeat_only() {
-        let (_env_lock, _env_guard) = lock_supervisor_env();
+        let _env_guard = lock_supervisor_env();
         std::env::remove_var("SUPERVISOR_SOCKET_PATH");
         std::env::set_var("SUPERVISOR_HEARTBEAT_PATH", "/custom/heartbeat.json");
 
@@ -9453,7 +9555,7 @@ worker:
 
     #[test]
     fn supervisor_config_from_env_socket_only() {
-        let (_env_lock, _env_guard) = lock_supervisor_env();
+        let _env_guard = lock_supervisor_env();
         std::env::remove_var("SUPERVISOR_HEARTBEAT_PATH");
         std::env::set_var("SUPERVISOR_SOCKET_PATH", "/tmp/supervisor.sock");
 
@@ -9469,7 +9571,7 @@ worker:
 
     #[test]
     fn supervisor_config_from_env_both_paths() {
-        let (_env_lock, _env_guard) = lock_supervisor_env();
+        let _env_guard = lock_supervisor_env();
         std::env::set_var(
             "SUPERVISOR_HEARTBEAT_PATH",
             "/var/lib/needle/heartbeat.json",
@@ -9492,7 +9594,7 @@ worker:
 
     #[test]
     fn supervisor_config_from_env_expands_tilde() {
-        let (_env_lock, _env_guard) = lock_supervisor_env();
+        let _env_guard = lock_supervisor_env();
         std::env::set_var("SUPERVISOR_HEARTBEAT_PATH", "~/heartbeat.json");
         std::env::set_var("SUPERVISOR_SOCKET_PATH", "~/supervisor.sock");
 
@@ -10503,7 +10605,7 @@ agent:
 
     #[test]
     fn worker_binary_path_tilde_is_expanded() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let mut config = Config {
             worker: WorkerConfig {
@@ -10524,7 +10626,7 @@ agent:
 
     #[test]
     fn bead_cli_path_tilde_is_expanded() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let mut config = Config {
             bead_cli: BeadCliConfig {
@@ -10569,7 +10671,7 @@ agent:
 
     #[test]
     fn get_home_env_returns_some_when_set() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         // Save the original HOME value
         let original_home = std::env::var("HOME").ok();
 
@@ -10589,7 +10691,7 @@ agent:
 
     #[test]
     fn get_home_env_returns_none_when_not_set() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         // Save the original HOME value
         let original_home = std::env::var("HOME").ok();
 
@@ -10607,7 +10709,7 @@ agent:
 
     #[test]
     fn get_home_env_never_panics() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         // This test verifies that get_home_env() handles all cases gracefully
         // without panicking, even with unusual HOME values.
 
@@ -10912,7 +11014,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_str_with_slash() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde_str("~/docs");
         std::env::remove_var("HOME");
@@ -10921,7 +11023,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_str_bare_tilde() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde_str("~");
         std::env::remove_var("HOME");
@@ -10930,7 +11032,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_str_nested_path() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde_str("~/config/needle/file.yaml");
         std::env::remove_var("HOME");
@@ -10939,7 +11041,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_str_without_tilde_unchanged() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde_str("/absolute/path");
         std::env::remove_var("HOME");
@@ -10948,7 +11050,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_str_relative_path_unchanged() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde_str("relative/path");
         std::env::remove_var("HOME");
@@ -10957,7 +11059,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_str_other_user_tilde_unchanged() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde_str("~otheruser/path");
         std::env::remove_var("HOME");
@@ -10966,7 +11068,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_str_empty_string() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde_str("");
         std::env::remove_var("HOME");
@@ -10975,7 +11077,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_str_trailing_slash() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde_str("~/");
         std::env::remove_var("HOME");
@@ -10984,7 +11086,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_str_missing_home() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::remove_var("HOME");
         let result = expand_tilde_str("~/docs");
         assert_eq!(result, "~/docs"); // No HOME, return unchanged
@@ -10992,7 +11094,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_str_missing_home_bare_tilde() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::remove_var("HOME");
         let result = expand_tilde_str("~");
         assert_eq!(result, "~"); // No HOME, return unchanged
@@ -11000,7 +11102,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_pathbuf_with_slash() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde(Path::new("~/docs"));
         std::env::remove_var("HOME");
@@ -11009,7 +11111,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_pathbuf_bare_tilde() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde(Path::new("~"));
         std::env::remove_var("HOME");
@@ -11018,7 +11120,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_pathbuf_nested_path() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde(Path::new("~/config/needle/file.yaml"));
         std::env::remove_var("HOME");
@@ -11030,7 +11132,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_pathbuf_absolute_path_unchanged() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde(Path::new("/absolute/path"));
         std::env::remove_var("HOME");
@@ -11039,7 +11141,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_pathbuf_relative_path_unchanged() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde(Path::new("relative/path"));
         std::env::remove_var("HOME");
@@ -11048,7 +11150,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_pathbuf_missing_home() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::remove_var("HOME");
         let result = expand_tilde(Path::new("~/docs"));
         assert_eq!(result, PathBuf::from("~/docs")); // No HOME, return unchanged
@@ -11056,7 +11158,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_pathbuf_empty_string() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde(Path::new(""));
         std::env::remove_var("HOME");
@@ -11065,7 +11167,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_pathbuf_trailing_slash() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde(Path::new("~/"));
         std::env::remove_var("HOME");
@@ -11074,7 +11176,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_pathbuf_parent_path() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = expand_tilde(Path::new("~/../"));
         std::env::remove_var("HOME");
@@ -11083,7 +11185,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_option_some() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let input = Some(PathBuf::from("~/docs"));
         let result = expand_tilde_option(&input);
@@ -11107,7 +11209,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_vec_single() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let input = vec![PathBuf::from("~/docs")];
         let result = expand_tilde_vec(&input);
@@ -11117,7 +11219,7 @@ agent:
 
     #[test]
     fn test_expand_tilde_vec_multiple() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let input = vec![
             PathBuf::from("~/docs"),
@@ -11138,7 +11240,7 @@ agent:
 
     #[test]
     fn test_dirs_or_home_with_home() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let result = dirs_or_home(".config/needle");
         std::env::remove_var("HOME");
@@ -11147,7 +11249,7 @@ agent:
 
     #[test]
     fn test_dirs_or_home_without_home_fallback() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::remove_var("HOME");
         let result = dirs_or_home(".config/needle");
         assert_eq!(result, PathBuf::from("/tmp/.config/needle"));
@@ -11155,7 +11257,7 @@ agent:
 
     #[test]
     fn test_config_expand_tildes_global_config() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let mut config = Config::default();
         config.workspace.default = PathBuf::from("~/workspace");
@@ -11181,7 +11283,7 @@ agent:
 
     #[test]
     fn test_config_expand_tildes_workspace_config() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let mut config = Config::default();
         config.strands.explore.workspace_root = PathBuf::from("~/workspaces");
@@ -11216,7 +11318,7 @@ agent:
 
     #[test]
     fn test_config_expand_tildes_env_var_paths() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let mut config = Config::default();
         config.strands.learning.global_learnings_file = PathBuf::from("~/global-learnings.md");
@@ -11247,7 +11349,7 @@ agent:
 
     #[test]
     fn test_config_expand_tildes_mixed_paths() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let mut config = Config::default();
         config.workspace.default = PathBuf::from("~/workspace");
@@ -11270,7 +11372,7 @@ agent:
 
     #[test]
     fn test_config_expand_tildes_missing_home() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::remove_var("HOME");
         let mut config = Config::default();
         config.workspace.default = PathBuf::from("~/workspace");
@@ -11285,7 +11387,7 @@ agent:
 
     #[test]
     fn test_config_expand_tildes_bead_cli_path() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let mut config = Config::default();
         config.bead_cli.path = Some(PathBuf::from("~/.local/bin/bead"));
@@ -11301,7 +11403,7 @@ agent:
 
     #[test]
     fn test_config_expand_tildes_worker_binary_path() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let mut config = Config::default();
         config.worker.worker_binary_path = Some(PathBuf::from("~/bin/needle"));
@@ -11317,7 +11419,7 @@ agent:
 
     #[test]
     fn test_config_expand_tildes_context_files_vector() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let mut config = Config::default();
         config.prompt.context_files = vec![
@@ -11341,7 +11443,7 @@ agent:
 
     #[test]
     fn test_config_expand_tildes_telemetry_log_dir() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let mut config = Config::default();
         config.telemetry.file_sink.log_dir = Some(PathBuf::from("~/.needle/logs"));
@@ -11357,7 +11459,7 @@ agent:
 
     #[test]
     fn test_config_expand_tildes_self_modification_canary_workspace() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let mut config = Config::default();
         config.self_modification.canary_workspace = PathBuf::from("~/test-canary");
@@ -11373,7 +11475,7 @@ agent:
 
     #[test]
     fn test_config_expand_tildes_tilde_in_middle_unchanged() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let mut config = Config::default();
         // Tilde in the middle of a path should not be expanded
@@ -11393,7 +11495,7 @@ agent:
 
     #[test]
     fn test_config_expand_tildes_tilde_at_end_unchanged() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let mut config = Config::default();
         // Tilde at the end of a path should not be expanded
@@ -11407,7 +11509,7 @@ agent:
 
     #[test]
     fn test_config_expand_tildes_bare_tilde_only() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let mut config = Config::default();
         config.workspace.default = PathBuf::from("~");
@@ -11420,7 +11522,7 @@ agent:
 
     #[test]
     fn test_config_expand_tildes_tilde_slash_only() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let mut config = Config::default();
         config.workspace.default = PathBuf::from("~/");
@@ -11433,7 +11535,7 @@ agent:
 
     #[test]
     fn test_config_expand_tildes_multiple_fields() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let mut config = Config::default();
         // Set multiple tilde paths across different config sections
@@ -11476,7 +11578,7 @@ agent:
 
     #[test]
     fn test_config_expand_tildes_needle_dot_d_directory() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let mut config = Config::default();
         // Test ~/.needle.d/ directory path expansion
@@ -11503,7 +11605,7 @@ agent:
 
     #[test]
     fn test_config_expand_tildes_needle_dot_d_config_file() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let mut config = Config::default();
         // Test ~/.needle.d/config.yaml nested file path
@@ -11526,7 +11628,7 @@ agent:
 
     #[test]
     fn test_config_expand_tildes_multiple_tildes_in_vector() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
         std::env::set_var("HOME", "/home/testuser");
         let mut config = Config::default();
         // Test multiple tilde paths in a vector field
@@ -13336,7 +13438,7 @@ agent:
     #[serial]
     #[test]
     fn test_isolate_bead_cli_env_creates_temp_dir() {
-        let (_lock, _guard, tmp_dir) = isolate_bead_cli_env();
+        let (_guard, tmp_dir) = isolate_bead_cli_env();
 
         // Verify temp directory exists
         assert!(tmp_dir.path().exists(), "temp directory should exist");
@@ -13348,7 +13450,7 @@ agent:
     #[serial]
     #[test]
     fn test_isolate_bead_cli_env_isolates_path() {
-        let (_lock, _guard, tmp_dir) = isolate_bead_cli_env();
+        let (_guard, tmp_dir) = isolate_bead_cli_env();
 
         // Verify PATH contains only the temp directory
         let path_var = std::env::var("PATH").expect("PATH should be set");
@@ -13370,7 +13472,7 @@ agent:
     #[serial]
     #[test]
     fn test_isolate_bead_cli_env_temp_dir_is_empty() {
-        let (_lock, _guard, tmp_dir) = isolate_bead_cli_env();
+        let (_guard, tmp_dir) = isolate_bead_cli_env();
 
         // Verify temp directory starts empty
         let entries =
@@ -13394,10 +13496,10 @@ agent:
         // environment. That is what timed out needle-ci's `cargo test --lib`
         // lane (exit 124 after 900 s) from 2026-08-28 to 2026-08-30.
         let (first_path, _tmp_dir1) = {
-            let (_lock1, _guard1, tmp_dir1) = isolate_bead_cli_env();
+            let (_guard1, tmp_dir1) = isolate_bead_cli_env();
             (tmp_dir1.path().to_path_buf(), tmp_dir1)
         };
-        let (_lock2, _guard2, tmp_dir2) = isolate_bead_cli_env();
+        let (_guard2, tmp_dir2) = isolate_bead_cli_env();
 
         // Each call should create a different temp directory
         assert_ne!(
@@ -13409,7 +13511,7 @@ agent:
 
     #[test]
     fn test_create_test_executable_creates_file() {
-        let (_lock, _guard, tmp_dir) = isolate_bead_cli_env();
+        let (_guard, tmp_dir) = isolate_bead_cli_env();
 
         let executable = create_test_executable(tmp_dir.path(), "test-exec", None);
 
@@ -13434,7 +13536,7 @@ agent:
     fn test_create_test_executable_sets_permissions() {
         use std::os::unix::fs::PermissionsExt;
 
-        let (_lock, _guard, tmp_dir) = isolate_bead_cli_env();
+        let (_guard, tmp_dir) = isolate_bead_cli_env();
 
         let executable = create_test_executable(tmp_dir.path(), "test-perms", None);
 
@@ -13453,7 +13555,7 @@ agent:
 
     #[test]
     fn test_create_test_executable_with_default_content() {
-        let (_lock, _guard, tmp_dir) = isolate_bead_cli_env();
+        let (_guard, tmp_dir) = isolate_bead_cli_env();
 
         let executable = create_test_executable(tmp_dir.path(), "test-default", None);
 
@@ -13470,7 +13572,7 @@ agent:
 
     #[test]
     fn test_create_test_executable_with_custom_content() {
-        let (_lock, _guard, tmp_dir) = isolate_bead_cli_env();
+        let (_guard, tmp_dir) = isolate_bead_cli_env();
 
         let custom_script = "#!/bin/sh\necho 'custom output'";
         let executable = create_test_executable(tmp_dir.path(), "test-custom", Some(custom_script));
@@ -13490,7 +13592,7 @@ agent:
     fn test_create_test_executable_multiple_executables() {
         use std::os::unix::fs::PermissionsExt;
 
-        let (_lock, _guard, tmp_dir) = isolate_bead_cli_env();
+        let (_guard, tmp_dir) = isolate_bead_cli_env();
 
         // Create multiple executables
         let exec1 = create_test_executable(tmp_dir.path(), "cli1", Some("#!/bin/sh\necho 'one'"));
@@ -13531,7 +13633,7 @@ agent:
 
     #[test]
     fn test_create_test_executable_path_return_value() {
-        let (_lock, _guard, tmp_dir) = isolate_bead_cli_env();
+        let (_guard, tmp_dir) = isolate_bead_cli_env();
 
         let executable = create_test_executable(tmp_dir.path(), "my-test-cli", None);
 
@@ -13547,7 +13649,7 @@ agent:
 
     #[test]
     fn test_create_test_executable_with_multiline_content() {
-        let (_lock, _guard, tmp_dir) = isolate_bead_cli_env();
+        let (_guard, tmp_dir) = isolate_bead_cli_env();
 
         let multiline_content = r#"#!/bin/sh
 # This is a multi-line script

@@ -11507,7 +11507,7 @@ mod tests {
         // later test pointed at a deleted directory. That is what made
         // invalid_config_reload_keeps_worker_running_and_emits_rejection watch
         // the wrong config file and time out whenever the two ran together.
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_guard = crate::util::test_env::isolate_env();
 
         let temp = tempfile::tempdir().unwrap();
         let state_dir = temp.path().join(".needle").join("state");
