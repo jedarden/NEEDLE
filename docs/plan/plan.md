@@ -4,7 +4,7 @@
 
 ## Design Principles
 
-These six principles are non-negotiable. Every design decision in this plan traces back to one or more of them.
+These eight principles are non-negotiable. Every design decision in this plan traces back to one or more of them.
 
 1. **Deterministic order.** Given the same queue state, every worker computes the same bead ordering. There is no randomness in selection. Ties are broken by creation time.
 
@@ -17,6 +17,10 @@ These six principles are non-negotiable. Every design decision in this plan trac
 5. **Self-healing.** Workers detect and recover from stuck states, stale claims, crashed peers, and corrupted databases without human intervention. Recovery paths are explicit, not heuristic.
 
 6. **Separation of concerns.** The orchestrator does not execute work. The agent does not manage state. The bead store does not enforce workflow. Each component has one job.
+
+7. **The human is the absolute last resort.** Every stuck state has a named, automatic next step, and a human is reached only after every automatic step has been tried and its evidence recorded. Retry, decompose, quarantine with backoff, re-analyze against the plan, *then* label `human` — never before. A bead that reaches a human without that trail is a NEEDLE defect, not an operator task. The fleet-wide count of beads at the human rung is a health metric whose target is zero (see Phase 19).
+
+8. **The workspace plan is the complete plan.** `docs/plan/plan.md` in a workspace is the whole specification an agent works from: every fork is decided in it, and an agent that cannot act from the plan and the bead together is missing plan text, not a human. Escalation therefore re-reads the plan before it asks anyone; work that exists only in a conversation, an ADR nobody wired into the plan, or an operator's head is not work the fleet can do. ADRs record *why* a decision changed; the plan carries the decision itself.
 
 ---
 
@@ -4853,3 +4857,85 @@ An implementer will hit each of these forks; the plan decides them so no mid-bui
 - Changing a Tier-C key produces a named `config.reload.restart_required` rather than silence.
 - `needle config --dump --show-source` against a running worker reflects a post-reload value, not the boot-time snapshot.
 - The 2026-08-21 migration is reproducible as a config edit: enabling OTLP fleet-wide costs one interval, not a fifteen-worker drain.
+
+
+# Phase 19: Autonomous Backlog Management — Never Stuck Without a Human
+
+**Status:** planned (ADR-022 quarantine ladder, ADR-023 gate-error classification). Principles 7 and 8.
+**Goal:** the fleet keeps a 3,000-bead backlog moving on its own. Measured 2026-08-29 on ex44 (20 workers): 3,181 open beads, **106** ready; 2,926 dependency-blocked of which **2,129 hang off 91 non-ready roots** (quarantined or `human`); 2,075 (65%) are fleet-generated `split-child` beads; 743 are agent-filed "Verify/Test/Confirm …" beads; creates/day ≈ closes/day (1,424 vs 1,401) — a treadmill. 171 open beads sat invisibly quarantined (`manual_blocked`, set by `bead update --status blocked`), and 2,346 of 2,470 verification failures that week were the gate failing to *execute* (empty `bead.workspace`, fixed in `8818f9e9`; a `verification:` hook that never existed on disk), each counted as a bead failure. Nobody was needed to fix any of that; NEEDLE simply had no automatic next step. This phase gives every stuck state one.
+
+## The escalation ladder (the contract every other section serves)
+
+Every bead that cannot make progress moves down exactly this ladder, never skipping a rung, with evidence recorded on the bead at each step:
+
+| Rung | Trigger | Automatic action | Evidence recorded |
+|---|---|---|---|
+| 1 Retry | transient (Tier 1) error | redispatch, `retry_count` | telemetry only |
+| 2 Decompose | `split_after_failures` (3) | Mitosis, ≤ `mitosis.max_children` (8), depth ≤ `mitosis.max_depth` (2) | children + `split-child` label |
+| 3 Quarantine | `quarantine_after_failures` (5) | labels `quarantined`, `quarantine-until:<rfc3339>`, `quarantine-round:N`; backoff 2h·2^(N−1), cap 48h; Pluck skips until expiry | note: failure reasons, last trace path |
+| 4 Re-analyze | quarantine round 3 expires | one *analysis dispatch*: agent re-reads `docs/plan/plan.md` + the bead's failure trail and must produce either a re-scoped child bead or a `human` label with a stated reason the plan cannot answer | note: `analysis:` block |
+| 5 Human | rung 4 explicitly concludes the plan is silent | label `human`; `needle status` counts it | the rung-4 note |
+
+Gate *execution* errors (19.1) are not failures and do not advance a bead down the ladder. Nothing in NEEDLE may ever set `--status blocked` again (19.2).
+
+## Changes
+
+### 19.1 Gate execution errors are infrastructure, not bead failures (ADR-023)
+- New outcome class `GateError` in `src/outcome/mod.rs`, distinct from `Failure`: the gate command could not be spawned (ENOENT, permission), the gate's working directory is missing or empty, the command named in config does not exist in the workspace, or the gate itself timed out before producing a verdict. A gate that *ran and failed* is still `Failure`.
+- `GateError` → release the bead, leave `failure-count` untouched, emit `gate.execution_error{workspace, gate, command, reason}`.
+- Per-workspace gate health: after 3 consecutive `GateError`s the workspace is `gate-degraded` (state file `~/.needle/state/gate-health/<workspace-id>.json`). Pluck and Explore skip a degraded workspace for ordinary dispatch and instead surface exactly one fingerprinted bead there — `Gate broken: <command> — <reason>` (P0, labels `infra`, `fingerprint:<hash>`) — which *is* claimable, because fixing a gate is verified by running the gate. The first successful gate run clears the degradation and closes that bead. *Because* dispatching without a working gate would return NEEDLE to acceptance-by-self-report (ADR-020), and cycling every bead through a broken gate is how 138 beads were buried.
+- A `verification:`/`gates:` entry naming a path that does not exist at worker boot is reported by `needle doctor` (FAIL, with the path) and by the worker at startup; it does not wait for the first dispatch to discover it.
+
+### 19.2 Quarantine is visible, time-bounded, and escalates (ADR-022, supersedes ADR-012's mechanism)
+- `BeadAction::Quarantined` stops calling `store.block()`. It adds labels `quarantined`, `quarantine-until:<rfc3339>`, `quarantine-round:N` and appends the failure trail to the bead's notes. The `cycling` label is retained for continuity. The backend descriptor's `block` operation is removed.
+- Pluck excludes a bead while `quarantine-until` is in the future; when it has passed, the bead is a normal candidate again with its `failure-count` intact (the `reset_failure_count` ordering bug, needle-b39fe1b6, is a prerequisite). Round N+1 is entered on the next failure. After round 3 the bead goes to rung 4, not round 4.
+- Backoff: 2h, 4h, 8h — cap 48h — chosen so a transient cause (red tree, provider outage) clears itself inside a working day without a human noticing, while a persistent cause reaches rung 4 within ~14h of wall clock.
+- Migration: Mend's first pass under the new binary converts every open bead whose store reports `manual_blocked=true` (bead-rs must expose this — see the bead-rs dependency) to the label scheme with `quarantine-round:1` and an immediate expiry, then clears the flag with `bead update --status open`. Migration-era beads whose old labels live only in notes get `quarantined` + `quarantine-round:1` and nothing else.
+- `needle status` and `needle doctor` gain: quarantined count per workspace (by round), beads at the human rung, **blocked-tree size** (open beads transitively behind each non-ready root) and the top five roots by that size. *Because* a root pinning 158 dependents must be the most visible bead in the workspace, and on 2026-08-29 it was invisible to every tool but `bead why`.
+
+### 19.3 Root-aware, aging-aware Pluck ordering
+- Sort key becomes `(effective_priority, pinned_bucket, failure_count, created_at, id)` — still fully deterministic (Principle 1). `effective_priority = min(own priority, min priority over all open beads transitively blocked by this bead)`; `pinned_bucket` is `-floor(log2(1 + open beads transitively blocked))` so a root that unblocks 100 beads sorts ahead of a leaf of equal priority.
+- Aging: a bead open more than 14 days is treated one priority level higher, more than 30 days two levels, computed from `created_at` at query time — no writes, no drift between workers.
+- Graph walk is memoized per cycle from `list_all`; workspaces above 5,000 open beads fall back to own-priority ordering with a `pluck.ordering_degraded` event rather than a slow cycle.
+
+### 19.4 Generation budget and anti-noise
+- Mitosis caps: `mitosis.max_children` (default 8) and `mitosis.max_depth` (default 2 — a child of a child is `NotSplittable` and proceeds to rung 3). Both are per-workspace overridable.
+- **Post-dispatch audit** (new step in HANDLING, after the gate): beads created during the dispatch window by the dispatching worker's actor are inspected. (a) A bead whose title matches the verification-shaped pattern (`^(verify|test|confirm|validate|check|re-?run)\b`, case-insensitive) and that names the parent's own work is closed with reason `verification is the gate's job (Phase 19.4)` and its body folded into the parent's notes. (b) If the agent created more than `generation.max_per_dispatch` (default 3) beads, the excess (newest first) are set `deferred` with label `over-budget` — visible, reversible, never deleted. *Because* 743 verify-shaped beads and 2,075 split-children were consuming the throughput meant for human-authored work.
+- Alert beads (Knot exhaustion, starvation, gate-broken, Unravel proposals) carry `fingerprint:<sha256[:12]>` of `(workspace, kind, cause)`. Creation first looks for an open bead with the same fingerprint and appends to its notes instead; a closed one suppresses re-creation for 24h.
+- Fleet metric `generation_ratio` (beads created ÷ beads closed, per day, per workspace and fleet-wide) is emitted by the supervisor; a ratio above 1.0 for three consecutive days raises a fingerprinted alert bead in the NEEDLE workspace itself.
+
+### 19.5 Reclamation runs on the clock, not on Pluck's mood
+- Mend's stale-claim sweep runs on a wall-clock timer (`mend.interval_secs`, default 300) inside every worker, independent of whether Pluck found work — the waterfall position stays for its other housekeeping (needle-9f2308f2 carries the implementation).
+- Explore's cross-workspace mend passes `stuck_threshold_secs` as the claim TTL instead of `None`, so a roaming worker reclaims by age in remote stores exactly as it does at home.
+- Supersession (a worker's own newer claim makes its older claim stale, needle-791e962b) and stale-assignee-on-open (needle-44e7e5cd) are part of the same sweep.
+
+### 19.6 Worker allocation follows frontier health
+- Explore ranks candidate workspaces by `(P0 ready count desc, ready count desc, oldest ready bead age desc, path asc)` and de-herds by a per-worker offset `hash(qualified_id) % 3` *within the top three* only — replacing the unconditional per-cycle random shuffle (which violated Principle 1) while keeping bf-6anj4's guarantee that no workspace is unreachable.
+- `needle supervise` reports, per workspace, ready count vs. assigned workers, and spawns toward the largest ready frontier first.
+
+### 19.7 Autonomous triage
+- Mend closes an open `split-child` whose every parent is closed (reason `orphaned split-child (Phase 19.7)`; 27 existed on 2026-08-29).
+- Mend sets `deferred` + label `stale` on P3/P4 beads created by a worker identity (actor matching the fleet's `<agent>-<identifier>` pattern) that have not been touched for 30 days. Human-authored beads are never auto-deferred — the stale list is reported instead.
+
+### 19.8 Observability
+- Events: `gate.execution_error`, `workspace.gate_degraded` / `workspace.gate_restored`, `bead.quarantined{round, until}`, `bead.quarantine_expired`, `bead.escalated{rung}`, `bead.human_rung`, `audit.bead_closed_as_verification`, `audit.bead_deferred_over_budget`, `alert.deduplicated{fingerprint}`, `pluck.ordering_degraded`, `generation_ratio`.
+- `needle status --ladder` prints the fleet ladder histogram: beads at each rung, per workspace.
+
+### 19.9 Tests
+- A bead failing 5 times ends with `quarantined` + `quarantine-until` labels and **no** `manual_blocked` (assert via `bead why --id`); it is absent from Pluck's candidates until the timestamp passes and present afterwards with `failure-count` intact.
+- Round 3 expiry produces exactly one analysis dispatch; its outcome is either a new child bead or a `human` label with an `analysis:` note — a bare `human` label without the note fails the test.
+- A gate whose command does not exist yields `GateError`, an unchanged `failure-count`, and after three such errors a `gate-degraded` workspace with exactly one claimable `Gate broken:` bead; a passing gate run restores the workspace and closes it.
+- Pluck ordering: a P2 root blocking one P0 bead sorts ahead of a bare P1 leaf; two workers see the identical order.
+- Post-dispatch audit: an agent that creates four beads including "Verify the endpoint works" ends the cycle with that bead closed, one bead `over-budget`, and the parent's notes containing the folded text.
+- Two Knot alerts with the same cause in the same workspace produce one bead with two note entries.
+- Migration: a store with a `manual_blocked` open bead comes out of one Mend pass with the flag cleared and the label scheme applied.
+
+### 19.10 Deployment
+- Version bump, needle-ci, GitHub release, canary → stable. Then a one-time fleet sweep converts the 148 beads left quarantined on 2026-08-29 (NEEDLE 32, commitgraph 31, spaxel 71, mta-my-way 14) through the 19.2 migration — no hand `bead update` pass.
+
+## Exit criteria
+- Fleet-wide `generation_ratio` < 1.0 for seven consecutive days while closes/day stays at or above the 2026-08-29 baseline.
+- Zero open beads with `manual_blocked=true` fleet-wide; every quarantined bead has an expiry.
+- The human-rung count across all workspaces is below 10 and every one of them carries a rung-4 `analysis:` note.
+- No workspace with open, unblocked work has `ready = 0` for more than one Mend interval.
+- No stale in-progress claim (older than `stuck_threshold_secs`) survives two Mend intervals in any workspace, including NEEDLE's own.
