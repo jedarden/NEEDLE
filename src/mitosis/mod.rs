@@ -778,6 +778,23 @@ impl MitosisEvaluator {
             });
         }
 
+        // Apply max_children cap: truncate proposal if it exceeds the limit.
+        let original_count = to_create.len();
+        let max_children = self.config.max_children as usize;
+        let _truncated = if to_create.len() > max_children {
+            to_create.truncate(max_children);
+            tracing::warn!(
+                parent_id = %parent.id,
+                proposed = original_count,
+                truncated_to = max_children,
+                dropped = original_count - max_children,
+                "mitosis proposal exceeded max_children cap"
+            );
+            Some((original_count - max_children) as u32)
+        } else {
+            None
+        };
+
         // Create all children and link each as a blocker of the parent in a
         // single atomic operation. A crash mid-split (SIGKILL/OOM/eviction)
         // rolls the whole thing back rather than leaving an orphaned child with
@@ -3960,5 +3977,165 @@ End of response."#;
         assert!(guard.deps_added.is_empty());
         // Both fields are read while holding the same lock, preventing
         // any race condition between the two reads.
+    }
+
+    #[tokio::test]
+    async fn max_children_truncates_proposal() {
+        // Test that proposals exceeding max_children are truncated
+        let config = MitosisConfig {
+            enabled: true,
+            first_failure_only: true,
+            force_failure_threshold: 0,
+            repeat_interval: 0,
+            max_depth: 5,
+            max_children: 8, // Cap at 8 children
+            timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
+        };
+        let telemetry = crate::telemetry::Telemetry::new("test".to_string());
+        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+
+        let store = MockStore::new();
+        let parent = test_bead();
+
+        // Propose 12 children (exceeds max_children=8)
+        let proposed: Vec<ProposedChild> = (1..=12)
+            .map(|i| ProposedChild {
+                title: format!("Task {}", i),
+                body: format!("Description for task {}", i),
+            })
+            .collect();
+
+        let result = evaluator
+            .create_children(&store, &parent, &proposed)
+            .await
+            .unwrap();
+
+        match result {
+            MitosisResult::Split { children } => {
+                assert_eq!(children.len(), 8, "should create only max_children");
+                // Verify exactly 8 children were created in the store
+                let guard = store.lock_state();
+                assert_eq!(guard.created.len(), 8, "should create 8 children in store");
+                assert_eq!(guard.deps_added.len(), 8, "should add 8 dependencies");
+            }
+            other => panic!("expected Split, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn max_children_with_dedup() {
+        // Test that max_children is applied AFTER deduplication
+        let config = MitosisConfig {
+            enabled: true,
+            first_failure_only: true,
+            force_failure_threshold: 0,
+            repeat_interval: 0,
+            max_depth: 5,
+            max_children: 8,
+            timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
+        };
+        let telemetry = crate::telemetry::Telemetry::new("test".to_string());
+        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+
+        // Simulate existing children that will be deduplicated
+        let store = MockStore::new().with_existing_children(vec![
+            existing_child("Task 1", "parent-001"),
+            existing_child("Task 2", "parent-001"),
+            existing_child("Task 3", "parent-001"),
+        ]);
+
+        let parent = test_bead();
+
+        // Propose 12 children, but 3 will be deduplicated
+        let proposed: Vec<ProposedChild> = (1..=12)
+            .map(|i| ProposedChild {
+                title: format!("Task {}", i),
+                body: format!("Description for task {}", i),
+            })
+            .collect();
+
+        let result = evaluator
+            .create_children(&store, &parent, &proposed)
+            .await
+            .unwrap();
+
+        match result {
+            MitosisResult::Split { children } => {
+                // 12 proposed - 3 deduped = 9 eligible, but capped at 8
+                assert_eq!(children.len(), 8, "should cap at max_children after dedup");
+                let guard = store.lock_state();
+                assert_eq!(guard.created.len(), 8);
+            }
+            other => panic!("expected Split, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn max_depth_blocks_grandchild_split() {
+        // Test that a grandchild split at max_depth returns NotSplittable
+        let config = MitosisConfig {
+            enabled: true,
+            first_failure_only: true,
+            force_failure_threshold: 0,
+            repeat_interval: 0,
+            max_depth: 2, // Maximum depth is 2
+            max_children: 8,
+            timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
+        };
+        let telemetry = crate::telemetry::Telemetry::new("test".to_string());
+        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+
+        let store = MockStore::new();
+
+        // Parent is already at depth 2 (max_depth)
+        let mut bead = test_bead();
+        bead.labels = vec![
+            "failure-count:1".to_string(),
+            "mitosis-depth:2".to_string(), // At max depth
+        ];
+
+        let result = evaluator
+            .evaluate(
+                &store,
+                &bead,
+                Path::new("/tmp/test"),
+                &create_test_dispatcher(),
+                &PromptBuilder::new(&crate::config::PromptConfig::default()),
+                "claude-sonnet",
+            )
+            .await
+            .unwrap();
+
+        // Should skip with depth limit reason
+        match result {
+            MitosisResult::Skipped { reason } => {
+                assert!(
+                    reason.contains("exceeds maximum depth"),
+                    "wrong skip reason: {}",
+                    reason
+                );
+            }
+            other => panic!("expected Skipped at max_depth, got {:?}", other),
+        }
+
+        // No children should be created
+        let guard = store.lock_state();
+        assert!(guard.created.is_empty(), "should create no children at max_depth");
+        assert!(guard.deps_added.is_empty(), "should add no dependencies at max_depth");
+    }
+
+    #[tokio::test]
+    async fn max_depth_default_is_2() {
+        // Test that the new default max_depth is 2, not 0 (unlimited)
+        let config = MitosisConfig::default();
+        assert_eq!(config.max_depth, 2, "default max_depth should be 2");
+        assert_eq!(config.max_children, 8, "default max_children should be 8");
+    }
+
+    #[tokio::test]
+    async fn max_children_default_is_8() {
+        // Test that the default max_children is 8
+        let config = MitosisConfig::default();
+        assert_eq!(config.max_children, 8, "default max_children should be 8");
     }
 }

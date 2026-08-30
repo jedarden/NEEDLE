@@ -184,7 +184,7 @@ pub fn classify_timeout_eligibility(
                 ),
             };
         }
-        Outcome::Success | Outcome::Failure | Outcome::AgentNotFound => {
+        Outcome::Success | Outcome::Failure | Outcome::AgentNotFound | Outcome::GateError => {
             return TimeoutEligibility::NotEligible {
                 reason: format!(
                     "exit code {} is not a timeout (expected 124)",

@@ -3940,6 +3940,28 @@ fn config_dump(config: &Config) -> Vec<String> {
             "prompt.instructions: {}",
             config.prompt.instructions.as_deref().unwrap_or("")
         ),
+        format!("mitosis.enabled: {}", config.strands.mitosis.enabled),
+        format!(
+            "mitosis.first_failure_only: {}",
+            config.strands.mitosis.first_failure_only
+        ),
+        format!(
+            "mitosis.force_failure_threshold: {}",
+            config.strands.mitosis.force_failure_threshold
+        ),
+        format!(
+            "mitosis.repeat_interval: {}",
+            config.strands.mitosis.repeat_interval
+        ),
+        format!("mitosis.max_depth: {}", config.strands.mitosis.max_depth),
+        format!(
+            "mitosis.max_children: {}",
+            config.strands.mitosis.max_children
+        ),
+        format!(
+            "mitosis.timeout_triggered.enabled: {}",
+            config.strands.mitosis.timeout_triggered.enabled
+        ),
     ]
 }
 

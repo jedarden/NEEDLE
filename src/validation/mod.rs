@@ -39,6 +39,13 @@ pub enum GateResult {
     Pass,
     /// The gate failed validation with a reason.
     Fail(String),
+    /// The gate could not run (execution error: ENOENT/EACCES/missing directory/timeout).
+    ExecutionError {
+        /// The command that could not run.
+        command: String,
+        /// Human-readable error reason (e.g., "ENOENT", "EACCES", "directory not found").
+        reason: String,
+    },
 }
 
 impl GateResult {
@@ -52,7 +59,13 @@ impl GateResult {
         match self {
             GateResult::Pass => None,
             GateResult::Fail(reason) => Some(reason),
+            GateResult::ExecutionError { .. } => None,
         }
+    }
+
+    /// Returns true if this is an execution error (gate could not run).
+    pub fn is_execution_error(&self) -> bool {
+        matches!(self, GateResult::ExecutionError { .. })
     }
 }
 
@@ -555,20 +568,52 @@ impl CommandGate {
                     results.insert(cmd.clone(), GateResult::Pass);
                 }
                 Err(failure) => {
-                    tracing::warn!(
-                        command = %cmd,
-                        exit_code = ?failure.exit_code,
-                        "command gate failed"
-                    );
-                    results.insert(
-                        cmd.clone(),
-                        GateResult::Fail(format!(
-                            "command '{}' failed: {}",
-                            cmd,
-                            failure.output.trim()
-                        )),
-                    );
-                    // Stop on first failure
+                    // Detect execution errors: command could not run at all.
+                    // These produce failure.exit_code=None and error messages like
+                    // "failed to execute command: No such file or directory" (ENOENT)
+                    // or "Permission denied" (EACCES).
+                    let is_execution_error = failure.exit_code.is_none()
+                        && (failure.output.contains("No such file or directory")
+                            || failure.output.contains("Permission denied")
+                            || failure.output.contains("failed to execute command"));
+
+                    if is_execution_error {
+                        tracing::warn!(
+                            command = %cmd,
+                            error = %failure.output,
+                            "gate execution error — command could not run"
+                        );
+                        // Extract the error reason (e.g., "ENOENT", "EACCES")
+                        let reason = if failure.output.contains("No such file") {
+                            "ENOENT".to_string()
+                        } else if failure.output.contains("Permission denied") {
+                            "EACCES".to_string()
+                        } else {
+                            "execution_failed".to_string()
+                        };
+                        results.insert(
+                            cmd.clone(),
+                            GateResult::ExecutionError {
+                                command: cmd.clone(),
+                                reason,
+                            },
+                        );
+                    } else {
+                        tracing::warn!(
+                            command = %cmd,
+                            exit_code = ?failure.exit_code,
+                            "command gate failed"
+                        );
+                        results.insert(
+                            cmd.clone(),
+                            GateResult::Fail(format!(
+                                "command '{}' failed: {}",
+                                cmd,
+                                failure.output.trim()
+                            )),
+                        );
+                    }
+                    // Stop on first failure/error
                     break;
                 }
             }

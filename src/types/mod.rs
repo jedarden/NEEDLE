@@ -367,6 +367,12 @@ pub enum Outcome {
     Interrupted,
     /// Negative exit code — process crashed or was killed by a signal.
     Crash(i32),
+    /// Gate execution error — the gate could not run (ENOENT/EACCES/missing directory/timeout).
+    ///
+    /// This is distinct from `Failure`: a gate that ran and failed verification is `Failure`,
+    /// while a gate that could not run at all is `GateError`. Gate errors release the bead
+    /// without incrementing the failure count.
+    GateError,
 }
 
 impl Outcome {
@@ -423,6 +429,7 @@ impl Outcome {
             Outcome::AgentNotFound => "agent_not_found",
             Outcome::Interrupted => "interrupted",
             Outcome::Crash(_) => "crash",
+            Outcome::GateError => "gate_error",
         }
     }
 }

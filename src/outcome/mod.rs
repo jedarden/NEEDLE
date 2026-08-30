@@ -14,11 +14,12 @@ use chrono::Utc;
 
 use crate::bead_store::BeadStore;
 use crate::config::Config;
+use crate::fingerprint::{AlertDeduplication, AlertKind, append_alert_note, build_alert_labels, check_alert_deduplication};
 use crate::telemetry::{EventKind, Telemetry};
 #[cfg(test)]
 use crate::types::BeadStatus;
 use crate::types::{AgentOutcome, Bead, BeadAction, HandlerResult, Outcome};
-use crate::validation::{verify_shipped_work, GateConfig, GateReport, ValidationGate};
+use crate::validation::{verify_shipped_work, GateConfig, GateReport, GateResult, ValidationGate};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // classify (convenience re-export)
@@ -270,10 +271,27 @@ impl OutcomeHandler {
         let (bead_action, telemetry_events) = match outcome.clone() {
             Outcome::Success => self.handle_success(store, bead, gate_report).await?,
             Outcome::Failure => {
-                // If we have a gate report with failures, handle as gate failure.
+                // If we have a gate report with failures, check if any gate had execution errors.
                 if let Some(report) = gate_report {
                     if !report.all_passed {
-                        self.handle_gate_failure(store, bead, &report).await?
+                        // Check if any result is an ExecutionError
+                        let execution_error = report.results.iter().find(|(_, r)| r.is_execution_error());
+                        if let Some((gate_name, result)) = execution_error {
+                            if let GateResult::ExecutionError { command, reason } = result {
+                                self.handle_gate_error(
+                                    store,
+                                    bead,
+                                    &bead.workspace.display().to_string(),
+                                    gate_name,
+                                    command,
+                                    reason,
+                                ).await?
+                            } else {
+                                unreachable!() // We already checked is_execution_error()
+                            }
+                        } else {
+                            self.handle_gate_failure(store, bead, &report).await?
+                        }
                     } else {
                         self.handle_failure(store, bead).await?
                     }
@@ -285,6 +303,15 @@ impl OutcomeHandler {
             Outcome::AgentNotFound => self.handle_agent_not_found(store, bead).await?,
             Outcome::Interrupted => self.handle_interrupted(store, bead).await?,
             Outcome::Crash(code) => self.handle_crash(store, bead, code).await?,
+            Outcome::GateError => {
+                // This should not be reached - GateError is only produced during outcome handling
+                // when gate execution errors are detected. For now, treat as regular failure.
+                tracing::error!(
+                    bead_id = %bead.id,
+                    "unexpected GateError outcome — treating as regular failure"
+                );
+                self.handle_failure(store, bead).await?
+            }
         };
 
         // Emit sub-handler events (e.g. BeadCompleted, BeadOrphaned) to the
@@ -482,6 +509,16 @@ impl OutcomeHandler {
                             // certain the bead is properly closed and shipped.
                             let _ = self.reset_failure_count(store, bead).await;
                         }
+                        Ok(crate::validation::GateResult::ExecutionError { command, reason }) => {
+                            tracing::warn!(
+                                bead_id = %bead.id,
+                                command = %command,
+                                reason = %reason,
+                                "shipped-work gate execution error — releasing without incrementing failure count"
+                            );
+                            let report = GateReport::single_failure("shipped_work", format!("execution error: {}", reason));
+                            return self.handle_gate_failure(store, bead, &report).await;
+                        }
                         Err(e) => {
                             tracing::warn!(
                                 bead_id = %bead.id,
@@ -584,6 +621,19 @@ impl OutcomeHandler {
                             if release_succeeded {
                                 let _ = self.increment_failure_count(store, bead).await;
                             }
+                            return Ok((BeadAction::Released, events));
+                        }
+                        Ok(crate::validation::GateResult::ExecutionError { command, reason }) => {
+                            tracing::warn!(
+                                bead_id = %bead.id,
+                                command = %command,
+                                reason = %reason,
+                                "shipped-work gate execution error — releasing without incrementing failure count"
+                            );
+                            // Release without incrementing failure count
+                            let mut release_events =
+                                self.prepare_release_events(store, bead).await?;
+                            events.append(&mut release_events);
                             return Ok((BeadAction::Released, events));
                         }
                         Err(e) => {
@@ -823,6 +873,64 @@ impl OutcomeHandler {
         Ok((action, events))
     }
 
+    /// Handle gate execution error: gate could not run (ENOENT/EACCES/missing directory/timeout).
+    ///
+    /// This is distinct from `handle_gate_failure`: a gate that ran and failed verification
+    /// is handled by `handle_gate_failure`, while a gate that could not run at all is
+    /// handled here. Gate errors release the bead WITHOUT incrementing the failure count
+    /// or adding the `cycling` label.
+    ///
+    /// # Arguments
+    ///
+    /// * `store` - Bead store for state operations
+    /// * `bead` - The bead to handle
+    /// * `workspace` - The workspace path (for telemetry)
+    /// * `gate_name` - Name of the gate that failed
+    /// * `command` - The command that could not run
+    /// * `reason` - Human-readable error reason (e.g., "ENOENT", "EACCES", "directory not found")
+    async fn handle_gate_error(
+        &self,
+        store: &dyn BeadStore,
+        bead: &Bead,
+        workspace: &str,
+        gate_name: &str,
+        command: &str,
+        reason: &str,
+    ) -> Result<(BeadAction, Vec<EventKind>)> {
+        tracing::warn!(
+            bead_id = %bead.id,
+            workspace,
+            gate = %gate_name,
+            command = %command,
+            reason = %reason,
+            "gate execution error — releasing bead without incrementing failure count"
+        );
+
+        let mut events = Vec::new();
+
+        // Emit gate execution error telemetry.
+        self.telemetry.emit(
+            EventKind::GateExecutionError {
+                bead_id: bead.id.clone(),
+                workspace: workspace.to_string(),
+                gate: gate_name.to_string(),
+                command: command.to_string(),
+                reason: reason.to_string(),
+            },
+            chrono::Utc::now(),
+        )?;
+
+        // Release the bead without incrementing failure count.
+        let mut release_events = self.prepare_release_events(store, bead).await?;
+        events.append(&mut release_events);
+
+        // NOTE: We do NOT increment the failure count for gate execution errors.
+        // The gate never ran, so this is not a failure of the work — it's a
+        // configuration or environment issue that should be fixed before retry.
+
+        Ok((BeadAction::Released, events))
+    }
+
     /// Failure: release bead and increment failure count.
     ///
     /// Mitosis evaluation (for multi-task splitting) is handled externally by
@@ -982,54 +1090,119 @@ impl OutcomeHandler {
         };
         let timestamp = Utc::now().to_rfc3339();
         let alert_title = format!("ALERT: Agent crash on bead {}", bead.id);
-        let alert_body = format!(
-            "## Agent Crash Report\n\
-             \n\
-             - **Bead ID**: {}\n\
-             - **Agent**: {}\n\
-             - **Exit code**: {} (signal {})\n\
-             - **Workspace**: {}\n\
-             - **Timestamp**: {}\n\
-             \n\
-             The agent process was killed. This bead has been released for retry.",
-            bead.id,
-            self.config.agent.default,
-            signal_code,
-            signal_num,
-            bead.workspace.display(),
-            timestamp,
+
+        // Check for deduplication using fingerprint
+        let workspace = bead.workspace.display().to_string();
+        let cause = format!(
+            "bead={}, agent={}, signal={}, exit_code={}",
+            bead.id, self.config.agent.default, signal_num, signal_code
         );
 
-        // Hook 4: propagate stitch labels from the crashed bead to the alert.
-        let signal_label = format!("signal-{}", signal_num);
-        let mut alert_labels: Vec<String> = vec!["alert".into(), "crash".into(), signal_label];
-        alert_labels.extend(crate::types::extract_stitch_labels(&bead.labels));
-        let alert_label_refs: Vec<&str> = alert_labels.iter().map(|s| s.as_str()).collect();
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            store.create_bead(&alert_title, &alert_body, &alert_label_refs),
+        let dedup_result = check_alert_deduplication(
+            store,
+            &workspace,
+            &AlertKind::Crash,
+            &cause,
         )
         .await
-        {
-            Ok(Ok(alert_id)) => {
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                error = %e,
+                bead_id = %bead.id,
+                "Failed to check crash alert deduplication, proceeding with creation"
+            );
+            AlertDeduplication::CreateNew
+        });
+
+        match dedup_result {
+            AlertDeduplication::Deduplicated { bead_id, fingerprint } => {
+                let note = format!(
+                    "Crash recurred for bead {}: signal={}, exit_code={}, agent={}, timestamp={}",
+                    bead.id, signal_num, signal_code, self.config.agent.default, timestamp
+                );
+                let _ = append_alert_note(store, &bead_id, &note).await;
+
                 tracing::info!(
                     bead_id = %bead.id,
-                    %alert_id,
-                    "crash alert bead created"
+                    crash_alert_bead_id = %bead_id,
+                    fingerprint = %fingerprint,
+                    signal = signal_num,
+                    "Crash alert deduplicated - appended note to existing bead"
                 );
             }
-            Ok(Err(e)) => {
-                tracing::warn!(
+            AlertDeduplication::Suppressed { bead_id, closed_at } => {
+                tracing::info!(
                     bead_id = %bead.id,
-                    error = %e,
-                    "failed to create crash alert bead"
+                    crash_alert_bead_id = %bead_id,
+                    closed_at = %closed_at,
+                    "Crash alert suppressed - alert was closed within 24h"
                 );
             }
-            Err(_) => {
-                tracing::warn!(
-                    bead_id = %bead.id,
-                    "create_bead timed out after 30s during crash handling"
+            AlertDeduplication::CreateNew => {
+                let alert_body = format!(
+                    "## Agent Crash Report\n\
+                     \n\
+                     - **Bead ID**: {}\n\
+                     - **Agent**: {}\n\
+                     - **Exit code**: {} (signal {})\n\
+                     - **Workspace**: {}\n\
+                     - **Timestamp**: {}\n\
+                     \n\
+                     The agent process was killed. This bead has been released for retry.",
+                    bead.id,
+                    self.config.agent.default,
+                    signal_code,
+                    signal_num,
+                    bead.workspace.display(),
+                    timestamp,
                 );
+
+                let fingerprint = crate::fingerprint::compute_fingerprint(
+                    &workspace,
+                    &AlertKind::Crash,
+                    &cause,
+                );
+
+                // Hook 4: propagate stitch labels from the crashed bead to the alert.
+                let signal_label = format!("signal-{}", signal_num);
+                let alert_labels = build_alert_labels(
+                    &fingerprint,
+                    &["alert", "crash", &signal_label],
+                );
+
+                // Add stitch labels
+                let mut final_labels = alert_labels;
+                final_labels.extend(crate::types::extract_stitch_labels(&bead.labels));
+                let alert_label_refs: Vec<&str> = final_labels.iter().map(|s| s.as_str()).collect();
+
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    store.create_bead(&alert_title, &alert_body, &alert_label_refs),
+                )
+                .await
+                {
+                    Ok(Ok(alert_id)) => {
+                        tracing::info!(
+                            bead_id = %bead.id,
+                            %alert_id,
+                            fingerprint = %fingerprint,
+                            "crash alert bead created"
+                        );
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!(
+                            bead_id = %bead.id,
+                            error = %e,
+                            "failed to create crash alert bead"
+                        );
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            bead_id = %bead.id,
+                            "create_bead timed out after 30s during crash handling"
+                        );
+                    }
+                }
             }
         }
 
@@ -1382,6 +1555,7 @@ impl fmt::Display for Outcome {
             Outcome::AgentNotFound => write!(f, "AgentNotFound"),
             Outcome::Interrupted => write!(f, "Interrupted"),
             Outcome::Crash(code) => write!(f, "Crash({})", code),
+            Outcome::GateError => write!(f, "GateError"),
         }
     }
 }
@@ -2858,6 +3032,115 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, EventKind::WorkerHandlingTimeout { .. })),
             "workspace failure should emit WorkerHandlingTimeout event"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_gate_execution_error_releases_without_incrementing_failure_count() {
+        // Regression test for needle-4aaa010c: gate execution errors should release
+        // the bead WITHOUT incrementing failure count or adding the cycling label.
+        let handler = test_handler();
+        let store = MockBeadStore::new(BeadStatus::InProgress)
+            .with_labels(vec!["failure-count:2".to_string()]);
+        let bead = test_bead(BeadStatus::InProgress);
+
+        // Create a gate report with an execution error (command could not run)
+        let mut results = std::collections::HashMap::new();
+        results.insert(
+            "test_gate".to_string(),
+            crate::validation::GateResult::ExecutionError {
+                command: "nonexistent_command".to_string(),
+                reason: "ENOENT".to_string(),
+            },
+        );
+        let gate_report = Some(crate::validation::GateReport::new(results));
+
+        // Simulate the outcome handling with gate execution error
+        let result = handler
+            .handle(&store, &bead, &test_output(1), false)
+            .await
+            .unwrap();
+
+        // The bead should be released
+        assert_eq!(result.bead_action, BeadAction::Released);
+
+        // Verify failure count was NOT incremented
+        let actions = store.actions();
+        assert!(
+            !actions.iter().any(
+                |a| matches!(a, StoreAction::AddLabel(_, label)
+                    if label == "failure-count:3" || label.contains("failure-count"))
+            ),
+            "gate execution error should NOT increment failure count"
+        );
+
+        // Verify cycling label was NOT added
+        assert!(
+            !actions.iter().any(
+                |a| matches!(a, StoreAction::AddLabel(_, label) if label == "cycling")
+            ),
+            "gate execution error should NOT add cycling label"
+        );
+
+        // Verify gate.execution_error event was emitted
+        assert!(
+            result.telemetry_events.iter().any(|e| matches!(
+                e,
+                EventKind::GateExecutionError {
+                    workspace: _,
+                    gate: _,
+                    command: _,
+                    reason: _,
+                    ..
+                }
+            )),
+            "gate execution error should emit gate.execution_error event"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_gate_failure_still_increments_failure_count() {
+        // Existing gate failures (verification failures) should still increment
+        // failure count. This is the positive case — we're ensuring the new
+        // GateError handling doesn't break existing gate failure behavior.
+        let handler = test_handler();
+        let store = MockBeadStore::new(BeadStatus::InProgress)
+            .with_labels(vec!["failure-count:1".to_string()]);
+        let bead = test_bead(BeadStatus::InProgress);
+
+        // Create a gate report with a verification failure (gate ran but failed)
+        let mut results = std::collections::HashMap::new();
+        results.insert(
+            "test_gate".to_string(),
+            crate::validation::GateResult::Fail("test failed".to_string()),
+        );
+        let gate_report = Some(crate::validation::GateReport::new(results));
+
+        // Simulate the outcome handling with gate failure
+        let result = handler
+            .handle(&store, &bead, &test_output(1), false)
+            .await
+            .unwrap();
+
+        // The bead should be released
+        assert_eq!(result.bead_action, BeadAction::Released);
+
+        // Verify failure count WAS incremented
+        let actions = store.actions();
+        assert!(
+            actions.iter().any(
+                |a| matches!(a, StoreAction::AddLabel(_, label) if label == "failure-count:2")
+            ),
+            "gate failure should increment failure count"
+        );
+
+        // Verify gate.execution_error event was NOT emitted
+        assert!(
+            !result.telemetry_events.iter().any(|e| matches!(
+                e,
+                EventKind::GateExecutionError { .. }
+            )),
+            "gate failure should NOT emit gate.execution_error event"
         );
     }
 }

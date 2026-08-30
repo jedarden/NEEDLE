@@ -606,6 +606,14 @@ pub enum EventKind {
         bead_id: BeadId,
         gates_run: u32,
     },
+    /// Gate execution error — the gate could not run (ENOENT/EACCES/missing directory/timeout).
+    GateExecutionError {
+        bead_id: BeadId,
+        workspace: String,
+        gate: String,
+        command: String,
+        reason: String,
+    },
 
     // ── Unravel ──
     UnravelAnalyzed {
@@ -1097,6 +1105,7 @@ impl EventKind {
             EventKind::SplitSkipped { .. } => "bead.split.skipped",
             EventKind::VerificationFailed { .. } => "verification.failed",
             EventKind::VerificationPassed { .. } => "verification.passed",
+            EventKind::GateExecutionError { .. } => "gate.execution_error",
             EventKind::UnravelAnalyzed { .. } => "bead.unravel.analyzed",
             EventKind::UnravelSkipped { .. } => "bead.unravel.skipped",
             EventKind::ReflectStarted { .. } => "reflect.started",
@@ -1207,6 +1216,7 @@ impl EventKind {
             | EventKind::MitosisEvaluated { bead_id, .. }
             | EventKind::VerificationFailed { bead_id, .. }
             | EventKind::VerificationPassed { bead_id, .. }
+            | EventKind::GateExecutionError { bead_id, .. }
             | EventKind::UnravelAnalyzed { bead_id, .. }
             | EventKind::UnravelSkipped { bead_id, .. }
             | EventKind::OutputTransformSpawned { bead_id, .. }
@@ -1878,6 +1888,21 @@ impl EventKind {
                 serde_json::json!({
                     "bead_id": bead_id.as_ref(),
                     "gates_run": gates_run,
+                })
+            }
+            EventKind::GateExecutionError {
+                bead_id,
+                workspace,
+                gate,
+                command,
+                reason,
+            } => {
+                serde_json::json!({
+                    "bead_id": bead_id.as_ref(),
+                    "workspace": workspace,
+                    "gate": gate,
+                    "command": command,
+                    "reason": reason,
                 })
             }
             EventKind::UnravelAnalyzed {
@@ -2711,6 +2736,7 @@ impl EventKind {
             | EventKind::SplitSkipped { .. }
             | EventKind::VerificationFailed { .. }
             | EventKind::VerificationPassed { .. }
+            | EventKind::GateExecutionError { .. }
             | EventKind::UnravelAnalyzed { .. }
             | EventKind::UnravelSkipped { .. }
             | EventKind::PulseScannerStarted { .. }
