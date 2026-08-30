@@ -2,7 +2,8 @@
 //!
 //! Pluck handles >90% of all bead processing. It queries the bead store for
 //! unassigned, ready beads, filters by excluded labels, and sorts them in
-//! deterministic priority order: `(priority ASC, created_at ASC, id ASC)`.
+//! deterministic priority order: `(effective_priority ASC, pinned_bucket ASC,
+//! failure_count ASC, created_at ASC, id ASC)`.
 //!
 //! Given the same queue state, every worker computes the same candidate list.
 
@@ -380,7 +381,8 @@ fn starvation_diagnostic_snapshot(
                 .collect(),
             split_after_failures,
             candidate_sort_order: vec![
-                "priority ASC".to_string(),
+                "effective_priority ASC".to_string(),
+                "pinned_bucket ASC".to_string(),
                 "failure_count ASC".to_string(),
                 "created_at ASC".to_string(),
                 "id ASC".to_string(),
@@ -827,48 +829,16 @@ impl PluckStrand {
         let base_priority = bead.priority.min(min_blocked_priority);
 
         // Apply aging: lower number = higher priority, so we subtract
-        let age_days = (now - bead.created_at).num_days();
-        if age_days > 30 {
+        let age = now.signed_duration_since(bead.created_at);
+        if age > chrono::Duration::days(30) {
             // Raise two levels (but don't go below 0)
             base_priority.saturating_sub(2)
-        } else if age_days > 14 {
+        } else if age > chrono::Duration::days(14) {
             // Raise one level
             base_priority.saturating_sub(1)
         } else {
             base_priority
         }
-    }
-
-    /// Count transitive open dependents for a bead.
-    ///
-    /// Uses BFS traversal through the graph to count all unique open beads
-    /// that transitively depend on this bead.
-    fn count_transitive_open_dependents(
-        bead_id: &BeadId,
-        graph: &std::collections::HashMap<BeadId, Vec<BeadId>>,
-        open_status: &std::collections::HashSet<BeadId>,
-    ) -> usize {
-        let mut visited = std::collections::HashSet::new();
-        let mut queue = std::collections::VecDeque::new();
-
-        queue.push_back(bead_id.clone());
-        visited.insert(bead_id.clone());
-
-        let mut count = 0;
-
-        while let Some(current) = queue.pop_front() {
-            if let Some(dependents) = graph.get(&current) {
-                for dep_id in dependents {
-                    if open_status.contains(dep_id) && !visited.contains(dep_id) {
-                        count += 1;
-                        visited.insert(dep_id.clone());
-                        queue.push_back(dep_id.clone());
-                    }
-                }
-            }
-        }
-
-        count
     }
 
     /// Compute pinned bucket score.
@@ -884,28 +854,31 @@ impl PluckStrand {
         -log_val
     }
 
-    /// Find minimum priority among open beads transitively blocked by this bead.
+    /// Compute both dependency-derived values needed by the ordering key.
     ///
-    /// Returns the bead's own priority if it doesn't block any open beads.
-    fn find_min_blocked_priority(
-        bead_id: &BeadId,
-        graph: &std::collections::HashMap<BeadId, Vec<BeadId>>,
-        open_beads_by_id: &std::collections::HashMap<BeadId, &Bead>,
-        visited: &mut std::collections::HashSet<BeadId>,
-    ) -> u8 {
-        let mut min_priority = u8::MAX;
+    /// The graph contains only open beads, so one traversal gives the minimum
+    /// priority inherited from all transitively blocked beads and the number
+    /// of unique open dependents for the pinned bucket.
+    fn dependency_metrics(
+        bead: &Bead,
+        graph: &HashMap<BeadId, Vec<BeadId>>,
+        open_beads_by_id: &HashMap<BeadId, &Bead>,
+    ) -> (u8, usize) {
+        let mut min_priority = bead.priority;
         let mut queue = std::collections::VecDeque::new();
+        let mut visited = HashSet::new();
 
-        queue.push_back(bead_id.clone());
-        visited.insert(bead_id.clone());
+        queue.push_back(bead.id.clone());
+        visited.insert(bead.id.clone());
+        let mut transitive_dependents = 0;
 
         while let Some(current) = queue.pop_front() {
             if let Some(blocked) = graph.get(&current) {
                 for blocked_id in blocked {
                     if let Some(&blocked_bead) = open_beads_by_id.get(blocked_id) {
-                        min_priority = min_priority.min(blocked_bead.priority);
-                        if !visited.contains(blocked_id) {
-                            visited.insert(blocked_id.clone());
+                        if visited.insert(blocked_id.clone()) {
+                            transitive_dependents += 1;
+                            min_priority = min_priority.min(blocked_bead.priority);
                             queue.push_back(blocked_id.clone());
                         }
                     }
@@ -913,37 +886,19 @@ impl PluckStrand {
             }
         }
 
-        if min_priority == u8::MAX {
-            // No blocked beads found, return own priority
-            if let Some(bead) = open_beads_by_id.get(bead_id) {
-                bead.priority
-            } else {
-                0 // fallback
-            }
-        } else {
-            min_priority
-        }
+        (min_priority, transitive_dependents)
     }
 
-    /// Build memoized dependency graphs from all open beads.
+    /// Build the dependency graph and open-bead lookup from one inventory snapshot.
     ///
     /// Returns:
-    /// - blocked_graph: maps bead_id -> list of bead IDs it blocks
-    /// - dependent_graph: maps bead_id -> list of bead IDs that depend on it
+    /// - blocked_graph: maps bead_id -> list of open bead IDs it blocks
     /// - open_beads_by_id: maps bead_id -> bead reference for all open beads
     fn build_dependency_graphs(
         all_beads: &[Bead],
-    ) -> (
-        std::collections::HashMap<BeadId, Vec<BeadId>>,
-        std::collections::HashMap<BeadId, Vec<BeadId>>,
-        std::collections::HashMap<BeadId, &Bead>,
-    ) {
-        let mut blocked_graph: std::collections::HashMap<BeadId, Vec<BeadId>> =
-            std::collections::HashMap::new();
-        let mut dependent_graph: std::collections::HashMap<BeadId, Vec<BeadId>> =
-            std::collections::HashMap::new();
-        let mut open_beads_by_id: std::collections::HashMap<BeadId, &Bead> =
-            std::collections::HashMap::new();
+    ) -> (HashMap<BeadId, Vec<BeadId>>, HashMap<BeadId, &Bead>) {
+        let mut blocked_graph: HashMap<BeadId, Vec<BeadId>> = HashMap::new();
+        let mut open_beads_by_id: HashMap<BeadId, &Bead> = HashMap::new();
 
         // First pass: collect all open beads
         for bead in all_beads {
@@ -966,23 +921,24 @@ impl PluckStrand {
                 if is_blocking {
                     blocked_graph
                         .entry(dependency.id.clone())
-                        .or_insert_with(Vec::new)
+                        .or_default()
                         .push(bead.id.clone());
                 }
             }
         }
 
-        // Build reverse graph (dependents)
-        for (blocker_id, blocked_list) in &blocked_graph {
-            for blocked_id in blocked_list {
-                dependent_graph
-                    .entry(blocked_id.clone())
-                    .or_insert_with(Vec::new)
-                    .push(blocker_id.clone());
-            }
-        }
+        (blocked_graph, open_beads_by_id)
+    }
 
-        (blocked_graph, dependent_graph, open_beads_by_id)
+    /// Sort by the current non-graph-aware key.
+    fn sort_by_current_key(candidates: &mut [Bead]) {
+        candidates.sort_by(|a, b| {
+            a.priority
+                .cmp(&b.priority)
+                .then_with(|| Self::extract_failure_count(a).cmp(&Self::extract_failure_count(b)))
+                .then_with(|| a.created_at.cmp(&b.created_at))
+                .then_with(|| a.id.as_ref().cmp(b.id.as_ref()))
+        });
     }
 
     /// Sort candidates in deterministic priority order with dependency awareness.
@@ -1021,79 +977,23 @@ impl PluckStrand {
             );
 
             // Fall back to current simpler sort to maintain performance
-            candidates.sort_by(|a, b| {
-                a.priority
-                    .cmp(&b.priority)
-                    .then_with(|| {
-                        Self::extract_failure_count(a).cmp(&Self::extract_failure_count(b))
-                    })
-                    .then_with(|| a.created_at.cmp(&b.created_at))
-                    .then_with(|| a.id.as_ref().cmp(b.id.as_ref()))
-            });
+            Self::sort_by_current_key(candidates);
             return;
         }
 
-        // Build memoized dependency graphs
-        let (blocked_graph, dependent_graph, open_beads_by_id) =
-            Self::build_dependency_graphs(all_beads);
-
-        // Build open status set for efficient lookup
-        let open_status: std::collections::HashSet<BeadId> =
-            open_beads_by_id.keys().cloned().collect();
-
-        candidates.sort_by(|a, b| {
-            // Compute effective priority with aging
-            let mut visited_a = std::collections::HashSet::new();
-            let min_blocked_a = Self::find_min_blocked_priority(
-                &a.id,
-                &blocked_graph,
-                &open_beads_by_id,
-                &mut visited_a,
-            );
-            let effective_priority_a = Self::compute_effective_priority(a, min_blocked_a, now);
-
-            let mut visited_b = std::collections::HashSet::new();
-            let min_blocked_b = Self::find_min_blocked_priority(
-                &b.id,
-                &blocked_graph,
-                &open_beads_by_id,
-                &mut visited_b,
-            );
-            let effective_priority_b = Self::compute_effective_priority(b, min_blocked_b, now);
-
-            // Primary sort by effective priority
-            effective_priority_a
-                .cmp(&effective_priority_b)
-                .then_with(|| {
-                    // Secondary: pinned bucket (beads blocking more open beads first)
-                    let transitive_count_a = Self::count_transitive_open_dependents(
-                        &a.id,
-                        &dependent_graph,
-                        &open_status,
-                    );
-                    let pinned_bucket_a = Self::compute_pinned_bucket(transitive_count_a);
-
-                    let transitive_count_b = Self::count_transitive_open_dependents(
-                        &b.id,
-                        &dependent_graph,
-                        &open_status,
-                    );
-                    let pinned_bucket_b = Self::compute_pinned_bucket(transitive_count_b);
-
-                    pinned_bucket_a.cmp(&pinned_bucket_b)
-                })
-                .then_with(|| {
-                    // Tertiary: failure count (struggling beads later)
-                    Self::extract_failure_count(a).cmp(&Self::extract_failure_count(b))
-                })
-                .then_with(|| {
-                    // Quaternary: created_at (older first)
-                    a.created_at.cmp(&b.created_at)
-                })
-                .then_with(|| {
-                    // Final tie-breaker: id (lexicographic)
-                    a.id.as_ref().cmp(b.id.as_ref())
-                })
+        // Build the graph once, then cache each candidate's complete ordering
+        // key. This keeps dependency traversal out of sort comparisons.
+        let (blocked_graph, open_beads_by_id) = Self::build_dependency_graphs(all_beads);
+        candidates.sort_by_cached_key(|bead| {
+            let (min_blocked_priority, transitive_dependents) =
+                Self::dependency_metrics(bead, &blocked_graph, &open_beads_by_id);
+            (
+                Self::compute_effective_priority(bead, min_blocked_priority, now),
+                Self::compute_pinned_bucket(transitive_dependents),
+                Self::extract_failure_count(bead),
+                bead.created_at,
+                bead.id.as_ref().to_string(),
+            )
         });
     }
 
@@ -1488,24 +1388,14 @@ impl super::Strand for PluckStrand {
         // 4. Sort: deterministic with dependency awareness.
         // Need full inventory for priority inheritance and pinned bucket computation.
         let all_beads = match store.list_all().await {
-            Ok(beads) => beads,
+            Ok(beads) => Some(beads),
             Err(e) => {
                 tracing::warn!(
                     error = %e,
                     "Failed to load full inventory for dependency-aware sorting, falling back to simple sort"
                 );
-                // Fallback to simple sort on failure
-                candidates.sort_by(|a, b| {
-                    a.priority
-                        .cmp(&b.priority)
-                        .then_with(|| {
-                            Self::extract_failure_count(a).cmp(&Self::extract_failure_count(b))
-                        })
-                        .then_with(|| a.created_at.cmp(&b.created_at))
-                        .then_with(|| a.id.as_ref().cmp(b.id.as_ref()))
-                });
-                // Continue to split trigger with fallback sort - return empty all_beads
-                Vec::new()
+                Self::sort_by_current_key(&mut candidates);
+                None
             }
         };
 
@@ -1521,8 +1411,11 @@ impl super::Strand for PluckStrand {
             );
         }
 
-        // Apply the new dependency-aware sorting
-        self.sort_candidates(&mut candidates, &all_beads, &self.telemetry);
+        // Apply the new dependency-aware sorting when the inventory snapshot
+        // was available; the error path above has already used the fallback.
+        if let Some(all_beads) = all_beads.as_deref() {
+            self.sort_candidates(&mut candidates, all_beads, &self.telemetry);
+        }
 
         // 5. Check for split trigger: if the first candidate has accumulated
         //    enough consecutive failures, dispatch a SPLIT instruction instead
@@ -2137,6 +2030,24 @@ mod tests {
         }
     }
 
+    fn make_bead_with_age(id: &str, priority: u8, age_days: i64) -> Bead {
+        let mut bead = make_bead(id, priority, "2026-01-01 00:00:00");
+        let created_at = Utc::now() - chrono::Duration::days(age_days);
+        bead.created_at = created_at;
+        bead.updated_at = created_at;
+        bead
+    }
+
+    fn make_blocks_dependency(id: &str) -> BrDependency {
+        BrDependency {
+            id: BeadId::from(id.to_string()),
+            title: String::new(),
+            status: "open".to_string(),
+            priority: 0,
+            dependency_type: "blocks".to_string(),
+        }
+    }
+
     fn make_bead_with_labels(id: &str, priority: u8, labels: Vec<&str>) -> Bead {
         let mut bead = make_bead(id, priority, "2026-01-01 00:00:00");
         bead.labels = labels.into_iter().map(|s| s.to_string()).collect();
@@ -2172,6 +2083,151 @@ mod tests {
     // ──────────────────────────────────────────────────────────────────────────
     // Sorting
     // ──────────────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn root_inherits_priority_from_open_transitive_dependent() {
+        let root = make_bead_with_age("p2-root", 2, 1);
+        let leaf = make_bead_with_age("p1-leaf", 1, 1);
+        let mut dependent = make_bead_with_age("p0-dependent", 0, 1);
+        dependent
+            .dependencies
+            .push(make_blocks_dependency("p2-root"));
+        let store = MemoryStore {
+            beads: vec![leaf, root, dependent],
+        };
+
+        let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()));
+        let result = strand.evaluate(&store, &HashSet::new()).await;
+
+        match result {
+            StrandResult::BeadFound(beads) => {
+                let root_position = beads.iter().position(|bead| bead.id.as_ref() == "p2-root");
+                let leaf_position = beads.iter().position(|bead| bead.id.as_ref() == "p1-leaf");
+                assert!(
+                    root_position < leaf_position,
+                    "P2 root inheriting P0 should sort before P1 leaf: {beads:?}"
+                );
+            }
+            other => panic!("expected BeadFound, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn pinned_bucket_prefers_root_with_more_open_dependents() {
+        let root = make_bead_with_age("root", 1, 1);
+        let leaf = make_bead_with_age("leaf", 1, 1);
+        let mut dependent_a = make_bead_with_age("dependent-a", 1, 1);
+        dependent_a
+            .dependencies
+            .push(make_blocks_dependency("root"));
+        let mut dependent_b = make_bead_with_age("dependent-b", 1, 1);
+        dependent_b
+            .dependencies
+            .push(make_blocks_dependency("root"));
+        let store = MemoryStore {
+            beads: vec![leaf, dependent_a, root, dependent_b],
+        };
+
+        let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()));
+        let result = strand.evaluate(&store, &HashSet::new()).await;
+
+        match result {
+            StrandResult::BeadFound(beads) => {
+                let root_position = beads.iter().position(|bead| bead.id.as_ref() == "root");
+                let leaf_position = beads.iter().position(|bead| bead.id.as_ref() == "leaf");
+                assert!(root_position < leaf_position);
+            }
+            other => panic!("expected BeadFound, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn thirty_one_day_old_p3_leaf_is_aged_to_p1() {
+        let old_leaf = make_bead_with_age("old-p3", 3, 31);
+        let fresh_p2 = make_bead_with_age("fresh-p2", 2, 1);
+        let store = MemoryStore {
+            beads: vec![fresh_p2, old_leaf],
+        };
+
+        let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()));
+        let result = strand.evaluate(&store, &HashSet::new()).await;
+
+        assert_eq!(
+            PluckStrand::compute_effective_priority(
+                &store.beads[1],
+                store.beads[1].priority,
+                Utc::now()
+            ),
+            1
+        );
+        match result {
+            StrandResult::BeadFound(beads) => {
+                assert_eq!(beads[0].id.as_ref(), "old-p3");
+            }
+            other => panic!("expected BeadFound, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn separate_pluck_instances_have_identical_ordering() {
+        let root = make_bead_with_age("root", 2, 1);
+        let mut child = make_bead_with_age("child", 0, 1);
+        child.dependencies.push(make_blocks_dependency("root"));
+        let fixture = vec![
+            make_bead_with_age("leaf", 1, 16),
+            root,
+            child,
+            make_bead_with_age("tie-b", 2, 1),
+            make_bead_with_age("tie-a", 2, 1),
+        ];
+        let store_a = MemoryStore {
+            beads: fixture.clone(),
+        };
+        let store_b = MemoryStore { beads: fixture };
+        let strand_a = PluckStrand::new(vec![], Telemetry::new("test-worker-a".to_string()));
+        let strand_b = PluckStrand::new(vec![], Telemetry::new("test-worker-b".to_string()));
+
+        let result_a = strand_a.evaluate(&store_a, &HashSet::new()).await;
+        let result_b = strand_b.evaluate(&store_b, &HashSet::new()).await;
+        let ids_a: Vec<_> = match result_a {
+            StrandResult::BeadFound(beads) => beads.into_iter().map(|bead| bead.id).collect(),
+            other => panic!("expected BeadFound, got: {other:?}"),
+        };
+        let ids_b: Vec<_> = match result_b {
+            StrandResult::BeadFound(beads) => beads.into_iter().map(|bead| bead.id).collect(),
+            other => panic!("expected BeadFound, got: {other:?}"),
+        };
+
+        assert_eq!(ids_a, ids_b);
+    }
+
+    #[tokio::test]
+    async fn large_open_queue_uses_degraded_ordering() {
+        use crate::telemetry::test_utils::TestHelper;
+        use std::time::{Duration, Instant};
+
+        let beads = (0..=5000)
+            .map(|index| make_bead(&format!("large-{index:04}"), 1, "2026-01-01 00:00:00"))
+            .collect();
+        let store = MemoryStore { beads };
+        let helper = TestHelper::new("test-worker");
+        let strand = PluckStrand::new(vec![], helper.telemetry().clone());
+
+        let started = Instant::now();
+        let result = strand.evaluate(&store, &HashSet::new()).await;
+        let elapsed = started.elapsed();
+        helper.sync().await;
+
+        assert!(matches!(result, StrandResult::BeadFound(_)));
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "degraded ordering took too long: {elapsed:?}"
+        );
+        let events = helper.events_by_type("strand.pluck.ordering_degraded");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data["open_bead_count"], 5001);
+        assert_eq!(events[0].data["threshold"], 5000);
+    }
 
     #[tokio::test]
     async fn candidates_sorted_by_priority_then_created_at() {
@@ -2254,14 +2310,14 @@ mod tests {
         // low-priority-number... i.e. HIGHER-priority (lower number = more
         // urgent) struggling bead must still be preferred over a healthy
         // bead at a less urgent priority.
+        let mut urgent_but_struggling = make_bead_with_age("urgent-but-struggling", 1, 1);
+        urgent_but_struggling.labels = vec!["failure-count:2".to_string()];
+        let healthy_but_low_priority = make_bead_with_age("healthy-but-low-priority", 2, 1);
         let store = MemoryStore {
-            beads: vec![
-                // failure-count:2 stays below the default split_after_failures
-                // threshold (3) — this test is about sort order, not the
-                // separate split-trigger path (see split_triggered_when_failure_count_exceeds_threshold).
-                make_bead_with_labels("urgent-but-struggling", 1, vec!["failure-count:2"]),
-                make_bead_with_labels("healthy-but-low-priority", 2, vec![]),
-            ],
+            // failure-count:2 stays below the default split_after_failures
+            // threshold (3) — this test is about sort order, not the
+            // separate split-trigger path (see split_triggered_when_failure_count_exceeds_threshold).
+            beads: vec![urgent_but_struggling, healthy_but_low_priority],
         };
 
         let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()));
@@ -3533,7 +3589,8 @@ mod tests {
         assert_eq!(
             record["pluck_parameters"]["candidate_sort_order"],
             serde_json::json!([
-                "priority ASC",
+                "effective_priority ASC",
+                "pinned_bucket ASC",
                 "failure_count ASC",
                 "created_at ASC",
                 "id ASC"

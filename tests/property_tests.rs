@@ -62,8 +62,9 @@ fn arb_bead_vec() -> impl Strategy<Value = Vec<Bead>> {
 //
 // "For any queue state, all workers compute the same candidate ordering."
 //
-// The sort key is (priority ASC, created_at ASC, id ASC). Given the same
-// input, the output must always be identical regardless of initial order.
+// Given the same input, the deterministic tie-break portion of Pluck's sort
+// remains identical regardless of initial order. Dependency-aware ordering is
+// covered by the Pluck strand unit tests.
 
 /// Sort beads using the same logic as PluckStrand::sort_candidates.
 fn deterministic_sort(beads: &mut [Bead]) {

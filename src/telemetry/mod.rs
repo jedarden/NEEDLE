@@ -1219,7 +1219,6 @@ impl EventKind {
             EventKind::OtlpDropped { .. } => "telemetry.otlp.dropped",
             EventKind::OtlpShutdownTimeout { .. } => "telemetry.otlp.shutdown_timeout",
             EventKind::Log { .. } => "log.entry",
-            EventKind::PluckOrderingDegraded { .. } => "strand.pluck.ordering_degraded",
         }
     }
 
