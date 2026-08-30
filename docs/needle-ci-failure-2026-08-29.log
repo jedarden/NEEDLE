@@ -1,0 +1,718 @@
+time=2026-08-29T22:46:03.073Z level=INFO msg="waiting for signals" argo=true signalPath=/var/run/argo/ctr/main/signal
++ rm -rf /workspace/lost+found '/workspace/.[!.]*'
++ git clone --depth 1 --branch main https://git.ardenone.com/jedarden/NEEDLE.git /workspace
+Cloning into '/workspace'...
++ cd /workspace
++ rustc --version
+info: syncing channel updates for 1.95.0-x86_64-unknown-linux-gnu
+info: latest update on 2026-04-16 for version 1.95.0 (59807616e 2026-04-14)
+info: downloading 7 components
+rustc 1.95.0 (59807616e 2026-04-14)
++ '[' -n sccache ']'
++ '[' -n https://s3.ardenone.com ']'
++ command -v sccache
++ SCCACHE_VERSION=0.17.0
++ SCCACHE_ARCHIVE=sccache-v0.17.0-x86_64-unknown-linux-musl.tar.gz
++ SCCACHE_SHA256=67c4a96dd237c1f518f6b36083f270f9976d516f1e57fce891755ea782e50006
++ SCCACHE_TMP=/tmp/sccache-v0.17.0-x86_64-unknown-linux-musl.tar.gz
++ SCCACHE_ROOT=/tmp/sccache-0.17.0
++ mkdir -p /tmp/sccache-0.17.0
++ curl -fsSL --retry 3 https://github.com/mozilla/sccache/releases/download/v0.17.0/sccache-v0.17.0-x86_64-unknown-linux-musl.tar.gz -o /tmp/sccache-v0.17.0-x86_64-unknown-linux-musl.tar.gz
++ echo '67c4a96dd237c1f518f6b36083f270f9976d516f1e57fce891755ea782e50006  /tmp/sccache-v0.17.0-x86_64-unknown-linux-musl.tar.gz'
++ sha256sum -c -
+/tmp/sccache-v0.17.0-x86_64-unknown-linux-musl.tar.gz: OK
++ tar -xzf /tmp/sccache-v0.17.0-x86_64-unknown-linux-musl.tar.gz --strip-components=1 -C /tmp/sccache-0.17.0
++ chmod 0755 /tmp/sccache-0.17.0/sccache
++ export PATH=/tmp/sccache-0.17.0:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
++ PATH=/tmp/sccache-0.17.0:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
++ export RUSTC_WRAPPER=sccache SCCACHE_S3_USE_SSL=true SCCACHE_REGION=garage
++ RUSTC_WRAPPER=sccache
++ SCCACHE_S3_USE_SSL=true
++ SCCACHE_REGION=garage
++ echo 'sccache enabled (bucket=sccache)'
++ sccache --start-server
+sccache enabled (bucket=sccache)
+sccache: Starting the server...
+sccache: Listening on address 127.0.0.1:4226
++ command -v bead
++ echo '=== Installing pinned bead-rs CLI (v0.1.3) ==='
+=== Installing pinned bead-rs CLI (v0.1.3) ===
++ cargo install --locked --git https://git.ardenone.com/jedarden/bead-rs.git --rev 85f36acba864bf60f8f06b7fbe3de33c280f3d08 --bin bead
+    Updating git repository `https://git.ardenone.com/jedarden/bead-rs.git`
+From https://git.ardenone.com/jedarden/bead-rs
+ * [new branch]      main       -> origin/main
+ * [new branch]      recovery/marathon-f013-ce5a1df -> origin/recovery/marathon-f013-ce5a1df
+ * [new ref]                    -> origin/HEAD
+ * [new tag]         v0.1.0     -> v0.1.0
+ * [new tag]         v0.1.1     -> v0.1.1
+ * [new tag]         v0.1.2     -> v0.1.2
+ * [new tag]         v0.1.3     -> v0.1.3
+ * [new tag]         v0.2.0     -> v0.2.0
+ * [new tag]         v0.2.1     -> v0.2.1
+ * [new tag]         v0.2.2     -> v0.2.2
+  Installing bead-rs v0.1.3 (https://git.ardenone.com/jedarden/bead-rs.git?rev=85f36acba864bf60f8f06b7fbe3de33c280f3d08#85f36acb)
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded pkg-config v0.3.33
+  Downloaded time-macros v0.2.18
+  Downloaded clap_mangen v0.2.20
+  Downloaded time-core v0.1.2
+  Downloaded tempfile v3.12.0
+  Downloaded uuid v1.8.0
+  Downloaded serial_test v3.5.0
+  Downloaded hashbrown v0.14.5
+  Downloaded clap_builder v4.5.2
+  Downloaded ahash v0.8.12
+  Downloaded serial_test_derive v3.5.0
+  Downloaded vcpkg v0.2.15
+  Downloaded roff v0.2.2
+  Downloaded powerfmt v0.2.0
+  Downloaded num-conv v0.1.0
+  Downloaded md5 v0.7.0
+  Downloaded hashlink v0.9.1
+  Downloaded fallible-streaming-iterator v0.1.9
+  Downloaded deranged v0.3.11
+  Downloaded clap_derive v4.5.4
+  Downloaded clap v4.5.4
+  Downloaded fallible-iterator v0.3.0
+  Downloaded anstream v0.6.21
+  Downloaded rusqlite v0.31.0
+  Downloaded clap_lex v0.7.7
+  Downloaded anstyle-parse v0.2.7
+  Downloaded time v0.3.36
+  Downloaded libsqlite3-sys v0.28.0
+   Compiling proc-macro2 v1.0.107
+   Compiling cfg-if v1.0.4
+   Compiling version_check v0.9.5
+   Compiling quote v1.0.47
+   Compiling unicode-ident v1.0.24
+   Compiling libc v0.2.189
+   Compiling zerocopy v0.8.56
+   Compiling syn v2.0.119
+   Compiling generic-array v0.14.7
+   Compiling once_cell v1.21.4
+   Compiling ahash v0.8.12
+   Compiling shlex v2.0.1
+   Compiling utf8parse v0.2.2
+   Compiling find-msvc-tools v0.1.10
+   Compiling typenum v1.20.1
+   Compiling cc v1.4.2
+   Compiling anstyle-parse v0.2.7
+   Compiling getrandom v0.2.17
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling parking_lot_core v0.9.12
+   Compiling anstyle v1.0.14
+   Compiling vcpkg v0.2.15
+   Compiling serde_core v1.0.229
+   Compiling anstyle-query v1.1.5
+   Compiling pkg-config v0.3.33
+   Compiling autocfg v1.5.1
+   Compiling colorchoice v1.0.5
+   Compiling smallvec v1.15.2
+   Compiling anstream v0.6.21
+   Compiling num-traits v0.2.19
+   Compiling libsqlite3-sys v0.28.0
+   Compiling slab v0.4.12
+   Compiling scopeguard v1.2.0
+   Compiling futures-core v0.3.33
+   Compiling rustix v0.38.44
+   Compiling zmij v1.0.23
+   Compiling strsim v0.11.1
+   Compiling clap_lex v0.7.7
+   Compiling bitflags v2.13.1
+   Compiling futures-task v0.3.33
+   Compiling heck v0.5.0
+   Compiling pin-project-lite v0.2.17
+   Compiling clap_builder v4.5.2
+   Compiling clap_derive v4.5.4
+   Compiling futures-util v0.3.33
+   Compiling lock_api v0.4.14
+   Compiling hashbrown v0.14.5
+   Compiling block-buffer v0.10.4
+   Compiling crypto-common v0.1.7
+   Compiling rand_core v0.6.4
+   Compiling ppv-lite86 v0.2.21
+   Compiling syn v3.0.3
+   Compiling powerfmt v0.2.0
+   Compiling anyhow v1.0.104
+   Compiling serde v1.0.229
+   Compiling linux-raw-sys v0.4.15
+   Compiling itoa v1.0.18
+   Compiling thiserror v1.0.69
+   Compiling serde_json v1.0.151
+   Compiling serde_derive v1.0.229
+   Compiling deranged v0.3.11
+   Compiling rand_chacha v0.3.1
+   Compiling digest v0.10.7
+   Compiling parking_lot v0.12.5
+   Compiling clap v4.5.4
+   Compiling hashlink v0.9.1
+   Compiling futures-executor v0.3.33
+   Compiling thiserror-impl v1.0.69
+   Compiling serial_test_derive v3.5.0
+   Compiling num-conv v0.1.0
+   Compiling fastrand v2.5.0
+   Compiling memchr v2.8.3
+   Compiling roff v0.2.2
+   Compiling fallible-iterator v0.3.0
+   Compiling time-core v0.1.2
+   Compiling iana-time-zone v0.1.65
+   Compiling cpufeatures v0.2.17
+   Compiling log v0.4.33
+   Compiling fallible-streaming-iterator v0.1.9
+   Compiling sha2 v0.10.9
+   Compiling serial_test v3.5.0
+   Compiling rusqlite v0.31.0
+   Compiling chrono v0.4.45
+   Compiling time v0.3.36
+   Compiling clap_mangen v0.2.20
+   Compiling tempfile v3.12.0
+   Compiling rand v0.8.7
+   Compiling uuid v1.8.0
+   Compiling hex v0.4.3
+   Compiling md5 v0.7.0
+   Compiling bead-rs v0.1.3 (/root/.cargo/git/checkouts/bead-rs-86514767cbfc7878/85f36ac)
+    Finished `release` profile [optimized] target(s) in 2m 35s
+  Installing /root/.cargo/bin/bead
+   Installed package `bead-rs v0.1.3 (https://git.ardenone.com/jedarden/bead-rs.git?rev=85f36acba864bf60f8f06b7fbe3de33c280f3d08#85f36acb)` (executable `bead`)
++ bead --version
+bead 0.1.3
++ echo '=== Running Definition of Done (all lanes) ==='
++ ./scripts/definition-of-done.sh --all
+=== Running Definition of Done (all lanes) ===
+NEEDLE_VERIFICATION_GATE: definition-of-done
+=== Fast Lane Checks ===
+Running: cargo fmt --check...
+✓ cargo fmt --check passed
+Running: cargo clippy...
+✓ cargo clippy passed
+Running: cargo check...
+✓ cargo check passed
+=== Slow Lane Checks ===
+Running: cargo test --no-run (build all test targets)...
+✓ cargo test --no-run (build all test targets) passed
+Running: cargo test --lib...
+✗ cargo test --lib failed (exit code: 124)
+Failure details for cargo test --lib (last 100 lines):
+test config::config_tests::routing_first_match_wins ... ok
+test config::config_tests::routing_non_anthropic_models_use_default_adapter ... ok
+test config::config_tests::routing_patterns_match_bare_aliases ... ok
+test config::config_tests::routing_patterns_match_full_model_ids ... ok
+test config::config_tests::routing_patterns_match_with_wildcards ... ok
+test config::config_tests::routing_strict_mode_failure ... ok
+test config::config_tests::routing_workspace_override ... ok
+test config::config_tests::scratch_sweep_defaults_to_enabled_with_48_hour_ttl ... ok
+test config::config_tests::scratch_sweep_parses_from_yaml ... ok
+test config::config_tests::section_hashes_are_deterministic_for_same_content ... ok
+test config::config_tests::section_hashes_are_stable_across_calls ... ok
+test config::config_tests::section_hashes_detect_changes ... ok
+test config::config_tests::section_hashes_ignore_yaml_formatting_differences ... ok
+test config::config_tests::section_hashes_returns_all_expected_sections ... ok
+test config::config_tests::source_map_tracks_cli_overrides ... ok
+test config::config_tests::splice_config_default_values ... ok
+test config::config_tests::splice_disabled_with_report_workspace_passes ... ok
+test config::config_tests::splice_enabled_with_report_workspace_passes ... ok
+test config::config_tests::splice_enabled_without_report_workspace_emits_warning ... ok
+test config::config_tests::supervisor_config_empty_section_loads_defaults ... ok
+test config::config_tests::supervisor_config_from_env_both_paths ... ok
+test config::config_tests::supervisor_config_from_env_defaults ... ok
+test config::config_tests::supervisor_config_from_env_expands_tilde ... ok
+test config::config_tests::supervisor_config_from_env_heartbeat_only ... ok
+test config::config_tests::supervisor_config_from_env_socket_only ... ok
+test config::config_tests::supervisor_config_from_full_yaml ... ok
+test config::config_tests::supervisor_config_json_roundtrip ... ok
+test config::config_tests::supervisor_config_resolved_heartbeat_path_custom ... ok
+test config::config_tests::supervisor_config_resolved_heartbeat_path_default ... ok
+test config::config_tests::supervisor_config_with_only_heartbeat_path ... ok
+test config::config_tests::supervisor_config_with_only_socket_path ... ok
+test config::config_tests::supervisor_config_yaml_roundtrip ... ok
+test config::config_tests::test_bead_cli_config_all_backend_variants_json_serialization ... ok
+test config::config_tests::test_bead_cli_config_all_backend_variants_yaml_serialization ... ok
+test config::config_tests::test_bead_cli_config_json_minimal_serialization ... ok
+test config::config_tests::test_bead_cli_config_json_roundtrip_preserves_all_values ... ok
+test config::config_tests::test_bead_cli_config_json_serialization_omits_none_path ... ok
+test config::config_tests::test_bead_cli_config_json_serialization_preserves_backend ... ok
+test config::config_tests::test_bead_cli_config_json_serialization_preserves_path ... ok
+test config::config_tests::test_bead_cli_config_json_with_explicit_path_alias ... ok
+test config::config_tests::test_bead_cli_config_yaml_minimal_serialization ... ok
+test config::config_tests::test_bead_cli_config_yaml_roundtrip_preserves_all_values ... ok
+test config::config_tests::test_bead_cli_config_yaml_serialization_omits_none_path ... ok
+test config::config_tests::test_bead_cli_config_yaml_with_explicit_path_alias ... ok
+test config::config_tests::test_config_expand_tildes_bare_tilde_only ... ok
+test config::config_tests::test_config_expand_tildes_bead_cli_path ... ok
+test config::config_tests::test_config_expand_tildes_context_files_vector ... ok
+test config::config_tests::test_config_expand_tildes_env_var_paths ... ok
+test config::config_tests::test_config_expand_tildes_global_config ... ok
+test config::config_tests::test_config_expand_tildes_missing_home ... ok
+test config::config_tests::test_config_expand_tildes_mixed_paths ... ok
+test config::config_tests::test_config_expand_tildes_multiple_fields ... ok
+test config::config_tests::test_config_expand_tildes_multiple_tildes_in_vector ... ok
+test config::config_tests::test_config_expand_tildes_needle_dot_d_config_file ... ok
+test config::config_tests::test_config_expand_tildes_needle_dot_d_directory ... ok
+test config::config_tests::test_config_expand_tildes_self_modification_canary_workspace ... ok
+test config::config_tests::test_config_expand_tildes_telemetry_log_dir ... ok
+test config::config_tests::test_config_expand_tildes_tilde_at_end_unchanged ... ok
+test config::config_tests::test_config_expand_tildes_tilde_in_middle_unchanged ... ok
+test config::config_tests::test_config_expand_tildes_tilde_slash_only ... ok
+test config::config_tests::test_config_expand_tildes_worker_binary_path ... ok
+test config::config_tests::test_config_expand_tildes_workspace_config ... ok
+test config::config_tests::test_create_test_executable_creates_file ... ok
+test config::config_tests::test_create_test_executable_multiple_executables ... ok
+test config::config_tests::test_create_test_executable_path_return_value ... ok
+test config::config_tests::test_create_test_executable_sets_permissions ... ok
+test config::config_tests::test_create_test_executable_with_custom_content ... ok
+test config::config_tests::test_create_test_executable_with_default_content ... ok
+test config::config_tests::test_create_test_executable_with_multiline_content ... ok
+test config::config_tests::test_dirs_or_home_with_home ... ok
+test config::config_tests::test_dirs_or_home_without_home_fallback ... ok
+test config::config_tests::test_expand_tilde_option_none ... ok
+test config::config_tests::test_expand_tilde_option_some ... ok
+test config::config_tests::test_expand_tilde_pathbuf_absolute_path_unchanged ... ok
+test config::config_tests::test_expand_tilde_pathbuf_bare_tilde ... ok
+test config::config_tests::test_expand_tilde_pathbuf_empty_string ... ok
+test config::config_tests::test_expand_tilde_pathbuf_missing_home ... ok
+test config::config_tests::test_expand_tilde_pathbuf_nested_path ... ok
+test config::config_tests::test_expand_tilde_pathbuf_parent_path ... ok
+test config::config_tests::test_expand_tilde_pathbuf_relative_path_unchanged ... ok
+test config::config_tests::test_expand_tilde_pathbuf_trailing_slash ... ok
+test config::config_tests::test_expand_tilde_pathbuf_with_slash ... ok
+test config::config_tests::test_expand_tilde_str_bare_tilde ... ok
+test config::config_tests::test_expand_tilde_str_empty_string ... ok
+test config::config_tests::test_expand_tilde_str_missing_home ... ok
+test config::config_tests::test_expand_tilde_str_missing_home_bare_tilde ... ok
+test config::config_tests::test_expand_tilde_str_nested_path ... ok
+test config::config_tests::test_expand_tilde_str_other_user_tilde_unchanged ... ok
+test config::config_tests::test_expand_tilde_str_relative_path_unchanged ... ok
+test config::config_tests::test_expand_tilde_str_trailing_slash ... ok
+test config::config_tests::test_expand_tilde_str_with_slash ... ok
+test config::config_tests::test_expand_tilde_str_without_tilde_unchanged ... ok
+test config::config_tests::test_expand_tilde_vec_empty ... ok
+test config::config_tests::test_expand_tilde_vec_multiple ... ok
+test config::config_tests::test_expand_tilde_vec_single ... ok
+test config::config_tests::test_isolate_bead_cli_env_creates_temp_dir ... ok
+test config::config_tests::test_isolate_bead_cli_env_isolates_path ... ok
+test commit_hook::tests::validate_commit_returns_ok_when_no_snapshot has been running for over 60 seconds
+test commit_hook::tests::validate_commit_skips_beads_and_predispatch_sha has been running for over 60 seconds
+test config::config_tests::test_isolate_bead_cli_env_multiple_calls_create_different_dirs has been running for over 60 seconds
+Running: cargo test --test integration_tests...
+✗ cargo test --test integration_tests failed (exit code: 101)
+Failure details for cargo test --test integration_tests (last 100 lines):
+
+thread 'subprocess_nonexistent_adapter_produces_actionable_error_message' (14916) panicked at tests/integration_tests.rs:1984:5:
+error message should mention the nonexistent adapter name 'totally-fake-adapter-xyz-999'. Got stderr:
+NEEDLE worker boot: creating tokio runtime...
+NEEDLE worker boot: tokio runtime created
+NEEDLE worker boot: initializing tracing subscriber...
+NEEDLE worker boot: tracing subscriber initialized
+NEEDLE worker boot: creating telemetry...
+NEEDLE worker boot: telemetry created
+NEEDLE worker boot: emitting worker.booting event (sync)...
+NEEDLE worker boot: worker.booting written to disk
+NEEDLE worker boot: starting telemetry writer thread...
+NEEDLE telemetry: starting writer thread and waiting for ready signal...
+NEEDLE telemetry: waiting for writer thread ready signal (timeout 5s)...
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry: writer thread ready signal received
+NEEDLE telemetry: start_and_wait complete
+NEEDLE worker boot: writer thread started
+NEEDLE worker boot: starting init step 'scratch_sweep'...
+NEEDLE worker boot: init step 'scratch_sweep' completed in 0ms
+NEEDLE telemetry writer thread: first event written: init.step.started
+NEEDLE worker boot: starting init step 'bead_store_discover'...
+NEEDLE worker boot: init step 'bead_store_discover' completed in 14ms
+Error: failed to open configured bead store
+
+Caused by:
+    bead-rs capability mismatch for workspace /tmp/.tmpS4NXG1/test-workspace: unexpected status 'blocked' in capabilities (only open, in_progress, deferred, and closed are valid stored statuses)
+
+
+---- worker_binary_path_tilde_expansion_multiple_tildes stdout ----
+
+thread 'worker_binary_path_tilde_expansion_multiple_tildes' (14954) panicked at tests/integration_tests.rs:4935:5:
+assertion `left == right` failed: first tilde should expand to HOME, second tilde preserved
+  left: "~ ~"
+ right: "/tmp/.tmpSu5Flm/fake-home ~"
+
+---- worker_binary_path_tilde_expansion_position stdout ----
+
+thread 'worker_binary_path_tilde_expansion_position' (14956) panicked at tests/integration_tests.rs:4995:5:
+assertion `left == right` failed: tilde in middle of path should not be expanded, path should be truncated
+  left: "/path/~/nested"
+ right: "/path/~"
+
+---- worker_binary_path_supervisor_initialization stdout ----
+
+thread 'worker_binary_path_supervisor_initialization' (14949) panicked at tests/integration_tests.rs:4319:10:
+supervisor should be created successfully with worker_binary_path: failed to initialize bead store for supervisor
+
+Caused by:
+    bead-rs capability mismatch for workspace /tmp/.tmpKIE8BX/workspace: unexpected status 'blocked' in capabilities (only open, in_progress, deferred, and closed are valid stored statuses)
+
+---- worker_boot_rejects_nonexistent_adapter stdout ----
+
+thread 'worker_boot_rejects_nonexistent_adapter' (14962) panicked at tests/integration_tests.rs:1606:5:
+error message should mention the nonexistent adapter name 'nonexistent-test-adapter-xyz-999'. Got stderr:
+NEEDLE worker boot: creating tokio runtime...
+NEEDLE worker boot: tokio runtime created
+NEEDLE worker boot: initializing tracing subscriber...
+NEEDLE worker boot: tracing subscriber initialized
+NEEDLE worker boot: creating telemetry...
+NEEDLE worker boot: telemetry created
+NEEDLE worker boot: emitting worker.booting event (sync)...
+NEEDLE worker boot: worker.booting written to disk
+NEEDLE worker boot: starting telemetry writer thread...
+NEEDLE telemetry: starting writer thread and waiting for ready signal...
+NEEDLE telemetry: waiting for writer thread ready signal (timeout 5s)...
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry: writer thread ready signal received
+NEEDLE telemetry: start_and_wait complete
+NEEDLE worker boot: writer thread started
+NEEDLE worker boot: starting init step 'scratch_sweep'...
+NEEDLE worker boot: init step 'scratch_sweep' completed in 0ms
+NEEDLE telemetry writer thread: first event written: init.step.started
+NEEDLE worker boot: starting init step 'bead_store_discover'...
+NEEDLE worker boot: init step 'bead_store_discover' completed in 14ms
+Error: failed to open configured bead store
+
+Caused by:
+    bead-rs capability mismatch for workspace /tmp/.tmp0CDsQo/test-workspace: unexpected status 'blocked' in capabilities (only open, in_progress, deferred, and closed are valid stored statuses)
+
+
+
+failures:
+    cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead
+    dead_worker_cleanup_integration
+    doctor_exit_code_on_failure_and_success
+    subprocess_adapter_failure_exits_nonzero
+    subprocess_nonexistent_adapter_produces_actionable_error_message
+    worker_binary_path_supervisor_initialization
+    worker_binary_path_tilde_expansion_multiple_tildes
+    worker_binary_path_tilde_expansion_position
+    worker_boot_rejects_nonexistent_adapter
+
+test result: FAILED. 72 passed; 9 failed; 0 ignored; 0 measured; 0 filtered out; finished in 253.15s
+
+error: test failed, to rerun pass `--test integration_tests`
+Running: cargo test --test p2_integration_tests...
+✗ cargo test --test p2_integration_tests failed (exit code: 101)
+Failure details for cargo test --test p2_integration_tests (last 100 lines):
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.37s
+     Running tests/p2_integration_tests.rs (target/debug/deps/p2_integration_tests-a0f5464505aee2db)
+
+running 27 tests
+test below_limit_allows_dispatch ... ok
+test crashed_worker_bead_released_by_peer ... ok
+test flock_serializes_concurrent_claims_on_same_bead ... ok
+test mend_strand_cleans_crashed_peer_returns_work_created ... ok
+test mend_strand_cleans_zero_activity_worker_logs_immediately ... ok
+test mend_strand_no_stale_peers_returns_no_work ... ok
+test mend_strand_preserves_active_worker_logs ... ok
+test mend_strand_removes_orphaned_lock_files ... ok
+test explore_discovers_work_in_other_workspace ... FAILED
+test mitosis_creates_children_on_first_failure ... ok
+test mitosis_duplicate_split_creates_zero_new_children ... ok
+test mitosis_evaluator_adapter_not_found_skips ... ok
+test mitosis_concurrent_workers_flock_serializes ... ok
+test mitosis_skips_non_first_failure ... ok
+test model_concurrency_limit_blocks_at_max ... ok
+test mitosis_splits_multitask_bead_creates_children ... ok
+test multi_worker_all_beads_eventually_claimed ... ok
+test pid_liveness_check_works ... ok
+test provider_concurrency_limit_blocks_at_max ... ok
+test registry_concurrent_registration_no_corruption ... ok
+test registry_deregister_during_concurrent_registrations ... ok
+test rpm_limit_blocks_after_exhaustion ... ok
+test stale_detection_works_correctly ... ok
+test strand_waterfall_pluck_mend_explore_knot ... ok
+test stuck_worker_bead_not_released ... ok
+test multi_worker_claiming_no_duplicates ... ok
+test heartbeat_emitter_writes_and_cleans_up ... ok
+
+failures:
+
+---- explore_discovers_work_in_other_workspace stdout ----
+
+thread 'explore_discovers_work_in_other_workspace' (15040) panicked at tests/p2_integration_tests.rs:1567:18:
+explore should discover the remote bead; got: NoWork
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    explore_discovers_work_in_other_workspace
+
+test result: FAILED. 26 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.53s
+
+error: test failed, to rerun pass `--test p2_integration_tests`
+Running: cargo test --test p3_integration_tests...
+✗ cargo test --test p3_integration_tests failed (exit code: 101)
+Failure details for cargo test --test p3_integration_tests (last 100 lines):
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.32s
+     Running tests/p3_integration_tests.rs (target/debug/deps/p3_integration_tests-bae578e31fa32e0f)
+
+running 25 tests
+test canary_reject_removes_testing_binary ... ok
+test canary_status_reports_channel_state ... ok
+test canary_rollback_restores_previous_stable ... ok
+test canary_promote_moves_testing_to_stable ... ok
+test file_hash_verifies_binary_integrity ... ok
+test hook_sink_prevents_recursion_on_sink_errors ... ok
+test hook_sink_skips_non_matching_events ... ok
+test hot_reload_no_stable_returns_skipped ... ok
+test hook_sink_dispatches_matching_events ... ok
+test knot_emits_starvation_telemetry_for_open_beads ... ok
+test pulse_deduplicates_across_scans ... ok
+test pulse_detects_scanner_findings_and_creates_beads ... ok
+test reflect_consolidates_closed_bead_into_learnings ... ok
+test splice_documents_stale_worker_and_deduplicates_session ... FAILED
+test unravel_creates_alternatives_without_modifying_original ... ok
+test unravel_disabled_returns_no_work ... ok
+test validation_gate_blocks_on_failure ... ok
+test validation_gate_captures_stderr ... ok
+test validation_gate_passes_all_commands ... ok
+test validation_gate_runs_in_workspace_directory ... ok
+test weave_creates_beads_from_agent_response ... ok
+test weave_disabled_returns_no_work ... ok
+test weave_respects_max_beads_guardrail ... ok
+test hot_reload_detects_new_stable_binary ... ok
+test hot_reload_same_binary_returns_no_change ... ok
+
+failures:
+
+---- splice_documents_stale_worker_and_deduplicates_session stdout ----
+
+thread 'splice_documents_stale_worker_and_deduplicates_session' (15170) panicked at tests/p3_integration_tests.rs:679:5:
+splice should create escalation work for a stale worker, got NoWork
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    splice_documents_stale_worker_and_deduplicates_session
+
+test result: FAILED. 24 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.69s
+
+error: test failed, to rerun pass `--test p3_integration_tests`
+Running: cargo test --test real_br_integration_tests...
+✗ cargo test --test real_br_integration_tests failed (exit code: 101)
+Failure details for cargo test --test real_br_integration_tests (last 100 lines):
+    Finished `test` profile [optimized + debuginfo] target(s) in 0.36s
+     Running tests/real_br_integration_tests.rs (target/debug/deps/real_br_integration_tests-e304e18f48d70f1a)
+
+running 31 tests
+test bead_rs_split_fixture_is_correctly_gated_without_transactional_batch ... ok
+test real_bead_rs_crashed_worker_bead_released_by_peer ... ok
+test real_bead_rs_close_preserves_assignee_for_historical_record ... ok
+test real_bead_rs_all_beads_eventually_claimed ... ok
+test real_bead_rs_explore_disabled_returns_no_work ... ok
+test real_bead_rs_explore_skips_home_workspace ... ok
+test real_bead_rs_explore_discovers_remote_workspace ... FAILED
+test real_bead_rs_database_corruption_auto_recovery ... ok
+test real_bead_rs_mend_no_stale_peers_returns_no_work ... ok
+test real_bead_rs_mend_keeps_registered_heartbeat ... ok
+test real_bead_rs_mend_cleans_crashed_peer ... ok
+test real_bead_rs_mend_removes_orphaned_heartbeat ... ok
+test real_bead_rs_mitosis_flock_serializes_concurrent_workers ... ok
+test real_bead_rs_mitosis_dedup_skips_existing_children ... ok
+test real_bead_rs_mitosis_precondition_checks ... ok
+test real_bead_rs_property_3_concurrent_claim_exclusivity_n2 ... ok
+test real_bead_rs_multi_worker_claiming_no_duplicates ... ok
+test real_bead_rs_provider_concurrency_limit_enforced ... ok
+test real_bead_rs_property_3_concurrent_claim_exclusivity_n5 ... ok
+test real_bead_rs_regression_silent_starvation_bug_fixed ... FAILED
+test real_bead_rs_reopen_allows_any_worker_to_claim ... FAILED
+test real_bead_rs_reopen_appears_in_ready_frontier ... FAILED
+test real_bead_rs_reopen_clears_assignee ... FAILED
+test real_bead_rs_reopen_handles_already_open_bead ... ok
+test real_bead_rs_reopen_unclaimed_bead_stays_unclaimed ... ok
+test real_bead_rs_reopen_with_dependencies ... FAILED
+test real_bead_rs_strand_waterfall_exhaustion ... FAILED
+test real_bead_rs_property_3_concurrent_claim_exclusivity_n20 ... ok
+test real_bead_rs_strand_waterfall_ordering ... ok
+test real_bead_rs_strand_waterfall_exhaustion_with_telemetry_jsonl ... FAILED
+test split_bead_creates_children_and_links_them_with_bead_rs ... ok
+
+failures:
+
+---- real_bead_rs_explore_discovers_remote_workspace stdout ----
+
+thread 'real_bead_rs_explore_discovers_remote_workspace' (15282) panicked at tests/real_br_integration_tests.rs:388:13:
+Explore should find bead in remote workspace, got NoWork
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- real_bead_rs_regression_silent_starvation_bug_fixed stdout ----
+
+thread 'real_bead_rs_regression_silent_starvation_bug_fixed' (15422) panicked at tests/real_br_integration_tests.rs:2085:5:
+BUG FIX: reopened bead must appear in ready frontier (was silently starving before ADR-018)
+
+---- real_bead_rs_reopen_allows_any_worker_to_claim stdout ----
+
+thread 'real_bead_rs_reopen_allows_any_worker_to_claim' (15431) panicked at tests/real_br_integration_tests.rs:1911:5:
+reopened bead should have no assignee
+
+---- real_bead_rs_reopen_appears_in_ready_frontier stdout ----
+
+thread 'real_bead_rs_reopen_appears_in_ready_frontier' (15440) panicked at tests/real_br_integration_tests.rs:1850:5:
+reopened bead MUST appear in ready frontier (assignee was cleared)
+
+---- real_bead_rs_reopen_clears_assignee stdout ----
+
+thread 'real_bead_rs_reopen_clears_assignee' (15454) panicked at tests/real_br_integration_tests.rs:1812:5:
+reopened bead MUST have no assignee (ADR-018); got assignee=Some("test-worker")
+
+---- real_bead_rs_reopen_with_dependencies stdout ----
+
+thread 'real_bead_rs_reopen_with_dependencies' (15486) panicked at tests/real_br_integration_tests.rs:2035:5:
+reopened parent should have no assignee
+
+---- real_bead_rs_strand_waterfall_exhaustion stdout ----
+
+thread 'real_bead_rs_strand_waterfall_exhaustion' (15500) panicked at tests/real_br_integration_tests.rs:1054:5:
+waterfall should return None when all strands return NoWork; got Some((Bead { id: BeadId("test-73f31c8f"), title: "test-deferred-task", body: Some("Test bead: test-deferred-task"), priority: 1, status: Open, assignee: None, labels: ["deferred"], workspace: "", dependencies: [], dependents: [], comments: [], created_at: 2026-08-29T23:18:48.899630573Z, updated_at: 2026-08-29T23:18:48.899630573Z }, "pluck"))
+
+---- real_bead_rs_strand_waterfall_exhaustion_with_telemetry_jsonl stdout ----
+NEEDLE telemetry writer thread: started successfully
+NEEDLE telemetry writer thread: signaling ready to main thread...
+NEEDLE telemetry writer thread: ready, waiting for events...
+NEEDLE telemetry writer thread: first event written: strand.evaluated
+
+thread 'real_bead_rs_strand_waterfall_exhaustion_with_telemetry_jsonl' (15514) panicked at tests/real_br_integration_tests.rs:1175:5:
+waterfall should return None when all strands return NoWork; got Some((Bead { id: BeadId("test-51c2dd53"), title: "test-deferred-task", body: Some("Test bead: test-deferred-task"), priority: 1, status: Open, assignee: None, labels: ["deferred"], workspace: "", dependencies: [], dependents: [], comments: [], created_at: 2026-08-29T23:18:48.985706722Z, updated_at: 2026-08-29T23:18:48.985706722Z }, "pluck"))
+
+
+failures:
+    real_bead_rs_explore_discovers_remote_workspace
+    real_bead_rs_regression_silent_starvation_bug_fixed
+    real_bead_rs_reopen_allows_any_worker_to_claim
+    real_bead_rs_reopen_appears_in_ready_frontier
+    real_bead_rs_reopen_clears_assignee
+    real_bead_rs_reopen_with_dependencies
+    real_bead_rs_strand_waterfall_exhaustion
+    real_bead_rs_strand_waterfall_exhaustion_with_telemetry_jsonl
+
+test result: FAILED. 23 passed; 8 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.00s
+
+error: test failed, to rerun pass `--test real_br_integration_tests`
+Running: installer tests...
+✗ installer tests failed (exit code: 1)
+Failure details for installer tests (last 100 lines):
+  ✗ help mentions security
+    expected to contain: SECURITY NOTE
+    in: Usage: install.sh [OPTIONS]
+
+NEEDLE installer downloads and verifies the latest release binary.
+
+CHECKSUM VERIFICATION:
+  By default, the installer verifies the downloaded binary's SHA-256 checksum
+  against the release metadata. Installation aborts if verification fails.
+
+  Opt-out: --skip-checksum or NEEDLE_SKIP_CHECKSUM=1
+    WARNING: Skipping verification is a SECURITY RISK. Only use this in
+    trusted environments (air-gapped networks, local development) where you
+    have alternative verification methods and accept the risk of installing a
+    tampered binary.
+
+  Important: Actual checksum MISMATCHES are never skippable, even with
+  --skip-checksum. This flag only applies when checksums are unavailable,
+  not when they indicate a mismatch.
+
+OPTIONS:
+    -h, --help              Show this help message
+    --skip-checksum         Skip checksum verification (SECURITY RISK)
+
+ENVIRONMENT VARIABLES:
+    NEEDLE_INSTALL_PATH     Installation path (default: ~/.local/bin/needle)
+    NEEDLE_SKIP_CHECKSUM    Set to '1' or 'true' to skip checksum (SECURITY RISK)
+
+EXAMPLES:
+    # Normal installation (recommended)
+    curl -fsSL https://github.com/jedarden/NEEDLE/releases/latest/download/install.sh | bash
+
+    # Skip checksum verification (NOT recommended, use with caution)
+    curl -fsSL https://github.com/jedarden/NEEDLE/releases/latest/download/install.sh | bash -s -- --skip-checksum
+
+    # Skip via environment variable (NOT recommended, use with caution)
+    NEEDLE_SKIP_CHECKSUM=1 curl -fsSL https://github.com/jedarden/NEEDLE/releases/latest/download/install.sh | bash
+  ✓ help documents --skip-checksum
+  ✗ help warns against skipping
+    expected to contain: NOT RECOMMENDED
+    in: Usage: install.sh [OPTIONS]
+
+NEEDLE installer downloads and verifies the latest release binary.
+
+CHECKSUM VERIFICATION:
+  By default, the installer verifies the downloaded binary's SHA-256 checksum
+  against the release metadata. Installation aborts if verification fails.
+
+  Opt-out: --skip-checksum or NEEDLE_SKIP_CHECKSUM=1
+    WARNING: Skipping verification is a SECURITY RISK. Only use this in
+    trusted environments (air-gapped networks, local development) where you
+    have alternative verification methods and accept the risk of installing a
+    tampered binary.
+
+  Important: Actual checksum MISMATCHES are never skippable, even with
+  --skip-checksum. This flag only applies when checksums are unavailable,
+  not when they indicate a mismatch.
+
+OPTIONS:
+    -h, --help              Show this help message
+    --skip-checksum         Skip checksum verification (SECURITY RISK)
+
+ENVIRONMENT VARIABLES:
+    NEEDLE_INSTALL_PATH     Installation path (default: ~/.local/bin/needle)
+    NEEDLE_SKIP_CHECKSUM    Set to '1' or 'true' to skip checksum (SECURITY RISK)
+
+EXAMPLES:
+    # Normal installation (recommended)
+    curl -fsSL https://github.com/jedarden/NEEDLE/releases/latest/download/install.sh | bash
+
+    # Skip checksum verification (NOT recommended, use with caution)
+    curl -fsSL https://github.com/jedarden/NEEDLE/releases/latest/download/install.sh | bash -s -- --skip-checksum
+
+    # Skip via environment variable (NOT recommended, use with caution)
+    NEEDLE_SKIP_CHECKSUM=1 curl -fsSL https://github.com/jedarden/NEEDLE/releases/latest/download/install.sh | bash
+TEST: test_download_failure_aborts
+  ✓ download failure aborts without --skip-checksum
+TEST: test_download_failure_continues_with_skip
+  ✓ download failure continues with --skip-checksum
+TEST: test_checksum_mismatch_never_skippable
+  ✓ checksum mismatch is security-critical and never skippable
+TEST: test_skip_checksum_outputs_warning
+  ✓ warning contains 'SECURITY WARNING'
+  ✓ warning contains 'Checksum verification'
+  ✓ warning contains 'DISABLED'
+  ✓ no warning when SKIP_CHECKSUM=false
+TEST: test_e2e_install_with_valid_checksum
+  ✓ mock binary hash matches checksums file
+TEST: test_e2e_install_with_mismatch_fails
+  ✓ checksum mismatch correctly detected
+TEST: test_version_discovery_no_curl_pipe
+  ✓ curl is never piped into an early-exiting reader
+
+=========================================
+Results: 18/20 passed
+=========================================
+
+✗ test_checksum_verification.sh FAILED
+
+✗ Some installer tests failed
+
+=== Definition of Done Summary ===
+Lane: all
+Checks run: 10
+Failures: 6
+
+Failed checks:
+  - cargo test --lib: exit code 124
+  - cargo test --test integration_tests: exit code 101
+  - cargo test --test p2_integration_tests: exit code 101
+  - cargo test --test p3_integration_tests: exit code 101
+  - cargo test --test real_br_integration_tests: exit code 101
+  - installer tests: exit code 1
+
+❌ Definition of NOT done
+time=2026-08-29T23:19:14.337Z level=INFO msg="file signal handler exiting due to context cancellation" argo=true
+time=2026-08-29T23:19:14.352Z level=INFO msg="sub-process exited" argo=true error="exit status 1"
+Error: exit status 1
