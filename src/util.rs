@@ -698,6 +698,14 @@ pub fn detect_bead_cli_backend(
                     .unwrap_or(explicit_path.display().to_string().as_str()),
             ) {
                 Ok(backend_name) => {
+                    // The probe reports the binary's own identity ("bead");
+                    // everywhere else (config, doctor, README) the backend is
+                    // spelled "bead-rs". Normalize so callers see one name.
+                    let backend_name = if backend_name == "bead" {
+                        "bead-rs".to_string()
+                    } else {
+                        backend_name
+                    };
                     return Some(crate::config::BackendDetection::new(
                         backend_name,
                         explicit_path.clone(),

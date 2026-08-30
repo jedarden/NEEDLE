@@ -704,7 +704,7 @@ pub enum BeadBackend {
     #[serde(rename = "br")]
     Br,
     /// bead (bead-rs alias for backward compatibility) - native CLI
-    #[serde(rename = "bead", alias = "bead-rs")]
+    #[serde(rename = "bead-rs", alias = "bead")]
     Bead,
 }
 
@@ -1584,7 +1584,8 @@ mod tests {
     fn test_resolve_bead_cli_auto_detects_bead_backend_from_custom_filename() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let custom_binary = tmp_dir.path().join("custom-bead-cli");
-        std::fs::write(&custom_binary, "#!/bin/sh\necho test").unwrap();
+        // Resolution probes `--version`; the fixture must identify as bead.
+        std::fs::write(&custom_binary, "#!/bin/sh\necho \"bead 0.2.4\"").unwrap();
         make_executable(&custom_binary);
 
         let config = BeadCliConfig {
@@ -2446,7 +2447,9 @@ mod tests {
 
     #[test]
     fn test_bead_backend_display_bead() {
-        assert_eq!(format!("{}", BeadBackend::Bead), "bead");
+        // Canonical spelling everywhere users see it (README, `needle init`,
+        // doctor): bead-rs. "bead" is accepted on input as an alias.
+        assert_eq!(format!("{}", BeadBackend::Bead), "bead-rs");
     }
 
     // ─── BeadBackend deserialization alias tests ─────────────────────────────────
@@ -3163,7 +3166,7 @@ path: /path/to/./bead
         let test_cases = vec![
             (BeadBackend::Auto, "auto"),
             (BeadBackend::Br, "br"),
-            (BeadBackend::Bead, "bead"),
+            (BeadBackend::Bead, "bead-rs"),
         ];
 
         for (backend, expected) in test_cases {
@@ -10423,8 +10426,10 @@ agent:
     // ── MitosisConfig.max_depth (fixes pre-existing compile breakage) ──
 
     #[test]
-    fn mitosis_config_max_depth_defaults_to_unlimited() {
-        assert_eq!(MitosisConfig::default().max_depth, 0);
+    fn mitosis_config_max_depth_defaults_to_two() {
+        // The cap exists to stop unbounded recursive splitting, so the default
+        // is bounded; 0 (unlimited) is opt-in via config.
+        assert_eq!(MitosisConfig::default().max_depth, 2);
     }
 
     #[test]
@@ -13043,7 +13048,7 @@ agent:
             let expected_backend = match backend {
                 BeadBackend::Auto => "auto",
                 BeadBackend::Br => "br",
-                BeadBackend::Bead => "bead",
+                BeadBackend::Bead => "bead-rs",
             };
             assert_eq!(
                 backend_str, expected_backend,
