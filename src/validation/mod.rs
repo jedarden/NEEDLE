@@ -380,10 +380,19 @@ impl CommandGate {
 /// This creates a clean copy of the workspace's committed state (git HEAD)
 /// to a temporary directory using `git archive`. This is used for running
 /// gates in isolation from uncommitted changes.
-async fn extract_committed_state(workspace: &Path, _bead_id: &str) -> Result<PathBuf> {
+async fn extract_committed_state(workspace: &Path, bead_id: &str) -> Result<PathBuf> {
     use std::process::Command;
 
-    let temp_dir = tempfile::tempdir()
+    // Name the extraction after the bead. A failing clean gate leaves this
+    // directory behind on purpose, and a bare `.tmpXXXXXX` is not something
+    // anyone can find later or attribute to a bead.
+    let safe_bead_id: String = bead_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let temp_dir = tempfile::Builder::new()
+        .prefix(&format!("needle-clean-{safe_bead_id}-"))
+        .tempdir()
         .context("failed to create temporary directory for committed state extraction")?;
 
     let extract_dir = temp_dir.path();
@@ -402,23 +411,39 @@ async fn extract_committed_state(workspace: &Path, _bead_id: &str) -> Result<Pat
         );
     }
 
-    // Extract the tar archive to the temporary directory
+    // Extract the tar archive to the temporary directory.
+    //
+    // stdin MUST be piped: without it the child inherits this process's stdin,
+    // `child.stdin` is None, the archive is silently never written, and tar
+    // fails on whatever it reads instead — which is how every `run_in: clean`
+    // gate failed with a bare "tar extraction failed".
     let mut child = Command::new("tar")
         .args(["-x", "-f", "-"])
         .current_dir(extract_dir)
+        .stdin(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .context("failed to spawn tar extraction")?;
 
-    // Write the archive to tar's stdin
-    if let Some(mut stdin) = child.stdin.take() {
+    // Write the archive to tar's stdin, then close it so tar sees EOF.
+    {
+        let mut stdin = child
+            .stdin
+            .take()
+            .context("tar extraction stdin was not piped")?;
         std::io::copy(&mut output.stdout.as_slice(), &mut stdin)
             .context("failed to write archive to tar")?;
     }
 
-    let status = child.wait().context("failed to wait for tar extraction")?;
+    let tar_output = child
+        .wait_with_output()
+        .context("failed to wait for tar extraction")?;
 
-    if !status.success() {
-        anyhow::bail!("tar extraction failed");
+    if !tar_output.status.success() {
+        anyhow::bail!(
+            "tar extraction failed: {}",
+            String::from_utf8_lossy(&tar_output.stderr).trim()
+        );
     }
 
     // Keep the temp directory alive by leaking it
@@ -715,25 +740,38 @@ fn truncate_output(s: &str, max_bytes: usize) -> String {
     }
 }
 
-/// Get git diff of uncommitted changes for uncommitted dependency detection.
+/// List the files that differ from HEAD, for uncommitted-dependency reporting.
+///
+/// `git status --porcelain`, not `git diff --name-only`: the usual cause of a
+/// gate that passes in the workspace and fails on a clean extraction is a file
+/// that was never added at all, and a diff lists only tracked modifications —
+/// so the diagnostic that is supposed to name the missing file came back empty
+/// in exactly the case it exists for.
 async fn get_git_diff(workspace: &Path) -> Result<String> {
     let output = tokio::process::Command::new("git")
-        .args(["diff", "--name-only"])
+        .args(["status", "--porcelain", "--untracked-files=all"])
         .current_dir(workspace)
         .kill_on_drop(true)
         .output()
         .await
-        .context("failed to get git diff")?;
+        .context("failed to get git status")?;
 
     if !output.status.success() {
         anyhow::bail!(
-            "git diff failed: {}",
+            "git status failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(stdout.trim().to_string())
+    // Porcelain v1: "XY <path>", with renames as "XY <old> -> <new>".
+    let files: Vec<&str> = stdout
+        .lines()
+        .filter_map(|line| line.get(3..))
+        .map(|path| path.rsplit(" -> ").next().unwrap_or(path).trim())
+        .filter(|path| !path.is_empty())
+        .collect();
+    Ok(files.join("\n"))
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1099,7 +1137,11 @@ mod tests {
         let config = GateConfig::Command {
             commands: vec![fail_with_stderr_bytes(6000)],
             stderr_cap_bytes: None,
-            run_in: RunIn::Clean,
+            // Workspace, not Clean: a Clean gate first extracts committed
+            // state, which cannot work in /tmp, and the resulting failure
+            // reason is the extraction error rather than the command's
+            // stderr — this test is about the cap, not about extraction.
+            run_in: RunIn::Workspace,
         };
         let gate = registry.create_gate(&config).unwrap();
         let bead = test_bead();
@@ -1264,6 +1306,15 @@ mod tests {
         // Initialize a git repo
         git_init(workspace);
         std::fs::write(workspace.join("README.md"), "test repo\\n").unwrap();
+        // `cargo check` needs a manifest, and the clean-mode run sees only
+        // what was committed — so the manifest has to be in this commit.
+        std::fs::write(
+            workspace.join("Cargo.toml"),
+            // No explicit target section: cargo auto-detects src/lib.rs or
+            // src/main.rs, and these fixtures use both.
+            "[package]\nname = \"uncommitted-dep-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
         git_add(workspace, ".");
         git_commit(workspace, "initial commit\\n");
 
@@ -1368,6 +1419,15 @@ pub fn uncommitted_function() {
         // Initialize a git repo
         git_init(workspace);
         std::fs::write(workspace.join("README.md"), "test repo\\n").unwrap();
+        // `cargo check` needs a manifest, and the clean-mode run sees only
+        // what was committed — so the manifest has to be in this commit.
+        std::fs::write(
+            workspace.join("Cargo.toml"),
+            // No explicit target section: cargo auto-detects src/lib.rs or
+            // src/main.rs, and these fixtures use both.
+            "[package]\nname = \"uncommitted-dep-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
         git_add(workspace, ".");
         git_commit(workspace, "initial commit\\n");
 
@@ -1431,6 +1491,15 @@ pub fn simple_function() -> i32 {
         // Initialize a git repo
         git_init(workspace);
         std::fs::write(workspace.join("README.md"), "test repo\\n").unwrap();
+        // `cargo check` needs a manifest, and the clean-mode run sees only
+        // what was committed — so the manifest has to be in this commit.
+        std::fs::write(
+            workspace.join("Cargo.toml"),
+            // No explicit target section: cargo auto-detects src/lib.rs or
+            // src/main.rs, and these fixtures use both.
+            "[package]\nname = \"uncommitted-dep-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
         git_add(workspace, ".");
         git_commit(workspace, "initial commit\\n");
 
@@ -1525,6 +1594,15 @@ pub fn broken_function( -> i32 {
         // Initialize a git repo
         git_init(workspace);
         std::fs::write(workspace.join("README.md"), "test repo\\n").unwrap();
+        // `cargo check` needs a manifest, and the clean-mode run sees only
+        // what was committed — so the manifest has to be in this commit.
+        std::fs::write(
+            workspace.join("Cargo.toml"),
+            // No explicit target section: cargo auto-detects src/lib.rs or
+            // src/main.rs, and these fixtures use both.
+            "[package]\nname = \"uncommitted-dep-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
         git_add(workspace, ".");
         git_commit(workspace, "initial commit\\n");
 
@@ -1577,6 +1655,15 @@ pub fn broken_function( -> i32 {
         // Initialize a git repo
         git_init(workspace);
         std::fs::write(workspace.join("README.md"), "test repo\\n").unwrap();
+        // `cargo check` needs a manifest, and the clean-mode run sees only
+        // what was committed — so the manifest has to be in this commit.
+        std::fs::write(
+            workspace.join("Cargo.toml"),
+            // No explicit target section: cargo auto-detects src/lib.rs or
+            // src/main.rs, and these fixtures use both.
+            "[package]\nname = \"uncommitted-dep-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
         git_add(workspace, ".");
         git_commit(workspace, "initial commit\\n");
 

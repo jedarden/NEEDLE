@@ -275,10 +275,21 @@ fn is_complex_shell_command(command: &str) -> bool {
         None => return false,
     };
 
-    matches!(
+    if matches!(
         first_token.as_str(),
         "cd" | "export" | "unset" | "shift" | "exit" | "return" | "break" | "continue"
-    )
+    ) {
+        return true;
+    }
+
+    // An explicit shell invocation carrying an inline script (`sh -c '...'`)
+    // is a shell construct too: the thing after -c is a program, not a path
+    // this module could resolve or check.
+    let shell = matches!(
+        first_token.rsplit('/').next().unwrap_or(&first_token),
+        "sh" | "bash" | "zsh" | "dash" | "ksh"
+    );
+    shell && command.split_whitespace().any(|token| token == "-c")
 }
 
 /// Extracts the first token from a command string.

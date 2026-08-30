@@ -2285,17 +2285,19 @@ mod tests {
 
         assert_eq!(result.bead_action, BeadAction::Quarantined);
         let actions = store.actions();
+        // bead-rs 0.2.x has no stored 'blocked' status, so quarantine defers
+        // the bead with a 'deferred' label instead of calling block().
         assert!(
             actions
                 .iter()
-                .any(|a| matches!(a, StoreAction::Block(id) if id == "needle-test")),
-            "5th consecutive failure must set status=blocked"
+                .any(|a| matches!(a, StoreAction::AddLabel(id, label) if id == "needle-test" && label == "deferred")),
+            "5th consecutive failure must defer the bead"
         );
         assert!(
-            actions
-                .iter()
-                .any(|a| matches!(a, StoreAction::AddLabel(_, label) if label == "cycling")),
-            "quarantine must add the cycling label"
+            actions.iter().any(
+                |a| matches!(a, StoreAction::AddLabel(_, label) if label.starts_with("quarantine:"))
+            ),
+            "quarantine must record its reason as a label, got: {actions:?}"
         );
         assert!(
             result.telemetry_events.iter().any(|e| matches!(
@@ -3360,27 +3362,36 @@ mod tests {
     async fn handle_gate_execution_error_releases_without_incrementing_failure_count() {
         // Regression test for needle-4aaa010c: gate execution errors should release
         // the bead WITHOUT incrementing failure count or adding the cycling label.
-        let handler = test_handler();
+        //
+        // A capturing sink, because the execution-error event is emitted through
+        // telemetry rather than returned in HandlerResult.
+        let helper = crate::telemetry::test_utils::TestHelper::new("gate-error-test");
+        let handler = OutcomeHandler::new(Config::default(), helper.telemetry().clone());
         let store = MockBeadStore::new(BeadStatus::InProgress)
             .with_labels(vec!["failure-count:2".to_string()]);
         let bead = test_bead(BeadStatus::InProgress);
 
-        // Create a gate report with an execution error (command could not run)
-        let mut results = std::collections::HashMap::new();
-        results.insert(
-            "test_gate".to_string(),
-            crate::validation::GateResult::ExecutionError {
-                command: "nonexistent_command".to_string(),
-                reason: "ENOENT".to_string(),
-            },
-        );
-        let _gate_report = Some(crate::validation::GateReport::new(results));
-
-        // Simulate the outcome handling with gate execution error
-        let result = handler
-            .handle(&store, &bead, &test_output(1), false)
+        // Drive the execution-error branch `handle` dispatches to when a gate
+        // could not be run at all. Building a GateReport and calling `handle`
+        // does not reach it: `handle` only consults gate results it ran itself
+        // (exit code 0), so a report built here is never looked at, and the
+        // ordinary failure path — which does increment — runs instead.
+        let (bead_action, telemetry_events) = handler
+            .handle_gate_error(
+                &store,
+                &bead,
+                &bead.workspace.display().to_string(),
+                "test_gate",
+                "nonexistent_command",
+                "ENOENT",
+            )
             .await
             .unwrap();
+        let result = HandlerResult {
+            bead_action,
+            telemetry_events,
+            outcome: Outcome::GateError,
+        };
 
         // The bead should be released
         assert_eq!(result.bead_action, BeadAction::Released);
@@ -3403,19 +3414,20 @@ mod tests {
             "gate execution error should NOT add cycling label"
         );
 
-        // Verify gate.execution_error event was emitted
+        // The memory sink is written asynchronously.
+        helper.sync().await;
+
+        // Verify gate.execution_error event was emitted. It goes out through
+        // telemetry, not through HandlerResult.telemetry_events — that vec
+        // carries only the subset the worker itself acts on.
         assert!(
-            result.telemetry_events.iter().any(|e| matches!(
-                e,
-                EventKind::GateExecutionError {
-                    workspace: _,
-                    gate: _,
-                    command: _,
-                    reason: _,
-                    ..
-                }
-            )),
-            "gate execution error should emit gate.execution_error event"
+            !helper.events_by_type("gate.execution_error").is_empty(),
+            "gate execution error should emit gate.execution_error event, got: {:?}",
+            helper
+                .all_events()
+                .iter()
+                .map(|e| e.event_type.clone())
+                .collect::<Vec<_>>()
         );
     }
 

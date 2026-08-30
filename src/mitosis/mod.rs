@@ -2904,7 +2904,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 5,
-            max_children: 0,
+            max_children: 8, // 0 is a literal cap of zero, not "unlimited"
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
@@ -2951,7 +2951,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 5,
-            max_children: 0,
+            max_children: 8, // 0 is a literal cap of zero, not "unlimited"
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
@@ -3027,7 +3027,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 5,
-            max_children: 0,
+            max_children: 8, // 0 is a literal cap of zero, not "unlimited"
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
@@ -3194,7 +3194,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 5,
-            max_children: 0,
+            max_children: 8, // 0 is a literal cap of zero, not "unlimited"
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
@@ -4067,11 +4067,15 @@ End of response."#;
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
 
-        // Simulate existing children that will be deduplicated
+        // Simulate existing children that will be deduplicated.
+        //
+        // Zero-padded on purpose: titles_match also matches on substrings, so
+        // an existing "Task 1" would additionally swallow "Task 10", "Task 11"
+        // and "Task 12" and this test would be measuring dedup, not the cap.
         let store = MockStore::new().with_existing_children(vec![
-            existing_child("Task 1", "parent-001"),
-            existing_child("Task 2", "parent-001"),
-            existing_child("Task 3", "parent-001"),
+            existing_child("Task 01", "parent-001"),
+            existing_child("Task 02", "parent-001"),
+            existing_child("Task 03", "parent-001"),
         ]);
 
         let parent = test_bead();
@@ -4079,7 +4083,7 @@ End of response."#;
         // Propose 12 children, but 3 will be deduplicated
         let proposed: Vec<ProposedChild> = (1..=12)
             .map(|i| ProposedChild {
-                title: format!("Task {}", i),
+                title: format!("Task {:02}", i),
                 body: format!("Description for task {}", i),
             })
             .collect();
