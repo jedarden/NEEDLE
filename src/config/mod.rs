@@ -8383,6 +8383,7 @@ mod config_tests {
     use super::*;
     use create_test_executable;
     use isolate_bead_cli_env;
+    use serial_test::serial;
 
     /// Delegates to the single crate-wide env lock. A module-private lock
     /// would not exclude the `HOME` mutations performed by other modules'
@@ -13822,6 +13823,7 @@ agent:
     // Test infrastructure helper tests
     // ──────────────────────────────────────────────────────────────────────────────
 
+    #[serial]
     #[test]
     fn test_isolate_bead_cli_env_creates_temp_dir() {
         let (_lock, _guard, tmp_dir) = isolate_bead_cli_env();
@@ -13833,6 +13835,7 @@ agent:
         assert!(tmp_dir.path().is_dir(), "temp path should be a directory");
     }
 
+    #[serial]
     #[test]
     fn test_isolate_bead_cli_env_isolates_path() {
         let (_lock, _guard, tmp_dir) = isolate_bead_cli_env();
@@ -13854,6 +13857,7 @@ agent:
         );
     }
 
+    #[serial]
     #[test]
     fn test_isolate_bead_cli_env_temp_dir_is_empty() {
         let (_lock, _guard, tmp_dir) = isolate_bead_cli_env();
@@ -13870,6 +13874,7 @@ agent:
         );
     }
 
+    #[serial]
     #[test]
     fn test_isolate_bead_cli_env_multiple_calls_create_different_dirs() {
         // The first call's env lock MUST be released before the second call:
