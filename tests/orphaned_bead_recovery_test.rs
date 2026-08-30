@@ -11,20 +11,19 @@
 //
 // This test simulates that scenario and verifies the boot-time recovery mechanism.
 
-use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use tempfile::TempDir;
 
-use NEEDLE::bead_store::{BeadStore, Filters};
-use NEEDLE::config::Config;
-use NEEDLE::telemetry::Telemetry;
-use NEEDLE::types::{Bead, BeadId, BeadStatus, WorkerId};
-use NEEDLE::worker::Worker;
+use needle::bead_store::{BeadStore, Filters};
+use needle::config::Config;
+use needle::telemetry::Telemetry;
+use needle::types::{Bead, BeadId, BeadStatus};
+use needle::worker::Worker;
 
 // ── Mock BeadStore ──
 
@@ -132,14 +131,14 @@ impl BeadStore for MockBeadStore {
             .ok_or_else(|| anyhow::anyhow!("bead not found: {}", id))
     }
 
-    async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<NEEDLE::types::ClaimResult> {
-        Ok(NEEDLE::types::ClaimResult::NotClaimable {
+    async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<needle::types::ClaimResult> {
+        Ok(needle::types::ClaimResult::NotClaimable {
             reason: "mock".to_string(),
         })
     }
 
-    async fn claim_auto(&self, _actor: &str) -> Result<NEEDLE::types::ClaimResult> {
-        Ok(NEEDLE::types::ClaimResult::NotClaimable {
+    async fn claim_auto(&self, _actor: &str) -> Result<needle::types::ClaimResult> {
+        Ok(needle::types::ClaimResult::NotClaimable {
             reason: "mock".to_string(),
         })
     }
@@ -187,12 +186,12 @@ impl BeadStore for MockBeadStore {
         Ok(BeadId::from("new-bead".to_string()))
     }
 
-    async fn doctor_repair(&self) -> Result<NEEDLE::bead_store::RepairReport> {
-        Ok(NEEDLE::bead_store::RepairReport::default())
+    async fn doctor_repair(&self) -> Result<needle::bead_store::RepairReport> {
+        Ok(needle::bead_store::RepairReport::default())
     }
 
-    async fn doctor_check(&self) -> Result<NEEDLE::bead_store::RepairReport> {
-        Ok(NEEDLE::bead_store::RepairReport::default())
+    async fn doctor_check(&self) -> Result<needle::bead_store::RepairReport> {
+        Ok(needle::bead_store::RepairReport::default())
     }
 
     async fn full_rebuild(&self) -> Result<()> {
@@ -247,13 +246,14 @@ async fn orphaned_bead_recovery_releases_stuck_beads_on_boot() {
 
     // Simulate worker boot - the recovery should run automatically
     let config = Config::default();
-    let telemetry = Telemetry::new(worker_id.to_string(), temp_dir.path().to_path_buf());
+    let telemetry = Telemetry::new(worker_id.to_string());
 
     // Create worker with the mock store
     let mut worker = Worker::new(config, worker_id.to_string(), store.clone());
 
     // Boot the worker - this should trigger orphaned bead recovery
-    worker.boot().await.unwrap();
+    // Note: boot() is now called internally during Worker construction
+    worker.run_cycle().await.unwrap();
 
     // Verify both beads were released
     assert_eq!(
@@ -305,7 +305,8 @@ async fn orphaned_bead_recovery_does_not_release_beads_without_trace() {
     let mut worker = Worker::new(config, worker_id.to_string(), store.clone());
 
     // Boot the worker
-    worker.boot().await.unwrap();
+    // Note: boot() is now called internally during Worker construction
+    worker.run_cycle().await.unwrap();
 
     // Verify the bead was NOT released (no trace file exists)
     assert_eq!(

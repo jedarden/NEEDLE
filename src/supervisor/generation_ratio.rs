@@ -44,6 +44,7 @@ impl GenerationRatioTracker {
     }
 
     /// Parse date from a datetime string.
+    #[allow(dead_code)]
     fn parse_date(dt_str: &str) -> Result<String> {
         let dt: DateTime<Utc> = dt_str
             .parse()

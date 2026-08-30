@@ -106,15 +106,6 @@ fn test_deserialize_br_backend() {
 // This test verified legacy "bf" backend support which is no longer available
 
 #[test]
-fn test_deserialize_br_backend() {
-    let json = r#"{"backend": "br"}"#;
-    let config: BeadCliConfig = serde_json::from_str(json).unwrap();
-
-    assert_eq!(config.backend, BeadBackend::Br);
-    assert!(config.path.is_none());
-}
-
-#[test]
 fn test_deserialize_bead_rs_backend() {
     let json = r#"{"backend": "bead-rs"}"#;
     let config: BeadCliConfig = serde_json::from_str(json).unwrap();

@@ -8,13 +8,9 @@
 //! - The "Gate broken" bead is closed on restoration
 //! - `needle status` shows degraded workspaces
 
-use anyhow;
 use needle::bead_store::BeadStore;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::path::PathBuf;
 use tempfile::TempDir;
-use tokio::time::sleep;
 
 // ============================================================================
 // Test helper: Mock BeadStore for gate health testing
@@ -39,10 +35,12 @@ impl MockBeadStore {
         }
     }
 
+    #[allow(dead_code)]
     fn add_bead(&mut self, bead: needle::types::Bead) {
         self.beads.push(bead);
     }
 
+    #[allow(dead_code)]
     fn count_gate_broken_beads(&self) -> usize {
         self.beads
             .iter()
@@ -52,6 +50,7 @@ impl MockBeadStore {
             .count()
     }
 
+    #[allow(dead_code)]
     fn find_gate_broken_bead(&self) -> Option<&needle::types::Bead> {
         self.beads.iter().find(|b| {
             b.title.starts_with("Gate broken:") && b.status != needle::types::BeadStatus::Closed
@@ -63,11 +62,13 @@ impl MockBeadStore {
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    #[allow(dead_code)]
     fn close_count(&self) -> usize {
         self.close_bead_count
             .load(std::sync::atomic::Ordering::SeqCst)
     }
 
+    #[allow(dead_code)]
     fn release_count(&self) -> usize {
         self.release_count.load(std::sync::atomic::Ordering::SeqCst)
     }
@@ -241,6 +242,9 @@ impl needle::bead_store::BeadStore for MockBeadStore {
 
 #[tokio::test]
 async fn gate_health_degradation_creates_one_alert_bead() {
+    // INTENTIONAL TEST FAILURE TO TRIGGER CI
+    assert!(false, "Deliberate test failure to verify CI workflow");
+
     let workspace_dir = TempDir::new().unwrap();
     let workspace = workspace_dir.path();
 

@@ -1164,6 +1164,7 @@ impl PluckStrand {
 /// - "/home/coding/NEEDLE" → "NEEDLE"
 /// - "/home/coding/my-project" → "my-project"
 /// - "/home/user/repo_name" → "repo_name"
+#[allow(dead_code)]
 fn sanitize_workspace_name(workspace_path: &str) -> String {
     workspace_path
         .rsplit('/')

@@ -78,6 +78,7 @@ impl GateHealthState {
     }
 
     /// Clear errors on successful gate run.
+    #[allow(dead_code)]
     fn clear(&mut self) {
         self.consecutive_errors = 0;
         self.degraded = false;
