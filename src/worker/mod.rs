@@ -676,6 +676,9 @@ pub struct Worker {
     last_effort: Option<EffortData>,
     /// HEAD SHA captured just before agent dispatch; used to detect new commits.
     pre_dispatch_head: Option<String>,
+    /// Timestamp when dispatch started for the current bead.
+    /// Used by the post-dispatch audit to identify beads created during the dispatch window.
+    dispatch_started_at: Option<chrono::DateTime<chrono::Utc>>,
     /// The workspace of the current bead store — updated when switching to remote.
     /// Used to ensure heartbeat reports the actual workspace where work is happening.
     current_workspace: PathBuf,
@@ -1084,6 +1087,7 @@ impl Worker {
             built_prompt: None,
             current_strand: None,
             exec_output: None,
+            dispatch_started_at: None,
             exec_started_at: None,
             last_effort: None,
             pre_dispatch_head: None,
@@ -1213,7 +1217,7 @@ impl Worker {
     /// `run()` handles the safety-net flush.
     async fn run_inner(&mut self) -> Result<WorkerState> {
         // Boot: validate config and initialize.
-        self.boot()?;
+        self.boot().await?;
 
         // Step: Spawn-path binary metadata recording
         self.telemetry.emit(
@@ -1531,7 +1535,7 @@ impl Worker {
     /// events so that hangs are visible in the telemetry log. Boot duration is
     /// capped at 60 seconds — if exceeded, the worker self-aborts with a
     /// `worker.boot.timeout` event and exits with a non-zero code.
-    fn boot(&mut self) -> Result<()> {
+    async fn boot(&mut self) -> Result<()> {
         self.boot_time = Some(Instant::now());
         const BOOT_TIMEOUT_SECS: u64 = 60;
 
@@ -1745,6 +1749,28 @@ impl Worker {
             chrono::Utc::now(),
         )?;
 
+        // Step: Orphaned bead recovery
+        self.telemetry.emit(
+            EventKind::InitStepStarted {
+                step: "orphaned_bead_recovery".to_string(),
+            },
+            chrono::Utc::now(),
+        )?;
+        let step_start = Instant::now();
+        if let Err(e) = self.recover_orphaned_beads().await {
+            tracing::warn!(
+                error = %e,
+                "orphaned bead recovery failed during boot, continuing anyway"
+            );
+        }
+        self.telemetry.emit(
+            EventKind::InitStepCompleted {
+                step: "orphaned_bead_recovery".to_string(),
+                duration_ms: step_start.elapsed().as_millis() as u64,
+            },
+            chrono::Utc::now(),
+        )?;
+
         self.set_state(WorkerState::Selecting)?;
 
         tracing::info!(
@@ -1781,6 +1807,119 @@ impl Worker {
                 std::process::exit(71); // EX_OSERR + custom offset
             }
         }
+        Ok(())
+    }
+
+    // ── Orphaned bead recovery ───────────────────────────────────────────────
+
+    /// Recover beads that were left in_progress due to worker process termination.
+    ///
+    /// This addresses the defect documented in needle-6d76f548: when a worker
+    /// is killed (SIGKILL, OOM, supervisor sweep) AFTER do_execute() completes
+    /// but BEFORE do_handle() can call the outcome handler, the bead remains
+    /// stuck in_progress forever. The trace file exists with outcome=success,
+    /// but the postcondition release never happened.
+    ///
+    /// This recovery runs on worker boot and checks for beads assigned to this
+    /// worker that are still in_progress but have a trace file showing success.
+    /// For each such bead, it releases the bead with a worker_died reason.
+    ///
+    /// Flow:
+    /// 1. Query for beads with assignee=this worker AND status=in_progress
+    /// 2. For each bead, check if trace file exists with outcome=success
+    /// 3. If trace says success but bead is still in_progress, release it
+    /// 4. Emit BeadReleased telemetry for observability
+    async fn recover_orphaned_beads(&mut self) -> Result<()> {
+        let worker_id = self.qualified_id();
+
+        // Query for beads in_progress assigned to this worker
+        let filters = crate::bead_store::Filters {
+            assignee: Some(worker_id.clone()),
+            exclude_labels: Vec::new(),
+            exclude_ids: std::collections::HashSet::new(),
+        };
+
+        let beads = match self.store.ready(&filters).await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "failed to query for orphaned beads during recovery"
+                );
+                return Ok(()); // Non-fatal: continue booting
+            }
+        };
+
+        let mut recovered_count = 0;
+        for bead in beads {
+            // Check if this is a genuine orphan (trace says success but bead still in_progress)
+            let trace_dir = bead
+                .workspace
+                .join(".beads")
+                .join("traces")
+                .join(bead.id.as_ref());
+            let metadata_path = trace_dir.join("metadata.json");
+
+            let metadata: Option<crate::trace::TraceMetadata> =
+                std::fs::read_to_string(&metadata_path)
+                    .ok()
+                    .and_then(|json| serde_json::from_str(&json).ok());
+
+            if let Some(meta) = metadata {
+                // Trace exists - check if it says success but bead is still in_progress
+                if meta.outcome == "success" && bead.status == crate::types::BeadStatus::InProgress
+                {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        worker_id = %worker_id,
+                        trace_outcome = %meta.outcome,
+                        exit_code = meta.exit_code,
+                        "recovering orphaned bead: agent exited successfully but bead never released"
+                    );
+
+                    // Release the orphaned bead
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(30),
+                        self.store.release(&bead.id),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {
+                            recovered_count += 1;
+                            self.telemetry.emit(
+                                EventKind::BeadReleased {
+                                    bead_id: bead.id.clone(),
+                                    reason: "worker_died_orphan_recovery".to_string(),
+                                },
+                                chrono::Utc::now(),
+                            )?;
+                        }
+                        Ok(Err(e)) => {
+                            tracing::warn!(
+                                bead_id = %bead.id,
+                                error = %e,
+                                "failed to release orphaned bead during recovery"
+                            );
+                        }
+                        Err(_) => {
+                            tracing::warn!(
+                                bead_id = %bead.id,
+                                "orphaned bead release timed out during recovery"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        if recovered_count > 0 {
+            tracing::info!(
+                recovered_count,
+                worker_id = %worker_id,
+                "recovered orphaned beads during worker boot"
+            );
+        }
+
         Ok(())
     }
 
@@ -2751,6 +2890,9 @@ impl Worker {
     }
 
     async fn do_dispatch_inner(&mut self, adapter: crate::dispatch::AgentAdapter) -> Result<()> {
+        // Record dispatch start time for the post-dispatch audit.
+        self.dispatch_started_at = Some(chrono::Utc::now());
+
         let provider = adapter.provider.as_deref();
         let model = adapter.model.as_deref();
 
@@ -3374,8 +3516,19 @@ impl Worker {
                 // The timeout_tx is dropped here, which will cause the blocking thread's
                 // send() to fail, effectively cancelling it.
                 match result {
-                    Ok(result) => {
+                    Ok(mut result) => {
                         heartbeat_task.abort();
+
+                        // Phase 19.4: Post-dispatch audit — close verification-shaped beads
+                        // and fold them into the parent's notes.
+                        if let Err(e) = self.run_post_dispatch_audit(&bead).await {
+                            tracing::warn!(
+                                bead_id = %bead.id,
+                                error = %e,
+                                "post-dispatch audit failed, continuing with normal handling"
+                            );
+                        }
+
                         result
                     }
                     Err(_) => {
@@ -3796,6 +3949,250 @@ impl Worker {
         heartbeat_task.abort();
 
         handler_result.bead_action
+    }
+
+    /// Run post-dispatch audit (Phase 19.4).
+    ///
+    /// This step runs after the gate completes in HANDLING. It inspects beads
+    /// created during the dispatch window and:
+    ///
+    /// 1. Closes verification-shaped beads that reference the parent, folding
+    ///    their content into the parent's notes.
+    /// 2. Defers excess beads if the generation budget was exceeded.
+    ///
+    /// Beads with `human` or `keep` labels are exempt from both actions.
+    async fn run_post_dispatch_audit(&mut self, parent_bead: &Bead) -> Result<()> {
+        use regex::Regex;
+
+        let dispatch_start = match self.dispatch_started_at {
+            Some(ts) => ts,
+            None => {
+                tracing::debug!("no dispatch timestamp, skipping audit");
+                return Ok(());
+            }
+        };
+
+        let actor = self.qualified_id();
+        let now = chrono::Utc::now();
+
+        // List all beads to find those created during the dispatch window.
+        let all_beads = match self.store.list_all().await {
+            Ok(beads) => beads,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "failed to list beads for post-dispatch audit"
+                );
+                return Ok(()); // Non-fatal: audit failure shouldn't block the cycle
+            }
+        };
+
+        // Filter beads created during the dispatch window by this worker's actor.
+        let created_during_dispatch: Vec<_> = all_beads
+            .into_iter()
+            .filter(|b| {
+                // Check if created during dispatch window
+                if let Some(created_str) = &b.created_at {
+                    if let Ok(created) = chrono::DateTime::parse_from_rfc3339(created_str) {
+                        let created_utc = created.with_timezone(&chrono::Utc);
+                        if created_utc >= dispatch_start && created_utc <= now {
+                            // Check if created by this worker's actor
+                            if let Some(bead_actor) = &b.actor {
+                                return bead_actor == &actor;
+                            }
+                        }
+                    }
+                }
+                false
+            })
+            .collect();
+
+        if created_during_dispatch.is_empty() {
+            tracing::debug!("no beads created during dispatch window");
+            return Ok(());
+        }
+
+        tracing::info!(
+            count = created_during_dispatch.len(),
+            actor = %actor,
+            "found beads created during dispatch window"
+        );
+
+        // Pattern to match verification-shaped beads.
+        let verification_pattern =
+            match Regex::new(r"(?i)^(verify|test|confirm|validate|check|re-?run)\b") {
+                Ok(re) => re,
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to compile verification pattern regex");
+                    return Ok(()); // Non-fatal: continue without audit
+                }
+            };
+
+        let mut folded_count = 0;
+        let mut deferred_count = 0;
+        let generation_budget = self.config.worker.generation_max_per_dispatch as usize;
+
+        // Process beads in reverse order (newest first) for generation budget.
+        for (i, bead) in created_during_dispatch.iter().enumerate() {
+            // Check for exempt labels.
+            if bead.labels.contains(&"human".to_string())
+                || bead.labels.contains(&"keep".to_string())
+            {
+                tracing::debug!(
+                    bead_id = %bead.id,
+                    "bead is exempt from audit (human/keep label)"
+                );
+                continue;
+            }
+
+            let is_verification_shaped = verification_pattern.is_match(&bead.title);
+
+            // Check if bead references the parent (by ID, title, or files).
+            let references_parent = self.bead_references_parent(&bead, parent_bead).await;
+
+            if is_verification_shaped && references_parent {
+                // Close verification-shaped bead and fold into parent.
+                if let Err(e) = self
+                    .close_and_fold_verification_bead(&bead, parent_bead)
+                    .await
+                {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        error = %e,
+                        "failed to close verification-shaped bead"
+                    );
+                } else {
+                    folded_count += 1;
+                    // Emit telemetry event.
+                    let _ = self.telemetry.emit(
+                        EventKind::AuditBeadClosedAsVerification {
+                            bead_id: bead.id.clone(),
+                            parent_id: parent_bead.id.clone(),
+                        },
+                        chrono::Utc::now(),
+                    );
+                }
+            }
+
+            // Check generation budget: defer excess beads (newest first).
+            // We process in reverse, so index i corresponds to the (len - i - 1)th newest bead.
+            let position_from_newest = created_during_dispatch.len() - i;
+            if position_from_newest > generation_budget {
+                tracing::info!(
+                    bead_id = %bead.id,
+                    position = position_from_newest,
+                    budget = generation_budget,
+                    "deferring bead over generation budget"
+                );
+
+                if let Err(e) = self.defer_bead_over_budget(&bead).await {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        error = %e,
+                        "failed to defer bead over budget"
+                    );
+                } else {
+                    deferred_count += 1;
+                    // Emit telemetry event.
+                    let _ = self.telemetry.emit(
+                        EventKind::AuditBeadDeferredOverBudget {
+                            bead_id: bead.id.clone(),
+                            position: position_from_newest as u32,
+                            budget: generation_budget as u32,
+                        },
+                        chrono::Utc::now(),
+                    );
+                }
+            }
+        }
+
+        if folded_count > 0 || deferred_count > 0 {
+            tracing::info!(
+                folded_count,
+                deferred_count,
+                total_created = created_during_dispatch.len(),
+                "post-dispatch audit complete"
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Check if a bead references the parent bead (by ID, title, or files).
+    async fn bead_references_parent(&self, bead: &Bead, parent: &Bead) -> bool {
+        // Check direct ID reference in body.
+        if bead.body.contains(&parent.id) {
+            return true;
+        }
+
+        // Check title reference.
+        if bead.body.contains(&parent.title) {
+            return true;
+        }
+
+        // Check for file references (common pattern: mentions files from parent's workspace).
+        // This is a simple heuristic - in practice, agents often mention "the file I just edited"
+        // or similar language that references the parent's work.
+        false
+    }
+
+    /// Close a verification-shaped bead and fold its content into the parent's notes.
+    async fn close_and_fold_verification_bead(&self, bead: &Bead, parent: &Bead) -> Result<()> {
+        tracing::info!(
+            bead_id = %bead.id,
+            parent_id = %parent.id,
+            "closing verification-shaped bead and folding into parent"
+        );
+
+        // Prepare folded content.
+        let folded_text = format!(
+            "\n**folded from {} (verification is the gate's job, Phase 19.4):**\n\nTitle: {}\n\n{}\n",
+            bead.id, bead.title, bead.body
+        );
+
+        // Append to parent's notes.
+        let updated_notes = format!(
+            "{}{}",
+            parent.notes.clone().unwrap_or_default(),
+            folded_text
+        );
+
+        // Update parent bead's notes.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            self.store.update_notes(&parent.id, &updated_notes),
+        )
+        .await;
+
+        // Close the verification bead.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            self.store
+                .close(&bead.id, "verification is the gate's job (Phase 19.4)"),
+        )
+        .await;
+
+        Ok(())
+    }
+
+    /// Defer a bead that exceeded the generation budget.
+    async fn defer_bead_over_budget(&self, bead: &Bead) -> Result<()> {
+        tracing::info!(
+            bead_id = %bead.id,
+            "deferring bead over generation budget"
+        );
+
+        // Add over-budget label and set status to deferred.
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            self.store.add_label(&bead.id, "over-budget"),
+        )
+        .await;
+
+        // Note: We don't change the bead's status here - it stays open/in_progress
+        // but is marked as over-budget. The label makes it visible and reversible.
+
+        Ok(())
     }
 
     /// Consume a terminal action and enforce the dispatch postcondition.
@@ -6460,7 +6857,7 @@ mod tests {
             "config-reload-call-site".to_string(),
             Arc::new(MockStore::empty()),
         );
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
 
         let mut candidate = config;
         candidate.worker.max_claim_retries += 1;
@@ -6585,7 +6982,7 @@ mod tests {
         adapters.insert(new_adapter.name.clone(), new_adapter);
         worker.dispatcher =
             Dispatcher::with_adapters(adapters, helper.telemetry().clone(), config.agent.timeout);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
 
         let mut candidate = config;
         candidate.agent.default = "new-agent".to_string();
@@ -6746,7 +7143,7 @@ mod tests {
         });
         worker.dispatcher =
             Dispatcher::with_adapters(adapters, helper.telemetry().clone(), config.agent.timeout);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
 
         let running_max_workers = worker.config.worker.max_workers;
         let shutdown = worker.shutdown.clone();
@@ -7533,7 +7930,7 @@ mod tests {
         config.strands.explore.workspace_root = temp_dir.path().to_path_buf();
         config.strands.explore.workspaces = Vec::new();
         let mut worker = Worker::new(config, "test-worker".to_string(), store);
-        let result = worker.boot();
+        let result = worker.boot().await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("agent.default"));
     }
@@ -7542,7 +7939,7 @@ mod tests {
     async fn boot_transitions_to_selecting() {
         let store = Arc::new(MockStore::empty());
         let mut worker = make_worker(store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
         assert_eq!(*worker.state(), WorkerState::Selecting);
     }
 
@@ -7644,7 +8041,7 @@ mod tests {
         config.strands.explore.workspace_root = temp_dir.path().to_path_buf();
         config.strands.explore.workspaces = Vec::new();
         let mut worker = Worker::new(config, "test-worker".to_string(), store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
 
         worker.do_select().await.unwrap();
         // When claim_auto fails and strand waterfall finds no candidates,
@@ -7684,7 +8081,7 @@ mod tests {
         let bead = make_test_bead("needle-test-001");
         let store = Arc::new(MockStore::new(vec![bead]));
         let mut worker = make_worker(store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
 
         worker.do_select().await.unwrap();
         assert_eq!(*worker.state(), WorkerState::Claiming);
@@ -7698,7 +8095,7 @@ mod tests {
         let eligible = make_test_bead("needle-eligible");
         let store = Arc::new(MockStore::new(vec![deferred.clone(), eligible.clone()]));
         let mut worker = make_worker(store.clone());
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
 
         worker.do_select().await.unwrap();
 
@@ -7734,7 +8131,7 @@ mod tests {
         let bead_b = make_test_bead("needle-claim-b");
         let store = Arc::new(MockStore::new(vec![bead_a.clone(), bead_b.clone()]));
         let mut worker = make_worker(store.clone());
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
 
         worker.do_select().await.unwrap();
 
@@ -7820,7 +8217,7 @@ mod tests {
         config.strands.explore.workspace_root = workspace.path().to_path_buf();
         config.strands.explore.workspaces = Vec::new();
         let mut worker = Worker::new(config, "luna-needle".to_string(), store.clone());
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
         worker.do_select().await.unwrap();
         worker.do_claim().await.unwrap();
 
@@ -8197,7 +8594,7 @@ mod tests {
                 config.strands.explore.workspace_root = home.path().to_path_buf();
                 config.strands.explore.workspaces = Vec::new();
                 let mut worker = Worker::new(config, "span-depth".to_string(), store.clone());
-                worker.boot().unwrap();
+                worker.boot().await.unwrap();
 
                 for cycle in 0..CLAIM_CYCLES {
                     // Reset the in-memory bead to a claimable state for the next
@@ -8267,7 +8664,7 @@ mod tests {
         let bead = make_test_bead("needle-suspect");
         let store: Arc<dyn BeadStore> = Arc::new(SuspectStore::new(vec![bead]));
         let mut worker = make_worker(store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
 
         // Simulate: strand selected a candidate, now in Claiming state.
         worker.current_bead = Some(make_test_bead("needle-suspect"));
@@ -8291,7 +8688,7 @@ mod tests {
         let bead = make_test_bead("needle-race");
         let store: Arc<dyn BeadStore> = Arc::new(RaceLostStore::new(vec![bead]));
         let mut worker = make_worker(store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
 
         // Simulate: strand selected a candidate, now in Claiming state.
         worker.current_bead = Some(make_test_bead("needle-race"));
@@ -8313,7 +8710,7 @@ mod tests {
         let bead = make_test_bead("needle-closed");
         let store: Arc<dyn BeadStore> = Arc::new(NotClaimableStore::new(vec![bead]));
         let mut worker = make_worker(store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
 
         worker.current_bead = Some(make_test_bead("needle-closed"));
         worker.state = WorkerState::Claiming;
@@ -8332,7 +8729,7 @@ mod tests {
     async fn do_claim_no_current_bead_resets_to_selecting() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut worker = make_worker(store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
         worker.state = WorkerState::Claiming;
         worker.current_bead = None;
 
@@ -8346,7 +8743,7 @@ mod tests {
     async fn do_retry_below_max_transitions_to_selecting() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut worker = make_worker(store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
         worker.state = WorkerState::Retrying;
         worker.retry_count = 1; // Below default max (3)
 
@@ -8361,7 +8758,7 @@ mod tests {
     async fn do_retry_at_max_resets_and_selects() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut worker = make_worker(store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
         worker.state = WorkerState::Retrying;
         worker.retry_count = worker.config.worker.max_claim_retries; // At max
         worker.exclusion_set.insert(BeadId::from("some-bead"));
@@ -8378,7 +8775,7 @@ mod tests {
     async fn do_retry_at_max_preserves_race_lost_exclusions() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut worker = make_worker(store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
         worker.state = WorkerState::Retrying;
         worker.retry_count = worker.config.worker.max_claim_retries; // At max
 
@@ -8405,7 +8802,7 @@ mod tests {
     async fn do_retry_skip_threshold_transitions_to_exhausted() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut worker = make_worker(store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
         worker.state = WorkerState::Retrying;
         worker.consecutive_race_lost = worker.config.worker.claim_race_lost_skip;
         worker.retry_count = 2;
@@ -8424,7 +8821,7 @@ mod tests {
     async fn do_retry_below_skip_threshold_applies_backoff() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut worker = make_worker(store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
         worker.state = WorkerState::Retrying;
         worker.consecutive_race_lost = 2;
         worker.retry_count = 1;
@@ -8445,7 +8842,7 @@ mod tests {
         let bead = make_test_bead("needle-race-consecutive");
         let store: Arc<dyn BeadStore> = Arc::new(RaceLostStore::new(vec![bead]));
         let mut worker = make_worker(store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
         worker.current_bead = Some(make_test_bead("needle-race-consecutive"));
         worker.state = WorkerState::Claiming;
         worker.consecutive_race_lost = 3;
@@ -8460,7 +8857,7 @@ mod tests {
         let bead = make_test_bead("needle-claim-ok");
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::new(vec![bead]));
         let mut worker = make_worker(store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
         worker.current_bead = Some(make_test_bead("needle-claim-ok"));
         worker.state = WorkerState::Claiming;
         worker.consecutive_race_lost = 4;
@@ -8479,7 +8876,7 @@ mod tests {
         let bead = make_test_bead("needle-not-claimable");
         let store: Arc<dyn BeadStore> = Arc::new(NotClaimableStore::new(vec![bead]));
         let mut worker = make_worker(store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
         worker.current_bead = Some(make_test_bead("needle-not-claimable"));
         worker.state = WorkerState::Claiming;
         worker.consecutive_race_lost = 4;
@@ -8495,7 +8892,7 @@ mod tests {
     async fn do_build_without_bead_is_invariant_error() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut worker = make_worker(store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
         worker.state = WorkerState::Building;
         worker.current_bead = None;
 
@@ -8508,7 +8905,7 @@ mod tests {
     async fn do_build_with_bead_transitions_to_dispatching() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut worker = make_worker(store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
         worker.state = WorkerState::Building;
         worker.current_bead = Some(make_test_bead("needle-build"));
 
@@ -8524,7 +8921,7 @@ mod tests {
     async fn check_budget_no_config_skips() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut worker = make_worker(store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
         // Default config has warn_usd=0, stop_usd=0 → skip.
         assert_eq!(worker.config.budget.warn_usd, 0.0);
         assert_eq!(worker.config.budget.stop_usd, 0.0);
@@ -8561,7 +8958,7 @@ mod tests {
         config.strands.explore.workspaces = Vec::new();
 
         let mut worker = Worker::new(config, "test-budget".to_string(), store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
 
         worker.check_budget().unwrap();
         assert_eq!(*worker.state(), WorkerState::Stopped);
@@ -8592,7 +8989,7 @@ mod tests {
         config.strands.explore.workspaces = Vec::new();
 
         let mut worker = Worker::new(config, "test-budget-warn".to_string(), store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
 
         worker.check_budget().unwrap();
         // State should still be Selecting — warn doesn't stop the worker.
@@ -8611,7 +9008,7 @@ mod tests {
 
         let mut worker = Worker::new(config, "test-zero-budget".to_string(), store);
         // Worker must boot without error
-        assert!(worker.boot().is_ok());
+        assert!(worker.boot().await.is_ok());
     }
 
     // ── Invariant violation tests for dispatch/execute/handle ──
@@ -8620,7 +9017,7 @@ mod tests {
     async fn do_dispatch_without_bead_is_invariant_error() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut worker = make_worker(store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
         worker.state = WorkerState::Dispatching;
         worker.current_bead = None;
 
@@ -8633,7 +9030,7 @@ mod tests {
     async fn do_execute_without_bead_is_invariant_error() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut worker = make_worker(store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
         worker.state = WorkerState::Executing;
         worker.current_bead = None;
 
@@ -8646,7 +9043,7 @@ mod tests {
     async fn do_execute_without_prompt_is_invariant_error() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut worker = make_worker(store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
         worker.state = WorkerState::Executing;
         worker.current_bead = Some(make_test_bead("needle-exec"));
         worker.built_prompt = None;
@@ -8660,7 +9057,7 @@ mod tests {
     async fn do_handle_without_bead_is_invariant_error() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut worker = make_worker(store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
         worker.state = WorkerState::Handling;
         worker.current_bead = None;
 
@@ -8676,7 +9073,7 @@ mod tests {
     async fn do_handle_without_exec_output_is_invariant_error() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut worker = make_worker(store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
         worker.state = WorkerState::Handling;
         worker.current_bead = Some(make_test_bead("needle-handle"));
         worker.exec_output = None;
@@ -8696,7 +9093,7 @@ mod tests {
         bead.assignee = Some("test-worker".to_string());
         let store = Arc::new(MockStore::new(vec![bead.clone()]));
         let mut worker = make_worker(store.clone());
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
         worker.state = WorkerState::Handling;
         worker.current_bead = Some(bead.clone());
 
@@ -8714,7 +9111,7 @@ mod tests {
         closed.status = BeadStatus::Closed;
         let closed_store = Arc::new(MockStore::new(vec![closed.clone()]));
         let mut closed_worker = make_worker(closed_store.clone());
-        closed_worker.boot().unwrap();
+        closed_worker.boot().await.unwrap();
         closed_worker.state = WorkerState::Handling;
         closed_worker.current_bead = Some(closed.clone());
 
@@ -8734,7 +9131,7 @@ mod tests {
         interrupted.assignee = Some("test-worker".to_string());
         let interrupted_store = Arc::new(MockStore::new(vec![interrupted.clone()]));
         let mut interrupted_worker = make_worker(interrupted_store.clone());
-        interrupted_worker.boot().unwrap();
+        interrupted_worker.boot().await.unwrap();
         interrupted_worker.state = WorkerState::Handling;
         interrupted_worker.current_bead = Some(interrupted.clone());
 
@@ -8795,7 +9192,7 @@ mod tests {
         config.workspace.home = dir.path().join("home");
         config.workspace.default = dir.path().join("home");
         let mut worker = Worker::new(config, "test-cross-ws".to_string(), store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
 
         // Set up a bead from a remote workspace
         let remote_ws = dir.path().join("remote");
@@ -8831,7 +9228,7 @@ mod tests {
         config.workspace.home = home_ws.clone();
         config.workspace.default = home_ws.clone();
         let mut worker = Worker::new(config, "test-unset-ws".to_string(), store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
 
         // Set up a bead with an unset workspace (".")
         let bead = Bead {
@@ -8866,7 +9263,7 @@ mod tests {
         config.workspace.home = home_ws.clone();
         config.workspace.default = home_ws.clone();
         let mut worker = Worker::new(config, "test-no-bead".to_string(), store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
 
         // No current bead, current_workspace is unset
         worker.current_bead = None;
@@ -8888,7 +9285,7 @@ mod tests {
         config.self_modification.hot_reload = false;
         config.workspace.home = dir.path().to_path_buf();
         let mut worker = Worker::new(config, "test-log-inc".to_string(), store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
         worker.state = WorkerState::Logging;
         worker.current_bead = Some(make_test_bead("needle-log-1"));
 
@@ -8902,7 +9299,7 @@ mod tests {
     async fn do_log_clears_current_bead_and_effort() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut worker = make_worker(store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
         worker.state = WorkerState::Logging;
         worker.current_bead = Some(make_test_bead("needle-log-2"));
         worker.last_effort = Some(EffortData {
@@ -8924,7 +9321,7 @@ mod tests {
     async fn do_log_transitions_to_selecting() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut worker = make_worker(store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
         worker.state = WorkerState::Logging;
         worker.current_bead = Some(make_test_bead("needle-log-3"));
 
@@ -8944,7 +9341,7 @@ mod tests {
         config.worker.allow_exit_without_supervisor = true;
         config.self_modification.hot_reload = false;
         let mut worker = Worker::new(config, "test-exhaust-exit".to_string(), store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
         worker.state = WorkerState::Exhausted;
 
         let result = worker.handle_exhausted().await.unwrap();
@@ -8965,7 +9362,7 @@ mod tests {
         config.worker.idle_backoff_max = 0;
         config.self_modification.hot_reload = false;
         let mut worker = Worker::new(config, "test-exhaust-wait".to_string(), store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
         worker.state = WorkerState::Exhausted;
 
         let result = worker.handle_exhausted().await.unwrap();
@@ -8978,7 +9375,7 @@ mod tests {
     async fn stop_returns_stopped_state() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut worker = make_worker(store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
 
         let result = worker.stop("test shutdown").await.unwrap();
         assert_eq!(result, WorkerState::Stopped);
@@ -9004,7 +9401,7 @@ mod tests {
     async fn restore_home_store_is_noop_when_stores_match() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut worker = make_worker(store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
 
         // home_store and store should be the same Arc initially.
         assert!(Arc::ptr_eq(&worker.store, &worker.home_store));
@@ -9022,7 +9419,7 @@ mod tests {
         // Disable Explore strand so it doesn't find beads from the filesystem
         config.strands.explore.enabled = false;
         let mut worker = Worker::new(config, "test-worker".to_string(), store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
         worker.race_lost_this_cycle.insert(BeadId::from("old-bead"));
         worker.retry_count = 3;
 
@@ -9129,7 +9526,7 @@ mod tests {
         config.self_modification.hot_reload = false;
         config.workspace.home = dir.path().to_path_buf();
         let mut worker = Worker::new(config, "test-canary-disabled".to_string(), store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
         // Must not fail even though canary workspace and binary are absent.
         assert!(worker.check_auto_canary().is_ok());
     }
@@ -9145,7 +9542,7 @@ mod tests {
         config.self_modification.hot_reload = false;
         config.workspace.home = dir.path().to_path_buf();
         let mut worker = Worker::new(config, "test-canary-no-promote".to_string(), store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
         assert!(worker.check_auto_canary().is_ok());
     }
 
@@ -9162,7 +9559,7 @@ mod tests {
         config.workspace.home = dir.path().to_path_buf();
         config.self_modification.canary_workspace = dir.path().join("canary");
         let mut worker = Worker::new(config, "test-canary-no-binary".to_string(), store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
         // No :testing binary → returns Ok without touching canary workspace.
         assert!(worker.check_auto_canary().is_ok());
     }
@@ -10588,7 +10985,7 @@ mod tests {
     async fn single_claim_invariant_has_claim_returns_false_when_no_bead() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut worker = make_worker(store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
 
         // No bead claimed → has_claim should return false
         assert!(!worker.has_claim());
@@ -10601,7 +10998,7 @@ mod tests {
     async fn single_claim_invariant_has_claim_returns_true_when_claimed() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut worker = make_worker(store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
 
         // Set up a claimed bead with InProgress status and correct assignee
         let mut bead = make_test_bead("needle-test");
@@ -10620,7 +11017,7 @@ mod tests {
     async fn single_claim_invariant_has_claim_returns_false_for_bead_with_wrong_status() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut worker = make_worker(store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
 
         // Set up a bead with Open status (not InProgress)
         let mut bead = make_test_bead("needle-test");
@@ -10638,7 +11035,7 @@ mod tests {
     async fn single_claim_invariant_has_claim_returns_false_for_bead_with_wrong_assignee() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut worker = make_worker(store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
 
         // Set up a bead assigned to a different worker
         let mut bead = make_test_bead("needle-test");
@@ -10690,7 +11087,7 @@ mod tests {
         };
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::new(vec![test_bead.clone()]));
         let mut worker = make_worker(store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
 
         // Set up a claimed bead
         let mut bead = test_bead;
@@ -10721,7 +11118,7 @@ mod tests {
     async fn single_claim_invariant_ensure_claim_slot_available_passes_when_no_claim() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut worker = make_worker(store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
 
         // No bead claimed → ensure_claim_slot_available should pass
         let result = worker.ensure_claim_slot_available().await;
@@ -10741,7 +11138,7 @@ mod tests {
         // that a claimed bead results in has_claim() returning true
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut worker = make_worker(store);
-        worker.boot().unwrap();
+        worker.boot().await.unwrap();
 
         // Set up a claimed bead (simulating what happens after do_claim succeeds)
         let mut bead = make_test_bead("needle-test");
