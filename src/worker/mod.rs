@@ -157,7 +157,7 @@ fn check_heartbeat_freshness(path: &Path, ttl_secs: u64) -> bool {
         Err(_) => return false, // Clock skew
     };
 
-    duration.as_secs() <= ttl_secs
+    duration.as_secs() < ttl_secs
 }
 
 /// Check if a supervisor is present using standard default paths.
@@ -7559,7 +7559,7 @@ mod tests {
             Arc::new(MockStore::empty()),
         );
 
-        let hb_dir = home.path().join("state").join("heartbeats");
+        let hb_dir = home.path().join(".needle").join("state").join("heartbeats");
         std::fs::create_dir_all(&hb_dir).unwrap();
         let heartbeat = serde_json::json!({ "last_heartbeat": chrono::Utc::now().to_rfc3339() });
         std::fs::write(
@@ -9866,7 +9866,7 @@ mod tests {
                 match_model: "sonnet".to_string(),
                 adapter: "claude-print".to_string(),
             }],
-            default_adapter: Some("claude-code-glm-4.7".to_string()),
+            default_adapter: Some("claude".to_string()),
             strict: false,
         });
         let worker = Worker::new(config, "test-routing-default-adapter".to_string(), store);
@@ -11485,7 +11485,7 @@ mod tests {
     fn is_supervisor_present_with_custom_home() {
         // Test with a custom HOME directory
         let temp = tempfile::tempdir().unwrap();
-        let state_dir = temp.path().join("state");
+        let state_dir = temp.path().join(".needle").join("state");
         fs::create_dir_all(&state_dir).unwrap();
 
         let heartbeat_path = state_dir.join("supervisor-heartbeat.json");

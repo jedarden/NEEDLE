@@ -2264,7 +2264,7 @@ mod tests {
     async fn heartbeat_path_computed_during_construction() {
         let _home_guard = isolate_test_home();
         let dir = tempfile::tempdir().unwrap();
-        let hb_dir = dir.path().join("state").join("heartbeats");
+        let hb_dir = dir.path().join(".needle").join("state").join("heartbeats");
         std::fs::create_dir_all(&hb_dir).unwrap();
 
         let mut config = Config::default();
@@ -4399,8 +4399,9 @@ mod tests {
     /// for cleanup on graceful shutdown.
     #[tokio::test]
     async fn heartbeat_path_field_correct_for_shutdown_handler() {
+        let _home_guard = isolate_test_home();
         let dir = tempfile::tempdir().unwrap();
-        let hb_dir = dir.path().join("state").join("heartbeats");
+        let hb_dir = dir.path().join(".needle").join("state").join("heartbeats");
         std::fs::create_dir_all(&hb_dir).unwrap();
 
         let mut config = Config::default();
