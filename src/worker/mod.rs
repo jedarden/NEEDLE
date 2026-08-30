@@ -7258,46 +7258,54 @@ mod tests {
         let worker_finished_for_run = worker_finished.clone();
 
         let result = runtime.block_on(async {
-            let request_invalid_reload = async {
-                tokio::time::timeout(Duration::from_secs(60), async {
-                    while !dispatch_started.exists() {
-                        tokio::time::sleep(Duration::from_millis(10)).await;
+            let request_invalid_reload =
+                async {
+                    tokio::time::timeout(Duration::from_secs(60), async {
+                        while !dispatch_started.exists() {
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                    })
+                    .await
+                    .expect("old-config dispatch did not start");
+
+                    std::fs::write(&config_path, "worker:\n  max_workers: 0\n").unwrap();
+                    helper.sync().await;
+
+                    assert_eq!(helper.events_by_type("agent.dispatched").len(), 1);
+                    helper.assert_event_not_emitted("config.reload.rejected");
+
+                    {
+                        let mut beads = store.beads.lock().unwrap();
+                        let claimed = beads
+                            .iter_mut()
+                            .find(|stored| stored.id == bead.id)
+                            .expect("claimed test bead should remain in the mock store");
+                        claimed.status = BeadStatus::Closed;
                     }
-                })
-                .await
-                .expect("old-config dispatch did not start");
 
-                std::fs::write(&config_path, "worker:\n  max_workers: 0\n").unwrap();
-                helper.sync().await;
+                    std::fs::write(&release_dispatch, b"").unwrap();
 
-                assert_eq!(helper.events_by_type("agent.dispatched").len(), 1);
-                helper.assert_event_not_emitted("config.reload.rejected");
+                    tokio::time::timeout(Duration::from_secs(60), async {
+                        while helper.events_by_type("config.reload.rejected").is_empty() {
+                            tokio::time::sleep(Duration::from_millis(10)).await;
+                        }
+                    })
+                    .await
+                    .unwrap_or_else(|_| {
+                        panic!(
+                    "invalid candidate was not rejected; HOME={:?} watched={:?} events={:?}",
+                    std::env::var("HOME"),
+                    global_config_path(),
+                    helper.all_events().iter().map(|e| e.event_type.clone()).collect::<Vec<_>>()
+                )
+                    });
 
-                {
-                    let mut beads = store.beads.lock().unwrap();
-                    let claimed = beads
-                        .iter_mut()
-                        .find(|stored| stored.id == bead.id)
-                        .expect("claimed test bead should remain in the mock store");
-                    claimed.status = BeadStatus::Closed;
-                }
-
-                std::fs::write(&release_dispatch, b"").unwrap();
-
-                tokio::time::timeout(Duration::from_secs(60), async {
-                    while helper.events_by_type("config.reload.rejected").is_empty() {
-                        tokio::time::sleep(Duration::from_millis(10)).await;
-                    }
-                })
-                .await
-                .expect("invalid candidate was not rejected");
-
-                assert!(
-                    !worker_finished.load(Ordering::SeqCst),
-                    "invalid config reload must not terminate the worker"
-                );
-                shutdown.store(true, Ordering::SeqCst);
-            };
+                    assert!(
+                        !worker_finished.load(Ordering::SeqCst),
+                        "invalid config reload must not terminate the worker"
+                    );
+                    shutdown.store(true, Ordering::SeqCst);
+                };
 
             let run_worker = async {
                 let result = worker.run_state_machine().await;
@@ -11493,7 +11501,14 @@ mod tests {
 
     #[test]
     fn is_supervisor_present_with_custom_home() {
-        // Test with a custom HOME directory
+        // Take the process-wide env lock: HOME is global, and this test used
+        // to set it with no lock and then "restore" it by reading HOME back
+        // (already its own temp path) and setting it to itself — leaving every
+        // later test pointed at a deleted directory. That is what made
+        // invalid_config_reload_keeps_worker_running_and_emits_rejection watch
+        // the wrong config file and time out whenever the two ran together.
+        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+
         let temp = tempfile::tempdir().unwrap();
         let state_dir = temp.path().join(".needle").join("state");
         fs::create_dir_all(&state_dir).unwrap();
@@ -11501,16 +11516,12 @@ mod tests {
         let heartbeat_path = state_dir.join("supervisor-heartbeat.json");
         fs::write(&heartbeat_path, "{}").unwrap();
 
-        // Set custom HOME
         std::env::set_var("HOME", temp.path());
 
         let result = is_supervisor_present();
 
-        // Restore original HOME
-        drop(temp); // Clean up temp dir before restoring HOME
-        if let Ok(home) = std::env::var("HOME") {
-            std::env::set_var("HOME", home);
-        }
+        // _env_guard restores HOME when it drops.
+        drop(temp);
 
         assert!(
             result,
