@@ -13872,12 +13872,21 @@ agent:
 
     #[test]
     fn test_isolate_bead_cli_env_multiple_calls_create_different_dirs() {
-        let (_lock1, _guard1, tmp_dir1) = isolate_bead_cli_env();
+        // The first call's env lock MUST be released before the second call:
+        // `isolate_bead_cli_env` takes the crate-wide, non-reentrant env
+        // mutex, so holding `_lock1` across the second call deadlocks this
+        // test forever and, with it, every other test that isolates the
+        // environment. That is what timed out needle-ci's `cargo test --lib`
+        // lane (exit 124 after 900 s) from 2026-08-28 to 2026-08-30.
+        let (first_path, _tmp_dir1) = {
+            let (_lock1, _guard1, tmp_dir1) = isolate_bead_cli_env();
+            (tmp_dir1.path().to_path_buf(), tmp_dir1)
+        };
         let (_lock2, _guard2, tmp_dir2) = isolate_bead_cli_env();
 
         // Each call should create a different temp directory
         assert_ne!(
-            tmp_dir1.path(),
+            first_path,
             tmp_dir2.path(),
             "each isolate_bead_cli_env call should create a different temp directory"
         );
