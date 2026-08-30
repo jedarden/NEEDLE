@@ -47,3 +47,14 @@ Run `needle doctor` for diagnostics:
 - Worker status
 
 For backend issues, run `bead doctor` directly.
+
+### Never bypass the Definition of Done
+
+`git commit --no-verify` is not a tool. The pre-commit hook logs every bypass to
+`.beads/bypasses.jsonl` with the commit sha, and NEEDLE's `no-dod-bypass` gate
+fails the dispatch of any bead whose commits appear there — the bead is
+released, not closed, and the failure counts toward quarantine. If the hook is
+red because of someone else's edits in the shared tree, verify on a clean
+extraction (`git archive HEAD | tar -x -C "$(mktemp -d)"`), then commit with
+the hook enabled. A red CI never makes a bypass acceptable; it makes the
+build-fix bead the only claimable work.

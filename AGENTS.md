@@ -152,6 +152,17 @@ The unified script aggregates ALL failures rather than aborting on the first. Th
 
 Pre-commit bypasses are recorded in `.beads/bypasses.jsonl`. Each `git commit --no-verify` increments the count, making invisible bypasses impossible. Monitor this file to detect when quality gates are being skipped.
 
+**A bypass is a failed dispatch (2026-08-30).** The `no-dod-bypass` gate in
+`.needle.yaml` (`scripts/gate-no-dod-bypass.sh`) fails any bead whose commits
+are listed in `bypasses.jsonl`: the bead is released and the failure counts
+toward quarantine. On 2026-08-28..30 needle-ci was red for 36 h; every worker
+bypassed the hook "because CI is red anyway", ~225 commits landed unverified,
+78 tests drifted and `main` stopped compiling (fdb5730b). If the hook is red
+because of another worker's edits in the shared checkout, verify on a clean
+extraction (`git archive HEAD | tar -x -C "$(mktemp -d)"`) and commit with the
+hook enabled. The other two gates (`definition-of-done.sh --fast` and
+`cargo test --lib`) run on a clean extraction for the same reason.
+
 ### On this Host
 
 The `cargo` wrapper may offload a clean repository to iad-ci and use a resource-limited local fallback for a dirty repository. Do not assume a command ran remotely; report what actually ran and its result.

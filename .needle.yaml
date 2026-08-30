@@ -12,7 +12,12 @@ agent:
 bead_cli:
   backend: bead-rs
 worker:
-  max_workers: 10
+  # NEEDLE is build-heavy: one worker, launched with -w /home/coding/NEEDLE.
+  # Roaming workers are excluded via strands.explore.workspaces in the global
+  # config (ADR-015 operational discipline). NOTE: worker.* is not a workspace
+  # override today, so this value documents intent only (see the per-workspace
+  # cap bead filed 2026-08-30).
+  max_workers: 1
   launch_stagger_seconds: 2
   idle_timeout: 60
   idle_action: wait
@@ -175,10 +180,27 @@ budget:
 # ensuring a single source of truth for "is this work acceptable?"
 # See scripts/definition-of-done.sh for the unified verification command.
 # The fast lane runs locally in seconds: fmt, clippy, check.
+# Three gates, in order. All three must pass for a bead to close; a failure
+# releases the bead and counts toward quarantine.
+#   1. no-dod-bypass (workspace): a `git commit --no-verify` on this bead's
+#      commits is a failed dispatch — the hook logs every bypass with its sha.
+#   2. definition-of-done --fast (clean): fmt, clippy, check on a clean
+#      extraction of HEAD, not the shared tree with other workers' edits.
+#   3. cargo test --lib (clean): the lane needle-ci runs; ~6 min warm.
+# validation.outcome_timeout_seconds (global config) is 1800 to fit 2 and 3.
 gates:
   - type: command
+    run_in: workspace
+    commands:
+      - scripts/gate-no-dod-bypass.sh
+  - type: command
+    run_in: clean
     commands:
       - scripts/definition-of-done.sh --fast
+  - type: command
+    run_in: clean
+    commands:
+      - cargo test --lib
 self_modification:
   enabled: false
   canary_workspace: /home/coding/.needle/canary
