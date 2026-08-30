@@ -322,6 +322,7 @@ struct MendSummary {
     beads_released: u32,
     locks_removed: u32,
     deps_cleaned: u32,
+    cycles_broken: u32,
     db_repaired: bool,
     db_rebuilt: bool,
     agent_logs_cleaned: u32,
@@ -350,6 +351,7 @@ impl MendSummary {
     /// Operations that return `WorkCreated`:
     /// - `beads_released > 0`: Orphaned beads were released back to Open status.
     /// - `deps_cleaned > 0`: Stale dependency links were removed (beads become claimable).
+    /// - `cycles_broken > 0`: Dependency cycles were broken (beads may become claimable).
     /// - `assignees_cleared > 0`: Stale assignees were cleared (beads become claimable).
     ///
     /// Operations that return `NoWork` (maintenance, not work creation):
@@ -361,10 +363,13 @@ impl MendSummary {
     /// A `WorkCreated` return must be paired with a telemetry event identifying
     /// the created bead(s) so operators can see what the restart is chasing.
     fn did_work(&self) -> bool {
-        // Bead release, dependency removal, and assignee clearing add claimable items to the queue.
+        // Bead release, dependency removal, cycle breaking, and assignee clearing add claimable items to the queue.
         // Lock removal, DB repair, and DB rebuild are maintenance operations
         // that don't create new work and must not trigger a waterfall restart.
-        self.beads_released > 0 || self.deps_cleaned > 0 || self.assignees_cleared > 0
+        self.beads_released > 0
+            || self.deps_cleaned > 0
+            || self.cycles_broken > 0
+            || self.assignees_cleared > 0
     }
 }
 
@@ -1675,6 +1680,207 @@ impl MendStrand {
             }
         }
     }
+
+    // ── Step 0.5: Dependency cycle breaking ─────────────────────────────────────
+
+    /// Detect and break dependency cycles in the bead store.
+    ///
+    /// This function runs as Step 0.5 in the Mend strand, BEFORE the stale-claim
+    /// sweep (Step 1). This ordering ensures that beads freed by cycle breaking
+    /// are ranked in the same cycle as beads freed by stale-claim cleanup.
+    ///
+    /// The cycle-breaking algorithm:
+    /// 1. Build a directed graph from all "blocks" dependencies
+    /// 2. Detect cycles using depth-first search
+    /// 3. For each cycle, select the edge to break by newest timestamp
+    /// 4. Remove that edge and append notes to both beads
+    /// 5. Emit telemetry for the broken cycle
+    ///
+    /// The algorithm is idempotent: running it multiple times on the same cycle
+    /// will produce the same result (the same edge is removed each time).
+    ///
+    /// # Arguments
+    /// * `store` - The bead store to query and modify
+    /// * `summary` - Mend summary to update with cycle count
+    ///
+    /// # Returns
+    /// * `Ok(())` - All detected cycles were processed
+    /// * `Err(anyhow::Error)` - Store read/write failure
+    async fn break_dependency_cycles(
+        &self,
+        store: &dyn BeadStore,
+        summary: &mut MendSummary,
+    ) -> Result<()> {
+        let all_beads = store.list_all().await?;
+
+        // Build adjacency list: bead_id -> Vec<blocker_id>
+        let mut graph: std::collections::HashMap<BeadId, Vec<BeadId>> =
+            std::collections::HashMap::new();
+
+        // Build a lookup for bead timestamps
+        let mut bead_timestamps: std::collections::HashMap<BeadId, DateTime<Utc>> =
+            std::collections::HashMap::new();
+
+        for bead in &all_beads {
+            bead_timestamps.insert(bead.id.clone(), bead.updated_at);
+            for dep in &bead.dependencies {
+                if dep.dependency_type == "blocks" {
+                    graph
+                        .entry(bead.id.clone())
+                        .or_insert_with(Vec::new)
+                        .push(dep.id.clone());
+                }
+            }
+        }
+
+        // Detect cycles using DFS
+        let cycles = detect_cycles(&graph);
+
+        if cycles.is_empty() {
+            return Ok(());
+        }
+
+        tracing::info!(
+            cycle_count = cycles.len(),
+            "mend: detected dependency cycles, breaking edges"
+        );
+
+        // For each cycle, select and remove the newest edge
+        for cycle in &cycles {
+            if cycle.len() < 2 {
+                continue; // Skip invalid cycles
+            }
+
+            // Find the edge to break: newest timestamp (ties: lexically largest blocked_id)
+            let mut newest_edge: Option<(BeadId, BeadId)> = None;
+            let mut newest_timestamp = DateTime::<Utc>::MIN_UTC;
+
+            // For each edge in the cycle (blocked -> blocker)
+            for i in 0..cycle.len() {
+                let blocked_id = &cycle[i];
+                let blocker_id = &cycle[(i + 1) % cycle.len()];
+
+                if let Some(&timestamp) = bead_timestamps.get(blocked_id) {
+                    // Update if this edge is newer, or same timestamp but lexically larger blocked_id
+                    let is_newer = timestamp > newest_timestamp
+                        || (timestamp == newest_timestamp
+                            && newest_edge
+                                .as_ref()
+                                .map(|(id, _): &(BeadId, _)| id.as_ref() < blocked_id.as_ref())
+                                .unwrap_or(true));
+
+                    if is_newer {
+                        newest_timestamp = timestamp;
+                        newest_edge = Some((blocked_id.clone(), blocker_id.clone()));
+                    }
+                }
+            }
+
+            if let Some((blocked_id, blocker_id)) = newest_edge {
+                tracing::info!(
+                    blocked_id = %blocked_id,
+                    blocker_id = %blocker_id,
+                    cycle_len = cycle.len(),
+                    "mend: breaking dependency cycle by removing edge"
+                );
+
+                // Remove the dependency
+                match store.remove_dependency(&blocked_id, &blocker_id).await {
+                    Ok(()) => {
+                        // Emit telemetry for the broken cycle
+                        let _ = self.telemetry.emit(
+                            EventKind::MendCycleBroken {
+                                blocked_id: blocked_id.clone(),
+                                blocker_id: blocker_id.clone(),
+                                cycle_len: cycle.len(),
+                            },
+                            chrono::Utc::now(),
+                        );
+
+                        // Append notes to both beads
+                        let note = format!(
+                            "cycle broken (Phase 19.7): removed {} ← {}",
+                            blocked_id, blocker_id
+                        );
+
+                        // Try to add notes to both beads (best-effort - don't fail if notes update fails)
+                        for bead_id in [&blocked_id, &blocker_id] {
+                            if let Err(e) = self.append_bead_notes(store, bead_id, &note).await {
+                                tracing::debug!(
+                                    bead_id = %bead_id,
+                                    error = %e,
+                                    "mend: failed to append notes for broken cycle"
+                                );
+                            }
+                        }
+
+                        summary.cycles_broken += 1;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            blocked_id = %blocked_id,
+                            blocker_id = %blocker_id,
+                            error = %e,
+                            "mend: failed to remove dependency edge for cycle breaking"
+                        );
+                        // Continue processing other cycles
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Append a note to a bead using the bead CLI.
+    ///
+    /// This is a best-effort operation - failures are logged but not treated
+    /// as fatal errors since note attachment is not critical to cycle breaking.
+    ///
+    /// # Arguments
+    /// * `_store` - The bead store (unused but kept for interface consistency)
+    /// * `bead_id` - The bead to update
+    /// * `note` - The note text to append
+    ///
+    /// # Returns
+    /// * `Ok(())` - Note was appended successfully
+    /// * `Err(anyhow::Error)` - Note append failed
+    async fn append_bead_notes(
+        &self,
+        _store: &dyn BeadStore,
+        bead_id: &BeadId,
+        note: &str,
+    ) -> Result<()> {
+        use std::io::Write;
+        use std::process::Command;
+
+        // Get the workspace path from the store's context
+        // We'll need to get the current workspace directory
+        let workspace =
+            std::env::current_dir().context("failed to get current directory for bead update")?;
+
+        // Write the note to a temp file to avoid shell escaping issues
+        let mut temp_file =
+            tempfile::NamedTempFile::new().context("failed to create temp file for bead note")?;
+        writeln!(temp_file, "{}", note).context("failed to write note to temp file")?;
+
+        // Run: bead update <id> --notes @<temp_file>
+        let output = Command::new("bead")
+            .current_dir(&workspace)
+            .args(["update", bead_id, "--notes"])
+            .arg(format!("@{}", temp_file.path().display()))
+            .output()
+            .context("bead update command failed")?;
+
+        if !output.status.success() {
+            return Err(anyhow::anyhow!(
+                "bead update failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
@@ -1707,6 +1913,13 @@ impl super::Strand for MendStrand {
             return StrandResult::Skipped {
                 reason: "no_home_store".to_string(),
             };
+        }
+
+        // Step 0.5: Dependency cycle breaking.
+        // Must run BEFORE stale-claim sweep so freed roots are ranked in the same cycle.
+        if let Err(e) = self.break_dependency_cycles(store, &mut summary).await {
+            tracing::warn!(error = %e, "mend: dependency cycle breaking failed");
+            // Non-fatal — continue with remaining steps.
         }
 
         // Step 1: Stale claim cleanup via peer monitoring.
@@ -1798,6 +2011,7 @@ impl super::Strand for MendStrand {
                 beads_released: summary.beads_released,
                 locks_removed: summary.locks_removed,
                 deps_cleaned: summary.deps_cleaned,
+                cycles_broken: summary.cycles_broken,
                 db_repaired: summary.db_repaired,
                 db_rebuilt: summary.db_rebuilt,
                 agent_logs_cleaned: summary.agent_logs_cleaned,
@@ -1817,6 +2031,7 @@ impl super::Strand for MendStrand {
                 beads_released = summary.beads_released,
                 locks_removed = summary.locks_removed,
                 deps_cleaned = summary.deps_cleaned,
+                cycles_broken = summary.cycles_broken,
                 db_repaired = summary.db_repaired,
                 db_rebuilt = summary.db_rebuilt,
                 agent_logs_cleaned = summary.agent_logs_cleaned,
@@ -1837,6 +2052,74 @@ impl super::Strand for MendStrand {
 
         result
     }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Detect cycles in a dependency graph.
+///
+/// Returns a list of cycles, where each cycle is a vector of bead IDs in order.
+fn detect_cycles(graph: &std::collections::HashMap<BeadId, Vec<BeadId>>) -> Vec<Vec<BeadId>> {
+    let mut cycles = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+    let mut rec_stack = std::collections::HashSet::new();
+    let mut path = Vec::new();
+    let mut path_set = std::collections::HashSet::new();
+
+    for node in graph.keys() {
+        if !visited.contains(node) {
+            dfs_cycle_detection(
+                node,
+                graph,
+                &mut visited,
+                &mut rec_stack,
+                &mut path,
+                &mut path_set,
+                &mut cycles,
+            );
+        }
+    }
+
+    cycles
+}
+
+/// Depth-first search helper for cycle detection.
+fn dfs_cycle_detection<'a>(
+    node: &'a BeadId,
+    graph: &'a std::collections::HashMap<BeadId, Vec<BeadId>>,
+    visited: &mut std::collections::HashSet<&'a BeadId>,
+    rec_stack: &mut std::collections::HashSet<&'a BeadId>,
+    path: &mut Vec<&'a BeadId>,
+    path_set: &mut std::collections::HashSet<&'a BeadId>,
+    cycles: &mut Vec<Vec<BeadId>>,
+) {
+    visited.insert(node);
+    rec_stack.insert(node);
+    path.push(node);
+    path_set.insert(node);
+
+    if let Some(neighbors) = graph.get(node) {
+        for neighbor in neighbors {
+            if !visited.contains(neighbor) {
+                dfs_cycle_detection(neighbor, graph, visited, rec_stack, path, path_set, cycles);
+            } else if rec_stack.contains(neighbor) {
+                // Found a cycle - extract it from the path
+                let cycle_start = path.iter().position(|n| *n == neighbor).unwrap();
+                let cycle: Vec<BeadId> = path[cycle_start..].iter().map(|&id| id.clone()).collect();
+
+                // Only add unique cycles
+                if !cycles.iter().any(|c| c == &cycle) {
+                    cycles.push(cycle);
+                }
+            }
+        }
+    }
+
+    path.pop();
+    path_set.remove(node);
+    rec_stack.remove(node);
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

@@ -651,26 +651,108 @@ impl super::Strand for ExploreStrand {
             exclude_ids: HashSet::new(),
         };
 
-        // Shuffle this worker's workspace scan order fresh every cycle (bf-6anj4).
-        // The previous static `compute_start_index` (hash(qualified_id) % N) was
-        // constant for a worker's whole session, so a worker whose fixed index
-        // landed near an always-non-empty (or always-excluded) workspace could
-        // permanently starve later workspaces. A fresh shuffle each cycle de-herds
-        // workers without pinning coverage to a static, identity-derived value.
-        let mut workspaces = {
+        // Collect frontier health metrics for deterministic workspace ranking.
+        // Workspaces are ranked by: (P0 ready count desc, ready count desc,
+        // oldest ready bead age desc, path asc), then the top three are rotated
+        // by hash(qualified_id) % 3 to spread concurrent workers across them while
+        // keeping all workspaces reachable (bf-6anj4's guarantee).
+        #[derive(Clone)]
+        struct WorkspaceHealth {
+            path: PathBuf,
+            p0_count: usize,
+            ready_count: usize,
+            oldest_bead_age_secs: i64,
+        }
+
+        let workspaces_list = {
             let workspaces = self.workspaces.lock().unwrap();
             workspaces.clone()
         };
-        {
-            use rand::seq::SliceRandom;
-            workspaces.shuffle(&mut rand::thread_rng());
+
+        let mut workspace_health: Vec<WorkspaceHealth> = Vec::new();
+
+        // First pass: collect frontier health metrics from all valid workspaces
+        for workspace in &workspaces_list {
+            // Skip home workspace
+            if workspace == &self.home_workspace {
+                continue;
+            }
+
+            // Check that .beads/ exists
+            if !Self::has_beads_dir(workspace) {
+                continue;
+            }
+
+            // Skip gate-degraded workspaces
+            if let Ok(true) = crate::gate_health::is_degraded(workspace) {
+                continue;
+            }
+
+            // Create store and query for ready beads
+            let remote_store = match self.store_factory.create_store(workspace).await {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+
+            match remote_store.ready(&filters).await {
+                Ok(candidates) => {
+                    let p0_count = candidates.iter().filter(|b| b.priority == 0).count();
+                    let ready_count = candidates.len();
+                    let oldest_bead_age_secs = candidates
+                        .iter()
+                        .map(|b| {
+                            (Utc::now() - b.created_at.with_timezone(&chrono::Utc)).num_seconds()
+                        })
+                        .max()
+                        .unwrap_or(0);
+
+                    workspace_health.push(WorkspaceHealth {
+                        path: workspace.clone(),
+                        p0_count,
+                        ready_count,
+                        oldest_bead_age_secs,
+                    });
+                }
+                Err(_) => continue,
+            }
         }
+
+        // Sort by frontier health: P0 count desc, ready count desc,
+        // oldest bead age desc, path asc
+        workspace_health.sort_by(|a, b| {
+            b.p0_count
+                .cmp(&a.p0_count)
+                .then_with(|| b.ready_count.cmp(&a.ready_count))
+                .then_with(|| b.oldest_bead_age_secs.cmp(&a.oldest_bead_age_secs))
+                .then_with(|| {
+                    a.path
+                        .display()
+                        .to_string()
+                        .cmp(&b.path.display().to_string())
+                })
+        });
+
+        // Rotate top three by worker hash to spread concurrent workers
+        if workspace_health.len() >= 3 {
+            let mut hasher = DefaultHasher::new();
+            self.qualified_id.hash(&mut hasher);
+            let offset = (hasher.finish() % 3) as usize;
+
+            if offset > 0 {
+                let top = workspace_health[0..3].to_vec();
+                workspace_health[0] = top[offset].clone();
+                workspace_health[offset] = top[0].clone();
+            }
+        }
+
+        let mut workspaces: Vec<PathBuf> =
+            workspace_health.iter().map(|h| h.path.clone()).collect();
         let total_workspaces = workspaces.len();
 
         tracing::debug!(
             qualified_id = %self.qualified_id,
             total_workspaces,
-            "worker scan: shuffled order over {} workspaces this cycle",
+            "worker scan: frontier-ranked order over {} workspaces this cycle",
             total_workspaces
         );
 
@@ -4253,5 +4335,608 @@ mod tests {
             should_release.load(std::sync::atomic::Ordering::SeqCst),
             "old stuck bead should be released based on age threshold even though assignee PID is alive"
         );
+    }
+
+    // ── Frontier Ranking Tests (Phase 19.1) ───────────────────────────────────────
+
+    /// Mock store for testing frontier ranking with controlled bead priorities.
+    struct FrontierRankingStore {
+        workspace: PathBuf,
+        beads: Vec<Bead>,
+    }
+
+    impl FrontierRankingStore {
+        fn new(workspace: PathBuf, beads: Vec<Bead>) -> Self {
+            Self { workspace, beads }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BeadStore for FrontierRankingStore {
+        fn has_valid_store(&self) -> bool {
+            true
+        }
+
+        async fn list_all(&self) -> Result<Vec<Bead>> {
+            Ok(vec![])
+        }
+
+        async fn ready(&self, _filters: &Filters) -> Result<Vec<Bead>> {
+            Ok(self.beads.clone())
+        }
+
+        async fn show(&self, _id: &BeadId) -> Result<Bead> {
+            anyhow::bail!("not implemented")
+        }
+
+        async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<ClaimResult> {
+            anyhow::bail!("not implemented")
+        }
+
+        async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {
+            anyhow::bail!("not implemented")
+        }
+
+        async fn release(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+
+        async fn block(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+
+        async fn flush(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn reopen(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+
+        async fn labels(&self, _id: &BeadId) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+
+        async fn add_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn remove_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn create_bead(&self, _title: &str, _body: &str, _labels: &[&str]) -> Result<BeadId> {
+            Ok(BeadId::from("new-bead".to_string()))
+        }
+
+        async fn doctor_repair(&self) -> Result<RepairReport> {
+            Ok(RepairReport::default())
+        }
+
+        async fn doctor_check(&self) -> Result<RepairReport> {
+            Ok(RepairReport::default())
+        }
+
+        async fn full_rebuild(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn add_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+
+        async fn remove_dependency(
+            &self,
+            _blocked_id: &BeadId,
+            _blocker_id: &BeadId,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Mock factory for frontier ranking tests.
+    struct FrontierRankingFactory {
+        workspaces: std::collections::HashMap<PathBuf, Vec<Bead>>,
+    }
+
+    impl FrontierRankingFactory {
+        fn new(workspaces: Vec<(PathBuf, Vec<Bead>)>) -> Self {
+            Self {
+                workspaces: workspaces.into_iter().collect(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl StoreFactory for FrontierRankingFactory {
+        async fn create_store(&self, workspace: &Path) -> Result<Arc<dyn BeadStore>> {
+            if let Some(beads) = self.workspaces.get(workspace) {
+                Ok(Arc::new(FrontierRankingStore::new(
+                    workspace.to_path_buf(),
+                    beads.clone(),
+                )))
+            } else {
+                Err(anyhow::anyhow!("unknown workspace"))
+            }
+        }
+    }
+
+    /// Test that two workers with different identifiers pick different first targets
+    /// among the top three workspaces when there are multiple high-ranking candidates.
+    #[test]
+    fn frontier_ranking_rotates_top_three_for_different_workers() {
+        let runtime = create_test_runtime();
+        runtime.block_on(async {
+            let temp_root = tempfile::tempdir().unwrap();
+
+            // Create three workspaces with equal P0 counts (so they rank top 3)
+            let ws1 = temp_root.path().join("ws1");
+            let ws2 = temp_root.path().join("ws2");
+            let ws3 = temp_root.path().join("ws3");
+
+            for ws in &[&ws1, &ws2, &ws3] {
+                fs::create_dir(ws).unwrap();
+                fs::create_dir(ws.join(".beads")).unwrap();
+            }
+
+            // Each workspace has 1 P0 bead (equal ranking)
+            let p0_bead = |id: &str| Bead {
+                id: BeadId::from(id.to_string()),
+                title: format!("P0 Bead {}", id),
+                body: None,
+                priority: 0,
+                status: BeadStatus::Open,
+                assignee: None,
+                labels: vec![],
+                workspace: PathBuf::new(),
+                dependencies: vec![],
+                dependents: vec![],
+                comments: vec![],
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            };
+
+            let workspaces_data = vec![
+                (ws1.clone(), vec![p0_bead("ws1-p0")]),
+                (ws2.clone(), vec![p0_bead("ws2-p0")]),
+                (ws3.clone(), vec![p0_bead("ws3-p0")]),
+            ];
+
+            let factory = Arc::new(FrontierRankingFactory::new(workspaces_data));
+
+            // Create two workers with different IDs
+            let home = PathBuf::from("/home/test");
+
+            let temp_dir1 = tempfile::tempdir().unwrap();
+            let registry1 = crate::registry::Registry::new(temp_dir1.path());
+            let telemetry1 = Telemetry::new("test-worker-1".to_string());
+
+            let strand1 = ExploreStrand::new_with_store_factory(
+                vec![ws1.clone(), ws2.clone(), ws3.clone()],
+                home.clone(),
+                registry1,
+                telemetry1,
+                "worker-alpha".to_string(),
+                factory.clone(),
+            );
+
+            let temp_dir2 = tempfile::tempdir().unwrap();
+            let registry2 = crate::registry::Registry::new(temp_dir2.path());
+            let telemetry2 = Telemetry::new("test-worker-2".to_string());
+
+            let strand2 = ExploreStrand::new_with_store_factory(
+                vec![ws1.clone(), ws2.clone(), ws3.clone()],
+                home,
+                registry2,
+                telemetry2,
+                "worker-bravo".to_string(),
+                factory,
+            );
+
+            let store = DummyStore;
+
+            // Run both strands
+            let result1 = strand1.evaluate(&store, &HashSet::new()).await;
+            let result2 = strand2.evaluate(&store, &HashSet::new()).await;
+
+            // Both should find candidates
+            let StrandResult::BeadFound(candidates1) = result1 else {
+                panic!("worker-alpha should find candidates");
+            };
+            let StrandResult::BeadFound(candidates2) = result2 else {
+                panic!("worker-bravo should find candidates");
+            };
+
+            // The first candidate should be from different workspaces
+            // (due to rotation of top 3)
+            let first_ws1 = &candidates1[0].workspace;
+            let first_ws2 = &candidates2[0].workspace;
+
+            // With different qualified_ids, rotation offset should differ
+            // (hash collision is possible but unlikely)
+            assert_ne!(
+                first_ws1, first_ws2,
+                "workers with different IDs should pick different first targets among top 3"
+            );
+        });
+    }
+
+    /// Test that a workspace with one P0 ready bead outranks one with ten P3 beads.
+    #[test]
+    fn frontier_ranking_p0_count_trumps_total_ready_count() {
+        let runtime = create_test_runtime();
+        runtime.block_on(async {
+            let temp_root = tempfile::tempdir().unwrap();
+
+            // Create two workspaces
+            let ws_p0 = temp_root.path().join("ws-p0");
+            let ws_p3 = temp_root.path().join("ws-p3");
+
+            for ws in &[&ws_p0, &ws_p3] {
+                fs::create_dir(ws).unwrap();
+                fs::create_dir(ws.join(".beads")).unwrap();
+            }
+
+            // ws_p0: 1 P0 bead
+            let p0_bead = Bead {
+                id: BeadId::from("p0-bead".to_string()),
+                title: "P0 Bead".to_string(),
+                body: None,
+                priority: 0,
+                status: BeadStatus::Open,
+                assignee: None,
+                labels: vec![],
+                workspace: PathBuf::new(),
+                dependencies: vec![],
+                dependents: vec![],
+                comments: vec![],
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            };
+
+            // ws_p3: 10 P3 beads
+            let p3_beads: Vec<Bead> = (0..10)
+                .map(|i| Bead {
+                    id: BeadId::from(format!("p3-bead-{}", i)),
+                    title: format!("P3 Bead {}", i),
+                    body: None,
+                    priority: 3,
+                    status: BeadStatus::Open,
+                    assignee: None,
+                    labels: vec![],
+                    workspace: PathBuf::new(),
+                    dependencies: vec![],
+                    dependents: vec![],
+                    comments: vec![],
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                })
+                .collect();
+
+            let workspaces_data = vec![(ws_p0.clone(), vec![p0_bead]), (ws_p3.clone(), p3_beads)];
+
+            let factory = Arc::new(FrontierRankingFactory::new(workspaces_data));
+
+            let home = PathBuf::from("/home/test");
+            let temp_dir = tempfile::tempdir().unwrap();
+            let registry = crate::registry::Registry::new(temp_dir.path());
+            let telemetry = Telemetry::new("test-worker".to_string());
+
+            let strand = ExploreStrand::new_with_store_factory(
+                vec![ws_p0.clone(), ws_p3.clone()],
+                home,
+                registry,
+                telemetry,
+                "test-worker".to_string(),
+                factory,
+            );
+
+            let store = DummyStore;
+            let result = strand.evaluate(&store, &HashSet::new()).await;
+
+            let StrandResult::BeadFound(candidates) = result else {
+                panic!("should find candidates");
+            };
+
+            // The P0 workspace should be ranked first
+            // (P0 count is primary sort key, not total ready count)
+            assert_eq!(
+                candidates[0].workspace, ws_p0,
+                "workspace with 1 P0 bead should outrank workspace with 10 P3 beads"
+            );
+        });
+    }
+
+    /// Test that frontier ranking ordering is deterministic across runs.
+    #[test]
+    fn frontier_ranking_is_deterministic_across_runs() {
+        let runtime = create_test_runtime();
+        runtime.block_on(async {
+            let temp_root = tempfile::tempdir().unwrap();
+
+            // Create multiple workspaces with varying bead priorities
+            let workspaces: Vec<PathBuf> = (0..5)
+                .map(|i| {
+                    let ws = temp_root.path().join(format!("ws{}", i));
+                    fs::create_dir(&ws).unwrap();
+                    fs::create_dir(ws.join(".beads")).unwrap();
+                    ws
+                })
+                .collect();
+
+            // Give each workspace a different bead profile
+            let workspaces_data: Vec<(PathBuf, Vec<Bead>)> = workspaces
+                .iter()
+                .enumerate()
+                .map(|(i, ws)| {
+                    let beads = match i {
+                        0 => vec![Bead {
+                            // ws0: 1 P0, 1 P3
+                            id: BeadId::from("ws0-p0".to_string()),
+                            title: "P0".to_string(),
+                            body: None,
+                            priority: 0,
+                            status: BeadStatus::Open,
+                            assignee: None,
+                            labels: vec![],
+                            workspace: PathBuf::new(),
+                            dependencies: vec![],
+                            dependents: vec![],
+                            comments: vec![],
+                            created_at: Utc::now(),
+                            updated_at: Utc::now(),
+                        }],
+                        1 => (0..2)
+                            .map(|j| Bead {
+                                id: BeadId::from(format!("ws1-p{}", j)),
+                                title: format!("P{}", j),
+                                body: None,
+                                priority: j as u8,
+                                status: BeadStatus::Open,
+                                assignee: None,
+                                labels: vec![],
+                                workspace: PathBuf::new(),
+                                dependencies: vec![],
+                                dependents: vec![],
+                                comments: vec![],
+                                created_at: Utc::now(),
+                                updated_at: Utc::now(),
+                            })
+                            .collect(),
+                        2 => (0..3)
+                            .map(|j| Bead {
+                                id: BeadId::from(format!("ws2-p{}", j)),
+                                title: format!("P{}", j),
+                                body: None,
+                                priority: j as u8,
+                                status: BeadStatus::Open,
+                                assignee: None,
+                                labels: vec![],
+                                workspace: PathBuf::new(),
+                                dependencies: vec![],
+                                dependents: vec![],
+                                comments: vec![],
+                                created_at: Utc::now(),
+                                updated_at: Utc::now(),
+                            })
+                            .collect(),
+                        3 => (0..1)
+                            .map(|j| Bead {
+                                id: BeadId::from(format!("ws3-p{}", j)),
+                                title: format!("P{}", j),
+                                body: None,
+                                priority: (j + 2) as u8,
+                                status: BeadStatus::Open,
+                                assignee: None,
+                                labels: vec![],
+                                workspace: PathBuf::new(),
+                                dependencies: vec![],
+                                dependents: vec![],
+                                comments: vec![],
+                                created_at: Utc::now(),
+                                updated_at: Utc::now(),
+                            })
+                            .collect(),
+                        _ => vec![],
+                    };
+                    (ws.clone(), beads)
+                })
+                .collect();
+
+            let factory = Arc::new(FrontierRankingFactory::new(workspaces_data));
+
+            let home = PathBuf::from("/home/test");
+
+            // Run the same worker twice with the same configuration
+            let mut first_order = None;
+
+            for run in 0..2 {
+                let temp_dir = tempfile::tempdir().unwrap();
+                let registry = crate::registry::Registry::new(temp_dir.path());
+                let telemetry = Telemetry::new(format!("test-worker-{}", run));
+
+                let strand = ExploreStrand::new_with_store_factory(
+                    workspaces.clone(),
+                    home.clone(),
+                    registry,
+                    telemetry,
+                    "same-worker-id".to_string(),
+                    factory.clone(),
+                );
+
+                let store = DummyStore;
+                let result = strand.evaluate(&store, &HashSet::new()).await;
+
+                let StrandResult::BeadFound(candidates) = result else {
+                    panic!("run {} should find candidates", run);
+                };
+
+                let order: Vec<PathBuf> = candidates.iter().map(|b| b.workspace.clone()).collect();
+
+                if run == 0 {
+                    first_order = Some(order);
+                } else {
+                    let first_order = first_order.as_ref().unwrap();
+                    assert_eq!(
+                        order, first_order,
+                        "frontier ranking should produce identical ordering across runs"
+                    );
+                }
+            }
+        });
+    }
+
+    /// Test that oldest bead age is used as a tiebreaker (descending order).
+    #[test]
+    fn frontier_ranking_oldest_bead_age_is_tiebreaker() {
+        let runtime = create_test_runtime();
+        runtime.block_on(async {
+            let temp_root = tempfile::tempdir().unwrap();
+
+            let ws1 = temp_root.path().join("ws1");
+            let ws2 = temp_root.path().join("ws2");
+
+            for ws in &[&ws1, &ws2] {
+                fs::create_dir(ws).unwrap();
+                fs::create_dir(ws.join(".beads")).unwrap();
+            }
+
+            // Both workspaces have 1 P0 bead with same ready count
+            // ws1 has older bead
+            let old_p0 = Bead {
+                id: BeadId::from("old-p0".to_string()),
+                title: "Old P0".to_string(),
+                body: None,
+                priority: 0,
+                status: BeadStatus::Open,
+                assignee: None,
+                labels: vec![],
+                workspace: PathBuf::new(),
+                dependencies: vec![],
+                dependents: vec![],
+                comments: vec![],
+                created_at: Utc::now() - chrono::Duration::hours(24), // 1 day old
+                updated_at: Utc::now(),
+            };
+
+            let new_p0 = Bead {
+                id: BeadId::from("new-p0".to_string()),
+                title: "New P0".to_string(),
+                body: None,
+                priority: 0,
+                status: BeadStatus::Open,
+                assignee: None,
+                labels: vec![],
+                workspace: PathBuf::new(),
+                dependencies: vec![],
+                dependents: vec![],
+                comments: vec![],
+                created_at: Utc::now() - chrono::Duration::minutes(30), // 30 min old
+                updated_at: Utc::now(),
+            };
+
+            let workspaces_data = vec![(ws1.clone(), vec![old_p0]), (ws2.clone(), vec![new_p0])];
+
+            let factory = Arc::new(FrontierRankingFactory::new(workspaces_data));
+
+            let home = PathBuf::from("/home/test");
+            let temp_dir = tempfile::tempdir().unwrap();
+            let registry = crate::registry::Registry::new(temp_dir.path());
+            let telemetry = Telemetry::new("test-worker".to_string());
+
+            let strand = ExploreStrand::new_with_store_factory(
+                vec![ws1.clone(), ws2.clone()],
+                home,
+                registry,
+                telemetry,
+                "test-worker".to_string(),
+                factory,
+            );
+
+            let store = DummyStore;
+            let result = strand.evaluate(&store, &HashSet::new()).await;
+
+            let StrandResult::BeadFound(candidates) = result else {
+                panic!("should find candidates");
+            };
+
+            // ws1 (with older bead) should rank first
+            assert_eq!(
+                candidates[0].workspace, ws1,
+                "workspace with older ready bead should rank higher"
+            );
+        });
+    }
+
+    /// Test that path is used as final tiebreaker (ascending order).
+    #[test]
+    fn frontier_ranking_path_is_final_tiebreaker() {
+        let runtime = create_test_runtime();
+        runtime.block_on(async {
+            let temp_root = tempfile::tempdir().unwrap();
+
+            let ws_a = temp_root.path().join("aaa-workspace");
+            let ws_z = temp_root.path().join("zzz-workspace");
+
+            for ws in &[&ws_a, &ws_z] {
+                fs::create_dir(ws).unwrap();
+                fs::create_dir(ws.join(".beads")).unwrap();
+            }
+
+            // Both have identical bead profiles (same P0 count, ready count, age)
+            let same_bead = Bead {
+                id: BeadId::from("same-bead".to_string()),
+                title: "Same".to_string(),
+                body: None,
+                priority: 0,
+                status: BeadStatus::Open,
+                assignee: None,
+                labels: vec![],
+                workspace: PathBuf::new(),
+                dependencies: vec![],
+                dependents: vec![],
+                comments: vec![],
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            };
+
+            let workspaces_data = vec![
+                (ws_a.clone(), vec![same_bead.clone()]),
+                (ws_z.clone(), vec![same_bead]),
+            ];
+
+            let factory = Arc::new(FrontierRankingFactory::new(workspaces_data));
+
+            let home = PathBuf::from("/home/test");
+            let temp_dir = tempfile::tempdir().unwrap();
+            let registry = crate::registry::Registry::new(temp_dir.path());
+            let telemetry = Telemetry::new("test-worker".to_string());
+
+            let strand = ExploreStrand::new_with_store_factory(
+                vec![ws_a.clone(), ws_z.clone()],
+                home,
+                registry,
+                telemetry,
+                "test-worker".to_string(),
+                factory,
+            );
+
+            let store = DummyStore;
+            let result = strand.evaluate(&store, &HashSet::new()).await;
+
+            let StrandResult::BeadFound(candidates) = result else {
+                panic!("should find candidates");
+            };
+
+            // ws_a (alphabetically first) should rank first
+            assert_eq!(
+                candidates[0].workspace, ws_a,
+                "workspace with alphabetically first path should rank higher when all else is equal"
+            );
+        });
     }
 }
