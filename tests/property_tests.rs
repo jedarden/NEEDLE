@@ -188,6 +188,10 @@ proptest! {
                     exit_code
                 );
             }
+            Outcome::GateError => {
+                // Produced only inside outcome handling, never by classify().
+                prop_assert!(false, "classify() must never yield GateError");
+            }
         }
     }
 

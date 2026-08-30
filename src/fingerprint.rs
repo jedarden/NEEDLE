@@ -80,8 +80,11 @@ pub fn compute_fingerprint(workspace: &str, kind: &AlertKind, cause: &str) -> St
     hasher.update(input.as_bytes());
     let hash = hasher.finalize();
 
-    // Take first 12 characters (6 bytes) of hex hash
-    format!("fingerprint:{:12x}", hash)
+    // First 12 hex characters (6 bytes) of the digest. Note `{:12x}` is a
+    // MINIMUM width: on the 32-byte digest it printed all 64 characters, so
+    // every fingerprint was 76 chars instead of 23.
+    let hex = format!("{:x}", hash);
+    format!("fingerprint:{}", &hex[..12])
 }
 
 /// Normalize cause text for fingerprint computation.

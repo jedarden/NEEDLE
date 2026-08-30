@@ -44,7 +44,7 @@ impl needle::bead_store::BeadStore for MockBeadStore {
     }
 
     async fn show(&self, _id: &needle::types::BeadId) -> anyhow::Result<needle::types::Bead> {
-        needle::anyhow::bail!("not implemented")
+        anyhow::bail!("not implemented")
     }
 
     async fn claim(
@@ -52,7 +52,7 @@ impl needle::bead_store::BeadStore for MockBeadStore {
         _id: &needle::types::BeadId,
         _actor: &str,
     ) -> anyhow::Result<needle::types::ClaimResult> {
-        needle::anyhow::bail!("not implemented")
+        anyhow::bail!("not implemented")
     }
 
     async fn release(&self, _id: &needle::types::BeadId) -> anyhow::Result<()> {
@@ -226,8 +226,8 @@ fn test_fingerprint_format() {
     );
     assert_eq!(
         fp.len(),
-        23,
-        "Fingerprint should be 'fingerprint:' + 12 hex chars (23 total)"
+        "fingerprint:".len() + 12,
+        "Fingerprint should be 'fingerprint:' + 12 hex chars (24 total)"
     );
 
     // Check that the suffix is valid hex
@@ -297,6 +297,10 @@ async fn test_deduplication_recently_closed() {
         BeadStatus::Closed,
         vec![&fp],
     );
+    // The dedup window is measured from the bead's updated_at (Bead has no
+    // closed_at); make the fixture actually closed at `closed_at`.
+    let mut closed_bead = closed_bead;
+    closed_bead.updated_at = closed_at;
     store.add_bead(closed_bead);
 
     // Check for deduplication
@@ -339,6 +343,10 @@ async fn test_deduplication_old_closed_bead() {
         BeadStatus::Closed,
         vec![&fp],
     );
+    // The dedup window is measured from the bead's updated_at (Bead has no
+    // closed_at); make the fixture actually closed at `closed_at`.
+    let mut old_bead = old_bead;
+    old_bead.updated_at = closed_at;
     store.add_bead(old_bead);
 
     // Check for deduplication - should create new since old bead is outside suppression window
