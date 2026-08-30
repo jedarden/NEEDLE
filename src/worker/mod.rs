@@ -1578,24 +1578,9 @@ impl Worker {
 
         // Validate gate command paths
         let workspace = &self.config.workspace.default;
-        let gates: Vec<crate::validation::GateConfig> = self
-            .config
-            .gates
-            .as_ref()
-            .map(|g| g.as_slice())
-            .unwrap_or(&[])
-            .to_vec();
-        let verification: Vec<String> = self
-            .config
-            .verification
-            .as_ref()
-            .map(|v| v.as_slice())
-            .unwrap_or(&[])
-            .to_vec();
-
         let gate_validation_result = crate::validation::validate_gate_command_paths(
-            &gates,
-            &verification,
+            &self.config.gates,
+            &self.config.verification,
             workspace,
             None, // Config file path not needed for boot warnings
         );

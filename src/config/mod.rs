@@ -7437,6 +7437,8 @@ impl ConfigLoader {
                 "worker.scratch_sweep.ttl_hours",
                 "health.heartbeat_interval_secs",
                 "health.heartbeat_ttl_secs",
+                "verification",
+                "gates",
             ] {
                 sources.insert((*key).to_string(), source.clone());
             }

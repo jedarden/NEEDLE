@@ -4827,104 +4827,70 @@ fn doctor_check_telemetry_logs(config: &Config, needle_home: &Path, repair: bool
 /// - Absolute paths: checked directly
 /// - Workspace-relative paths: checked relative to workspace root
 /// - Bare commands: checked with `which` (may be on PATH)
-fn doctor_check_gate_commands(config: &Config, workspace_root: &Path) -> CheckResult {
-    use crate::config::GateConfig;
-    use std::process::Command;
+fn doctor_check_gate_commands(
+    config: &Config,
+    workspace_root: &Path,
+    sources: &SourceMap,
+) -> CheckResult {
+    let gate_count = config
+        .gates
+        .iter()
+        .map(|gate| match gate {
+            crate::validation::GateConfig::Command { commands, .. } => commands.len(),
+        })
+        .sum::<usize>();
+    let command_count = gate_count + config.verification.len();
 
-    let mut missing_commands: Vec<String> = Vec::new();
-    let mut path_commands: Vec<String> = Vec::new();
-
-    // Collect all commands from verification and gates
-    let mut all_commands: Vec<(String, String)> = Vec::new(); // (command, source)
-
-    // Legacy verification format
-    for cmd in &config.verification {
-        all_commands.push((cmd.clone(), "verification".to_string()));
-    }
-
-    // New gates format
-    for gate_config in &config.gates {
-        if let GateConfig::Command { commands, .. } = gate_config {
-            for cmd in commands {
-                all_commands.push((cmd.clone(), "gates".to_string()));
-            }
-        }
-    }
-
-    if all_commands.is_empty() {
+    if command_count == 0 {
         return CheckResult::pass("Gate commands", "none configured");
     }
 
-    for (cmd, source) in all_commands {
-        // Parse the first token (the executable)
-        let first_token = match cmd.split_whitespace().next() {
-            Some(token) => token,
-            None => continue, // Empty command
-        };
-
-        // Check if it's an absolute path
-        if first_token.starts_with('/') {
-            if !PathBuf::from(first_token).exists() {
-                missing_commands.push(format!("{}: {} (not found)", source, first_token));
-            }
-            continue;
-        }
-
-        // Check if it's a workspace-relative path (contains /)
-        if first_token.contains('/') {
-            let full_path = workspace_root.join(first_token);
-            if !full_path.exists() {
-                missing_commands.push(format!(
-                    "{}: {} (relative to workspace, not found)",
-                    source, first_token
-                ));
-            }
-            continue;
-        }
-
-        // Bare command - check with which
-        match Command::new("which").arg(first_token).output() {
-            Ok(output) if output.status.success() => {
-                // Command found on PATH
-            }
-            Ok(_) => {
-                // Command not found on PATH
-                path_commands.push(format!("{}: {} (not on PATH)", source, first_token));
-            }
-            Err(e) => {
-                // which command failed (shouldn't happen)
-                path_commands.push(format!(
-                    "{}: {} (which check failed: {})",
-                    source, first_token, e
-                ));
-            }
-        }
-    }
-
-    if !missing_commands.is_empty() {
-        let mut details = missing_commands.clone();
-        if !path_commands.is_empty() {
-            details.extend(path_commands.clone());
-        }
-        return CheckResult::fail(
-            "Gate commands",
-            format!("{} command(s) with missing paths", missing_commands.len()),
+    let mut errors = Vec::new();
+    let gate_source = gate_config_file(sources, "gates");
+    errors.extend(
+        crate::validation::validate_gate_command_paths(
+            &config.gates,
+            &[],
+            workspace_root,
+            gate_source,
         )
-        .with_detail(details);
-    }
+        .errors()
+        .iter()
+        .cloned(),
+    );
 
-    if !path_commands.is_empty() {
-        return CheckResult::warn(
-            "Gate commands",
-            format!("{} command(s) not found on PATH", path_commands.len()),
+    let verification_source = gate_config_file(sources, "verification");
+    errors.extend(
+        crate::validation::validate_gate_command_paths(
+            &[],
+            &config.verification,
+            workspace_root,
+            verification_source,
         )
-        .with_detail(path_commands);
+        .errors()
+        .iter()
+        .cloned(),
+    );
+
+    if errors.is_empty() {
+        return CheckResult::pass(
+            "Gate commands",
+            format!("{command_count} command(s) validated"),
+        );
     }
 
-    CheckResult::pass(
-        "Gate commands",
-        format!("{} command(s) validated", all_commands.len()),
-    )
+    let descriptions = errors.iter().map(ToString::to_string).collect::<Vec<_>>();
+    CheckResult::fail("Gate commands", descriptions.join("; ")).with_detail(descriptions)
+}
+
+/// Return the source file for a resolved gate field, when that field came from
+/// a config file rather than an environment variable or a CLI override.
+fn gate_config_file<'a>(sources: &'a SourceMap, key: &str) -> Option<&'a Path> {
+    match sources.get(key) {
+        Some(crate::config::ConfigSource::GlobalFile(path))
+        | Some(crate::config::ConfigSource::WorkspaceFile(path)) => Some(path),
+        _ => None,
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -4935,7 +4901,7 @@ fn doctor_check_gate_commands(config: &Config, workspace_root: &Path) -> CheckRe
 fn cmd_doctor(repair: bool, workspace: Option<PathBuf>, json: bool) -> Result<()> {
     let global = ConfigLoader::load_global()?;
     let workspace_root = workspace.unwrap_or_else(|| global.workspace.default.clone());
-    let (config, _) = ConfigLoader::load_resolved(
+    let (config, sources) = ConfigLoader::load_resolved(
         &workspace_root,
         CliOverrides {
             workspace: Some(workspace_root.clone()),
@@ -4950,6 +4916,13 @@ fn cmd_doctor(repair: bool, workspace: Option<PathBuf>, json: bool) -> Result<()
 
     // Config
     results.push(doctor_check_config(&workspace_root));
+
+    // Gate command paths
+    results.push(doctor_check_gate_commands(
+        &config,
+        &workspace_root,
+        &sources,
+    ));
 
     // Workspace accessibility + .beads/ presence
     results.push(doctor_check_workspace(&workspace_root));
@@ -7318,6 +7291,36 @@ mod tests {
             .with_detail(vec!["line 3".to_string(), "line 7".to_string()]);
         assert_eq!(r.detail.len(), 2);
         assert_eq!(r.detail[0], "line 3");
+    }
+
+    #[test]
+    fn doctor_check_gate_commands_reports_missing_path_and_source() {
+        let workspace = tempfile::tempdir().unwrap();
+        let config_file = workspace.path().join(".needle.yaml");
+        let mut config = Config::default();
+        config.verification = vec!["/nonexistent/hook.sh".to_string()];
+        let mut sources = SourceMap::new();
+        sources.insert(
+            "verification".to_string(),
+            ConfigSource::WorkspaceFile(config_file.clone()),
+        );
+
+        let result = doctor_check_gate_commands(&config, workspace.path(), &sources);
+
+        assert_eq!(result.status, CheckStatus::Fail);
+        assert!(result.message.contains("/nonexistent/hook.sh"));
+        assert!(result.message.contains(&config_file.display().to_string()));
+    }
+
+    #[test]
+    fn doctor_check_gate_commands_accepts_path_command() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.verification = vec!["true".to_string()];
+
+        let result = doctor_check_gate_commands(&config, workspace.path(), &SourceMap::new());
+
+        assert_eq!(result.status, CheckStatus::Pass);
     }
 
     #[test]

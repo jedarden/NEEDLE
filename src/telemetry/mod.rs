@@ -1297,6 +1297,7 @@ impl EventKind {
             | EventKind::QueueEmpty
             | EventKind::PluckStarvationDetected { .. }
             | EventKind::AlertDeduplicated { .. }
+            | EventKind::GatePathMissing { .. }
             | EventKind::HealthCheck { .. }
             | EventKind::FleetCpuSaturated { .. }
             | EventKind::FleetMemoryLow { .. }
@@ -2936,6 +2937,7 @@ impl EventKind {
             | EventKind::SpawnPathModifiedInPlace { .. }
             | EventKind::Log { .. }
             | EventKind::PluckOrderingDegraded { .. }
+            | EventKind::GatePathMissing { .. }
             | EventKind::MendCycleBroken { .. }
             | EventKind::AuditBeadClosedAsVerification { .. }
             | EventKind::AuditBeadDeferredOverBudget { .. } => None,

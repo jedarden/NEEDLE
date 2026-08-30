@@ -19,6 +19,11 @@ mod shipped_work;
 pub mod worker_config;
 pub use shipped_work::verify_shipped_work;
 
+mod gate_path_validation;
+pub use gate_path_validation::{
+    validate_gate_command_paths, GatePathValidationError, GatePathValidationResult, PathType,
+};
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
