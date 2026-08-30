@@ -22,26 +22,29 @@ Prerequisites: `git`, `tmux`, and an agent CLI on your `PATH` — the flow below
 everything else builds from source (see below).
 
 ```bash
-# 1. Install needle, its transform helpers, and the bead-rs backend (`bead`)
+# 1. Install needle, its transform helpers, and the bead-rs backend
 curl -fsSL https://github.com/jedarden/NEEDLE/releases/latest/download/install.sh | bash
-#    → ~/.local/bin/{needle,bead,needle-transform-*}; make sure ~/.local/bin is on your PATH
 
-# 2. Bind your repo to the backend, then create its bead store
-cd /path/to/your/repo
-needle init --backend bead-rs     # writes ~/.config/needle/config.yaml, ./.needle.yaml,
-                                  # and a "Working with beads" section in ./AGENTS.md
-bead init --prefix <short-name>   # creates ./.beads/ (SQLite + a git-tracked checkpoint)
+# 2. Initialize your repo with the bead-rs backend
+cd <your-repo> && needle init --backend bead-rs
 
-# 3. Give it work
-bead create --title "Add a CONTRIBUTING.md" --priority 2 --issue-type task
+# 3. Create the bead store
+bead init --prefix <name>
 
-# 4. Check that everything resolves (exit code 0 = healthy)
+# 4. Create your first bead
+bead create --title "Add a CONTRIBUTING.md" --priority 2
+
+# 5. Verify system health
 needle doctor
-needle test-agent claude
 
-# 5. Run a worker — each worker lives in its own tmux session
-needle run --agent claude -i alpha
+# 6. Run a worker
+needle run --agent claude --identity alpha
+
+# 7. Check status and attach to the session
 needle status
+tmux attach -t needle-claude-alpha
+
+# 8. Verify completion
 bead list --status closed
 ```
 
@@ -53,11 +56,10 @@ worker at a repository you care about.
 
 ```bash
 cargo install --git https://github.com/jedarden/NEEDLE
-cargo install --git https://github.com/jedarden/bead-rs --bin bead   # `cargo install bead` is an unrelated crate
+cargo install --git https://github.com/jedarden/bead-rs --bin bead
 ```
 
-The installer drops binaries in `~/.local/bin` (override with `NEEDLE_INSTALL_PATH`; skip the
-backend with `--skip-bead`). An existing `bead` at or above the release version is kept.
+The installer drops binaries in `~/.local/bin` (override with `NEEDLE_INSTALL_PATH`). An existing `bead` at or above the release version is kept.
 
 ### 🔒 Security Note
 
