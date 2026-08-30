@@ -7,7 +7,7 @@
 //! - Recently closed beads suppress creation within 24h
 //! - After 24h, new beads can be created again
 
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use needle::fingerprint::{compute_fingerprint, AlertDeduplication, AlertKind};
 use needle::types::{Bead, BeadId, BeadStatus};
 use std::collections::HashMap;
@@ -416,6 +416,9 @@ async fn test_deduplication_priority_recently_closed_over_open() {
     );
 
     store.add_bead(open_bead);
+    // As above: the dedup window keys on updated_at.
+    let mut closed_bead = closed_bead;
+    closed_bead.updated_at = closed_at;
     store.add_bead(closed_bead);
 
     // Priority: recently closed should take precedence over open
