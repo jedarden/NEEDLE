@@ -1088,6 +1088,18 @@ mod tests {
     // ── configurable stderr cap tests (GitHub issue jedarden/NEEDLE#9) ──
 
     /// Shell snippet producing exactly `n` bytes of stderr, then failing.
+    /// The command these fixtures gate on.
+    ///
+    /// Deliberately not `cargo check`: what is under test is that a clean
+    /// extraction contains only committed files, and a real compile adds a
+    /// whole toolchain run per test — four of them in parallel starved
+    /// unrelated timing-sensitive tests in the full suite. `rustc --edition
+    /// 2021 --emit=metadata` type-checks the crate root the same way for these
+    /// purposes, at a fraction of the cost.
+    const CHECK_SOURCES: &str = "rustc --edition 2021 --emit=metadata --crate-type lib \
+         --out-dir \"$(mktemp -d)\" \
+         \"$([ -f src/main.rs ] && echo src/main.rs || echo src/lib.rs)\"";
+
     fn fail_with_stderr_bytes(n: usize) -> String {
         format!("head -c {n} /dev/zero | tr '\\0' 'x' 1>&2; exit 1")
     }
@@ -1306,15 +1318,6 @@ mod tests {
         // Initialize a git repo
         git_init(workspace);
         std::fs::write(workspace.join("README.md"), "test repo\\n").unwrap();
-        // `cargo check` needs a manifest, and the clean-mode run sees only
-        // what was committed — so the manifest has to be in this commit.
-        std::fs::write(
-            workspace.join("Cargo.toml"),
-            // No explicit target section: cargo auto-detects src/lib.rs or
-            // src/main.rs, and these fixtures use both.
-            "[package]\nname = \"uncommitted-dep-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-        )
-        .unwrap();
         git_add(workspace, ".");
         git_commit(workspace, "initial commit\\n");
 
@@ -1349,7 +1352,7 @@ pub fn uncommitted_function() {
         git_commit(workspace, "add main.rs");
 
         // Create a CommandGate that runs `cargo check` (which will fail in clean mode, pass in workspace)
-        let gate = CommandGate::with_options(vec!["cargo check".to_string()], 65536, RunIn::Clean);
+        let gate = CommandGate::with_options(vec![CHECK_SOURCES.to_string()], 65536, RunIn::Clean);
 
         let bead = crate::types::Bead {
             id: "test-bead".into(),
@@ -1419,15 +1422,6 @@ pub fn uncommitted_function() {
         // Initialize a git repo
         git_init(workspace);
         std::fs::write(workspace.join("README.md"), "test repo\\n").unwrap();
-        // `cargo check` needs a manifest, and the clean-mode run sees only
-        // what was committed — so the manifest has to be in this commit.
-        std::fs::write(
-            workspace.join("Cargo.toml"),
-            // No explicit target section: cargo auto-detects src/lib.rs or
-            // src/main.rs, and these fixtures use both.
-            "[package]\nname = \"uncommitted-dep-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-        )
-        .unwrap();
         git_add(workspace, ".");
         git_commit(workspace, "initial commit\\n");
 
@@ -1446,7 +1440,7 @@ pub fn simple_function() -> i32 {
         git_add(workspace, "src/lib.rs");
         git_commit(workspace, "add lib.rs");
 
-        let gate = CommandGate::with_options(vec!["cargo check".to_string()], 65536, RunIn::Clean);
+        let gate = CommandGate::with_options(vec![CHECK_SOURCES.to_string()], 65536, RunIn::Clean);
 
         let bead = crate::types::Bead {
             id: BeadId::from("test-bead-both-pass"),
@@ -1491,15 +1485,6 @@ pub fn simple_function() -> i32 {
         // Initialize a git repo
         git_init(workspace);
         std::fs::write(workspace.join("README.md"), "test repo\\n").unwrap();
-        // `cargo check` needs a manifest, and the clean-mode run sees only
-        // what was committed — so the manifest has to be in this commit.
-        std::fs::write(
-            workspace.join("Cargo.toml"),
-            // No explicit target section: cargo auto-detects src/lib.rs or
-            // src/main.rs, and these fixtures use both.
-            "[package]\nname = \"uncommitted-dep-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-        )
-        .unwrap();
         git_add(workspace, ".");
         git_commit(workspace, "initial commit\\n");
 
@@ -1518,7 +1503,7 @@ pub fn broken_function( -> i32 {
         git_add(workspace, "src/lib.rs");
         git_commit(workspace, "add broken lib.rs");
 
-        let gate = CommandGate::with_options(vec!["cargo check".to_string()], 65536, RunIn::Clean);
+        let gate = CommandGate::with_options(vec![CHECK_SOURCES.to_string()], 65536, RunIn::Clean);
 
         let bead = crate::types::Bead {
             id: BeadId::from("test-bead-both-fail"),
@@ -1594,15 +1579,6 @@ pub fn broken_function( -> i32 {
         // Initialize a git repo
         git_init(workspace);
         std::fs::write(workspace.join("README.md"), "test repo\\n").unwrap();
-        // `cargo check` needs a manifest, and the clean-mode run sees only
-        // what was committed — so the manifest has to be in this commit.
-        std::fs::write(
-            workspace.join("Cargo.toml"),
-            // No explicit target section: cargo auto-detects src/lib.rs or
-            // src/main.rs, and these fixtures use both.
-            "[package]\nname = \"uncommitted-dep-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-        )
-        .unwrap();
         git_add(workspace, ".");
         git_commit(workspace, "initial commit\\n");
 
@@ -1655,15 +1631,6 @@ pub fn broken_function( -> i32 {
         // Initialize a git repo
         git_init(workspace);
         std::fs::write(workspace.join("README.md"), "test repo\\n").unwrap();
-        // `cargo check` needs a manifest, and the clean-mode run sees only
-        // what was committed — so the manifest has to be in this commit.
-        std::fs::write(
-            workspace.join("Cargo.toml"),
-            // No explicit target section: cargo auto-detects src/lib.rs or
-            // src/main.rs, and these fixtures use both.
-            "[package]\nname = \"uncommitted-dep-fixture\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-        )
-        .unwrap();
         git_add(workspace, ".");
         git_commit(workspace, "initial commit\\n");
 
@@ -1708,7 +1675,7 @@ pub fn func2() {
         git_add(workspace, "src/main.rs");
         git_commit(workspace, "add main.rs");
 
-        let gate = CommandGate::with_options(vec!["cargo check".to_string()], 65536, RunIn::Clean);
+        let gate = CommandGate::with_options(vec![CHECK_SOURCES.to_string()], 65536, RunIn::Clean);
 
         let bead = crate::types::Bead {
             id: BeadId::from("test-bead-multiple-untracked"),
