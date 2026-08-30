@@ -430,6 +430,14 @@ pub struct WorkerConfig {
     /// the orphaned bead risk and have an external recovery mechanism.
     #[serde(default = "WorkerConfig::default_allow_exit_without_supervisor")]
     pub allow_exit_without_supervisor: bool,
+
+    /// Generation budget for post-dispatch audit (Phase 19.4).
+    ///
+    /// Maximum number of beads an agent may create during a single dispatch
+    /// before excess beads are deferred with the `over-budget` label.
+    /// Default: 3.
+    #[serde(default = "WorkerConfig::default_generation_max_per_dispatch")]
+    pub generation_max_per_dispatch: u32,
 }
 
 impl Default for WorkerConfig {
@@ -457,6 +465,7 @@ impl Default for WorkerConfig {
             scratch_sweep: ScratchSweepConfig::default(),
             worker_binary_path: None,
             allow_exit_without_supervisor: Self::default_allow_exit_without_supervisor(),
+            generation_max_per_dispatch: Self::default_generation_max_per_dispatch(),
         }
     }
 }
@@ -521,6 +530,9 @@ impl WorkerConfig {
     }
     fn default_config_reload_check_interval_secs() -> u64 {
         0
+    }
+    fn default_generation_max_per_dispatch() -> u32 {
+        3
     }
 
     fn default_allow_exit_without_supervisor() -> bool {
@@ -1251,26 +1263,6 @@ mod tests {
     }
 
     #[test]
-    fn test_bead_cli_config_with_bf_backend() {
-        let config = BeadCliConfig {
-            backend: BeadBackend::Bead,
-            path: None,
-        };
-        assert_eq!(config.backend, BeadBackend::Bead);
-        assert!(config.path.is_none());
-    }
-
-    #[test]
-    fn test_bead_cli_config_with_br_backend() {
-        let config = BeadCliConfig {
-            backend: BeadBackend::Bead,
-            path: None,
-        };
-        assert_eq!(config.backend, BeadBackend::Bead);
-        assert!(config.path.is_none());
-    }
-
-    #[test]
     fn test_bead_cli_config_with_bead_backend() {
         let config = BeadCliConfig {
             backend: BeadBackend::Bead,
@@ -1387,7 +1379,7 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_bead_cli_bf_backend() {
+    fn test_resolve_bead_cli_explicit_path_bf_named_binary() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let bf_bin = tmp_dir.path().join("bf");
         std::fs::write(&bf_bin, "#!/bin/sh\necho test").unwrap();
@@ -1530,22 +1522,8 @@ mod tests {
         assert!(symlink_bead.exists());
     }
 
-    #[test]
-    fn test_resolve_bead_cli_explicit_path_bf_backend_returns_bf() {
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let custom_bf = tmp_dir.path().join("my-bf-wrapper");
-        std::fs::write(&custom_bf, "#!/bin/sh\necho test").unwrap();
-        make_executable(&custom_bf);
-
-        let config = BeadCliConfig {
-            backend: BeadBackend::Bead,
-            path: Some(custom_bf.clone()),
-        };
-
-        let (backend, path, _source) = resolve_bead_cli(&config).unwrap();
-        assert_eq!(backend, Backend::Bead);
-        assert_eq!(path, custom_bf);
-    }
+    // REMOVED: test_resolve_bead_cli_explicit_path_bf_backend_returns_bf
+    // Duplicate test - functionality covered by test_resolve_bead_cli_explicit_path_bead_backend_returns_bead
 
     #[test]
     fn test_resolve_bead_cli_explicit_path_bead_backend_returns_bead() {
@@ -1601,41 +1579,30 @@ mod tests {
         assert_eq!(path, renamed_binary);
     }
 
-    #[serial]
     #[test]
-    fn test_resolve_bead_cli_auto_precedence_bead_first() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
+    fn test_resolve_bead_cli_auto_detects_bead_backend_from_custom_filename() {
         let tmp_dir = tempfile::tempdir().unwrap();
-        let home = tmp_dir.path().to_path_buf();
-
-        // Create both ~/.local/bin/bf and ~/.local/bin/bead
-        let bin_dir = home.join(".local/bin");
-        std::fs::create_dir_all(&bin_dir).unwrap();
-        let bf_bin = bin_dir.join("bf");
-        std::fs::write(&bf_bin, "#!/bin/sh\necho test").unwrap();
-        make_executable(&bf_bin);
-        let bead_bin = bin_dir.join("bead");
-        std::fs::write(&bead_bin, "#!/bin/sh\necho test").unwrap();
-        make_executable(&bead_bin);
-
-        // Set HOME to tmp_dir
-        std::env::set_var("HOME", &home);
-        std::env::set_var("PATH", "");
+        let custom_binary = tmp_dir.path().join("custom-bead-cli");
+        std::fs::write(&custom_binary, "#!/bin/sh\necho test").unwrap();
+        make_executable(&custom_binary);
 
         let config = BeadCliConfig {
             backend: BeadBackend::Auto,
-            path: None,
+            path: Some(custom_binary.clone()),
         };
 
         let (backend, path, _source) = resolve_bead_cli(&config).unwrap();
-        // Per ADR-013: auto detection prefers bead, then bf
+        // Auto backend should detect custom names as Bead
         assert_eq!(backend, Backend::Bead);
-        assert_eq!(path, bead_bin);
+        assert_eq!(path, custom_binary);
     }
+
+    #[serial]
+    // REMOVED: test_resolve_bead_cli_auto_precedence_bead_first
+    // Bead-forge/bf backend is no longer supported; this test tested obsolete fallback behavior.
 
     // REMOVED: test_resolve_bead_cli_auto_fallback_to_bf
     // Bead-forge/bf backend is no longer supported; this test tested obsolete fallback behavior.
-
     #[test]
     fn test_resolve_bead_cli_br_backend() {
         let tmp_dir = tempfile::tempdir().unwrap();
@@ -1786,12 +1753,12 @@ mod tests {
 
     #[serial]
     #[test]
-    fn test_resolve_bead_cli_auto_error_both_bead_and_bf_non_executable() {
+    fn test_resolve_bead_cli_auto_error_bead_non_executable() {
         let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
-        // Create PATH directory with both bead and bf files WITHOUT execute permissions
+        // Create PATH directory with bead file WITHOUT execute permissions
         let path_dir = tmp_dir.path().join("bin");
         std::fs::create_dir_all(&path_dir).unwrap();
 
@@ -1799,23 +1766,13 @@ mod tests {
         std::fs::write(&bead_file, "#!/bin/sh\necho bead").unwrap();
         // Explicitly do NOT set execute permissions - leave it mode 644
 
-        let bf_file = path_dir.join("bf");
-        std::fs::write(&bf_file, "#!/bin/sh\necho bf").unwrap();
-        // Explicitly do NOT set execute permissions - leave it mode 644
-
-        // Verify files exist but are NOT executable
+        // Verify file exists but is NOT executable
         use std::os::unix::fs::PermissionsExt;
         let bead_perms = std::fs::metadata(&bead_file).unwrap().permissions().mode();
-        let bf_perms = std::fs::metadata(&bf_file).unwrap().permissions().mode();
         assert_eq!(
             bead_perms & 0o111,
             0,
             "bead file should not have execute permissions"
-        );
-        assert_eq!(
-            bf_perms & 0o111,
-            0,
-            "bf file should not have execute permissions"
         );
 
         // Set environment
@@ -1830,7 +1787,7 @@ mod tests {
         let result = resolve_bead_cli(&config);
         assert!(
             result.is_err(),
-            "Auto backend should error when both bead and bf lack execute permissions"
+            "Auto backend should error when bead lacks execute permissions"
         );
 
         let err = result.unwrap_err().to_string();
@@ -2857,6 +2814,9 @@ path: /path with spaces/to/bead
     }
 
     #[serial]
+    // REMOVED: test_detect_bead_backend_auto_falls_back_to_bf_when_bead_missing
+    // Bead-forge/bf backend is no longer supported; this test tested obsolete fallback behavior.
+    #[serial]
     #[test]
     fn test_detect_bead_backend_auto_falls_back_to_br() {
         let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
@@ -2978,6 +2938,9 @@ path: /path with spaces/to/bead
         assert_eq!(path, bead_bin);
     }
 
+    #[serial]
+    // REMOVED: test_detect_bead_backend_config_uses_bf_alias
+    // Bead-forge/bf backend is no longer supported; this test tested obsolete fallback behavior.
     #[serial]
     #[test]
     fn test_detect_bead_backend_config_br_backend() {
@@ -3379,7 +3342,7 @@ path: /path/to/./bead
         let result = resolve_bead_cli(&config);
         assert!(
             result.is_err(),
-            "Auto should error when neither bead nor bf is found"
+            "Auto should error when bead CLI is not found"
         );
 
         let err = result.unwrap_err().to_string();
@@ -3910,6 +3873,11 @@ pub struct ExploreConfig {
     /// backoff. The effective interval never exceeds this value.
     #[serde(default = "ExploreConfig::default_max_scan_interval_cycles")]
     pub max_scan_interval_cycles: u32,
+
+    /// Cross-workspace cleanup: release beads stuck in_progress for longer
+    /// than this (seconds). Default matches MendConfig (300s = 5 minutes).
+    #[serde(default = "ExploreConfig::default_stuck_threshold_secs")]
+    pub stuck_threshold_secs: u64,
 }
 
 impl Default for ExploreConfig {
@@ -3922,6 +3890,7 @@ impl Default for ExploreConfig {
             starvation_threshold_minutes: Self::default_starvation_threshold_minutes(),
             scan_interval_cycles: Self::default_scan_interval_cycles(),
             max_scan_interval_cycles: Self::default_max_scan_interval_cycles(),
+            stuck_threshold_secs: Self::default_stuck_threshold_secs(),
         }
     }
 }
@@ -3949,6 +3918,10 @@ impl ExploreConfig {
 
     fn default_max_scan_interval_cycles() -> u32 {
         8
+    }
+
+    fn default_stuck_threshold_secs() -> u64 {
+        300
     }
 }
 
@@ -4107,8 +4080,17 @@ pub struct MitosisConfig {
     /// are depth 0; each split increments the depth by 1 for its children).
     /// Beads at or beyond this depth are flagged with a `human` label instead
     /// of being split further, to prevent unbounded recursive splitting.
-    #[serde(default)]
+    #[serde(default = "MitosisConfig::default_max_depth")]
     pub max_depth: u32,
+
+    /// Maximum number of children to create in a single split (default: 8).
+    ///
+    /// When a mitosis agent proposes more children than this limit, the proposal
+    /// is truncated to the first `max_children` and a note is added to the parent
+    /// bead indicating the truncation. This prevents runaway splits that would
+    /// create unmanageable numbers of child beads.
+    #[serde(default = "MitosisConfig::default_max_children")]
+    pub max_children: u32,
 
     /// Timeout-triggered mitosis policy (opt-in, default: disabled).
     #[serde(default)]
@@ -4122,7 +4104,8 @@ impl Default for MitosisConfig {
             first_failure_only: Self::default_first_failure_only(),
             force_failure_threshold: 0,
             repeat_interval: 0,
-            max_depth: 0,
+            max_depth: Self::default_max_depth(),
+            max_children: Self::default_max_children(),
             timeout_triggered: TimeoutTriggeredPolicy::default(),
         }
     }
@@ -4134,6 +4117,12 @@ impl MitosisConfig {
     }
     fn default_first_failure_only() -> bool {
         true
+    }
+    fn default_max_depth() -> u32 {
+        2
+    }
+    fn default_max_children() -> u32 {
+        8
     }
 }
 
