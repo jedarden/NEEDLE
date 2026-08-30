@@ -221,16 +221,35 @@ if [[ "$LANE" == "slow" ]] || [[ "$LANE" == "all" ]]; then
       --test p3_integration_tests \
       --test real_br_integration_tests
 
+  # Every test target runs with its own TMPDIR, created outside /tmp and
+  # outside this checkout. bead-rs workspace discovery stops at the first
+  # .beads it meets walking up from a temp dir: a stray /tmp/.beads (left by
+  # any test or tool on the host) refuses every fixture's `bead init`, and a
+  # temp dir under the repo would sit beneath the repo's own .beads. On
+  # 2026-08-30 one such stray dir failed 40 integration tests across four
+  # targets. Per-lane dirs also stop one target's litter from reaching the next.
+  LANE_TMPS=()
+  lane_tmp() {
+    local root="${DOD_TMP_ROOT:-/var/tmp}"
+    [ -d "$root" ] && [ -w "$root" ] || root="/tmp"
+    local d
+    d="$(mktemp -d "$root/needle-dod-$1.XXXXXX")"
+    LANE_TMPS+=("$d")
+    printf '%s' "$d"
+  }
+  cleanup_lane_tmps() { [ "${#LANE_TMPS[@]}" -gt 0 ] && rm -rf "${LANE_TMPS[@]}" 2>/dev/null || true; }
+  trap cleanup_lane_tmps EXIT
+
   # cargo test --lib (unit tests)
-  run_check "cargo test --lib" timeout --kill-after=30 900 cargo test --lib
+  run_check "cargo test --lib" env TMPDIR="$(lane_tmp lib)" timeout --kill-after=30 900 cargo test --lib
 
   # Core integration coverage. Keep each target separately named so CI reports
   # which strand phase failed, and bound every target to fit the verify-step
   # deadline while still allowing the shared debug build to complete.
-  run_check "cargo test --test integration_tests" timeout --kill-after=30 900 cargo test --test integration_tests
-  run_check "cargo test --test p2_integration_tests" timeout --kill-after=30 900 cargo test --test p2_integration_tests
-  run_check "cargo test --test p3_integration_tests" timeout --kill-after=30 900 cargo test --test p3_integration_tests
-  run_check "cargo test --test real_br_integration_tests" timeout --kill-after=30 900 cargo test --test real_br_integration_tests
+  run_check "cargo test --test integration_tests" env TMPDIR="$(lane_tmp integration_tests)" timeout --kill-after=30 900 cargo test --test integration_tests
+  run_check "cargo test --test p2_integration_tests" env TMPDIR="$(lane_tmp p2_integration_tests)" timeout --kill-after=30 900 cargo test --test p2_integration_tests
+  run_check "cargo test --test p3_integration_tests" env TMPDIR="$(lane_tmp p3_integration_tests)" timeout --kill-after=30 900 cargo test --test p3_integration_tests
+  run_check "cargo test --test real_br_integration_tests" env TMPDIR="$(lane_tmp real_br_integration_tests)" timeout --kill-after=30 900 cargo test --test real_br_integration_tests
 
   # Installer tests (isolated, shell-level regression tests)
   run_check "installer tests" timeout --kill-after=30 60 bash tests/installer/run.sh
