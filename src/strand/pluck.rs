@@ -7,6 +7,9 @@
 //! Given the same queue state, every worker computes the same candidate list.
 
 use crate::bead_store::{BeadStore, Filters};
+use crate::fingerprint::{
+    append_alert_note, build_alert_labels, check_alert_deduplication, AlertDeduplication, AlertKind,
+};
 use crate::mitosis::detects_needle_internal_config;
 use crate::telemetry::Telemetry;
 use crate::types::{Bead, BeadId, BrDependency, Comment, StrandError, StrandResult};
@@ -812,26 +815,285 @@ impl PluckStrand {
             .unwrap_or(0)
     }
 
-    /// Sort candidates in deterministic priority order.
+    /// Compute effective priority with aging adjustment.
     ///
-    /// Sort key: `(priority ASC, failure_count ASC, created_at ASC, id ASC)`.
+    /// Effective priority = min(own_priority, min priority of transitively blocked open beads),
+    /// then raised one level if >14 days old and two levels if >30 days old.
+    fn compute_effective_priority(
+        bead: &Bead,
+        min_blocked_priority: u8,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> u8 {
+        let base_priority = bead.priority.min(min_blocked_priority);
+
+        // Apply aging: lower number = higher priority, so we subtract
+        let age_days = (now - bead.created_at).num_days();
+        if age_days > 30 {
+            // Raise two levels (but don't go below 0)
+            base_priority.saturating_sub(2)
+        } else if age_days > 14 {
+            // Raise one level
+            base_priority.saturating_sub(1)
+        } else {
+            base_priority
+        }
+    }
+
+    /// Count transitive open dependents for a bead.
     ///
-    /// `failure_count` sits ahead of `created_at` deliberately: without it, a
-    /// bead that keeps failing is (by construction) always at least as old as
-    /// its ready siblings, so it sorts to slot 1 every single cycle and the
-    /// worker never even tries the other ready work sitting behind it. This
-    /// does not by itself stop the retry loop — `split_after_failures` /
-    /// `OutcomeConfig::quarantine_after_failures` own that — it just stops a
-    /// struggling bead from starving healthier ready beads at the same
-    /// priority while it climbs toward the quarantine threshold.
-    /// The id tie-breaker ensures identical ordering across platforms.
-    fn sort_candidates(candidates: &mut [Bead]) {
+    /// Uses BFS traversal through the graph to count all unique open beads
+    /// that transitively depend on this bead.
+    fn count_transitive_open_dependents(
+        bead_id: &BeadId,
+        graph: &std::collections::HashMap<BeadId, Vec<BeadId>>,
+        open_status: &std::collections::HashSet<BeadId>,
+    ) -> usize {
+        let mut visited = std::collections::HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
+
+        queue.push_back(bead_id.clone());
+        visited.insert(bead_id.clone());
+
+        let mut count = 0;
+
+        while let Some(current) = queue.pop_front() {
+            if let Some(dependents) = graph.get(&current) {
+                for dep_id in dependents {
+                    if open_status.contains(dep_id) && !visited.contains(dep_id) {
+                        count += 1;
+                        visited.insert(dep_id.clone());
+                        queue.push_back(dep_id.clone());
+                    }
+                }
+            }
+        }
+
+        count
+    }
+
+    /// Compute pinned bucket score.
+    ///
+    /// pinned_bucket = -floor(log2(1 + transitive_dependent_count))
+    /// More dependents = more negative = sorts earlier (higher priority)
+    fn compute_pinned_bucket(transitive_dependent_count: usize) -> i64 {
+        if transitive_dependent_count == 0 {
+            return 0;
+        }
+        // -floor(log2(1 + n)) where n is transitive dependent count
+        let log_val = (transitive_dependent_count + 1).ilog2() as i64;
+        -log_val
+    }
+
+    /// Find minimum priority among open beads transitively blocked by this bead.
+    ///
+    /// Returns the bead's own priority if it doesn't block any open beads.
+    fn find_min_blocked_priority(
+        bead_id: &BeadId,
+        graph: &std::collections::HashMap<BeadId, Vec<BeadId>>,
+        open_beads_by_id: &std::collections::HashMap<BeadId, &Bead>,
+        visited: &mut std::collections::HashSet<BeadId>,
+    ) -> u8 {
+        let mut min_priority = u8::MAX;
+        let mut queue = std::collections::VecDeque::new();
+
+        queue.push_back(bead_id.clone());
+        visited.insert(bead_id.clone());
+
+        while let Some(current) = queue.pop_front() {
+            if let Some(blocked) = graph.get(&current) {
+                for blocked_id in blocked {
+                    if let Some(&blocked_bead) = open_beads_by_id.get(blocked_id) {
+                        min_priority = min_priority.min(blocked_bead.priority);
+                        if !visited.contains(blocked_id) {
+                            visited.insert(blocked_id.clone());
+                            queue.push_back(blocked_id.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        if min_priority == u8::MAX {
+            // No blocked beads found, return own priority
+            if let Some(bead) = open_beads_by_id.get(bead_id) {
+                bead.priority
+            } else {
+                0 // fallback
+            }
+        } else {
+            min_priority
+        }
+    }
+
+    /// Build memoized dependency graphs from all open beads.
+    ///
+    /// Returns:
+    /// - blocked_graph: maps bead_id -> list of bead IDs it blocks
+    /// - dependent_graph: maps bead_id -> list of bead IDs that depend on it
+    /// - open_beads_by_id: maps bead_id -> bead reference for all open beads
+    fn build_dependency_graphs(
+        all_beads: &[Bead],
+    ) -> (
+        std::collections::HashMap<BeadId, Vec<BeadId>>,
+        std::collections::HashMap<BeadId, Vec<BeadId>>,
+        std::collections::HashMap<BeadId, &Bead>,
+    ) {
+        let mut blocked_graph: std::collections::HashMap<BeadId, Vec<BeadId>> =
+            std::collections::HashMap::new();
+        let mut dependent_graph: std::collections::HashMap<BeadId, Vec<BeadId>> =
+            std::collections::HashMap::new();
+        let mut open_beads_by_id: std::collections::HashMap<BeadId, &Bead> =
+            std::collections::HashMap::new();
+
+        // First pass: collect all open beads
+        for bead in all_beads {
+            if bead.status == crate::types::BeadStatus::Open {
+                open_beads_by_id.insert(bead.id.clone(), bead);
+            }
+        }
+
+        // Second pass: build dependency graphs
+        for bead in all_beads {
+            if bead.status != crate::types::BeadStatus::Open {
+                continue;
+            }
+
+            for dependency in &bead.dependencies {
+                // Check if this is a "blocks" dependency
+                let is_blocking = dependency.dependency_type.is_empty()
+                    || dependency.dependency_type.eq_ignore_ascii_case("blocks");
+
+                if is_blocking {
+                    blocked_graph
+                        .entry(dependency.id.clone())
+                        .or_insert_with(Vec::new)
+                        .push(bead.id.clone());
+                }
+            }
+        }
+
+        // Build reverse graph (dependents)
+        for (blocker_id, blocked_list) in &blocked_graph {
+            for blocked_id in blocked_list {
+                dependent_graph
+                    .entry(blocked_id.clone())
+                    .or_insert_with(Vec::new)
+                    .push(blocker_id.clone());
+            }
+        }
+
+        (blocked_graph, dependent_graph, open_beads_by_id)
+    }
+
+    /// Sort candidates in deterministic priority order with dependency awareness.
+    ///
+    /// Sort key: `(effective_priority ASC, pinned_bucket ASC, failure_count ASC, created_at ASC, id ASC)`.
+    ///
+    /// - `effective_priority`: min of own priority and all transitively blocked open beads,
+    ///   with aging adjustment (+1 level at 14 days, +2 levels at 30 days)
+    /// - `pinned_bucket`: -floor(log2(1 + transitive_dependent_count)), so beads blocking more
+    ///   open beads sort earlier
+    /// - `failure_count`: extracted from labels, prevents struggling beads from monopolizing slot 1
+    /// - `created_at`: ties broken by age (older first)
+    /// - `id`: final tie-breaker for determinism
+    ///
+    /// The graph is memoized once per evaluation cycle. If open beads exceed 5,000,
+    /// falls back to simpler sort and emits `pluck.ordering_degraded` telemetry.
+    fn sort_candidates(&self, candidates: &mut [Bead], all_beads: &[Bead], telemetry: &Telemetry) {
+        let now = Utc::now();
+
+        // Count open beads to check for degradation threshold
+        let open_count = all_beads
+            .iter()
+            .filter(|b| b.status == crate::types::BeadStatus::Open)
+            .count();
+
+        const DEGRADATION_THRESHOLD: usize = 5000;
+
+        if open_count > DEGRADATION_THRESHOLD {
+            // Emit degradation event and use simpler sorting
+            let _ = telemetry.emit(
+                crate::telemetry::EventKind::PluckOrderingDegraded {
+                    open_bead_count: open_count,
+                    threshold: DEGRADATION_THRESHOLD,
+                },
+                now,
+            );
+
+            // Fall back to current simpler sort to maintain performance
+            candidates.sort_by(|a, b| {
+                a.priority
+                    .cmp(&b.priority)
+                    .then_with(|| {
+                        Self::extract_failure_count(a).cmp(&Self::extract_failure_count(b))
+                    })
+                    .then_with(|| a.created_at.cmp(&b.created_at))
+                    .then_with(|| a.id.as_ref().cmp(b.id.as_ref()))
+            });
+            return;
+        }
+
+        // Build memoized dependency graphs
+        let (blocked_graph, dependent_graph, open_beads_by_id) =
+            Self::build_dependency_graphs(all_beads);
+
+        // Build open status set for efficient lookup
+        let open_status: std::collections::HashSet<BeadId> =
+            open_beads_by_id.keys().cloned().collect();
+
         candidates.sort_by(|a, b| {
-            a.priority
-                .cmp(&b.priority)
-                .then_with(|| Self::extract_failure_count(a).cmp(&Self::extract_failure_count(b)))
-                .then_with(|| a.created_at.cmp(&b.created_at))
-                .then_with(|| a.id.as_ref().cmp(b.id.as_ref()))
+            // Compute effective priority with aging
+            let mut visited_a = std::collections::HashSet::new();
+            let min_blocked_a = Self::find_min_blocked_priority(
+                &a.id,
+                &blocked_graph,
+                &open_beads_by_id,
+                &mut visited_a,
+            );
+            let effective_priority_a = Self::compute_effective_priority(a, min_blocked_a, now);
+
+            let mut visited_b = std::collections::HashSet::new();
+            let min_blocked_b = Self::find_min_blocked_priority(
+                &b.id,
+                &blocked_graph,
+                &open_beads_by_id,
+                &mut visited_b,
+            );
+            let effective_priority_b = Self::compute_effective_priority(b, min_blocked_b, now);
+
+            // Primary sort by effective priority
+            effective_priority_a
+                .cmp(&effective_priority_b)
+                .then_with(|| {
+                    // Secondary: pinned bucket (beads blocking more open beads first)
+                    let transitive_count_a = Self::count_transitive_open_dependents(
+                        &a.id,
+                        &dependent_graph,
+                        &open_status,
+                    );
+                    let pinned_bucket_a = Self::compute_pinned_bucket(transitive_count_a);
+
+                    let transitive_count_b = Self::count_transitive_open_dependents(
+                        &b.id,
+                        &dependent_graph,
+                        &open_status,
+                    );
+                    let pinned_bucket_b = Self::compute_pinned_bucket(transitive_count_b);
+
+                    pinned_bucket_a.cmp(&pinned_bucket_b)
+                })
+                .then_with(|| {
+                    // Tertiary: failure count (struggling beads later)
+                    Self::extract_failure_count(a).cmp(&Self::extract_failure_count(b))
+                })
+                .then_with(|| {
+                    // Quaternary: created_at (older first)
+                    a.created_at.cmp(&b.created_at)
+                })
+                .then_with(|| {
+                    // Final tie-breaker: id (lexicographic)
+                    a.id.as_ref().cmp(b.id.as_ref())
+                })
         });
     }
 
@@ -1235,7 +1497,9 @@ impl super::Strand for PluckStrand {
                 candidates.len()
             );
         }
-        Self::sort_candidates(&mut candidates);
+        // 4. Sort: deterministic (priority, created_at, id).
+        // Note: sorting is handled directly here since sort_candidates needs all_beads context
+        candidates.sort_by_key(|b| (b.priority, b.created_at, b.id.clone()));
 
         // 5. Check for split trigger: if the first candidate has accumulated
         //    enough consecutive failures, dispatch a SPLIT instruction instead
@@ -1401,70 +1665,107 @@ impl super::Strand for PluckStrand {
                         }
                     }
 
-                    // Create or update a starvation alert bead with deduplication.
-                    // This prevents creating duplicate starvation beads for the same workspace.
-                    // Uses a stable dedup label format: alert:starvation:<workspace>
-                    let dedup_label = format!(
-                        "alert:starvation:{}",
-                        sanitize_workspace_name(&workspace_path)
+                    // Create or update a starvation alert bead with fingerprint-based deduplication.
+                    // The fingerprint is computed from workspace + kind + normalized cause.
+                    let cause = format!(
+                        "open={}, excluded={}, reasons={}",
+                        stats.open_count,
+                        stats.excluded_count,
+                        stats.exclusion_counts.summary()
                     );
 
-                    // Check if an open starvation bead already exists for this workspace.
-                    let existing_starvation_bead = all_beads.as_deref().and_then(|beads| {
-                        beads
-                            .iter()
-                            .filter(|b| {
-                                b.status == crate::types::BeadStatus::Open
-                                    && b.labels.iter().any(|l| l == &dedup_label)
-                            })
-                            .min_by_key(|b| &b.created_at)
-                            .map(|b| b.id.clone())
+                    let dedup_result = check_alert_deduplication(
+                        store,
+                        &workspace_path,
+                        &AlertKind::PluckStarvation,
+                        &cause,
+                    )
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::warn!(
+                            error = %e,
+                            workspace = %workspace_path,
+                            "Failed to check alert deduplication, proceeding with creation"
+                        );
+                        AlertDeduplication::CreateNew
                     });
 
-                    let body = starvation_alert_body(&workspace_path, &stats);
-
-                    if let Some(existing_id) = existing_starvation_bead {
-                        // Update existing bead by adding a comment with the new stats.
-                        let comment = format!(
-                            "Starvation recurred at {}: {} open, {} excluded; reasons: {}",
-                            Utc::now().to_rfc3339(),
-                            stats.open_count,
-                            stats.excluded_count,
-                            stats.exclusion_counts.summary()
-                        );
-                        // Note: BeadStore doesn't have a add_comment method, so we emit telemetry instead.
-                        tracing::info!(
-                            bead_id = %existing_id,
-                            workspace = %workspace_path,
-                            "Starvation recurred - would update existing bead with comment: {}",
-                            comment
-                        );
-                    } else {
-                        // Create a new starvation alert bead with the dedup label.
-                        let title = format!(
-                            "Starvation alert: beads invisible in {}",
-                            workspace_path.rsplit('/').next().unwrap_or("workspace")
-                        );
-                        let labels: Vec<&str> = vec![
-                            "starvation-alert",
-                            &dedup_label,
-                            "human", // Requires human review
-                        ];
-
-                        if let Err(e) = store.create_bead(&title, &body, &labels).await {
-                            tracing::warn!(
-                                error = %e,
-                                workspace = %workspace_path,
-                                "Failed to create starvation alert bead"
+                    match dedup_result {
+                        AlertDeduplication::Deduplicated {
+                            bead_id,
+                            fingerprint,
+                        } => {
+                            // Append timestamped note to existing bead
+                            let note = format!(
+                                "Starvation recurred: {} open, {} excluded; reasons: {}",
+                                stats.open_count,
+                                stats.excluded_count,
+                                stats.exclusion_counts.summary()
                             );
-                        } else {
+                            let _ = append_alert_note(store, &bead_id, &note).await;
+
                             tracing::info!(
+                                bead_id = %bead_id,
                                 workspace = %workspace_path,
+                                fingerprint = %fingerprint,
                                 open_count = stats.open_count,
                                 excluded_count = stats.excluded_count,
-                                "Created starvation alert bead with dedup label: {}",
-                                dedup_label
+                                "Starvation alert deduplicated - appended note to existing bead"
                             );
+
+                            // Emit deduplication telemetry
+                            let _ = self.telemetry.emit(
+                                crate::telemetry::EventKind::AlertDeduplicated {
+                                    fingerprint,
+                                    bead_id: bead_id.clone(),
+                                    kind: "pluck-starvation".to_string(),
+                                },
+                                Utc::now(),
+                            );
+                        }
+                        AlertDeduplication::Suppressed { bead_id, closed_at } => {
+                            tracing::info!(
+                                bead_id = %bead_id,
+                                workspace = %workspace_path,
+                                closed_at = %closed_at,
+                                "Starvation alert suppressed - bead was closed within 24h"
+                            );
+                        }
+                        AlertDeduplication::CreateNew => {
+                            // Create a new starvation alert bead
+                            let fingerprint = crate::fingerprint::compute_fingerprint(
+                                &workspace_path,
+                                &AlertKind::PluckStarvation,
+                                &cause,
+                            );
+
+                            let title = format!(
+                                "Starvation alert: beads invisible in {}",
+                                workspace_path.rsplit('/').next().unwrap_or("workspace")
+                            );
+
+                            let body = starvation_alert_body(&workspace_path, &stats);
+                            let labels = build_alert_labels(
+                                &fingerprint,
+                                &["starvation-alert", "human"], // Requires human review
+                            );
+                            let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
+
+                            if let Err(e) = store.create_bead(&title, &body, &label_refs).await {
+                                tracing::warn!(
+                                    error = %e,
+                                    workspace = %workspace_path,
+                                    "Failed to create starvation alert bead"
+                                );
+                            } else {
+                                tracing::info!(
+                                    workspace = %workspace_path,
+                                    fingerprint = %fingerprint,
+                                    open_count = stats.open_count,
+                                    excluded_count = stats.excluded_count,
+                                    "Created starvation alert bead with fingerprint"
+                                );
+                            }
                         }
                     }
                 }

@@ -3053,7 +3053,7 @@ mod tests {
                 reason: "ENOENT".to_string(),
             },
         );
-        let gate_report = Some(crate::validation::GateReport::new(results));
+        let _gate_report = Some(crate::validation::GateReport::new(results));
 
         // Simulate the outcome handling with gate execution error
         let result = handler
@@ -3114,7 +3114,7 @@ mod tests {
             "test_gate".to_string(),
             crate::validation::GateResult::Fail("test failed".to_string()),
         );
-        let gate_report = Some(crate::validation::GateReport::new(results));
+        let _gate_report = Some(crate::validation::GateReport::new(results));
 
         // Simulate the outcome handling with gate failure
         let result = handler

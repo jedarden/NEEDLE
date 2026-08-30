@@ -43,6 +43,7 @@ use crate::types::{Bead, BeadId, BeadStatus, StrandError, StrandResult};
 /// * `registry` - Worker registry for live worker lookup
 /// * `telemetry` - Telemetry emitter for orphan release events
 /// * `qualified_id` - This worker's fully-qualified identity (excluded from orphan detection)
+/// * `claim_ttl` - Optional claim TTL for age-based reclaim (None = dead-PID reclaim only)
 ///
 /// # Returns
 /// * `Ok(u32)` - Number of orphans released
@@ -52,17 +53,28 @@ pub async fn cleanup_orphaned_in_progress(
     registry: &Registry,
     telemetry: &Telemetry,
     qualified_id: &str,
+    claim_ttl: Option<Duration>,
 ) -> Result<u32> {
-    cleanup_in_progress(store, registry, telemetry, qualified_id, None).await
+    cleanup_in_progress(store, registry, telemetry, qualified_id, claim_ttl).await
 }
 
-/// Test-optimized version that avoids blocking registry operations.
+/// Test-only version that uses dead-PID reclaim only (no age-based threshold).
 ///
-/// This version is optimized for test environments where blocking I/O
-/// can cause deadlocks. It returns early if there are no in-progress beads,
-/// avoiding the expensive registry.list() call entirely.
+/// This version is intended for tests that need to verify dead-PID detection
+/// without age-based cleanup interfering. It passes `None` for `claim_ttl`,
+/// so only beads whose assignee has no live worker are released.
+///
+/// # Arguments
+/// * `store` - The bead store to scan
+/// * `registry` - Worker registry for live worker lookup
+/// * `telemetry` - Telemetry emitter for orphan release events
+/// * `qualified_id` - This worker's fully-qualified identity (excluded from orphan detection)
+///
+/// # Returns
+/// * `Ok(u32)` - Number of orphans released
+/// * `Err(anyhow::Error)` - Store read failure
 #[cfg(test)]
-pub async fn cleanup_orphaned_in_progress_test_optimized(
+pub async fn cleanup_orphaned_in_progress_test_no_ttl(
     store: &dyn BeadStore,
     registry: &Registry,
     telemetry: &Telemetry,

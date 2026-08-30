@@ -436,6 +436,9 @@ mod tests {
         match evaluate(dir.path(), Some(&snap), "", false).await.unwrap() {
             GateResult::Fail(reason) => assert!(reason.contains("not been pushed")),
             GateResult::Pass => panic!("expected Fail for unpushed commit"),
+            GateResult::ExecutionError { .. } => {
+                panic!("expected Pass or Fail, got ExecutionError")
+            }
         }
     }
 
@@ -457,6 +460,9 @@ mod tests {
         match evaluate(dir.path(), Some(&snap), "", false).await.unwrap() {
             GateResult::Fail(_) => {}
             GateResult::Pass => panic!("a notes-only commit must not satisfy the gate on its own"),
+            GateResult::ExecutionError { .. } => {
+                panic!("expected Pass or Fail, got ExecutionError")
+            }
         }
     }
 
@@ -487,6 +493,9 @@ mod tests {
             GateResult::Fail(_) => {}
             GateResult::Pass => {
                 panic!("the marker file must not make a notes-only commit substantial")
+            }
+            GateResult::ExecutionError { .. } => {
+                panic!("expected Pass or Fail, got ExecutionError")
             }
         }
     }
@@ -565,6 +574,9 @@ mod tests {
                 assert!(reason.contains("without evidence"));
             }
             GateResult::Pass => panic!("expected Fail for missing evidence: line"),
+            GateResult::ExecutionError { .. } => {
+                panic!("expected Pass or Fail, got ExecutionError")
+            }
         }
     }
 
@@ -588,6 +600,9 @@ mod tests {
             }
             GateResult::Pass => {
                 panic!("expected Fail for commit without evidence: line in notes")
+            }
+            GateResult::ExecutionError { .. } => {
+                panic!("expected Pass or Fail, got ExecutionError")
             }
         }
     }
@@ -627,6 +642,9 @@ mod tests {
                 assert!(reason.contains("without note update"));
             }
             GateResult::Pass => panic!("expected Fail when notes didn't change"),
+            GateResult::ExecutionError { .. } => {
+                panic!("expected Pass or Fail, got ExecutionError")
+            }
         }
     }
 

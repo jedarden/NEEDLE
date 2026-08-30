@@ -136,15 +136,15 @@ printf '%s\n' "$@" >> invocations.log
 
 #[tokio::test]
 #[cfg(unix)]
-async fn bead_forge_claim_uses_atomic_batch() {
-    //! Verify bead-forge claim uses atomic batch for safety.
+async fn bead_rs_claim_uses_atomic_batch() {
+    //! Verify bead-rs claim uses atomic batch for safety.
     //!
     //! This prevents duplicate dispatch by ensuring the claim operation
     //! is atomic within the SQLite transaction.
     let root = tempfile::tempdir().unwrap();
     let backend = builtin_bead_backends()
         .into_iter()
-        .find(|backend| backend.name == "bead-forge")
+        .find(|backend| backend.name == "bead-rs")
         .unwrap();
     let binary = root.path().join("mock-cli");
     executable(
@@ -156,12 +156,12 @@ printf '%s\n' "$@" >> invocations.log
     let store =
         CliBeadStore::new(backend, binary, root.path().to_path_buf(), None, None, None).unwrap();
 
-    let _ = store.claim(&BeadId::from("bf-1"), "worker-a").await;
+    let _ = store.claim(&BeadId::from("bead-1"), "worker-a").await;
 
     let invocations = fs::read_to_string(root.path().join("invocations.log")).unwrap();
     assert!(
         invocations.contains("batch") || invocations.contains("atomic"),
-        "bead-forge claim should use atomic batch: {invocations}"
+        "bead-rs claim should use atomic batch: {invocations}"
     );
 }
 
@@ -250,15 +250,15 @@ printf '%s\n' "$@" >> invocations.log
 
 #[tokio::test]
 #[cfg(unix)]
-async fn bead_forge_release_uses_batch_operation() {
-    //! Verify bead-forge release uses the batch operation.
+async fn bead_rs_release_uses_batch_operation() {
+    //! Verify bead-rs release uses the batch operation.
     //!
     //! This ensures the release is part of a transaction, preventing
     //! partial updates that could leave beads in inconsistent states.
     let root = tempfile::tempdir().unwrap();
     let backend = builtin_bead_backends()
         .into_iter()
-        .find(|backend| backend.name == "bead-forge")
+        .find(|backend| backend.name == "bead-rs")
         .unwrap();
     let binary = root.path().join("mock-cli");
     executable(
@@ -270,12 +270,12 @@ printf '%s\n' "$@" >> invocations.log
     let store =
         CliBeadStore::new(backend, binary, root.path().to_path_buf(), None, None, None).unwrap();
 
-    store.release(&BeadId::from("bf-1")).await.unwrap();
+    store.release(&BeadId::from("bead-1")).await.unwrap();
 
     let invocations = fs::read_to_string(root.path().join("invocations.log")).unwrap();
     assert!(
         invocations.contains("batch") || invocations.contains("update"),
-        "bead-forge release should use batch or update operation: {invocations}"
+        "bead-rs release should use batch or update operation: {invocations}"
     );
 }
 
@@ -349,7 +349,7 @@ async fn dependency_operations_maintain_dialect_specific_order() {
     //! Verify dependency operations maintain correct argument order.
     //!
     //! bead-rs: dep add <blocked> <blocker> --kind blocks
-    //! bead-forge: dep add <blocker> --blocks <blocked>
+    //! bead-rs: dep add <blocker> --blocks <blocked>
     //!
     //! Bugs here cause corrupted dependency graphs.
     let root = tempfile::tempdir().unwrap();
@@ -370,7 +370,7 @@ async fn dependency_operations_maintain_dialect_specific_order() {
 
     let backend = builtin_bead_backends()
         .into_iter()
-        .find(|backend| backend.name == "bead-forge")
+        .find(|backend| backend.name == "bead-rs")
         .unwrap();
     let binary = root.path().join("mock-cli-forge");
     executable(&binary, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n");
@@ -384,7 +384,7 @@ async fn dependency_operations_maintain_dialect_specific_order() {
             || forge_argv
                 .windows(2)
                 .any(|w| w == ["blocker-1", "--blocks"]),
-        "bead-forge dep_add must use --blocks flag: {forge_argv:?}"
+        "bead-rs dep_add must use --blocks flag: {forge_argv:?}"
     );
 }
 
@@ -480,7 +480,7 @@ async fn atomic_claim_capability_is_correctly_declared() {
     let backends = builtin_bead_backends();
 
     for backend in &backends {
-        if backend.name == "bead-rs" || backend.name == "bead-forge" {
+        if backend.name == "bead-rs" || backend.name == "bead-rs" {
             assert!(
                 backend.capabilities.atomic_claim,
                 "{} backend must declare atomic_claim capability",

@@ -24,6 +24,9 @@ use sha2::{Digest, Sha256};
 
 use crate::bead_store::{BeadStore, NewChild};
 use crate::config::UnravelConfig;
+use crate::fingerprint::{
+    append_alert_note, build_alert_labels, check_alert_deduplication, AlertDeduplication, AlertKind,
+};
 use crate::telemetry::{EventKind, Telemetry};
 use crate::types::{Bead, BeadId, StrandResult};
 
@@ -420,21 +423,92 @@ impl super::Strand for UnravelStrand {
             // whole thing back rather than orphaning a child with no dependency
             // link (plan.md Phase 5.3, Race 3). This strand is best-effort: on
             // failure we log and move on rather than aborting the run.
+
+            // Apply fingerprint-based deduplication to each proposal to prevent
+            // creating identical alternatives for the same parent bead.
+            let mut deduplicated_specs = Vec::new();
+            let mut suppressed_count = 0u32;
+
+            for (child_title, child_body) in child_specs.iter() {
+                let workspace = bead.workspace.display().to_string();
+                let cause = format!("parent={}, proposal={}", bead.id, child_title);
+
+                match check_alert_deduplication(
+                    store,
+                    &workspace,
+                    &AlertKind::UnravelProposal,
+                    &cause,
+                )
+                .await
+                {
+                    Ok(AlertDeduplication::Deduplicated {
+                        bead_id,
+                        fingerprint,
+                    }) => {
+                        let note = format!(
+                            "Unravel proposal recurred for parent {}: proposal='{}'",
+                            bead.id, child_title
+                        );
+                        let _ = append_alert_note(store, &bead_id, &note).await;
+
+                        tracing::info!(
+                            parent_id = %bead.id,
+                            proposal_title = %child_title,
+                            deduplicated_bead_id = %bead_id,
+                            fingerprint = %fingerprint,
+                            "Unravel proposal deduplicated"
+                        );
+                        suppressed_count += 1;
+                    }
+                    Ok(AlertDeduplication::Suppressed { bead_id, closed_at }) => {
+                        tracing::info!(
+                            parent_id = %bead.id,
+                            proposal_title = %child_title,
+                            suppressed_bead_id = %bead_id,
+                            closed_at = %closed_at,
+                            "Unravel proposal suppressed - closed within 24h"
+                        );
+                        suppressed_count += 1;
+                    }
+                    Ok(AlertDeduplication::CreateNew) => {
+                        let fingerprint = crate::fingerprint::compute_fingerprint(
+                            &workspace,
+                            &AlertKind::UnravelProposal,
+                            &cause,
+                        );
+                        let labels = build_alert_labels(&fingerprint, &["unravel-proposal"]);
+                        let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
+
+                        deduplicated_specs.push((child_title, child_body, label_refs));
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            parent_id = %bead.id,
+                            proposal_title = %child_title,
+                            error = %e,
+                            "Failed to check unravel proposal deduplication, including anyway"
+                        );
+                        let labels = vec!["unravel-proposal"];
+                        deduplicated_specs.push((child_title, child_body, labels));
+                    }
+                }
+            }
+
             let mut created_for_this_bead = 0u32;
-            if !child_specs.is_empty() {
-                let labels: Vec<&str> = vec!["unravel-proposal"];
-                let new_children: Vec<NewChild> = child_specs
+            if !deduplicated_specs.is_empty() {
+                let new_children: Vec<NewChild> = deduplicated_specs
                     .iter()
-                    .map(|(title, body)| NewChild {
+                    .map(|(title, body, labels)| NewChild {
                         title,
                         body,
-                        labels: &labels,
+                        labels,
                     })
                     .collect();
 
                 match store.split_bead(&bead.id, &new_children).await {
                     Ok(child_ids) => {
-                        for (child_id, (child_title, _)) in child_ids.iter().zip(child_specs.iter())
+                        for (child_id, (child_title, _, _)) in
+                            child_ids.iter().zip(deduplicated_specs.iter())
                         {
                             tracing::info!(
                                 parent_id = %bead.id,
@@ -454,6 +528,14 @@ impl super::Strand for UnravelStrand {
                         );
                     }
                 }
+            }
+
+            if suppressed_count > 0 {
+                tracing::info!(
+                    parent_id = %bead.id,
+                    suppressed_count,
+                    "unravel strand: suppressed duplicate proposals"
+                );
             }
 
             // Emit telemetry for this bead.

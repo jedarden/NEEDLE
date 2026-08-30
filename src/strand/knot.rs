@@ -19,6 +19,9 @@ use tracing::Instrument;
 
 use crate::bead_store::BeadStore;
 use crate::config::KnotConfig;
+use crate::fingerprint::{
+    append_alert_note, build_alert_labels, check_alert_deduplication, AlertDeduplication, AlertKind,
+};
 use crate::telemetry::Telemetry;
 use crate::types::{BeadId, BeadStatus, StrandError, StrandResult};
 
@@ -247,23 +250,131 @@ impl super::Strand for KnotStrand {
                         "unknown".to_string()
                     };
 
-                    // Emit telemetry instead of creating a bead.
+                    // Emit telemetry AND create an alert bead with fingerprint-based deduplication.
                     let _ = self.telemetry.emit(
                         crate::telemetry::EventKind::PluckStarvationDetected {
-                            workspace: workspace_path,
+                            workspace: workspace_path.clone(),
                             open_count: *open_count,
                             excluded_count,
-                            candidate_exclusion_reasons,
+                            candidate_exclusion_reasons: candidate_exclusion_reasons.clone(),
                         },
                         Utc::now(),
                     );
+
+                    // Create alert bead with deduplication
+                    let cause = format!(
+                        "diagnosis={}, open={}, excluded={}, reasons={}",
+                        diagnosis.as_str(),
+                        open_count,
+                        excluded_count,
+                        candidate_exclusion_reasons.join(", ")
+                    );
+
+                    let dedup_result = check_alert_deduplication(
+                        store,
+                        &workspace_path,
+                        &AlertKind::KnotStarvation,
+                        &cause,
+                    )
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::warn!(
+                            error = %e,
+                            workspace = %workspace_path,
+                            "Failed to check knot alert deduplication, proceeding with creation"
+                        );
+                        AlertDeduplication::CreateNew
+                    });
+
+                    match dedup_result {
+                        AlertDeduplication::Deduplicated {
+                            bead_id,
+                            fingerprint,
+                        } => {
+                            let note = format!(
+                                "Knot starvation recurred: diagnosis={}, open={}, excluded={}",
+                                diagnosis.as_str(),
+                                open_count,
+                                excluded_count
+                            );
+                            let _ = append_alert_note(store, &bead_id, &note).await;
+
+                            tracing::info!(
+                                workspace = %workspace_path,
+                                deduplicated_bead_id = %bead_id,
+                                fingerprint = %fingerprint,
+                                diagnosis = %diagnosis.as_str(),
+                                "Knot starvation alert deduplicated"
+                            );
+                        }
+                        AlertDeduplication::Suppressed { bead_id, closed_at } => {
+                            tracing::info!(
+                                workspace = %workspace_path,
+                                suppressed_bead_id = %bead_id,
+                                closed_at = %closed_at,
+                                "Knot starvation alert suppressed - closed within 24h"
+                            );
+                        }
+                        AlertDeduplication::CreateNew => {
+                            let fingerprint = crate::fingerprint::compute_fingerprint(
+                                &workspace_path,
+                                &AlertKind::KnotStarvation,
+                                &cause,
+                            );
+
+                            let title = format!(
+                                "KNOT: Starvation detected in {}",
+                                workspace_path.rsplit('/').next().unwrap_or("workspace")
+                            );
+
+                            let body = format!(
+                                "## Knot Starvation Alert\n\n\
+                                 **Diagnosis:** {}\n\
+                                 **Workspace:** {}\n\
+                                 **Open beads:** {}\n\
+                                 **Excluded beads:** {}\n\
+                                 **Exclusion reasons:** {}\n\
+                                 **Timestamp:** {}\n\n\
+                                 This workspace has open beads that Pluck cannot see due to \
+                                 filtering rules. This may indicate a configuration error.",
+                                diagnosis.as_str(),
+                                workspace_path,
+                                open_count,
+                                excluded_count,
+                                candidate_exclusion_reasons.join(", "),
+                                Utc::now().to_rfc3339()
+                            );
+
+                            let labels =
+                                build_alert_labels(&fingerprint, &["knot-starvation", "human"]);
+                            let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
+
+                            match store.create_bead(&title, &body, &label_refs).await {
+                                Ok(alert_id) => {
+                                    tracing::info!(
+                                        workspace = %workspace_path,
+                                        alert_id = %alert_id,
+                                        fingerprint = %fingerprint,
+                                        "Knot starvation alert bead created"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        error = %e,
+                                        workspace = %workspace_path,
+                                        "Failed to create knot starvation alert bead"
+                                    );
+                                }
+                            }
+                        }
+                    }
 
                     self.record_alert();
                     tracing::warn!(
                         diagnosis = diagnosis.as_str(),
                         open_count,
                         excluded_count,
-                        "knot emitted starvation telemetry"
+                        "knot emitted starvation telemetry and created alert bead"
                     );
                 }
             }

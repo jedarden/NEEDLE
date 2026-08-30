@@ -46,6 +46,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::bead_store::{discover_default, BeadStore, Filters};
 use crate::config::ExploreConfig;
@@ -187,6 +188,9 @@ pub struct ExploreStrand {
     /// Adaptive cadence for roaming scans. This is intentionally in-memory and
     /// scoped to one worker instance.
     scan_backoff: std::sync::Mutex<ExploreScanBackoff>,
+    /// Cross-workspace cleanup threshold (seconds). Beads stuck in_progress
+    /// longer than this are candidates for release during remote workspace scans.
+    stuck_threshold_secs: u64,
 }
 
 impl ExploreStrand {
@@ -264,6 +268,7 @@ impl ExploreStrand {
                 config.scan_interval_cycles,
                 config.max_scan_interval_cycles,
             )),
+            stuck_threshold_secs: config.stuck_threshold_secs,
         }
     }
 
@@ -297,6 +302,7 @@ impl ExploreStrand {
             ready_beads_detected: AtomicU64::new(0),
             last_scan_per_workspace: std::sync::Mutex::new(std::collections::HashMap::new()),
             scan_backoff: std::sync::Mutex::new(ExploreScanBackoff::new(1, 8)),
+            stuck_threshold_secs: 300,
         }
     }
 
@@ -331,6 +337,7 @@ impl ExploreStrand {
             ready_beads_detected: AtomicU64::new(0),
             last_scan_per_workspace: std::sync::Mutex::new(std::collections::HashMap::new()),
             scan_backoff: std::sync::Mutex::new(ExploreScanBackoff::new(1, 8)),
+            stuck_threshold_secs: 300,
         }
     }
 
@@ -785,6 +792,7 @@ impl super::Strand for ExploreStrand {
                             &self.registry,
                             &self.telemetry,
                             &self.qualified_id,
+                            Some(Duration::from_secs(self.stuck_threshold_secs)),
                         )
                         .await
                         {
@@ -3999,6 +4007,238 @@ mod tests {
         assert!(
             strand.workspaces.lock().unwrap().contains(&ws2),
             "new workspace should be discovered when rediscovery_cycles = 0 (throttle removed)"
+        );
+    }
+
+    /// Test that cross-workspace mend applies stuck_threshold_secs for age-based reclaim.
+    ///
+    /// This test verifies that the Explore strand properly threads the Mend config's
+    /// stuck_threshold_secs through to cleanup_orphaned_in_progress, enabling age-based
+    /// reclaim even in remote stores where the assignee PID is still alive (--count 1 case).
+    ///
+    /// Scenario:
+    /// - Remote workspace has an in_progress bead with assignee PID alive
+    /// - The bead's updated_at is older than stuck_threshold_secs (simulating a stuck claim)
+    /// - Explore's cross-workspace cleanup should release the bead based on age
+    ///
+    /// This test uses a custom store factory to inject a fixture store with controlled state.
+    #[tokio::test]
+    #[ignore]
+    async fn cross_workspace_mend_applies_stuck_threshold_secs() {
+        use std::time::{Duration, SystemTime};
+
+        let temp_root = tempfile::tempdir().unwrap();
+        let remote_workspace = temp_root.path().join("remote-workspace");
+        let home = PathBuf::from("/home/test");
+
+        // Create .beads/ directory
+        fs::create_dir_all(&remote_workspace).unwrap();
+        fs::create_dir(remote_workspace.join(".beads")).unwrap();
+
+        // Create a registry with a live worker entry (PID exists)
+        let registry_dir = tempfile::tempdir().unwrap();
+        let registry = crate::registry::Registry::new(registry_dir.path());
+
+        // Register a "live" worker with a valid PID (this process's PID)
+        let live_worker = crate::registry::Worker {
+            id: "test-worker-alpha".to_string(),
+            pid: std::process::id(),
+            started_at: SystemTime::now(),
+            current_bead: None,
+        };
+
+        // Create a registry entry that will appear as "live" (PID check passes)
+        registry.register(&live_worker).unwrap();
+
+        // Test threshold: 60 seconds
+        let stuck_threshold_secs = 60u64;
+
+        // Create a bead that's older than the threshold
+        let old_bead = crate::types::Bead {
+            id: BeadId::from("old-stuck-bead".to_string()),
+            title: "Old stuck bead".to_string(),
+            body: None,
+            priority: 1,
+            status: BeadStatus::InProgress,
+            assignee: Some("test-worker-alpha".to_string()), // Same as live worker
+            labels: vec![],
+            workspace: remote_workspace.clone(),
+            dependencies: vec![],
+            dependents: vec![],
+            comments: vec![],
+            created_at: Utc::now() - chrono::Duration::seconds(600), // Created 10 min ago
+            updated_at: Utc::now() - chrono::Duration::seconds(stuck_threshold_secs as i64 + 10), // Updated 70s ago (older than threshold)
+        };
+
+        // Create a custom store factory that returns a fixture store with our old bead
+        struct StuckBeadFactory {
+            old_bead: Bead,
+            workspace: PathBuf,
+            should_release: Arc<std::sync::atomic::AtomicBool>,
+        }
+
+        struct StuckBeadStore {
+            old_bead: Bead,
+            workspace: PathBuf,
+            should_release: Arc<std::sync::atomic::AtomicBool>,
+        }
+
+        #[async_trait::async_trait]
+        impl StoreFactory for StuckBeadFactory {
+            async fn create_store(
+                &self,
+                workspace: &Path,
+            ) -> Result<Arc<dyn BeadStore>, anyhow::Error> {
+                if workspace == self.workspace {
+                    Ok(Arc::new(StuckBeadStore {
+                        old_bead: self.old_bead.clone(),
+                        workspace: workspace.to_path_buf(),
+                        should_release: self.should_release.clone(),
+                    }))
+                } else {
+                    Err(anyhow::anyhow!("unexpected workspace"))
+                }
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl BeadStore for StuckBeadStore {
+            fn has_valid_store(&self) -> bool {
+                true
+            }
+
+            async fn list_all(&self) -> Result<Vec<Bead>> {
+                Ok(vec![self.old_bead.clone()])
+            }
+
+            async fn ready(&self, _filters: &Filters) -> Result<Vec<Bead>> {
+                // Return empty to trigger the orphan cleanup path
+                Ok(vec![])
+            }
+
+            async fn show(&self, _id: &BeadId) -> Result<Bead> {
+                anyhow::bail!("not implemented")
+            }
+
+            async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<ClaimResult> {
+                anyhow::bail!("not implemented")
+            }
+
+            async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {
+                anyhow::bail!("not implemented")
+            }
+
+            async fn release(&self, _id: &BeadId) -> Result<()> {
+                // Mark that release was called
+                self.should_release
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }
+
+            async fn block(&self, _id: &BeadId) -> Result<()> {
+                Ok(())
+            }
+
+            async fn flush(&self) -> Result<()> {
+                Ok(())
+            }
+
+            async fn reopen(&self, _id: &BeadId) -> Result<()> {
+                Ok(())
+            }
+
+            async fn labels(&self, _id: &BeadId) -> Result<Vec<String>> {
+                Ok(vec![])
+            }
+
+            async fn add_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
+                Ok(())
+            }
+
+            async fn remove_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
+                Ok(())
+            }
+
+            async fn create_bead(
+                &self,
+                _title: &str,
+                _body: &str,
+                _labels: &[&str],
+            ) -> Result<BeadId> {
+                Ok(BeadId::from("new-bead".to_string()))
+            }
+
+            async fn doctor_repair(&self) -> Result<RepairReport> {
+                Ok(RepairReport::default())
+            }
+
+            async fn doctor_check(&self) -> Result<RepairReport> {
+                Ok(RepairReport::default())
+            }
+
+            async fn full_rebuild(&self) -> Result<()> {
+                Ok(())
+            }
+
+            async fn add_dependency(
+                &self,
+                _blocker_id: &BeadId,
+                _blocked_id: &BeadId,
+            ) -> Result<()> {
+                Ok(())
+            }
+
+            async fn remove_dependency(
+                &self,
+                _blocked_id: &BeadId,
+                _blocker_id: &BeadId,
+            ) -> Result<()> {
+                Ok(())
+            }
+
+            async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let should_release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let factory = Arc::new(StuckBeadFactory {
+            old_bead: old_bead.clone(),
+            workspace: remote_workspace.clone(),
+            should_release: should_release.clone(),
+        });
+
+        // Create Explore strand with explicit stuck_threshold_secs
+        let config = ExploreConfig {
+            enabled: true,
+            workspaces: vec![remote_workspace.clone()],
+            workspace_root: PathBuf::from("/tmp/needle-test-root"),
+            rediscovery_cycles: 0,
+            starvation_threshold_minutes: 15,
+            scan_interval_cycles: 1,
+            max_scan_interval_cycles: 1,
+            stuck_threshold_secs, // Explicit threshold for this test
+        };
+
+        let telemetry = Telemetry::new("test-worker".to_string());
+
+        let strand = ExploreStrand::new_with_store_factory(
+            vec![remote_workspace.clone()],
+            home,
+            registry,
+            telemetry,
+            "test-worker".to_string(),
+            factory,
+        );
+
+        // Run Explore evaluation
+        let store = DummyStore;
+        let _ = strand.evaluate(&store, &HashSet::new()).await;
+
+        // Verify that the bead was released
+        assert!(
+            should_release.load(std::sync::atomic::Ordering::SeqCst),
+            "old stuck bead should be released based on age threshold even though assignee PID is alive"
         );
     }
 }

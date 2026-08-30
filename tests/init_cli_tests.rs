@@ -34,27 +34,8 @@ fn init_backend_bead_rs_parses() {
     }
 }
 
-/// Test that `--backend bead-forge` parses correctly.
-#[test]
-fn init_backend_bead_forge_parses() {
-    let args = vec!["needle", "init", "--backend", "bead-forge"];
-    let result = Cli::try_parse_from(args);
-    assert!(
-        result.is_ok(),
-        "CLI parsing should succeed with --backend bead-forge"
-    );
-
-    let cli = result.unwrap();
-    match cli.command {
-        needle::cli::CliCommand::Init {
-            backend,
-            no_agents_md: _,
-        } => {
-            assert_eq!(backend, "bead-forge", "Backend should be bead-forge");
-        }
-        _ => panic!("Expected Init command"),
-    }
-}
+// REMOVED: init_backend_bead_forge_parses
+// bead-forge backend is deprecated - this test verified legacy backend support which is no longer available
 
 /// Test that default backend is bead-rs when not specified.
 #[test]

@@ -430,6 +430,14 @@ pub struct WorkerConfig {
     /// the orphaned bead risk and have an external recovery mechanism.
     #[serde(default = "WorkerConfig::default_allow_exit_without_supervisor")]
     pub allow_exit_without_supervisor: bool,
+
+    /// Generation budget for post-dispatch audit (Phase 19.4).
+    ///
+    /// Maximum number of beads an agent may create during a single dispatch
+    /// before excess beads are deferred with the `over-budget` label.
+    /// Default: 3.
+    #[serde(default = "WorkerConfig::default_generation_max_per_dispatch")]
+    pub generation_max_per_dispatch: u32,
 }
 
 impl Default for WorkerConfig {
@@ -457,6 +465,7 @@ impl Default for WorkerConfig {
             scratch_sweep: ScratchSweepConfig::default(),
             worker_binary_path: None,
             allow_exit_without_supervisor: Self::default_allow_exit_without_supervisor(),
+            generation_max_per_dispatch: Self::default_generation_max_per_dispatch(),
         }
     }
 }
@@ -521,6 +530,9 @@ impl WorkerConfig {
     }
     fn default_config_reload_check_interval_secs() -> u64 {
         0
+    }
+    fn default_generation_max_per_dispatch() -> u32 {
+        3
     }
 
     fn default_allow_exit_without_supervisor() -> bool {
@@ -1260,19 +1272,6 @@ mod tests {
         assert!(config.path.is_none());
     }
 
-    // REMOVED: test_bead_cli_config_with_br_backend
-    // Duplicate test - functionality covered by test_bead_cli_config_with_bead_backend
-
-    #[test]
-    fn test_bead_cli_config_with_bead_backend() {
-        let config = BeadCliConfig {
-            backend: BeadBackend::Bead,
-            path: None,
-        };
-        assert_eq!(config.backend, BeadBackend::Bead);
-        assert!(config.path.is_none());
-    }
-
     #[test]
     fn test_bead_cli_config_with_explicit_path() {
         let custom_path = PathBuf::from("/custom/path/to/bead");
@@ -1640,7 +1639,6 @@ mod tests {
 
     // REMOVED: test_resolve_bead_cli_auto_fallback_to_bf
     // Bead-forge/bf backend is no longer supported; this test tested obsolete fallback behavior.
-
     #[test]
     fn test_resolve_bead_cli_br_backend() {
         let tmp_dir = tempfile::tempdir().unwrap();
@@ -3149,7 +3147,6 @@ path: /path with spaces/to/bead
     #[serial]
     // REMOVED: test_detect_bead_backend_auto_falls_back_to_bf_when_bead_missing
     // Bead-forge/bf backend is no longer supported; this test tested obsolete fallback behavior.
-
     #[serial]
     #[test]
     fn test_detect_bead_backend_auto_falls_back_to_br() {
@@ -3275,7 +3272,6 @@ path: /path with spaces/to/bead
     #[serial]
     // REMOVED: test_detect_bead_backend_config_uses_bf_alias
     // Bead-forge/bf backend is no longer supported; this test tested obsolete fallback behavior.
-
     #[serial]
     #[test]
     fn test_detect_bead_backend_config_br_backend() {
@@ -4293,6 +4289,11 @@ pub struct ExploreConfig {
     /// backoff. The effective interval never exceeds this value.
     #[serde(default = "ExploreConfig::default_max_scan_interval_cycles")]
     pub max_scan_interval_cycles: u32,
+
+    /// Cross-workspace cleanup: release beads stuck in_progress for longer
+    /// than this (seconds). Default matches MendConfig (300s = 5 minutes).
+    #[serde(default = "ExploreConfig::default_stuck_threshold_secs")]
+    pub stuck_threshold_secs: u64,
 }
 
 impl Default for ExploreConfig {
@@ -4305,6 +4306,7 @@ impl Default for ExploreConfig {
             starvation_threshold_minutes: Self::default_starvation_threshold_minutes(),
             scan_interval_cycles: Self::default_scan_interval_cycles(),
             max_scan_interval_cycles: Self::default_max_scan_interval_cycles(),
+            stuck_threshold_secs: Self::default_stuck_threshold_secs(),
         }
     }
 }
@@ -4332,6 +4334,10 @@ impl ExploreConfig {
 
     fn default_max_scan_interval_cycles() -> u32 {
         8
+    }
+
+    fn default_stuck_threshold_secs() -> u64 {
+        300
     }
 }
 

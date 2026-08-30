@@ -26,20 +26,6 @@ fn test_serialize_auto_backend() {
 }
 
 #[test]
-fn test_serialize_bf_backend() {
-    let config = BeadCliConfig {
-        backend: BeadBackend::Br,
-        path: None,
-    };
-
-    let json = serde_json::to_string(&config).unwrap();
-    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
-
-    assert_eq!(parsed["backend"], "br");
-    assert!(parsed.get("path").is_none());
-}
-
-#[test]
 fn test_serialize_br_backend() {
     let config = BeadCliConfig {
         backend: BeadBackend::Br,
@@ -52,6 +38,8 @@ fn test_serialize_br_backend() {
     assert_eq!(parsed["backend"], "br");
     assert!(parsed.get("path").is_none());
 }
+
+// REMOVED: test_serialize_bf_backend (duplicate - functionality covered by test_serialize_br_backend)
 
 #[test]
 fn test_serialize_bead_backend() {
@@ -71,14 +59,14 @@ fn test_serialize_bead_backend() {
 fn test_serialize_with_path() {
     let config = BeadCliConfig {
         backend: BeadBackend::Auto,
-        path: Some(PathBuf::from("/usr/local/bin/bf")),
+        path: Some(PathBuf::from("/usr/local/bin/bead")),
     };
 
     let json = serde_json::to_string(&config).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
     assert_eq!(parsed["backend"], "auto");
-    assert_eq!(parsed["path"], "/usr/local/bin/bf");
+    assert_eq!(parsed["path"], "/usr/local/bin/bead");
 }
 
 #[test]
@@ -105,7 +93,7 @@ fn test_deserialize_auto_backend() {
 }
 
 #[test]
-fn test_deserialize_bead_forge_backend() {
+fn test_deserialize_br_backend() {
     let json = r#"{"backend": "br"}"#;
     let config: BeadCliConfig = serde_json::from_str(json).unwrap();
 
@@ -113,6 +101,7 @@ fn test_deserialize_bead_forge_backend() {
     assert!(config.path.is_none());
 }
 
+// REMOVED: test_deserialize_bead_forge_backend - duplicate, functionality covered by test_deserialize_br_backend
 // "bf" alias removed - bead-forge is deprecated
 // This test verified legacy "bf" backend support which is no longer available
 
@@ -145,21 +134,21 @@ fn test_deserialize_bead_alias() {
 
 #[test]
 fn test_deserialize_with_path() {
-    let json = r#"{"backend": "auto", "path": "/custom/path/bf"}"#;
+    let json = r#"{"backend": "auto", "path": "/custom/path/bead"}"#;
     let config: BeadCliConfig = serde_json::from_str(json).unwrap();
 
     assert_eq!(config.backend, BeadBackend::Auto);
-    assert_eq!(config.path, Some(PathBuf::from("/custom/path/bf")));
+    assert_eq!(config.path, Some(PathBuf::from("/custom/path/bead")));
 }
 
 #[test]
 fn test_deserialize_explicit_path_alias() {
     // Test the "explicit_path" alias for the path field
-    let json = r#"{"backend": "br", "explicit_path": "/usr/bin/bf"}"#;
+    let json = r#"{"backend": "br", "explicit_path": "/usr/bin/bead"}"#;
     let config: BeadCliConfig = serde_json::from_str(json).unwrap();
 
     assert_eq!(config.backend, BeadBackend::Br);
-    assert_eq!(config.path, Some(PathBuf::from("/usr/bin/bf")));
+    assert_eq!(config.path, Some(PathBuf::from("/usr/bin/bead")));
 }
 
 #[test]
@@ -176,10 +165,10 @@ fn test_round_trip_auto_backend() {
 }
 
 #[test]
-fn test_round_trip_bf_backend_with_path() {
+fn test_round_trip_br_backend_with_path() {
     let original = BeadCliConfig {
         backend: BeadBackend::Br,
-        path: Some(PathBuf::from("/opt/bin/bf")),
+        path: Some(PathBuf::from("/opt/bin/bead")),
     };
 
     let json = serde_json::to_string(&original).unwrap();
@@ -301,14 +290,14 @@ fn test_round_trip_all_backend_path_combinations() {
         (BeadBackend::Auto, None, "auto with no path"),
         (
             BeadBackend::Auto,
-            Some(PathBuf::from("/usr/local/bin/bf")),
+            Some(PathBuf::from("/usr/local/bin/bead")),
             "auto with path",
         ),
         // Br backend
         (BeadBackend::Br, None, "br with no path"),
         (
             BeadBackend::Br,
-            Some(PathBuf::from("/opt/bin/bf")),
+            Some(PathBuf::from("/opt/bin/bead")),
             "br with path",
         ),
         // Bead backend
@@ -405,20 +394,20 @@ fn test_yaml_deserialize_bead_rs_backend() {
 
 #[test]
 fn test_yaml_deserialize_with_path() {
-    let yaml = "backend: auto\npath: /custom/path/bf";
+    let yaml = "backend: auto\npath: /custom/path/bead";
     let config: BeadCliConfig = serde_yaml::from_str(yaml).unwrap();
 
     assert_eq!(config.backend, BeadBackend::Auto);
-    assert_eq!(config.path, Some(PathBuf::from("/custom/path/bf")));
+    assert_eq!(config.path, Some(PathBuf::from("/custom/path/bead")));
 }
 
 #[test]
 fn test_yaml_round_trip_all_backends() {
     let test_cases = vec![
         (BeadBackend::Auto, None::<PathBuf>),
-        (BeadBackend::Auto, Some(PathBuf::from("/usr/bin/bf"))),
+        (BeadBackend::Auto, Some(PathBuf::from("/usr/bin/bead"))),
         (BeadBackend::Br, None::<PathBuf>),
-        (BeadBackend::Br, Some(PathBuf::from("/opt/bin/bf"))),
+        (BeadBackend::Br, Some(PathBuf::from("/opt/bin/bead"))),
         (BeadBackend::Bead, None::<PathBuf>),
         (
             BeadBackend::Bead,
@@ -514,7 +503,7 @@ fn test_toml_deserialize_bead_rs_backend() {
 fn test_toml_deserialize_with_path() {
     let toml = r#"
 backend = "auto"
-path = "/custom/path/bf"
+path = "/custom/path/bead"
 "#;
     let config: BeadCliConfig = toml::from_str(toml).unwrap();
 
@@ -526,9 +515,9 @@ path = "/custom/path/bf"
 fn test_toml_round_trip_all_backends() {
     let test_cases = vec![
         (BeadBackend::Auto, None::<PathBuf>),
-        (BeadBackend::Auto, Some(PathBuf::from("/usr/bin/bf"))),
+        (BeadBackend::Auto, Some(PathBuf::from("/usr/bin/bead"))),
         (BeadBackend::Br, None::<PathBuf>),
-        (BeadBackend::Br, Some(PathBuf::from("/opt/bin/bf"))),
+        (BeadBackend::Br, Some(PathBuf::from("/opt/bin/bead"))),
         (BeadBackend::Bead, None::<PathBuf>),
         (
             BeadBackend::Bead,

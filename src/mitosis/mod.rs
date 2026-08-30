@@ -4120,8 +4120,14 @@ End of response."#;
 
         // No children should be created
         let guard = store.lock_state();
-        assert!(guard.created.is_empty(), "should create no children at max_depth");
-        assert!(guard.deps_added.is_empty(), "should add no dependencies at max_depth");
+        assert!(
+            guard.created.is_empty(),
+            "should create no children at max_depth"
+        );
+        assert!(
+            guard.deps_added.is_empty(),
+            "should add no dependencies at max_depth"
+        );
     }
 
     #[tokio::test]

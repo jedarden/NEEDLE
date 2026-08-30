@@ -544,6 +544,19 @@ pub enum EventKind {
         error: String,
     },
 
+    // ── Post-dispatch audit (Phase 19.4) ──
+    /// Verification-shaped bead was closed and folded into parent.
+    AuditBeadClosedAsVerification {
+        bead_id: BeadId,
+        parent_id: BeadId,
+    },
+    /// Bead was deferred for exceeding generation budget.
+    AuditBeadDeferredOverBudget {
+        bead_id: BeadId,
+        position: u32,
+        budget: u32,
+    },
+
     // ── Effort tracking ──
     EffortRecorded {
         bead_id: BeadId,
@@ -1100,6 +1113,8 @@ impl EventKind {
             EventKind::MendZeroActivityLogCleaned { .. } => "mend.zero_activity_log_cleaned",
             EventKind::MendStaleAssigneeCleared { .. } => "mend.stale_assignee_cleared",
             EventKind::MendAssigneeClearFailed { .. } => "mend.assignee_clear_failed",
+            EventKind::AuditBeadClosedAsVerification { .. } => "audit.bead_closed_as_verification",
+            EventKind::AuditBeadDeferredOverBudget { .. } => "audit.bead_deferred_over_budget",
             EventKind::EffortRecorded { .. } => "effort.recorded",
             EventKind::BudgetWarning { .. } => "budget.warning",
             EventKind::BudgetStop { .. } => "budget.stop",
@@ -1262,6 +1277,7 @@ impl EventKind {
             | EventKind::StrandSkipped { .. }
             | EventKind::QueueEmpty
             | EventKind::PluckStarvationDetected { .. }
+            | EventKind::AlertDeduplicated { .. }
             | EventKind::HealthCheck { .. }
             | EventKind::FleetCpuSaturated { .. }
             | EventKind::FleetMemoryLow { .. }
@@ -1518,6 +1534,17 @@ impl EventKind {
                     "open_count": open_count,
                     "excluded_count": excluded_count,
                     "candidate_exclusion_reasons": candidate_exclusion_reasons,
+                })
+            }
+            EventKind::AlertDeduplicated {
+                fingerprint,
+                bead_id,
+                kind,
+            } => {
+                serde_json::json!({
+                    "fingerprint": fingerprint,
+                    "bead_id": bead_id.as_ref(),
+                    "kind": kind,
                 })
             }
             EventKind::ClaimAttempt { bead_id, attempt } => {
@@ -2564,6 +2591,22 @@ impl EventKind {
                 "assignee": assignee,
                 "error": error,
             }),
+            EventKind::AuditBeadClosedAsVerification {
+                bead_id,
+                parent_id,
+            } => serde_json::json!({
+                "bead_id": bead_id,
+                "parent_id": parent_id,
+            }),
+            EventKind::AuditBeadDeferredOverBudget {
+                bead_id,
+                position,
+                budget,
+            } => serde_json::json!({
+                "bead_id": bead_id,
+                "position": position,
+                "budget": budget,
+            }),
             EventKind::BeadQuarantined {
                 bead_id,
                 failure_count,
@@ -2697,6 +2740,7 @@ impl EventKind {
             | EventKind::StrandSkipped { .. }
             | EventKind::QueueEmpty
             | EventKind::PluckStarvationDetected { .. }
+            | EventKind::AlertDeduplicated { .. }
             | EventKind::ClaimAttempt { .. }
             | EventKind::ClaimSuccess { .. }
             | EventKind::ClaimRaceLost { .. }

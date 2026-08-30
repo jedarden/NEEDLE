@@ -1331,6 +1331,9 @@ pub fn uncommitted_function() {
             GateResult::Pass => {
                 panic!("Expected failure due to uncommitted dependency, but got Pass");
             }
+            GateResult::ExecutionError { .. } => {
+                panic!("Expected Pass or Fail, got ExecutionError")
+            }
         }
 
         // Verify the clean extraction was cleaned up after detecting uncommitted dependency
@@ -1472,6 +1475,9 @@ pub fn broken_function( -> i32 {
             }
             GateResult::Pass => {
                 panic!("Expected failure due to syntax error, but got Pass");
+            }
+            GateResult::ExecutionError { .. } => {
+                panic!("Expected Pass or Fail, got ExecutionError")
             }
         }
 
@@ -1649,6 +1655,9 @@ pub fn func2() {
             }
             GateResult::Pass => {
                 panic!("Expected failure due to uncommitted dependencies, but got Pass");
+            }
+            GateResult::ExecutionError { .. } => {
+                panic!("Expected Pass or Fail, got ExecutionError")
             }
         }
     }

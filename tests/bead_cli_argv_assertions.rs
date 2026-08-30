@@ -1,6 +1,6 @@
 //! Fixture-CLI tests asserting exact argv for bead store operations.
 //!
-//! These tests use mock CLI invocations to assert that NEEDLE calls `bf`
+//! These tests use mock CLI invocations to assert that NEEDLE calls `bead`
 //! with the exact correct arguments. This prevents silent regressions where
 //! the code might emit flags that the CLI doesn't accept.
 
@@ -121,7 +121,7 @@ impl BeadStore for FixtureCliStore {
     }
 
     async fn add_dependency(&self, blocker_id: &BeadId, blocked_id: &BeadId) -> Result<()> {
-        // Record the exact argv for bf dep add
+        // Record the exact argv for bead dep add
         let args = vec![
             "dep".to_string(),
             "add".to_string(),
@@ -134,7 +134,7 @@ impl BeadStore for FixtureCliStore {
     }
 
     async fn remove_dependency(&self, blocked_id: &BeadId, blocker_id: &BeadId) -> Result<()> {
-        // Record the exact argv for bf dep remove
+        // Record the exact argv for bead dep remove
         let args = vec![
             "dep".to_string(),
             "remove".to_string(),
@@ -154,7 +154,7 @@ impl BeadStore for FixtureCliStore {
     }
 
     async fn create_bead(&self, title: &str, body: &str, labels: &[&str]) -> Result<BeadId> {
-        // Record the exact argv that the bead-forge descriptor emits.
+        // Record the exact argv that the bead-rs descriptor emits.
         let mut args: Vec<String> = vec![
             "create".to_string(),
             "--title".to_string(),

@@ -4820,6 +4820,113 @@ fn doctor_check_telemetry_logs(config: &Config, needle_home: &Path, repair: bool
     }
 }
 
+/// Check that all gate command paths exist.
+///
+/// Validates both legacy `verification:` entries and new `gates:` configurations.
+/// For each command, checks if the first token (the executable) exists:
+/// - Absolute paths: checked directly
+/// - Workspace-relative paths: checked relative to workspace root
+/// - Bare commands: checked with `which` (may be on PATH)
+fn doctor_check_gate_commands(config: &Config, workspace_root: &Path) -> CheckResult {
+    use crate::config::GateConfig;
+    use std::process::Command;
+
+    let mut missing_commands: Vec<String> = Vec::new();
+    let mut path_commands: Vec<String> = Vec::new();
+
+    // Collect all commands from verification and gates
+    let mut all_commands: Vec<(String, String)> = Vec::new(); // (command, source)
+
+    // Legacy verification format
+    for cmd in &config.verification {
+        all_commands.push((cmd.clone(), "verification".to_string()));
+    }
+
+    // New gates format
+    for gate_config in &config.gates {
+        if let GateConfig::Command { commands, .. } = gate_config {
+            for cmd in commands {
+                all_commands.push((cmd.clone(), "gates".to_string()));
+            }
+        }
+    }
+
+    if all_commands.is_empty() {
+        return CheckResult::pass("Gate commands", "none configured");
+    }
+
+    for (cmd, source) in all_commands {
+        // Parse the first token (the executable)
+        let first_token = match cmd.split_whitespace().next() {
+            Some(token) => token,
+            None => continue, // Empty command
+        };
+
+        // Check if it's an absolute path
+        if first_token.starts_with('/') {
+            if !PathBuf::from(first_token).exists() {
+                missing_commands.push(format!("{}: {} (not found)", source, first_token));
+            }
+            continue;
+        }
+
+        // Check if it's a workspace-relative path (contains /)
+        if first_token.contains('/') {
+            let full_path = workspace_root.join(first_token);
+            if !full_path.exists() {
+                missing_commands.push(format!(
+                    "{}: {} (relative to workspace, not found)",
+                    source, first_token
+                ));
+            }
+            continue;
+        }
+
+        // Bare command - check with which
+        match Command::new("which").arg(first_token).output() {
+            Ok(output) if output.status.success() => {
+                // Command found on PATH
+            }
+            Ok(_) => {
+                // Command not found on PATH
+                path_commands.push(format!("{}: {} (not on PATH)", source, first_token));
+            }
+            Err(e) => {
+                // which command failed (shouldn't happen)
+                path_commands.push(format!(
+                    "{}: {} (which check failed: {})",
+                    source, first_token, e
+                ));
+            }
+        }
+    }
+
+    if !missing_commands.is_empty() {
+        let mut details = missing_commands.clone();
+        if !path_commands.is_empty() {
+            details.extend(path_commands.clone());
+        }
+        return CheckResult::fail(
+            "Gate commands",
+            format!("{} command(s) with missing paths", missing_commands.len()),
+        )
+        .with_detail(details);
+    }
+
+    if !path_commands.is_empty() {
+        return CheckResult::warn(
+            "Gate commands",
+            format!("{} command(s) not found on PATH", path_commands.len()),
+        )
+        .with_detail(path_commands);
+    }
+
+    CheckResult::pass(
+        "Gate commands",
+        format!("{} command(s) validated", all_commands.len()),
+    )
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // `needle doctor` — comprehensive system health check
 // ──────────────────────────────────────────────────────────────────────────────

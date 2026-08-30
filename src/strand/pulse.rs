@@ -27,6 +27,9 @@ use sha2::{Digest, Sha256};
 
 use crate::bead_store::BeadStore;
 use crate::config::PulseConfig;
+use crate::fingerprint::{
+    append_alert_note, build_alert_labels, check_alert_deduplication, AlertDeduplication, AlertKind,
+};
 use crate::telemetry::{EventKind, Telemetry};
 use crate::types::{BeadId, StrandResult};
 
@@ -391,48 +394,121 @@ impl super::Strand for PulseStrand {
             }
 
             let bead_title = format!("[Pulse] {}", finding.title);
-            let bead_body = format!(
-                "## Scanner Finding\n\n\
-                 **Scanner:** {}\n\
-                 **Severity:** {}/5 (1=critical)\n\
-                 **File:** {}\n\n\
-                 **Description:**\n{}\n\n\
-                 ---\n\
-                 This issue was detected by the pulse strand during a codebase health scan.",
-                scanner_name,
-                finding.severity,
-                finding.file_path.as_deref().unwrap_or("(unknown)"),
-                finding.body,
-            );
-            let labels: Vec<&str> = vec!["pulse-finding"];
 
-            match store.create_bead(&bead_title, &bead_body, &labels).await {
-                Ok(bead_id) => {
+            // Check for deduplication using fingerprint
+            let workspace = self.workspace.display().to_string();
+            let cause = format!(
+                "scanner={}, file={}, severity={}, title={}",
+                scanner_name,
+                finding.file_path.as_deref().unwrap_or("(unknown)"),
+                finding.severity,
+                finding.title
+            );
+
+            let dedup_result =
+                check_alert_deduplication(store, &workspace, &AlertKind::PulseFinding, &cause)
+                    .await
+                    .unwrap_or_else(|e| {
+                        tracing::warn!(
+                            scanner = %scanner_name,
+                            error = %e,
+                            "Failed to check pulse finding deduplication, proceeding with creation"
+                        );
+                        AlertDeduplication::CreateNew
+                    });
+
+            match dedup_result {
+                AlertDeduplication::Deduplicated {
+                    bead_id,
+                    fingerprint,
+                } => {
+                    let note = format!(
+                        "Pulse finding recurred: scanner={}, file={}, severity={}, title='{}'",
+                        scanner_name,
+                        finding.file_path.as_deref().unwrap_or("(unknown)"),
+                        finding.severity,
+                        finding.title
+                    );
+                    let _ = append_alert_note(store, &bead_id, &note).await;
+
                     tracing::info!(
-                        bead_id = %bead_id,
                         scanner = %scanner_name,
-                        severity = finding.severity,
-                        "pulse strand: created bead for finding"
+                        finding_title = %finding.title,
+                        deduplicated_bead_id = %bead_id,
+                        fingerprint = %fingerprint,
+                        "Pulse finding deduplicated"
                     );
-                    self.telemetry
-                        .emit(
-                            EventKind::PulseBeadCreated {
-                                bead_id: bead_id.clone(),
-                                scanner_name: scanner_name.clone(),
-                                severity: finding.severity,
-                            },
-                            chrono::Utc::now(),
-                        )
-                        .ok();
+
                     state.mark_seen(&finding.fingerprint);
-                    created += 1;
                 }
-                Err(e) => {
-                    tracing::warn!(
+                AlertDeduplication::Suppressed { bead_id, closed_at } => {
+                    tracing::info!(
                         scanner = %scanner_name,
-                        error = %e,
-                        "pulse strand: failed to create bead for finding"
+                        finding_title = %finding.title,
+                        suppressed_bead_id = %bead_id,
+                        closed_at = %closed_at,
+                        "Pulse finding suppressed - closed within 24h"
                     );
+
+                    state.mark_seen(&finding.fingerprint);
+                }
+                AlertDeduplication::CreateNew => {
+                    let fingerprint = crate::fingerprint::compute_fingerprint(
+                        &workspace,
+                        &AlertKind::PulseFinding,
+                        &cause,
+                    );
+
+                    let bead_body = format!(
+                        "## Scanner Finding\n\n\
+                         **Scanner:** {}\n\
+                         **Severity:** {}/5 (1=critical)\n\
+                         **File:** {}\n\n\
+                         **Description:**\n{}\n\n\
+                         ---\n\
+                         This issue was detected by the pulse strand during a codebase health scan.",
+                        scanner_name,
+                        finding.severity,
+                        finding.file_path.as_deref().unwrap_or("(unknown)"),
+                        finding.body,
+                    );
+
+                    let labels = build_alert_labels(&fingerprint, &["pulse-finding"]);
+                    let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
+
+                    match store
+                        .create_bead(&bead_title, &bead_body, &label_refs)
+                        .await
+                    {
+                        Ok(bead_id) => {
+                            tracing::info!(
+                                bead_id = %bead_id,
+                                scanner = %scanner_name,
+                                severity = finding.severity,
+                                fingerprint = %fingerprint,
+                                "pulse strand: created bead for finding"
+                            );
+                            self.telemetry
+                                .emit(
+                                    EventKind::PulseBeadCreated {
+                                        bead_id: bead_id.clone(),
+                                        scanner_name: scanner_name.clone(),
+                                        severity: finding.severity,
+                                    },
+                                    chrono::Utc::now(),
+                                )
+                                .ok();
+                            state.mark_seen(&finding.fingerprint);
+                            created += 1;
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                scanner = %scanner_name,
+                                error = %e,
+                                "pulse strand: failed to create bead for finding"
+                            );
+                        }
+                    }
                 }
             }
         }

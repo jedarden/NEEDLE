@@ -34,13 +34,13 @@ fn test_render_with_id_placeholder() {
     .expect("store creation should succeed");
 
     let mut values = HashMap::new();
-    values.insert("id", "bf-123".to_string());
+    values.insert("id", "bead-123".to_string());
 
     let result = store
         .render_operation("show", &values)
         .expect("rendering should succeed");
 
-    assert_eq!(result, vec!["show", "bf-123", "--json"]);
+    assert_eq!(result, vec!["show", "bead-123", "--json"]);
 }
 
 #[test]
@@ -67,7 +67,7 @@ fn test_render_with_actor_placeholder() {
     .expect("store creation should succeed");
 
     let mut values = HashMap::new();
-    values.insert("id", "bf-456".to_string());
+    values.insert("id", "bead-456".to_string());
     values.insert("actor", "worker-alpha".to_string());
 
     let result = store
@@ -78,7 +78,7 @@ fn test_render_with_actor_placeholder() {
         result,
         vec![
             "update",
-            "bf-456",
+            "bead-456",
             "--status",
             "in_progress",
             "--assignee",
@@ -144,15 +144,15 @@ fn test_render_with_blocked_and_blocker_placeholders() {
     .expect("store creation should succeed");
 
     let mut values = HashMap::new();
-    values.insert("blocked", "bf-parent".to_string());
-    values.insert("blocker", "bf-child".to_string());
+    values.insert("blocked", "bead-parent".to_string());
+    values.insert("blocker", "bead-child".to_string());
 
     let result = store
         .render_operation("dep_add", &values)
         .expect("rendering should succeed");
 
-    assert!(result.contains(&"bf-child".to_string()));
-    assert!(result.contains(&"bf-parent".to_string()));
+    assert!(result.contains(&"bead-child".to_string()));
+    assert!(result.contains(&"bead-parent".to_string()));
     assert!(result.contains(&"--kind".to_string()));
     assert!(result.contains(&"blocks".to_string()));
 }
@@ -181,7 +181,7 @@ fn test_render_with_reason_placeholder() {
     .expect("store creation should succeed");
 
     let mut values = HashMap::new();
-    values.insert("id", "bf-789".to_string());
+    values.insert("id", "bead-789".to_string());
     values.insert("reason", "Completed successfully".to_string());
 
     let result = store
@@ -190,7 +190,7 @@ fn test_render_with_reason_placeholder() {
 
     assert_eq!(
         result,
-        vec!["close", "bf-789", "--reason", "Completed successfully"]
+        vec!["close", "bead-789", "--reason", "Completed successfully"]
     );
 }
 
@@ -218,7 +218,7 @@ fn test_render_with_label_placeholder() {
     .expect("store creation should succeed");
 
     let mut values = HashMap::new();
-    values.insert("id", "bf-label-test".to_string());
+    values.insert("id", "bead-label-test".to_string());
     values.insert("label", "bug".to_string());
 
     let result = store
@@ -227,20 +227,20 @@ fn test_render_with_label_placeholder() {
 
     assert_eq!(
         result,
-        vec!["label", "add", "bf-label-test", "--label", "bug"]
+        vec!["label", "add", "bead-label-test", "--label", "bug"]
     );
 }
 
 #[test]
 fn test_render_with_implicit_model_placeholder() {
-    // bead-forge backend uses {model}, {harness}, {harness_version} in claim_auto
+    // bead-rs backend uses {model}, {harness}, {harness_version} in claim_auto
     let backend = builtin_bead_backends()
         .into_iter()
-        .find(|b| b.name == "bead-forge")
-        .expect("bead-forge backend should exist");
+        .find(|b| b.name == "bead-rs")
+        .expect("bead-rs backend should exist");
 
     let workspace = tempfile::tempdir().unwrap();
-    let binary = workspace.path().join("bf");
+    let binary = workspace.path().join("bead");
     std::fs::write(&binary, "#!/bin/sh\necho test\n").unwrap();
     #[cfg(unix)]
     std::fs::set_permissions(&binary, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();

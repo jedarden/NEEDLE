@@ -32,7 +32,7 @@ fn store(root: &Path, backend_name: &str) -> CliBeadStore {
 #[cfg(unix)]
 fn batch_backend() -> needle::bead_store::BeadBackend {
     let mut backend = builtin_bead_backends().into_iter().next().unwrap();
-    backend.name = "bead-forge".to_string();
+    backend.name = "bead-rs".to_string();
     backend.operations.get_mut("claim").unwrap().strategy = Some("batch_op".to_string());
     backend
 }
@@ -96,7 +96,7 @@ fn rendering_preserves_dialect_specific_dependency_orientation() {
         ["dep", "add", "blocked-1", "blocker-1", "--kind", "blocks"]
     );
     assert_eq!(
-        store(root.path(), "bead-forge")
+        store(root.path(), "bead-rs")
             .render_operation("dep_add", &values)
             .unwrap(),
         ["dep", "add", "blocker-1", "--blocks", "blocked-1"]
@@ -109,7 +109,7 @@ fn absent_optional_velocity_values_remove_their_flags() {
     let root = tempfile::tempdir().unwrap();
     let values = HashMap::from([("actor", "worker".to_string())]);
     assert_eq!(
-        store(root.path(), "bead-forge")
+        store(root.path(), "bead-rs")
             .render_operation("claim_auto", &values)
             .unwrap(),
         ["claim", "--assignee", "worker", "--json"]
@@ -165,20 +165,20 @@ fn missing_required_runtime_value_fails_before_process_execution() {
 
 #[test]
 #[cfg(unix)]
-fn bead_forge_list_shape_matches_installed_json_lines_contract() {
+fn bead_rs_list_shape_matches_installed_json_lines_contract() {
     let root = tempfile::tempdir().unwrap();
     let record = |id: &str| {
         format!(
             r#"{{"id":"{id}","title":"fixture","description":"","priority":2,"status":"open","assignee":null,"labels":[],"source_repo":".","dependencies":[],"created_at":"2026-08-12T00:00:00Z","updated_at":"2026-08-12T00:00:00Z"}}"#
         )
     };
-    let output = format!("{}\n{}\n", record("bf-a"), record("bf-b"));
-    let beads = store(root.path(), "bead-forge")
+    let output = format!("{}\n{}\n", record("bead-a"), record("bead-b"));
+    let beads = store(root.path(), "bead-rs")
         .parse_beads("list_all", &output)
         .unwrap();
     assert_eq!(beads.len(), 2);
-    assert_eq!(beads[0].id, BeadId::from("bf-a"));
-    assert_eq!(beads[1].id, BeadId::from("bf-b"));
+    assert_eq!(beads[0].id, BeadId::from("bead-a"));
+    assert_eq!(beads[1].id, BeadId::from("bead-b"));
 }
 
 #[tokio::test]
@@ -210,11 +210,11 @@ async fn explicit_bead_rs_claim_uses_revision_guard() {
 
 #[tokio::test]
 #[cfg(unix)]
-async fn bead_forge_release_uses_atomic_batch_update() {
+async fn bead_rs_release_uses_atomic_batch_update() {
     let root = tempfile::tempdir().unwrap();
     let backend = builtin_bead_backends()
         .into_iter()
-        .find(|backend| backend.name == "bead-forge")
+        .find(|backend| backend.name == "bead-rs")
         .unwrap();
     let binary = root.path().join("fixture-cli");
     executable(
@@ -224,19 +224,21 @@ async fn bead_forge_release_uses_atomic_batch_update() {
     let store =
         CliBeadStore::new(backend, binary, root.path().to_path_buf(), None, None, None).unwrap();
 
-    store.release(&BeadId::from("bf-1")).await.unwrap();
+    store.release(&BeadId::from("bead-1")).await.unwrap();
     let invocations = fs::read_to_string(root.path().join("invocations.log")).unwrap();
     assert!(invocations.starts_with("batch\n--json\n"));
-    assert!(invocations.contains(r#"[{"assignee":"","id":"bf-1","op":"update","status":"open"}]"#));
+    assert!(
+        invocations.contains(r#"[{"assignee":"","id":"bead-1","op":"update","status":"open"}]"#)
+    );
 }
 
 #[tokio::test]
 #[cfg(unix)]
-async fn bead_forge_explicit_claim_uses_atomic_batch_update() {
+async fn bead_rs_explicit_claim_uses_atomic_batch_update() {
     let root = tempfile::tempdir().unwrap();
     let backend = builtin_bead_backends()
         .into_iter()
-        .find(|backend| backend.name == "bead-forge")
+        .find(|backend| backend.name == "bead-rs")
         .unwrap();
     let binary = root.path().join("fixture-cli");
     executable(
@@ -245,9 +247,9 @@ async fn bead_forge_explicit_claim_uses_atomic_batch_update() {
 printf '%s\n' "$@" >> invocations.log
 if [ "$1" = show ]; then
   if [ -f claimed ]; then
-    printf '%s\n' '[{"id":"bf-1","title":"fixture","description":null,"priority":2,"status":"in_progress","assignee":"worker-a","labels":[],"source_repo":"","dependencies":[],"dependents":[],"comments":[],"created_at":"2026-08-12T00:00:00Z","updated_at":"2026-08-12T00:00:00Z"}]'
+    printf '%s\n' '[{"id":"bead-1","title":"fixture","description":null,"priority":2,"status":"in_progress","assignee":"worker-a","labels":[],"source_repo":"","dependencies":[],"dependents":[],"comments":[],"created_at":"2026-08-12T00:00:00Z","updated_at":"2026-08-12T00:00:00Z"}]'
   else
-    printf '%s\n' '[{"id":"bf-1","title":"fixture","description":null,"priority":2,"status":"open","assignee":null,"labels":[],"source_repo":"","dependencies":[],"dependents":[],"comments":[],"created_at":"2026-08-12T00:00:00Z","updated_at":"2026-08-12T00:00:00Z"}]'
+    printf '%s\n' '[{"id":"bead-1","title":"fixture","description":null,"priority":2,"status":"open","assignee":null,"labels":[],"source_repo":"","dependencies":[],"dependents":[],"comments":[],"created_at":"2026-08-12T00:00:00Z","updated_at":"2026-08-12T00:00:00Z"}]'
   fi
 elif [ "$1" = batch ]; then
   touch claimed
@@ -258,15 +260,16 @@ fi
         CliBeadStore::new(backend, binary, root.path().to_path_buf(), None, None, None).unwrap();
 
     let result = store
-        .claim(&BeadId::from("bf-1"), "worker-a")
+        .claim(&BeadId::from("bead-1"), "worker-a")
         .await
         .unwrap();
     assert!(matches!(result, ClaimResult::Claimed(_)));
     let invocations = fs::read_to_string(root.path().join("invocations.log")).unwrap();
     assert!(invocations.contains("batch\n--json\n"));
-    assert!(invocations
-        .contains(r#"[{"assignee":"worker-a","id":"bf-1","op":"update","status":"in_progress"}]"#));
-    assert!(!invocations.contains("update\nbf-1\n--assignee\n"));
+    assert!(invocations.contains(
+        r#"[{"assignee":"worker-a","id":"bead-1","op":"update","status":"in_progress"}]"#
+    ));
+    assert!(!invocations.contains("update\nbead-1\n--assignee\n"));
 }
 
 #[tokio::test]
@@ -275,7 +278,7 @@ async fn bead_forge_clear_assignee_uses_atomic_batch_update() {
     let root = tempfile::tempdir().unwrap();
     let backend = builtin_bead_backends()
         .into_iter()
-        .find(|backend| backend.name == "bead-forge")
+        .find(|backend| backend.name == "bead-rs")
         .unwrap();
     let binary = root.path().join("fixture-cli");
     executable(
@@ -285,11 +288,11 @@ async fn bead_forge_clear_assignee_uses_atomic_batch_update() {
     let store =
         CliBeadStore::new(backend, binary, root.path().to_path_buf(), None, None, None).unwrap();
 
-    store.clear_assignee(&BeadId::from("bf-1")).await.unwrap();
+    store.clear_assignee(&BeadId::from("bead-1")).await.unwrap();
     let invocations = fs::read_to_string(root.path().join("invocations.log")).unwrap();
     assert!(invocations.starts_with("batch\n--json\n"));
-    assert!(invocations.contains(r#"[{"assignee":"","id":"bf-1","op":"update"}]"#));
-    assert!(!invocations.contains("update\nbf-1\n--assignee\n"));
+    assert!(invocations.contains(r#"[{"assignee":"","id":"bead-1","op":"update"}]"#));
+    assert!(!invocations.contains("update\nbead-1\n--assignee\n"));
 }
 
 #[tokio::test]
@@ -300,12 +303,12 @@ async fn bead_forge_split_is_one_transactional_batch() {
     let root = tempfile::tempdir().unwrap();
     let backend = builtin_bead_backends()
         .into_iter()
-        .find(|backend| backend.name == "bead-forge")
+        .find(|backend| backend.name == "bead-rs")
         .unwrap();
     let binary = root.path().join("fixture-cli");
     executable(
         &binary,
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> invocations.log\nprintf '%s\\n' '[op 0] ok: bf-child-a' '[op 1] ok: bf-child-b' '[op 2] ok' '[op 3] ok'\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> invocations.log\nprintf '%s\\n' '[op 0] ok: bead-child-a' '[op 1] ok: bead-child-b' '[op 2] ok' '[op 3] ok'\n",
     );
     let store =
         CliBeadStore::new(backend, binary, root.path().to_path_buf(), None, None, None).unwrap();
@@ -325,22 +328,22 @@ async fn bead_forge_split_is_one_transactional_batch() {
     ];
 
     let ids = store
-        .split_bead(&BeadId::from("bf-parent"), &children)
+        .split_bead(&BeadId::from("bead-parent"), &children)
         .await
         .unwrap();
     assert_eq!(
         ids,
-        [BeadId::from("bf-child-a"), BeadId::from("bf-child-b")]
+        [BeadId::from("bead-child-a"), BeadId::from("bead-child-b")]
     );
     let invocations = fs::read_to_string(root.path().join("invocations.log")).unwrap();
     assert_eq!(invocations.matches("batch\n").count(), 1);
     let payload: serde_json::Value =
         serde_json::from_str(invocations.lines().nth(2).unwrap()).unwrap();
     assert_eq!(payload[2]["op"], "dep_add_blocker");
-    assert_eq!(payload[2]["id"], "bf-parent");
+    assert_eq!(payload[2]["id"], "bead-parent");
     assert_eq!(payload[2]["blocker"], "@0");
     assert_eq!(payload[3]["op"], "dep_add_blocker");
-    assert_eq!(payload[3]["id"], "bf-parent");
+    assert_eq!(payload[3]["id"], "bead-parent");
     assert_eq!(payload[3]["blocker"], "@1");
 }
 
@@ -355,12 +358,12 @@ async fn bead_forge_batch_retries_transient_etxtbsy_and_completes() {
 printf '%s\n' "$@" >> invocations.log
 if [ "$1" = show ]; then
   if [ -e batch-seen ]; then
-    printf '%s\n' '[{"id":"bf-1","title":"fixture","description":null,"priority":2,"status":"in_progress","assignee":"worker-a","labels":[],"source_repo":"","dependencies":[],"dependents":[],"comments":[],"created_at":"2026-08-12T00:00:00Z","updated_at":"2026-08-12T00:00:00Z"}]'
+    printf '%s\n' '[{"id":"bead-1","title":"fixture","description":null,"priority":2,"status":"in_progress","assignee":"worker-a","labels":[],"source_repo":"","dependencies":[],"dependents":[],"comments":[],"created_at":"2026-08-12T00:00:00Z","updated_at":"2026-08-12T00:00:00Z"}]'
   else
     touch show-seen
     (exec 9>>"$0"; touch busy-started; sleep 0.05) >/dev/null 2>&1 &
     while [ ! -e busy-started ]; do sleep 0.001; done
-    printf '%s\n' '[{"id":"bf-1","title":"fixture","description":null,"priority":2,"status":"open","assignee":null,"labels":[],"source_repo":"","dependencies":[],"dependents":[],"comments":[],"created_at":"2026-08-12T00:00:00Z","updated_at":"2026-08-12T00:00:00Z"}]'
+    printf '%s\n' '[{"id":"bead-1","title":"fixture","description":null,"priority":2,"status":"open","assignee":null,"labels":[],"source_repo":"","dependencies":[],"dependents":[],"comments":[],"created_at":"2026-08-12T00:00:00Z","updated_at":"2026-08-12T00:00:00Z"}]'
   fi
 elif [ "$1" = batch ]; then
   touch batch-seen
@@ -386,7 +389,7 @@ fi
         .finish();
     let subscriber_guard = tracing::subscriber::set_default(subscriber);
 
-    let result = store.claim(&BeadId::from("bf-1"), "worker-a").await;
+    let result = store.claim(&BeadId::from("bead-1"), "worker-a").await;
     drop(subscriber_guard);
 
     let claimed = result.unwrap();
@@ -395,8 +398,9 @@ fi
     let invocations = fs::read_to_string(root.path().join("invocations.log")).unwrap();
     assert_eq!(invocations.matches("show\n").count(), 2);
     assert_eq!(invocations.matches("batch\n").count(), 1);
-    assert!(invocations
-        .contains(r#"[{"assignee":"worker-a","id":"bf-1","op":"update","status":"in_progress"}]"#));
+    assert!(invocations.contains(
+        r#"[{"assignee":"worker-a","id":"bead-1","op":"update","status":"in_progress"}]"#
+    ));
 
     let logs = captured_trace(&capture);
     assert!(
