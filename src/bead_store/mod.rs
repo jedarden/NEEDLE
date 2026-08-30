@@ -304,8 +304,22 @@ fn verify_bead_rs_capabilities(binary: &Path, workspace: &Path) -> Result<()> {
         .and_then(|value| value.as_str())
         .unwrap_or("unknown");
 
-    // Compare actual vs expected backend identity
-    if actual_backend != expected_backend {
+    // Compare actual vs expected backend identity.
+    //
+    // Only a filename that *maps* to a known backend ("bead" -> bead-rs,
+    // "bf" -> bead-forge) carries an identity claim worth enforcing; that is
+    // the spoofing case this check exists for. Any other filename — a
+    // wrapper, a versioned path, `bead-rs` itself, a test fixture — makes no
+    // such claim, and rejecting it merely because the name is not literally
+    // the implementation string turns a legitimate install into a hard
+    // failure. Those binaries are still held to the capability contract
+    // below, which requires implementation == "bead-rs".
+    let filename_implies_backend = binary
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|filename| matches!(filename, "bead" | "bf"));
+
+    if filename_implies_backend && actual_backend != expected_backend {
         tracing::error!(
             workspace = %workspace.display(),
             binary = %binary.display(),
@@ -331,6 +345,17 @@ fn verify_bead_rs_capabilities(binary: &Path, workspace: &Path) -> Result<()> {
     );
 
     // Verify atomic_claim requirement
+    // Whatever the binary is called, `verify_bead_rs_capabilities` only
+    // accepts a bead-rs implementation.
+    if actual_backend != "bead-rs" {
+        bail!(
+            "bead-rs capability mismatch for workspace {}: binary {} reports implementation '{}', expected 'bead-rs'",
+            workspace.display(),
+            binary.display(),
+            actual_backend
+        );
+    }
+
     if capabilities
         .get("atomic_claim")
         .and_then(|value| value.as_bool())
@@ -3191,7 +3216,7 @@ exit 1
             r#"#!/usr/bin/env bash
 case "$1" in
   capabilities)
-    printf '{"implementation":"bead-rs","atomic_claim":true,"statuses":["open","in_progress","deferred","closed"],"schemas":[{"schema_ref":"urn:bead-rs:schema:issue:native-v1"},{"schema_ref":"urn:bead-rs:schema:event:native-v1"},{"schema_ref":"urn:bead-rs:schema:field-guide-native-v1"}],"commands":["ref","data","query"]}'
+    printf '{"implementation":"bead-rs","atomic_claim":true,"statuses":["open","in_progress","deferred","closed"],"schemas":[{"schema_ref":"urn:bead-rs:schema:issue:native-v1"},{"schema_ref":"urn:bead-rs:schema:event:native-v1"},{"schema_ref":"urn:bead-rs:schema:field-guide:native-v1"}],"commands":["ref","data","query"]}'
     ;;
   --version)
     echo "bead 0.1.1"
