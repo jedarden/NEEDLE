@@ -2886,6 +2886,7 @@ async fn cross_workspace_mend_releases_zombie_beads_and_returns_tagged_bead() {
         starvation_threshold_minutes: 15,
         scan_interval_cycles: 1,
         max_scan_interval_cycles: 8,
+        stuck_threshold_secs: 300,
     };
 
     let explore = ExploreStrand::new(
@@ -3041,6 +3042,7 @@ async fn cross_workspace_mend_skips_beads_with_live_assignees() {
         starvation_threshold_minutes: 15,
         scan_interval_cycles: 1,
         max_scan_interval_cycles: 8,
+        stuck_threshold_secs: 300,
     };
 
     let explore = ExploreStrand::new(
@@ -3175,6 +3177,7 @@ async fn cross_workspace_mend_skips_own_worker_beads() {
         starvation_threshold_minutes: 15,
         scan_interval_cycles: 1,
         max_scan_interval_cycles: 8,
+        stuck_threshold_secs: 300,
     };
 
     let explore = ExploreStrand::new(

@@ -101,7 +101,8 @@ pub fn workspace_id(workspace: &Path) -> Result<String> {
     hasher.update(path_str.as_bytes());
     let hash = hasher.finalize();
 
-    Ok(format!("{:12x}", hash))
+    // Take first 12 hex characters (not padding)
+    Ok(format!("{:x}", hash)[..12].to_string())
 }
 
 /// Get the gate health state file path for a workspace.
