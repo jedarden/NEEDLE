@@ -1355,7 +1355,7 @@ pub fn uncommitted_function() {
         let gate = CommandGate::with_options(vec![CHECK_SOURCES.to_string()], 65536, RunIn::Clean);
 
         let bead = crate::types::Bead {
-            id: "test-bead".into(),
+            id: "test-bead-clean-fails".into(),
             title: "Test Bead\\n".to_string(),
             body: None,
             priority: 0u8,
@@ -1396,14 +1396,20 @@ pub fn uncommitted_function() {
         }
 
         // Verify the clean extraction was cleaned up after detecting uncommitted dependency
-        // (not preserved for diagnosis since we identified the specific cause)
+        // (not preserved for diagnosis since we identified the specific cause).
+        //
+        // Match on this bead's id only. Every test in this module shares one
+        // TMPDIR, and one of them (both_modes_fail) preserves its extraction on
+        // purpose, so a scan for the generic "needle-clean" prefix sees a
+        // sibling test's directory and fails whichever test happens to run
+        // second.
         let clean_dirs = std::fs::read_dir(workspace.parent().unwrap())
             .unwrap()
             .filter_map(|entry| entry.ok())
             .any(|entry| {
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
-                name_str.contains("needle-clean") || name_str.contains(bead.id.as_ref())
+                name_str.contains(bead.id.as_ref())
             });
         assert!(
             !clean_dirs,
@@ -1469,7 +1475,7 @@ pub fn simple_function() -> i32 {
             .any(|entry| {
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
-                name_str.contains("needle-clean") || name_str.contains(bead.id.as_ref())
+                name_str.contains(bead.id.as_ref())
             });
         assert!(!clean_dirs, "Clean extraction should be removed on success");
     }
@@ -1550,7 +1556,7 @@ pub fn broken_function( -> i32 {
             .any(|entry| {
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
-                name_str.contains("needle-clean") || name_str.contains(bead.id.as_ref())
+                name_str.contains(bead.id.as_ref())
             });
         assert!(
             clean_dirs,
@@ -1562,7 +1568,7 @@ pub fn broken_function( -> i32 {
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
-                if name_str.contains("needle-clean") || name_str.contains(bead.id.as_ref()) {
+                if name_str.contains(bead.id.as_ref()) {
                     let _ = std::fs::remove_dir_all(entry.path());
                 }
             }
@@ -1612,7 +1618,7 @@ pub fn broken_function( -> i32 {
             .any(|entry| {
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
-                name_str.contains("needle-clean") || name_str.contains(bead.id.as_ref())
+                name_str.contains(bead.id.as_ref())
             });
         assert!(
             !clean_dirs,
