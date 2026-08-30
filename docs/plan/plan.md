@@ -4915,6 +4915,7 @@ Gate *execution* errors (19.1) are not failures and do not advance a bead down t
 
 ### 19.7 Autonomous triage
 - Mend closes an open `split-child` whose every parent is closed (reason `orphaned split-child (Phase 19.7)`; 27 existed on 2026-08-29).
+- Mend breaks dependency cycles deterministically: for each cycle `bead doctor` reports, remove the edge whose dependency was added most recently (ties: lexically largest blocked id), append a `cycle broken (Phase 19.7): removed <blocked> ← <blocker>` note to both beads, and emit `mend.cycle_broken`. *Because* on 2026-08-29 four cycles held the P0 acceptance beads (needle-66b015d6, needle-165ab6f6) permanently unready, and a cycle has no human-free exit otherwise.
 - Mend sets `deferred` + label `stale` on P3/P4 beads created by a worker identity (actor matching the fleet's `<agent>-<identifier>` pattern) that have not been touched for 30 days. Human-authored beads are never auto-deferred — the stale list is reported instead.
 
 ### 19.8 Observability
