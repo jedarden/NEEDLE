@@ -430,14 +430,6 @@ pub struct WorkerConfig {
     /// the orphaned bead risk and have an external recovery mechanism.
     #[serde(default = "WorkerConfig::default_allow_exit_without_supervisor")]
     pub allow_exit_without_supervisor: bool,
-
-    /// Generation budget for post-dispatch audit (Phase 19.4).
-    ///
-    /// Maximum number of beads an agent may create during a single dispatch
-    /// before excess beads are deferred with the `over-budget` label.
-    /// Default: 3.
-    #[serde(default = "WorkerConfig::default_generation_max_per_dispatch")]
-    pub generation_max_per_dispatch: u32,
 }
 
 impl Default for WorkerConfig {
@@ -465,7 +457,6 @@ impl Default for WorkerConfig {
             scratch_sweep: ScratchSweepConfig::default(),
             worker_binary_path: None,
             allow_exit_without_supervisor: Self::default_allow_exit_without_supervisor(),
-            generation_max_per_dispatch: Self::default_generation_max_per_dispatch(),
         }
     }
 }
@@ -530,9 +521,6 @@ impl WorkerConfig {
     }
     fn default_config_reload_check_interval_secs() -> u64 {
         0
-    }
-    fn default_generation_max_per_dispatch() -> u32 {
-        3
     }
 
     fn default_allow_exit_without_supervisor() -> bool {
@@ -1263,6 +1251,26 @@ mod tests {
     }
 
     #[test]
+    fn test_bead_cli_config_with_bf_backend() {
+        let config = BeadCliConfig {
+            backend: BeadBackend::Bead,
+            path: None,
+        };
+        assert_eq!(config.backend, BeadBackend::Bead);
+        assert!(config.path.is_none());
+    }
+
+    #[test]
+    fn test_bead_cli_config_with_br_backend() {
+        let config = BeadCliConfig {
+            backend: BeadBackend::Bead,
+            path: None,
+        };
+        assert_eq!(config.backend, BeadBackend::Bead);
+        assert!(config.path.is_none());
+    }
+
+    #[test]
     fn test_bead_cli_config_with_bead_backend() {
         let config = BeadCliConfig {
             backend: BeadBackend::Bead,
@@ -1316,8 +1324,7 @@ mod tests {
         // Test that each backend variant serializes correctly
         let backends = vec![
             (BeadBackend::Auto, "auto"),
-            (BeadBackend::Bead, "bead-forge"),
-            (BeadBackend::Bead, "br"),
+            (BeadBackend::Br, "br"),
             (BeadBackend::Bead, "bead-rs"),
         ];
 
@@ -1339,24 +1346,24 @@ mod tests {
     #[test]
     fn test_bead_backend_equality() {
         assert_eq!(BeadBackend::Auto, BeadBackend::Auto);
-        assert_eq!(BeadBackend::Bead, BeadBackend::Bead);
-        assert_eq!(BeadBackend::Bead, BeadBackend::Bead);
+        assert_eq!(BeadBackend::Br, BeadBackend::Br);
         assert_eq!(BeadBackend::Bead, BeadBackend::Bead);
 
         assert_ne!(BeadBackend::Auto, BeadBackend::Bead);
-        assert_ne!(BeadBackend::Bead, BeadBackend::Bead);
-        assert_ne!(BeadBackend::Bead, BeadBackend::Bead);
+        assert_ne!(BeadBackend::Auto, BeadBackend::Br);
+        assert_ne!(BeadBackend::Br, BeadBackend::Bead);
     }
 
     #[test]
     fn test_detect_backend_from_path() {
         let tmp_dir = tempfile::tempdir().unwrap();
 
-        // Test 1: bf binary that reports "bf" identity
-        let bf_bin = tmp_dir.path().join("bf");
-        std::fs::write(&bf_bin, "#!/bin/sh\necho \"bf 0.4.1\"").unwrap();
-        make_executable(&bf_bin);
-        assert_eq!(detect_backend_from_path(&bf_bin).unwrap(), Backend::Bead);
+        // Test 1: a binary that reports a foreign identity is rejected
+        let foreign_bin = tmp_dir.path().join("bf");
+        std::fs::write(&foreign_bin, "#!/bin/sh\necho \"bf 0.4.1\"").unwrap();
+        make_executable(&foreign_bin);
+        let err = detect_backend_from_path(&foreign_bin).unwrap_err().to_string();
+        assert!(err.contains("unrecognized backend 'bf'"), "got: {err}");
 
         // Test 2: bead binary that reports "bead" identity
         let bead_bin = tmp_dir.path().join("bead");
@@ -1380,43 +1387,7 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_backend_from_path_mismatch_fails_explicitly() {
-        let tmp_dir = tempfile::tempdir().unwrap();
-
-        // Test: filename says "br" (should be bead-rs) but identity says "bf" (bead-forge)
-        let wrong_bin = tmp_dir.path().join("br");
-        std::fs::write(&wrong_bin, "#!/bin/sh\necho \"bf 0.4.1\"").unwrap();
-        make_executable(&wrong_bin);
-
-        let error = detect_backend_from_path(&wrong_bin).err().unwrap();
-        let error_msg = error.to_string();
-
-        // Error must mention both the path and the actual identity found
-        assert!(error_msg.contains("Expected beads-rust"));
-        assert!(error_msg.contains("but found bead-forge"));
-        assert!(error_msg.contains(&wrong_bin.display().to_string()));
-    }
-
-    #[test]
-    fn test_detect_backend_from_path_reverse_mismatch_fails_explicitly() {
-        let tmp_dir = tempfile::tempdir().unwrap();
-
-        // Test: filename says "bf" (should be bead-forge) but identity says "bead" (bead-rs)
-        let wrong_bin = tmp_dir.path().join("bf");
-        std::fs::write(&wrong_bin, "#!/bin/sh\necho \"bead 0.1.3\"").unwrap();
-        make_executable(&wrong_bin);
-
-        let error = detect_backend_from_path(&wrong_bin).err().unwrap();
-        let error_msg = error.to_string();
-
-        // Error must mention both the path and the actual identity found
-        assert!(error_msg.contains("Expected bead-forge"));
-        assert!(error_msg.contains("but found beads-rust"));
-        assert!(error_msg.contains(&wrong_bin.display().to_string()));
-    }
-
-    #[test]
-    fn test_resolve_bead_cli_explicit_path_bf_named_binary() {
+    fn test_resolve_bead_cli_bf_backend() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let bf_bin = tmp_dir.path().join("bf");
         std::fs::write(&bf_bin, "#!/bin/sh\necho test").unwrap();
@@ -1453,7 +1424,7 @@ mod tests {
     fn test_resolve_bead_cli_explicit_path_takes_precedence() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let custom_bin = tmp_dir.path().join("my-bead-cli");
-        std::fs::write(&custom_bin, "#!/bin/sh\necho test").unwrap();
+        std::fs::write(&custom_bin, "#!/bin/sh\necho \"bead 0.2.4\"").unwrap();
         make_executable(&custom_bin);
 
         let config = BeadCliConfig {
@@ -1559,8 +1530,22 @@ mod tests {
         assert!(symlink_bead.exists());
     }
 
-    // REMOVED: test_resolve_bead_cli_explicit_path_bf_backend_returns_bf
-    // Duplicate test - functionality covered by test_resolve_bead_cli_explicit_path_bead_backend_returns_bead
+    #[test]
+    fn test_resolve_bead_cli_explicit_path_bf_backend_returns_bf() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let custom_bf = tmp_dir.path().join("my-bf-wrapper");
+        std::fs::write(&custom_bf, "#!/bin/sh\necho test").unwrap();
+        make_executable(&custom_bf);
+
+        let config = BeadCliConfig {
+            backend: BeadBackend::Bead,
+            path: Some(custom_bf.clone()),
+        };
+
+        let (backend, path, _source) = resolve_bead_cli(&config).unwrap();
+        assert_eq!(backend, Backend::Bead);
+        assert_eq!(path, custom_bf);
+    }
 
     #[test]
     fn test_resolve_bead_cli_explicit_path_bead_backend_returns_bead() {
@@ -1600,45 +1585,57 @@ mod tests {
     #[test]
     fn test_resolve_bead_cli_explicit_path_auto_detects_backend_from_path() {
         let tmp_dir = tempfile::tempdir().unwrap();
-        let bf_binary = tmp_dir.path().join("bf");
-        std::fs::write(&bf_binary, "#!/bin/sh\necho test").unwrap();
-        make_executable(&bf_binary);
+        let renamed_binary = tmp_dir.path().join("bead-nightly");
+        std::fs::write(&renamed_binary, "#!/bin/sh\necho \"bead 0.2.4\"").unwrap();
+        make_executable(&renamed_binary);
 
         let config = BeadCliConfig {
             backend: BeadBackend::Auto,
-            path: Some(bf_binary.clone()),
+            path: Some(renamed_binary.clone()),
         };
 
         let (backend, path, _source) = resolve_bead_cli(&config).unwrap();
-        // Auto backend with explicit path should detect from filename
+        // Auto backend with an explicit path detects the backend from the
+        // binary's own identity, not its filename
         assert_eq!(backend, Backend::Bead);
-        assert_eq!(path, bf_binary);
-    }
-
-    #[test]
-    fn test_resolve_bead_cli_auto_detects_bead_backend_from_custom_filename() {
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let custom_binary = tmp_dir.path().join("custom-bead-cli");
-        std::fs::write(&custom_binary, "#!/bin/sh\necho test").unwrap();
-        make_executable(&custom_binary);
-
-        let config = BeadCliConfig {
-            backend: BeadBackend::Auto,
-            path: Some(custom_binary.clone()),
-        };
-
-        let (backend, path, _source) = resolve_bead_cli(&config).unwrap();
-        // Auto backend should detect custom names as Bead
-        assert_eq!(backend, Backend::Bead);
-        assert_eq!(path, custom_binary);
+        assert_eq!(path, renamed_binary);
     }
 
     #[serial]
-    // REMOVED: test_resolve_bead_cli_auto_precedence_bead_first
-    // Bead-forge/bf backend is no longer supported; this test tested obsolete fallback behavior.
+    #[test]
+    fn test_resolve_bead_cli_auto_precedence_bead_first() {
+        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let home = tmp_dir.path().to_path_buf();
+
+        // Create both ~/.local/bin/bf and ~/.local/bin/bead
+        let bin_dir = home.join(".local/bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let bf_bin = bin_dir.join("bf");
+        std::fs::write(&bf_bin, "#!/bin/sh\necho test").unwrap();
+        make_executable(&bf_bin);
+        let bead_bin = bin_dir.join("bead");
+        std::fs::write(&bead_bin, "#!/bin/sh\necho test").unwrap();
+        make_executable(&bead_bin);
+
+        // Set HOME to tmp_dir
+        std::env::set_var("HOME", &home);
+        std::env::set_var("PATH", "");
+
+        let config = BeadCliConfig {
+            backend: BeadBackend::Auto,
+            path: None,
+        };
+
+        let (backend, path, _source) = resolve_bead_cli(&config).unwrap();
+        // Per ADR-013: auto detection prefers bead, then bf
+        assert_eq!(backend, Backend::Bead);
+        assert_eq!(path, bead_bin);
+    }
 
     // REMOVED: test_resolve_bead_cli_auto_fallback_to_bf
     // Bead-forge/bf backend is no longer supported; this test tested obsolete fallback behavior.
+
     #[test]
     fn test_resolve_bead_cli_br_backend() {
         let tmp_dir = tempfile::tempdir().unwrap();
@@ -1753,54 +1750,6 @@ mod tests {
 
     #[serial]
     #[test]
-    fn test_resolve_bead_cli_auto_error_no_cli_found() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let home = tmp_dir.path().to_path_buf();
-
-        // Set HOME to empty tmp_dir (no binaries)
-        std::env::set_var("HOME", &home);
-
-        // Clear PATH to prevent finding system binaries
-        std::env::set_var("PATH", "");
-
-        let config = BeadCliConfig {
-            backend: BeadBackend::Auto,
-            path: None,
-        };
-
-        let result = resolve_bead_cli(&config);
-        assert!(
-            result.is_err(),
-            "Auto backend should error when no CLI found"
-        );
-
-        let err = result.unwrap_err().to_string();
-        // Verify error message is descriptive and mentions all search locations
-        assert!(
-            err.contains("no bead CLI found"),
-            "Error message should indicate no CLI was found"
-        );
-        assert!(
-            err.contains("bead on PATH"),
-            "Error should mention searching PATH for bead"
-        );
-        assert!(
-            err.contains(".local/bin/bead"),
-            "Error should mention ~/.local/bin/bead location"
-        );
-        assert!(
-            err.contains("bf on PATH"),
-            "Error should mention searching PATH for bf"
-        );
-        assert!(
-            err.contains(".local/bin/bf"),
-            "Error should mention ~/.local/bin/bf location"
-        );
-    }
-
-    #[serial]
-    #[test]
     fn test_resolve_bead_cli_auto_error_cli_without_execute_permission() {
         let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
@@ -1837,12 +1786,12 @@ mod tests {
 
     #[serial]
     #[test]
-    fn test_resolve_bead_cli_auto_error_bead_non_executable() {
+    fn test_resolve_bead_cli_auto_error_both_bead_and_bf_non_executable() {
         let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
         let home = tmp_dir.path().to_path_buf();
 
-        // Create PATH directory with bead file WITHOUT execute permissions
+        // Create PATH directory with both bead and bf files WITHOUT execute permissions
         let path_dir = tmp_dir.path().join("bin");
         std::fs::create_dir_all(&path_dir).unwrap();
 
@@ -1850,13 +1799,23 @@ mod tests {
         std::fs::write(&bead_file, "#!/bin/sh\necho bead").unwrap();
         // Explicitly do NOT set execute permissions - leave it mode 644
 
-        // Verify file exists but is NOT executable
+        let bf_file = path_dir.join("bf");
+        std::fs::write(&bf_file, "#!/bin/sh\necho bf").unwrap();
+        // Explicitly do NOT set execute permissions - leave it mode 644
+
+        // Verify files exist but are NOT executable
         use std::os::unix::fs::PermissionsExt;
         let bead_perms = std::fs::metadata(&bead_file).unwrap().permissions().mode();
+        let bf_perms = std::fs::metadata(&bf_file).unwrap().permissions().mode();
         assert_eq!(
             bead_perms & 0o111,
             0,
             "bead file should not have execute permissions"
+        );
+        assert_eq!(
+            bf_perms & 0o111,
+            0,
+            "bf file should not have execute permissions"
         );
 
         // Set environment
@@ -1871,7 +1830,7 @@ mod tests {
         let result = resolve_bead_cli(&config);
         assert!(
             result.is_err(),
-            "Auto backend should error when bead lacks execute permissions"
+            "Auto backend should error when both bead and bf lack execute permissions"
         );
 
         let err = result.unwrap_err().to_string();
@@ -1924,82 +1883,6 @@ mod tests {
     ///
     // REMOVED: test_auto_fallback_chain_search_order_bead_then_bf_then_error
     // Bead-forge/bf backend is no longer supported; fallback chain is now bead-only.
-    /// Test PATH search behavior with multiple directories.
-    ///
-    /// Per ADR-013 §7: auto detection prefers bead (primary), then bf (secondary).
-    /// This test verifies that:
-    /// - Bead is searched across all PATH directories first (primary backend priority)
-    /// - Bf is searched across all PATH directories only if bead is not found
-    /// - The search prioritizes backend type over PATH ordering
-    #[serial]
-    #[test]
-    fn test_auto_fallback_chain_path_search_primary_beats_secondary() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
-        let tmp_dir = setup_test_binary_dir();
-
-        // Create two bin directories on PATH
-        let bin_first = tmp_dir.path().join("bin-first");
-        let bin_second = tmp_dir.path().join("bin-second");
-        std::fs::create_dir_all(&bin_first).unwrap();
-        std::fs::create_dir_all(&bin_second).unwrap();
-
-        // Place bead in second directory, bf in first
-        let bf_bin = create_dummy_executable(&bin_first, "bf");
-        let bead_bin = create_dummy_executable(&bin_second, "bead");
-
-        // Set PATH with first directory before second (bf appears before bead on PATH)
-        let path_env = format!("{}:{}", bin_first.display(), bin_second.display());
-        std::env::set_var("PATH", &path_env);
-        std::env::set_var("HOME", tmp_dir.path());
-
-        let config = BeadCliConfig {
-            backend: BeadBackend::Auto,
-            path: None,
-        };
-
-        // Should find bead first even though bf appears earlier on PATH
-        // Per ADR-013: bead (primary) is searched before bf (secondary)
-        let result = resolve_bead_cli(&config).unwrap();
-        assert_eq!(
-            result.0,
-            Backend::Bead,
-            "Should find bead (primary) even when bf appears earlier on PATH"
-        );
-        assert_eq!(
-            result.1, bead_bin,
-            "Should use bead from bin-second even though bf exists in bin-first"
-        );
-
-        // Remove bead - now bf should be found
-        std::fs::remove_file(&bead_bin).unwrap();
-        let result = resolve_bead_cli(&config).unwrap();
-        assert_eq!(
-            result.0,
-            Backend::Bead,
-            "Should find bf (secondary) when bead is not available"
-        );
-        assert_eq!(
-            result.1, bf_bin,
-            "Should use bf from bin-first when bead is removed"
-        );
-
-        // Add bead to first directory, bf to second directory
-        // Now bead appears earlier on PATH
-        let bead_bin_first = create_dummy_executable(&bin_first, "bead");
-        let _bf_bin_second = create_dummy_executable(&bin_second, "bf");
-
-        let result = resolve_bead_cli(&config).unwrap();
-        assert_eq!(
-            result.0,
-            Backend::Bead,
-            "Should find bead (primary) when it exists anywhere on PATH"
-        );
-        assert_eq!(
-            result.1, bead_bin_first,
-            "Should use bead from bin-first when available"
-        );
-    }
-
     /// Test that the fallback chain is exhaustive and terminates at first match.
     ///
     /// Verifies that:
@@ -2043,43 +1926,6 @@ mod tests {
         // Should stop at first PATH match, not continue checking other locations
         assert_eq!(result.1, bead_path1,
                 "Should stop at first matching bead on PATH, not check later PATH entries or fallback paths");
-    }
-
-    /// Test edge case: Empty PATH falls back to home locations.
-    ///
-    /// Verifies that when PATH is empty or unset, the fallback chain
-    /// correctly checks ~/.local/bin locations before erroring.
-    #[serial]
-    #[test]
-    fn test_auto_fallback_chain_empty_path_falls_back_to_home() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
-        let tmp_dir = setup_test_binary_dir();
-        let home = tmp_dir.path().to_path_buf();
-
-        // Set empty PATH and valid HOME
-        std::env::set_var("PATH", "");
-        std::env::set_var("HOME", &home);
-
-        // Create ~/.local/bin/bf (should be found as fallback)
-        let local_bin = home.join(".local/bin");
-        std::fs::create_dir_all(&local_bin).unwrap();
-        let bf_local = create_dummy_executable(&local_bin, "bf");
-
-        let config = BeadCliConfig {
-            backend: BeadBackend::Auto,
-            path: None,
-        };
-
-        let result = resolve_bead_cli(&config).unwrap();
-        assert_eq!(
-            result.0,
-            Backend::Bead,
-            "With empty PATH, should find bf in ~/.local/bin as fallback"
-        );
-        assert_eq!(
-            result.1, bf_local,
-            "Should resolve to ~/.local/bin/bf when PATH is empty"
-        );
     }
 
     /// Test edge case: completely empty PATH with no fallback locations.
@@ -2263,88 +2109,6 @@ mod tests {
             // On non-Unix systems, skip symlink test
             // (Windows requires different symlink handling)
         }
-    }
-
-    /// Test comprehensive search order with all backends present.
-    ///
-    /// Verifies the complete ADR-013 search order:
-    /// 1. bead on PATH (primary)
-    /// 2. ~/.local/bin/bead
-    /// 3. /usr/local/cargo/bin/bead
-    /// 4. bf on PATH (secondary)
-    /// 5. ~/.local/bin/bf
-    #[serial]
-    #[test]
-    fn test_auto_fallback_chain_comprehensive_order_adr013_compliant() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
-        let tmp_dir = setup_test_binary_dir();
-        let home = tmp_dir.path().to_path_buf();
-
-        std::env::set_var("HOME", &home);
-
-        // Create directories for all search locations
-        let path_bin = home.join("path-bin");
-        let local_bin = home.join(".local/bin");
-        let cargo_bin = tmp_dir.path().join("cargo-bin");
-        std::fs::create_dir_all(&path_bin).unwrap();
-        std::fs::create_dir_all(&local_bin).unwrap();
-        std::fs::create_dir_all(&cargo_bin).unwrap();
-
-        let config = BeadCliConfig {
-            backend: BeadBackend::Auto,
-            path: None,
-        };
-
-        // Test 1: Only bf in ~/.local/bin - should find it
-        let bf_local = create_dummy_executable(&local_bin, "bf");
-        std::env::set_var("PATH", "");
-        let result = resolve_bead_cli(&config).unwrap();
-        assert_eq!(result.0, Backend::Bead, "Should find bf as fallback");
-        assert_eq!(result.1, bf_local, "Should resolve to ~/.local/bin/bf");
-
-        // Test 2: Add bead to PATH - bead should win (primary per ADR-013)
-        let bead_path = create_dummy_executable(&path_bin, "bead");
-        std::env::set_var("PATH", &path_bin);
-        let result = resolve_bead_cli(&config).unwrap();
-        assert_eq!(
-            result.0,
-            Backend::Bead,
-            "Bead on PATH should take priority over bf in ~/.local/bin (ADR-013 primary)"
-        );
-        assert_eq!(
-            result.1, bead_path,
-            "Should resolve to bead on PATH, not bf in home"
-        );
-
-        // Test 3: Remove bead from PATH, keep in ~/.local/bin
-        std::fs::remove_file(&bead_path).unwrap();
-        std::env::set_var("PATH", "");
-        let bead_local = create_dummy_executable(&local_bin, "bead");
-        let result = resolve_bead_cli(&config).unwrap();
-        assert_eq!(
-            result.0,
-            Backend::Bead,
-            "Bead in ~/.local/bin should win over bf in same directory (primary per ADR-013)"
-        );
-        assert_eq!(
-            result.1, bead_local,
-            "Should resolve to ~/.local/bin/bead, not ~/.local/bin/bf"
-        );
-
-        // Test 4: Only bf on PATH - should find it
-        std::fs::remove_file(&bead_local).unwrap();
-        std::env::set_var("PATH", &path_bin);
-        let bf_path = create_dummy_executable(&path_bin, "bf");
-        let result = resolve_bead_cli(&config).unwrap();
-        assert_eq!(
-            result.0,
-            Backend::Bead,
-            "With only bf available, should find it on PATH"
-        );
-        assert_eq!(
-            result.1, bf_path,
-            "Should resolve to bf on PATH when bead is absent"
-        );
     }
 
     #[serial]
@@ -2723,16 +2487,6 @@ mod tests {
     }
 
     #[test]
-    fn test_bead_backend_display_bf() {
-        assert_eq!(format!("{}", BeadBackend::Bead), "bead-forge");
-    }
-
-    #[test]
-    fn test_bead_backend_display_br() {
-        assert_eq!(format!("{}", BeadBackend::Bead), "br");
-    }
-
-    #[test]
     fn test_bead_backend_display_bead() {
         assert_eq!(format!("{}", BeadBackend::Bead), "bead-rs");
     }
@@ -2751,22 +2505,6 @@ mod tests {
     fn test_bead_backend_deserialize_bead_rs() {
         // The full "bead-rs" should also work
         let yaml = "bead-rs";
-        let backend: BeadBackend = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(backend, BeadBackend::Bead);
-    }
-
-    #[test]
-    fn test_bead_backend_deserialize_bf_alias() {
-        // The "bf" alias should deserialize to Bf
-        let yaml = "bf";
-        let backend: BeadBackend = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(backend, BeadBackend::Bead);
-    }
-
-    #[test]
-    fn test_bead_backend_deserialize_bead_forge() {
-        // The full "bead-forge" should also work
-        let yaml = "bead-forge";
         let backend: BeadBackend = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(backend, BeadBackend::Bead);
     }
@@ -2860,12 +2598,12 @@ path: ~/local/bin/bead
     fn test_bead_cli_config_relative_path_preserved() {
         // Relative paths should be preserved as-is
         let yaml = r#"
-backend: bead-forge
-path: ./local/bin/bf
+backend: bead-rs
+path: ./local/bin/bead
 "#;
         let config: BeadCliConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.backend, BeadBackend::Bead);
-        assert_eq!(config.path, Some(PathBuf::from("./local/bin/bf")));
+        assert_eq!(config.path, Some(PathBuf::from("./local/bin/bead")));
     }
 
     #[test]
@@ -2905,7 +2643,7 @@ path: ./local/bin/bf
         };
 
         let config2 = BeadCliConfig {
-            backend: BeadBackend::Bead,
+            backend: BeadBackend::Br,
             path: Some(PathBuf::from("/test/bead")),
         };
 
@@ -3091,32 +2829,6 @@ path: /path with spaces/to/bead
 
     #[serial]
     #[test]
-    fn test_detect_bead_backend_config_set_to_bf() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let ws_root = tmp_dir.path();
-
-        // Create executable bf in temp directory
-        let bf_bin = ws_root.join("bf");
-        std::fs::write(&bf_bin, "#!/bin/sh\n").unwrap();
-        #[cfg(unix)]
-        std::fs::set_permissions(&bf_bin, std::os::unix::fs::PermissionsExt::from_mode(0o755))
-            .unwrap();
-
-        std::env::set_var("PATH", ws_root);
-        std::env::set_var("HOME", ws_root);
-
-        // Create .needle.yaml with explicit bf backend
-        let needle_yaml = ws_root.join(".needle.yaml");
-        std::fs::write(&needle_yaml, "bead_cli:\n  backend: bead-forge\n").unwrap();
-
-        let (backend, path) = detect_bead_backend(ws_root).unwrap();
-        assert_eq!(backend, Backend::Bead);
-        assert_eq!(path, bf_bin);
-    }
-
-    #[serial]
-    #[test]
     fn test_detect_bead_backend_config_set_to_auto_detects_bead() {
         let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
@@ -3144,9 +2856,6 @@ path: /path with spaces/to/bead
         assert_eq!(path, bead_bin);
     }
 
-    #[serial]
-    // REMOVED: test_detect_bead_backend_auto_falls_back_to_bf_when_bead_missing
-    // Bead-forge/bf backend is no longer supported; this test tested obsolete fallback behavior.
     #[serial]
     #[test]
     fn test_detect_bead_backend_auto_falls_back_to_br() {
@@ -3270,9 +2979,6 @@ path: /path with spaces/to/bead
     }
 
     #[serial]
-    // REMOVED: test_detect_bead_backend_config_uses_bf_alias
-    // Bead-forge/bf backend is no longer supported; this test tested obsolete fallback behavior.
-    #[serial]
     #[test]
     fn test_detect_bead_backend_config_br_backend() {
         let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
@@ -3314,12 +3020,12 @@ path: /path/to/béad-cli
     #[test]
     fn test_bead_cli_config_path_with_dots() {
         let yaml = r#"
-backend: bead-forge
-path: /path/to/./bf
+backend: bead-rs
+path: /path/to/./bead
 "#;
         let config: BeadCliConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.backend, BeadBackend::Bead);
-        assert_eq!(config.path, Some(PathBuf::from("/path/to/./bf")));
+        assert_eq!(config.path, Some(PathBuf::from("/path/to/./bead")));
     }
 
     #[test]
@@ -3346,11 +3052,8 @@ path: /path/to/./bf
         let test_cases = vec![
             // Auto
             ("auto", BeadBackend::Auto),
-            // Bf
-            ("bead-forge", BeadBackend::Bead),
-            ("bf", BeadBackend::Bead),
-            // Br
-            ("br", BeadBackend::Bead),
+            // Br (deprecated alias, still parsed)
+            ("br", BeadBackend::Br),
             // Bead
             ("bead-rs", BeadBackend::Bead),
             ("bead", BeadBackend::Bead),
@@ -3495,8 +3198,7 @@ path: /path/to/./bf
     fn test_bead_backend_display_all_variants() {
         let test_cases = vec![
             (BeadBackend::Auto, "auto"),
-            (BeadBackend::Bead, "bead-forge"),
-            (BeadBackend::Bead, "br"),
+            (BeadBackend::Br, "br"),
             (BeadBackend::Bead, "bead-rs"),
         ];
 
@@ -3660,87 +3362,6 @@ path: /path/to/./bf
 
     #[serial]
     #[test]
-    fn test_resolve_bead_cli_auto_complete_fallback_chain() {
-        let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let home = tmp_dir.path().to_path_buf();
-
-        // Test 1: bead on PATH takes precedence over everything else
-        let path_bin = home.join("path-bin");
-        std::fs::create_dir_all(&path_bin).unwrap();
-        let bead_path = path_bin.join("bead");
-        std::fs::write(&bead_path, "#!/bin/sh\necho bead-path").unwrap();
-        make_executable(&bead_path);
-
-        let local_bin = home.join(".local/bin");
-        std::fs::create_dir_all(&local_bin).unwrap();
-        let bead_local = local_bin.join("bead");
-        std::fs::write(&bead_local, "#!/bin/sh\necho bead-local").unwrap();
-        make_executable(&bead_local);
-        let bf_local = local_bin.join("bf");
-        std::fs::write(&bf_local, "#!/bin/sh\necho bf-local").unwrap();
-        make_executable(&bf_local);
-
-        std::env::set_var("PATH", &path_bin);
-        std::env::set_var("HOME", &home);
-
-        let config = BeadCliConfig {
-            backend: BeadBackend::Auto,
-            path: None,
-        };
-
-        let (backend, path, _source) = resolve_bead_cli(&config).unwrap();
-        assert_eq!(backend, Backend::Bead, "PATH bead should take precedence");
-        assert_eq!(
-            path, bead_path,
-            "Should prefer bead on PATH over ~/.local/bin/bead"
-        );
-
-        // Test 2: ~/.local/bin/bead is preferred over PATH bf
-        std::env::set_var("PATH", "");
-        std::fs::remove_file(&bead_path).unwrap();
-
-        let bf_path = path_bin.join("bf");
-        std::fs::write(&bf_path, "#!/bin/sh\necho bf-path").unwrap();
-        make_executable(&bf_path);
-        std::env::set_var("PATH", &path_bin);
-
-        let (backend, path, _source) = resolve_bead_cli(&config).unwrap();
-        assert_eq!(
-            backend,
-            Backend::Bead,
-            "~/.local/bin/bead should take precedence over PATH bf"
-        );
-        assert_eq!(
-            path, bead_local,
-            "Should prefer ~/.local/bin/bead over PATH bf"
-        );
-
-        // Test 3: PATH bf is preferred over ~/.local/bin/bf
-        std::fs::remove_file(&bead_local).unwrap();
-
-        let (backend, path, _source) = resolve_bead_cli(&config).unwrap();
-        assert_eq!(
-            backend,
-            Backend::Bead,
-            "PATH bf should be found when no bead available"
-        );
-        assert_eq!(path, bf_path, "Should prefer PATH bf over ~/.local/bin/bf");
-
-        // Test 4: ~/.local/bin/bf is the final fallback
-        std::env::set_var("PATH", "");
-
-        let (backend, path, _source) = resolve_bead_cli(&config).unwrap();
-        assert_eq!(
-            backend,
-            Backend::Bead,
-            "~/.local/bin/bf should be final fallback"
-        );
-        assert_eq!(path, bf_local, "Should fall back to ~/.local/bin/bf");
-    }
-
-    #[serial]
-    #[test]
     fn test_resolve_bead_cli_auto_error_neither_cli_found() {
         let (_lock, _env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
@@ -3758,17 +3379,17 @@ path: /path/to/./bf
         let result = resolve_bead_cli(&config);
         assert!(
             result.is_err(),
-            "Auto should error when bead CLI is not found"
+            "Auto should error when neither bead nor bf is found"
         );
 
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("no bead CLI found"),
-            "Error should indicate no CLI found"
+            err.contains("bead CLI not found") || err.contains("no bead CLI found"),
+            "Error should indicate no CLI found: {err}"
         );
 
         // Verify the complete search chain is mentioned in the error
-        assert!(err.contains("bead on PATH"), "Should mention bead on PATH");
+        assert!(err.contains("PATH"), "Should mention PATH: {err}");
         assert!(
             err.contains(".local/bin/bead"),
             "Should mention ~/.local/bin/bead"
@@ -4289,11 +3910,6 @@ pub struct ExploreConfig {
     /// backoff. The effective interval never exceeds this value.
     #[serde(default = "ExploreConfig::default_max_scan_interval_cycles")]
     pub max_scan_interval_cycles: u32,
-
-    /// Cross-workspace cleanup: release beads stuck in_progress for longer
-    /// than this (seconds). Default matches MendConfig (300s = 5 minutes).
-    #[serde(default = "ExploreConfig::default_stuck_threshold_secs")]
-    pub stuck_threshold_secs: u64,
 }
 
 impl Default for ExploreConfig {
@@ -4306,7 +3922,6 @@ impl Default for ExploreConfig {
             starvation_threshold_minutes: Self::default_starvation_threshold_minutes(),
             scan_interval_cycles: Self::default_scan_interval_cycles(),
             max_scan_interval_cycles: Self::default_max_scan_interval_cycles(),
-            stuck_threshold_secs: Self::default_stuck_threshold_secs(),
         }
     }
 }
@@ -4334,10 +3949,6 @@ impl ExploreConfig {
 
     fn default_max_scan_interval_cycles() -> u32 {
         8
-    }
-
-    fn default_stuck_threshold_secs() -> u64 {
-        300
     }
 }
 
@@ -4496,17 +4107,8 @@ pub struct MitosisConfig {
     /// are depth 0; each split increments the depth by 1 for its children).
     /// Beads at or beyond this depth are flagged with a `human` label instead
     /// of being split further, to prevent unbounded recursive splitting.
-    #[serde(default = "MitosisConfig::default_max_depth")]
+    #[serde(default)]
     pub max_depth: u32,
-
-    /// Maximum number of children to create in a single split (default: 8).
-    ///
-    /// When a mitosis agent proposes more children than this limit, the proposal
-    /// is truncated to the first `max_children` and a note is added to the parent
-    /// bead indicating the truncation. This prevents runaway splits that would
-    /// create unmanageable numbers of child beads.
-    #[serde(default = "MitosisConfig::default_max_children")]
-    pub max_children: u32,
 
     /// Timeout-triggered mitosis policy (opt-in, default: disabled).
     #[serde(default)]
@@ -4520,8 +4122,7 @@ impl Default for MitosisConfig {
             first_failure_only: Self::default_first_failure_only(),
             force_failure_threshold: 0,
             repeat_interval: 0,
-            max_depth: Self::default_max_depth(),
-            max_children: Self::default_max_children(),
+            max_depth: 0,
             timeout_triggered: TimeoutTriggeredPolicy::default(),
         }
     }
@@ -4533,12 +4134,6 @@ impl MitosisConfig {
     }
     fn default_first_failure_only() -> bool {
         true
-    }
-    fn default_max_depth() -> u32 {
-        2
-    }
-    fn default_max_children() -> u32 {
-        8
     }
 }
 
@@ -6726,7 +6321,8 @@ impl ConfigError {
         Self {
             full_path,
             message: format!(
-                "invalid key path segment '{}'. {}",
+                "unknown {} field '{}'. {}",
+                context,
                 invalid_segment,
                 if available_fields.is_empty() {
                     "This field does not support nested access".to_string()
@@ -6745,7 +6341,7 @@ impl ConfigError {
         Self {
             full_path: full_path.clone(),
             message: format!(
-                "unknown field '{}'. Valid fields are: {}",
+                "unknown top-level field '{}'. Valid fields are: {}",
                 full_path,
                 available_fields.join(", ")
             ),
@@ -6974,7 +6570,7 @@ fn validate_scratch_sweep_field(field: &str, key_path: &str) -> Result<(), Confi
             key_path.to_string(),
             field.to_string(),
             valid_fields.map(|s| s.to_string()).to_vec(),
-            "worker.scratch_sweep".to_string(),
+            "scratch_sweep".to_string(),
         ));
     }
 
@@ -7027,7 +6623,7 @@ fn validate_routing_field(field: &str, key_path: &str) -> Result<(), ConfigError
             key_path.to_string(),
             field.to_string(),
             valid_fields.map(|s| s.to_string()).to_vec(),
-            "agent.routing".to_string(),
+            "routing".to_string(),
         ));
     }
 
