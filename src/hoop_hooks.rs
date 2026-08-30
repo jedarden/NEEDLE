@@ -53,6 +53,17 @@ fn write_spawn_ack_in(dir: &Path, worker_name: &str) -> Result<()> {
     Ok(())
 }
 
+/// A workspace is a directory that already has a `.beads/` store. The default
+/// event/heartbeat paths live inside it; writing them anywhere else would
+/// create a half-workspace (`.beads/` without `config.json`) that bead-rs's
+/// discovery later refuses to init past — on 2026-08-30 test fixtures using
+/// `/tmp` as a workspace left `/tmp/.beads` behind and broke every temp-dir
+/// `bead init` on the CI pod. Explicit `$NEEDLE_EVENTS` / `$NEEDLE_HEARTBEATS`
+/// overrides are honoured regardless.
+fn default_target_allowed(workspace: &Path, env_override: &str) -> bool {
+    std::env::var_os(env_override).is_some() || workspace.join(".beads").is_dir()
+}
+
 /// Resolve the HOOP event-tap target: `$NEEDLE_EVENTS` if set, else
 /// `<workspace>/.beads/events.jsonl`.
 pub fn events_path(workspace: &Path) -> PathBuf {
@@ -76,6 +87,14 @@ pub fn emit_needle_event(
     event: &str,
     extra: Value,
 ) {
+    if !default_target_allowed(workspace, "NEEDLE_EVENTS") {
+        tracing::debug!(
+            workspace = %workspace.display(),
+            event,
+            "hoop_hooks: not a bead workspace (no .beads/) — event not recorded"
+        );
+        return;
+    }
     let path = events_path(workspace);
     if let Err(e) = append_jsonl_line(&path, |obj| {
         if let Some(b) = bead {
@@ -166,6 +185,14 @@ pub fn cleanup_heartbeat_file(path: &Path) -> Result<()> {
 /// (`executing` / `idle` / `knot`). Best-effort, same failure contract as
 /// [`emit_needle_event`].
 pub fn emit_needle_heartbeat(workspace: &Path, worker: &str, state: &str, extra: Value) {
+    if !default_target_allowed(workspace, "NEEDLE_HEARTBEATS") {
+        tracing::debug!(
+            workspace = %workspace.display(),
+            state,
+            "hoop_hooks: not a bead workspace (no .beads/) — heartbeat not recorded"
+        );
+        return;
+    }
     let path = heartbeats_path(workspace);
     if let Err(e) = append_jsonl_line(&path, |obj| {
         obj.insert("worker".to_string(), Value::String(worker.to_string()));
@@ -216,6 +243,21 @@ fn append_jsonl_line(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn default_targets_never_create_a_beads_dir_outside_a_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        // No .beads/ here and no env override: nothing may be written.
+        std::env::remove_var("NEEDLE_EVENTS");
+        std::env::remove_var("NEEDLE_HEARTBEATS");
+        emit_needle_event(dir.path(), "w", None, None, "test", serde_json::json!({}));
+        emit_needle_heartbeat(dir.path(), "w", "idle", serde_json::json!({}));
+        assert!(!dir.path().join(".beads").exists(), ".beads/ must not be created");
+        // With a store present, the default paths are used.
+        std::fs::create_dir_all(dir.path().join(".beads")).unwrap();
+        emit_needle_event(dir.path(), "w", None, None, "test", serde_json::json!({}));
+        assert!(dir.path().join(".beads").join("events.jsonl").exists());
+    }
     use super::*;
     use tempfile::TempDir;
 

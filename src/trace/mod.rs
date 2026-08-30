@@ -131,6 +131,17 @@ impl TraceCapture {
         beads_root: &Path,
         sanitizer: Option<Arc<Sanitizer>>,
     ) -> Option<Self> {
+        // Traces live inside the workspace's existing store. Creating
+        // `.beads/` where there is none leaves a half-workspace behind that
+        // bead-rs's discovery refuses to init past (see hoop_hooks).
+        if !beads_root.join(".beads").is_dir() {
+            tracing::warn!(
+                workspace = %beads_root.display(),
+                bead_id = %bead_id,
+                "trace capture skipped: workspace has no .beads/ store"
+            );
+            return None;
+        }
         let trace_dir = beads_root
             .join(".beads")
             .join("traces")
@@ -591,6 +602,7 @@ mod tests {
     fn trace_capture_creates_directory() {
         let temp_dir = TempDir::new().unwrap();
         let beads_root = temp_dir.path();
+        std::fs::create_dir_all(beads_root.join(".beads")).unwrap();
 
         let capture = TraceCapture::new(&test_bead_id(), beads_root).unwrap();
         assert!(capture.trace_dir().exists());
@@ -601,6 +613,7 @@ mod tests {
     fn trace_capture_returns_none_when_directory_creation_fails() {
         let temp_dir = TempDir::new().unwrap();
         let beads_root = temp_dir.path();
+        std::fs::create_dir_all(beads_root.join(".beads")).unwrap();
 
         // Create a file at the trace directory path to block directory creation.
         let blocking_path = beads_root
@@ -623,6 +636,7 @@ mod tests {
     fn trace_capture_writes_stdout() {
         let temp_dir = TempDir::new().unwrap();
         let beads_root = temp_dir.path();
+        std::fs::create_dir_all(beads_root.join(".beads")).unwrap();
 
         let capture = TraceCapture::new(&test_bead_id(), beads_root).unwrap();
         capture.write_stdout("hello stdout").unwrap();
@@ -637,6 +651,7 @@ mod tests {
     fn trace_capture_writes_stderr() {
         let temp_dir = TempDir::new().unwrap();
         let beads_root = temp_dir.path();
+        std::fs::create_dir_all(beads_root.join(".beads")).unwrap();
 
         let capture = TraceCapture::new(&test_bead_id(), beads_root).unwrap();
         capture.write_stderr("error output").unwrap();
@@ -651,6 +666,7 @@ mod tests {
     fn trace_capture_write_stderr_handles_errors_gracefully() {
         let temp_dir = TempDir::new().unwrap();
         let beads_root = temp_dir.path();
+        std::fs::create_dir_all(beads_root.join(".beads")).unwrap();
 
         let capture = TraceCapture::new(&test_bead_id(), beads_root).unwrap();
 
@@ -676,6 +692,7 @@ mod tests {
     fn trace_capture_writes_test_output() {
         let temp_dir = TempDir::new().unwrap();
         let beads_root = temp_dir.path();
+        std::fs::create_dir_all(beads_root.join(".beads")).unwrap();
 
         let capture = TraceCapture::new(&test_bead_id(), beads_root).unwrap();
         capture.write_test_output("test output content").unwrap();
@@ -690,6 +707,7 @@ mod tests {
     fn trace_capture_writes_trace_jsonl() {
         let temp_dir = TempDir::new().unwrap();
         let beads_root = temp_dir.path();
+        std::fs::create_dir_all(beads_root.join(".beads")).unwrap();
 
         let capture = TraceCapture::new(&test_bead_id(), beads_root).unwrap();
         let lines = vec![
@@ -709,6 +727,7 @@ mod tests {
     fn trace_capture_writes_metadata() {
         let temp_dir = TempDir::new().unwrap();
         let beads_root = temp_dir.path();
+        std::fs::create_dir_all(beads_root.join(".beads")).unwrap();
 
         let capture = TraceCapture::new(&test_bead_id(), beads_root).unwrap();
         let metadata = TraceMetadata {
@@ -745,6 +764,7 @@ mod tests {
     fn trace_capture_delete_removes_directory() {
         let temp_dir = TempDir::new().unwrap();
         let beads_root = temp_dir.path();
+        std::fs::create_dir_all(beads_root.join(".beads")).unwrap();
 
         let capture = TraceCapture::new(&test_bead_id(), beads_root).unwrap();
         assert!(capture.trace_dir().exists());
@@ -757,6 +777,7 @@ mod tests {
     fn trace_capture_write_stdout_handles_errors_gracefully() {
         let temp_dir = TempDir::new().unwrap();
         let beads_root = temp_dir.path();
+        std::fs::create_dir_all(beads_root.join(".beads")).unwrap();
 
         let capture = TraceCapture::new(&test_bead_id(), beads_root).unwrap();
 
@@ -782,6 +803,7 @@ mod tests {
     fn trace_capture_prune_removes_data_keeps_metadata() {
         let temp_dir = TempDir::new().unwrap();
         let beads_root = temp_dir.path();
+        std::fs::create_dir_all(beads_root.join(".beads")).unwrap();
 
         let capture = TraceCapture::new(&test_bead_id(), beads_root).unwrap();
         capture.write_stdout("stdout").unwrap();
