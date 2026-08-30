@@ -218,6 +218,11 @@ pub enum EventKind {
     WorkerBootTimeout {
         elapsed_ms: u64,
     },
+    /// Gate command path validation detected missing paths at worker boot.
+    GatePathMissing {
+        count: usize,
+        paths: Vec<String>,
+    },
     /// Worker launch was deferred due to resource saturation.
     WorkerLaunchDeferred {
         deferred_count: u64,
@@ -474,6 +479,7 @@ pub enum EventKind {
         beads_released: u32,
         locks_removed: u32,
         deps_cleaned: u32,
+        cycles_broken: u32,
         db_repaired: bool,
         db_rebuilt: bool,
         agent_logs_cleaned: u32,
@@ -1060,6 +1066,7 @@ impl EventKind {
             EventKind::InitStepStarted { .. } => "init.step.started",
             EventKind::InitStepCompleted { .. } => "init.step.completed",
             EventKind::WorkerBootTimeout { .. } => "worker.boot.timeout",
+            EventKind::GatePathMissing { .. } => "gate.command_missing",
             EventKind::WorkerLaunchDeferred { .. } => "worker.launch.deferred",
             EventKind::ConfigWarning { .. } => "config.warning",
             EventKind::StrandEvaluated { .. } => "strand.evaluated",
@@ -1127,8 +1134,6 @@ impl EventKind {
             EventKind::MendZeroActivityLogCleaned { .. } => "mend.zero_activity_log_cleaned",
             EventKind::MendStaleAssigneeCleared { .. } => "mend.stale_assignee_cleared",
             EventKind::MendAssigneeClearFailed { .. } => "mend.assignee_clear_failed",
-            EventKind::AuditBeadClosedAsVerification { .. } => "audit.bead_closed_as_verification",
-            EventKind::AuditBeadDeferredOverBudget { .. } => "audit.bead_deferred_over_budget",
             EventKind::EffortRecorded { .. } => "effort.recorded",
             EventKind::BudgetWarning { .. } => "budget.warning",
             EventKind::BudgetStop { .. } => "budget.stop",
@@ -1470,6 +1475,12 @@ impl EventKind {
             }
             EventKind::WorkerBootTimeout { elapsed_ms } => {
                 serde_json::json!({ "elapsed_ms": elapsed_ms })
+            }
+            EventKind::GatePathMissing { count, paths } => {
+                serde_json::json!({
+                    "count": count,
+                    "paths": paths
+                })
             }
             EventKind::WorkerLaunchDeferred {
                 deferred_count,

@@ -1567,6 +1567,76 @@ impl Worker {
         // Check boot timeout before each step
         self.check_boot_timeout(BOOT_TIMEOUT_SECS)?;
 
+        // Step: Gate command path validation
+        self.telemetry.emit(
+            EventKind::InitStepStarted {
+                step: "gate_path_validation".to_string(),
+            },
+            chrono::Utc::now(),
+        )?;
+        let step_start = Instant::now();
+
+        // Validate gate command paths
+        let workspace = &self.config.workspace.default;
+        let gates: Vec<crate::validation::GateConfig> = self
+            .config
+            .gates
+            .as_ref()
+            .map(|g| g.as_slice())
+            .unwrap_or(&[])
+            .to_vec();
+        let verification: Vec<String> = self
+            .config
+            .verification
+            .as_ref()
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+            .to_vec();
+
+        let gate_validation_result = crate::validation::validate_gate_command_paths(
+            &gates,
+            &verification,
+            workspace,
+            None, // Config file path not needed for boot warnings
+        );
+
+        match gate_validation_result {
+            crate::validation::GatePathValidationResult::Valid => {
+                // All gate paths exist - no action needed
+                tracing::debug!("all gate command paths exist");
+            }
+            crate::validation::GatePathValidationResult::Invalid { errors } => {
+                // Log warnings for each missing gate path
+                for error in &errors {
+                    tracing::warn!(
+                        command = %error.command,
+                        path = %error.path,
+                        path_type = ?error.path_type,
+                        "gate.command_missing: configured gate command path does not exist - dispatches will fail",
+                    );
+                }
+                // Also emit a telemetry event for the warnings
+                self.telemetry.emit(
+                    EventKind::GatePathMissing {
+                        count: errors.len(),
+                        paths: errors.iter().map(|e| e.path.clone()).collect(),
+                    },
+                    chrono::Utc::now(),
+                )?;
+            }
+        }
+
+        self.telemetry.emit(
+            EventKind::InitStepCompleted {
+                step: "gate_path_validation".to_string(),
+                duration_ms: step_start.elapsed().as_millis() as u64,
+            },
+            chrono::Utc::now(),
+        )?;
+
+        // Check boot timeout before each step
+        self.check_boot_timeout(BOOT_TIMEOUT_SECS)?;
+
         // Step: Registry registration
         self.telemetry.emit(
             EventKind::InitStepStarted {
@@ -5480,9 +5550,10 @@ impl Worker {
                 // Emit an initial heartbeat to show we're entering idle sleep.
                 // This ensures there's at least one diagnostic event even if the
                 // worker dies before the first sleep iteration completes.
+                let current_bead_id = self.current_bead.as_ref().map(|b| &b.id);
                 if let Err(e) = self.telemetry.emit(
                     EventKind::HeartbeatEmitted {
-                        bead_id: None,
+                        bead_id: current_bead_id.cloned(),
                         state: "EXHAUSTED_IDLE".to_string(),
                     },
                     chrono::Utc::now(),
@@ -5535,9 +5606,10 @@ impl Worker {
                     // This ensures that if the worker is killed during sleep, we have
                     // a record of how long it survived. The heartbeat event includes
                     // the elapsed time, which helps identify when the worker died.
+                    let current_bead_id = self.current_bead.as_ref().map(|b| &b.id);
                     if let Err(e) = self.telemetry.emit(
                         EventKind::HeartbeatEmitted {
-                            bead_id: None,
+                            bead_id: current_bead_id.cloned(),
                             state: "EXHAUSTED_IDLE".to_string(),
                         },
                         chrono::Utc::now(),
@@ -5556,9 +5628,10 @@ impl Worker {
 
                     // Update heartbeat state before sleeping to ensure the heartbeat file
                     // is fresh even if the worker dies during this sleep iteration.
+                    let current_bead_id = self.current_bead.as_ref().map(|b| &b.id);
                     self.health.update_state(
                         &WorkerState::Exhausted,
-                        None,
+                        current_bead_id,
                         Some(self.current_workspace.as_path()),
                     );
 
