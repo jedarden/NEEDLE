@@ -152,7 +152,8 @@ EOF
       "name": "$workspace_name",
       "stale_assignees": $local_stale,
       "total_beads": $local_total
-    }EOF
+    }
+EOF
     done < "$TMP_RESULTS"
 
     echo "" >> "$OUTPUT_FILE"
