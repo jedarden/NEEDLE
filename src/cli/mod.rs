@@ -2747,7 +2747,11 @@ fabric:
     let workspace_beads = current_dir.join(".beads");
     let workspace_config = current_dir.join(".needle.yaml");
 
-    if workspace_beads.is_dir() {
+    // `--backend` is an explicit request to bind this directory, so the
+    // binding is written whether or not `.beads/` exists yet: the README
+    // order is `needle init --backend` first, `bead init` second, and doctor
+    // reports an unbound workspace as a failure.
+    {
         if workspace_config.exists() {
             println!(
                 "\nWorkspace config already exists: {} (not modifying)",
@@ -2764,6 +2768,9 @@ fabric:
             })?;
             println!("\nCreated workspace config: {}", workspace_config.display());
             println!("  bead_cli.backend: {}", backend);
+            if !workspace_beads.is_dir() {
+                println!("  (no .beads/ yet — run `bead init --prefix <name>` next)");
+            }
         }
     }
 
@@ -4066,6 +4073,10 @@ fn doctor_check_workspace(workspace: &Path) -> CheckResult {
     }
 }
 
+/// bead-forge `issues.jsonl` validation. No longer reachable from doctor
+/// since the bead-forge backend was removed; kept for its unit tests and for
+/// operators inspecting a legacy store by hand.
+#[allow(dead_code)]
 fn doctor_check_jsonl(beads_dir: &Path) -> CheckResult {
     let jsonl = beads_dir.join("issues.jsonl");
     if !jsonl.exists() {
@@ -4113,7 +4124,7 @@ fn doctor_check_checkpoint(
             Err(error) => CheckResult::fail("Checkpoint", format!("unreadable: {error}")),
         };
     }
-    doctor_check_jsonl(beads_dir)
+    doctor_check_unbound_checkpoint()
 }
 
 /// Check the checkpoint with full store context.
@@ -4164,7 +4175,18 @@ fn doctor_check_store_checkpoint(
             Err(error) => CheckResult::fail("Checkpoint", format!("unreadable: {error}")),
         };
     }
-    doctor_check_jsonl(beads_dir)
+    doctor_check_unbound_checkpoint()
+}
+
+/// A workspace with no bead backend binding (`bead_cli.backend` unset or
+/// `auto`) has no checkpoint format to check. bead-forge's `issues.jsonl`
+/// was the old fallback here; that backend is gone, and running its check
+/// on a bead-rs workspace produced a misleading `[FAIL] JSONL` row.
+fn doctor_check_unbound_checkpoint() -> CheckResult {
+    CheckResult::warn(
+        "Checkpoint",
+        "skipped — no bead backend binding (set bead_cli.backend in .needle.yaml; see the Bead store row)",
+    )
 }
 
 fn doctor_check_sqlite(beads_dir: &Path) -> CheckResult {
@@ -4642,9 +4664,34 @@ fn doctor_check_adapter_template_executables(config: &Config) -> CheckResult {
             format!("cannot load adapters: {e}"),
         ),
         Ok(adapters) => {
+            // Only adapters this configuration can actually dispatch to are
+            // checked: the default, every routing target, and any adapter the
+            // user defined in adapters_dir. Unused built-ins (aider, opencode,
+            // the `generic` placeholder whose executable is `my-agent`) are
+            // skipped — a fresh install must not fail doctor over agents the
+            // user never chose.
+            let builtin_names: std::collections::HashSet<String> = dispatch::builtin_adapters()
+                .into_iter()
+                .map(|a| a.name)
+                .collect();
+            let mut in_use: std::collections::HashSet<String> = std::collections::HashSet::new();
+            in_use.insert(config.agent.default.clone());
+            if let Some(routing) = &config.agent.routing {
+                if let Some(default_adapter) = &routing.default_adapter {
+                    in_use.insert(default_adapter.clone());
+                }
+                for rule in &routing.rules {
+                    in_use.insert(rule.adapter.clone());
+                }
+            }
             let mut missing: Vec<String> = adapters
-                .values()
-                .flat_map(|a| dispatch::check_template_executables(&a.invoke_template))
+                .iter()
+                .filter(|(name, _)| in_use.contains(*name) || !builtin_names.contains(*name))
+                .flat_map(|(name, a)| {
+                    dispatch::check_template_executables(&a.invoke_template)
+                        .into_iter()
+                        .map(move |bin| format!("{bin} (adapter {name})"))
+                })
                 .collect();
             missing.sort();
             missing.dedup();

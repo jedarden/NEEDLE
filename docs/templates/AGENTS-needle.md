@@ -7,7 +7,8 @@ Beads are tracked via the `bead` CLI (bead-rs). NEVER edit `.beads/` by hand —
 ```bash
 bead list --ready              # List claimable beads
 bead show <id>                # Show bead details
-bead claim <id>                # Claim a bead (sets assignee, status=in_progress)
+bead claim                     # Claim the next ready bead (no id: selection is server-side)
+bead update <id> --status in_progress --assignee <you>   # Take a specific bead
 bead update <id> --notes "..."# Add notes without changing status
 bead close <id> --reason "..." # Complete a bead (requires reason)
 bead release <id>             # Release bead back to ready frontier
