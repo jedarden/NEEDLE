@@ -36,20 +36,18 @@ git commit -m "Initial commit"
 
 ## Step 2: Configure the Workspace
 
-Tell NEEDLE which bead backend to use:
+Bind the workspace to its bead backend. This writes `./.needle.yaml`, the global
+`~/.config/needle/config.yaml` (if absent), and a "Working with beads" section in
+`./AGENTS.md` for any coding agent that works in this repo:
 
 ```bash
-cat > .needle.yaml << 'EOF'
-# Minimal backend configuration
-bead_cli:
-  backend: bead-rs
-EOF
+needle init --backend bead-rs
 ```
 
-Create a minimal worker config (one worker, short idle timeout):
+Then narrow the global config to a single worker that exits when the queue is
+empty (overwrite the file `needle init` just created):
 
 ```bash
-mkdir -p ~/.config/needle
 cat > ~/.config/needle/config.yaml << 'EOF'
 # Minimal worker config for quickstart
 agent:
@@ -74,15 +72,38 @@ bead init --prefix quickstart
 needle doctor
 ```
 
-**Expected `needle doctor` output:**
+**Expected `needle doctor` output** (real output from needle 0.6.0 + bead 0.2.2 on a clean host; paths shortened):
 
 ```
-✓ Bead backend: bead-rs
-✓ Bead store initialized
-✓ Workspace configured
-✓ Agent CLI available: claude
-✓ Configuration valid
+NEEDLE Doctor
+────────────────────────────────────────────────────────────
+[PASS]  Config                        valid
+[PASS]  Workspace                     /tmp/needle-quickstart-project
+[WARN]  SQLite integrity              sqlite3 not on PATH — skipped
+[PASS]  Lock files                    none
+[PASS]  Bead CLI Backend              bead-rs
+         └─ CLI path: ~/.local/bin/bead
+         └─ source: config file
+         └─ verified against: bead 0.1.3 (commit 85f36ac)
+         └─ capability gap: split/mitosis is sequential, not atomic
+         └─ capability gap: claim omits model/harness velocity metadata
+[PASS]  Bead store                    ok
+[PASS]  Checkpoint                    native pointer is valid JSON
+[PASS]  Worker registry               empty
+[WARN]  Heartbeat dir                 missing: ~/.needle/state/heartbeats
+[PASS]  Heartbeat files               no heartbeat directory
+[PASS]  Peers                         no workers running
+[PASS]  Agent binary                  claude at ~/.local/bin/claude
+[PASS]  Adapter transforms            ok
+[PASS]  Adapter template executables  all commands available
+[PASS]  Disk space                    <n> MB available
+[PASS]  Telemetry logs                no log directory yet
+────────────────────────────────────────────────────────────
+14 passed, 2 warning(s), 0 failure(s).
+Run `needle doctor --repair` to attempt automatic fixes.
 ```
+
+Every row is `PASS` or `WARN` and the exit code is 0. A `FAIL` row names the fix.
 
 ## Step 4: Seed Test Beads
 
@@ -111,13 +132,13 @@ Start a single worker and watch it process the beads:
 
 ```bash
 # Run one worker
-needle run --agent claude
+needle run --agent claude -i alpha
 ```
 
 **What you'll see:**
 
 The worker will:
-1. Start and attach to a tmux session (`needle-worker-1-*`)
+1. Start in its own tmux session (`tmux ls` shows it; `needle status` lists it)
 2. Select the next claimable bead
 3. Dispatch it to Claude Code
 4. Wait for the agent to complete the work
@@ -190,6 +211,7 @@ rm -rf /tmp/needle-quickstart-project
 ## Next Steps
 
 - Try multiple workers: `needle run --agent claude --count 3`
+- Note the built-in `claude` adapter runs with `--dangerously-skip-permissions` — expected for unattended work, but read `needle config` first
 - Add more beads with dependencies: `bead dep add <dependent> <blocks>`
 - Configure different agents in `~/.config/needle/config.yaml`
 - See [main README](https://github.com/jedarden/NEEDLE) for full documentation

@@ -4,7 +4,17 @@ All notable changes to NEEDLE are documented in this file.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-08-30
+
+Closes the GitHub #16 onboarding gap: the README quickstart is now completable
+from the release assets alone on a clean Linux x86_64 host.
+
 ### Added
+
+- `install.sh` installs the bead-rs backend (`bead`) next to `needle`, verified
+  against bead-rs's `checksums.txt` with the same fail-closed rules as the needle
+  binary; `--skip-bead` / `NEEDLE_SKIP_BEAD=1` opt out, an existing newer `bead`
+  is kept, and the summary names both versions. [#16](https://github.com/jedarden/NEEDLE/issues/16)
 
 - `needle init --backend <name>` to explicitly select a bead backend during workspace initialization
 - Polling test infrastructure and skeleton for retry and timeout behavior validation
@@ -20,6 +30,22 @@ All notable changes to NEEDLE are documented in this file.
 
 ### Fixed
 
+- README quickstart and `docs/examples/quickstart` use the flags and adapter names the
+  binary actually accepts (`--identifier`/`-i`, the built-in `claude` adapter), list
+  `tmux` and the agent CLI as prerequisites, and disclose
+  `--dangerously-skip-permissions` up front. [#16](https://github.com/jedarden/NEEDLE/issues/16)
+- `needle init --backend` writes `.needle.yaml` even before `bead init` has created
+  `.beads/`, so the documented order (init → bead init → doctor) yields a bound workspace
+- `needle doctor` no longer runs the bead-forge `issues.jsonl` check on an unbound
+  workspace (it reported `[FAIL] JSONL` on bead-rs repos); unbound is a WARN pointing at
+  the `.needle.yaml` fix
+- `needle doctor`'s adapter-executable check covers only adapters in use (the default,
+  routing targets, user-defined files) instead of failing a fresh install over unused
+  built-ins such as `aider`, `opencode` and the `generic` placeholder
+- `install.sh`: `asset_list` unbound-variable abort under `set -u` on release documents
+  with no matching asset; installer test suites green again on `main`
+- `needle init`'s AGENTS.md template documented `bead claim <id>`; `bead claim` takes no
+  id (it claims the next ready bead) — the template now shows both forms
 - Built-in `claude-sonnet` and `claude-opus` adapters no longer use `unbuffer`, which masked
   exit codes and introduced an undocumented dependency. Direct `claude -p` invocation now
   propagates exit codes correctly, ensuring authentication failures and other errors result

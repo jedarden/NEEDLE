@@ -4817,9 +4817,6 @@ fn cmd_doctor(repair: bool, workspace: Option<PathBuf>, json: bool) -> Result<()
     let beads_dir = workspace_root.join(".beads");
     let heartbeat_dir = needle_home.join("state").join("heartbeats");
 
-    let width = 60;
-    println!("NEEDLE Doctor");
-    println!("{}", "─".repeat(width));
 
     let mut results: Vec<CheckResult> = Vec::new();
 

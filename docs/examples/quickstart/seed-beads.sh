@@ -40,4 +40,4 @@ echo "🎯 Ready frontier (claimable now):"
 bead list --ready
 
 echo ""
-echo "💡 Run 'needle run --agent claude --identity alpha' to start processing"
+echo "💡 Run 'needle run --agent claude -i alpha' to start processing"

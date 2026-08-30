@@ -4,45 +4,48 @@ This file shows what a healthy NEEDLE quickstart run looks like, including the `
 
 ## `needle doctor` Output (All Checks Pass)
 
+Real output from needle 0.6.0 with bead 0.2.2, immediately after Step 4 (paths
+shortened, disk figure elided). The two `WARN` rows are normal on a fresh host:
+`sqlite3` is optional, and the heartbeat directory appears when the first worker
+starts.
+
 ```
-✓─────────────────────────────────────────────────────────────────✓
-NEEDLE Doctor: Configuration and Dependency Check
-✓─────────────────────────────────────────────────────────────────✓
-
-[✓] Bead backend detection
-    backend:          bead-rs
-    binary:           /home/user/.local/bin/bead
-    version:          bead-rs 0.2.0
-
-[✓] Bead store initialization
-    store:            /tmp/needle-quickstart-project/.beads/beads.db
-    checkpoint:       .beads/checkpoint/current.json
-    status:           Valid
-
-[✓] Workspace configuration
-    config:           /tmp/needle-quickstart-project/.needle.yaml
-    backend:          bead-rs
-    workspaces:       1 configured
-
-[✓] Agent CLI availability
-    agent:            claude
-    path:             /home/user/.local/bin/claude
-    version:          claude 1.2.3
-
-[✓] Configuration validation
-    global config:    ~/.config/needle/config.yaml
-    worker config:    Valid
-    agent config:     Valid
-
-[✓] Telemetry (optional)
-    otlp_sink:        Not configured (optional)
-
-═════════════════════════════════════════════════════════════════════
-✓ All checks passed — your workspace is ready for NEEDLE workers
-═════════════════════════════════════════════════════════════════════
+NEEDLE Doctor
+────────────────────────────────────────────────────────────
+[PASS]  Config                        valid
+[PASS]  Workspace                     /tmp/needle-quickstart-project
+[WARN]  SQLite integrity              sqlite3 not on PATH — skipped
+[PASS]  Lock files                    none
+[PASS]  Bead CLI Backend              bead-rs
+         └─ CLI path: ~/.local/bin/bead
+         └─ source: config file
+         └─ verified against: bead 0.1.3 (commit 85f36ac)
+         └─ capability gap: split/mitosis is sequential, not atomic
+         └─ capability gap: claim omits model/harness velocity metadata
+[PASS]  Bead store                    ok
+[PASS]  Checkpoint                    native pointer is valid JSON
+[PASS]  Worker registry               empty
+[WARN]  Heartbeat dir                 missing: ~/.needle/state/heartbeats
+[PASS]  Heartbeat files               no heartbeat directory
+[PASS]  Peers                         no workers running
+[PASS]  Agent binary                  claude at ~/.local/bin/claude
+[PASS]  Adapter transforms            ok
+[PASS]  Adapter template executables  all commands available
+[PASS]  Disk space                    <n> MB available
+[PASS]  Telemetry logs                no log directory yet
+────────────────────────────────────────────────────────────
+14 passed, 2 warning(s), 0 failure(s).
+Run `needle doctor --repair` to attempt automatic fixes.
 ```
+
+Exit code is `0`. A `FAIL` row names its fix — for example, an unbound workspace
+says `set bead_cli.backend in .needle.yaml`, and a missing backend says which
+binary to install.
 
 ## Healthy Worker Session
+
+> Illustrative. The doctor block above is captured output; the worker session
+> below shows the shape of a run, not a verbatim transcript.
 
 ### Starting the Worker
 

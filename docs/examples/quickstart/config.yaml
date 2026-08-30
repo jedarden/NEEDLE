@@ -1,5 +1,5 @@
 # Minimal worker config for quickstart example
-# Place this at ~/.config/needle/config.yaml
+# Place this at ~/.config/needle/config.yaml (overwrites the one `needle init` writes)
 
 agent:
   default: claude

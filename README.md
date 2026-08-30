@@ -17,38 +17,47 @@ NEEDLE is a universal wrapper for headless coding CLI agents. It processes a sha
 
 ## 🚀 Quickstart
 
+Prerequisites: `git`, `tmux`, and an agent CLI on your `PATH` — the flow below uses
+[Claude Code](https://claude.ai/code) (`claude`). Prebuilt binaries are Linux x86_64;
+everything else builds from source (see below).
+
 ```bash
-# Install the latest release (prebuilt binary: Linux x86_64; other targets: build from source)
+# 1. Install needle, its transform helpers, and the bead-rs backend (`bead`)
 curl -fsSL https://github.com/jedarden/NEEDLE/releases/latest/download/install.sh | bash
+#    → ~/.local/bin/{needle,bead,needle-transform-*}; make sure ~/.local/bin is on your PATH
 
-# Or build from source (uses the toolchain pinned in rust-toolchain.toml)
-cargo install --git https://github.com/jedarden/NEEDLE
+# 2. Bind your repo to the backend, then create its bead store
+cd /path/to/your/repo
+needle init --backend bead-rs     # writes ~/.config/needle/config.yaml, ./.needle.yaml,
+                                  # and a "Working with beads" section in ./AGENTS.md
+bead init --prefix <short-name>   # creates ./.beads/ (SQLite + a git-tracked checkpoint)
 
-# Install a bead backend (required)
-# The bead-rs backend manages your workspace's bead store (SQLite + checkpoint)
-cargo install --git https://github.com/jedarden/bead-rs --bin bead
-# See https://github.com/jedarden/bead-rs for backend details and prebuilt installers (coming soon)
+# 3. Give it work
+bead create --title "Add a CONTRIBUTING.md" --priority 2 --issue-type task
 
-# Configure your bead workspace backend (required)
-cd /path/to/your/workspace
-cat > .needle.yaml << 'EOF'
-bead_cli:
-  backend: bead-rs  # or 'bead-forge' for legacy bf/br workspaces
-EOF
-# This file tells needle which bead CLI backend to use
-
-# Initialise the workspace's bead store
-bead init --prefix <short-name>
-
-# Verify everything resolves
+# 4. Check that everything resolves (exit code 0 = healthy)
 needle doctor
+needle test-agent claude
 
-# Run a worker
-needle run --agent claude --identity alpha
+# 5. Run a worker — each worker lives in its own tmux session
+needle run --agent claude -i alpha
+needle status
+bead list --status closed
 ```
 
-The installer drops `needle` in `~/.local/bin` (override with `NEEDLE_INSTALL_PATH`);
-make sure that directory is on your `PATH`.
+**Heads-up:** the built-in `claude` adapter invokes `claude -p … --dangerously-skip-permissions`.
+Unattended operation means no permission prompts; read `needle config` before pointing a
+worker at a repository you care about.
+
+**Build from source** (Rust 1.85+; NEEDLE pins its toolchain in `rust-toolchain.toml`):
+
+```bash
+cargo install --git https://github.com/jedarden/NEEDLE
+cargo install --git https://github.com/jedarden/bead-rs --bin bead   # `cargo install bead` is an unrelated crate
+```
+
+The installer drops binaries in `~/.local/bin` (override with `NEEDLE_INSTALL_PATH`; skip the
+backend with `--skip-bead`). An existing `bead` at or above the release version is kept.
 
 ### 🔒 Security Note
 
@@ -279,7 +288,7 @@ chmod +x claude-interactive-install.sh
 
 ```bash
 cd /path/to/workspace
-needle run --agent claude-interactive --count 4
+needle run --agent claude-interactive --count 4   # or: -i alpha to name a single worker
 ```
 
 Source lives in [`plugins/claude-interactive/`](plugins/claude-interactive/).
