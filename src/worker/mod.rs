@@ -1124,6 +1124,33 @@ impl Worker {
             );
         }
 
+        // Validate gate command paths at worker boot.
+        // This prevents silent failures where a non-existent verification script
+        // causes every dispatch to fail without any clear error message.
+        let workspace_path = &worker.config.workspace.default;
+        let validation_result = crate::validation::validate_gate_command_paths(
+            &worker.config.gates,
+            &worker.config.verification,
+            workspace_path,
+            Some(&workspace_path.join(".needle.yaml")),
+        );
+
+        if !validation_result.is_valid() {
+            tracing::warn!(
+                workspace = %workspace_path.display(),
+                errors = ?validation_result.errors(),
+                "gate command path validation failed — some gate commands reference non-existent paths"
+            );
+            for error in validation_result.errors() {
+                tracing::warn!(
+                    command = %error.command,
+                    path = %error.path,
+                    path_type = ?error.path_type,
+                    "gate command path does not exist"
+                );
+            }
+        }
+
         worker
     }
 
@@ -4172,7 +4199,7 @@ impl Worker {
     async fn bead_references_parent(&self, bead: &Bead, parent: &Bead) -> bool {
         // Check direct ID reference in body.
         if let Some(body) = &bead.body {
-            if body.contains(&parent.id) {
+            if body.contains(parent.id.as_str()) {
                 return true;
             }
 
@@ -6863,8 +6890,8 @@ mod tests {
         assert_eq!(worker.last_config_reload_check, first_check);
     }
 
-    #[test]
-    fn state_machine_reaches_config_reload_check_at_cycle_boundary() {
+    #[tokio::test]
+    async fn state_machine_reaches_config_reload_check_at_cycle_boundary() {
         let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
         let home = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
@@ -6921,8 +6948,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn config_reload_requested_mid_dispatch_waits_for_cycle_boundary() {
+    #[tokio::test]
+    async fn config_reload_requested_mid_dispatch_waits_for_cycle_boundary() {
         use std::collections::HashMap;
 
         let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
@@ -11472,7 +11499,10 @@ mod tests {
         let result = worker.do_select().await;
 
         // The transition should succeed
-        assert!(result.is_ok(), "do_select should succeed when no beads are found");
+        assert!(
+            result.is_ok(),
+            "do_select should succeed when no beads are found"
+        );
 
         // CRITICAL ASSERTIONS: The fix ensures current_bead is cleared
         assert!(
@@ -11481,7 +11511,8 @@ mod tests {
         );
 
         assert_eq!(
-            worker.state, WorkerState::Exhausted,
+            worker.state,
+            WorkerState::Exhausted,
             "worker must be in EXHAUSTED state after do_select finds no beads"
         );
 

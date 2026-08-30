@@ -6,10 +6,11 @@
 //! Depends on: `types`, `config`, `bead_store`, `telemetry`, `validation`.
 
 use std::fmt;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::Utc;
 
 use crate::bead_store::BeadStore;
@@ -17,10 +18,9 @@ use crate::config::Config;
 use crate::fingerprint::{
     append_alert_note, build_alert_labels, check_alert_deduplication, AlertDeduplication, AlertKind,
 };
+use crate::gate_health;
 use crate::telemetry::{EventKind, Telemetry};
-#[cfg(test)]
-use crate::types::BeadStatus;
-use crate::types::{AgentOutcome, Bead, BeadAction, HandlerResult, Outcome};
+use crate::types::{AgentOutcome, Bead, BeadAction, BeadId, BeadStatus, HandlerResult, Outcome};
 use crate::validation::{verify_shipped_work, GateConfig, GateReport, GateResult, ValidationGate};
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -489,6 +489,27 @@ impl OutcomeHandler {
                 gates_run,
                 "all validation gates passed"
             );
+
+            // Check if workspace was degraded and restore it.
+            let workspace_path = &bead.workspace;
+            if let Ok(true) = gate_health::is_degraded(workspace_path) {
+                tracing::info!(
+                    workspace = %bead.workspace.display(),
+                    bead_id = %bead.id,
+                    "workspace was degraded — restoring after successful gate run"
+                );
+
+                if let Err(e) = self
+                    .restore_degraded_workspace(store, workspace_path, &bead.id)
+                    .await
+                {
+                    tracing::error!(
+                        workspace = %bead.workspace.display(),
+                        error = %e,
+                        "failed to restore degraded workspace — manual intervention may be required"
+                    );
+                }
+            }
         }
 
         // Normal success flow: check if agent closed the bead.
@@ -927,6 +948,49 @@ impl OutcomeHandler {
             chrono::Utc::now(),
         )?;
 
+        // Record the error in gate health state and check if workspace is degraded.
+        let workspace_path = PathBuf::from(workspace);
+        match gate_health::record_error(&workspace_path, command.to_string(), reason.to_string()) {
+            Ok((previous_state, now_degraded)) => {
+                if now_degraded {
+                    tracing::error!(
+                        workspace = %workspace,
+                        gate = %gate_name,
+                        command = %command,
+                        reason = %reason,
+                        consecutive_errors = previous_state.as_ref().map(|s| s.consecutive_errors + 1).unwrap_or(1),
+                        "workspace degraded after 3 consecutive gate execution errors"
+                    );
+
+                    // Create the "Gate broken" alert bead with fingerprint deduplication.
+                    if let Err(e) = self
+                        .create_gate_broken_bead(
+                            store,
+                            workspace,
+                            gate_name,
+                            command,
+                            reason,
+                            previous_state.as_ref(),
+                        )
+                        .await
+                    {
+                        tracing::error!(
+                            error = %e,
+                            workspace = %workspace,
+                            "failed to create Gate broken alert bead for degraded workspace"
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    workspace = %workspace,
+                    "failed to record gate health state — degradation tracking may be inaccurate"
+                );
+            }
+        }
+
         // Release the bead without incrementing failure count.
         let mut release_events = self.prepare_release_events(store, bead).await?;
         events.append(&mut release_events);
@@ -936,6 +1000,253 @@ impl OutcomeHandler {
         // configuration or environment issue that should be fixed before retry.
 
         Ok((BeadAction::Released, events))
+    }
+
+    /// Create a "Gate broken" alert bead when workspace degrades.
+    ///
+    /// This method creates a P0 bead with fingerprinting to prevent duplicates.
+    /// The bead remains claimable - fixing a gate is verified by running it.
+    async fn create_gate_broken_bead(
+        &self,
+        store: &dyn BeadStore,
+        workspace: &str,
+        gate_name: &str,
+        command: &str,
+        reason: &str,
+        previous_state: Option<&crate::gate_health::GateHealthState>,
+    ) -> Result<()> {
+        use crate::fingerprint::{build_alert_labels, compute_fingerprint};
+
+        let cause = format!("gate={}, command={}, reason={}", gate_name, command, reason);
+        let fingerprint = compute_fingerprint(workspace, &AlertKind::GateBroken, &cause);
+
+        // Check for existing beads with the same fingerprint
+        let dedup_result =
+            check_alert_deduplication(store, workspace, &AlertKind::GateBroken, &cause)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!(
+                        error = %e,
+                        workspace,
+                        "Failed to check Gate broken alert deduplication, proceeding with creation"
+                    );
+                    AlertDeduplication::CreateNew
+                });
+
+        match dedup_result {
+            AlertDeduplication::Deduplicated { bead_id, .. } => {
+                tracing::info!(
+                    bead_id = %bead_id,
+                    fingerprint = %fingerprint,
+                    workspace,
+                    "Gate broken alert deduplicated - existing bead already open"
+                );
+
+                // Emit telemetry for the existing bead
+                self.telemetry.emit(
+                    EventKind::WorkspaceGateDegraded {
+                        workspace: workspace.to_string(),
+                        gate: gate_name.to_string(),
+                        command: command.to_string(),
+                        reason: reason.to_string(),
+                        consecutive_errors: previous_state
+                            .map(|s| s.consecutive_errors)
+                            .unwrap_or(0),
+                        bead_id: bead_id.clone(),
+                    },
+                    Utc::now(),
+                )?;
+
+                return Ok(());
+            }
+            AlertDeduplication::Suppressed { bead_id, closed_at } => {
+                tracing::info!(
+                    bead_id = %bead_id,
+                    closed_at = %closed_at,
+                    fingerprint = %fingerprint,
+                    workspace,
+                    "Gate broken alert suppressed - bead was closed within 24h"
+                );
+
+                // Still emit telemetry even though we're not creating a bead
+                self.telemetry.emit(
+                    EventKind::WorkspaceGateDegraded {
+                        workspace: workspace.to_string(),
+                        gate: gate_name.to_string(),
+                        command: command.to_string(),
+                        reason: reason.to_string(),
+                        consecutive_errors: previous_state
+                            .map(|s| s.consecutive_errors)
+                            .unwrap_or(0),
+                        bead_id: bead_id.clone(),
+                    },
+                    Utc::now(),
+                )?;
+
+                return Ok(());
+            }
+            AlertDeduplication::CreateNew => {
+                // Create the new bead
+                let bead_title = format!("Gate broken: {} — {}", command, reason);
+                let bead_body = format!(
+                    "## Gate Execution Error\n\
+                     \n\
+                     The gate command `{}` failed to execute in workspace `{}`.\n\
+                     \n\
+                     ### Error Details\n\
+                     - **Gate**: {}\n\
+                     - **Command**: `{}`\n\
+                     - **Reason**: {}\n\
+                     - **Consecutive errors**: {}\n\
+                     \n\
+                     ### Impact\n\
+                     This workspace is now **degraded**. Pluck and Explore strands will skip it for ordinary dispatch.\n\
+                     The workspace remains claimable for manual intervention or fixing this specific gate.\n\
+                     \n\
+                     ### Resolution\n\
+                     Fix the gate command (e.g., install missing dependency, correct path, resolve permissions) \n\
+                     and the workspace will be automatically restored on the next successful gate run.\n\
+                     \n\
+                     ### Acceptance Criteria\n\
+                     - [ ] Gate command runs successfully\n\
+                     - [ ] No stderr errors (ENOENT, EACCES, timeout)\n\
+                     - [ ] Exit code is 0\n\
+                     \n\
+                     ### Verification\n\
+                     The gate command will be re-run on the next dispatch attempt. A successful run will:\n\
+                     - Clear the degraded state\n\
+                     - Close this bead automatically\n\
+                     - Restore normal workspace operation\n",
+                    command, workspace, gate_name, command, reason,
+                    previous_state.map(|s| s.consecutive_errors.to_string()).unwrap_or_else(|| "unknown".to_string())
+                );
+
+                let labels = build_alert_labels(&fingerprint, &["infra", "priority:0"]);
+                let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
+
+                let bead_id = tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    store.create_bead(&bead_title, &bead_body, &label_refs),
+                )
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!("create_bead timed out after 30s during Gate broken handling")
+                })?
+                .context("failed to create Gate broken bead")?;
+
+                tracing::info!(
+                    bead_id = %bead_id,
+                    fingerprint = %fingerprint,
+                    workspace,
+                    "Created Gate broken alert bead for degraded workspace"
+                );
+
+                // Emit telemetry for the new bead
+                self.telemetry.emit(
+                    EventKind::WorkspaceGateDegraded {
+                        workspace: workspace.to_string(),
+                        gate: gate_name.to_string(),
+                        command: command.to_string(),
+                        reason: reason.to_string(),
+                        consecutive_errors: previous_state
+                            .map(|s| s.consecutive_errors)
+                            .unwrap_or(0),
+                        bead_id: bead_id.clone(),
+                    },
+                    Utc::now(),
+                )?;
+
+                Ok(())
+            }
+        }
+    }
+
+    /// Restore a degraded workspace after successful gate run.
+    ///
+    /// This method:
+    /// 1. Clears the gate health state
+    /// 2. Finds the associated "Gate broken" bead by fingerprint
+    /// 3. Closes the bead with a reason
+    /// 4. Emits workspace.gate_restored telemetry
+    async fn restore_degraded_workspace(
+        &self,
+        store: &dyn BeadStore,
+        workspace_path: &std::path::Path,
+        success_bead_id: &BeadId,
+    ) -> Result<()> {
+        // Get the previous state before clearing
+        let previous_state = gate_health::clear_state(workspace_path).unwrap_or(None);
+
+        let degraded_duration_secs = if let Some(ref state) = previous_state {
+            let last_error = chrono::DateTime::parse_from_rfc3339(&state.last_error_at)
+                .unwrap_or_else(|_| chrono::Utc::now().into());
+            let now: chrono::DateTime<chrono::FixedOffset> = chrono::Utc::now().into();
+            (now - last_error).num_seconds().max(0) as u64
+        } else {
+            0
+        };
+
+        // Find the Gate broken bead for this workspace
+        let workspace = workspace_path.to_string_lossy().to_string();
+
+        // We need to find beads with the gate-broken alert kind in this workspace
+        let all_beads = store
+            .list_all()
+            .await
+            .context("failed to list beads while restoring degraded workspace")?;
+
+        // Find Gate broken beads in this workspace
+        let gate_broken_beads: Vec<&Bead> = all_beads
+            .iter()
+            .filter(|b| {
+                b.workspace == workspace_path
+                    && b.title.starts_with("Gate broken:")
+                    && b.status != BeadStatus::Closed
+            })
+            .collect();
+
+        // Close each Gate broken bead found
+        for bead in &gate_broken_beads {
+            tracing::info!(
+                bead_id = %bead.id,
+                workspace = %workspace,
+                "Closing Gate broken bead after workspace restoration"
+            );
+
+            let close_reason = format!(
+                "Workspace restored after successful gate run in bead {}. \
+                 Gates are now functioning correctly.",
+                success_bead_id
+            );
+
+            // Close the bead
+            tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                store.close(&bead.id, &close_reason),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("close timed out after 30s during workspace restoration"))?
+            .context("failed to close Gate broken bead during workspace restoration")?;
+
+            // Emit restoration telemetry
+            self.telemetry.emit(
+                EventKind::WorkspaceGateRestored {
+                    workspace: workspace.clone(),
+                    bead_id: bead.id.clone(),
+                    degraded_duration_secs,
+                },
+                Utc::now(),
+            )?;
+        }
+
+        tracing::info!(
+            workspace = %workspace,
+            beads_closed = gate_broken_beads.len(),
+            degraded_duration_secs,
+            "Successfully restored degraded workspace"
+        );
+
+        Ok(())
     }
 
     /// Failure: release bead and increment failure count.

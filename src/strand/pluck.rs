@@ -1215,6 +1215,22 @@ impl super::Strand for PluckStrand {
             };
         }
 
+        // Check if the home workspace is gate-degraded. If so, skip ordinary dispatch.
+        // Degraded workspaces are excluded from Pluck to prevent repeated gate
+        // execution errors. The workspace remains claimable for manual intervention
+        // or for fixing the specific gate that caused degradation.
+        if let Ok(true) = crate::gate_health::is_degraded(
+            &std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")),
+        ) {
+            tracing::warn!(
+                workspace = %std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")).display(),
+                "Home workspace is gate-degraded — skipping Pluck strand for ordinary dispatch"
+            );
+            return StrandResult::Skipped {
+                reason: "workspace_gate_degraded".to_string(),
+            };
+        }
+
         // 1. Query bead store for ready, unassigned beads. If the normal
         // query is empty, retry through the bounded relaxation waterfall.
         let (mut candidates, relaxation_tier) = match self.query_with_relaxation(store).await {

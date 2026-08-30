@@ -716,6 +716,19 @@ impl super::Strand for ExploreStrand {
                 continue;
             }
 
+            // Check if the workspace is gate-degraded. If so, skip ordinary dispatch.
+            // Degraded workspaces are excluded from Explore to prevent repeated gate
+            // execution errors. The workspace remains claimable for manual intervention
+            // or for fixing the specific gate that caused degradation.
+            if let Ok(true) = crate::gate_health::is_degraded(workspace) {
+                tracing::warn!(
+                    workspace = %workspace.display(),
+                    "workspace is gate-degraded — skipping Explore strand for ordinary dispatch"
+                );
+                exclusion_reasons.insert("workspace_gate_degraded".to_string());
+                continue;
+            }
+
             // Create a store for this workspace and query for ready beads.
             let remote_store = match self.store_factory.create_store(workspace).await {
                 Ok(s) => s,
@@ -4040,7 +4053,7 @@ mod tests {
         let registry = crate::registry::Registry::new(registry_dir.path());
 
         // Register a "live" worker with a valid PID (this process's PID)
-        let live_worker = crate::registry::Worker {
+        let live_worker = crate::registry::WorkerEntry {
             id: "test-worker-alpha".to_string(),
             pid: std::process::id(),
             started_at: SystemTime::now(),
