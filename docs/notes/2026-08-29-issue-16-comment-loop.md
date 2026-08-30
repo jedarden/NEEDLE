@@ -21,7 +21,7 @@ The outcome handler in `src/outcome/mod.rs` reset the failure count **before** r
 
 The failure count meant to quarantine repeat offenders was zeroed on every pass, so the threshold was never reached.
 
-## The Fix (commit TBD)
+## The Fix (commit c3921e09)
 
 Moved the `reset_failure_count()` call to happen ONLY after shipped-work verification **passes**:
 
