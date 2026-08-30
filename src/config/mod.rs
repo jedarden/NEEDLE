@@ -3639,14 +3639,13 @@ pub struct PluckConfig {
     #[serde(default = "PluckConfig::default_split_after_failures")]
     pub split_after_failures: u32,
 
-    /// Write persistent starvation records and diagnostic snapshots to the
-    /// NEEDLE workspace (default: true).
+    /// Write persistent Pluck no-candidate diagnostic snapshots to the NEEDLE
+    /// workspace (default: true).
     ///
-    /// When enabled, starvation events are written to a persistent log file in
-    /// NEEDLE's workspace (~/.needle/state/starvation-records.jsonl) rather than
-    /// only being emitted as telemetry. Records are never written to target scanned
-    /// workspaces, only to NEEDLE's own workspace. Set this to false to opt out
-    /// of both the legacy summary and the full `starvation_events.jsonl` stream.
+    /// This historical setting name is retained for compatibility. When
+    /// enabled, local selection diagnostics are appended to NEEDLE's own
+    /// `~/.needle/state/starvation_events.jsonl`; they are not terminal
+    /// starvation verdicts and are never written to target workspaces.
     #[serde(default = "PluckConfig::default_persistent_starvation_records")]
     pub persistent_starvation_records: bool,
 }
@@ -3936,11 +3935,11 @@ pub struct KnotConfig {
     #[serde(default)]
     pub alert_destination: Option<String>,
 
-    /// Minimum minutes between alert beads for the same workspace.
+    /// Minimum minutes between terminal starvation events for the same workspace.
     #[serde(default = "KnotConfig::default_alert_cooldown_minutes")]
     pub alert_cooldown_minutes: u64,
 
-    /// Number of consecutive exhaustion cycles before creating an alert bead.
+    /// Number of consecutive terminal invisible-queue diagnoses before alerting.
     #[serde(default = "KnotConfig::default_exhaustion_threshold")]
     pub exhaustion_threshold: u64,
 }

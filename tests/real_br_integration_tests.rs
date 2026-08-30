@@ -32,7 +32,7 @@ use needle::mitosis::{MitosisEvaluator, MitosisResult};
 use needle::registry::Registry;
 use needle::strand::{ExploreStrand, MendStrand, Strand, StrandRunner};
 use needle::telemetry::Telemetry;
-use needle::types::{BeadId, ClaimOutcome, StrandResult};
+use needle::types::{BeadId, BeadStatus, ClaimOutcome, StrandResult};
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Test infrastructure
@@ -1024,15 +1024,13 @@ async fn real_bead_rs_strand_waterfall_ordering() {
 
 #[tokio::test]
 async fn real_bead_rs_strand_waterfall_exhaustion() {
-    // Create a workspace with a bead that has an excluded label ("deferred").
-    // This simulates the INVISIBLE diagnosis scenario: open beads exist but
-    // Pluck's filters excluded them, triggering Knot to create an alert bead.
+    // Create a workspace with a runnable bead that this worker just lost in a
+    // claim race. The runner-level exclusion keeps it from being selected while
+    // Knot's independent inventory still sees the open bead.
     let workspace = create_test_workspace("waterfall-exhaustion").unwrap();
     let store = Arc::new(store_for_workspace(workspace.path()).unwrap());
 
-    // Create a bead with the "deferred" label (excluded by default Pluck filters).
     let bead_id = create_bead(workspace.path(), "test-deferred-task", 1).unwrap();
-    add_label(workspace.path(), &bead_id, "deferred").unwrap();
 
     // Verify the bead exists and is open.
     let beads = store.ready(&Filters::default()).await.unwrap();
@@ -1041,13 +1039,14 @@ async fn real_bead_rs_strand_waterfall_exhaustion() {
 
     // Create a StrandRunner with default config.
     let mut config = needle::config::Config::default();
+    config.workspace.default = workspace.path().to_path_buf();
     config.strands.explore.workspace_root = workspace.path().to_path_buf();
+    config.strands.knot.exhaustion_threshold = 1;
     let registry = Registry::new(workspace.path());
     let telemetry = test_telemetry("test-waterfall-exhaustion", workspace.path());
     let runner = StrandRunner::from_config(&config, "test-worker", registry, telemetry);
 
-    // Run the waterfall with an empty exclusion set.
-    let exclusions = HashSet::new();
+    let exclusions = HashSet::from([bead_id.clone()]);
     let outcome = runner
         .select(store.as_ref(), &exclusions)
         .await
@@ -1079,10 +1078,10 @@ async fn real_bead_rs_strand_waterfall_exhaustion() {
     // beads before filtering them out).
     for eval in &outcome.strand_evaluations {
         if eval.strand_name == "pluck" {
-            // Pluck may report "bead_found(0)" if it found beads before filtering.
+            // Pluck found the race-lost bead before the runner exclusion.
             assert!(
-                eval.result.contains("no_work") || eval.result.contains("bead_found(0)"),
-                "Pluck should return no_work or bead_found(0); got result='{}'",
+                eval.result.contains("no_work") || eval.result.contains("bead_found"),
+                "Pluck should return no_work or bead_found; got result='{}'",
                 eval.result
             );
         } else {
@@ -1095,8 +1094,7 @@ async fn real_bead_rs_strand_waterfall_exhaustion() {
         }
     }
 
-    // Verify Knot created a starvation alert bead in the workspace.
-    // The alert bead should have the "starvation-alert" label.
+    // Internal starvation control-plane alerts must never become target work.
     let all_beads = store.list_all().await.unwrap();
     let alert_beads: Vec<_> = all_beads
         .iter()
@@ -1104,8 +1102,8 @@ async fn real_bead_rs_strand_waterfall_exhaustion() {
         .collect();
 
     assert!(
-        !alert_beads.is_empty(),
-        "Knot should have created a starvation alert bead; found {} alert beads in workspace",
+        alert_beads.is_empty(),
+        "Knot must not create starvation alert beads; found {} in workspace",
         alert_beads.len()
     );
 
@@ -1114,10 +1112,7 @@ async fn real_bead_rs_strand_waterfall_exhaustion() {
         .show(&bead_id)
         .await
         .expect("original bead should still exist");
-    assert!(
-        original_bead.labels.contains(&"deferred".to_string()),
-        "original bead should still have 'deferred' label"
-    );
+    assert_eq!(original_bead.status, BeadStatus::Open);
 
     // Verify waterfall_restarts is 0 (no strand returned WorkCreated).
     assert_eq!(
@@ -1140,19 +1135,17 @@ async fn real_bead_rs_strand_waterfall_exhaustion() {
 async fn real_bead_rs_strand_waterfall_exhaustion_with_telemetry_jsonl() {
     use std::io::BufRead;
 
-    // Create a workspace with a bead that has an excluded label ("deferred").
-    // This simulates the INVISIBLE diagnosis scenario: open beads exist but
-    // Pluck's filters excluded them, triggering Knot to create an alert bead.
+    // Simulate a runnable bead that this worker just lost in a claim race.
     let workspace = create_test_workspace("waterfall-exhaustion-jsonl").unwrap();
     let store = Arc::new(store_for_workspace(workspace.path()).unwrap());
 
-    // Create a bead with the "deferred" label (excluded by default Pluck filters).
     let bead_id = create_bead(workspace.path(), "test-deferred-task", 1).unwrap();
-    add_label(workspace.path(), &bead_id, "deferred").unwrap();
 
     // Create a StrandRunner with default config.
     let mut config = needle::config::Config::default();
+    config.workspace.default = workspace.path().to_path_buf();
     config.strands.explore.workspace_root = workspace.path().to_path_buf();
+    config.strands.knot.exhaustion_threshold = 1;
     let registry = Registry::new(workspace.path());
     let worker_id = "test-waterfall-jsonl".to_string();
     let log_dir = workspace.path().join(".needle/logs");
@@ -1164,8 +1157,7 @@ async fn real_bead_rs_strand_waterfall_exhaustion_with_telemetry_jsonl() {
 
     let runner = StrandRunner::from_config(&config, "test-worker", registry, telemetry.clone());
 
-    // Run the waterfall with an empty exclusion set.
-    let exclusions = HashSet::new();
+    let exclusions = HashSet::from([bead_id]);
     let outcome = runner
         .select(store.as_ref(), &exclusions)
         .await
@@ -1301,10 +1293,10 @@ async fn real_bead_rs_strand_waterfall_exhaustion_with_telemetry_jsonl() {
             .unwrap_or_else(|| panic!("strand.evaluated event should have result"));
 
         if strand_name == "pluck" {
-            // Pluck may report "bead_found(0)" if it found beads before filtering.
+            // Pluck found the race-lost bead before the runner exclusion.
             assert!(
-                result.contains("no_work") || result.contains("bead_found(0)"),
-                "Pluck strand.evaluated should return no_work or bead_found(0); got result='{}'",
+                result.contains("no_work") || result.contains("bead_found"),
+                "Pluck strand.evaluated should return no_work or bead_found; got result='{}'",
                 result
             );
         } else {
@@ -1317,8 +1309,21 @@ async fn real_bead_rs_strand_waterfall_exhaustion_with_telemetry_jsonl() {
         }
     }
 
-    // Verify Knot created a starvation alert bead in the workspace.
-    // The alert bead should have the "starvation-alert" label.
+    let terminal_starvation = events
+        .iter()
+        .find(|event| event["event_type"] == "strand.knot.starvation_detected")
+        .expect("Knot should emit the terminal starvation verdict");
+    assert_eq!(terminal_starvation["data"]["open_count"], 1);
+    assert_eq!(
+        terminal_starvation["data"]["workspace"],
+        workspace.path().display().to_string()
+    );
+
+    assert!(events
+        .iter()
+        .all(|event| event["event_type"] != "strand.pluck.starvation_detected"));
+
+    // Neither phase may manufacture target-repository work.
     let all_beads = store.list_all().await.unwrap();
     let alert_beads: Vec<_> = all_beads
         .iter()
@@ -1326,8 +1331,8 @@ async fn real_bead_rs_strand_waterfall_exhaustion_with_telemetry_jsonl() {
         .collect();
 
     assert!(
-        !alert_beads.is_empty(),
-        "Knot should have created a starvation alert bead; found {} alert beads in workspace",
+        alert_beads.is_empty(),
+        "starvation diagnostics must not create target beads; found {} in workspace",
         alert_beads.len()
     );
 }

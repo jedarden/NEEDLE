@@ -45,7 +45,9 @@ Additional fields are event-specific and documented per type below.
 - `strand.evaluated` — A strand evaluation completed
 - `strand.skipped` — A strand was skipped (e.g., due to config)
 - `strand.resolve.evaluated` — Resolve strand evaluation
-- `strand.pluck.starvation_detected` — Pluck strand detected bead starvation
+- `strand.pluck.no_candidate` — Pluck found no local candidate; diagnostic only, waterfall continues
+- `strand.knot.starvation_detected` — terminal starvation verdict after the full strand waterfall
+- `strand.pluck.starvation_detected` — legacy compatibility event; no longer emitted by strand selection
 
 ### Bead Processing
 - `bead.claim.attempted` — Worker attempted to claim a bead

@@ -1,9 +1,10 @@
-//! Knot strand: exhaustion alerting with three-state verification.
+//! Knot strand: terminal starvation telemetry with independent verification.
 //!
 //! When all other strands return NoWork, Knot diagnoses why:
 //! - NO_BEADS_EXIST: queue is genuinely empty (normal idle)
 //! - ALL_CLAIMED: other workers hold every bead (normal contention)
-//! - INVISIBLE: open beads exist but Pluck's filters excluded them (config error)
+//! - BLOCKED_ONLY: every open bead has an unfinished dependency (normal idle)
+//! - INVISIBLE: unblocked open beads exist but Pluck's filters excluded them
 //!
 //! Only the INVISIBLE diagnosis triggers a starvation telemetry event. Rate-limited to one
 //! alert per workspace per `config.knot.alert_cooldown_minutes`.
@@ -12,6 +13,7 @@
 //! Pluck's `ready()` — to avoid v1's 100% false positive rate.
 
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
@@ -19,13 +21,10 @@ use tracing::Instrument;
 
 use crate::bead_store::BeadStore;
 use crate::config::KnotConfig;
-use crate::fingerprint::{
-    append_alert_note, build_alert_labels, check_alert_deduplication, AlertDeduplication, AlertKind,
-};
 use crate::telemetry::Telemetry;
 use crate::types::{BeadId, BeadStatus, StrandError, StrandResult};
 
-/// Diagnosis from the three-state verification check.
+/// Diagnosis from the terminal verification check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExhaustionDiagnosis {
     /// Queue is genuinely empty — no beads at all.
@@ -35,12 +34,15 @@ pub enum ExhaustionDiagnosis {
         in_progress_count: usize,
         claimed_by: Vec<String>,
     },
+    /// Open beads exist, but every one is waiting on an unfinished blocker.
+    BlockedOnly { open_count: usize },
     /// Open beads exist but Pluck found none — configuration error (filters, workspace).
     Invisible {
         total: usize,
         open_count: usize,
         in_progress_count: usize,
         claimed_by: Vec<String>,
+        workspace: String,
     },
 }
 
@@ -50,14 +52,18 @@ impl ExhaustionDiagnosis {
         match self {
             ExhaustionDiagnosis::NoBeadsExist => "no_beads_exist",
             ExhaustionDiagnosis::AllClaimed { .. } => "all_claimed",
+            ExhaustionDiagnosis::BlockedOnly { .. } => "blocked_only",
             ExhaustionDiagnosis::Invisible { .. } => "invisible",
         }
     }
 }
 
-/// The Knot strand — exhaustion alerting with three-state verification.
+/// The Knot strand — terminal starvation telemetry with independent verification.
 pub struct KnotStrand {
     config: KnotConfig,
+    /// Configured home workspace used when bead-rs inventory rows do not carry
+    /// their workspace path. Falls back to the explicit fleet scope.
+    workspace_scope: PathBuf,
     /// How many consecutive exhaustion cycles have occurred.
     exhaustion_count: Mutex<u64>,
     /// Timestamp of the last alert emitted (for rate limiting).
@@ -69,15 +75,35 @@ pub struct KnotStrand {
 impl KnotStrand {
     /// Create a new KnotStrand with the given configuration and telemetry.
     pub fn new(config: KnotConfig, telemetry: Telemetry) -> Self {
+        Self::with_workspace(config, telemetry, PathBuf::from("fleet"))
+    }
+
+    /// Create a Knot strand with a non-empty terminal event scope.
+    pub fn with_workspace(config: KnotConfig, telemetry: Telemetry, workspace: PathBuf) -> Self {
         KnotStrand {
             config,
+            workspace_scope: workspace,
             exhaustion_count: Mutex::new(0),
             last_alert_at: Mutex::new(None),
             telemetry,
         }
     }
 
-    /// Perform three-state verification using a DIFFERENT code path from Pluck.
+    fn workspace_from_inventory(&self, beads: &[crate::types::Bead]) -> String {
+        beads
+            .iter()
+            .map(|bead| bead.workspace.as_path())
+            .find(|workspace| !workspace.as_os_str().is_empty())
+            .or_else(|| {
+                let configured = self.workspace_scope.as_path();
+                (!configured.as_os_str().is_empty()).then_some(configured)
+            })
+            .unwrap_or_else(|| Path::new("fleet"))
+            .display()
+            .to_string()
+    }
+
+    /// Perform terminal verification using a DIFFERENT code path from Pluck.
     ///
     /// Queries ALL beads via `list_all()` (not `ready()`) and classifies the
     /// exhaustion reason.
@@ -90,6 +116,7 @@ impl KnotStrand {
 
         let total = all_beads.len();
         let mut open_count = 0usize;
+        let mut unblocked_open_count = 0usize;
         let mut in_progress_count = 0usize;
         let mut claimed_by = Vec::new();
 
@@ -97,6 +124,35 @@ impl KnotStrand {
             match bead.status {
                 BeadStatus::Open => {
                     open_count += 1;
+                    let has_unfinished_blocker = bead.dependencies.iter().any(|dependency| {
+                        if dependency.dependency_type != "blocks" {
+                            return false;
+                        }
+
+                        let enriched_status = dependency.status.to_ascii_lowercase();
+                        if matches!(
+                            enriched_status.as_str(),
+                            "closed" | "done" | "completed" | "resolved"
+                        ) {
+                            return false;
+                        }
+                        if !enriched_status.is_empty() {
+                            return true;
+                        }
+
+                        // bead-rs returns lean dependency edges without status.
+                        // Resolve those against the inventory; an absent blocker
+                        // is conservatively treated as unfinished.
+                        all_beads
+                            .iter()
+                            .find(|candidate| candidate.id == dependency.id)
+                            .map_or(true, |blocker| {
+                                !matches!(blocker.status, BeadStatus::Done | BeadStatus::Closed)
+                            })
+                    });
+                    if !has_unfinished_blocker {
+                        unblocked_open_count += 1;
+                    }
                 }
                 BeadStatus::InProgress => {
                     in_progress_count += 1;
@@ -126,12 +182,19 @@ impl KnotStrand {
             return Ok(ExhaustionDiagnosis::NoBeadsExist);
         }
 
+        // The ready queue is expected to omit dependency-blocked open beads.
+        // This is normal idle, not evidence that Pluck hid runnable work.
+        if open_count > 0 && unblocked_open_count == 0 {
+            return Ok(ExhaustionDiagnosis::BlockedOnly { open_count });
+        }
+
         // Open beads exist but Pluck returned nothing → config error.
         Ok(ExhaustionDiagnosis::Invisible {
             total,
             open_count,
             in_progress_count,
             claimed_by,
+            workspace: self.workspace_from_inventory(&all_beads),
         })
     }
 
@@ -161,6 +224,14 @@ impl KnotStrand {
         *guard += 1;
         *guard
     }
+
+    fn reset_exhaustion(&self) {
+        let mut guard = self
+            .exhaustion_count
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *guard = 0;
+    }
 }
 
 #[async_trait::async_trait]
@@ -170,8 +241,6 @@ impl super::Strand for KnotStrand {
     }
 
     async fn evaluate(&self, store: &dyn BeadStore, _exclusions: &HashSet<BeadId>) -> StrandResult {
-        let cycle = self.increment_exhaustion();
-
         // Check if the home bead store exists. If not, skip this strand.
         // This distinguishes between "no home store configured" (expected for
         // roam-only workers) and "home store is broken" (unexpected error).
@@ -191,7 +260,7 @@ impl super::Strand for KnotStrand {
             needle.strand.name = "knot",
             needle.strand.result = tracing::field::Empty, // Will be set based on diagnosis
             needle.strand.diagnosis = tracing::field::Empty, // Will be set based on diagnosis
-            needle.strand.exhaustion_count = cycle,
+            needle.strand.exhaustion_count = tracing::field::Empty,
         );
 
         async {
@@ -206,10 +275,17 @@ impl super::Strand for KnotStrand {
                     return StrandResult::Error(e);
                 }
             };
+            let cycle = if matches!(diagnosis, ExhaustionDiagnosis::Invisible { .. }) {
+                self.increment_exhaustion()
+            } else {
+                self.reset_exhaustion();
+                0
+            };
 
             // Record the diagnosis result on the span
             tracing::Span::current().record("needle.strand.result", "no_work");
             tracing::Span::current().record("needle.strand.diagnosis", diagnosis.as_str());
+            tracing::Span::current().record("needle.strand.exhaustion_count", cycle);
 
             tracing::info!(
                 strand = "knot",
@@ -224,6 +300,7 @@ impl super::Strand for KnotStrand {
                 open_count,
                 in_progress_count,
                 claimed_by,
+                workspace,
             } = &diagnosis
             {
                 if cycle >= self.config.exhaustion_threshold && !self.is_within_cooldown() {
@@ -239,21 +316,13 @@ impl super::Strand for KnotStrand {
                         candidate_exclusion_reasons.push("excluded_by_status".to_string());
                     }
 
-                    // Extract workspace path from beads for telemetry.
-                    // All beads in a single store should have the same workspace.
-                    let workspace_path = if let Ok(beads) = store.list_all().await {
-                        beads
-                            .first()
-                            .and_then(|b| b.workspace.to_str().map(|s| s.to_string()))
-                            .unwrap_or_else(|| "unknown".to_string())
-                    } else {
-                        "unknown".to_string()
-                    };
-
-                    // Emit telemetry AND create an alert bead with fingerprint-based deduplication.
+                    // Emit the sole terminal starvation verdict. Knot must not
+                    // manufacture target-repository work: doing so feeds the
+                    // scheduler its own control-plane artifact and can trigger
+                    // recursive Unravel generation.
                     let _ = self.telemetry.emit(
-                        crate::telemetry::EventKind::PluckStarvationDetected {
-                            workspace: workspace_path.clone(),
+                        crate::telemetry::EventKind::KnotStarvationDetected {
+                            workspace: workspace.clone(),
                             open_count: *open_count,
                             excluded_count,
                             candidate_exclusion_reasons: candidate_exclusion_reasons.clone(),
@@ -261,120 +330,13 @@ impl super::Strand for KnotStrand {
                         Utc::now(),
                     );
 
-                    // Create alert bead with deduplication
-                    let cause = format!(
-                        "diagnosis={}, open={}, excluded={}, reasons={}",
-                        diagnosis.as_str(),
-                        open_count,
-                        excluded_count,
-                        candidate_exclusion_reasons.join(", ")
-                    );
-
-                    let dedup_result = check_alert_deduplication(
-                        store,
-                        &workspace_path,
-                        &AlertKind::KnotStarvation,
-                        &cause,
-                    )
-                    .await
-                    .unwrap_or_else(|e| {
-                        tracing::warn!(
-                            error = %e,
-                            workspace = %workspace_path,
-                            "Failed to check knot alert deduplication, proceeding with creation"
-                        );
-                        AlertDeduplication::CreateNew
-                    });
-
-                    match dedup_result {
-                        AlertDeduplication::Deduplicated {
-                            bead_id,
-                            fingerprint,
-                        } => {
-                            let note = format!(
-                                "Knot starvation recurred: diagnosis={}, open={}, excluded={}",
-                                diagnosis.as_str(),
-                                open_count,
-                                excluded_count
-                            );
-                            let _ = append_alert_note(store, &bead_id, &note).await;
-
-                            tracing::info!(
-                                workspace = %workspace_path,
-                                deduplicated_bead_id = %bead_id,
-                                fingerprint = %fingerprint,
-                                diagnosis = %diagnosis.as_str(),
-                                "Knot starvation alert deduplicated"
-                            );
-                        }
-                        AlertDeduplication::Suppressed { bead_id, closed_at } => {
-                            tracing::info!(
-                                workspace = %workspace_path,
-                                suppressed_bead_id = %bead_id,
-                                closed_at = %closed_at,
-                                "Knot starvation alert suppressed - closed within 24h"
-                            );
-                        }
-                        AlertDeduplication::CreateNew => {
-                            let fingerprint = crate::fingerprint::compute_fingerprint(
-                                &workspace_path,
-                                &AlertKind::KnotStarvation,
-                                &cause,
-                            );
-
-                            let title = format!(
-                                "KNOT: Starvation detected in {}",
-                                workspace_path.rsplit('/').next().unwrap_or("workspace")
-                            );
-
-                            let body = format!(
-                                "## Knot Starvation Alert\n\n\
-                                 **Diagnosis:** {}\n\
-                                 **Workspace:** {}\n\
-                                 **Open beads:** {}\n\
-                                 **Excluded beads:** {}\n\
-                                 **Exclusion reasons:** {}\n\
-                                 **Timestamp:** {}\n\n\
-                                 This workspace has open beads that Pluck cannot see due to \
-                                 filtering rules. This may indicate a configuration error.",
-                                diagnosis.as_str(),
-                                workspace_path,
-                                open_count,
-                                excluded_count,
-                                candidate_exclusion_reasons.join(", "),
-                                Utc::now().to_rfc3339()
-                            );
-
-                            let labels =
-                                build_alert_labels(&fingerprint, &["knot-starvation", "human"]);
-                            let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
-
-                            match store.create_bead(&title, &body, &label_refs).await {
-                                Ok(alert_id) => {
-                                    tracing::info!(
-                                        workspace = %workspace_path,
-                                        alert_id = %alert_id,
-                                        fingerprint = %fingerprint,
-                                        "Knot starvation alert bead created"
-                                    );
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        error = %e,
-                                        workspace = %workspace_path,
-                                        "Failed to create knot starvation alert bead"
-                                    );
-                                }
-                            }
-                        }
-                    }
-
                     self.record_alert();
                     tracing::warn!(
+                        workspace = %workspace,
                         diagnosis = diagnosis.as_str(),
                         open_count,
                         excluded_count,
-                        "knot emitted starvation telemetry and created alert bead"
+                        "knot emitted terminal starvation telemetry"
                     );
                 }
             }
@@ -697,7 +659,7 @@ mod tests {
         let events_guard = events.lock().unwrap();
         assert_eq!(events_guard.len(), 1, "telemetry emitted at threshold");
         let event = &events_guard[0];
-        assert_eq!(event.event_type, "strand.pluck.starvation_detected");
+        assert_eq!(event.event_type, "strand.knot.starvation_detected");
         assert_eq!(event.data["workspace"], "/tmp/test");
         assert_eq!(event.data["open_count"], 1);
         assert_eq!(event.data["excluded_count"], 1);
@@ -774,7 +736,7 @@ mod tests {
         assert_eq!(events_guard.len(), 1, "telemetry event emitted");
         let event = &events_guard[0];
 
-        assert_eq!(event.event_type, "strand.pluck.starvation_detected");
+        assert_eq!(event.event_type, "strand.knot.starvation_detected");
         assert_eq!(event.data["open_count"], 2);
         assert_eq!(event.data["excluded_count"], 1);
 
@@ -866,11 +828,13 @@ mod tests {
                 open_count,
                 in_progress_count,
                 claimed_by,
+                workspace,
             } => {
                 assert_eq!(total, 2);
                 assert_eq!(open_count, 1);
                 assert_eq!(in_progress_count, 1);
                 assert_eq!(claimed_by, vec!["w1"]);
+                assert_eq!(workspace, "/tmp/test");
             }
             other => panic!("expected Invisible, got: {other:?}"),
         }
@@ -889,6 +853,59 @@ mod tests {
             matches!(diagnosis, ExhaustionDiagnosis::AllClaimed { .. }),
             "expected AllClaimed, got: {diagnosis:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn dependency_blocked_open_beads_are_normal_idle() {
+        let mut waiting = make_bead("waiting", BeadStatus::Open, None);
+        waiting.dependencies.push(crate::types::BrDependency {
+            id: BeadId::from("blocker"),
+            title: String::new(),
+            status: String::new(),
+            priority: 1,
+            dependency_type: "blocks".to_string(),
+        });
+        let store = KnotTestStore::new(vec![
+            waiting,
+            make_bead("blocker", BeadStatus::InProgress, Some("worker-1")),
+        ]);
+        let config = KnotConfig {
+            exhaustion_threshold: 1,
+            alert_cooldown_minutes: 60,
+            ..default_knot_config()
+        };
+        let (knot, events) = make_test_knot_with_events(config);
+
+        let result = knot.evaluate(&store, &HashSet::new()).await;
+        assert!(matches!(result, StrandResult::NoWork));
+        assert!(matches!(
+            knot.diagnose(&store).await.unwrap(),
+            ExhaustionDiagnosis::BlockedOnly { open_count: 1 }
+        ));
+        assert!(events.lock().unwrap().is_empty());
+        assert_eq!(store.created_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn ordinary_idle_resets_consecutive_invisible_threshold() {
+        let config = KnotConfig {
+            exhaustion_threshold: 2,
+            alert_cooldown_minutes: 60,
+            ..default_knot_config()
+        };
+        let (knot, events) = make_test_knot_with_events(config);
+        let invisible = KnotTestStore::new(vec![make_bead("open", BeadStatus::Open, None)]);
+        let empty = KnotTestStore::new(vec![]);
+
+        knot.evaluate(&invisible, &HashSet::new()).await;
+        knot.evaluate(&empty, &HashSet::new()).await;
+        knot.evaluate(&invisible, &HashSet::new()).await;
+        assert!(events.lock().unwrap().is_empty());
+
+        knot.evaluate(&invisible, &HashSet::new()).await;
+        drop(knot);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(events.lock().unwrap().len(), 1);
     }
 
     // ──────────────────────────────────────────────────────────────────────────

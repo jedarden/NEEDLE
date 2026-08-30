@@ -258,7 +258,11 @@ impl StrandRunner {
             telemetry,
         );
 
-        let knot = KnotStrand::new(config.strands.knot.clone(), runner_telemetry.clone());
+        let knot = KnotStrand::with_workspace(
+            config.strands.knot.clone(),
+            runner_telemetry.clone(),
+            config.workspace.default.clone(),
+        );
         StrandRunner {
             strands: vec![
                 Box::new(pluck),
@@ -770,12 +774,14 @@ mod tests {
 
     #[tokio::test]
     async fn work_created_restarts_waterfall() {
+        let terminal_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
         let runner = StrandRunner::new(vec![
             Box::new(StubStrand::work_created("creator")),
             Box::new(StubStrand::beads(
                 "finder",
                 vec![make_test_bead("test-002")],
             )),
+            Box::new(CountingStrand::no_work("knot", terminal_count.clone())),
         ]);
         let store = EmptyStore;
         // WorkCreated restarts the waterfall. On the second pass, "creator"
@@ -787,6 +793,11 @@ mod tests {
         );
         assert_eq!(outcome.waterfall_restarts, 1);
         assert_eq!(outcome.restart_triggers, vec!["creator"]);
+        assert_eq!(
+            terminal_count.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "terminal Knot must not diagnose starvation after an earlier strand creates selectable work"
+        );
     }
 
     #[tokio::test]

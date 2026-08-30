@@ -269,7 +269,25 @@ pub enum EventKind {
         workspace: Option<String>,
     },
     QueueEmpty,
+    /// Legacy compatibility event retained for readers of older telemetry.
+    /// Strand selection no longer emits this pre-waterfall verdict.
     PluckStarvationDetected {
+        workspace: String,
+        open_count: usize,
+        excluded_count: usize,
+        candidate_exclusion_reasons: Vec<String>,
+    },
+    /// Pluck found no candidate in its local store. This is diagnostic only;
+    /// the remaining strands still have an opportunity to find or create work.
+    PluckNoCandidate {
+        workspace: String,
+        open_count: usize,
+        excluded_count: usize,
+        candidate_exclusion_reasons: Vec<String>,
+    },
+    /// The complete strand waterfall reached Knot with open work still
+    /// invisible. This is the sole terminal starvation verdict.
+    KnotStarvationDetected {
         workspace: String,
         open_count: usize,
         excluded_count: usize,
@@ -1129,6 +1147,8 @@ impl EventKind {
             EventKind::BeadStoreError { .. } => "bead_store.error",
             EventKind::QueueEmpty => "worker.queue_empty",
             EventKind::PluckStarvationDetected { .. } => "strand.pluck.starvation_detected",
+            EventKind::PluckNoCandidate { .. } => "strand.pluck.no_candidate",
+            EventKind::KnotStarvationDetected { .. } => "strand.knot.starvation_detected",
             EventKind::PluckOrderingDegraded { .. } => "strand.pluck.ordering_degraded",
             EventKind::MendCycleBroken { .. } => "mend.cycle_broken",
             EventKind::AuditBeadClosedAsVerification { .. } => "audit.bead_closed_as_verification",
@@ -1360,6 +1380,8 @@ impl EventKind {
             | EventKind::StrandSkipped { .. }
             | EventKind::QueueEmpty
             | EventKind::PluckStarvationDetected { .. }
+            | EventKind::PluckNoCandidate { .. }
+            | EventKind::KnotStarvationDetected { .. }
             | EventKind::AlertDeduplicated { .. }
             | EventKind::GatePathMissing { .. }
             | EventKind::HealthCheck { .. }
@@ -1620,6 +1642,18 @@ impl EventKind {
             }
             EventKind::QueueEmpty => serde_json::json!({}),
             EventKind::PluckStarvationDetected {
+                workspace,
+                open_count,
+                excluded_count,
+                candidate_exclusion_reasons,
+            }
+            | EventKind::PluckNoCandidate {
+                workspace,
+                open_count,
+                excluded_count,
+                candidate_exclusion_reasons,
+            }
+            | EventKind::KnotStarvationDetected {
                 workspace,
                 open_count,
                 excluded_count,
@@ -2914,6 +2948,8 @@ impl EventKind {
             | EventKind::StrandSkipped { .. }
             | EventKind::QueueEmpty
             | EventKind::PluckStarvationDetected { .. }
+            | EventKind::PluckNoCandidate { .. }
+            | EventKind::KnotStarvationDetected { .. }
             | EventKind::AlertDeduplicated { .. }
             | EventKind::ClaimAttempt { .. }
             | EventKind::ClaimSuccess { .. }

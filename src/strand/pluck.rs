@@ -8,9 +8,6 @@
 //! Given the same queue state, every worker computes the same candidate list.
 
 use crate::bead_store::{BeadStore, Filters};
-use crate::fingerprint::{
-    append_alert_note, build_alert_labels, check_alert_deduplication, AlertDeduplication, AlertKind,
-};
 use crate::mitosis::detects_needle_internal_config;
 use crate::telemetry::Telemetry;
 use crate::types::{Bead, BeadId, BrDependency, Comment, StrandError, StrandResult};
@@ -55,7 +52,7 @@ impl RelaxationTier {
             Self::StatusOnly => &[
                 "worker label constraints",
                 "priority constraints",
-                "readiness constraints",
+                "backend ready-frontier constraints",
                 "assignee constraints",
             ],
         }
@@ -80,7 +77,8 @@ struct ExclusionCounts {
 }
 
 impl ExclusionCounts {
-    /// Render non-zero counts in a stable order for the alert body.
+    /// Render non-zero counts in a stable order for diagnostic tests.
+    #[cfg(test)]
     fn summary(&self) -> String {
         let mut reasons = Vec::new();
         if self.blocked > 0 {
@@ -100,11 +98,6 @@ impl ExclusionCounts {
         } else {
             reasons.join(", ")
         }
-    }
-
-    /// Return the same summary as a list for persistent JSONL records.
-    fn summary_vec(&self) -> Vec<String> {
-        self.summary().split(", ").map(str::to_string).collect()
     }
 }
 
@@ -197,6 +190,7 @@ impl FilteringStats {
     ///
     /// Dependency-only queues are waiting for their blockers to finish; they
     /// are not evidence that Pluck is starving ready work.
+    #[cfg(test)]
     fn has_unblocked_open_bead(&self) -> bool {
         self.open_count > self.exclusion_counts.blocked
     }
@@ -350,7 +344,7 @@ fn starvation_diagnostic_snapshot(
 
     StarvationDiagnosticSnapshot {
         schema_version: 1,
-        event: "pluck.starvation",
+        event: "pluck.no_candidate",
         timestamp,
         target_workspace: workspace_from_inventory(beads),
         summary: StarvationSummary {
@@ -452,50 +446,12 @@ fn extract_workspace_path(beads: &[Bead]) -> String {
     }
 }
 
-fn starvation_alert_body(workspace_path: &str, stats: &FilteringStats) -> String {
-    let message = if stats.open_count > 0 {
-        "Pluck found no candidates but open beads exist"
-    } else {
-        "Pluck found no candidates and queue is empty"
-    };
-
-    format!(
-        "{}.\n\n\
-         **Workspace:** {}\n\
-         **Open beads:** {}\n\
-         **Excluded beads:** {}\n\
-         **Exclusion reasons:** {}\n\n\
-         **Timestamp:** {}",
-        message,
-        workspace_path,
-        stats.open_count,
-        stats.excluded_count,
-        stats.exclusion_counts.summary(),
-        Utc::now().to_rfc3339()
-    )
-}
-
-/// Persistent starvation record written to NEEDLE workspace.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct StarvationRecord {
-    /// UTC timestamp when starvation was detected.
-    timestamp: chrono::DateTime<chrono::Utc>,
-    /// Target workspace that was being processed (not NEEDLE workspace).
-    target_workspace: String,
-    /// Count of open beads before filtering.
-    open_count: usize,
-    /// Count of beads excluded during filtering.
-    excluded_count: usize,
-    /// Reasons why beads were excluded.
-    exclusion_reasons: Vec<String>,
-}
-
 /// The durable, machine-readable starvation snapshot.
 ///
-/// This deliberately lives beside the legacy [`StarvationRecord`] instead of
-/// replacing it.  The legacy record is consumed by older operators, while
-/// this record contains enough point-in-time state to explain a starvation
-/// event without querying a store that may already have changed.
+/// Despite the historical type name, this is a local no-candidate diagnostic,
+/// not a terminal starvation verdict. It contains enough point-in-time state
+/// to explain why Pluck continued the waterfall without querying a store that
+/// may already have changed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StarvationDiagnosticSnapshot {
     /// Schema version for readers of the JSONL file.
@@ -663,13 +619,13 @@ impl PluckStrand {
         }
     }
 
-    /// Create a new PluckStrand with persistent starvation records configured.
+    /// Create a PluckStrand with persistent no-candidate diagnostics configured.
     ///
-    /// When `persistent_starvation_records` is true, starvation events are
-    /// written to `needle_workspace/state/starvation-records.jsonl` and full
-    /// snapshots are appended to
-    /// `needle_workspace/state/starvation_events.jsonl`.
-    /// Records are never written to target workspaces, only to NEEDLE workspace.
+    /// When `persistent_starvation_records` is true, full local-selection
+    /// snapshots are appended to `needle_workspace/state/starvation_events.jsonl`.
+    /// The legacy setting and filename are retained for compatibility, but the
+    /// records are diagnostic and never a terminal starvation verdict. Records
+    /// are never written to target workspaces.
     pub fn with_persistent_records(
         exclude_labels: Vec<String>,
         split_after_failures: u32,
@@ -703,8 +659,9 @@ impl PluckStrand {
     /// The first retry drops configured worker-label exclusions. The second
     /// retry also drops any priority predicate (the current `Filters` type has
     /// no priority field, but the tier is retained for backend/config parity).
-    /// The final retry reads the complete inventory and accepts only beads
-    /// whose status is `open`.
+    /// The final retry reads the complete inventory and accepts open beads
+    /// that have no unfinished blocking dependency. Dependency safety is not
+    /// a worker-local constraint and is therefore never relaxed.
     async fn query_with_relaxation(
         &self,
         store: &dyn BeadStore,
@@ -780,12 +737,22 @@ impl PluckStrand {
         tracing::warn!(
             tier = tier.name(),
             dropped_constraints = ?tier.dropped_constraints(),
-            "Pluck ready queries returned no candidates; retrying with status=open as the sole filter"
+            "Pluck ready queries returned no candidates; retrying with status=open and dependency safety"
         );
         let inventory = store.starvation_inventory().await?;
+        let finished_by_id: HashMap<BeadId, bool> = inventory
+            .iter()
+            .map(|bead| (bead.id.clone(), bead.status.is_done()))
+            .collect();
         let candidates: Vec<Bead> = inventory
             .into_iter()
-            .filter(|bead| bead.status == crate::types::BeadStatus::Open)
+            .filter(|bead| {
+                bead.status == crate::types::BeadStatus::Open
+                    && !bead
+                        .dependencies
+                        .iter()
+                        .any(|dependency| dependency_is_blocking(dependency, &finished_by_id))
+            })
             .collect();
         tracing::debug!(
             tier = tier.name(),
@@ -1009,70 +976,6 @@ impl PluckStrand {
             self.last_excluded_count.load(Ordering::Relaxed),
             self.last_exclusion_reasons.lock().unwrap().clone(),
         )
-    }
-
-    /// Write a persistent starvation record to NEEDLE workspace.
-    ///
-    /// Records are written in JSONL format to `~/.needle/state/starvation-records.jsonl`.
-    /// This method is called only when `persistent_starvation_records` is enabled.
-    fn write_starvation_record(
-        &self,
-        target_workspace: &str,
-        open_count: usize,
-        excluded_count: usize,
-        exclusion_reasons: &[String],
-    ) -> Result<()> {
-        let needle_home = self
-            .needle_workspace
-            .as_ref()
-            .context("needle_workspace not set - cannot write persistent record")?;
-
-        // Create state directory if it doesn't exist
-        let state_dir = needle_home.join("state");
-        std::fs::create_dir_all(&state_dir).with_context(|| {
-            format!("failed to create state directory: {}", state_dir.display())
-        })?;
-
-        // Write record to starvation-records.jsonl (append mode)
-        let record_path = state_dir.join("starvation-records.jsonl");
-        let record = StarvationRecord {
-            timestamp: Utc::now(),
-            target_workspace: target_workspace.to_string(),
-            open_count,
-            excluded_count,
-            exclusion_reasons: exclusion_reasons.to_vec(),
-        };
-
-        // Serialize to JSON and append to file
-        let record_json =
-            serde_json::to_string(&record).context("failed to serialize starvation record")?;
-
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&record_path)
-            .with_context(|| {
-                format!(
-                    "failed to open starvation records file: {}",
-                    record_path.display()
-                )
-            })?;
-
-        use std::io::Write;
-        writeln!(file, "{}", record_json).with_context(|| {
-            format!(
-                "failed to write starvation record to: {}",
-                record_path.display()
-            )
-        })?;
-
-        tracing::debug!(
-            record_path = %record_path.display(),
-            target_workspace = %target_workspace,
-            "Wrote persistent starvation record"
-        );
-
-        Ok(())
     }
 
     /// Append a complete starvation snapshot to NEEDLE's durable diagnostic
@@ -1528,9 +1431,10 @@ impl super::Strand for PluckStrand {
                 .store(stats.excluded_count, Ordering::Relaxed);
             *self.last_exclusion_reasons.lock().unwrap() = stats.exclusion_reasons.clone();
 
-            // Emit PluckStarvationDetected telemetry event with filtering statistics.
+            // This is a local selection diagnostic, not a starvation verdict.
+            // Explore and every work-generating strand still run after Pluck.
             let _ = self.telemetry.emit(
-                crate::telemetry::EventKind::PluckStarvationDetected {
+                crate::telemetry::EventKind::PluckNoCandidate {
                     workspace: workspace_path.clone(),
                     open_count: stats.open_count,
                     excluded_count: stats.excluded_count,
@@ -1539,11 +1443,9 @@ impl super::Strand for PluckStrand {
                 Utc::now(),
             );
 
-            // Persist a point-in-time snapshot whenever the inventory proves
-            // that open work remained.  This is intentionally outside the
-            // starvation-alert-bead branch: a dependency-only inventory is
-            // still valuable evidence, even when it is not actionable
-            // starvation and no alert bead is created.
+            // Persist a point-in-time snapshot whenever open work remains. A
+            // dependency-only inventory is still valuable diagnostic evidence,
+            // even though it is ordinary idle rather than starvation.
             if self.persistent_starvation_records && stats.open_count > 0 {
                 if let Some(beads) = all_beads.as_deref() {
                     let snapshot = starvation_diagnostic_snapshot(
@@ -1565,150 +1467,11 @@ impl super::Strand for PluckStrand {
                 }
             }
 
-            // An empty inventory (or an inventory containing only in-progress
-            // work) is ordinary idleness, not starvation. Keep the telemetry for
-            // observability, but do not create a self-contradictory alert.
-            //
-            // Only create a starvation alert when at least one open bead has
-            // no blocking dependencies. A dependency-only queue is expected
-            // idleness while the blockers are being worked.
-            if stats.open_count > 0 {
-                if !stats.has_unblocked_open_bead() {
-                    tracing::info!(
-                        workspace = %workspace_path,
-                        open_count = stats.open_count,
-                        blocked_count = stats.exclusion_counts.blocked,
-                        reason = "blocked_on_dependencies",
-                        "Skipping starvation alert because every open bead has a blocking dependency"
-                    );
-                } else {
-                    // Write persistent starvation record to NEEDLE workspace if enabled.
-                    if self.persistent_starvation_records {
-                        let reason_summary = stats.exclusion_counts.summary_vec();
-                        if let Err(e) = self.write_starvation_record(
-                            &workspace_path,
-                            stats.open_count,
-                            stats.excluded_count,
-                            &reason_summary,
-                        ) {
-                            tracing::warn!(
-                                error = %e,
-                                "Failed to write persistent starvation record"
-                            );
-                        }
-                    }
-
-                    // Create or update a starvation alert bead with fingerprint-based deduplication.
-                    // The fingerprint is computed from workspace + kind + normalized cause.
-                    let cause = format!(
-                        "open={}, excluded={}, reasons={}",
-                        stats.open_count,
-                        stats.excluded_count,
-                        stats.exclusion_counts.summary()
-                    );
-
-                    let dedup_result = check_alert_deduplication(
-                        store,
-                        &workspace_path,
-                        &AlertKind::PluckStarvation,
-                        &cause,
-                    )
-                    .await
-                    .unwrap_or_else(|e| {
-                        tracing::warn!(
-                            error = %e,
-                            workspace = %workspace_path,
-                            "Failed to check alert deduplication, proceeding with creation"
-                        );
-                        AlertDeduplication::CreateNew
-                    });
-
-                    match dedup_result {
-                        AlertDeduplication::Deduplicated {
-                            bead_id,
-                            fingerprint,
-                        } => {
-                            // Append timestamped note to existing bead
-                            let note = format!(
-                                "Starvation recurred: {} open, {} excluded; reasons: {}",
-                                stats.open_count,
-                                stats.excluded_count,
-                                stats.exclusion_counts.summary()
-                            );
-                            let _ = append_alert_note(store, &bead_id, &note).await;
-
-                            tracing::info!(
-                                bead_id = %bead_id,
-                                workspace = %workspace_path,
-                                fingerprint = %fingerprint,
-                                open_count = stats.open_count,
-                                excluded_count = stats.excluded_count,
-                                "Starvation alert deduplicated - appended note to existing bead"
-                            );
-
-                            // Emit deduplication telemetry
-                            let _ = self.telemetry.emit(
-                                crate::telemetry::EventKind::AlertDeduplicated {
-                                    fingerprint,
-                                    bead_id: bead_id.clone(),
-                                    kind: "pluck-starvation".to_string(),
-                                },
-                                Utc::now(),
-                            );
-                        }
-                        AlertDeduplication::Suppressed { bead_id, closed_at } => {
-                            tracing::info!(
-                                bead_id = %bead_id,
-                                workspace = %workspace_path,
-                                closed_at = %closed_at,
-                                "Starvation alert suppressed - bead was closed within 24h"
-                            );
-                        }
-                        AlertDeduplication::CreateNew => {
-                            // Create a new starvation alert bead
-                            let fingerprint = crate::fingerprint::compute_fingerprint(
-                                &workspace_path,
-                                &AlertKind::PluckStarvation,
-                                &cause,
-                            );
-
-                            let title = format!(
-                                "Starvation alert: beads invisible in {}",
-                                workspace_path.rsplit('/').next().unwrap_or("workspace")
-                            );
-
-                            let body = starvation_alert_body(&workspace_path, &stats);
-                            let labels = build_alert_labels(
-                                &fingerprint,
-                                &["starvation-alert", "human"], // Requires human review
-                            );
-                            let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
-
-                            if let Err(e) = store.create_bead(&title, &body, &label_refs).await {
-                                tracing::warn!(
-                                    error = %e,
-                                    workspace = %workspace_path,
-                                    "Failed to create starvation alert bead"
-                                );
-                            } else {
-                                tracing::info!(
-                                    workspace = %workspace_path,
-                                    fingerprint = %fingerprint,
-                                    open_count = stats.open_count,
-                                    excluded_count = stats.excluded_count,
-                                    "Created starvation alert bead with fingerprint"
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-
             tracing::debug!(
                 workspace = %workspace_path,
                 open_count = stats.open_count,
                 excluded_count = stats.excluded_count,
-                "Emitted PluckStarvationDetected telemetry, returning NoWork"
+                "emitted PluckNoCandidate diagnostics, continuing the waterfall"
             );
             StrandResult::NoWork
         } else {
@@ -1747,6 +1510,11 @@ mod tests {
             Ok(self.beads.clone())
         }
         async fn ready(&self, filters: &Filters) -> Result<Vec<Bead>> {
+            let finished_by_id: HashMap<BeadId, bool> = self
+                .beads
+                .iter()
+                .map(|bead| (bead.id.clone(), bead.status.is_done()))
+                .collect();
             let result: Vec<Bead> = self
                 .beads
                 .iter()
@@ -1759,6 +1527,12 @@ mod tests {
                     }
                     // Filter out beads with excluded labels.
                     if b.labels.iter().any(|l| filters.exclude_labels.contains(l)) {
+                        return false;
+                    }
+                    if b.dependencies
+                        .iter()
+                        .any(|dependency| dependency_is_blocking(dependency, &finished_by_id))
+                    {
                         return false;
                     }
                     true
@@ -2441,7 +2215,7 @@ mod tests {
             &[
                 "worker label constraints",
                 "priority constraints",
-                "readiness constraints",
+                "backend ready-frontier constraints",
                 "assignee constraints"
             ]
         );
@@ -2691,29 +2465,6 @@ mod tests {
         assert!(stats.has_unblocked_open_bead());
     }
 
-    #[test]
-    fn starvation_alert_body_contains_counted_exclusion_reasons() {
-        let stats = FilteringStats {
-            open_count: 2,
-            excluded_count: 2,
-            exclusion_counts: ExclusionCounts {
-                blocked: 1,
-                manual_blocked: 1,
-                human: 1,
-                deferred_assignee: 1,
-            },
-            ..Default::default()
-        };
-
-        let body = starvation_alert_body("/workspace", &stats);
-
-        assert!(body.contains("**Open beads:** 2"));
-        assert!(body.contains("**Excluded beads:** 2"));
-        assert!(body.contains(
-            "**Exclusion reasons:** blocked=1, manual_blocked=1, human=1, deferred_assignee=1"
-        ));
-    }
-
     // ──────────────────────────────────────────────────────────────────────────
     // Split trigger tests
     // ──────────────────────────────────────────────────────────────────────────
@@ -2885,7 +2636,7 @@ mod tests {
     }
 
     // ──────────────────────────────────────────────────────────────────────────
-    // PluckStarvationDetected telemetry tests
+    // PluckNoCandidate telemetry tests
     // ──────────────────────────────────────────────────────────────────────────
 
     #[tokio::test]
@@ -2919,10 +2670,10 @@ mod tests {
         helper.sync().await;
 
         // Verify starvation event was emitted
-        helper.assert_event_emitted("strand.pluck.starvation_detected");
+        helper.assert_event_emitted("strand.pluck.no_candidate");
 
         // Get the starvation event and verify its contents
-        let starvation_events = helper.events_by_type("strand.pluck.starvation_detected");
+        let starvation_events = helper.events_by_type("strand.pluck.no_candidate");
         assert_eq!(
             starvation_events.len(),
             1,
@@ -3002,10 +2753,10 @@ mod tests {
         helper.sync().await;
 
         // Verify starvation event was emitted
-        helper.assert_event_emitted("strand.pluck.starvation_detected");
+        helper.assert_event_emitted("strand.pluck.no_candidate");
 
         // Get the starvation event and verify its contents
-        let starvation_events = helper.events_by_type("strand.pluck.starvation_detected");
+        let starvation_events = helper.events_by_type("strand.pluck.no_candidate");
         assert_eq!(
             starvation_events.len(),
             1,
@@ -3079,10 +2830,10 @@ mod tests {
         helper.sync().await;
 
         // Verify starvation event was emitted
-        helper.assert_event_emitted("strand.pluck.starvation_detected");
+        helper.assert_event_emitted("strand.pluck.no_candidate");
 
         // Get the starvation event and verify its contents
-        let starvation_events = helper.events_by_type("strand.pluck.starvation_detected");
+        let starvation_events = helper.events_by_type("strand.pluck.no_candidate");
         assert_eq!(
             starvation_events.len(),
             1,
@@ -3162,10 +2913,10 @@ mod tests {
         helper.sync().await;
 
         // Verify starvation event was emitted
-        helper.assert_event_emitted("strand.pluck.starvation_detected");
+        helper.assert_event_emitted("strand.pluck.no_candidate");
 
         // Get the starvation event and verify its contents
-        let starvation_events = helper.events_by_type("strand.pluck.starvation_detected");
+        let starvation_events = helper.events_by_type("strand.pluck.no_candidate");
         assert_eq!(
             starvation_events.len(),
             1,
@@ -3238,10 +2989,10 @@ mod tests {
         helper.sync().await;
 
         // Verify starvation event was emitted
-        helper.assert_event_emitted("strand.pluck.starvation_detected");
+        helper.assert_event_emitted("strand.pluck.no_candidate");
 
         // Get the starvation event and verify its contents
-        let starvation_events = helper.events_by_type("strand.pluck.starvation_detected");
+        let starvation_events = helper.events_by_type("strand.pluck.no_candidate");
         assert_eq!(
             starvation_events.len(),
             1,
@@ -3284,7 +3035,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn starvation_persistent_record_written_to_needle_workspace() {
+    async fn no_candidate_diagnostic_written_to_needle_workspace() {
         use crate::telemetry::test_utils::TestHelper;
 
         let helper = TestHelper::new("test-worker");
@@ -3320,71 +3071,34 @@ mod tests {
             other => panic!("expected NoWork when all beads excluded, got: {other:?}"),
         }
 
-        // Verify that a persistent record was written to the NEEDLE workspace
+        // Verify that a diagnostic snapshot was written to the NEEDLE workspace.
         let state_dir = needle_workspace_path.join("state");
-        let record_path = state_dir.join("starvation-records.jsonl");
+        let record_path = state_dir.join("starvation_events.jsonl");
 
         assert!(
             record_path.exists(),
-            "starvation record should exist at {:?}",
+            "selection diagnostic should exist at {:?}",
             record_path
         );
 
-        // Read and verify the record content
+        // Read and verify the final JSONL object.
         let record_content = std::fs::read_to_string(&record_path)
-            .expect("should be able to read starvation record file");
-
-        // Parse the JSONL record
-        let record: serde_json::Value =
-            serde_json::from_str(&record_content).expect("starvation record should be valid JSON");
-
-        // Verify record structure
-        assert!(
-            record.get("timestamp").is_some(),
-            "record should have timestamp"
-        );
-        assert!(
-            record.get("target_workspace").is_some(),
-            "record should have target_workspace"
-        );
-        assert!(
-            record.get("open_count").is_some(),
-            "record should have open_count"
-        );
-        assert!(
-            record.get("excluded_count").is_some(),
-            "record should have excluded_count"
-        );
-        assert!(
-            record.get("exclusion_reasons").is_some(),
-            "record should have exclusion_reasons"
-        );
-
-        // Verify the target_workspace field contains the workspace being processed
-        // (not the NEEDLE workspace itself)
-        let target_workspace = record["target_workspace"].as_str().unwrap();
-        assert_eq!(
-            target_workspace, "/tmp/test",
-            "target_workspace should be the processed workspace"
-        );
-
-        // Verify counts
-        let open_count = record["open_count"].as_u64().unwrap();
-        let excluded_count = record["excluded_count"].as_u64().unwrap();
-        assert_eq!(open_count, 3, "open_count should be 3");
-        assert_eq!(excluded_count, 3, "excluded_count should be 3");
-
-        // Verify exclusion reasons
-        let exclusion_reasons = record["exclusion_reasons"].as_array().unwrap();
-        assert_eq!(
-            exclusion_reasons.len(),
-            3,
-            "should have 3 exclusion reasons"
-        );
+            .expect("should be able to read selection diagnostic");
+        let record: serde_json::Value = serde_json::from_str(
+            record_content
+                .lines()
+                .last()
+                .expect("one diagnostic record"),
+        )
+        .expect("selection diagnostic should be valid JSON");
+        assert_eq!(record["event"], "pluck.no_candidate");
+        assert_eq!(record["target_workspace"], "/tmp/test");
+        assert_eq!(record["summary"]["open_bead_count"], 3);
+        assert_eq!(record["summary"]["excluded_bead_count"], 3);
     }
 
     #[tokio::test]
-    async fn starvation_persistent_record_disabled_when_flag_false() {
+    async fn no_candidate_diagnostic_disabled_when_flag_false() {
         use crate::telemetry::test_utils::TestHelper;
 
         let helper = TestHelper::new("test-worker");
@@ -3418,16 +3132,16 @@ mod tests {
 
         // Verify that NO persistent record was written
         let state_dir = needle_workspace_path.join("state");
-        let record_path = state_dir.join("starvation-records.jsonl");
+        let record_path = state_dir.join("starvation_events.jsonl");
 
         assert!(
             !record_path.exists(),
-            "starvation record should NOT exist when persistent records are disabled"
+            "selection diagnostic should not exist when persistent records are disabled"
         );
     }
 
     #[tokio::test]
-    async fn starvation_persistent_record_not_written_to_target_workspace() {
+    async fn no_candidate_diagnostic_not_written_to_target_workspace() {
         use crate::telemetry::test_utils::TestHelper;
 
         let helper = TestHelper::new("test-worker");
@@ -3468,30 +3182,34 @@ mod tests {
             other => panic!("expected NoWork when all beads excluded, got: {other:?}"),
         }
 
-        // Verify record was written to NEEDLE workspace
+        // Verify the diagnostic was written to NEEDLE workspace.
         let needle_state_dir = needle_workspace_path.join("state");
-        let needle_record_path = needle_state_dir.join("starvation-records.jsonl");
+        let needle_record_path = needle_state_dir.join("starvation_events.jsonl");
 
         assert!(
             needle_record_path.exists(),
-            "starvation record should exist in NEEDLE workspace"
+            "selection diagnostic should exist in NEEDLE workspace"
         );
 
         // Verify record was NOT written to target workspace
         let target_state_dir = target_workspace_path.join("state");
-        let target_record_path = target_state_dir.join("starvation-records.jsonl");
+        let target_record_path = target_state_dir.join("starvation_events.jsonl");
 
         assert!(
             !target_record_path.exists(),
-            "starvation record should NOT exist in target workspace"
+            "selection diagnostic should not exist in target workspace"
         );
 
         // Verify the record contains the target workspace path in its content
         let record_content = std::fs::read_to_string(&needle_record_path)
-            .expect("should be able to read starvation record file");
-
-        let record: serde_json::Value =
-            serde_json::from_str(&record_content).expect("starvation record should be valid JSON");
+            .expect("should be able to read selection diagnostic");
+        let record: serde_json::Value = serde_json::from_str(
+            record_content
+                .lines()
+                .last()
+                .expect("one diagnostic record"),
+        )
+        .expect("selection diagnostic should be valid JSON");
 
         // The record should mention the target workspace in its data
         let target_workspace_field = record["target_workspace"].as_str().unwrap();
@@ -3549,7 +3267,7 @@ mod tests {
             .expect("diagnostic record should be one valid JSON object per line");
 
         assert_eq!(record["schema_version"], 1);
-        assert_eq!(record["event"], "pluck.starvation");
+        assert_eq!(record["event"], "pluck.no_candidate");
         assert_eq!(record["target_workspace"], "/tmp/test");
         assert!(record["timestamp"].as_str().is_some());
         assert_eq!(record["summary"]["candidate_count"], 0);
@@ -3663,13 +3381,11 @@ mod tests {
 
         helper.sync().await;
 
-        // Verify PluckStarvationDetected event was emitted
-        helper.assert_event_emitted("strand.pluck.starvation_detected");
+        // Verify PluckNoCandidate event was emitted
+        helper.assert_event_emitted("strand.pluck.no_candidate");
 
         // Verify the event contains correct starvation data
-        let starvation_event = helper
-            .find_event("strand.pluck.starvation_detected")
-            .unwrap();
+        let starvation_event = helper.find_event("strand.pluck.no_candidate").unwrap();
         assert_eq!(starvation_event.data["open_count"], 3);
         assert_eq!(starvation_event.data["excluded_count"], 3);
 
@@ -3736,13 +3452,11 @@ mod tests {
 
         helper.sync().await;
 
-        // Verify PluckStarvationDetected event was emitted
-        helper.assert_event_emitted("strand.pluck.starvation_detected");
+        // Verify PluckNoCandidate event was emitted
+        helper.assert_event_emitted("strand.pluck.no_candidate");
 
         // Verify the event contains correct starvation data
-        let starvation_event = helper
-            .find_event("strand.pluck.starvation_detected")
-            .unwrap();
+        let starvation_event = helper.find_event("strand.pluck.no_candidate").unwrap();
         assert_eq!(starvation_event.data["open_count"], 2);
         assert_eq!(starvation_event.data["excluded_count"], 2);
 
@@ -3792,13 +3506,11 @@ mod tests {
 
         helper.sync().await;
 
-        // Verify PluckStarvationDetected event was emitted
-        helper.assert_event_emitted("strand.pluck.starvation_detected");
+        // Verify PluckNoCandidate event was emitted
+        helper.assert_event_emitted("strand.pluck.no_candidate");
 
         // Verify the event contains correct starvation data (all zeros)
-        let starvation_event = helper
-            .find_event("strand.pluck.starvation_detected")
-            .unwrap();
+        let starvation_event = helper.find_event("strand.pluck.no_candidate").unwrap();
         assert_eq!(starvation_event.data["open_count"], 0);
         assert_eq!(starvation_event.data["excluded_count"], 0);
 
@@ -3868,7 +3580,7 @@ mod tests {
         );
 
         // Verify telemetry was still emitted (event went to telemetry, not workspace)
-        helper.assert_event_emitted("strand.pluck.starvation_detected");
+        helper.assert_event_emitted("strand.pluck.no_candidate");
     }
 
     #[test]
@@ -3979,21 +3691,21 @@ mod tests {
         let workspace_path = workspace.path().to_str().unwrap();
 
         let mut blocker = make_bead_with_workspace_and_labels("blocker", 1, workspace_path, vec![]);
-        blocker.status = BeadStatus::Closed; // Blocker is done
+        blocker.status = BeadStatus::InProgress;
 
         let mut blocked = make_bead_with_workspace_and_labels("blocked", 1, workspace_path, vec![]);
         blocked.status = BeadStatus::Open; // Bead is open but blocked by dependency
         blocked.dependencies.push(BrDependency {
             id: blocker.id.clone(),
             title: "Blocks the blocked bead".to_string(),
-            status: "closed".to_string(),
+            status: "in_progress".to_string(),
             priority: 1,
             dependency_type: "blocks".to_string(),
         });
 
-        // Even though there's an open bead, it's blocked by a closed dependency
-        // This should NOT trigger a starvation alert
-        let store = UnfilteredStore {
+        // Even though there's an open bead, it is waiting on unfinished work.
+        // Pluck should diagnose no candidate and continue the waterfall.
+        let store = MemoryStore {
             beads: vec![blocked],
         };
 
@@ -4019,12 +3731,10 @@ mod tests {
         helper.sync().await;
 
         // Verify starvation telemetry was emitted (it's always emitted)
-        helper.assert_event_emitted("strand.pluck.starvation_detected");
+        helper.assert_event_emitted("strand.pluck.no_candidate");
 
         // Verify the event shows all beads are blocked
-        let event = helper
-            .find_event("strand.pluck.starvation_detected")
-            .unwrap();
+        let event = helper.find_event("strand.pluck.no_candidate").unwrap();
         assert_eq!(
             event.data.get("open_count").and_then(|v| v.as_u64()),
             Some(1),

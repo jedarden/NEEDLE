@@ -751,9 +751,10 @@ async fn knot_emits_starvation_telemetry_for_open_beads() {
         .collect();
     let starvation = events
         .iter()
-        .find(|event| event["event_type"] == "strand.pluck.starvation_detected")
+        .find(|event| event["event_type"] == "strand.knot.starvation_detected")
         .expect("knot should emit starvation telemetry for an invisible open bead");
     assert_eq!(starvation["data"]["open_count"], 1);
+    assert_eq!(store.list_all().await.unwrap().len(), 1);
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
