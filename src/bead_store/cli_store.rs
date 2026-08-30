@@ -705,6 +705,18 @@ impl BeadStore for CliBeadStore {
         )
         .await
     }
+
+    async fn update_description(&self, id: &BeadId, description: &str) -> Result<()> {
+        self.mutate(
+            "update",
+            &[
+                ("id", id.to_string()),
+                ("description", description.to_string()),
+            ],
+        )
+        .await
+    }
+
     async fn labels(&self, id: &BeadId) -> Result<Vec<String>> {
         Ok(self.show(id).await?.labels)
     }

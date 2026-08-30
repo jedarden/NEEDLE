@@ -477,9 +477,8 @@ impl super::Strand for UnravelStrand {
                             &cause,
                         );
                         let labels = build_alert_labels(&fingerprint, &["unravel-proposal"]);
-                        let label_refs: Vec<&str> = labels.iter().map(|s| s.as_str()).collect();
 
-                        deduplicated_specs.push((child_title, child_body, label_refs));
+                        deduplicated_specs.push((child_title, child_body, labels));
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -488,7 +487,7 @@ impl super::Strand for UnravelStrand {
                             error = %e,
                             "Failed to check unravel proposal deduplication, including anyway"
                         );
-                        let labels = vec!["unravel-proposal"];
+                        let labels = vec!["unravel-proposal".to_string()];
                         deduplicated_specs.push((child_title, child_body, labels));
                     }
                 }
@@ -496,12 +495,19 @@ impl super::Strand for UnravelStrand {
 
             let mut created_for_this_bead = 0u32;
             if !deduplicated_specs.is_empty() {
+                // Pre-collect all label references to avoid lifetime issues
+                let all_label_refs: Vec<Vec<&str>> = deduplicated_specs
+                    .iter()
+                    .map(|(_, _, labels)| labels.iter().map(|s| s.as_str()).collect())
+                    .collect();
+
                 let new_children: Vec<NewChild> = deduplicated_specs
                     .iter()
-                    .map(|(title, body, labels)| NewChild {
+                    .zip(all_label_refs.iter())
+                    .map(|((title, body, _labels), label_refs)| NewChild {
                         title,
                         body,
-                        labels,
+                        labels: label_refs.as_slice(),
                     })
                     .collect();
 

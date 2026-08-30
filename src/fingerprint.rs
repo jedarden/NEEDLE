@@ -117,7 +117,7 @@ fn normalize_cause(cause: &str) -> String {
     // Normalize whitespace
     normalized = regex::Regex::new(r"\s+")
         .unwrap()
-        .replace_all(&normalized.trim(), " ")
+        .replace_all(normalized.trim(), " ")
         .to_string();
 
     normalized

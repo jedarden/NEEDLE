@@ -3136,6 +3136,39 @@ fn cmd_status(
             }
             println!();
 
+            // Show gate-degraded workspaces
+            let degraded_workspaces = scan_degraded_workspaces(&needle_home).unwrap_or_default();
+            if !degraded_workspaces.is_empty() {
+                println!("Gate-Degraded Workspaces:");
+                println!(
+                    "  ⚠️  {} workspace(s) with broken gate commands",
+                    degraded_workspaces.len()
+                );
+                for state in &degraded_workspaces {
+                    let last_error = state
+                        .last_error_at
+                        .rsplit_once('T')
+                        .map(|(date, time)| {
+                            format!(
+                                "{} {}",
+                                date,
+                                time.split_once('.').map(|(t, _)| t).unwrap_or(time)
+                            )
+                        })
+                        .unwrap_or_else(|| state.last_error_at.clone());
+
+                    println!(
+                        "  {} — {} consecutive error(s), last: {}",
+                        state.workspace.display(),
+                        state.consecutive_errors,
+                        last_error
+                    );
+                    println!("    Command: {}", state.last_command);
+                    println!("    Reason: {}", state.last_reason);
+                }
+                println!();
+            }
+
             // Check for updates with timeout - best-effort, non-fatal
             let update_check = std::thread::spawn(|| {
                 std::panic::catch_unwind(|| {
@@ -3242,12 +3275,23 @@ fn cmd_status(
             }
         }
         ListFormat::Json => {
+            let degraded_workspaces = scan_degraded_workspaces(&needle_home).unwrap_or_default();
             let summary = serde_json::json!({
                 "active_sessions": active_count,
                 "registered_workers": registered_count,
                 "discovered_workers": discovered_count,
                 "total_beads_processed": total_beads,
                 "unregistered_workers": unregistered.len(),
+                "degraded_workspaces": degraded_workspaces.len(),
+                "degraded": degraded_workspaces.iter().map(|state| {
+                    serde_json::json!({
+                        "workspace": state.workspace,
+                        "consecutive_errors": state.consecutive_errors,
+                        "last_error_at": state.last_error_at,
+                        "last_command": state.last_command,
+                        "last_reason": state.last_reason,
+                    })
+                }).collect::<Vec<_>>(),
                 "workers": heartbeat_statuses.iter().map(|ws| {
                     serde_json::json!({
                         "id": ws.entry.id,
@@ -5297,6 +5341,47 @@ fn format_duration(secs: u64) -> String {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Gate health degradation helpers
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Scan for gate-degraded workspaces and return their state information.
+fn scan_degraded_workspaces(
+    needle_home: &Path,
+) -> Result<Vec<crate::gate_health::GateHealthState>> {
+    let gate_health_dir = needle_home.join("state").join("gate-health");
+
+    if !gate_health_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut degraded_states = Vec::new();
+
+    let entries =
+        std::fs::read_dir(&gate_health_dir).context("failed to read gate health directory")?;
+
+    for entry in entries {
+        let entry = entry.context("failed to read directory entry")?;
+        let path = entry.path();
+
+        if path.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read gate health state file: {:?}", path))?;
+
+        let state: crate::gate_health::GateHealthState = serde_json::from_str(&content)
+            .with_context(|| format!("failed to parse gate health state file: {:?}", path))?;
+
+        if state.degraded {
+            degraded_states.push(state);
+        }
+    }
+
+    Ok(degraded_states)
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Idle-strand cooldown helpers
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -7297,8 +7382,10 @@ mod tests {
     fn doctor_check_gate_commands_reports_missing_path_and_source() {
         let workspace = tempfile::tempdir().unwrap();
         let config_file = workspace.path().join(".needle.yaml");
-        let mut config = Config::default();
-        config.verification = vec!["/nonexistent/hook.sh".to_string()];
+        let config = Config {
+            verification: vec!["/nonexistent/hook.sh".to_string()],
+            ..Default::default()
+        };
         let mut sources = SourceMap::new();
         sources.insert(
             "verification".to_string(),
@@ -7315,8 +7402,10 @@ mod tests {
     #[test]
     fn doctor_check_gate_commands_accepts_path_command() {
         let workspace = tempfile::tempdir().unwrap();
-        let mut config = Config::default();
-        config.verification = vec!["true".to_string()];
+        let config = Config {
+            verification: vec!["true".to_string()],
+            ..Default::default()
+        };
 
         let result = doctor_check_gate_commands(&config, workspace.path(), &SourceMap::new());
 

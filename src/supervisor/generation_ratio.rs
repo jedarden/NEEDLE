@@ -396,7 +396,7 @@ impl GenerationRatioTracker {
         if let Some((ws, consecutive_days, ratio)) =
             self.should_alert(date, workspace, threshold_days, threshold_ratio)
         {
-            let (_title, body) =
+            let (_title, _body) =
                 Self::build_alert_content(&ws, date, consecutive_days, ratio, threshold_ratio);
 
             let cause = format!(

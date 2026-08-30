@@ -1013,6 +1013,7 @@ async fn mitosis_creates_children_on_first_failure() {
         force_failure_threshold: 0,
         repeat_interval: 0,
         max_depth: 0,
+        max_children: 0,
         ..MitosisConfig::default()
     };
     let telemetry = Telemetry::new("test".to_string());
@@ -1073,6 +1074,7 @@ async fn mitosis_skips_non_first_failure() {
         force_failure_threshold: 0,
         repeat_interval: 0,
         max_depth: 0,
+        max_children: 0,
         ..MitosisConfig::default()
     };
     let telemetry = Telemetry::new("test".to_string());
@@ -1124,6 +1126,7 @@ async fn mitosis_evaluator_adapter_not_found_skips() {
         force_failure_threshold: 0,
         repeat_interval: 0,
         max_depth: 0,
+        max_children: 0,
         ..MitosisConfig::default()
     };
     let telemetry = Telemetry::new("test".to_string());
@@ -1545,6 +1548,7 @@ async fn explore_discovers_work_in_other_workspace() {
         starvation_threshold_minutes: 15,
         scan_interval_cycles: 1,
         max_scan_interval_cycles: 8,
+        stuck_threshold_secs: 300,
     };
     let strand = ExploreStrand::new(
         config,
@@ -1584,6 +1588,7 @@ async fn mitosis_splits_multitask_bead_creates_children() {
         force_failure_threshold: 0,
         repeat_interval: 0,
         max_depth: 0,
+        max_children: 0,
         ..MitosisConfig::default()
     };
     let lock_dir = tempfile::tempdir().unwrap();

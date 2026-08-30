@@ -1057,7 +1057,7 @@ impl OutcomeHandler {
                     Utc::now(),
                 )?;
 
-                return Ok(());
+                Ok(())
             }
             AlertDeduplication::Suppressed { bead_id, closed_at } => {
                 tracing::info!(
@@ -1083,7 +1083,7 @@ impl OutcomeHandler {
                     Utc::now(),
                 )?;
 
-                return Ok(());
+                Ok(())
             }
             AlertDeduplication::CreateNew => {
                 // Create the new bead

@@ -1259,6 +1259,16 @@ pub trait BeadStore: Send + Sync {
         bail!("configured bead backend does not implement close")
     }
 
+    /// Update a bead's description (body) with new content.
+    ///
+    /// Used by the post-dispatch audit to fold verification-shaped bead
+    /// content into the parent bead's description.
+    ///
+    /// Backends that do not support description updates return an error.
+    async fn update_description(&self, _id: &BeadId, _description: &str) -> Result<()> {
+        bail!("configured bead backend does not implement update_description")
+    }
+
     /// List all labels on a bead.
     async fn labels(&self, id: &BeadId) -> Result<Vec<String>>;
 

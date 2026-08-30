@@ -319,6 +319,7 @@ impl ExploreStrand {
         telemetry: Telemetry,
         qualified_id: String,
         store_factory: Arc<dyn StoreFactory>,
+        stuck_threshold_secs: u64,
     ) -> Self {
         ExploreStrand {
             enabled: true,
@@ -337,7 +338,7 @@ impl ExploreStrand {
             ready_beads_detected: AtomicU64::new(0),
             last_scan_per_workspace: std::sync::Mutex::new(std::collections::HashMap::new()),
             scan_backoff: std::sync::Mutex::new(ExploreScanBackoff::new(1, 8)),
-            stuck_threshold_secs: 300,
+            stuck_threshold_secs,
         }
     }
 
@@ -747,8 +748,7 @@ impl super::Strand for ExploreStrand {
             }
         }
 
-        let mut workspaces: Vec<PathBuf> =
-            workspace_health.iter().map(|h| h.path.clone()).collect();
+        let workspaces: Vec<PathBuf> = workspace_health.iter().map(|h| h.path.clone()).collect();
         let total_workspaces = workspaces.len();
 
         tracing::debug!(
@@ -2032,6 +2032,7 @@ mod tests {
             telemetry,
             "test-worker".to_string(),
             mock_factory,
+            300,
         );
 
         let store = DummyStore;
@@ -2145,6 +2146,7 @@ mod tests {
             telemetry,
             "test-worker".to_string(),
             factory,
+            300,
         );
 
         let store = DummyStore;
@@ -2220,6 +2222,7 @@ mod tests {
                 telemetry,
                 "test-worker".to_string(),
                 mock_factory.clone(),
+                300,
             );
 
             let store = DummyStore;
@@ -2312,6 +2315,7 @@ mod tests {
                 telemetry,
                 "test-worker".to_string(),
                 mock_factory.clone(),
+                300,
             );
 
             let store = DummyStore;
@@ -2404,6 +2408,7 @@ mod tests {
                 telemetry,
                 "test-worker".to_string(),
                 mock_factory.clone(),
+                300,
             );
 
             let store = DummyStore;
@@ -4136,7 +4141,7 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn cross_workspace_mend_applies_stuck_threshold_secs() {
-        use std::time::{Duration, SystemTime};
+        use std::time::SystemTime;
 
         let temp_root = tempfile::tempdir().unwrap();
         let remote_workspace = temp_root.path().join("remote-workspace");
@@ -4152,7 +4157,7 @@ mod tests {
 
         // Register a "live" worker with a valid PID (this process's PID)
         let live_worker = crate::registry::WorkerEntry {
-            id: "test-worker-alpha".to_string(),
+            id: "test-worker".to_string(),
             pid: std::process::id(),
             workspace: PathBuf::from("/test/workspace"),
             agent: "test-adapter".to_string(),
@@ -4176,7 +4181,7 @@ mod tests {
             body: None,
             priority: 1,
             status: BeadStatus::InProgress,
-            assignee: Some("test-worker-alpha".to_string()), // Same as live worker
+            assignee: Some("test-worker".to_string()), // Same as live worker
             labels: vec![],
             workspace: remote_workspace.clone(),
             dependencies: vec![],
@@ -4195,7 +4200,7 @@ mod tests {
 
         struct StuckBeadStore {
             old_bead: Bead,
-            workspace: PathBuf,
+            _workspace: PathBuf,
             should_release: Arc<std::sync::atomic::AtomicBool>,
         }
 
@@ -4208,7 +4213,7 @@ mod tests {
                 if workspace == self.workspace {
                     Ok(Arc::new(StuckBeadStore {
                         old_bead: self.old_bead.clone(),
-                        workspace: workspace.to_path_buf(),
+                        _workspace: workspace.to_path_buf(),
                         should_release: self.should_release.clone(),
                     }))
                 } else {
@@ -4325,7 +4330,7 @@ mod tests {
         });
 
         // Create Explore strand with explicit stuck_threshold_secs
-        let config = ExploreConfig {
+        let _config = ExploreConfig {
             enabled: true,
             workspaces: vec![remote_workspace.clone()],
             workspace_root: PathBuf::from("/tmp/needle-test-root"),
@@ -4345,6 +4350,7 @@ mod tests {
             telemetry,
             "test-worker".to_string(),
             factory,
+            stuck_threshold_secs,
         );
 
         // Run Explore evaluation
@@ -4362,13 +4368,16 @@ mod tests {
 
     /// Mock store for testing frontier ranking with controlled bead priorities.
     struct FrontierRankingStore {
-        workspace: PathBuf,
+        _workspace: PathBuf,
         beads: Vec<Bead>,
     }
 
     impl FrontierRankingStore {
         fn new(workspace: PathBuf, beads: Vec<Bead>) -> Self {
-            Self { workspace, beads }
+            Self {
+                _workspace: workspace,
+                beads,
+            }
         }
     }
 
@@ -4543,6 +4552,7 @@ mod tests {
                 telemetry1,
                 "worker-alpha".to_string(),
                 factory.clone(),
+                300,
             );
 
             let temp_dir2 = tempfile::tempdir().unwrap();
@@ -4556,6 +4566,7 @@ mod tests {
                 telemetry2,
                 "worker-bravo".to_string(),
                 factory,
+                300,
             );
 
             let store = DummyStore;
@@ -4675,6 +4686,7 @@ mod tests {
                 telemetry,
                 "test-worker".to_string(),
                 factory,
+                300,
             );
 
             let store = DummyStore;
@@ -4808,6 +4820,7 @@ mod tests {
                     telemetry,
                     "same-worker-id".to_string(),
                     factory.clone(),
+                    300,
                 );
 
                 let store = DummyStore;
@@ -4897,6 +4910,7 @@ mod tests {
                 telemetry,
                 "test-worker".to_string(),
                 factory,
+                300,
             );
 
             let store = DummyStore;
@@ -4965,6 +4979,7 @@ mod tests {
                 telemetry,
                 "test-worker".to_string(),
                 factory,
+                300,
             );
 
             let store = DummyStore;

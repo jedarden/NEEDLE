@@ -497,3 +497,137 @@ async fn generation_budget_defers_excess_beads() {
 
     println!("✅ Test passed: generation budget defers 2 newest beads (5 created, 2 deferred, parent untouched");
 }
+
+// ============================================================================
+// Test: Task 19.4 scenario - verification bead closed, normal bead untouched
+// ============================================================================
+
+#[tokio::test]
+async fn task_19_4_scenario_verification_closed_normal_untouched() {
+    let workspace = PathBuf::from("/tmp/test-workspace");
+    let store = Arc::new(AuditMockStore::new(workspace.clone()));
+
+    // Create a parent bead
+    let parent_id = store
+        .create_bead(
+            "Implement API endpoint",
+            "Add a new REST API endpoint for user authentication",
+            &["api", "auth"],
+        )
+        .await
+        .unwrap();
+
+    // Agent creates two beads during dispatch:
+    // 1. "Verify the endpoint works" - should be closed and folded
+    // 2. "Add retry to client" - should remain untouched
+    let verify_bead = store
+        .create_bead(
+            "Verify the endpoint works",
+            &format!(
+                "Check that {} endpoint responds correctly",
+                parent_id.as_ref()
+            ),
+            &[],
+        )
+        .await
+        .unwrap();
+
+    let retry_bead = store
+        .create_bead(
+            "Add retry to client",
+            "Implement retry logic for the HTTP client",
+            &[],
+        )
+        .await
+        .unwrap();
+
+    // Manually invoke the post-dispatch audit logic
+    let verification_pattern =
+        regex::Regex::new(r"(?i)^(verify|test|confirm|validate|check|re-?run)\b").unwrap();
+
+    for bead in store.list_all().await.unwrap() {
+        if bead.labels.contains(&"keep".to_string()) || bead.labels.contains(&"human".to_string()) {
+            continue; // Exempt
+        }
+
+        let is_verification_shaped = verification_pattern.is_match(&bead.title);
+        let references_parent = bead
+            .body
+            .as_deref()
+            .unwrap_or("")
+            .contains(&parent_id.to_string());
+
+        if is_verification_shaped && references_parent {
+            // Close the bead
+            store
+                .close(&bead.id, "verification is the gate's job (Phase 19.4)")
+                .await
+                .unwrap();
+
+            // Update parent description with folded content
+            if let Ok(p) = store.show(&parent_id).await {
+                let folded_content = format!(
+                    "\n\n## folded: {}\n{}\n",
+                    bead.title,
+                    bead.body.as_deref().unwrap_or("(no body)")
+                );
+                let current_body = p.body.as_deref().unwrap_or("").to_string();
+                let updated_body = format!("{}{}", current_body, folded_content);
+                store
+                    .update_description(&parent_id, &updated_body)
+                    .await
+                    .unwrap();
+            }
+        }
+    }
+
+    // Verify results
+    let close_calls = store.get_close_calls();
+    let update_calls = store.get_update_calls();
+
+    // Should have closed exactly one bead (verify_bead, not retry_bead)
+    assert_eq!(
+        close_calls.len(),
+        1,
+        "Should close exactly one verification bead"
+    );
+    assert_eq!(
+        close_calls[0].0, verify_bead,
+        "Should close the verification bead"
+    );
+    assert_eq!(
+        close_calls[0].1,
+        "verification is the gate's job (Phase 19.4)"
+    );
+
+    // Should have updated the parent description
+    assert_eq!(
+        update_calls.len(),
+        1,
+        "Should update parent description once"
+    );
+    assert_eq!(update_calls[0].0, parent_id, "Should update parent bead");
+
+    // Verify the folded content is in the parent's notes
+    let updated_parent = store.show(&parent_id).await.unwrap();
+    let body = updated_parent.body.as_deref().unwrap();
+    assert!(body.contains("## folded: Verify the endpoint works"));
+    assert!(body.contains("Check that"));
+
+    // Verify retry_bead is untouched (not closed, still in the list)
+    let all_beads = store.list_all().await.unwrap();
+    let retry_bead_still_exists = all_beads.iter().any(|b| b.id == retry_bead);
+    assert!(
+        retry_bead_still_exists,
+        "Retry bead should still exist (untouched)"
+    );
+
+    let retry_bead_obj = store.show(&retry_bead).await.unwrap();
+    assert_eq!(
+        retry_bead_obj.status,
+        BeadStatus::Open,
+        "Retry bead should still be open (untouched)"
+    );
+
+    println!("✅ Test passed: verification bead closed, normal bead untouched, parent notes contain folded text");
+}

@@ -76,6 +76,27 @@ pub trait Strand: Send + Sync {
 
     /// Evaluate this strand against the current queue state.
     async fn evaluate(&self, store: &dyn BeadStore, exclusions: &HashSet<BeadId>) -> StrandResult;
+
+    /// Break dependency cycles detected in the bead store.
+    ///
+    /// Default implementation does nothing. Strands can override this to provide
+    /// cycle-breaking logic.
+    async fn break_dependency_cycles(&self, _store: &dyn BeadStore) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    /// Append notes to a bead.
+    ///
+    /// Default implementation does nothing. Strands can override this to provide
+    /// note-adding logic.
+    async fn append_bead_notes(
+        &self,
+        _store: &dyn BeadStore,
+        _bead_id: &BeadId,
+        _note: &str,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 /// Runs strands in order, returning the first candidate found.

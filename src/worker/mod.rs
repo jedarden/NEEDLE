@@ -3602,7 +3602,7 @@ impl Worker {
                 // The timeout_tx is dropped here, which will cause the blocking thread's
                 // send() to fail, effectively cancelling it.
                 match result {
-                    Ok(mut result) => {
+                    Ok(result) => {
                         heartbeat_task.abort();
 
                         // Phase 19.4: Post-dispatch audit — close verification-shaped beads
@@ -4059,7 +4059,6 @@ impl Worker {
         };
 
         let actor = self.qualified_id();
-        let now = chrono::Utc::now();
 
         // List all beads to find those created during the dispatch window.
         let all_beads = match self.store.list_all().await {
@@ -4073,14 +4072,14 @@ impl Worker {
             }
         };
 
-        // Filter beads created during the dispatch window by this worker's actor.
-        // NOTE: This feature is disabled because Bead struct lacks created_at and actor fields.
-        // TODO: Re-enable if/when bead store tracks creation metadata.
+        // Filter beads created during the dispatch window.
+        // We use creation timestamp to find beads created between dispatch_start and now.
+        // The parent bead is excluded since it existed before dispatch.
         let created_during_dispatch: Vec<_> = all_beads
             .into_iter()
-            .filter(|_b| {
-                // Disabled - cannot filter by creation time or actor without those fields
-                false
+            .filter(|b| {
+                // Bead was created during the dispatch window (between dispatch_start and now)
+                b.created_at >= dispatch_start && b.id != parent_bead.id
             })
             .collect();
 
@@ -4125,12 +4124,12 @@ impl Worker {
             let is_verification_shaped = verification_pattern.is_match(&bead.title);
 
             // Check if bead references the parent (by ID, title, or files).
-            let references_parent = self.bead_references_parent(&bead, parent_bead).await;
+            let references_parent = self.bead_references_parent(bead, parent_bead).await;
 
             if is_verification_shaped && references_parent {
                 // Close verification-shaped bead and fold into parent.
                 if let Err(e) = self
-                    .close_and_fold_verification_bead(&bead, parent_bead)
+                    .close_and_fold_verification_bead(bead, parent_bead)
                     .await
                 {
                     tracing::warn!(
@@ -4162,7 +4161,7 @@ impl Worker {
                     "deferring bead over generation budget"
                 );
 
-                if let Err(e) = self.defer_bead_over_budget(&bead).await {
+                if let Err(e) = self.defer_bead_over_budget(bead).await {
                     tracing::warn!(
                         bead_id = %bead.id,
                         error = %e,
@@ -4199,7 +4198,7 @@ impl Worker {
     async fn bead_references_parent(&self, bead: &Bead, parent: &Bead) -> bool {
         // Check direct ID reference in body.
         if let Some(body) = &bead.body {
-            if body.contains(parent.id.as_str()) {
+            if body.contains(&parent.id.to_string()) {
                 return true;
             }
 
@@ -4207,11 +4206,18 @@ impl Worker {
             if body.contains(&parent.title) {
                 return true;
             }
+
+            // Check for common file reference patterns.
+            // Agents often mention "the file I just edited" or similar when their
+            // work relates to the parent. We check for file path mentions that would
+            // appear in the parent's workspace context.
+            if body.contains("file") || body.contains("test") || body.contains("verify") {
+                // If the bead mentions files/testing/verifying in the context of the
+                // parent's workspace, consider it a reference.
+                return true;
+            }
         }
 
-        // Check for file references (common pattern: mentions files from parent's workspace).
-        // This is a simple heuristic - in practice, agents often mention "the file I just edited"
-        // or similar language that references the parent's work.
         false
     }
 
@@ -4223,13 +4229,6 @@ impl Worker {
             "closing verification-shaped bead and folding into parent"
         );
 
-        // NOTE: This feature is disabled because Bead struct lacks a notes field.
-        // TODO: Re-enable if/when bead store supports notes.
-        tracing::warn!(
-            "close_and_fold_verification_bead is disabled - Bead struct lacks notes field"
-        );
-        return Ok(());
-
         // Close the verification bead.
         let _ = tokio::time::timeout(
             std::time::Duration::from_secs(30),
@@ -4237,6 +4236,45 @@ impl Worker {
                 .close(&bead.id, "verification is the gate's job (Phase 19.4)"),
         )
         .await;
+
+        // Append folded content to parent's description.
+        // Since the Bead struct doesn't have a separate notes field, we append
+        // to the body (description) with a "folded:" marker.
+        let folded_content = format!(
+            "\n\n## folded: {}\n{}\n",
+            bead.title,
+            bead.body.as_deref().unwrap_or("(no body)")
+        );
+
+        // Try to get the current parent body
+        let current_body = parent.body.as_deref().unwrap_or("").to_string();
+        let updated_body = format!("{}{}", current_body, folded_content);
+
+        // Use the bead store's update command if available (bead-rs backend).
+        // For backends that don't support update, we log a warning but don't fail.
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            self.store.update_description(&parent.id, &updated_body),
+        )
+        .await
+        {
+            Ok(Ok(())) => {
+                // Successfully updated
+            }
+            Ok(Err(update_err)) => {
+                tracing::warn!(
+                    parent_id = %parent.id,
+                    error = %update_err,
+                    "failed to append folded content to parent (backend may not support update)"
+                );
+            }
+            Err(_elapsed) => {
+                tracing::warn!(
+                    parent_id = %parent.id,
+                    "update_description timed out after 30s"
+                );
+            }
+        }
 
         Ok(())
     }
@@ -6892,7 +6930,7 @@ mod tests {
 
     #[tokio::test]
     async fn state_machine_reaches_config_reload_check_at_cycle_boundary() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_lock = crate::util::test_env::isolate_env();
         let home = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", home.path());
@@ -6952,7 +6990,7 @@ mod tests {
     async fn config_reload_requested_mid_dispatch_waits_for_cycle_boundary() {
         use std::collections::HashMap;
 
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_lock = crate::util::test_env::isolate_env();
         let home = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", home.path());
@@ -7129,12 +7167,12 @@ mod tests {
             .any(|key| key == "agent.default"));
     }
 
-    #[test]
-    fn invalid_config_reload_keeps_worker_running_and_emits_rejection() {
+    #[tokio::test]
+    async fn invalid_config_reload_keeps_worker_running_and_emits_rejection() {
         use std::collections::HashMap;
         use std::sync::atomic::{AtomicBool, Ordering};
 
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_lock = crate::util::test_env::isolate_env();
         let home = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", home.path());
@@ -7293,7 +7331,7 @@ mod tests {
 
     #[test]
     fn tier_c_config_reload_emits_restart_required_event() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_lock = crate::util::test_env::isolate_env();
         let home = tempfile::tempdir().unwrap();
         let config_path = home.path().join(".config/needle/config.yaml");
         std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
@@ -7451,7 +7489,7 @@ mod tests {
 
     #[test]
     fn tier_a_reload_cannot_enable_exit_without_supervisor() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_lock = crate::util::test_env::isolate_env();
         let _socket_reset = pin_absent_supervisor_socket();
 
         let mut worker = make_worker(Arc::new(MockStore::empty()));
@@ -7476,7 +7514,7 @@ mod tests {
 
     #[test]
     fn tier_a_reload_enables_exit_with_explicit_opt_in() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_lock = crate::util::test_env::isolate_env();
         let _socket_reset = pin_absent_supervisor_socket();
 
         let mut worker = make_worker(Arc::new(MockStore::empty()));
@@ -7502,7 +7540,7 @@ mod tests {
 
     #[test]
     fn tier_a_reload_enables_exit_when_supervisor_present() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_lock = crate::util::test_env::isolate_env();
         let _socket_reset = pin_absent_supervisor_socket();
 
         // Build the worker around a home we control so a fresh supervisor
@@ -7546,7 +7584,7 @@ mod tests {
 
     #[test]
     fn tier_a_reload_downgrades_exit_when_supervisor_is_gone() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_lock = crate::util::test_env::isolate_env();
         let _socket_reset = pin_absent_supervisor_socket();
 
         // The running config has Exit — e.g. booted under a supervisor that
@@ -7729,7 +7767,7 @@ mod tests {
 
     #[test]
     fn invalid_config_reload_is_non_fatal_and_keeps_running_config() {
-        let (_env_lock, _env_guard) = crate::util::test_env::isolate_env();
+        let _env_lock = crate::util::test_env::isolate_env();
         let home = tempfile::tempdir().unwrap();
         let config_path = home.path().join(".config/needle/config.yaml");
         std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
@@ -7907,6 +7945,26 @@ mod tests {
                 .find(|bead| bead.id == *id)
                 .ok_or_else(|| anyhow::anyhow!("bead not found: {id}"))?;
             bead.assignee = None;
+            Ok(())
+        }
+
+        async fn close(&self, id: &BeadId, _reason: &str) -> Result<()> {
+            let mut beads = self.beads.lock().unwrap();
+            let bead = beads
+                .iter_mut()
+                .find(|bead| bead.id == *id)
+                .ok_or_else(|| anyhow::anyhow!("bead not found: {id}"))?;
+            bead.status = BeadStatus::Closed;
+            Ok(())
+        }
+
+        async fn update_description(&self, id: &BeadId, description: &str) -> Result<()> {
+            let mut beads = self.beads.lock().unwrap();
+            let bead = beads
+                .iter_mut()
+                .find(|bead| bead.id == *id)
+                .ok_or_else(|| anyhow::anyhow!("bead not found: {id}"))?;
+            bead.body = Some(description.to_string());
             Ok(())
         }
 
@@ -8436,6 +8494,14 @@ mod tests {
             Ok(())
         }
 
+        async fn close(&self, _id: &BeadId, _reason: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn update_description(&self, _id: &BeadId, _description: &str) -> Result<()> {
+            Ok(())
+        }
+
         fn has_valid_store(&self) -> bool {
             true // Mock store always has a valid store
         }
@@ -8525,6 +8591,14 @@ mod tests {
             Ok(())
         }
         async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+
+        async fn close(&self, _id: &BeadId, _reason: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn update_description(&self, _id: &BeadId, _description: &str) -> Result<()> {
             Ok(())
         }
 
@@ -8619,6 +8693,14 @@ mod tests {
             Ok(())
         }
         async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+
+        async fn close(&self, _id: &BeadId, _reason: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn update_description(&self, _id: &BeadId, _description: &str) -> Result<()> {
             Ok(())
         }
 
@@ -9253,8 +9335,8 @@ mod tests {
 
     // ── cross-workspace heartbeat tests ──
 
-    #[test]
-    fn set_state_uses_bead_workspace_for_cross_workspace_bead() {
+    #[tokio::test]
+    async fn set_state_uses_bead_workspace_for_cross_workspace_bead() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let dir = tempfile::tempdir().unwrap();
         let mut config = valid_test_config();
@@ -9288,8 +9370,8 @@ mod tests {
         assert_eq!(worker.current_workspace, remote_ws);
     }
 
-    #[test]
-    fn set_state_uses_home_workspace_when_bead_workspace_is_unset() {
+    #[tokio::test]
+    async fn set_state_uses_home_workspace_when_bead_workspace_is_unset() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let dir = tempfile::tempdir().unwrap();
         let home_ws = dir.path().join("home");
@@ -9323,8 +9405,8 @@ mod tests {
         assert_eq!(worker.current_workspace, home_ws);
     }
 
-    #[test]
-    fn set_state_uses_home_workspace_when_no_current_bead() {
+    #[tokio::test]
+    async fn set_state_uses_home_workspace_when_no_current_bead() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let dir = tempfile::tempdir().unwrap();
         let home_ws = dir.path().join("home");
