@@ -26,6 +26,8 @@ pub enum AlertKind {
     PulseFinding,
     /// Gate-broken alert (dependency cycle blocking progress).
     GateBroken,
+    /// Generation ratio alert (backlog growing for consecutive days).
+    GenerationRatio,
 }
 
 impl AlertKind {
@@ -38,6 +40,7 @@ impl AlertKind {
             AlertKind::UnravelProposal => "unravel-proposal",
             AlertKind::PulseFinding => "pulse-finding",
             AlertKind::GateBroken => "gate-broken",
+            AlertKind::GenerationRatio => "generation-ratio",
         }
     }
 }

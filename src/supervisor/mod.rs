@@ -11,8 +11,10 @@
 //! Depends on: `bead_store`, `config`, `registry`, `telemetry`.
 
 pub mod binary_freshness;
+pub mod generation_ratio;
 
 pub use binary_freshness::{BinaryFreshnessChecker, FreshnessCheck};
+pub use generation_ratio::{DailyCounts, GenerationRatioTracker};
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};

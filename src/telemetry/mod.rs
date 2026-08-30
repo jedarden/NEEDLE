@@ -876,6 +876,22 @@ pub enum EventKind {
         passed: u32,
         failed: u32,
     },
+    /// Fleet metric: beads created divided by beads closed per day.
+    ///
+    /// Emits per-workspace and fleet-wide ratios. Tracking this over time
+    /// indicates whether backlog is growing (ratio > 1.0) or shrinking (ratio < 1.0).
+    GenerationRatio {
+        /// Date (YYYY-MM-DD) for which this ratio is computed.
+        date: String,
+        /// Workspace name (empty string for fleet-wide metric).
+        workspace: String,
+        /// Number of beads created on this date.
+        created: u64,
+        /// Number of beads closed on this date.
+        closed: u64,
+        /// Computed ratio (created / closed), or 0 if closed == 0.
+        ratio: f64,
+    },
     CanaryPromoted {
         hash: String,
     },
@@ -1221,6 +1237,7 @@ impl EventKind {
             EventKind::CanarySuiteCompleted { .. } => "canary.suite_completed",
             EventKind::CanaryPromoted { .. } => "canary.promoted",
             EventKind::CanaryRejected { .. } => "canary.rejected",
+            EventKind::GenerationRatio { .. } => "generation_ratio",
             EventKind::SpawnPathModifiedInPlace { .. } => "spawn_path.modified_in_place",
             EventKind::CargoTestStarted { .. } => "cargo_test.started",
             EventKind::CargoTestCompleted { .. } => "cargo_test.completed",
@@ -1387,6 +1404,7 @@ impl EventKind {
             | EventKind::CanarySuiteCompleted { .. }
             | EventKind::CanaryPromoted { .. }
             | EventKind::CanaryRejected { .. }
+            | EventKind::GenerationRatio { .. }
             | EventKind::CargoTestStarted { .. }
             | EventKind::CargoTestCompleted { .. }
             | EventKind::ClaimRaceLostSkipped { .. }
@@ -1429,6 +1447,7 @@ impl EventKind {
             EventKind::MendCycleBroken { .. } => None,
             EventKind::AuditBeadClosedAsVerification { .. } => None,
             EventKind::AuditBeadDeferredOverBudget { .. } => None,
+            EventKind::GenerationRatio { .. } => None,
         }
     }
 
@@ -2157,6 +2176,21 @@ impl EventKind {
                     "source": source,
                     "error_message": error_message,
                     "error_type": error_type,
+                })
+            }
+            EventKind::GenerationRatio {
+                date,
+                workspace,
+                created,
+                closed,
+                ratio,
+            } => {
+                serde_json::json!({
+                    "date": date,
+                    "workspace": workspace,
+                    "created": created,
+                    "closed": closed,
+                    "ratio": ratio,
                 })
             }
             EventKind::VersionVerifyStarted {
@@ -2959,6 +2993,7 @@ impl EventKind {
             | EventKind::CanarySuiteCompleted { .. }
             | EventKind::CanaryPromoted { .. }
             | EventKind::CanaryRejected { .. }
+            | EventKind::GenerationRatio { .. }
             | EventKind::CargoTestStarted { .. }
             | EventKind::OutputTransformSpawned { .. }
             | EventKind::OutputTransformExited { .. }
