@@ -2281,7 +2281,20 @@ impl Worker {
                     bead.workspace.clone()
                 };
                 if !is_workspace_unset(&workspace) {
-                    self.telemetry.set_workspace(workspace);
+                    self.telemetry.set_workspace(workspace.clone());
+                    // Persist the resolved workspace on the bead itself. Beads
+                    // claimed in the home workspace come back from the store
+                    // with an unset workspace, and every downstream consumer
+                    // that does not repeat this fallback (the outcome handler's
+                    // validation gates, verify_shipped_work, predispatch
+                    // cleanup) would otherwise run against an empty path —
+                    // `sh` spawned with current_dir("") fails with ENOENT, the
+                    // gate reports "failed to execute command", and the bead
+                    // collects a bogus verification failure (2,346 of 2,470
+                    // gate failures fleet-wide in the week to 2026-08-29).
+                    if is_workspace_unset(&bead.workspace) {
+                        bead.workspace = workspace;
+                    }
                 }
                 self.current_bead = Some(bead);
                 // Verify single-claim invariant after setting current_bead
