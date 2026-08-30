@@ -1371,7 +1371,7 @@ mod tests {
         std::fs::write(
             &path,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = capabilities ]; then\n  printf '%s\\n' '{{\"implementation\":\"bead-rs\",\"atomic_claim\":true,\"statuses\":[\"open\",\"in_progress\",\"deferred\",\"closed\"],\"schemas\":[{{\"schema_ref\":\"urn:bead-rs:schema:issue:native-v1\"}},{{\"schema_ref\":\"urn:bead-rs:schema:event:native-v1\"}},{{\"schema_ref\":\"urn:bead-rs:schema:field-guide:native-v1\"}}]}}'\nelse\n  echo '{version}'\nfi\n"
+                "#!/bin/sh\ncase \"$1\" in\n  capabilities)\n    printf '%s\\n' '{{\"implementation\":\"bead-rs\",\"atomic_claim\":true,\"statuses\":[\"open\",\"in_progress\",\"deferred\",\"closed\"],\"schemas\":[{{\"schema_ref\":\"urn:bead-rs:schema:issue:native-v1\"}},{{\"schema_ref\":\"urn:bead-rs:schema:event:native-v1\"}},{{\"schema_ref\":\"urn:bead-rs:schema:field-guide:native-v1\"}}],\"commands\":[\"ref\",\"data\",\"query\"]}}'\n    ;;\n  --version)\n    echo '{version}'\n    ;;\n  *)\n    echo '{version}'\n    ;;\nesac\n"
             ),
         )
         .unwrap();
@@ -3051,11 +3051,17 @@ mod tests {
         std::fs::write(
             &bead_rs,
             r#"#!/usr/bin/env bash
-if [ "$1" = "capabilities" ]; then
-  printf '{"implementation":"bead-rs","atomic_claim":true,"statuses":["open","in_progress","deferred","closed"],"schemas":[{"schema_ref":"urn:bead-rs:schema:issue:native-v1"}],"commands":["ref","data","query"]}'
-else
-  echo "bead 0.1.1"
-fi
+case "$1" in
+  capabilities)
+    printf '{"implementation":"bead-rs","atomic_claim":true,"statuses":["open","in_progress","deferred","closed"],"schemas":[{"schema_ref":"urn:bead-rs:schema:issue:native-v1"}],"commands":["ref","data","query"]}'
+    ;;
+  --version)
+    echo "bead 0.1.1"
+    ;;
+  *)
+    echo "bead 0.1.1"
+    ;;
+esac
 "#,
         )
         .unwrap();
@@ -3183,11 +3189,17 @@ exit 1
         std::fs::write(
             &bead_rs,
             r#"#!/usr/bin/env bash
-if [ "$1" = "capabilities" ]; then
-  printf '{"implementation":"bead-rs","atomic_claim":true,"statuses":["open","in_progress","deferred","closed"],"schemas":[{"schema_ref":"urn:bead-rs:schema:issue:native-v1"},{"schema_ref":"urn:bead-rs:schema:event:native-v1"},{"schema_ref":"urn:bead-rs:schema:field-guide:native-v1"}],"commands":["ref","data","query"]}'
-else
-  echo "bead 0.1.1"
-fi
+case "$1" in
+  capabilities)
+    printf '{"implementation":"bead-rs","atomic_claim":true,"statuses":["open","in_progress","deferred","closed"],"schemas":[{"schema_ref":"urn:bead-rs:schema:issue:native-v1"},{"schema_ref":"urn:bead-rs:schema:event:native-v1"},{"schema_ref":"urn:bead-rs:schema:field-guide-native-v1"}],"commands":["ref","data","query"]}'
+    ;;
+  --version)
+    echo "bead 0.1.1"
+    ;;
+  *)
+    echo "bead 0.1.1"
+    ;;
+esac
 "#,
         )
         .unwrap();
@@ -3217,11 +3229,17 @@ fi
         std::fs::write(
             &incomplete_caps,
             r#"#!/usr/bin/env bash
-if [ "$1" = "capabilities" ]; then
-  printf '{"implementation":"bead-rs","atomic_claim":false,"statuses":["open","in_progress"],"schemas":[]}'
-else
-  echo "bead 0.1.1"
-fi
+case "$1" in
+  capabilities)
+    printf '{"implementation":"bead-rs","atomic_claim":false,"statuses":["open","in_progress"],"schemas":[]}'
+    ;;
+  --version)
+    echo "bead 0.1.1"
+    ;;
+  *)
+    echo "bead 0.1.1"
+    ;;
+esac
 "#,
         )
         .unwrap();

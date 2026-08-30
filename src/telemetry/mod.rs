@@ -48,6 +48,16 @@ pub mod file_sink;
 
 pub use file_sink::FileSink;
 
+// ─── Query & Stats ─────────────────────────────────────────────────────────────
+
+/// Query and aggregation for stored telemetry logs.
+pub mod query;
+
+pub use query::{
+    compute_stats, discover_log_files, query_logs, AggregateStats, QueryFilter, QueryResult,
+    WorkerStats,
+};
+
 // ─── TelemetryEvent ──────────────────────────────────────────────────────────
 
 /// A single structured telemetry record.
