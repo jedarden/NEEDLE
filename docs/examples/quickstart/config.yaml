@@ -1,5 +1,8 @@
 # Minimal worker config for quickstart example
-# Place this at ~/.config/needle/config.yaml (overwrites the one `needle init` writes)
+# Place this at ~/.config/needle/config.yaml — ONLY inside the sandbox HOME from
+# Step 0 of the quickstart README. On a real NEEDLE host this file IS the fleet
+# config; overwriting it with this example took an ex44 fleet down to one worker
+# on 2026-08-30.
 
 agent:
   default: claude

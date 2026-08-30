@@ -9,6 +9,18 @@ You need:
 - `bead` CLI installed (bead-rs backend)
 - A Claude Code CLI on your `$PATH` (any agent works, but we'll use Claude)
 
+## Step 0: Sandbox your HOME (mandatory)
+
+This walkthrough writes `~/.config/needle/config.yaml`. Never run it against a
+HOME that already runs NEEDLE — on 2026-08-30 a worker did exactly that and
+replaced a fleet's global config with the one-worker example below. Use a
+throwaway HOME for the whole example:
+
+```bash
+export HOME="$(mktemp -d /tmp/needle-quickstart-home.XXXXXX)"
+export PATH="$HOME/.local/bin:$PATH"
+```
+
 ## Step 1: Create a Throwaway Workspace
 
 We'll use a disposable project so the agent has harmless work to do:
@@ -44,8 +56,9 @@ Bind the workspace to its bead backend. This writes `./.needle.yaml`, the global
 needle init --backend bead-rs
 ```
 
-Then narrow the global config to a single worker that exits when the queue is
-empty (overwrite the file `needle init` just created):
+Then narrow the sandbox HOME's global config to a single worker that exits when
+the queue is empty (this overwrites the file `needle init` just created — which
+is fine only because HOME is the sandbox from Step 0):
 
 ```bash
 cat > ~/.config/needle/config.yaml << 'EOF'
