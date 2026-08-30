@@ -366,6 +366,7 @@ async fn real_bead_rs_explore_discovers_remote_workspace() {
         starvation_threshold_minutes: 15,
         scan_interval_cycles: 1,
         max_scan_interval_cycles: 8,
+        stuck_threshold_secs: 300,
     };
 
     let explore = ExploreStrand::new(
@@ -409,6 +410,7 @@ async fn real_bead_rs_explore_skips_home_workspace() {
         starvation_threshold_minutes: 15,
         scan_interval_cycles: 1,
         max_scan_interval_cycles: 8,
+        stuck_threshold_secs: 300,
     };
 
     let reg_dir = tempfile::tempdir().unwrap();
@@ -445,6 +447,7 @@ async fn real_bead_rs_explore_disabled_returns_no_work() {
         enabled: false,
         workspaces: vec![remote_workspace.path().to_path_buf()],
         workspace_root: scan_root.path().to_path_buf(),
+        stuck_threshold_secs: 300,
         rediscovery_cycles: 60,
         starvation_threshold_minutes: 15,
         scan_interval_cycles: 1,

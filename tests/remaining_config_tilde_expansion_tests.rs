@@ -908,6 +908,84 @@ prompt:
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// strands.resolve.custom_template_path tilde expansion tests (Option<PathBuf>)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Test tilde expansion in strands.resolve.custom_template_path configuration field.
+#[tokio::test]
+#[serial]
+async fn resolve_custom_template_path_tilde_expansion() {
+    let _guard = HomeGuard::isolate();
+    let isolated_home = env::var("HOME").unwrap();
+
+    // Test: Some with tilde path
+    let yaml = r#"
+strands:
+  resolve:
+    custom_template_path: ~/custom-resolve-template.md
+"#;
+
+    let mut config: Config = serde_yaml::from_str(yaml).expect("failed to parse config");
+    config.expand_tildes();
+
+    let expected = Some(PathBuf::from(&isolated_home).join("custom-resolve-template.md"));
+    assert_eq!(
+        config.strands.resolve.custom_template_path, expected,
+        "strands.resolve.custom_template_path should expand tilde in Some"
+    );
+
+    println!("✓ strands.resolve.custom_template_path tilde expansion test passed");
+}
+
+/// Test that None in strands.resolve.custom_template_path remains None after expansion.
+#[tokio::test]
+#[serial]
+async fn resolve_custom_template_path_none_unchanged() {
+    let _guard = HomeGuard::isolate();
+
+    // Test: None (field not set)
+    let yaml = r#"
+strands:
+  resolve: {}
+"#;
+
+    let mut config: Config = serde_yaml::from_str(yaml).expect("failed to parse config");
+    config.expand_tildes();
+
+    assert!(
+        config.strands.resolve.custom_template_path.is_none(),
+        "None should remain None after expansion"
+    );
+
+    println!("✓ strands.resolve.custom_template_path None remains None");
+}
+
+/// Test that non-tilde paths in strands.resolve.custom_template_path pass through unchanged.
+#[tokio::test]
+#[serial]
+async fn resolve_custom_template_path_non_tilde_paths_unchanged() {
+    let _guard = HomeGuard::isolate();
+
+    // Test: absolute path
+    let yaml = r#"
+strands:
+  resolve:
+    custom_template_path: /etc/needle/resolve-template.md
+"#;
+
+    let mut config: Config = serde_yaml::from_str(yaml).expect("failed to parse config");
+    config.expand_tildes();
+
+    let expected = Some(PathBuf::from("/etc/needle/resolve-template.md"));
+    assert_eq!(
+        config.strands.resolve.custom_template_path, expected,
+        "absolute path should pass through unchanged"
+    );
+
+    println!("✓ strands.resolve.custom_template_path non-tilde paths pass through unchanged");
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Combined tests - multiple config sections
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -942,6 +1020,9 @@ prompt:
     - ~/context/notes.md
 self_modification:
   canary_workspace: ~/canary/workspace
+strands:
+  resolve:
+    custom_template_path: ~/custom-resolve-template.md
 "#;
 
     let mut config: Config = serde_yaml::from_str(yaml).expect("failed to parse config");
@@ -1006,6 +1087,12 @@ self_modification:
         config.self_modification.canary_workspace,
         PathBuf::from(&isolated_home).join("canary/workspace"),
         "self_modification section should be expanded"
+    );
+
+    assert_eq!(
+        config.strands.resolve.custom_template_path,
+        Some(PathBuf::from(&isolated_home).join("custom-resolve-template.md")),
+        "strands.resolve section should be expanded"
     );
 
     println!("✓ multiple config sections tilde expansion test passed");

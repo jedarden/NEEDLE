@@ -1354,7 +1354,9 @@ mod tests {
         let foreign_bin = tmp_dir.path().join("bf");
         std::fs::write(&foreign_bin, "#!/bin/sh\necho \"bf 0.4.1\"").unwrap();
         make_executable(&foreign_bin);
-        let err = detect_backend_from_path(&foreign_bin).unwrap_err().to_string();
+        let err = detect_backend_from_path(&foreign_bin)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("unrecognized backend 'bf'"), "got: {err}");
 
         // Test 2: bead binary that reports "bead" identity
@@ -6003,6 +6005,10 @@ impl Config {
         // strands.pulse.scanners[].command paths are strings, not PathBuf, so skip
 
         // strands.reflect section - no PathBuf fields
+
+        // strands.resolve section
+        self.strands.resolve.custom_template_path =
+            expand_tilde_option(&self.strands.resolve.custom_template_path);
 
         // strands.learning section
         self.strands.learning.global_learnings_file =
