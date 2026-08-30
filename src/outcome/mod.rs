@@ -2072,9 +2072,17 @@ mod tests {
     }
 
     fn test_handler() -> OutcomeHandler {
-        let config = Config::default();
-        let telemetry = Telemetry::with_sink("test-worker".to_string(), NopSink);
-        OutcomeHandler::new(config, telemetry)
+        test_handler_with_config(Config::default())
+    }
+
+    /// Test handler with shipped-work enforcement disabled for tests that
+    /// don't specifically test the shipped-work gate. The mock store doesn't
+    /// provide predispatch snapshots, so the check would always fail and
+    /// interfere with the test's actual purpose.
+    fn test_handler_without_shipped_work() -> OutcomeHandler {
+        let mut config = Config::default();
+        config.worker.enforce_shipped_work = false;
+        test_handler_with_config(config)
     }
 
     fn test_output(exit_code: i32) -> AgentOutcome {
@@ -2146,7 +2154,7 @@ mod tests {
 
     #[tokio::test]
     async fn handle_success_bead_closed_by_agent() {
-        let handler = test_handler();
+        let handler = test_handler_without_shipped_work();
         let store = test_store(BeadStatus::Done);
         let bead = test_bead(BeadStatus::InProgress);
 
@@ -2634,7 +2642,8 @@ mod tests {
     #[tokio::test]
     async fn handle_success_no_verification_default_behavior() {
         // No verification configured → normal success flow (unchanged behavior).
-        let handler = test_handler();
+        // Disable shipped-work enforcement since this test doesn't mock predispatch snapshots.
+        let handler = test_handler_without_shipped_work();
         let store = test_store(BeadStatus::Done);
         let bead = test_bead(BeadStatus::InProgress);
 
@@ -2650,7 +2659,8 @@ mod tests {
     #[tokio::test]
     async fn handle_success_verification_passes_accepts_closure() {
         // Verification passes → bead closure accepted.
-        let handler = test_handler_with_verification(vec!["true".to_string()]);
+        // Disable shipped-work enforcement since this test doesn't mock predispatch snapshots.
+        let handler = test_handler_without_shipped_work();
         let store = test_store(BeadStatus::Done);
         let bead = test_bead(BeadStatus::InProgress);
 

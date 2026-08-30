@@ -700,11 +700,11 @@ pub enum BeadBackend {
     /// Auto-detect the appropriate backend
     #[serde(rename = "auto")]
     Auto,
-    /// br - deprecated alias for bead-rs (legacy support)
+    /// br - deprecated alias for bead (legacy support)
     #[serde(rename = "br")]
     Br,
-    /// bead-rs (bead) - native CLI
-    #[serde(rename = "bead-rs", alias = "bead")]
+    /// bead (bead-rs alias for backward compatibility) - native CLI
+    #[serde(rename = "bead", alias = "bead-rs")]
     Bead,
 }
 
@@ -771,7 +771,7 @@ pub enum Backend {
 impl std::fmt::Display for Backend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Backend::Bead => write!(f, "bead-rs"),
+            Backend::Bead => write!(f, "bead"),
         }
     }
 }
@@ -804,7 +804,7 @@ impl std::fmt::Display for BackendSource {
 /// that can be easily serialized or passed between components.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BackendDetection {
-    /// The backend name (e.g., "bead-rs" or "bead-forge")
+    /// The backend name (e.g., "bead")
     pub backend: String,
     /// The resolved path to the CLI binary
     pub cli_path: PathBuf,
@@ -841,8 +841,7 @@ impl BackendDetection {
 /// 2. **Fallback probing**: If no config exists or backend is set to `auto`,
 ///    probe PATH for available CLIs in priority order:
 ///    - bead (bead-rs)
-///    - bf (bead-forge)
-///    - br (deprecated alias for bead-rs)
+///    - br (deprecated alias for bead)
 ///
 /// # Arguments
 ///
@@ -2447,7 +2446,7 @@ mod tests {
 
     #[test]
     fn test_bead_backend_display_bead() {
-        assert_eq!(format!("{}", BeadBackend::Bead), "bead-rs");
+        assert_eq!(format!("{}", BeadBackend::Bead), "bead");
     }
 
     // ─── BeadBackend deserialization alias tests ─────────────────────────────────
@@ -2462,7 +2461,7 @@ mod tests {
 
     #[test]
     fn test_bead_backend_deserialize_bead_rs() {
-        // The full "bead-rs" should also work
+        // The "bead-rs" alias is accepted for backward compatibility
         let yaml = "bead-rs";
         let backend: BeadBackend = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(backend, BeadBackend::Bead);
@@ -2704,7 +2703,7 @@ path: ./local/bin/bead
 
         // Test serialization to JSON
         let json = serde_json::to_string(&config).unwrap();
-        assert!(json.contains("bead-rs"));
+        assert!(json.contains("bead"));
         assert!(json.contains("/usr/local/bin/bead"));
 
         // Test deserialization from JSON
@@ -2718,7 +2717,7 @@ path: ./local/bin/bead
 
     #[test]
     fn test_bead_cli_config_json_with_explicit_path_alias() {
-        // JSON deserialization should support explicit_path alias
+        // JSON deserialization should support "bead-rs" alias (for backward compatibility) and explicit_path alias
         let json = r#"{"backend":"bead-rs","explicit_path":"/custom/bead"}"#;
         let config: BeadCliConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.backend, BeadBackend::Bead);
@@ -3019,7 +3018,7 @@ path: /path/to/./bead
             ("auto", BeadBackend::Auto),
             // Br (deprecated alias, still parsed)
             ("br", BeadBackend::Br),
-            // Bead
+            // Bead ("bead-rs" alias for backward compatibility)
             ("bead-rs", BeadBackend::Bead),
             ("bead", BeadBackend::Bead),
         ];
@@ -3164,7 +3163,7 @@ path: /path/to/./bead
         let test_cases = vec![
             (BeadBackend::Auto, "auto"),
             (BeadBackend::Br, "br"),
-            (BeadBackend::Bead, "bead-rs"),
+            (BeadBackend::Bead, "bead"),
         ];
 
         for (backend, expected) in test_cases {
@@ -13044,7 +13043,7 @@ agent:
             let expected_backend = match backend {
                 BeadBackend::Auto => "auto",
                 BeadBackend::Br => "br",
-                BeadBackend::Bead => "bead-rs",
+                BeadBackend::Bead => "bead",
             };
             assert_eq!(
                 backend_str, expected_backend,

@@ -106,6 +106,14 @@ pub fn discover_log_files(log_dir: &Path) -> Result<Vec<PathBuf>> {
             continue;
         }
 
+        // Filter to only include standard NEEDLE telemetry files
+        // Pattern: {worker}-{session}-{date}.jsonl or {worker}-{session}-{date}-{seq}.jsonl
+        // Exclude .agent.jsonl and other non-standard files
+        let filename = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        if filename.ends_with(".agent") {
+            continue;
+        }
+
         log_files.push(path);
     }
 
@@ -237,9 +245,15 @@ pub fn compute_stats(log_dir: &Path, worker_filter: Option<&str>) -> Result<Aggr
         let reader = BufReader::new(file);
 
         for line in reader.lines() {
-            let line = line?;
-            let event: TelemetryEvent = serde_json::from_str(&line)
-                .with_context(|| format!("failed to parse event from: {}", path.display()))?;
+            let line = match line {
+                Ok(l) => l,
+                Err(_) => continue,
+            };
+
+            let event: TelemetryEvent = match serde_json::from_str(&line) {
+                Ok(e) => e,
+                Err(_) => continue, // Skip malformed lines silently
+            };
 
             // Apply worker filter if specified
             if let Some(filter) = worker_filter {

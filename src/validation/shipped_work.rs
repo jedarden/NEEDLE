@@ -327,19 +327,32 @@ mod tests {
 
     // ── fallback: bead notes ──
 
-    /// Without a snapshot the gate cannot distinguish a commit made during this
-    /// dispatch from one that predates it, so it must not render a verdict.
-    /// Failing closed here would release every closure whenever snapshot
-    /// recording failed — the same unbounded retry loop, triggered from the
-    /// other side.
+    /// When no snapshot is available, the gate fails closed to prevent unbounded
+    /// retry loops. A missing snapshot means we cannot verify shipped work, so the
+    /// closure must be treated as a failure. This triggers the failure-quarantine
+    /// circuit: the bead is reopened, released, and the failure count is incremented.
+    /// After `outcome.quarantine_after_failures` consecutive failures, the bead is
+    /// quarantined (set deferred) and stops retrying. This bounded loop prevents the
+    /// unbounded retry loop described in GitHub issue #16 (bead needle-0fbf5145
+    /// posted 18 identical GitHub comments because every closure was accepted).
     #[tokio::test]
-    async fn no_snapshot_fails_open() {
+    async fn no_snapshot_fails_closed() {
         let dir = TempDir::new().unwrap();
         init_repo(dir.path()).await;
-        assert_eq!(
-            evaluate(dir.path(), None, "", false).await.unwrap(),
-            GateResult::Pass
-        );
+        match evaluate(dir.path(), None, "", false).await.unwrap() {
+            GateResult::Fail(reason) => {
+                assert!(
+                    reason.contains("no pre-dispatch snapshot recorded"),
+                    "failure reason should mention missing snapshot"
+                );
+            }
+            GateResult::Pass => {
+                panic!("no snapshot must fail closed to prevent unbounded retry loops");
+            }
+            GateResult::ExecutionError { .. } => {
+                panic!("no snapshot should return Fail, not ExecutionError");
+            }
+        }
     }
 
     #[tokio::test]
