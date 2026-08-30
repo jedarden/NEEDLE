@@ -444,7 +444,6 @@ mod tests {
     use super::*;
     use std::ffi::OsString;
     use std::fs;
-    use std::sync::{Mutex, OnceLock};
     use tempfile::TempDir;
 
     struct HomeGuard {
@@ -468,12 +467,25 @@ mod tests {
         }
     }
 
-    fn home_lock() -> std::sync::MutexGuard<'static, ()> {
-        static HOME_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        HOME_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("HOME test lock should not be poisoned")
+    /// Take the ONE process-wide env lock, not a module-private one.
+    ///
+    /// HOME is global: a second mutex only serialises this module against
+    /// itself, so a test here could still swap HOME out from under a
+    /// worker/config/health test that was holding `util::test_env`'s lock.
+    /// That is how `invalid_config_reload_keeps_worker_running_and_emits_rejection`
+    /// lost its config path mid-run and timed out waiting for a reload event.
+    /// Holds the process-wide env lock plus the restore guard for HOME/PATH.
+    struct EnvLock {
+        _env_guard: crate::util::test_env::EnvGuard,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    fn home_lock() -> EnvLock {
+        let (lock, env_guard) = crate::util::test_env::isolate_env();
+        EnvLock {
+            _env_guard: env_guard,
+            _lock: lock,
+        }
     }
 
     fn create_test_event(worker_id: &str) -> TelemetryEvent {

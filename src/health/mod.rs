@@ -1442,31 +1442,37 @@ mod tests {
     /// // Now dirs_or_home() resolves to the temp directory, not the real HOME
     /// ```
     fn isolate_test_home() -> HomeGuard {
-        let original_home = std::env::var_os("HOME");
         let temp_dir = tempfile::tempdir().unwrap();
         let temp_path = temp_dir.path().to_path_buf();
+        let mut guard = isolate_test_home_at(&temp_path);
+        guard._temp_dir = Some(temp_dir);
+        guard
+    }
 
-        std::env::set_var("HOME", &temp_path);
-
+    /// Point HOME at a directory the test already owns.
+    ///
+    /// `resolve_heartbeat_dir` resolves a relative heartbeat dir against the
+    /// live HOME, not against `config.workspace.home`, so a test that asserts
+    /// on a path under its own tempdir has to make that tempdir the HOME.
+    fn isolate_test_home_at(home: &Path) -> HomeGuard {
+        // HOME is process-global: hold the one env lock every other
+        // HOME/PATH-mutating test uses, or the value another test set is the
+        // one this test's HealthMonitor resolves against (seen as two
+        // different tempdirs in the same assertion).
+        let (lock, env_guard) = crate::util::test_env::isolate_env();
+        std::env::set_var("HOME", home);
         HomeGuard {
-            _temp_dir: temp_dir,
-            original_home,
+            _temp_dir: None,
+            _env_guard: env_guard,
+            _lock: lock,
         }
     }
 
-    /// Guard that restores HOME to its original value when dropped.
+    /// Guard that restores HOME (and the env lock) when dropped.
     struct HomeGuard {
-        _temp_dir: tempfile::TempDir,
-        original_home: Option<std::ffi::OsString>,
-    }
-
-    impl Drop for HomeGuard {
-        fn drop(&mut self) {
-            match &self.original_home {
-                Some(home) => std::env::set_var("HOME", home),
-                None => std::env::remove_var("HOME"),
-            }
-        }
+        _temp_dir: Option<tempfile::TempDir>,
+        _env_guard: crate::util::test_env::EnvGuard,
+        _lock: std::sync::MutexGuard<'static, ()>,
     }
 
     fn test_config(heartbeat_dir: &Path) -> Config {
@@ -2262,8 +2268,8 @@ mod tests {
     /// the heartbeat file path for cleanup on graceful shutdown.
     #[tokio::test]
     async fn heartbeat_path_computed_during_construction() {
-        let _home_guard = isolate_test_home();
         let dir = tempfile::tempdir().unwrap();
+        let _home_guard = isolate_test_home_at(dir.path());
         let hb_dir = dir.path().join(".needle").join("state").join("heartbeats");
         std::fs::create_dir_all(&hb_dir).unwrap();
 
@@ -4399,8 +4405,8 @@ mod tests {
     /// for cleanup on graceful shutdown.
     #[tokio::test]
     async fn heartbeat_path_field_correct_for_shutdown_handler() {
-        let _home_guard = isolate_test_home();
         let dir = tempfile::tempdir().unwrap();
+        let _home_guard = isolate_test_home_at(dir.path());
         let hb_dir = dir.path().join(".needle").join("state").join("heartbeats");
         std::fs::create_dir_all(&hb_dir).unwrap();
 

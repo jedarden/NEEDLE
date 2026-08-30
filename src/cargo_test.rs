@@ -1989,6 +1989,10 @@ mod tests {
     fn run_with_bead_trace_creates_trace_directory() {
         let temp_dir = TempDir::new().unwrap();
         let workspace = temp_dir.path();
+        // TraceCapture only writes into a real bead workspace (a workspace
+        // with .beads/), so that a stray bead id can never create a .beads
+        // tree in a shared temp dir. Give the fixture one.
+        fs::create_dir_all(workspace.join(".beads")).unwrap();
 
         // Create a minimal Cargo project for testing
         let cargo_toml = workspace.join("Cargo.toml");
@@ -2061,6 +2065,10 @@ mod tests {
     fn run_with_bead_trace_handles_test_output() {
         let temp_dir = TempDir::new().unwrap();
         let workspace = temp_dir.path();
+        // TraceCapture only writes into a real bead workspace (a workspace
+        // with .beads/), so that a stray bead id can never create a .beads
+        // tree in a shared temp dir. Give the fixture one.
+        fs::create_dir_all(workspace.join(".beads")).unwrap();
 
         // Create a minimal Cargo project
         let cargo_toml = workspace.join("Cargo.toml");
@@ -2126,6 +2134,10 @@ mod tests {
     fn run_with_bead_trace_handles_empty_output() {
         let temp_dir = TempDir::new().unwrap();
         let workspace = temp_dir.path();
+        // TraceCapture only writes into a real bead workspace (a workspace
+        // with .beads/), so that a stray bead id can never create a .beads
+        // tree in a shared temp dir. Give the fixture one.
+        fs::create_dir_all(workspace.join(".beads")).unwrap();
 
         // Create a minimal Cargo project
         let cargo_toml = workspace.join("Cargo.toml");
@@ -2219,9 +2231,22 @@ mod tests {
             ".beads directory should not exist initially"
         );
 
-        // Run cargo test with bead trace capture
         let runner = CargoTest::new(workspace);
         let bead_id = "bf-dir-test";
+
+        // A workspace with no .beads/ is not a bead workspace: trace capture
+        // must skip it entirely rather than conjure a .beads tree there. This
+        // is what stopped stray runs from littering shared temp dirs with
+        // .beads (c96d5ef3); the run itself still succeeds.
+        let _ = runner.run_with_bead_trace(bead_id).unwrap();
+        assert!(
+            !beads_dir.exists(),
+            "run_with_bead_trace must not create .beads in a non-bead workspace"
+        );
+
+        // Once the workspace is a bead workspace, the missing parent
+        // directories under it are created on demand.
+        fs::create_dir_all(&beads_dir).unwrap();
         let _ = runner.run_with_bead_trace(bead_id).unwrap();
 
         // Verify parent directories were created
@@ -2240,6 +2265,10 @@ mod tests {
     fn run_with_bead_trace_writes_test_metrics() {
         let temp_dir = TempDir::new().unwrap();
         let workspace = temp_dir.path();
+        // TraceCapture only writes into a real bead workspace (a workspace
+        // with .beads/), so that a stray bead id can never create a .beads
+        // tree in a shared temp dir. Give the fixture one.
+        fs::create_dir_all(workspace.join(".beads")).unwrap();
 
         // Create a minimal Cargo project
         let cargo_toml = workspace.join("Cargo.toml");
@@ -2313,6 +2342,10 @@ mod tests {
     fn run_with_bead_trace_metrics_captures_exit_code() {
         let temp_dir = TempDir::new().unwrap();
         let workspace = temp_dir.path();
+        // TraceCapture only writes into a real bead workspace (a workspace
+        // with .beads/), so that a stray bead id can never create a .beads
+        // tree in a shared temp dir. Give the fixture one.
+        fs::create_dir_all(workspace.join(".beads")).unwrap();
 
         // Create a minimal Cargo project with a failing test
         let cargo_toml = workspace.join("Cargo.toml");

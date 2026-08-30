@@ -6973,10 +6973,7 @@ mod tests {
         // not replace this with a direct check_config_reload() call: the
         // regression is a missing call site, not a broken helper.
         worker.state = WorkerState::Logging;
-        let terminal_state = tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(worker.run_state_machine())
-            .unwrap();
+        let terminal_state = worker.run_state_machine().await.unwrap();
 
         assert_eq!(terminal_state, WorkerState::Stopped);
         assert_eq!(
@@ -6985,13 +6982,15 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn config_reload_requested_mid_dispatch_waits_for_cycle_boundary() {
+    #[test]
+    fn config_reload_requested_mid_dispatch_waits_for_cycle_boundary() {
         use std::collections::HashMap;
 
         let _env_lock = crate::util::test_env::isolate_env();
         let home = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
+        // TraceCapture only writes inside a bead workspace (one with .beads/).
+        std::fs::create_dir_all(workspace.path().join(".beads")).unwrap();
         std::env::set_var("HOME", home.path());
 
         let config_path = home.path().join(".config/needle/config.yaml");
@@ -7088,7 +7087,7 @@ mod tests {
         adapters.insert(new_adapter.name.clone(), new_adapter);
         worker.dispatcher =
             Dispatcher::with_adapters(adapters, helper.telemetry().clone(), config.agent.timeout);
-        worker.boot().await.unwrap();
+        runtime.block_on(worker.boot()).unwrap();
 
         let mut candidate = config;
         candidate.agent.default = "new-agent".to_string();
@@ -7097,7 +7096,7 @@ mod tests {
         let terminal_state = runtime
             .block_on(async {
                 let request_reload_during_dispatch = async {
-                    tokio::time::timeout(Duration::from_secs(5), async {
+                    tokio::time::timeout(Duration::from_secs(60), async {
                         while !dispatch_started.exists() {
                             tokio::time::sleep(Duration::from_millis(10)).await;
                         }
@@ -7166,14 +7165,16 @@ mod tests {
             .any(|key| key == "agent.default"));
     }
 
-    #[tokio::test]
-    async fn invalid_config_reload_keeps_worker_running_and_emits_rejection() {
+    #[test]
+    fn invalid_config_reload_keeps_worker_running_and_emits_rejection() {
         use std::collections::HashMap;
         use std::sync::atomic::{AtomicBool, Ordering};
 
         let _env_lock = crate::util::test_env::isolate_env();
         let home = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
+        // TraceCapture only writes inside a bead workspace (one with .beads/).
+        std::fs::create_dir_all(workspace.path().join(".beads")).unwrap();
         std::env::set_var("HOME", home.path());
 
         let config_path = home.path().join(".config/needle/config.yaml");
@@ -7249,7 +7250,7 @@ mod tests {
         });
         worker.dispatcher =
             Dispatcher::with_adapters(adapters, helper.telemetry().clone(), config.agent.timeout);
-        worker.boot().await.unwrap();
+        runtime.block_on(worker.boot()).unwrap();
 
         let running_max_workers = worker.config.worker.max_workers;
         let shutdown = worker.shutdown.clone();
@@ -7258,7 +7259,7 @@ mod tests {
 
         let result = runtime.block_on(async {
             let request_invalid_reload = async {
-                tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::time::timeout(Duration::from_secs(60), async {
                     while !dispatch_started.exists() {
                         tokio::time::sleep(Duration::from_millis(10)).await;
                     }
@@ -7283,7 +7284,7 @@ mod tests {
 
                 std::fs::write(&release_dispatch, b"").unwrap();
 
-                tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::time::timeout(Duration::from_secs(60), async {
                     while helper.events_by_type("config.reload.rejected").is_empty() {
                         tokio::time::sleep(Duration::from_millis(10)).await;
                     }
@@ -7545,6 +7546,12 @@ mod tests {
         // Build the worker around a home we control so a fresh supervisor
         // heartbeat can be planted where detect_supervisor_direct looks.
         let home = tempfile::tempdir().unwrap();
+        // HealthMonitor resolves its heartbeat dir against the live HOME
+        // (resolve_heartbeat_dir) at construction time, not against
+        // config.workspace.home — so HOME must point at this temp home before
+        // the worker is built, or the planted supervisor heartbeat is invisible.
+        // `_env_lock` holds the process-wide env lock and restores HOME.
+        std::env::set_var("HOME", home.path());
         let explore_root = tempfile::tempdir().unwrap();
         let mut config = valid_test_config();
         config.self_modification.hot_reload = false;
@@ -8259,7 +8266,11 @@ mod tests {
         let mut worker = make_worker(store.clone());
         worker.boot().await.unwrap();
 
+        // Selection and claiming are separate states: do_select picks a
+        // candidate through the strand waterfall, do_claim is what actually
+        // takes it in the store.
         worker.do_select().await.unwrap();
+        worker.do_claim().await.unwrap();
 
         let worker_id = worker.qualified_id();
         assert_eq!(
