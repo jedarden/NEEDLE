@@ -1890,11 +1890,8 @@ impl Dispatcher {
 
                     // Branch 3: idle deadline expired
                     () = async {
-                        if let Some(deadline) = next_idle {
-                            tokio::time::sleep_until(deadline).await;
-                        } else {
-                            std::future::pending().await
-                        }
+                        let deadline = idle_deadline.unwrap();
+                        tokio::time::sleep_until(deadline).await;
                     }, if has_idle_deadline => {
                         // Idle timeout: kill the process group.
                         if pid > 0 {
@@ -1922,11 +1919,8 @@ impl Dispatcher {
 
                     // Branch 4: hard deadline expired
                     () = async {
-                        if let Some(deadline) = next_hard {
-                            tokio::time::sleep_until(deadline).await;
-                        } else {
-                            std::future::pending().await
-                        }
+                        let deadline = hard_deadline.unwrap();
+                        tokio::time::sleep_until(deadline).await;
                     }, if has_hard_deadline => {
                         // Hard timeout: kill the process group.
                         if pid > 0 {
