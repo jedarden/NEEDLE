@@ -222,24 +222,36 @@ fn extract_git_archive(workspace: &Path, target_dir: &Path) -> Result<()> {
     }
 
     // Extract the tar archive to the target directory
+    // stdin MUST be piped: without it tar inherits this process's stdin,
+    // `tar_child.stdin` is None, the archive is silently never written, and
+    // tar fails on whatever it reads instead.
     let mut tar_child = Command::new("tar")
         .args(["-x", "-f", "-"])
         .current_dir(target_dir)
+        .stdin(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .context("failed to spawn tar extraction")?;
 
-    // Write the archive to tar's stdin
-    if let Some(mut stdin) = tar_child.stdin.take() {
+    // Write the archive to tar's stdin, then close it so tar sees EOF.
+    {
+        let mut stdin = tar_child
+            .stdin
+            .take()
+            .context("tar extraction stdin was not piped")?;
         std::io::copy(&mut archive_output.stdout.as_slice(), &mut stdin)
             .context("failed to write archive to tar")?;
     }
 
-    let status = tar_child
-        .wait()
+    let tar_output = tar_child
+        .wait_with_output()
         .context("failed to wait for tar extraction")?;
 
-    if !status.success() {
-        anyhow::bail!("tar extraction failed");
+    if !tar_output.status.success() {
+        anyhow::bail!(
+            "tar extraction failed: {}",
+            String::from_utf8_lossy(&tar_output.stderr).trim()
+        );
     }
 
     Ok(())
@@ -316,7 +328,11 @@ mod tests {
 
         // Verify directory name pattern
         let dir_name = dir.file_name().unwrap().to_string_lossy();
-        assert!(dir_name.starts_with("needle-test-worker_test-bead-"));
+        // create_extraction_directory joins every part with '-'.
+        assert!(
+            dir_name.starts_with("needle-test-worker-test-bead-"),
+            "unexpected extraction directory name: {dir_name}"
+        );
     }
 
     #[tokio::test]

@@ -131,6 +131,15 @@ use crate::tsnet::{inject_identity_env, IdentityRegistry, TsnetConfig};
 use crate::types::{BeadId, InputMethod, Outcome};
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Extraction module
+// ──────────────────────────────────────────────────────────────────────────────
+
+mod extraction;
+pub use extraction::{
+    cleanup_extraction, extract_clean_workspace, ExtractionConfig, ExtractionResult,
+};
+
+// ──────────────────────────────────────────────────────────────────────────────
 // ExecutionResult
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -2648,6 +2657,9 @@ fn extract_executables_from_template(template: &str) -> Vec<String> {
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>();
 
+    // Wrapper commands that should be transparent - we add them AND continue to the real command
+    const WRAPPERS: &[&str] = &["unbuffer", "timeout", "script", "env", "nice", "stdbuf"];
+
     for segment in segments {
         // Tokenize by whitespace (simple shell tokenization)
         let tokens = segment.split_whitespace().collect::<Vec<_>>();
@@ -2690,43 +2702,83 @@ fn extract_executables_from_template(template: &str) -> Vec<String> {
             token
         };
 
-        // Skip if empty or a shell builtin (but continue checking for commands after builtins like 'env')
+        // Skip if empty or a shell builtin
         if cmd_name.is_empty() || BUILTINS.contains(&cmd_name) {
-            // Special case: 'env' and 'export' are used to run commands with env vars
-            // Skip them and continue to find the actual command
-            if cmd_name == "env" || cmd_name == "export" {
-                // Continue searching in the same segment for the real command
-                for token in token_iter {
-                    let token = *token;
+            continue;
+        }
 
-                    // Skip variable assignments and placeholders
-                    if token.contains('=') || (token.starts_with('{') && token.ends_with('}')) {
-                        continue;
-                    }
+        // Skip if it's a flag (starts with -)
+        if cmd_name.starts_with('-') {
+            continue;
+        }
 
-                    // Skip redirections
-                    if matches!(token, ">" | ">>" | "<" | "2>" | "2>>" | "&>" | "&>>") {
-                        continue;
-                    }
+        // Add if not already present
+        if !executables.contains(&cmd_name.to_string()) {
+            executables.push(cmd_name.to_string());
+        }
 
-                    // Found the actual command
-                    let actual_cmd = if token.contains('/') {
-                        token.rsplit('/').next().unwrap_or(token)
-                    } else {
-                        token
-                    };
-
-                    if !actual_cmd.is_empty()
-                        && !BUILTINS.contains(&actual_cmd)
-                        && !actual_cmd.starts_with('-')
-                        && !executables.contains(&actual_cmd.to_string())
-                    {
-                        executables.push(actual_cmd.to_string());
-                    }
-                    break;
+        // If this is a wrapper command, continue searching for the real command
+        if WRAPPERS.contains(&cmd_name) {
+            // Skip wrapper-specific arguments to find the real command
+            let mut skip_next = false;
+            match cmd_name {
+                "timeout" => {
+                    // timeout takes a duration argument (numeric), skip it
+                    skip_next = true;
+                }
+                "script" => {
+                    // script takes a file argument, skip it
+                    skip_next = true;
+                }
+                "stdbuf" => {
+                    // stdbuf takes -i/-o/-e with size arguments, skip them
+                    skip_next = true;
+                }
+                _ => {
+                    // unbuffer, nice, env don't have positional arguments to skip
                 }
             }
-            continue;
+
+            // Continue searching in the same segment for the real command
+            for token in token_iter {
+                let token = *token;
+
+                // Skip the next token if we marked it (wrapper-specific argument)
+                if skip_next {
+                    skip_next = false;
+                    continue;
+                }
+
+                // Skip variable assignments and placeholders
+                if token.contains('=') || (token.starts_with('{') && token.ends_with('}')) {
+                    continue;
+                }
+
+                // Skip redirections
+                if matches!(token, ">" | ">>" | "<" | "2>" | "2>>" | "&>" | "&>>") {
+                    continue;
+                }
+
+                // Skip flags
+                if token.starts_with('-') {
+                    continue;
+                }
+
+                // Found the actual command
+                let actual_cmd = if token.contains('/') {
+                    token.rsplit('/').next().unwrap_or(token)
+                } else {
+                    token
+                };
+
+                if !actual_cmd.is_empty()
+                    && !BUILTINS.contains(&actual_cmd)
+                    && !executables.contains(&actual_cmd.to_string())
+                {
+                    executables.push(actual_cmd.to_string());
+                }
+                break;
+            }
         }
 
         // Skip if it's a flag (starts with -)
@@ -3909,13 +3961,14 @@ output_transform: "needle-transform-custom"
     fn all_builtin_adapters_load() {
         let adapters =
             load_adapters(Path::new("/nonexistent/adapters"), &builtin_adapters()).unwrap();
+        assert!(adapters.contains_key("claude"));
         assert!(adapters.contains_key("claude-sonnet"));
         assert!(adapters.contains_key("claude-opus"));
         assert!(adapters.contains_key("opencode"));
         assert!(adapters.contains_key("codex"));
         assert!(adapters.contains_key("aider"));
         assert!(adapters.contains_key("generic"));
-        assert_eq!(adapters.len(), 6);
+        assert_eq!(adapters.len(), 7);
     }
 
     // ── E2E: Agent adapter invocation (needle-4vq) ──
