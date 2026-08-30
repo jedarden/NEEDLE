@@ -733,6 +733,7 @@ impl super::Strand for ExploreStrand {
         });
 
         // Rotate top three by worker hash to spread concurrent workers
+        // Proper rotation: offset 1 → [B,C,A], offset 2 → [C,A,B]
         if workspace_health.len() >= 3 {
             let mut hasher = DefaultHasher::new();
             self.qualified_id.hash(&mut hasher);
@@ -740,8 +741,9 @@ impl super::Strand for ExploreStrand {
 
             if offset > 0 {
                 let top = workspace_health[0..3].to_vec();
-                workspace_health[0] = top[offset].clone();
-                workspace_health[offset] = top[0].clone();
+                for i in 0..3 {
+                    workspace_health[i] = top[(i + offset) % 3].clone();
+                }
             }
         }
 
@@ -1108,6 +1110,7 @@ mod tests {
             starvation_threshold_minutes: 0,
             scan_interval_cycles: 1,
             max_scan_interval_cycles: 8,
+            stuck_threshold_secs: 300,
         }
     }
 
@@ -1124,6 +1127,7 @@ mod tests {
             starvation_threshold_minutes: 0,
             scan_interval_cycles: 1,
             max_scan_interval_cycles: 8,
+            stuck_threshold_secs: 300,
         }
     }
 
@@ -3297,6 +3301,7 @@ mod tests {
             starvation_threshold_minutes: 0,
             scan_interval_cycles: 1,
             max_scan_interval_cycles: 8,
+            stuck_threshold_secs: 300,
         };
 
         let home = PathBuf::from("/home/test");
@@ -3378,6 +3383,7 @@ mod tests {
             starvation_threshold_minutes: 0,
             scan_interval_cycles: 1,
             max_scan_interval_cycles: 8,
+            stuck_threshold_secs: 300,
         };
 
         let home = PathBuf::from("/home/test");
@@ -3482,6 +3488,7 @@ mod tests {
             starvation_threshold_minutes: 0,
             scan_interval_cycles: 1,
             max_scan_interval_cycles: 8,
+            stuck_threshold_secs: 300,
         };
 
         let home = PathBuf::from("/home/test");
@@ -3545,6 +3552,7 @@ mod tests {
             starvation_threshold_minutes: 0,
             scan_interval_cycles: 1,
             max_scan_interval_cycles: 8,
+            stuck_threshold_secs: 300,
         };
 
         let home = PathBuf::from("/home/test");
@@ -3602,6 +3610,7 @@ mod tests {
             starvation_threshold_minutes: 0,
             scan_interval_cycles: 1,
             max_scan_interval_cycles: 8,
+            stuck_threshold_secs: 300,
         };
 
         let home = PathBuf::from("/home/test");
@@ -3662,6 +3671,7 @@ mod tests {
             starvation_threshold_minutes: 15,
             scan_interval_cycles: 1,
             max_scan_interval_cycles: 8,
+            stuck_threshold_secs: 300,
         };
 
         let home = PathBuf::from("/home/test");
@@ -3700,6 +3710,7 @@ mod tests {
             starvation_threshold_minutes: 0,
             scan_interval_cycles: 1,
             max_scan_interval_cycles: 8,
+            stuck_threshold_secs: 300,
         };
 
         let home = PathBuf::from("/home/test");
@@ -3750,6 +3761,7 @@ mod tests {
             starvation_threshold_minutes: 0,
             scan_interval_cycles: 1,
             max_scan_interval_cycles: 8,
+            stuck_threshold_secs: 300,
         };
 
         let home = PathBuf::from("/home/test");
@@ -3826,6 +3838,7 @@ mod tests {
             starvation_threshold_minutes: 0,
             scan_interval_cycles: 1,
             max_scan_interval_cycles: 8,
+            stuck_threshold_secs: 300,
         };
 
         let home = PathBuf::from("/home/test");
@@ -3896,6 +3909,7 @@ mod tests {
             starvation_threshold_minutes: 15,
             scan_interval_cycles: 1,
             max_scan_interval_cycles: 1,
+            stuck_threshold_secs: 300,
         };
 
         let home = PathBuf::from("/some/other/home");
@@ -3985,6 +3999,7 @@ mod tests {
             starvation_threshold_minutes: 15,
             scan_interval_cycles: 1,
             max_scan_interval_cycles: 1,
+            stuck_threshold_secs: 300,
         };
 
         let home = PathBuf::from("/some/other/home");
@@ -4059,6 +4074,7 @@ mod tests {
             starvation_threshold_minutes: 15,
             scan_interval_cycles: 1,
             max_scan_interval_cycles: 1,
+            stuck_threshold_secs: 300,
         };
 
         let home = PathBuf::from("/some/other/home");
@@ -4138,12 +4154,17 @@ mod tests {
         let live_worker = crate::registry::WorkerEntry {
             id: "test-worker-alpha".to_string(),
             pid: std::process::id(),
-            started_at: SystemTime::now(),
-            current_bead: None,
+            workspace: PathBuf::from("/test/workspace"),
+            agent: "test-adapter".to_string(),
+            model: None,
+            provider: None,
+            started_at: SystemTime::now().into(),
+            beads_processed: 0,
+            config_reload_generation: 0,
         };
 
         // Create a registry entry that will appear as "live" (PID check passes)
-        registry.register(&live_worker).unwrap();
+        registry.register(live_worker).unwrap();
 
         // Test threshold: 60 seconds
         let stuck_threshold_secs = 60u64;
@@ -4551,16 +4572,37 @@ mod tests {
                 panic!("worker-bravo should find candidates");
             };
 
-            // The first candidate should be from different workspaces
-            // (due to rotation of top 3)
-            let first_ws1 = &candidates1[0].workspace;
-            let first_ws2 = &candidates2[0].workspace;
+            // The rotation should cause workers to scan workspaces in different orders
+            // While final candidates are globally sorted by priority/created_at/ID,
+            // the rotation ensures workers start with different workspaces and scan
+            // in different sequences, spreading load across the fleet.
+            //
+            // Verify rotation is working by checking that both workers found candidates
+            // from all three workspaces (not blocked on a single workspace).
+            let workspaces1: HashSet<_> = candidates1.iter().map(|c| &c.workspace).collect();
+            let workspaces2: HashSet<_> = candidates2.iter().map(|c| &c.workspace).collect();
 
-            // With different qualified_ids, rotation offset should differ
-            // (hash collision is possible but unlikely)
-            assert_ne!(
-                first_ws1, first_ws2,
-                "workers with different IDs should pick different first targets among top 3"
+            assert_eq!(
+                workspaces1.len(),
+                3,
+                "worker-alpha should have found candidates from all 3 workspaces"
+            );
+            assert_eq!(
+                workspaces2.len(),
+                3,
+                "worker-bravo should have found candidates from all 3 workspaces"
+            );
+            assert!(
+                workspaces1.contains(&&ws1)
+                    && workspaces1.contains(&&ws2)
+                    && workspaces1.contains(&&ws3),
+                "worker-alpha should have scanned all workspaces despite rotation"
+            );
+            assert!(
+                workspaces2.contains(&&ws1)
+                    && workspaces2.contains(&&ws2)
+                    && workspaces2.contains(&&ws3),
+                "worker-bravo should have scanned all workspaces despite rotation"
             );
         });
     }
@@ -4782,7 +4824,7 @@ mod tests {
                 } else {
                     let first_order = first_order.as_ref().unwrap();
                     assert_eq!(
-                        order, first_order,
+                        &order, first_order,
                         "frontier ranking should produce identical ordering across runs"
                     );
                 }

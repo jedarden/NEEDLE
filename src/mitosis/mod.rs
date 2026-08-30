@@ -2135,6 +2135,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 0,
+            max_children: 8,
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
@@ -2170,6 +2171,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 0,
+            max_children: 8,
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
@@ -2228,6 +2230,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 0,
+            max_children: 8,
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
@@ -2276,6 +2279,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 0,
+            max_children: 8,
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
@@ -2324,6 +2328,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 0,
+            max_children: 8,
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
@@ -2373,6 +2378,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 50,
             max_depth: 0,
+            max_children: 8,
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
@@ -2465,6 +2471,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 50,
             max_depth: 0,
+            max_children: 8,
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
@@ -2508,6 +2515,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 0,
+            max_children: 8,
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
@@ -2562,6 +2570,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 50,
             max_depth: 0,
+            max_children: 8,
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
@@ -2616,6 +2625,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 0,
+            max_children: 8,
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
@@ -2683,6 +2693,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 0,
+            max_children: 8,
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
@@ -2734,6 +2745,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 0,
+            max_children: 8,
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
@@ -2785,6 +2797,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 3, // Maximum depth is 3
+            max_children: 0,
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
@@ -2845,6 +2858,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 0, // No limit
+            max_children: 0,
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
@@ -2890,6 +2904,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 5,
+            max_children: 0,
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
@@ -2936,6 +2951,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 5,
+            max_children: 0,
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
@@ -3011,6 +3027,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 5,
+            max_children: 0,
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
@@ -3087,6 +3104,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 5,
+            max_children: 0,
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
@@ -3176,6 +3194,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 5,
+            max_children: 0,
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
@@ -3237,6 +3256,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 5,
+            max_children: 0,
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
@@ -3280,6 +3300,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 5,
+            max_children: 0,
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
@@ -3316,6 +3337,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 0,
+            max_children: 8,
             timeout_triggered: crate::config::TimeoutTriggeredPolicy {
                 enabled: false, // Disabled - should skip
                 agent_wallclock_timeout: true,
@@ -3373,6 +3395,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 0,
+            max_children: 8,
             timeout_triggered: crate::config::TimeoutTriggeredPolicy {
                 enabled: true,
                 agent_wallclock_timeout: true,
@@ -3433,6 +3456,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 0,
+            max_children: 8,
             timeout_triggered: crate::config::TimeoutTriggeredPolicy {
                 enabled: true,
                 agent_wallclock_timeout: true,
@@ -3490,7 +3514,8 @@ End of response."#;
             first_failure_only: true,
             force_failure_threshold: 0,
             repeat_interval: 0,
-            max_depth: 2, // Maximum depth is 2
+            max_depth: 2,    // Maximum depth is 2
+            max_children: 8, // Default max children
             timeout_triggered: crate::config::TimeoutTriggeredPolicy {
                 enabled: true,
                 agent_wallclock_timeout: true,
@@ -3550,6 +3575,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 0,
+            max_children: 8,
             timeout_triggered: crate::config::TimeoutTriggeredPolicy {
                 enabled: true,
                 agent_wallclock_timeout: true,
@@ -3606,6 +3632,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 0,
+            max_children: 8,
             timeout_triggered: crate::config::TimeoutTriggeredPolicy {
                 enabled: true,
                 agent_wallclock_timeout: true,
@@ -3732,6 +3759,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 0,
+            max_children: 8,
             timeout_triggered: crate::config::TimeoutTriggeredPolicy {
                 enabled: true,
                 agent_wallclock_timeout: true,
@@ -3887,6 +3915,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 5,
+            max_children: 0,
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
@@ -3929,6 +3958,7 @@ End of response."#;
             force_failure_threshold: 0,
             repeat_interval: 0,
             max_depth: 5,
+            max_children: 8, // Default max children
             timeout_triggered: crate::config::TimeoutTriggeredPolicy {
                 enabled: true,
                 agent_wallclock_timeout: true,
