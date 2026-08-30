@@ -258,7 +258,7 @@ fn test_compute_stats_worker_filter() {
     let log_dir = temp_dir.path();
 
     // Create test log files
-    let events1 = vec![
+    let events1 = [
         create_mock_event("worker-alpha", "sess001", "worker.started", None),
         create_mock_event("worker-bravo", "sess002", "worker.started", None),
     ];
@@ -316,7 +316,7 @@ fn test_query_empty_directory() {
 
     // No log files created
     let filter = QueryFilter::default();
-    let result = query_logs(&log_dir, &filter).unwrap();
+    let result = query_logs(log_dir, &filter).unwrap();
 
     assert_eq!(result.events.len(), 0);
     assert_eq!(result.files_scanned, 0);
@@ -391,7 +391,7 @@ fn test_query_malformed_json_handling() {
     file.flush().unwrap();
 
     let filter = QueryFilter::default();
-    let result = query_logs(&log_dir, &filter).unwrap();
+    let result = query_logs(log_dir, &filter).unwrap();
 
     // Should only parse valid events
     assert_eq!(result.events.len(), 2);

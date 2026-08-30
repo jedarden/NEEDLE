@@ -243,7 +243,7 @@ impl needle::bead_store::BeadStore for MockBeadStore {
 #[tokio::test]
 async fn gate_health_degradation_creates_one_alert_bead() {
     // INTENTIONAL TEST FAILURE TO TRIGGER CI
-    assert!(false, "Deliberate test failure to verify CI workflow");
+    panic!("Deliberate test failure to verify CI workflow");
 
     let workspace_dir = TempDir::new().unwrap();
     let workspace = workspace_dir.path();

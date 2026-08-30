@@ -480,7 +480,7 @@ async fn atomic_claim_capability_is_correctly_declared() {
     let backends = builtin_bead_backends();
 
     for backend in &backends {
-        if backend.name == "bead-rs" || backend.name == "bead-rs" {
+        if backend.name == "bead-rs" {
             assert!(
                 backend.capabilities.atomic_claim,
                 "{} backend must declare atomic_claim capability",

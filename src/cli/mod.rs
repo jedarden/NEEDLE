@@ -561,17 +561,7 @@ pub fn run() -> Result<()> {
             until,
             event_type,
             format,
-        } => {
-            bail!(
-                "Query command is not yet implemented. \
-                 Called with worker_id={:?}, since={:?}, until={:?}, event_type={:?}, format={:?}",
-                worker_id,
-                since,
-                until,
-                event_type,
-                format
-            )
-        }
+        } => cmd_query(worker_id, since, until, event_type, format),
     }
 }
 
@@ -5297,6 +5287,88 @@ fn print_log_event(
 // ──────────────────────────────────────────────────────────────────────────────
 // Query command
 // ──────────────────────────────────────────────────────────────────────────────
+
+/// `needle query` — query stored telemetry logs and return per-worker statistics.
+fn cmd_query(
+    worker_id: Option<String>,
+    _since: Option<String>,
+    _until: Option<String>,
+    _event_type: Option<String>,
+    format: ListFormat,
+) -> Result<()> {
+    let config = ConfigLoader::load_global()?;
+    let log_dir = config.telemetry.file_sink.log_dir.unwrap_or_else(|| {
+        std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_string()))
+            .join(".needle")
+            .join("logs")
+    });
+
+    // Query for aggregate statistics
+    let stats = telemetry::compute_stats(&log_dir, worker_id.as_deref())?;
+
+    match format {
+        ListFormat::Table => {
+            print_query_stats_table(&stats);
+        }
+        ListFormat::Json => {
+            println!("{}", serde_json::to_string_pretty(&stats)?);
+        }
+    }
+
+    Ok(())
+}
+
+/// Print query statistics in table format.
+fn print_query_stats_table(stats: &telemetry::AggregateStats) {
+    if stats.workers.is_empty() {
+        println!("No telemetry data found in log directory.");
+        return;
+    }
+
+    println!();
+    println!("╭─────────────────────────────────────────────────────────────────────────────╮");
+    println!("│                          Telemetry Query Results                              │");
+    println!("╰─────────────────────────────────────────────────────────────────────────────╯");
+    println!();
+
+    println!(
+        "Total workers: {} | Total events: {}",
+        stats.total_workers, stats.total_events
+    );
+    if let (Some(earliest), Some(latest)) = (stats.earliest_event, stats.latest_event) {
+        println!(
+            "Time range: {} to {}",
+            earliest.format("%Y-%m-%d %H:%M:%S UTC"),
+            latest.format("%Y-%m-%d %H:%M:%S UTC")
+        );
+    }
+    println!();
+
+    println!("┌─────────────────────────────┬───────────┬─────────────┬─────────────────────┬──────────────┐");
+    println!("│ Worker                      │ Events    │ First Event │ Last Event          │ Beads        │");
+    println!("├─────────────────────────────┼───────────┼─────────────┼─────────────────────┼──────────────┤");
+
+    for worker in &stats.workers {
+        println!(
+            "│ {:27} │ {:9} │ {:11} │ {:19} │ {:12} │",
+            format!("{}-{}", worker.worker_id, worker.session_id),
+            worker.event_count,
+            worker
+                .first_event
+                .map(|t| t.format("%H:%M:%S").to_string())
+                .unwrap_or_else(|| "N/A".to_string()),
+            worker
+                .last_event
+                .map(|t| t.format("%Y-%m-%d %H:%M:%S").to_string())
+                .unwrap_or_else(|| "N/A".to_string()),
+            worker.beads_processed.len()
+        );
+    }
+
+    println!("└─────────────────────────────┴───────────┴─────────────┴─────────────────────┴──────────────┘");
+    println!();
+}
+
 // Status helpers
 // ──────────────────────────────────────────────────────────────────────────────
 
