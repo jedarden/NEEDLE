@@ -254,6 +254,10 @@ pub enum CliCommand {
         /// Workspace to check (defaults to config workspace).
         #[arg(short = 'w', long)]
         workspace: Option<PathBuf>,
+
+        /// Output machine-readable JSON instead of human-readable table.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Initialize v2 config with optional v1 migration.
@@ -519,7 +523,11 @@ pub fn run() -> Result<()> {
             show_source,
             live,
         } => cmd_config(get, set, dump, show_source, live),
-        CliCommand::Doctor { repair, workspace } => cmd_doctor(repair, workspace),
+        CliCommand::Doctor {
+            repair,
+            workspace,
+            json,
+        } => cmd_doctor(repair, workspace, json),
         CliCommand::Init {
             backend,
             no_agents_md,
@@ -3932,7 +3940,8 @@ fn config_dump(config: &Config) -> Vec<String> {
 // Doctor: structured check result types
 // ──────────────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 #[allow(dead_code)]
 enum CheckStatus {
     Pass,
@@ -3941,12 +3950,15 @@ enum CheckStatus {
     Skip,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
 struct CheckResult {
     name: String,
     status: CheckStatus,
     message: String,
     /// Extra lines printed indented below the main line.
     detail: Vec<String>,
+    /// Fix command for failures (null if no fix available).
+    fix: Option<String>,
 }
 
 impl CheckResult {
@@ -3956,6 +3968,7 @@ impl CheckResult {
             status: CheckStatus::Pass,
             message: msg.into(),
             detail: vec![],
+            fix: None,
         }
     }
     fn warn(name: impl Into<String>, msg: impl Into<String>) -> Self {
@@ -3964,6 +3977,7 @@ impl CheckResult {
             status: CheckStatus::Warn,
             message: msg.into(),
             detail: vec![],
+            fix: None,
         }
     }
     fn fail(name: impl Into<String>, msg: impl Into<String>) -> Self {
@@ -3972,6 +3986,7 @@ impl CheckResult {
             status: CheckStatus::Fail,
             message: msg.into(),
             detail: vec![],
+            fix: None,
         }
     }
     #[allow(dead_code)]
@@ -3981,10 +3996,16 @@ impl CheckResult {
             status: CheckStatus::Skip,
             message: msg.into(),
             detail: vec![],
+            fix: None,
         }
     }
     fn with_detail(mut self, lines: Vec<String>) -> Self {
         self.detail = lines;
+        self
+    }
+    #[allow(dead_code)]
+    fn with_fix(mut self, fix: impl Into<String>) -> Self {
+        self.fix = Some(fix.into());
         self
     }
     fn display(&self) -> String {
@@ -4014,7 +4035,8 @@ fn doctor_check_workspace(workspace: &Path) -> CheckResult {
         return CheckResult::fail(
             "Workspace",
             format!("directory not found: {}", workspace.display()),
-        );
+        )
+        .with_fix(format!("mkdir -p {}", workspace.display()));
     }
     if !workspace.is_dir() {
         return CheckResult::fail(
@@ -4030,7 +4052,8 @@ fn doctor_check_workspace(workspace: &Path) -> CheckResult {
         return CheckResult::fail(
             "Workspace",
             format!(".beads/ missing in {}", workspace.display()),
-        );
+        )
+        .with_fix(format!("mkdir -p {}", beads_dir.display()));
     }
     // Probe write access.
     let probe = workspace.join(".needle_doctor_probe");
@@ -4081,6 +4104,57 @@ fn doctor_check_checkpoint(
         let pointer = beads_dir.join("checkpoint/current.json");
         if !pointer.exists() {
             return CheckResult::fail("Checkpoint", "checkpoint/current.json not found");
+        }
+        return match std::fs::read_to_string(&pointer) {
+            Ok(content) if serde_json::from_str::<serde_json::Value>(&content).is_ok() => {
+                CheckResult::pass("Checkpoint", "native pointer is valid JSON")
+            }
+            Ok(_) => CheckResult::fail("Checkpoint", "current.json is invalid JSON"),
+            Err(error) => CheckResult::fail("Checkpoint", format!("unreadable: {error}")),
+        };
+    }
+    doctor_check_jsonl(beads_dir)
+}
+
+/// Check the checkpoint with full store context.
+/// This handles the "empty store + no checkpoint" WARN case that only occurs
+/// immediately after `bead init` before any beads are created.
+fn doctor_check_store_checkpoint(
+    store: &std::sync::Arc<dyn BeadStore>,
+    beads_dir: &Path,
+    bead_cli: &crate::config::BeadCliConfig,
+) -> CheckResult {
+    if matches!(
+        bead_cli.backend,
+        crate::config::BeadBackend::Bead | crate::config::BeadBackend::Br
+    ) {
+        let pointer = beads_dir.join("checkpoint/current.json");
+        if !pointer.exists() {
+            // Check if the store is empty (zero beads)
+            let rt = tokio::runtime::Runtime::new()
+                .context("failed to create tokio runtime for store checkpoint check")
+                .unwrap();
+            let all_beads = rt.block_on(store.list_all());
+
+            match all_beads {
+                Ok(beads) if beads.is_empty() => {
+                    return CheckResult::warn(
+                        "Checkpoint",
+                        "empty store — the checkpoint appears after the first bead (or run: bead sync flush-only)",
+                    );
+                }
+                Ok(_) => {
+                    // Store has beads but no checkpoint - this is a FAIL
+                    return CheckResult::fail("Checkpoint", "checkpoint/current.json not found");
+                }
+                Err(e) => {
+                    // Can't determine store state - fail the check
+                    return CheckResult::fail(
+                        "Checkpoint",
+                        format!("unable to verify store state: {e}"),
+                    );
+                }
+            }
         }
         return match std::fs::read_to_string(&pointer) {
             Ok(content) if serde_json::from_str::<serde_json::Value>(&content).is_ok() => {
@@ -4203,9 +4277,12 @@ fn doctor_check_bead_store(
     workspace: &Path,
     beads_dir: &Path,
     repair: bool,
-) -> Result<CheckResult> {
+) -> Result<(CheckResult, Option<std::sync::Arc<dyn BeadStore>>)> {
     if !beads_dir.is_dir() {
-        return Ok(CheckResult::pass("Bead store", "skipped (no .beads/)"));
+        return Ok((
+            CheckResult::pass("Bead store", "skipped (no .beads/)"),
+            None,
+        ));
     }
     let store = match crate::bead_store::discover_default(
         workspace.to_path_buf(),
@@ -4215,13 +4292,17 @@ fn doctor_check_bead_store(
     ) {
         Ok(store) => store,
         Err(error) => {
-            return Ok(CheckResult::fail(
-                "Bead store",
-                format!("configured backend unavailable: {error:#}"),
+            return Ok((
+                CheckResult::fail(
+                    "Bead store",
+                    format!("configured backend unavailable: {error:#}"),
+                ),
+                None,
             ))
         }
     };
-    doctor_run_bead_store_checks(store, repair)
+    let result = doctor_run_bead_store_checks(store.clone(), repair)?;
+    Ok((result, Some(store)))
 }
 
 fn doctor_check_bead_backend(config: &Config) -> CheckResult {
@@ -4234,7 +4315,13 @@ fn doctor_check_bead_backend(config: &Config) -> CheckResult {
             } else {
                 format!("no bead store CLI found on PATH (checked {checked}): {error:#}")
             };
-            return CheckResult::fail("Bead backend", message);
+            // Add fix command for missing bead CLI
+            let fix = if config.bead_cli.path.is_none() {
+                "cargo install --git https://github.com/jedarden/bead-rs --bin bead".to_string()
+            } else {
+                "cargo install --git https://github.com/jedarden/bead-rs --bin bead # then update bead_cli.path in config".to_string()
+            };
+            return CheckResult::fail("Bead backend", message).with_fix(fix);
         }
     };
     let name = match backend {
@@ -4244,7 +4331,8 @@ fn doctor_check_bead_backend(config: &Config) -> CheckResult {
         .into_iter()
         .find(|descriptor| descriptor.name == name)
     else {
-        return CheckResult::fail("Bead backend", format!("descriptor {name} is missing"));
+        return CheckResult::fail("Bead backend", format!("descriptor {name} is missing"))
+            .with_fix("cargo install --git https://github.com/jedarden/bead-rs --bin bead");
     };
     let mut detail = vec![
         format!("CLI path: {}", path.display()),
@@ -4668,7 +4756,7 @@ fn doctor_check_telemetry_logs(config: &Config, needle_home: &Path, repair: bool
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// `needle doctor` — check system health and optionally repair.
-fn cmd_doctor(repair: bool, workspace: Option<PathBuf>) -> Result<()> {
+fn cmd_doctor(repair: bool, workspace: Option<PathBuf>, json: bool) -> Result<()> {
     let global = ConfigLoader::load_global()?;
     let workspace_root = workspace.unwrap_or_else(|| global.workspace.default.clone());
     let (config, _) = ConfigLoader::load_resolved(
@@ -4694,8 +4782,10 @@ fn cmd_doctor(repair: bool, workspace: Option<PathBuf>) -> Result<()> {
     // Workspace accessibility + .beads/ presence
     results.push(doctor_check_workspace(&workspace_root));
 
-    // JSONL consistency
-    if beads_dir.is_dir() {
+    // JSONL consistency (basic file check only for non-bead-rs backends)
+    // For bead-rs backends, we defer checkpoint checks until after the store is opened
+    // so we can distinguish "empty store + no checkpoint" (WARN) from other missing checkpoint cases (FAIL)
+    if beads_dir.is_dir() && !matches!(config.bead_cli.backend, crate::config::BeadBackend::Bead) {
         results.push(doctor_check_checkpoint(&beads_dir, &config.bead_cli));
     }
 
@@ -4717,11 +4807,17 @@ fn cmd_doctor(repair: bool, workspace: Option<PathBuf>) -> Result<()> {
     results.push(doctor_check_bead_backend(&config));
 
     // Bead store connectivity.
-    results.push(doctor_check_bead_store(
-        &workspace_root,
-        &beads_dir,
-        repair,
-    )?);
+    let (store_result, store) = doctor_check_bead_store(&workspace_root, &beads_dir, repair)?;
+    results.push(store_result);
+
+    // Store checkpoint check (with full store context for "empty store + no checkpoint" WARN case)
+    if let Some(store) = store {
+        results.push(doctor_check_store_checkpoint(
+            &store,
+            &beads_dir,
+            &config.bead_cli,
+        ));
+    }
 
     // Worker registry
     results.push(doctor_check_registry(&needle_home, repair));
@@ -4757,15 +4853,7 @@ fn cmd_doctor(repair: bool, workspace: Option<PathBuf>) -> Result<()> {
     // Telemetry logs
     results.push(doctor_check_telemetry_logs(&config, &needle_home, repair));
 
-    // Print results.
-    for r in &results {
-        println!("{}", r.display());
-        for line in &r.detail {
-            println!("         └─ {line}");
-        }
-    }
-
-    // Summary.
+    // Calculate summary.
     let fails = results
         .iter()
         .filter(|r| r.status == CheckStatus::Fail)
@@ -4779,16 +4867,42 @@ fn cmd_doctor(repair: bool, workspace: Option<PathBuf>) -> Result<()> {
         .filter(|r| r.status == CheckStatus::Pass)
         .count();
 
-    println!("{}", "─".repeat(width));
-    if fails == 0 && warns == 0 {
-        println!("{passed} check(s) passed.");
+    // Output results.
+    if json {
+        let json_output = serde_json::json!({
+            "rows": results,
+            "summary": {
+                "pass": passed,
+                "warn": warns,
+                "fail": fails,
+            },
+            "exit_code": if fails > 0 { 1 } else { 0 }
+        });
+        println!("{}", json_output);
     } else {
-        println!("{passed} passed, {warns} warning(s), {fails} failure(s).");
-        if fails > 0 {
-            println!("Exit code 1: {fails} failure(s).");
+        // Print human-readable results.
+        let width = 60;
+        println!("NEEDLE Doctor");
+        println!("{}", "─".repeat(width));
+
+        for r in &results {
+            println!("{}", r.display());
+            for line in &r.detail {
+                println!("         └─ {line}");
+            }
         }
-        if !repair && (fails > 0 || warns > 0) {
-            println!("Run `needle doctor --repair` to attempt automatic fixes.");
+
+        println!("{}", "─".repeat(width));
+        if fails == 0 && warns == 0 {
+            println!("{passed} check(s) passed.");
+        } else {
+            println!("{passed} passed, {warns} warning(s), {fails} failure(s).");
+            if fails > 0 {
+                println!("Exit code 1: {fails} failure(s).");
+            }
+            if !repair && (fails > 0 || warns > 0) {
+                println!("Run `needle doctor --repair` to attempt automatic fixes.");
+            }
         }
     }
 

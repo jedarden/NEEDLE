@@ -1475,19 +1475,24 @@ mod tests {
 
     /// Tests nonexistent workspace path handling.
     ///
-    /// NOTE: This test is quarantined due to spawn_blocking deadlock in test environments.
-    /// See deadlock_scenario_assigned_beads_allow_advancement for details.
-    #[tokio::test]
-    #[ignore]
-    async fn nonexistent_workspace_path_returns_no_work() {
-        let strand = make_test_explore_strand(
-            true,
-            vec![PathBuf::from("/nonexistent/path/that/does/not/exist")],
-            PathBuf::from("/home/test"),
-        );
-        let store = DummyStore;
-        let result = strand.evaluate(&store, &HashSet::new()).await;
-        assert!(matches!(result, StrandResult::NoWork));
+    /// This test was previously quarantined due to spawn_blocking deadlock when using
+    /// #[tokio::test] with the default current-thread runtime. The test creates a real
+    /// Registry instance that performs blocking file I/O via spawn_blocking, which can
+    /// exhaust the limited blocking thread pool. This test now uses an explicit multi-threaded
+    /// runtime with 512 blocking threads to prevent deadlock.
+    #[test]
+    fn nonexistent_workspace_path_returns_no_work() {
+        let runtime = create_test_runtime();
+        runtime.block_on(async {
+            let strand = make_test_explore_strand(
+                true,
+                vec![PathBuf::from("/nonexistent/path/that/does/not/exist")],
+                PathBuf::from("/home/test"),
+            );
+            let store = DummyStore;
+            let result = strand.evaluate(&store, &HashSet::new()).await;
+            assert!(matches!(result, StrandResult::NoWork));
+        });
     }
 
     #[test]
@@ -2071,91 +2076,91 @@ mod tests {
     /// that the strand advances past workspace 1 after filtering out unclaimable
     /// candidates.
     ///
-    /// NOTE: This test is quarantined due to spawn_blocking deadlock in test environments.
-    /// The test uses real Registry instances that do blocking file I/O and PID checks
-    /// via spawn_blocking, which can deadlock when the blocking thread pool is exhausted.
-    /// Re-enabling this test requires either:
-    /// - Making Registry operations async instead of blocking
-    /// - Providing a mock Registry that doesn't do file I/O
-    /// - Running tests with a runtime that has sufficient blocking threads
-    #[tokio::test]
-    #[ignore]
-    async fn deadlock_scenario_assigned_beads_allow_advancement() {
-        let temp_root = tempfile::tempdir().unwrap();
-        let workspace1 = temp_root.path().join("workspace1");
-        let workspace2 = temp_root.path().join("workspace2");
-        let home = PathBuf::from("/home/test");
+    /// This test was previously quarantined due to spawn_blocking deadlock when using
+    /// #[tokio::test] with the default current-thread runtime. The test creates a real
+    /// Registry instance that performs blocking file I/O via spawn_blocking, which can
+    /// exhaust the limited blocking thread pool. This test now uses an explicit multi-threaded
+    /// runtime with 512 blocking threads to prevent deadlock.
+    #[test]
+    fn deadlock_scenario_assigned_beads_allow_advancement() {
+        let runtime = create_test_runtime();
+        runtime.block_on(async {
+            let temp_root = tempfile::tempdir().unwrap();
+            let workspace1 = temp_root.path().join("workspace1");
+            let workspace2 = temp_root.path().join("workspace2");
+            let home = PathBuf::from("/home/test");
 
-        // Create .beads/ directories so has_beads_dir() returns true
-        fs::create_dir_all(&workspace1).unwrap();
-        fs::create_dir_all(&workspace2).unwrap();
-        fs::create_dir(workspace1.join(".beads")).unwrap();
-        fs::create_dir(workspace2.join(".beads")).unwrap();
+            // Create .beads/ directories so has_beads_dir() returns true
+            fs::create_dir_all(&workspace1).unwrap();
+            fs::create_dir_all(&workspace2).unwrap();
+            fs::create_dir(workspace1.join(".beads")).unwrap();
+            fs::create_dir(workspace2.join(".beads")).unwrap();
 
-        // Create a mock store factory
-        let mock_factory = Arc::new(DeadlockMockStoreFactory::new(
-            workspace1.clone(),
-            workspace2.clone(),
-        ));
+            // Create a mock store factory
+            let mock_factory = Arc::new(DeadlockMockStoreFactory::new(
+                workspace1.clone(),
+                workspace2.clone(),
+            ));
 
-        let temp_dir = tempfile::tempdir().unwrap();
-        let registry = crate::registry::Registry::new(temp_dir.path());
-        let telemetry = Telemetry::new("test-worker".to_string());
+            let temp_dir = tempfile::tempdir().unwrap();
+            let registry = crate::registry::Registry::new(temp_dir.path());
+            let telemetry = Telemetry::new("test-worker".to_string());
 
-        let strand = ExploreStrand::new_with_store_factory(
-            vec![workspace1.clone(), workspace2.clone()],
-            home,
-            registry,
-            telemetry,
-            "test-worker".to_string(),
-            mock_factory.clone(),
-        );
+            let strand = ExploreStrand::new_with_store_factory(
+                vec![workspace1.clone(), workspace2.clone()],
+                home,
+                registry,
+                telemetry,
+                "test-worker".to_string(),
+                mock_factory.clone(),
+            );
 
-        let store = DummyStore;
-        let result = strand.evaluate(&store, &HashSet::new()).await;
+            let store = DummyStore;
+            let result = strand.evaluate(&store, &HashSet::new()).await;
 
-        // Verify that both workspaces were queried
-        let call_count = mock_factory.call_count();
-        assert!(
-            call_count >= 2,
-            "both workspaces should be queried (at minimum), got: {}",
-            call_count
-        );
+            // Verify that both workspaces were queried
+            let call_count = mock_factory.call_count();
+            assert!(
+                call_count >= 2,
+                "both workspaces should be queried (at minimum), got: {}",
+                call_count
+            );
 
-        // Verify that workspace 2's candidate was returned
-        match result {
-            StrandResult::BeadFound(candidates) => {
-                assert_eq!(
-                    candidates.len(),
-                    1,
-                    "should find 1 candidate from workspace 2"
-                );
-                assert_eq!(candidates[0].id, BeadId::from("ws2-valid-bead".to_string()));
-                assert_eq!(candidates[0].workspace, workspace2);
-                assert!(
-                    candidates[0].assignee.is_none(),
-                    "candidate should be unassigned"
-                );
+            // Verify that workspace 2's candidate was returned
+            match result {
+                StrandResult::BeadFound(candidates) => {
+                    assert_eq!(
+                        candidates.len(),
+                        1,
+                        "should find 1 candidate from workspace 2"
+                    );
+                    assert_eq!(candidates[0].id, BeadId::from("ws2-valid-bead".to_string()));
+                    assert_eq!(candidates[0].workspace, workspace2);
+                    assert!(
+                        candidates[0].assignee.is_none(),
+                        "candidate should be unassigned"
+                    );
+                }
+                StrandResult::NoWork => {
+                    panic!("deadlock bug reproduced: strand returned NoWork instead of finding workspace 2's candidate");
+                }
+                StrandResult::WorkCreated => {
+                    panic!("unexpected WorkCreated result");
+                }
+                StrandResult::Error(e) => {
+                    panic!("unexpected Error result: {:?}", e);
+                }
+                StrandResult::Split(_, _) => {
+                    panic!("unexpected Split result");
+                }
+                StrandResult::Skipped { .. } => {
+                    panic!("unexpected Skipped result");
+                }
+                StrandResult::FoundButExcluded => {
+                    panic!("unexpected FoundButExcluded result");
+                }
             }
-            StrandResult::NoWork => {
-                panic!("deadlock bug reproduced: strand returned NoWork instead of finding workspace 2's candidate");
-            }
-            StrandResult::WorkCreated => {
-                panic!("unexpected WorkCreated result");
-            }
-            StrandResult::Error(e) => {
-                panic!("unexpected Error result: {:?}", e);
-            }
-            StrandResult::Split(_, _) => {
-                panic!("unexpected Split result");
-            }
-            StrandResult::Skipped { .. } => {
-                panic!("unexpected Skipped result");
-            }
-            StrandResult::FoundButExcluded => {
-                panic!("unexpected FoundButExcluded result");
-            }
-        }
+        });
     }
 
     /// Unit test for when workspace 1 has only excluded beads (blocked label).
@@ -2163,74 +2168,79 @@ mod tests {
     /// This proves that the strand advances when candidates are excluded by
     /// the Filters (deferred/human/blocked labels), not just when assigned.
     ///
-    /// NOTE: This test is quarantined due to spawn_blocking deadlock in test environments.
-    /// See deadlock_scenario_assigned_beads_allow_advancement for details.
-    #[tokio::test]
-    #[ignore]
-    async fn deadlock_scenario_excluded_beads_allow_advancement() {
-        let temp_root = tempfile::tempdir().unwrap();
-        let workspace1 = temp_root.path().join("workspace1");
-        let workspace2 = temp_root.path().join("workspace2");
-        let home = PathBuf::from("/home/test");
+    /// This test was previously quarantined due to spawn_blocking deadlock when using
+    /// #[tokio::test] with the default current-thread runtime. The test creates a real
+    /// Registry instance that performs blocking file I/O via spawn_blocking, which can
+    /// exhaust the limited blocking thread pool. This test now uses an explicit multi-threaded
+    /// runtime with 512 blocking threads to prevent deadlock.
+    #[test]
+    fn deadlock_scenario_excluded_beads_allow_advancement() {
+        let runtime = create_test_runtime();
+        runtime.block_on(async {
+            let temp_root = tempfile::tempdir().unwrap();
+            let workspace1 = temp_root.path().join("workspace1");
+            let workspace2 = temp_root.path().join("workspace2");
+            let home = PathBuf::from("/home/test");
 
-        // Create .beads/ directories so has_beads_dir() returns true
-        fs::create_dir_all(&workspace1).unwrap();
-        fs::create_dir_all(&workspace2).unwrap();
-        fs::create_dir(workspace1.join(".beads")).unwrap();
-        fs::create_dir(workspace2.join(".beads")).unwrap();
+            // Create .beads/ directories so has_beads_dir() returns true
+            fs::create_dir_all(&workspace1).unwrap();
+            fs::create_dir_all(&workspace2).unwrap();
+            fs::create_dir(workspace1.join(".beads")).unwrap();
+            fs::create_dir(workspace2.join(".beads")).unwrap();
 
-        // Create a mock store factory for excluded beads scenario
-        let mock_factory = Arc::new(ExcludedBeadsMockFactory::new(
-            workspace1.clone(),
-            workspace2.clone(),
-        ));
+            // Create a mock store factory for excluded beads scenario
+            let mock_factory = Arc::new(ExcludedBeadsMockFactory::new(
+                workspace1.clone(),
+                workspace2.clone(),
+            ));
 
-        let temp_dir = tempfile::tempdir().unwrap();
-        let registry = crate::registry::Registry::new(temp_dir.path());
-        let telemetry = Telemetry::new("test-worker".to_string());
+            let temp_dir = tempfile::tempdir().unwrap();
+            let registry = crate::registry::Registry::new(temp_dir.path());
+            let telemetry = Telemetry::new("test-worker".to_string());
 
-        let strand = ExploreStrand::new_with_store_factory(
-            vec![workspace1.clone(), workspace2.clone()],
-            home,
-            registry,
-            telemetry,
-            "test-worker".to_string(),
-            mock_factory.clone(),
-        );
+            let strand = ExploreStrand::new_with_store_factory(
+                vec![workspace1.clone(), workspace2.clone()],
+                home,
+                registry,
+                telemetry,
+                "test-worker".to_string(),
+                mock_factory.clone(),
+            );
 
-        let store = DummyStore;
-        let result = strand.evaluate(&store, &HashSet::new()).await;
+            let store = DummyStore;
+            let result = strand.evaluate(&store, &HashSet::new()).await;
 
-        // Verify that workspace 2's candidate was returned
-        match result {
-            StrandResult::BeadFound(candidates) => {
-                assert_eq!(
-                    candidates.len(),
-                    1,
-                    "should find 1 candidate from workspace 2"
-                );
-                assert_eq!(candidates[0].id, BeadId::from("ws2-valid-bead".to_string()));
-                assert_eq!(candidates[0].workspace, workspace2);
+            // Verify that workspace 2's candidate was returned
+            match result {
+                StrandResult::BeadFound(candidates) => {
+                    assert_eq!(
+                        candidates.len(),
+                        1,
+                        "should find 1 candidate from workspace 2"
+                    );
+                    assert_eq!(candidates[0].id, BeadId::from("ws2-valid-bead".to_string()));
+                    assert_eq!(candidates[0].workspace, workspace2);
+                }
+                StrandResult::NoWork => {
+                    panic!("deadlock bug reproduced: strand returned NoWork even though workspace 2 has valid candidates");
+                }
+                StrandResult::WorkCreated => {
+                    panic!("unexpected WorkCreated result");
+                }
+                StrandResult::Error(e) => {
+                    panic!("unexpected Error result: {:?}", e);
+                }
+                StrandResult::Split(_, _) => {
+                    panic!("unexpected Split result");
+                }
+                StrandResult::Skipped { .. } => {
+                    panic!("unexpected Skipped result");
+                }
+                StrandResult::FoundButExcluded => {
+                    panic!("unexpected FoundButExcluded result");
+                }
             }
-            StrandResult::NoWork => {
-                panic!("deadlock bug reproduced: strand returned NoWork even though workspace 2 has valid candidates");
-            }
-            StrandResult::WorkCreated => {
-                panic!("unexpected WorkCreated result");
-            }
-            StrandResult::Error(e) => {
-                panic!("unexpected Error result: {:?}", e);
-            }
-            StrandResult::Split(_, _) => {
-                panic!("unexpected Split result");
-            }
-            StrandResult::Skipped { .. } => {
-                panic!("unexpected Skipped result");
-            }
-            StrandResult::FoundButExcluded => {
-                panic!("unexpected FoundButExcluded result");
-            }
-        }
+        });
     }
 
     /// Unit test for the excluded AND assigned edge case.
@@ -2250,96 +2260,101 @@ mod tests {
     /// - A bead that fails EITHER condition should be filtered out
     /// - A bead that fails BOTH conditions should DEFINITELY be filtered out
     ///
-    /// NOTE: This test is quarantined due to spawn_blocking deadlock in test environments.
-    /// See deadlock_scenario_assigned_beads_allow_advancement for details.
-    #[tokio::test]
-    #[ignore]
-    async fn deadlock_scenario_excluded_and_assigned_beads_allow_advancement() {
-        let temp_root = tempfile::tempdir().unwrap();
-        let workspace1 = temp_root.path().join("workspace1");
-        let workspace2 = temp_root.path().join("workspace2");
-        let home = PathBuf::from("/home/test");
+    /// This test was previously quarantined due to spawn_blocking deadlock when using
+    /// #[tokio::test] with the default current-thread runtime. The test creates a real
+    /// Registry instance that performs blocking file I/O via spawn_blocking, which can
+    /// exhaust the limited blocking thread pool. This test now uses an explicit multi-threaded
+    /// runtime with 512 blocking threads to prevent deadlock.
+    #[test]
+    fn deadlock_scenario_excluded_and_assigned_beads_allow_advancement() {
+        let runtime = create_test_runtime();
+        runtime.block_on(async {
+            let temp_root = tempfile::tempdir().unwrap();
+            let workspace1 = temp_root.path().join("workspace1");
+            let workspace2 = temp_root.path().join("workspace2");
+            let home = PathBuf::from("/home/test");
 
-        // Create .beads/ directories so has_beads_dir() returns true
-        fs::create_dir_all(&workspace1).unwrap();
-        fs::create_dir_all(&workspace2).unwrap();
-        fs::create_dir(workspace1.join(".beads")).unwrap();
-        fs::create_dir(workspace2.join(".beads")).unwrap();
+            // Create .beads/ directories so has_beads_dir() returns true
+            fs::create_dir_all(&workspace1).unwrap();
+            fs::create_dir_all(&workspace2).unwrap();
+            fs::create_dir(workspace1.join(".beads")).unwrap();
+            fs::create_dir(workspace2.join(".beads")).unwrap();
 
-        // Create a mock store factory for excluded AND assigned beads scenario
-        let mock_factory = Arc::new(ExcludedAndAssignedMockFactory::new(
-            workspace1.clone(),
-            workspace2.clone(),
-        ));
+            // Create a mock store factory for excluded AND assigned beads scenario
+            let mock_factory = Arc::new(ExcludedAndAssignedMockFactory::new(
+                workspace1.clone(),
+                workspace2.clone(),
+            ));
 
-        let temp_dir = tempfile::tempdir().unwrap();
-        let registry = crate::registry::Registry::new(temp_dir.path());
-        let telemetry = Telemetry::new("test-worker".to_string());
+            let temp_dir = tempfile::tempdir().unwrap();
+            let registry = crate::registry::Registry::new(temp_dir.path());
+            let telemetry = Telemetry::new("test-worker".to_string());
 
-        let strand = ExploreStrand::new_with_store_factory(
-            vec![workspace1.clone(), workspace2.clone()],
-            home,
-            registry,
-            telemetry,
-            "test-worker".to_string(),
-            mock_factory.clone(),
-        );
+            let strand = ExploreStrand::new_with_store_factory(
+                vec![workspace1.clone(), workspace2.clone()],
+                home,
+                registry,
+                telemetry,
+                "test-worker".to_string(),
+                mock_factory.clone(),
+            );
 
-        let store = DummyStore;
-        let result = strand.evaluate(&store, &HashSet::new()).await;
+            let store = DummyStore;
+            let result = strand.evaluate(&store, &HashSet::new()).await;
 
-        // Verify that both workspaces were queried
-        let call_count = mock_factory.call_count();
-        assert!(
-            call_count >= 2,
-            "both workspaces should be queried (at minimum), got: {}",
-            call_count
-        );
+            // Verify that both workspaces were queried
+            let call_count = mock_factory.call_count();
+            assert!(
+                call_count >= 2,
+                "both workspaces should be queried (at minimum), got: {}",
+                call_count
+            );
 
-        // Verify that workspace 2's candidate was returned (proving advancement past workspace 1)
-        match result {
-            StrandResult::BeadFound(candidates) => {
-                assert_eq!(
-                    candidates.len(),
-                    1,
-                    "should find 1 candidate from workspace 2"
-                );
-                assert_eq!(candidates[0].id, BeadId::from("ws2-valid-bead".to_string()));
-                assert_eq!(candidates[0].workspace, workspace2);
-                assert!(
-                    candidates[0].assignee.is_none(),
-                    "candidate should be unassigned"
-                );
-                assert!(
-                    !candidates[0]
-                        .labels
-                        .iter()
-                        .any(|l| l == "blocked" || l == "deferred" || l == "human"),
-                    "candidate should not have excluded labels"
-                );
-            }
-            StrandResult::NoWork => {
-                panic!(
-                        "deadlock bug reproduced: strand returned NoWork instead of finding workspace 2's candidate.\n\
-                         This proves the strand is not advancing past workspace 1 even though all its candidates are BOTH excluded AND assigned."
+            // Verify that workspace 2's candidate was returned (proving advancement past workspace 1)
+            match result {
+                StrandResult::BeadFound(candidates) => {
+                    assert_eq!(
+                        candidates.len(),
+                        1,
+                        "should find 1 candidate from workspace 2"
                     );
+                    assert_eq!(candidates[0].id, BeadId::from("ws2-valid-bead".to_string()));
+                    assert_eq!(candidates[0].workspace, workspace2);
+                    assert!(
+                        candidates[0].assignee.is_none(),
+                        "candidate should be unassigned"
+                    );
+                    assert!(
+                        !candidates[0]
+                            .labels
+                            .iter()
+                            .any(|l| l == "blocked" || l == "deferred" || l == "human"),
+                        "candidate should not have excluded labels"
+                    );
+                }
+                StrandResult::NoWork => {
+                    panic!(
+                            "deadlock bug reproduced: strand returned NoWork instead of finding workspace 2's candidate.\n\
+                             This proves the strand is not advancing past workspace 1 even though all its candidates are BOTH excluded AND assigned."
+                        );
+                }
+                StrandResult::WorkCreated => {
+                    panic!("unexpected WorkCreated result");
+                }
+                StrandResult::Error(e) => {
+                    panic!("unexpected Error result: {:?}", e);
+                }
+                StrandResult::Split(_, _) => {
+                    panic!("unexpected Split result");
+                }
+                StrandResult::Skipped { .. } => {
+                    panic!("unexpected Skipped result");
+                }
+                StrandResult::FoundButExcluded => {
+                    panic!("unexpected FoundButExcluded result");
+                }
             }
-            StrandResult::WorkCreated => {
-                panic!("unexpected WorkCreated result");
-            }
-            StrandResult::Error(e) => {
-                panic!("unexpected Error result: {:?}", e);
-            }
-            StrandResult::Split(_, _) => {
-                panic!("unexpected Split result");
-            }
-            StrandResult::Skipped { .. } => {
-                panic!("unexpected Skipped result");
-            }
-            StrandResult::FoundButExcluded => {
-                panic!("unexpected FoundButExcluded result");
-            }
-        }
+        });
     }
 
     // ── Mock Store Factories ─────────────────────────────────────────────────────
