@@ -490,6 +490,9 @@ pub enum EventKind {
         idle_workers_flagged: u32,
         rate_limits_cleaned: u32,
         assignees_cleared: u32,
+        triage_orphans_closed: u32,
+        triage_stale_deferred: u32,
+        triage_stale_reported: u32,
     },
     MendTraceCleanup {
         traces_pruned: u32,
@@ -558,6 +561,17 @@ pub enum EventKind {
         bead_id: String,
         assignee: String,
         error: String,
+    },
+    MendTriageOrphanClosed {
+        bead_id: BeadId,
+    },
+    MendTriageStaleDeferred {
+        bead_id: BeadId,
+        age_days: u64,
+    },
+    MendTriageStaleReport {
+        human_authored_count: u32,
+        stale_beads: Vec<String>,
     },
 
     // ── Post-dispatch audit (Phase 19.4) ──
@@ -648,6 +662,21 @@ pub enum EventKind {
         gate: String,
         command: String,
         reason: String,
+    },
+    /// Workspace degraded after consecutive gate execution errors.
+    WorkspaceGateDegraded {
+        workspace: String,
+        gate: String,
+        command: String,
+        reason: String,
+        consecutive_errors: u32,
+        bead_id: BeadId,
+    },
+    /// Workspace restored after successful gate run following degradation.
+    WorkspaceGateRestored {
+        workspace: String,
+        bead_id: BeadId,
+        degraded_duration_secs: u64,
     },
 
     // ── Unravel ──
@@ -1134,6 +1163,9 @@ impl EventKind {
             EventKind::MendZeroActivityLogCleaned { .. } => "mend.zero_activity_log_cleaned",
             EventKind::MendStaleAssigneeCleared { .. } => "mend.stale_assignee_cleared",
             EventKind::MendAssigneeClearFailed { .. } => "mend.assignee_clear_failed",
+            EventKind::MendTriageOrphanClosed { .. } => "mend.triage.orphan_closed",
+            EventKind::MendTriageStaleDeferred { .. } => "mend.triage.stale_deferred",
+            EventKind::MendTriageStaleReport { .. } => "mend.triage.stale_report",
             EventKind::EffortRecorded { .. } => "effort.recorded",
             EventKind::BudgetWarning { .. } => "budget.warning",
             EventKind::BudgetStop { .. } => "budget.stop",
@@ -1147,6 +1179,8 @@ impl EventKind {
             EventKind::VerificationFailed { .. } => "verification.failed",
             EventKind::VerificationPassed { .. } => "verification.passed",
             EventKind::GateExecutionError { .. } => "gate.execution_error",
+            EventKind::WorkspaceGateDegraded { .. } => "workspace.gate_degraded",
+            EventKind::WorkspaceGateRestored { .. } => "workspace.gate_restored",
             EventKind::UnravelAnalyzed { .. } => "bead.unravel.analyzed",
             EventKind::UnravelSkipped { .. } => "bead.unravel.skipped",
             EventKind::ReflectStarted { .. } => "reflect.started",
@@ -1258,6 +1292,8 @@ impl EventKind {
             | EventKind::VerificationFailed { bead_id, .. }
             | EventKind::VerificationPassed { bead_id, .. }
             | EventKind::GateExecutionError { bead_id, .. }
+            | EventKind::WorkspaceGateDegraded { bead_id, .. }
+            | EventKind::WorkspaceGateRestored { bead_id, .. }
             | EventKind::UnravelAnalyzed { bead_id, .. }
             | EventKind::UnravelSkipped { bead_id, .. }
             | EventKind::OutputTransformSpawned { bead_id, .. }
@@ -1317,6 +1353,9 @@ impl EventKind {
             | EventKind::MendZeroActivityLogCleaned { .. }
             | EventKind::MendStaleAssigneeCleared { .. }
             | EventKind::MendAssigneeClearFailed { .. }
+            | EventKind::MendTriageOrphanClosed { .. }
+            | EventKind::MendTriageStaleDeferred { .. }
+            | EventKind::MendTriageStaleReport { .. }
             | EventKind::MendTraceCleanup { .. }
             | EventKind::MendLearningCleanup { .. }
             | EventKind::BudgetWarning { .. }
@@ -1807,6 +1846,7 @@ impl EventKind {
                 beads_released,
                 locks_removed,
                 deps_cleaned,
+                cycles_broken,
                 db_repaired,
                 db_rebuilt,
                 agent_logs_cleaned,
@@ -1817,11 +1857,15 @@ impl EventKind {
                 idle_workers_flagged,
                 rate_limits_cleaned,
                 assignees_cleared,
+                triage_orphans_closed,
+                triage_stale_deferred,
+                triage_stale_reported,
             } => {
                 serde_json::json!({
                     "beads_released": beads_released,
                     "locks_removed": locks_removed,
                     "deps_cleaned": deps_cleaned,
+                    "cycles_broken": cycles_broken,
                     "db_repaired": db_repaired,
                     "db_rebuilt": db_rebuilt,
                     "agent_logs_cleaned": agent_logs_cleaned,
@@ -1832,6 +1876,9 @@ impl EventKind {
                     "idle_workers_flagged": idle_workers_flagged,
                     "rate_limits_cleaned": rate_limits_cleaned,
                     "assignees_cleared": assignees_cleared,
+                    "triage_orphans_closed": triage_orphans_closed,
+                    "triage_stale_deferred": triage_stale_deferred,
+                    "triage_stale_reported": triage_stale_reported,
                 })
             }
             EventKind::EffortRecorded {
@@ -1967,6 +2014,34 @@ impl EventKind {
                     "gate": gate,
                     "command": command,
                     "reason": reason,
+                })
+            }
+            EventKind::WorkspaceGateDegraded {
+                workspace,
+                gate,
+                command,
+                reason,
+                consecutive_errors,
+                bead_id,
+            } => {
+                serde_json::json!({
+                    "workspace": workspace,
+                    "gate": gate,
+                    "command": command,
+                    "reason": reason,
+                    "consecutive_errors": consecutive_errors,
+                    "bead_id": bead_id.as_ref(),
+                })
+            }
+            EventKind::WorkspaceGateRestored {
+                workspace,
+                bead_id,
+                degraded_duration_secs,
+            } => {
+                serde_json::json!({
+                    "workspace": workspace,
+                    "bead_id": bead_id.as_ref(),
+                    "degraded_duration_secs": degraded_duration_secs,
                 })
             }
             EventKind::UnravelAnalyzed {
@@ -2621,6 +2696,20 @@ impl EventKind {
                 "assignee": assignee,
                 "error": error,
             }),
+            EventKind::MendTriageOrphanClosed { bead_id } => serde_json::json!({
+                "bead_id": bead_id,
+            }),
+            EventKind::MendTriageStaleDeferred { bead_id, age_days } => serde_json::json!({
+                "bead_id": bead_id,
+                "age_days": age_days,
+            }),
+            EventKind::MendTriageStaleReport {
+                human_authored_count,
+                stale_beads,
+            } => serde_json::json!({
+                "human_authored_count": human_authored_count,
+                "stale_beads": stale_beads,
+            }),
             EventKind::AuditBeadClosedAsVerification { bead_id, parent_id } => serde_json::json!({
                 "bead_id": bead_id,
                 "parent_id": parent_id,
@@ -2753,19 +2842,18 @@ impl EventKind {
                 "blocker_id": blocker_id,
                 "cycle_len": cycle_len,
             }),
-            EventKind::AuditBeadClosedAsVerification {
-                bead_id,
-                original_assignee,
-            } => serde_json::json!({
+            EventKind::AuditBeadClosedAsVerification { bead_id, parent_id } => serde_json::json!({
                 "bead_id": bead_id,
-                "original_assignee": original_assignee,
+                "parent_id": parent_id,
             }),
             EventKind::AuditBeadDeferredOverBudget {
                 bead_id,
-                budget_millis,
+                position,
+                budget,
             } => serde_json::json!({
                 "bead_id": bead_id,
-                "budget_millis": budget_millis,
+                "position": position,
+                "budget": budget,
             }),
         }
     }
@@ -2845,6 +2933,8 @@ impl EventKind {
             | EventKind::VerificationFailed { .. }
             | EventKind::VerificationPassed { .. }
             | EventKind::GateExecutionError { .. }
+            | EventKind::WorkspaceGateDegraded { .. }
+            | EventKind::WorkspaceGateRestored { .. }
             | EventKind::UnravelAnalyzed { .. }
             | EventKind::UnravelSkipped { .. }
             | EventKind::PulseScannerStarted { .. }
@@ -2930,6 +3020,9 @@ impl EventKind {
             | EventKind::VersionVerifyFailed { .. }
             | EventKind::MendStaleAssigneeCleared { .. }
             | EventKind::MendAssigneeClearFailed { .. }
+            | EventKind::MendTriageOrphanClosed { .. }
+            | EventKind::MendTriageStaleDeferred { .. }
+            | EventKind::MendTriageStaleReport { .. }
             | EventKind::WorkerLaunchDeferred { .. }
             | EventKind::ConfigWarning { .. }
             | EventKind::BeadQuarantined { .. }

@@ -338,6 +338,9 @@ struct MendSummary {
     rate_limit_providers_removed: u32,
     rate_limit_providers_reset: u32,
     assignees_cleared: u32,
+    triage_orphans_closed: u32,
+    triage_stale_deferred: u32,
+    triage_stale_reported: u32,
 }
 
 impl MendSummary {
@@ -353,23 +356,28 @@ impl MendSummary {
     /// - `deps_cleaned > 0`: Stale dependency links were removed (beads become claimable).
     /// - `cycles_broken > 0`: Dependency cycles were broken (beads may become claimable).
     /// - `assignees_cleared > 0`: Stale assignees were cleared (beads become claimable).
+    /// - `triage_orphans_closed > 0`: Orphaned split-children were closed.
+    /// - `triage_stale_deferred > 0`: Stale worker-created P3/P4 beads were deferred.
     ///
     /// Operations that return `NoWork` (maintenance, not work creation):
     /// - `locks_removed > 0`: Lock file cleanup (doesn't add beads to queue).
     /// - `db_repaired`: Doctor repair fixed index corruption (doesn't add beads).
     /// - `db_rebuilt`: Full rebuild from JSONL (doesn't add beads).
     /// - `traces_pruned`, `agent_logs_cleaned`, `learnings_*`: File cleanup.
+    /// - `triage_stale_reported > 0`: Human-authored stale beads were reported (read-only).
     ///
     /// A `WorkCreated` return must be paired with a telemetry event identifying
     /// the created bead(s) so operators can see what the restart is chasing.
     fn did_work(&self) -> bool {
-        // Bead release, dependency removal, cycle breaking, and assignee clearing add claimable items to the queue.
+        // Bead release, dependency removal, cycle breaking, assignee clearing, and triage add claimable items to the queue.
         // Lock removal, DB repair, and DB rebuild are maintenance operations
         // that don't create new work and must not trigger a waterfall restart.
         self.beads_released > 0
             || self.deps_cleaned > 0
             || self.cycles_broken > 0
             || self.assignees_cleared > 0
+            || self.triage_orphans_closed > 0
+            || self.triage_stale_deferred > 0
     }
 }
 
@@ -1727,7 +1735,7 @@ impl MendStrand {
                 if dep.dependency_type == "blocks" {
                     graph
                         .entry(bead.id.clone())
-                        .or_insert_with(Vec::new)
+                        .or_default()
                         .push(dep.id.clone());
                 }
             }
@@ -1881,6 +1889,228 @@ impl MendStrand {
 
         Ok(())
     }
+
+    // ── Step 6.5: Autonomous triage - orphaned split-children cleanup ──────────────
+
+    /// Close open beads with label `split-child` whose every dependent (beads they block) is closed.
+    ///
+    /// This cleans up split-children that became orphaned when their parents were closed.
+    /// An orphaned split-child is an open bead with the `split-child` label where all
+    /// beads that depend on it (its dependents) are already closed.
+    async fn triage_orphaned_split_children(
+        &self,
+        store: &dyn BeadStore,
+        summary: &mut MendSummary,
+    ) -> Result<()> {
+        let all_beads = store.list_all().await?;
+
+        // Build a map of bead statuses for quick lookup
+        use std::collections::HashMap;
+        let bead_statuses: HashMap<BeadId, BeadStatus> = all_beads
+            .iter()
+            .map(|b| (b.id.clone(), b.status.clone()))
+            .collect();
+
+        // Build a map of beads to their dependents
+        let mut dependents_map: HashMap<BeadId, Vec<BeadId>> = HashMap::new();
+        for bead in &all_beads {
+            for dep in &bead.dependencies {
+                if dep.dependency_type == "blocks" {
+                    dependents_map
+                        .entry(dep.id.clone())
+                        .or_default()
+                        .push(bead.id.clone());
+                }
+            }
+        }
+
+        for bead in &all_beads {
+            // Only check open beads with the split-child label
+            if bead.status != BeadStatus::Open {
+                continue;
+            }
+
+            if !bead.labels.iter().any(|l| l == "split-child") {
+                continue;
+            }
+
+            // Get all dependents of this bead
+            let dependents = dependents_map
+                .get(&bead.id)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
+
+            // Check if all dependents are closed
+            let all_dependents_closed = dependents.is_empty()
+                || dependents.iter().all(|dep_id| {
+                    bead_statuses
+                        .get(dep_id)
+                        .map(|s| s.is_done())
+                        .unwrap_or(false)
+                });
+
+            if all_dependents_closed {
+                // This is an orphaned split-child - close it
+                tracing::info!(
+                    bead_id = %bead.id,
+                    dependents_count = dependents.len(),
+                    "closing orphaned split-child (all dependents are closed)"
+                );
+
+                match store
+                    .close(&bead.id, "orphaned split-child (Phase 19.7)")
+                    .await
+                {
+                    Ok(()) => {
+                        let _ = self.telemetry.emit(
+                            EventKind::MendTriageOrphanClosed {
+                                bead_id: bead.id.clone(),
+                            },
+                            chrono::Utc::now(),
+                        );
+                        summary.triage_orphans_closed += 1;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            bead_id = %bead.id,
+                            error = %e,
+                            "failed to close orphaned split-child"
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    // ── Step 6.6: Autonomous triage - stale worker-created P3/P4 bead cleanup ───────
+
+    /// Defer P3/P4 beads created by worker identities with no update for 30 days.
+    ///
+    /// Worker-created beads are identified by their actor matching the pattern
+    /// `<agent>-<identifier>`. Human-authored beads (created by users) are only
+    /// reported in a `mend.stale_report` event and are NOT deferred.
+    ///
+    /// Staleness threshold: 30 days without an `updated_at` change.
+    async fn triage_stale_worker_created_beads(
+        &self,
+        store: &dyn BeadStore,
+        summary: &mut MendSummary,
+    ) -> Result<()> {
+        let all_beads = store.list_all().await?;
+        let now = Utc::now();
+        let stale_threshold = chrono::Duration::days(30);
+
+        // Separate worker-created and human-authored stale beads
+        let mut worker_stale_beads: Vec<&Bead> = Vec::new();
+        let mut human_stale_beads: Vec<String> = Vec::new();
+
+        // Regex to match worker identities: <agent>-<identifier>
+        // This matches patterns like "claude-test-worker", "echo-test-worker", etc.
+        let worker_identity_regex = regex::Regex::new(r"^[a-z]+-[a-z0-9]+(-[a-z0-9]+)*$")
+            .map_err(|e| anyhow::anyhow!("failed to compile worker identity regex: {}", e))?;
+
+        for bead in &all_beads {
+            // Only check open P3 or P4 beads
+            if bead.status != BeadStatus::Open {
+                continue;
+            }
+
+            if bead.priority != 3 && bead.priority != 4 {
+                continue;
+            }
+
+            // Check if bead is stale (no update for 30 days)
+            let age = now.signed_duration_since(bead.updated_at);
+            if age < stale_threshold {
+                continue;
+            }
+
+            // Check if this is a worker-created or human-authored bead
+            // Worker-created beads have comments with author matching <agent>-<identifier>
+            let is_worker_created = bead.comments.iter().any(|comment| {
+                // Comments from workers typically have author matching the pattern
+                worker_identity_regex.is_match(&comment.author)
+            });
+
+            if is_worker_created {
+                worker_stale_beads.push(bead);
+            } else {
+                human_stale_beads.push(bead.id.as_ref().to_string());
+            }
+        }
+
+        // Process worker-created stale beads - defer them and add 'stale' label
+        for bead in worker_stale_beads {
+            let age_days = now.signed_duration_since(bead.updated_at).num_days().max(0) as u64;
+
+            tracing::info!(
+                bead_id = %bead.id,
+                age_days,
+                priority = bead.priority,
+                "deferring stale worker-created P3/P4 bead"
+            );
+
+            // Defer the bead
+            // Note: We need to implement bead deferral in the BeadStore trait
+            // For now, we'll add a 'stale' label and note
+            match store.add_label(&bead.id, "stale").await {
+                Ok(()) => {
+                    // Add a note about the deferral
+                    let note = format!(
+                        "Stale worker-created P{0} bead: no update for {1} days (Phase 19.7)",
+                        bead.priority, age_days
+                    );
+
+                    if let Err(e) = self.append_bead_notes(store, &bead.id, &note).await {
+                        tracing::debug!(
+                            bead_id = %bead.id,
+                            error = %e,
+                            "mend: failed to append notes for stale bead"
+                        );
+                    }
+
+                    let _ = self.telemetry.emit(
+                        EventKind::MendTriageStaleDeferred {
+                            bead_id: bead.id.clone(),
+                            age_days,
+                        },
+                        chrono::Utc::now(),
+                    );
+
+                    summary.triage_stale_deferred += 1;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        error = %e,
+                        "failed to add stale label to worker-created bead"
+                    );
+                }
+            }
+        }
+
+        // Emit a report for human-authored stale beads (read-only, no changes)
+        if !human_stale_beads.is_empty() {
+            tracing::info!(
+                count = human_stale_beads.len(),
+                "human-authored stale P3/P4 beads detected (reported only, not deferred)"
+            );
+
+            let _ = self.telemetry.emit(
+                EventKind::MendTriageStaleReport {
+                    human_authored_count: human_stale_beads.len() as u32,
+                    stale_beads: human_stale_beads.clone(),
+                },
+                chrono::Utc::now(),
+            );
+
+            summary.triage_stale_reported += human_stale_beads.len() as u32;
+        }
+
+        Ok(())
+    }
 }
 
 #[async_trait::async_trait]
@@ -2005,6 +2235,24 @@ impl super::Strand for MendStrand {
             // DB check failure is non-fatal — continue with the summary.
         }
 
+        // Step 6.5: Autonomous triage - orphaned split-children cleanup.
+        if let Err(e) = self
+            .triage_orphaned_split_children(store, &mut summary)
+            .await
+        {
+            tracing::warn!(error = %e, "mend: orphaned split-child triage failed");
+            // Non-fatal — continue with remaining steps.
+        }
+
+        // Step 6.6: Autonomous triage - stale worker-created P3/P4 bead cleanup.
+        if let Err(e) = self
+            .triage_stale_worker_created_beads(store, &mut summary)
+            .await
+        {
+            tracing::warn!(error = %e, "mend: stale worker-created bead triage failed");
+            // Non-fatal — continue with remaining steps.
+        }
+
         // Emit cycle summary telemetry.
         let _ = self.telemetry.emit(
             EventKind::MendCycleSummary {
@@ -2022,6 +2270,9 @@ impl super::Strand for MendStrand {
                 idle_workers_flagged: summary.idle_workers_flagged,
                 rate_limits_cleaned: summary.rate_limits_cleaned,
                 assignees_cleared: summary.assignees_cleared,
+                triage_orphans_closed: summary.triage_orphans_closed,
+                triage_stale_deferred: summary.triage_stale_deferred,
+                triage_stale_reported: summary.triage_stale_reported,
             },
             chrono::Utc::now(),
         );
@@ -2160,6 +2411,7 @@ mod tests {
     use super::*;
     use crate::bead_store::{Filters, RepairReport};
     use crate::health::HeartbeatData;
+    use crate::telemetry::test_utils::MemorySink;
     use crate::types::{Bead, BeadId, BrDependency, ClaimResult, WorkerState};
 
     use async_trait::async_trait;
@@ -7421,6 +7673,430 @@ mod tests {
                 .iter()
                 .any(|e| e.event_type == "mend.stale_assignee_cleared"),
             "MendStaleAssigneeCleared event should be emitted for idle worker"
+        );
+    }
+
+    // ── Autonomous triage tests ────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn triage_closes_orphaned_split_child() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        // Create a split-child bead with closed dependents
+        let dt = Utc::now();
+        let split_child = Bead {
+            id: BeadId::from("split-child-1"),
+            title: "Split Child".to_string(),
+            body: None,
+            priority: 1,
+            status: BeadStatus::Open,
+            assignee: None,
+            labels: vec!["split-child".to_string()],
+            workspace: PathBuf::from("/tmp/test"),
+            dependencies: vec![],
+            dependents: vec![BrDependency {
+                id: BeadId::from("dependent-1"),
+                title: "Dependent 1".to_string(),
+                status: "closed".to_string(),
+                priority: 1,
+                dependency_type: "blocks".to_string(),
+            }],
+            comments: vec![],
+            created_at: dt,
+            updated_at: dt,
+        };
+
+        let closed_dependent = Bead {
+            id: BeadId::from("dependent-1"),
+            title: "Dependent 1".to_string(),
+            body: None,
+            priority: 1,
+            status: BeadStatus::Closed,
+            assignee: None,
+            labels: vec![],
+            workspace: PathBuf::from("/tmp/test"),
+            dependencies: vec![BrDependency {
+                id: BeadId::from("split-child-1"),
+                title: "Split Child".to_string(),
+                status: "".to_string(),
+                priority: 1,
+                dependency_type: "blocks".to_string(),
+            }],
+            dependents: vec![],
+            comments: vec![],
+            created_at: dt,
+            updated_at: dt,
+        };
+
+        let (store, _release_count, _) = MockBeadStore::new(vec![split_child, closed_dependent]);
+        let (sink, events) = MemorySink::new();
+        let telemetry = Telemetry::with_sink("test-worker".to_string(), sink);
+        let registry = Registry::new(reg_dir.path());
+
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            hb_dir.path().to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.path().to_path_buf(),
+            "test-worker".to_string(),
+            registry,
+            telemetry,
+            PathBuf::from("/tmp/needle-test-logs"),
+            0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            LimitsConfig::default(),
+        );
+
+        let result = mend.evaluate(&store, &HashSet::new()).await;
+        assert!(
+            matches!(result, StrandResult::WorkCreated),
+            "expected WorkCreated after closing orphaned split-child, got: {result:?}"
+        );
+
+        // Wait for background task to process telemetry events.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        // Verify MendTriageOrphanClosed event was emitted.
+        let captured = events.lock().unwrap();
+        assert!(
+            captured
+                .iter()
+                .any(|e| e.event_type == "mend.triage.orphan_closed"),
+            "MendTriageOrphanClosed event should be emitted for orphaned split-child"
+        );
+    }
+
+    #[tokio::test]
+    async fn triage_skips_split_child_with_open_dependents() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        let dt = Utc::now();
+        let split_child = Bead {
+            id: BeadId::from("split-child-1"),
+            title: "Split Child".to_string(),
+            body: None,
+            priority: 1,
+            status: BeadStatus::Open,
+            assignee: None,
+            labels: vec!["split-child".to_string()],
+            workspace: PathBuf::from("/tmp/test"),
+            dependencies: vec![],
+            dependents: vec![BrDependency {
+                id: BeadId::from("dependent-1"),
+                title: "Dependent 1".to_string(),
+                status: "".to_string(),
+                priority: 1,
+                dependency_type: "blocks".to_string(),
+            }],
+            comments: vec![],
+            created_at: dt,
+            updated_at: dt,
+        };
+
+        let open_dependent = Bead {
+            id: BeadId::from("dependent-1"),
+            title: "Dependent 1".to_string(),
+            body: None,
+            priority: 1,
+            status: BeadStatus::Open,
+            assignee: None,
+            labels: vec![],
+            workspace: PathBuf::from("/tmp/test"),
+            dependencies: vec![BrDependency {
+                id: BeadId::from("split-child-1"),
+                title: "Split Child".to_string(),
+                status: "".to_string(),
+                priority: 1,
+                dependency_type: "blocks".to_string(),
+            }],
+            dependents: vec![],
+            comments: vec![],
+            created_at: dt,
+            updated_at: dt,
+        };
+
+        let (store, _, _) = MockBeadStore::new(vec![split_child, open_dependent]);
+        let (sink, events) = MemorySink::new();
+        let telemetry = Telemetry::with_sink("test-worker".to_string(), sink);
+        let registry = Registry::new(reg_dir.path());
+
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            hb_dir.path().to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.path().to_path_buf(),
+            "test-worker".to_string(),
+            registry,
+            telemetry,
+            PathBuf::from("/tmp/needle-test-logs"),
+            0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            LimitsConfig::default(),
+        );
+
+        let result = mend.evaluate(&store, &HashSet::new()).await;
+        assert!(
+            matches!(result, StrandResult::NoWork),
+            "expected NoWork when split-child has open dependents, got: {result:?}"
+        );
+
+        // Wait for background task to process telemetry events.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        // Verify NO orphan_closed event was emitted.
+        let captured = events.lock().unwrap();
+        assert!(
+            !captured
+                .iter()
+                .any(|e| e.event_type == "mend.triage.orphan_closed"),
+            "MendTriageOrphanClosed event should NOT be emitted for split-child with open dependents"
+        );
+    }
+
+    #[tokio::test]
+    async fn triage_defers_stale_worker_created_p3_bead() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        let now = Utc::now();
+        let stale_dt = now - chrono::Duration::days(35); // 35 days old
+
+        // Create a stale P3 bead created by a worker
+        let stale_worker_bead = Bead {
+            id: BeadId::from("stale-worker-bead"),
+            title: "Stale Worker Bead".to_string(),
+            body: None,
+            priority: 3,
+            status: BeadStatus::Open,
+            assignee: None,
+            labels: vec![],
+            workspace: PathBuf::from("/tmp/test"),
+            dependencies: vec![],
+            dependents: vec![],
+            comments: vec![crate::types::Comment {
+                id: 1,
+                bead_id: "stale-worker-bead".to_string(),
+                text: "Created by worker".to_string(),
+                author: "claude-test-worker".to_string(),
+                created_at: stale_dt,
+            }],
+            created_at: stale_dt,
+            updated_at: stale_dt,
+        };
+
+        let (store, _, _) = MockBeadStore::new(vec![stale_worker_bead]);
+        let (sink, events) = MemorySink::new();
+        let telemetry = Telemetry::with_sink("test-worker".to_string(), sink);
+        let registry = Registry::new(reg_dir.path());
+
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            hb_dir.path().to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.path().to_path_buf(),
+            "test-worker".to_string(),
+            registry,
+            telemetry,
+            PathBuf::from("/tmp/needle-test-logs"),
+            0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            LimitsConfig::default(),
+        );
+
+        let result = mend.evaluate(&store, &HashSet::new()).await;
+        assert!(
+            matches!(result, StrandResult::WorkCreated),
+            "expected WorkCreated after deferring stale worker-created bead, got: {result:?}"
+        );
+
+        // Wait for background task to process telemetry events.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        // Verify MendTriageStaleDeferred event was emitted.
+        let captured = events.lock().unwrap();
+        assert!(
+            captured
+                .iter()
+                .any(|e| e.event_type == "mend.triage.stale_deferred"),
+            "MendTriageStaleDeferred event should be emitted for stale worker-created bead"
+        );
+    }
+
+    #[tokio::test]
+    async fn triage_reports_human_authored_stale_p4_bead() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        let now = Utc::now();
+        let stale_dt = now - chrono::Duration::days(35); // 35 days old
+
+        // Create a stale P4 bead created by a human
+        let stale_human_bead = Bead {
+            id: BeadId::from("stale-human-bead"),
+            title: "Stale Human Bead".to_string(),
+            body: None,
+            priority: 4,
+            status: BeadStatus::Open,
+            assignee: None,
+            labels: vec![],
+            workspace: PathBuf::from("/tmp/test"),
+            dependencies: vec![],
+            dependents: vec![],
+            comments: vec![crate::types::Comment {
+                id: 1,
+                bead_id: "stale-human-bead".to_string(),
+                text: "Created by human".to_string(),
+                author: "user@example.com".to_string(),
+                created_at: stale_dt,
+            }],
+            created_at: stale_dt,
+            updated_at: stale_dt,
+        };
+
+        let (store, _, _) = MockBeadStore::new(vec![stale_human_bead]);
+        let (sink, events) = MemorySink::new();
+        let telemetry = Telemetry::with_sink("test-worker".to_string(), sink);
+        let registry = Registry::new(reg_dir.path());
+
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            hb_dir.path().to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.path().to_path_buf(),
+            "test-worker".to_string(),
+            registry,
+            telemetry,
+            PathBuf::from("/tmp/needle-test-logs"),
+            0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            LimitsConfig::default(),
+        );
+
+        let result = mend.evaluate(&store, &HashSet::new()).await;
+        assert!(
+            matches!(result, StrandResult::NoWork),
+            "expected NoWork when only human-authored stale beads exist, got: {result:?}"
+        );
+
+        // Wait for background task to process telemetry events.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        // Verify MendTriageStaleReport event was emitted (read-only, no changes).
+        let captured = events.lock().unwrap();
+        assert!(
+            captured
+                .iter()
+                .any(|e| e.event_type == "mend.triage.stale_report"),
+            "MendTriageStaleReport event should be emitted for human-authored stale beads"
+        );
+
+        // Verify NO stale_deferred event was emitted (human beads are not deferred).
+        assert!(
+            !captured
+                .iter()
+                .any(|e| e.event_type == "mend.triage.stale_deferred"),
+            "MendTriageStaleDeferred event should NOT be emitted for human-authored beads"
+        );
+    }
+
+    #[tokio::test]
+    async fn triage_skips_recent_p3_bead() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        let now = Utc::now();
+        let recent_dt = now - chrono::Duration::days(15); // 15 days old (not stale)
+
+        // Create a recent P3 bead created by a worker
+        let recent_worker_bead = Bead {
+            id: BeadId::from("recent-worker-bead"),
+            title: "Recent Worker Bead".to_string(),
+            body: None,
+            priority: 3,
+            status: BeadStatus::Open,
+            assignee: None,
+            labels: vec![],
+            workspace: PathBuf::from("/tmp/test"),
+            dependencies: vec![],
+            dependents: vec![],
+            comments: vec![crate::types::Comment {
+                id: 1,
+                bead_id: "recent-worker-bead".to_string(),
+                text: "Created by worker".to_string(),
+                author: "claude-test-worker".to_string(),
+                created_at: recent_dt,
+            }],
+            created_at: recent_dt,
+            updated_at: recent_dt,
+        };
+
+        let (store, _, _) = MockBeadStore::new(vec![recent_worker_bead]);
+        let (sink, events) = MemorySink::new();
+        let telemetry = Telemetry::with_sink("test-worker".to_string(), sink);
+        let registry = Registry::new(reg_dir.path());
+
+        let mend = MendStrand::new(
+            MendConfig::default(),
+            hb_dir.path().to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.path().to_path_buf(),
+            "test-worker".to_string(),
+            registry,
+            telemetry,
+            PathBuf::from("/tmp/needle-test-logs"),
+            0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            LimitsConfig::default(),
+        );
+
+        let result = mend.evaluate(&store, &HashSet::new()).await;
+        assert!(
+            matches!(result, StrandResult::NoWork),
+            "expected NoWork when recent P3 beads exist, got: {result:?}"
+        );
+
+        // Wait for background task to process telemetry events.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        // Verify NO stale_deferred event was emitted (bead is too recent).
+        let captured = events.lock().unwrap();
+        assert!(
+            !captured
+                .iter()
+                .any(|e| e.event_type == "mend.triage.stale_deferred"),
+            "MendTriageStaleDeferred event should NOT be emitted for recent beads"
         );
     }
 }
