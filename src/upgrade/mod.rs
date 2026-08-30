@@ -14,7 +14,6 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use crate::bead_store::spawn_with_etxtbsy_retry_child;
 use crate::telemetry::{EventKind, Telemetry};
 
 /// Current version of the needle binary.
@@ -790,54 +789,57 @@ pub async fn re_exec_stable(
     agent: Option<&str>,
     timeout: Option<u64>,
 ) -> Result<()> {
-    let stable_path = stable_path.to_path_buf();
-    let worker_name = worker_name.to_string();
-    let workspace = workspace.map(|p| p.to_path_buf());
-    let agent = agent.map(|a| a.to_string());
+    use std::os::unix::process::CommandExt;
 
-    // Retry with ETXTBSY handling - the :stable binary was just written and may be busy
-    let mut child = spawn_with_etxtbsy_retry_child(
-        || {
-            let stable_path = stable_path.clone();
-            let worker_name = worker_name.clone();
-            let workspace = workspace.clone();
-            let agent = agent.clone();
-            async move {
-                let mut cmd = tokio::process::Command::new(&stable_path);
-                cmd.arg("run").arg("--resume");
-                cmd.arg("--identifier").arg(&worker_name);
-                cmd.arg("--count").arg("1");
+    const ETXTBSY_ERRNO: i32 = 26;
+    const MAX_ATTEMPTS: usize = 5;
+    const BACKOFF_MS: u64 = 20;
 
-                if let Some(ws) = &workspace {
-                    cmd.arg("--workspace").arg(ws);
-                }
-                if let Some(a) = &agent {
-                    cmd.arg("--agent").arg(a);
-                }
-                if let Some(t) = timeout {
-                    cmd.arg("--timeout").arg(t.to_string());
-                }
+    // `exec` is essential here: deployed systemd units restart a static
+    // launcher path that can legitimately lag behind :stable. Exiting and
+    // relying on Restart=always would relaunch the stale binary forever.
+    for attempt in 0..MAX_ATTEMPTS {
+        let mut cmd = std::process::Command::new(stable_path);
+        cmd.arg("run").arg("--resume");
+        cmd.arg("--identifier").arg(worker_name);
+        cmd.arg("--count").arg("1");
 
-                cmd.spawn()
-            }
-        },
-        5,  // max_attempts
-        20, // backoff_ms
-    )
-    .await
-    .context("failed to spawn :stable binary after retries")?;
+        if let Some(ws) = workspace {
+            cmd.arg("--workspace").arg(ws);
+        }
+        if let Some(a) = agent {
+            cmd.arg("--agent").arg(a);
+        }
+        if let Some(t) = timeout {
+            cmd.arg("--timeout").arg(t.to_string());
+        }
 
-    // Wait for the child process to complete - it will replace us
-    let status = child
-        .wait()
-        .await
-        .context("failed to wait for :stable binary")?;
+        // On success this never returns: the kernel replaces the current
+        // process image while retaining the PID and systemd service identity.
+        let error = cmd.exec();
+        if error.raw_os_error() == Some(ETXTBSY_ERRNO) && attempt + 1 < MAX_ATTEMPTS {
+            let delay_ms = BACKOFF_MS * (attempt as u64 + 1);
+            tracing::warn!(
+                attempt = attempt + 1,
+                max_attempts = MAX_ATTEMPTS,
+                delay_ms,
+                stable_path = %stable_path.display(),
+                "needle-stable is temporarily busy; retrying hot-reload exec"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            continue;
+        }
 
-    // If we get here, the child exited (which shouldn't happen on successful exec)
-    Err(anyhow::anyhow!(
-        "re-exec failed: :stable binary exited with status {}",
-        status
-    ))
+        return Err(error).with_context(|| {
+            format!(
+                "failed to exec :stable binary after {} attempt(s): {}",
+                attempt + 1,
+                stable_path.display()
+            )
+        });
+    }
+
+    unreachable!("hot-reload exec retry loop always returns or replaces the process")
 }
 
 #[cfg(not(unix))]

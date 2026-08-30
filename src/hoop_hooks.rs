@@ -252,7 +252,10 @@ mod tests {
         std::env::remove_var("NEEDLE_HEARTBEATS");
         emit_needle_event(dir.path(), "w", None, None, "test", serde_json::json!({}));
         emit_needle_heartbeat(dir.path(), "w", "idle", serde_json::json!({}));
-        assert!(!dir.path().join(".beads").exists(), ".beads/ must not be created");
+        assert!(
+            !dir.path().join(".beads").exists(),
+            ".beads/ must not be created"
+        );
         // With a store present, the default paths are used.
         std::fs::create_dir_all(dir.path().join(".beads")).unwrap();
         emit_needle_event(dir.path(), "w", None, None, "test", serde_json::json!({}));

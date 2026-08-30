@@ -481,10 +481,6 @@ const RACE_LOST_EXCLUSION_TTL: Duration = Duration::from_secs(30);
 /// inner timeouts (50s, 60s, 90s) to allow normal recovery to work first.
 const HANDLING_WATCHDOG_TIMEOUT_SECS: u64 = 120;
 
-/// Exit code for clean exit when a stale binary is detected.
-/// This signals the supervisor to relaunch with the new binary.
-const EXIT_CODE_STALE_BINARY: i32 = 72;
-
 /// The metadata used to detect changes to the global configuration file.
 ///
 /// The mtime is useful for ordinary edits, but it is not sufficient by itself:
@@ -1464,19 +1460,19 @@ impl Worker {
                     lifecycle_span.in_scope(|| self.do_log())?;
 
                     // After logging completes, check if the running binary is stale
-                    // compared to the latest needle-stable on disk. If a newer binary
-                    // is detected, exit cleanly so a supervisor or relaunch can pick
-                    // up the new binary. This check runs between dispatch cycles,
-                    // never mid-claim, ensuring no bead is left in_progress.
+                    // compared to the latest needle-stable on disk. If a new binary
+                    // is detected, replace this process with :stable while preserving
+                    // its PID and worker identity. This check runs between dispatch
+                    // cycles, never mid-claim, so no bead is left in_progress.
                     if let Err(e) = self.check_hot_reload().await {
                         tracing::warn!(
                             error = %e,
                             "hot-reload check failed, continuing on current binary"
                         );
                     }
-                    // If check_hot_reload() detected a new binary and successfully
-                    // re-execed, we won't reach here (the process is replaced).
-                    // On re-exec failure, we continue normally.
+                    // If check_hot_reload() successfully re-execed, we won't reach
+                    // here because the process image has been replaced. On failure,
+                    // the old process continues and retries at a later safe boundary.
 
                     // Check for a changed global config only at the cycle
                     // boundary. The check is interval-gated and non-fatal: a
@@ -1488,11 +1484,9 @@ impl Worker {
                         );
                     }
 
-                    // After hot-reload check, perform the periodic freshness check.
-                    // This runs at the configured interval (worker.freshness_check_interval_secs)
-                    // and logs warnings when a stale binary is detected, but does NOT exit.
-                    // The distinction: hot-reload exits cleanly when new binary is available;
-                    // freshness checking warns but continues processing.
+                    // After the hash-based hot-reload check, perform the periodic
+                    // build-metadata freshness check. Either path re-execs :stable
+                    // at this same safe boundary when it detects a stale process.
                     if let Err(e) = self.check_freshness().await {
                         tracing::warn!(
                             error = %e,
@@ -4650,45 +4644,49 @@ impl Worker {
         Ok(())
     }
 
-    /// Check for a new :stable binary and exit cleanly if detected.
+    /// Check for a new :stable binary and re-exec it if detected.
     ///
     /// Called between LOGGING and SELECTING. If a new binary is found:
-    /// 1. Emit `worker.binary_freshness_exit` telemetry
-    /// 2. Exit with code 72 to signal supervisor to relaunch with new binary
+    /// 1. Emit `worker.upgrade.detected` telemetry.
+    /// 2. Replace this process image with :stable using `run --resume`.
     ///
-    /// This ensures no bead is left mid-dispatch — the check only runs after
-    /// a claim is closed and before the next claim is attempted.
+    /// This ensures no bead is left mid-dispatch and does not depend on an
+    /// external supervisor relaunching the correct executable path.
     async fn check_hot_reload(&mut self) -> Result<()> {
+        if !self.config.self_modification.hot_reload {
+            return Ok(());
+        }
+
         let needle_home = &self.config.workspace.home;
         match upgrade::check_hot_reload(needle_home) {
             Ok(HotReloadCheck::NewBinaryDetected {
                 old_hash,
                 new_hash,
-                stable_path: _,
+                stable_path,
             }) => {
                 tracing::info!(
                     old_hash = %truncate_for_display(&old_hash, 12),
                     new_hash = %truncate_for_display(&new_hash, 12),
-                    "new :stable binary detected — exiting cleanly for supervisor relaunch"
+                    "new :stable binary detected — re-execing at safe cycle boundary"
                 );
 
                 self.telemetry.emit(
-                    EventKind::BinaryFreshnessExit {
+                    EventKind::UpgradeDetected {
                         old_hash: old_hash.clone(),
                         new_hash: new_hash.clone(),
-                        was_deleted: false,
                     },
                     chrono::Utc::now(),
                 )?;
 
-                // Flush telemetry before exit
-                std::mem::forget(self.telemetry.clone());
-
-                tracing::info!(
-                    "exiting with code {} to signal binary refresh",
-                    EXIT_CODE_STALE_BINARY
-                );
-                std::process::exit(EXIT_CODE_STALE_BINARY);
+                upgrade::re_exec_stable(
+                    &stable_path,
+                    &self.worker_name,
+                    Some(&self.config.workspace.default),
+                    Some(&self.config.agent.default),
+                    Some(self.config.agent.timeout),
+                )
+                .await
+                .context("failed to replace worker process with needle-stable")
             }
             Ok(HotReloadCheck::NoChange) => Ok(()),
             Ok(HotReloadCheck::Skipped { reason }) => {
@@ -4697,32 +4695,33 @@ impl Worker {
             }
             Ok(HotReloadCheck::CurrentBinaryDeleted {
                 stable_hash,
-                stable_path: _,
+                stable_path,
             }) => {
-                // Current binary has been deleted/unlinked (e.g., mv-replaced while running).
-                // This is an unconditional signal to exit cleanly so the supervisor can relaunch.
+                // A deleted executable cannot be hashed or recovered in place.
+                // Re-exec :stable directly instead of relying on a launcher that
+                // may itself still point at the deleted path.
                 tracing::error!(
                     stable_hash = %truncate_for_display(&stable_hash, 12),
-                    "current binary has been deleted/unlinked — exiting cleanly for supervisor relaunch"
+                    "current binary has been deleted/unlinked — re-execing needle-stable"
                 );
 
                 self.telemetry.emit(
-                    EventKind::BinaryFreshnessExit {
+                    EventKind::UpgradeDetected {
                         old_hash: "<deleted>".to_string(),
                         new_hash: stable_hash.clone(),
-                        was_deleted: true,
                     },
                     chrono::Utc::now(),
                 )?;
 
-                // Flush telemetry before exit
-                std::mem::forget(self.telemetry.clone());
-
-                tracing::info!(
-                    "exiting with code {} to signal binary refresh",
-                    EXIT_CODE_STALE_BINARY
-                );
-                std::process::exit(EXIT_CODE_STALE_BINARY);
+                upgrade::re_exec_stable(
+                    &stable_path,
+                    &self.worker_name,
+                    Some(&self.config.workspace.default),
+                    Some(&self.config.agent.default),
+                    Some(self.config.agent.timeout),
+                )
+                .await
+                .context("failed to recover deleted worker executable from needle-stable")
             }
             Err(e) => {
                 tracing::warn!(error = %e, "hot-reload check failed, continuing");
@@ -5371,9 +5370,9 @@ impl Worker {
     ///
     /// This check runs between dispatch cycles (never mid-claim) at the interval
     /// configured by `worker.freshness_check_interval_secs`. When a stale binary
-    /// is detected, it exits cleanly with `EXIT_CODE_STALE_BINARY` to signal the
-    /// supervisor to relaunch with the new binary. This ensures workers running
-    /// old binaries eventually pick up fixes and improvements.
+    /// is detected, it re-execs needle-stable in place. This ensures workers
+    /// pick up fixes even when their systemd launcher is a separate stale file
+    /// and no NEEDLE supervisor owns the process.
     ///
     /// The check compares git commit SHAs embedded in the build metadata, not binary
     /// file hashes. This ensures we detect when the codebase has advanced even if the
@@ -5429,17 +5428,16 @@ impl Worker {
             let current_display = truncate_commit_sha(current_commit);
             let stable_display = truncate_commit_sha(stable_commit);
 
-            // Exit cleanly when stale binary is detected
-            // This check runs between dispatch cycles (in LOGGING state), ensuring
-            // no bead is left mid-dispatch. The exit code signals the supervisor
-            // to relaunch with the new binary.
+            // Re-exec when stale binary is detected. This check runs between
+            // dispatch cycles (in LOGGING state), ensuring no bead is left
+            // mid-dispatch and preserving the systemd service PID.
             tracing::info!(
                 current_commit = %current_display,
                 stable_commit = %stable_display,
                 current_version = %current_metadata.version,
                 stable_version = %stable_metadata.version,
                 "running binary is STALE — current commit {} differs from needle-stable commit {}. \
-                 Exiting cleanly for supervisor relaunch with new binary. \
+                 Re-execing needle-stable at the safe cycle boundary. \
                  This check runs every {} seconds (configured by worker.freshness_check_interval_secs). \
                  Set to 0 to disable freshness checking.",
                 current_display,
@@ -5448,22 +5446,23 @@ impl Worker {
             );
 
             self.telemetry.emit(
-                EventKind::BinaryFreshnessExit {
+                EventKind::UpgradeDetected {
                     old_hash: current_commit.clone(),
                     new_hash: stable_commit.clone(),
-                    was_deleted: false,
                 },
                 chrono::Utc::now(),
             )?;
 
-            // Flush telemetry before exit
-            std::mem::forget(self.telemetry.clone());
-
-            tracing::info!(
-                "exiting with code {} to signal binary refresh",
-                EXIT_CODE_STALE_BINARY
-            );
-            std::process::exit(EXIT_CODE_STALE_BINARY);
+            let stable_path = self.config.workspace.home.join("bin/needle-stable");
+            upgrade::re_exec_stable(
+                &stable_path,
+                &self.worker_name,
+                Some(&self.config.workspace.default),
+                Some(&self.config.agent.default),
+                Some(self.config.agent.timeout),
+            )
+            .await
+            .context("failed to replace stale worker process with needle-stable")?;
         } else {
             // Binary is fresh — reset the warned flag so we warn again if it becomes stale later
             self.stale_binary_warned = false;
