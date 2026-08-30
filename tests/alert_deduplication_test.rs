@@ -32,21 +32,18 @@ impl MockBeadStore {
 
 #[async_trait::async_trait]
 impl needle::bead_store::BeadStore for MockBeadStore {
-    async fn list_all(&self) -> needle::anyhow::Result<Vec<needle::types::Bead>> {
+    async fn list_all(&self) -> anyhow::Result<Vec<needle::types::Bead>> {
         Ok(self.beads.values().cloned().collect())
     }
 
     async fn ready(
         &self,
         _filters: &needle::bead_store::Filters,
-    ) -> needle::anyhow::Result<Vec<needle::types::Bead>> {
+    ) -> anyhow::Result<Vec<needle::types::Bead>> {
         Ok(vec![])
     }
 
-    async fn show(
-        &self,
-        _id: &needle::types::BeadId,
-    ) -> needle::anyhow::Result<needle::types::Bead> {
+    async fn show(&self, _id: &needle::types::BeadId) -> anyhow::Result<needle::types::Bead> {
         needle::anyhow::bail!("not implemented")
     }
 
@@ -54,43 +51,35 @@ impl needle::bead_store::BeadStore for MockBeadStore {
         &self,
         _id: &needle::types::BeadId,
         _actor: &str,
-    ) -> needle::anyhow::Result<needle::types::ClaimResult> {
+    ) -> anyhow::Result<needle::types::ClaimResult> {
         needle::anyhow::bail!("not implemented")
     }
 
-    async fn release(&self, _id: &needle::types::BeadId) -> needle::anyhow::Result<()> {
+    async fn release(&self, _id: &needle::types::BeadId) -> anyhow::Result<()> {
         Ok(())
     }
 
-    async fn block(&self, _id: &needle::types::BeadId) -> needle::anyhow::Result<()> {
+    async fn block(&self, _id: &needle::types::BeadId) -> anyhow::Result<()> {
         Ok(())
     }
 
-    async fn flush(&self) -> needle::anyhow::Result<()> {
+    async fn flush(&self) -> anyhow::Result<()> {
         Ok(())
     }
 
-    async fn reopen(&self, _id: &needle::types::BeadId) -> needle::anyhow::Result<()> {
+    async fn reopen(&self, _id: &needle::types::BeadId) -> anyhow::Result<()> {
         Ok(())
     }
 
-    async fn labels(&self, _id: &needle::types::BeadId) -> needle::anyhow::Result<Vec<String>> {
+    async fn labels(&self, _id: &needle::types::BeadId) -> anyhow::Result<Vec<String>> {
         Ok(vec![])
     }
 
-    async fn add_label(
-        &self,
-        _id: &needle::types::BeadId,
-        _label: &str,
-    ) -> needle::anyhow::Result<()> {
+    async fn add_label(&self, _id: &needle::types::BeadId, _label: &str) -> anyhow::Result<()> {
         Ok(())
     }
 
-    async fn remove_label(
-        &self,
-        _id: &needle::types::BeadId,
-        _label: &str,
-    ) -> needle::anyhow::Result<()> {
+    async fn remove_label(&self, _id: &needle::types::BeadId, _label: &str) -> anyhow::Result<()> {
         Ok(())
     }
 
@@ -99,19 +88,19 @@ impl needle::bead_store::BeadStore for MockBeadStore {
         _title: &str,
         _body: &str,
         _labels: &[&str],
-    ) -> needle::anyhow::Result<needle::types::BeadId> {
+    ) -> anyhow::Result<needle::types::BeadId> {
         Ok(BeadId::from("test-bead".to_string()))
     }
 
-    async fn doctor_repair(&self) -> needle::anyhow::Result<needle::bead_store::RepairReport> {
+    async fn doctor_repair(&self) -> anyhow::Result<needle::bead_store::RepairReport> {
         Ok(needle::bead_store::RepairReport::default())
     }
 
-    async fn doctor_check(&self) -> needle::anyhow::Result<needle::bead_store::RepairReport> {
+    async fn doctor_check(&self) -> anyhow::Result<needle::bead_store::RepairReport> {
         Ok(needle::bead_store::RepairReport::default())
     }
 
-    async fn full_rebuild(&self) -> needle::anyhow::Result<()> {
+    async fn full_rebuild(&self) -> anyhow::Result<()> {
         Ok(())
     }
 
@@ -119,7 +108,7 @@ impl needle::bead_store::BeadStore for MockBeadStore {
         &self,
         _blocker_id: &needle::types::BeadId,
         _blocked_id: &needle::types::BeadId,
-    ) -> needle::anyhow::Result<()> {
+    ) -> anyhow::Result<()> {
         Ok(())
     }
 
@@ -127,15 +116,15 @@ impl needle::bead_store::BeadStore for MockBeadStore {
         &self,
         _blocked_id: &needle::types::BeadId,
         _blocker_id: &needle::types::BeadId,
-    ) -> needle::anyhow::Result<()> {
+    ) -> anyhow::Result<()> {
         Ok(())
     }
 
-    async fn clear_assignee(&self, _id: &needle::types::BeadId) -> needle::anyhow::Result<()> {
+    async fn clear_assignee(&self, _id: &needle::types::BeadId) -> anyhow::Result<()> {
         Ok(())
     }
 
-    async fn claim_auto(&self, _actor: &str) -> needle::anyhow::Result<needle::types::ClaimResult> {
+    async fn claim_auto(&self, _actor: &str) -> anyhow::Result<needle::types::ClaimResult> {
         Ok(needle::types::ClaimResult::NotClaimable {
             reason: "not implemented".to_string(),
         })
@@ -146,13 +135,7 @@ impl needle::bead_store::BeadStore for MockBeadStore {
     }
 }
 
-fn make_test_bead(
-    id: &str,
-    title: &str,
-    status: BeadStatus,
-    labels: Vec<&str>,
-    closed_at: Option<DateTime<Utc>>,
-) -> Bead {
+fn make_test_bead(id: &str, title: &str, status: BeadStatus, labels: Vec<&str>) -> Bead {
     Bead {
         id: BeadId::from(id.to_string()),
         title: title.to_string(),
@@ -167,7 +150,6 @@ fn make_test_bead(
         comments: vec![],
         created_at: Utc::now(),
         updated_at: Utc::now(),
-        closed_at,
     }
 }
 
@@ -272,7 +254,6 @@ async fn test_deduplication_open_bead() {
         "Starvation alert",
         BeadStatus::Open,
         vec![&fp],
-        None,
     );
     store.add_bead(existing_bead);
 
@@ -315,7 +296,6 @@ async fn test_deduplication_recently_closed() {
         "Starvation alert",
         BeadStatus::Closed,
         vec![&fp],
-        Some(closed_at),
     );
     store.add_bead(closed_bead);
 
@@ -358,7 +338,6 @@ async fn test_deduplication_old_closed_bead() {
         "Starvation alert",
         BeadStatus::Closed,
         vec![&fp],
-        Some(closed_at),
     );
     store.add_bead(old_bead);
 
@@ -418,7 +397,6 @@ async fn test_deduplication_priority_recently_closed_over_open() {
         "Starvation alert",
         BeadStatus::Open,
         vec![&fp],
-        None,
     );
 
     let closed_at = Utc::now() - chrono::Duration::hours(6);
@@ -427,7 +405,6 @@ async fn test_deduplication_priority_recently_closed_over_open() {
         "Starvation alert",
         BeadStatus::Closed,
         vec![&fp],
-        Some(closed_at),
     );
 
     store.add_bead(open_bead);

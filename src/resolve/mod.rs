@@ -1122,7 +1122,8 @@ mod tests {
 
     #[test]
     fn resolve_response_parse_and_validate() {
-        let json = r#"{"decision":{"complete":{"evidence":"Commit abc123","summary":"Done"}}}"#;
+        let json =
+            r#"{"decision":{"complete":{"evidence":"Commit abc123","commit_message":"Done"}}}"#;
         let response = ResolveResponse::parse_and_validate(json).unwrap();
         assert!(matches!(
             response.decision,
@@ -1139,7 +1140,7 @@ mod tests {
     #[test]
     fn resolve_response_looks_valid_heuristic() {
         assert!(ResolveResponse::looks_valid(
-            r#"{"decision":{"complete":{"evidence":"x","summary":"y"}}}"#
+            r#"{"decision":{"complete":{"evidence":"x","commit_message":"y"}}}"#
         ));
 
         assert!(!ResolveResponse::looks_valid("not json"));
@@ -1476,7 +1477,7 @@ mod tests {
         ));
 
         // Missing evidence field
-        let json = r#"{"decision":{"complete":{"summary":"Done"}}}"#;
+        let json = r#"{"decision":{"complete":{"commit_message":"Done"}}}"#;
         let result = resolver.parse_and_validate_response(json);
 
         assert!(result.is_err());
@@ -1509,7 +1510,7 @@ mod tests {
         ));
 
         // Empty evidence
-        let json = r#"{"decision":{"complete":{"evidence":"","summary":"Done"}}}"#;
+        let json = r#"{"decision":{"complete":{"evidence":"","commit_message":"Done"}}}"#;
         let result = resolver.parse_and_validate_response(json);
 
         assert!(result.is_err());
@@ -2109,7 +2110,7 @@ mod tests {
 
         // Typo in decision type
         let result = resolver.parse_and_validate_response(
-            r#"{"decision":{"compleet":{"evidence":"test","summary":"test"}}}"#,
+            r#"{"decision":{"compleet":{"evidence":"test","commit_message":"test"}}}"#,
         );
         assert!(result.is_err());
     }
@@ -2122,7 +2123,7 @@ mod tests {
 
         // Wrong case (should be snake_case)
         let result = resolver.parse_and_validate_response(
-            r#"{"decision":{"Complete":{"evidence":"test","summary":"test"}}}"#,
+            r#"{"decision":{"Complete":{"evidence":"test","commit_message":"test"}}}"#,
         );
         assert!(result.is_err());
     }
@@ -2146,7 +2147,7 @@ mod tests {
 
         // Decision field is an array, not an object
         let result = resolver.parse_and_validate_response(
-            r#"{"decision":[{"complete":{"evidence":"test","summary":"test"}}]}"#,
+            r#"{"decision":[{"complete":{"evidence":"test","commit_message":"test"}}]}"#,
         );
         assert!(result.is_err());
     }
@@ -2162,8 +2163,8 @@ mod tests {
         ));
 
         // Missing evidence field in Complete
-        let result =
-            resolver.parse_and_validate_response(r#"{"decision":{"complete":{"summary":"Done"}}}"#);
+        let result = resolver
+            .parse_and_validate_response(r#"{"decision":{"complete":{"commit_message":"Done"}}}"#);
         assert!(result.is_err());
     }
 
@@ -2348,19 +2349,19 @@ mod tests {
         ));
 
         let result = resolver.parse_and_validate_response(
-            r#"{"decision":{"complete":{"evidence":"  ","summary":"Done"}}}"#,
+            r#"{"decision":{"complete":{"evidence":"  ","commit_message":"Done"}}}"#,
         );
         assert!(result.is_err());
     }
 
     #[test]
-    fn parse_and_validate_fails_on_empty_complete_summary() {
+    fn parse_and_validate_fails_on_empty_complete_commit_message() {
         let resolver = Resolver::new(crate::prompt::PromptBuilder::new(
             &crate::config::PromptConfig::default(),
         ));
 
         let result = resolver.parse_and_validate_response(
-            r#"{"decision":{"complete":{"evidence":"Commit abc123","summary":"\t\n"}}}"#,
+            r#"{"decision":{"complete":{"evidence":"Commit abc123","commit_message":"\t\n"}}}"#,
         );
         assert!(result.is_err());
     }

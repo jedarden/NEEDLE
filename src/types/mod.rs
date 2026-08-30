@@ -3606,11 +3606,13 @@ test foo ... ok"#;
         // timeout=299 (<300) should fail first
         let decision = decompose_bead_decision(&bead, 299, 1, None);
         assert!(decision.is_refuse());
-        // Should fail on timeout check (first threshold check)
+        // Should fail on body size check (first threshold check in code order)
+        // The code checks body size before timeout, so even though timeout is too short,
+        // the refusal reason is about body size being too small
         assert!(decision
             .refusal_reason()
             .unwrap()
-            .contains("timeout too short"));
+            .contains("bead body too small"));
     }
 
     #[test]

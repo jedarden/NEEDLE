@@ -3982,7 +3982,7 @@ mod tests {
         blocker.status = BeadStatus::Closed; // Blocker is done
 
         let mut blocked = make_bead_with_workspace_and_labels("blocked", 1, workspace_path, vec![]);
-        blocked.status = BeadStatus::Blocked;
+        blocked.status = BeadStatus::Open; // Bead is open but blocked by dependency
         blocked.dependencies.push(BrDependency {
             id: blocker.id.clone(),
             title: "Blocks the blocked bead".to_string(),

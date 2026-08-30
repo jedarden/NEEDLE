@@ -3224,6 +3224,24 @@ mod tests {
             })
             .unwrap();
 
+        // Create a heartbeat file showing this worker is actively working on this bead.
+        // Without this, Mend's stale-assignee cleanup will treat the assignee as stale
+        // (no heartbeat = stale) and clear it, causing the test to fail.
+        use crate::health::Heartbeat;
+        let heartbeat = Heartbeat {
+            qualified_id: "alive-worker".to_string(),
+            worker_id: "alive-worker".to_string(),
+            pid: std::process::id(),
+            workspace: PathBuf::from("/tmp/test"),
+            current_bead: Some(bead.id.clone()),
+            agent: "test".to_string(),
+            model: None,
+            provider: None,
+            started_at: Utc::now(),
+            last_heartbeat: Utc::now(),
+        };
+        HealthMonitor::write_heartbeat(&heartbeat, hb_dir.path()).unwrap();
+
         let (store, _release_count, clear_count) = MockBeadStore::new(vec![bead]);
         let mend = MendStrand::new(
             MendConfig::default(),

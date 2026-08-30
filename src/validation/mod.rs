@@ -1105,7 +1105,7 @@ mod tests {
         let bead = test_bead();
         let result = gate.validate(&bead, Path::new("/tmp")).await.unwrap();
         assert!(!result.passed());
-        assert!(result.failure_reason().unwrap().contains("[truncated]"));
+        assert!(result.failure_reason().unwrap().contains("... [truncated]"));
     }
 
     #[tokio::test]

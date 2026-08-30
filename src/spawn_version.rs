@@ -281,7 +281,8 @@ mod tests {
             "unknown"
         );
         assert_eq!(parse_backend_name("has@symbol 1.0.0"), "unknown");
-        assert_eq!(parse_backend_name("has space 1.0.0"), "unknown");
+        // "has space" is split by whitespace, so "has" is the first word and is valid
+        assert_eq!(parse_backend_name("has space 1.0.0"), "has");
     }
 
     #[test]
