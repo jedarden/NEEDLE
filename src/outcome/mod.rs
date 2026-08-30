@@ -14,7 +14,9 @@ use chrono::Utc;
 
 use crate::bead_store::BeadStore;
 use crate::config::Config;
-use crate::fingerprint::{AlertDeduplication, AlertKind, append_alert_note, build_alert_labels, check_alert_deduplication};
+use crate::fingerprint::{
+    append_alert_note, build_alert_labels, check_alert_deduplication, AlertDeduplication, AlertKind,
+};
 use crate::telemetry::{EventKind, Telemetry};
 #[cfg(test)]
 use crate::types::BeadStatus;
@@ -275,7 +277,8 @@ impl OutcomeHandler {
                 if let Some(report) = gate_report {
                     if !report.all_passed {
                         // Check if any result is an ExecutionError
-                        let execution_error = report.results.iter().find(|(_, r)| r.is_execution_error());
+                        let execution_error =
+                            report.results.iter().find(|(_, r)| r.is_execution_error());
                         if let Some((gate_name, result)) = execution_error {
                             if let GateResult::ExecutionError { command, reason } = result {
                                 self.handle_gate_error(
@@ -285,7 +288,8 @@ impl OutcomeHandler {
                                     gate_name,
                                     command,
                                     reason,
-                                ).await?
+                                )
+                                .await?
                             } else {
                                 unreachable!() // We already checked is_execution_error()
                             }
@@ -516,7 +520,10 @@ impl OutcomeHandler {
                                 reason = %reason,
                                 "shipped-work gate execution error — releasing without incrementing failure count"
                             );
-                            let report = GateReport::single_failure("shipped_work", format!("execution error: {}", reason));
+                            let report = GateReport::single_failure(
+                                "shipped_work",
+                                format!("execution error: {}", reason),
+                            );
                             return self.handle_gate_failure(store, bead, &report).await;
                         }
                         Err(e) => {
@@ -1098,24 +1105,22 @@ impl OutcomeHandler {
             bead.id, self.config.agent.default, signal_num, signal_code
         );
 
-        let dedup_result = check_alert_deduplication(
-            store,
-            &workspace,
-            &AlertKind::Crash,
-            &cause,
-        )
-        .await
-        .unwrap_or_else(|e| {
-            tracing::warn!(
-                error = %e,
-                bead_id = %bead.id,
-                "Failed to check crash alert deduplication, proceeding with creation"
-            );
-            AlertDeduplication::CreateNew
-        });
+        let dedup_result = check_alert_deduplication(store, &workspace, &AlertKind::Crash, &cause)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    error = %e,
+                    bead_id = %bead.id,
+                    "Failed to check crash alert deduplication, proceeding with creation"
+                );
+                AlertDeduplication::CreateNew
+            });
 
         match dedup_result {
-            AlertDeduplication::Deduplicated { bead_id, fingerprint } => {
+            AlertDeduplication::Deduplicated {
+                bead_id,
+                fingerprint,
+            } => {
                 let note = format!(
                     "Crash recurred for bead {}: signal={}, exit_code={}, agent={}, timestamp={}",
                     bead.id, signal_num, signal_code, self.config.agent.default, timestamp
@@ -1157,18 +1162,13 @@ impl OutcomeHandler {
                     timestamp,
                 );
 
-                let fingerprint = crate::fingerprint::compute_fingerprint(
-                    &workspace,
-                    &AlertKind::Crash,
-                    &cause,
-                );
+                let fingerprint =
+                    crate::fingerprint::compute_fingerprint(&workspace, &AlertKind::Crash, &cause);
 
                 // Hook 4: propagate stitch labels from the crashed bead to the alert.
                 let signal_label = format!("signal-{}", signal_num);
-                let alert_labels = build_alert_labels(
-                    &fingerprint,
-                    &["alert", "crash", &signal_label],
-                );
+                let alert_labels =
+                    build_alert_labels(&fingerprint, &["alert", "crash", &signal_label]);
 
                 // Add stitch labels
                 let mut final_labels = alert_labels;
@@ -3067,18 +3067,18 @@ mod tests {
         // Verify failure count was NOT incremented
         let actions = store.actions();
         assert!(
-            !actions.iter().any(
-                |a| matches!(a, StoreAction::AddLabel(_, label)
-                    if label == "failure-count:3" || label.contains("failure-count"))
-            ),
+            !actions
+                .iter()
+                .any(|a| matches!(a, StoreAction::AddLabel(_, label)
+                    if label == "failure-count:3" || label.contains("failure-count"))),
             "gate execution error should NOT increment failure count"
         );
 
         // Verify cycling label was NOT added
         assert!(
-            !actions.iter().any(
-                |a| matches!(a, StoreAction::AddLabel(_, label) if label == "cycling")
-            ),
+            !actions
+                .iter()
+                .any(|a| matches!(a, StoreAction::AddLabel(_, label) if label == "cycling")),
             "gate execution error should NOT add cycling label"
         );
 
@@ -3136,10 +3136,10 @@ mod tests {
 
         // Verify gate.execution_error event was NOT emitted
         assert!(
-            !result.telemetry_events.iter().any(|e| matches!(
-                e,
-                EventKind::GateExecutionError { .. }
-            )),
+            !result
+                .telemetry_events
+                .iter()
+                .any(|e| matches!(e, EventKind::GateExecutionError { .. })),
             "gate failure should NOT emit gate.execution_error event"
         );
     }

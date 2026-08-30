@@ -261,6 +261,12 @@ pub enum EventKind {
         excluded_count: usize,
         candidate_exclusion_reasons: Vec<String>,
     },
+    /// Alert bead was deduplicated - an existing bead was updated instead of creating a new one.
+    AlertDeduplicated {
+        fingerprint: String,
+        bead_id: BeadId,
+        kind: String,
+    },
 
     // ── Bead claim ──
     ClaimAttempt {
@@ -1039,6 +1045,7 @@ impl EventKind {
             EventKind::BeadStoreError { .. } => "bead_store.error",
             EventKind::QueueEmpty => "worker.queue_empty",
             EventKind::PluckStarvationDetected { .. } => "strand.pluck.starvation_detected",
+            EventKind::AlertDeduplicated { .. } => "alert.deduplicated",
             EventKind::ClaimAttempt { .. } => "bead.claim.attempted",
             EventKind::ClaimSuccess { .. } => "bead.claim.succeeded",
             EventKind::ClaimRaceLost { .. } => "bead.claim.race_lost",
