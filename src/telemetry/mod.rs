@@ -261,6 +261,11 @@ pub enum EventKind {
         excluded_count: usize,
         candidate_exclusion_reasons: Vec<String>,
     },
+    /// Pluck ordering degraded due to large queue size.
+    PluckOrderingDegraded {
+        open_bead_count: usize,
+        threshold: usize,
+    },
     /// Alert bead was deduplicated - an existing bead was updated instead of creating a new one.
     AlertDeduplicated {
         fingerprint: String,
@@ -504,6 +509,11 @@ pub enum EventKind {
     MendDependencyRemoved {
         bead_id: BeadId,
         blocker_id: BeadId,
+    },
+    MendCycleBroken {
+        blocked_id: BeadId,
+        blocker_id: BeadId,
+        cycle_len: usize,
     },
     MendBeadReleaseFailed {
         bead_id: String,
@@ -1058,6 +1068,10 @@ impl EventKind {
             EventKind::BeadStoreError { .. } => "bead_store.error",
             EventKind::QueueEmpty => "worker.queue_empty",
             EventKind::PluckStarvationDetected { .. } => "strand.pluck.starvation_detected",
+            EventKind::PluckOrderingDegraded { .. } => "strand.pluck.ordering_degraded",
+            EventKind::MendCycleBroken { .. } => "mend.cycle_broken",
+            EventKind::AuditBeadClosedAsVerification { .. } => "audit.bead_closed_as_verification",
+            EventKind::AuditBeadDeferredOverBudget { .. } => "audit.bead_deferred_over_budget",
             EventKind::AlertDeduplicated { .. } => "alert.deduplicated",
             EventKind::ClaimAttempt { .. } => "bead.claim.attempted",
             EventKind::ClaimSuccess { .. } => "bead.claim.succeeded",
@@ -1200,6 +1214,7 @@ impl EventKind {
             EventKind::OtlpDropped { .. } => "telemetry.otlp.dropped",
             EventKind::OtlpShutdownTimeout { .. } => "telemetry.otlp.shutdown_timeout",
             EventKind::Log { .. } => "log.entry",
+            EventKind::PluckOrderingDegraded { .. } => "strand.pluck.ordering_degraded",
         }
     }
 
@@ -1366,6 +1381,10 @@ impl EventKind {
             EventKind::UpgradeCheckStarted { .. } => None,
             EventKind::UpgradeCheckCompleted { .. } => None,
             EventKind::UpgradeCheckFailed { .. } => None,
+            EventKind::PluckOrderingDegraded { .. } => None,
+            EventKind::MendCycleBroken { .. } => None,
+            EventKind::AuditBeadClosedAsVerification { .. } => None,
+            EventKind::AuditBeadDeferredOverBudget { .. } => None,
         }
     }
 
@@ -2591,10 +2610,7 @@ impl EventKind {
                 "assignee": assignee,
                 "error": error,
             }),
-            EventKind::AuditBeadClosedAsVerification {
-                bead_id,
-                parent_id,
-            } => serde_json::json!({
+            EventKind::AuditBeadClosedAsVerification { bead_id, parent_id } => serde_json::json!({
                 "bead_id": bead_id,
                 "parent_id": parent_id,
             }),
@@ -2709,6 +2725,36 @@ impl EventKind {
                 "worker_constraints": worker_constraints,
                 "detected_at": detected_at,
                 "fleet_state": fleet_state,
+            }),
+            EventKind::PluckOrderingDegraded {
+                open_bead_count,
+                threshold,
+            } => serde_json::json!({
+                "open_bead_count": open_bead_count,
+                "threshold": threshold,
+            }),
+            EventKind::MendCycleBroken {
+                blocked_id,
+                blocker_id,
+                cycle_len,
+            } => serde_json::json!({
+                "blocked_id": blocked_id,
+                "blocker_id": blocker_id,
+                "cycle_len": cycle_len,
+            }),
+            EventKind::AuditBeadClosedAsVerification {
+                bead_id,
+                original_assignee,
+            } => serde_json::json!({
+                "bead_id": bead_id,
+                "original_assignee": original_assignee,
+            }),
+            EventKind::AuditBeadDeferredOverBudget {
+                bead_id,
+                budget_millis,
+            } => serde_json::json!({
+                "bead_id": bead_id,
+                "budget_millis": budget_millis,
             }),
         }
     }
@@ -2878,7 +2924,11 @@ impl EventKind {
             | EventKind::BeadQuarantined { .. }
             | EventKind::FalseCloseDetected { .. }
             | EventKind::SpawnPathModifiedInPlace { .. }
-            | EventKind::Log { .. } => None,
+            | EventKind::Log { .. }
+            | EventKind::PluckOrderingDegraded { .. }
+            | EventKind::MendCycleBroken { .. }
+            | EventKind::AuditBeadClosedAsVerification { .. }
+            | EventKind::AuditBeadDeferredOverBudget { .. } => None,
         }
     }
 }

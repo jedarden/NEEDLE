@@ -1485,7 +1485,30 @@ impl super::Strand for PluckStrand {
             );
         }
 
-        // 4. Sort: deterministic (priority, created_at, id).
+        // 4. Sort: deterministic with dependency awareness.
+        // Need full inventory for priority inheritance and pinned bucket computation.
+        let all_beads = match store.list_all().await {
+            Ok(beads) => beads,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to load full inventory for dependency-aware sorting, falling back to simple sort"
+                );
+                // Fallback to simple sort on failure
+                candidates.sort_by(|a, b| {
+                    a.priority
+                        .cmp(&b.priority)
+                        .then_with(|| {
+                            Self::extract_failure_count(a).cmp(&Self::extract_failure_count(b))
+                        })
+                        .then_with(|| a.created_at.cmp(&b.created_at))
+                        .then_with(|| a.id.as_ref().cmp(b.id.as_ref()))
+                });
+                // Continue to split trigger with fallback sort - return empty all_beads
+                Vec::new()
+            }
+        };
+
         if !candidates.is_empty() {
             let first = &candidates[0];
             tracing::debug!(
@@ -1493,13 +1516,13 @@ impl super::Strand for PluckStrand {
                 first_bead_id = %first.id,
                 first_priority = first.priority,
                 first_created_at = %first.created_at,
-                "Sorting {} candidates by (priority ASC, created_at ASC, id ASC)",
+                "Sorting {} candidates by (effective_priority, pinned_bucket, failure_count, created_at, id)",
                 candidates.len()
             );
         }
-        // 4. Sort: deterministic (priority, created_at, id).
-        // Note: sorting is handled directly here since sort_candidates needs all_beads context
-        candidates.sort_by_key(|b| (b.priority, b.created_at, b.id.clone()));
+
+        // Apply the new dependency-aware sorting
+        self.sort_candidates(&mut candidates, &all_beads, &self.telemetry);
 
         // 5. Check for split trigger: if the first candidate has accumulated
         //    enough consecutive failures, dispatch a SPLIT instruction instead
