@@ -524,15 +524,25 @@ mod tests {
 
         let captured = get_captured_backtrace().expect("Backtrace should be captured");
 
-        // Verify the backtrace has a reasonable number of frames
-        // Note: Without unstable .frames() API, we can't count frames directly,
-        // but we can verify the backtrace is substantial by checking its string representation
+        // Verify the backtrace has substantial content
+        // Backtrace format is comma-separated frames, which may be on one line or multiple
+        // We verify it has substantial content by checking for multiple frame indicators
         let backtrace_str = captured.backtrace.to_string();
-        let frame_count = backtrace_str.lines().count();
+
+        // Count frame indicators (entries enclosed in braces) instead of lines
+        // Format: [{ fn: ... }, { fn: ... }, ...]
+        let frame_count = backtrace_str.matches("{ fn:").count();
+
         assert!(
-            frame_count > 1,
-            "Full backtrace should contain multiple frames, got: {}",
+            frame_count > 5,
+            "Full backtrace should contain multiple frames (got {}), indicating complete trace",
             frame_count
+        );
+
+        // Verify it contains key structural elements of a full backtrace
+        assert!(
+            backtrace_str.contains("Backtrace ["),
+            "Backtrace should start with 'Backtrace [' marker"
         );
 
         // Note: In some test environments symbols may not be available,

@@ -46,6 +46,9 @@ use crate::cost::{BudgetConfig, PricingConfig};
 use crate::types::{HardDeadline, IdentifierScheme, IdleAction};
 use crate::validation::GateConfig;
 
+#[cfg(test)]
+use serial_test::serial;
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Sub-structs
 // ──────────────────────────────────────────────────────────────────────────────
