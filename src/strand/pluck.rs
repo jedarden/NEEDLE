@@ -2022,11 +2022,15 @@ mod tests {
 
     #[tokio::test]
     async fn candidates_sorted_by_priority_then_created_at() {
+        // Ages, not fixed dates: compute_effective_priority ages a bead up a
+        // level at 14 days and two at 30, so any fixture pinned to a literal
+        // date eventually has every priority flattened to 0 and stops testing
+        // the ordering it was written for.
         let store = MemoryStore {
             beads: vec![
-                make_bead("low-pri", 2, "2026-01-01 00:00:00"),
-                make_bead("high-pri", 1, "2026-01-02 00:00:00"),
-                make_bead("high-pri-older", 1, "2026-01-01 00:00:00"),
+                make_bead_with_age("low-pri", 2, 2),
+                make_bead_with_age("high-pri", 1, 1),
+                make_bead_with_age("high-pri-older", 1, 2),
             ],
         };
 
@@ -2333,11 +2337,13 @@ mod tests {
     #[tokio::test]
     async fn same_queue_state_produces_same_ordering() {
         // Run twice with the same input and verify identical output.
+        // Ages rather than literal dates — see the note in
+        // candidates_sorted_by_priority_then_created_at.
         let beads = vec![
-            make_bead("z-bead", 2, "2026-01-01 00:00:00"),
-            make_bead("a-bead", 1, "2026-01-03 00:00:00"),
-            make_bead("m-bead", 1, "2026-01-01 00:00:00"),
-            make_bead("m-bead-2", 1, "2026-01-01 00:00:00"),
+            make_bead_with_age("z-bead", 2, 3),
+            make_bead_with_age("a-bead", 1, 1),
+            make_bead_with_age("m-bead", 1, 3),
+            make_bead_with_age("m-bead-2", 1, 3),
         ];
 
         let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()));

@@ -2509,6 +2509,21 @@ mod tests {
                 anyhow::bail!("bead not found: {}", id)
             }
         }
+        async fn close(&self, id: &BeadId, _reason: &str) -> Result<()> {
+            // BeadStore::close defaults to an error ("configured bead backend
+            // does not implement close"), so a mock that does not override it
+            // silently turns every close-driven code path into a no-op — which
+            // is why orphaned-split-child triage counted nothing.
+            let mut beads = self.all_beads.lock().unwrap();
+            match beads.iter_mut().find(|b| &b.id == id) {
+                Some(bead) => {
+                    bead.status = BeadStatus::Closed;
+                    bead.assignee = None;
+                    Ok(())
+                }
+                None => anyhow::bail!("bead not found: {}", id),
+            }
+        }
         async fn block(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
