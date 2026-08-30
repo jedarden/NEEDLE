@@ -593,8 +593,9 @@ UNAMEEOF
     # Create mock curl that returns a fake release with only x86_64 assets
     cat > "$mock_dir/bin/curl" << "CURLEOF"
 #!/usr/bin/env bash
-# Use full path to grep to avoid circular dependency with our mock
-if echo "$*" | /run/current-system/sw/bin/grep -q "api.github.com"; then
+# Match with a bash pattern: no external tool, so no dependency on where
+# grep lives on this host (a hardcoded /run/current-system path broke CI).
+if [[ "$*" == *"api.github.com"* ]]; then
     cat << "APIJSON"
 {
   "tag_name": "v0.5.0",
@@ -611,15 +612,16 @@ fi
 CURLEOF
     chmod +x "$mock_dir/bin/curl"
 
-    # Prepend mock bin to PATH
+    # Prepend mock bin to PATH for this test only
+    local saved_path="$PATH"
     export PATH="$mock_dir/bin:$PATH"
-
-    # Run install.sh - it should fail during asset availability check
+    # Run install.sh - it should fail during asset availability check. The
+    # `|| exit_code=$?` keeps a non-zero exit from tripping `set -e` here.
     local install_script="$REPO_INSTALL_SH"
     local output
-    local exit_code
-    output=$(bash "$install_script" 2>&1)
-    exit_code=$?
+    local exit_code=0
+    output=$(bash "$install_script" 2>&1) || exit_code=$?
+    export PATH="$saved_path"
 
     # Should exit with non-zero
     assert_exit_code 1 "$exit_code" "install.sh should exit 1 for unsupported arch"

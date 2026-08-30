@@ -43,6 +43,7 @@ detect_asset_name() {
     echo "needle-${arch}-${os}"
 }
 ASSET_NAME="$(detect_asset_name)"
+BEAD_ASSET_NAME="bead-${ASSET_NAME#needle-}"
 
 setup() {
     # Fresh, unique fixture root + fake curl + isolated home per test.
@@ -67,7 +68,15 @@ while [[ $# -gt 0 ]]; do
         *)  url="$1"; shift ;;
     esac
 done
-if [[ "$url" == *"/releases/latest" ]]; then
+if [[ "$url" == *"/bead-rs/"* ]]; then
+    # bead-rs release: separate fixture tree so its checksums.txt does not
+    # collide with needle's.
+    if [[ "$url" == *"/releases/latest" ]]; then
+        file="$MOCK_ROOT/beadrs/api.json"
+    else
+        file="$MOCK_ROOT/beadrs/files/$(basename "$url")"
+    fi
+elif [[ "$url" == *"/releases/latest" ]]; then
     file="$MOCK_ROOT/api.json"
 else
     file="$MOCK_ROOT/files/$(basename "$url")"
@@ -88,7 +97,17 @@ MOCKEOF
     printf '#!/bin/sh\necho "needle 0.1.0-mock"\n' > "$MOCK_ROOT/files/$ASSET_NAME"
     chmod +x "$MOCK_ROOT/files/$ASSET_NAME"
 
-    printf '{"tag_name": "v0.1.0"}\n' > "$MOCK_ROOT/api.json"
+    printf '{"tag_name": "v0.1.0", "assets": [{"name": "%s"}, {"name": "checksums.txt"}]}\n' \
+        "$ASSET_NAME" > "$MOCK_ROOT/api.json"
+
+    # bead-rs release fixtures: a mock `bead` binary, its release document and
+    # a correct checksums.txt. install.sh bundles bead next to needle.
+    mkdir -p "$MOCK_ROOT/beadrs/files"
+    printf '#!/bin/sh\necho "bead 0.2.2-mock"\n' > "$MOCK_ROOT/beadrs/files/$BEAD_ASSET_NAME"
+    chmod +x "$MOCK_ROOT/beadrs/files/$BEAD_ASSET_NAME"
+    printf '{"tag_name": "v0.2.2", "assets": [{"name": "%s"}, {"name": "checksums.txt"}]}\n' \
+        "$BEAD_ASSET_NAME" > "$MOCK_ROOT/beadrs/api.json"
+    write_bead_checksums correct
 
     LAST_RC=""
     LAST_OUT="$BASE_DIR/out.log"
@@ -124,6 +143,16 @@ write_checksums() {
         printf '%s  %s\notherhash  some-other-asset\n' "$hash" "$ASSET_NAME" > "$MOCK_ROOT/files/checksums.txt"
     fi
 }
+
+# write_bead_checksums <correct|hash>
+write_bead_checksums() {
+    local hash="$1"
+    if [[ "$hash" == "correct" ]]; then
+        hash=$(sha256sum "$MOCK_ROOT/beadrs/files/$BEAD_ASSET_NAME" | awk '{print $1}')
+    fi
+    printf '%s  %s\n' "$hash" "$BEAD_ASSET_NAME" > "$MOCK_ROOT/beadrs/files/checksums.txt"
+}
+bead_installed() { [[ -f "$MOCK_HOME/bin/bead" ]]; }
 
 # run_installer [--env NAME=VALUE ...] [--] [args...]
 # Runs the real install.sh with an empty environment, mock curl first on
@@ -380,6 +409,7 @@ test_version_discovery_large_payload() {
         echo '{'
         echo '  "tag_name": "v9.9.9-bigpayload",'
         echo '  "assets": ['
+        printf '    {"name": "%s"},\n' "$ASSET_NAME"
         local i
         for i in $(seq 1 4000); do
             printf '    {"name": "pad-asset-%d", "browser_download_url": "https://github.com/jedarden/NEEDLE/releases/download/v9.9.9-bigpayload/pad-%d"},\n' "$i" "$i"
@@ -420,6 +450,8 @@ test_unknown_option_rejected() {
 test_unsupported_architecture_fails_early() {
     echo "TEST: unsupported architecture (arm64) fails before download"
     setup
+    printf '{"tag_name": "v0.1.0", "assets": [{"name": "needle-x86_64-unknown-linux-gnu"}, {"name": "checksums.txt"}]}\n' \
+        > "$MOCK_ROOT/api.json"
 
     # Create a mock uname that reports arm64
     local mock_uname="$BASE_DIR/bin/uname"
@@ -464,6 +496,114 @@ EOF
     teardown
 }
 
+# ---------------------------------------------------------------------------
+# bead backend bundling (GitHub #16)
+# ---------------------------------------------------------------------------
+
+test_bead_installed_alongside_needle() {
+    echo "TEST: bead backend is installed next to needle with a verified checksum"
+    setup
+    write_checksums correct
+    run_installer
+    assert_rc_zero
+    assert_installed
+    record "$( bead_installed; echo $? )" "bead installed next to needle"
+    assert_output_contains "bead install reported" "bead v0.2.2 installed to"
+    assert_output_contains "summary names the bead version" "bead backend: v0.2.2"
+    teardown
+}
+
+test_bead_checksum_tamper_aborts() {
+    echo "TEST: tampered bead checksum aborts and leaves bead uninstalled"
+    setup
+    write_checksums correct
+    write_bead_checksums "0000000000000000000000000000000000000000000000000000000000000000"
+    run_installer
+    assert_rc_nonzero
+    record "$( ! bead_installed; echo $? )" "bead NOT moved into place"
+    assert_output_contains "bead mismatch reported" "Checksum mismatch for $BEAD_ASSET_NAME"
+    teardown
+}
+
+test_skip_bead_flag_leaves_bead_absent() {
+    echo "TEST: --skip-bead installs needle only"
+    setup
+    write_checksums correct
+    run_installer -- --skip-bead
+    assert_rc_zero
+    assert_installed
+    record "$( ! bead_installed; echo $? )" "bead absent with --skip-bead"
+    assert_output_contains "skip acknowledged" "Skipping bead backend install"
+    teardown
+}
+
+test_skip_bead_env_leaves_bead_absent() {
+    echo "TEST: NEEDLE_SKIP_BEAD=1 installs needle only"
+    setup
+    write_checksums correct
+    run_installer --env NEEDLE_SKIP_BEAD=1
+    assert_rc_zero
+    assert_installed
+    record "$( ! bead_installed; echo $? )" "bead absent with NEEDLE_SKIP_BEAD=1"
+    teardown
+}
+
+test_existing_newer_bead_retained() {
+    echo "TEST: an existing bead at or above the release version is kept"
+    setup
+    write_checksums correct
+    printf '#!/bin/sh\necho "bead 9.9.9 (local)"\n' > "$BASE_DIR/bin/bead"
+    chmod +x "$BASE_DIR/bin/bead"
+    run_installer
+    assert_rc_zero
+    assert_installed
+    record "$( ! bead_installed; echo $? )" "release bead NOT installed over a newer one"
+    assert_output_contains "existing bead kept" "bead 9.9.9 already on PATH"
+    assert_output_contains "summary names the kept version" "bead backend: 9.9.9"
+    teardown
+}
+
+test_existing_older_bead_replaced() {
+    echo "TEST: an existing bead below the release version is replaced"
+    setup
+    write_checksums correct
+    printf '#!/bin/sh\necho "bead 0.1.3 (old)"\n' > "$BASE_DIR/bin/bead"
+    chmod +x "$BASE_DIR/bin/bead"
+    run_installer
+    assert_rc_zero
+    record "$( bead_installed; echo $? )" "release bead installed over an older one"
+    assert_output_contains "bead install reported" "bead v0.2.2 installed to"
+    teardown
+}
+
+test_bead_release_unreachable_is_nonfatal() {
+    echo "TEST: bead-rs release unreachable warns but needle still installs"
+    setup
+    write_checksums correct
+    rm -f "$MOCK_ROOT/beadrs/api.json"
+    run_installer
+    assert_rc_zero
+    assert_installed
+    record "$( ! bead_installed; echo $? )" "bead absent when its release is unreachable"
+    assert_output_contains "legible warning" "bead not installed"
+    assert_output_contains "later install path" "cargo install --git https://github.com/jedarden/bead-rs --bin bead"
+    teardown
+}
+
+test_bead_no_platform_asset_is_nonfatal() {
+    echo "TEST: bead-rs release without this platform's asset warns but needle still installs"
+    setup
+    write_checksums correct
+    printf '{"tag_name": "v0.2.2", "assets": [{"name": "bead-some-other-platform"}, {"name": "checksums.txt"}]}\n' \
+        > "$MOCK_ROOT/beadrs/api.json"
+    run_installer
+    assert_rc_zero
+    assert_installed
+    record "$( ! bead_installed; echo $? )" "bead absent when no platform asset exists"
+    assert_output_contains "legible warning" "No prebuilt bead for"
+    teardown
+}
+
 main() {
     echo "========================================="
     echo "NEEDLE Installer E2E Tests (real install.sh + mock curl)"
@@ -485,6 +625,14 @@ main() {
     test_help_documents_security_tradeoff
     test_unknown_option_rejected
     test_unsupported_architecture_fails_early
+    test_bead_installed_alongside_needle
+    test_bead_checksum_tamper_aborts
+    test_skip_bead_flag_leaves_bead_absent
+    test_skip_bead_env_leaves_bead_absent
+    test_existing_newer_bead_retained
+    test_existing_older_bead_replaced
+    test_bead_release_unreachable_is_nonfatal
+    test_bead_no_platform_asset_is_nonfatal
 
     echo ""
     echo "========================================="
