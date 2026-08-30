@@ -1730,13 +1730,11 @@ exit 1
         let whitespace_binary = tmp_dir.path().join("whitespace-binary");
 
         // Create a binary that produces only whitespace
-        std::fs::write(
-            &whitespace_binary,
-            r#"#!/bin/sh
-echo "   \t\n"
-"#,
-        )
-        .unwrap();
+        // printf, not echo: `echo` does not interpret backslash escapes in
+        // every /bin/sh (bash's builtin prints them literally), so this
+        // fixture emitted the literal text `   \t\n` — which is not
+        // whitespace-only, and the parse it was meant to reject succeeded.
+        std::fs::write(&whitespace_binary, "#!/bin/sh\nprintf '   \\t\\n'\n").unwrap();
 
         let mut perms = std::fs::metadata(&whitespace_binary).unwrap().permissions();
         perms.set_mode(0o755);

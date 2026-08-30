@@ -183,8 +183,14 @@ fn panic_hook(info: &PanicInfo<'_>) {
         },
     };
 
-    // Capture the full backtrace at the moment of panic
-    let backtrace = Backtrace::capture();
+    // Capture the full backtrace at the moment of panic.
+    //
+    // force_capture, not capture: std reads RUST_BACKTRACE once and caches the
+    // enabled flag process-wide, so if anything captured a backtrace before
+    // set_full_backtrace_env ran, every later capture in this process is
+    // permanently Disabled and the hook records "<disabled>" — which is the
+    // one situation the hook exists for.
+    let backtrace = Backtrace::force_capture();
     let backtrace_str = format!("{:?}", backtrace);
 
     // Capture timestamp
