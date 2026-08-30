@@ -4931,13 +4931,15 @@ async fn worker_binary_path_tilde_expansion_multiple_tildes() {
         "first tilde should expand, second tilde preserved"
     );
 
-    // Test 4: Tilde followed by bare tilde (~ ~)
+    // Test 4: Tilde followed by bare tilde (~ ~) - should NOT expand
+    //
+    // "~ ~" is neither a bare "~" nor a "~/"-prefixed path, so it is a
+    // filename that happens to start with a tilde and is returned verbatim.
     let tilde_space_tilde = "~ ~";
     let expanded = expand_tilde(tilde_space_tilde);
-    let expected = format!("{} ~", isolated_home.to_str().unwrap());
     assert_eq!(
-        expanded, expected,
-        "first tilde should expand to HOME, second tilde preserved"
+        expanded, "~ ~",
+        "a tilde not followed by a separator is not a home reference"
     );
 
     // Test 5: Path with tilde in middle and start (~/path/~another)
@@ -4993,11 +4995,14 @@ async fn worker_binary_path_tilde_expansion_position() {
     );
 
     // Test 2: Tilde in middle of path (/path/~/nested) - should NOT expand
+    //
+    // And must not be truncated either: expand_tilde only ever rewrites a
+    // leading "~/" or a bare "~", and returns anything else verbatim.
     let tilde_in_middle = "/path/~/nested";
     let expanded = expand_tilde(tilde_in_middle);
     assert_eq!(
-        expanded, "/path/~",
-        "tilde in middle of path should not be expanded, path should be truncated"
+        expanded, "/path/~/nested",
+        "tilde in middle of path should not be expanded and the path must survive intact"
     );
 
     // Test 3: Tilde with path before it (before~/path) - should NOT expand
@@ -8454,9 +8459,14 @@ async fn trace_metadata_written_after_bead_action() {
     let mut config = Config::default();
     config.worker.idle_action = needle::types::IdleAction::Exit;
 
-    // Create trace capture in a temp directory
+    // Create trace capture in a temp directory.
+    //
+    // TraceCapture::new returns None for a workspace that is not a bead
+    // workspace, so that a stray bead id cannot create a .beads tree in a
+    // shared temp dir. Make the fixture one.
     let temp_dir = TempDir::new().unwrap();
     let workspace = temp_dir.path();
+    std::fs::create_dir_all(workspace.join(".beads")).unwrap();
     let bead_id = BeadId::from("test-bead");
     let capture = TraceCapture::new(&bead_id, workspace).unwrap();
 
