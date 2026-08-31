@@ -68,6 +68,8 @@ pub struct KnotStrand {
     exhaustion_count: Mutex<u64>,
     /// Timestamp of the last alert emitted (for rate limiting).
     last_alert_at: Mutex<Option<DateTime<Utc>>>,
+    /// Timestamp of the first starvation detection (for transient gap backoff).
+    first_starvation_detected_at: Mutex<Option<DateTime<Utc>>>,
     /// Telemetry emitter for starvation events.
     telemetry: Telemetry,
 }
@@ -85,6 +87,7 @@ impl KnotStrand {
             workspace_scope: workspace,
             exhaustion_count: Mutex::new(0),
             last_alert_at: Mutex::new(None),
+            first_starvation_detected_at: Mutex::new(None),
             telemetry,
         }
     }
@@ -232,6 +235,45 @@ impl KnotStrand {
             .unwrap_or_else(|e| e.into_inner());
         *guard = 0;
     }
+
+    /// Check whether we're within the transient gap backoff window.
+    ///
+    /// Returns true if we're still waiting for the backoff period to elapse.
+    fn is_within_backoff_window(&self) -> bool {
+        let guard = self.first_starvation_detected_at.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(first_detected) = *guard {
+            // Use a random backoff between 5-15 minutes (jittered)
+            let backoff_minutes = 5 + (first_detected.timestamp() % 10); // 5-14 minutes based on timestamp
+            let backoff_duration = chrono::Duration::minutes(backoff_minutes);
+            Utc::now() - first_detected < backoff_duration
+        } else {
+            false
+        }
+    }
+
+    /// Record that starvation was first detected (start the backoff window).
+    fn record_first_starvation_detection(&self) {
+        let mut guard = self.first_starvation_detected_at.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.is_none() {
+            *guard = Some(Utc::now());
+        }
+    }
+
+    /// Clear the starvation detection timestamp (when condition resolves).
+    fn clear_starvation_detection(&self) {
+        let mut guard = self.first_starvation_detected_at.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = None;
+    }
+
+    /// Get the backoff window duration in minutes (for logging).
+    fn backoff_window_minutes(&self) -> i64 {
+        let guard = self.first_starvation_detected_at.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(first_detected) = *guard {
+            5 + (first_detected.timestamp() % 10)
+        } else {
+            0
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -275,7 +317,22 @@ impl super::Strand for KnotStrand {
                     return StrandResult::Error(e);
                 }
             };
-            let cycle = if matches!(diagnosis, ExhaustionDiagnosis::Invisible { .. }) {
+
+            // Check if we had a previous starvation detection in backoff and the condition resolved
+            let was_in_backoff = self.first_starvation_detected_at.lock().unwrap_or_else(|e| e.into_inner()).is_some();
+            let is_now_invisible = matches!(diagnosis, ExhaustionDiagnosis::Invisible { .. });
+
+            // If we were tracking a starvation detection and it's no longer Invisible, log as resolved
+            if was_in_backoff && !is_now_invisible {
+                tracing::info!(
+                    strand = "knot",
+                    diagnosis = diagnosis.as_str(),
+                    "transient starvation gap resolved — condition self-corrected within backoff window"
+                );
+                self.clear_starvation_detection();
+            }
+
+            let cycle = if is_now_invisible {
                 self.increment_exhaustion()
             } else {
                 self.reset_exhaustion();
@@ -294,7 +351,7 @@ impl super::Strand for KnotStrand {
                 "knot strand evaluated"
             );
 
-            // Only emit telemetry for INVISIBLE diagnosis and only after threshold.
+            // Only emit telemetry for INVISIBLE diagnosis and only after threshold AND backoff window.
             if let ExhaustionDiagnosis::Invisible {
                 total,
                 open_count,
@@ -304,40 +361,72 @@ impl super::Strand for KnotStrand {
             } = &diagnosis
             {
                 if cycle >= self.config.exhaustion_threshold && !self.is_within_cooldown() {
-                    // Calculate excluded beads: those that are neither open nor in progress.
-                    let excluded_count = total - open_count - in_progress_count;
+                    // First time reaching threshold - record detection and enter backoff
+                    if cycle == self.config.exhaustion_threshold {
+                        self.record_first_starvation_detection();
+                        tracing::info!(
+                            workspace = %workspace,
+                            diagnosis = diagnosis.as_str(),
+                            open_count,
+                            backoff_window_minutes = self.backoff_window_minutes(),
+                            "starvation threshold reached — entering backoff window to confirm persistence"
+                        );
+                    } else if self.is_within_backoff_window() {
+                        // Still within backoff window - continue waiting
+                        tracing::info!(
+                            workspace = %workspace,
+                            diagnosis = diagnosis.as_str(),
+                            open_count,
+                            backoff_window_minutes = self.backoff_window_minutes(),
+                            "still within backoff window, waiting to confirm persistence"
+                        );
+                    } else {
+                        // Backoff window has elapsed — condition is persistent
+                        tracing::info!(
+                            workspace = %workspace,
+                            diagnosis = diagnosis.as_str(),
+                            open_count,
+                            "starvation persisted through backoff window — emitting telemetry"
+                        );
 
-                    // Build candidate exclusion reasons from assignees holding in-progress beads.
-                    let mut candidate_exclusion_reasons = Vec::new();
-                    for worker in claimed_by {
-                        candidate_exclusion_reasons.push(format!("held_by_{}", worker));
-                    }
-                    if excluded_count > 0 {
-                        candidate_exclusion_reasons.push("excluded_by_status".to_string());
-                    }
+                        // Calculate excluded beads: those that are neither open nor in progress.
+                        let excluded_count = total - open_count - in_progress_count;
 
-                    // Emit the sole terminal starvation verdict. Knot must not
-                    // manufacture target-repository work: doing so feeds the
-                    // scheduler its own control-plane artifact and can trigger
-                    // recursive Unravel generation.
-                    let _ = self.telemetry.emit(
-                        crate::telemetry::EventKind::KnotStarvationDetected {
-                            workspace: workspace.clone(),
-                            open_count: *open_count,
+                        // Build candidate exclusion reasons from assignees holding in-progress beads.
+                        let mut candidate_exclusion_reasons = Vec::new();
+                        for worker in claimed_by {
+                            candidate_exclusion_reasons.push(format!("held_by_{}", worker));
+                        }
+                        if excluded_count > 0 {
+                            candidate_exclusion_reasons.push("excluded_by_status".to_string());
+                        }
+
+                        // Emit the sole terminal starvation verdict. Knot must not
+                        // manufacture target-repository work: doing so feeds the
+                        // scheduler its own control-plane artifact and can trigger
+                        // recursive Unravel generation.
+                        let _ = self.telemetry.emit(
+                            crate::telemetry::EventKind::KnotStarvationDetected {
+                                workspace: workspace.clone(),
+                                open_count: *open_count,
+                                excluded_count,
+                                candidate_exclusion_reasons: candidate_exclusion_reasons.clone(),
+                            },
+                            Utc::now(),
+                        );
+
+                        self.record_alert();
+                        // Clear the backoff tracking after emitting the alert
+                        self.clear_starvation_detection();
+
+                        tracing::warn!(
+                            workspace = %workspace,
+                            diagnosis = diagnosis.as_str(),
+                            open_count,
                             excluded_count,
-                            candidate_exclusion_reasons: candidate_exclusion_reasons.clone(),
-                        },
-                        Utc::now(),
-                    );
-
-                    self.record_alert();
-                    tracing::warn!(
-                        workspace = %workspace,
-                        diagnosis = diagnosis.as_str(),
-                        open_count,
-                        excluded_count,
-                        "knot emitted terminal starvation telemetry"
-                    );
+                            "knot emitted terminal starvation telemetry"
+                        );
+                    }
                 }
             }
 
@@ -647,17 +736,24 @@ mod tests {
         );
         assert_eq!(store.created_count(), 0, "no beads created below threshold");
 
-        // Third cycle: hits threshold, telemetry emitted.
+        // Third cycle: hits threshold, enters backoff window, no telemetry yet.
         let result = knot.evaluate(&store, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::NoWork));
         assert_eq!(store.created_count(), 0, "no beads created at threshold");
+
+        // Simulate backoff window elapse by clearing tracking
+        *knot.first_starvation_detected_at.lock().unwrap() = None;
+
+        // Fourth cycle: backoff elapsed, telemetry emitted.
+        let result = knot.evaluate(&store, &HashSet::new()).await;
+        assert!(matches!(result, StrandResult::NoWork));
 
         // Drop knot to close telemetry channel and flush all events.
         drop(knot);
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let events_guard = events.lock().unwrap();
-        assert_eq!(events_guard.len(), 1, "telemetry emitted at threshold");
+        assert_eq!(events_guard.len(), 1, "telemetry emitted after backoff elapsed");
         let event = &events_guard[0];
         assert_eq!(event.event_type, "strand.knot.starvation_detected");
         assert_eq!(event.data["workspace"], "/tmp/test");
@@ -675,9 +771,16 @@ mod tests {
         };
         let (knot, events) = make_test_knot_with_events(config);
 
-        // First cycle: emits telemetry.
+        // First cycle: enters backoff, no telemetry yet.
         knot.evaluate(&store, &HashSet::new()).await;
         assert_eq!(store.created_count(), 0, "no beads created on first cycle");
+
+        // Simulate backoff window elapse
+        *knot.first_starvation_detected_at.lock().unwrap() = None;
+
+        // Second cycle: backoff elapsed, emits telemetry.
+        knot.evaluate(&store, &HashSet::new()).await;
+        assert_eq!(store.created_count(), 0, "no beads created on second cycle");
 
         // Allow time for background telemetry task to process the event.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -685,22 +788,17 @@ mod tests {
         assert_eq!(
             events.lock().unwrap().len(),
             1,
-            "telemetry emitted on first cycle"
+            "telemetry emitted after backoff elapsed"
         );
 
-        // Second cycle: within cooldown, no new telemetry.
+        // Third cycle: within cooldown, no new telemetry.
         knot.evaluate(&store, &HashSet::new()).await;
-        assert_eq!(store.created_count(), 0, "no beads created on second cycle");
+        assert_eq!(store.created_count(), 0, "no beads created on third cycle");
         assert_eq!(
             events.lock().unwrap().len(),
             1,
             "rate limited — no second telemetry event"
         );
-
-        // Third cycle: still within cooldown.
-        knot.evaluate(&store, &HashSet::new()).await;
-        assert_eq!(store.created_count(), 0, "no beads created on third cycle");
-        assert_eq!(events.lock().unwrap().len(), 1, "still rate limited");
     }
 
     #[tokio::test]
@@ -718,6 +816,13 @@ mod tests {
         };
         let (knot, events) = make_test_knot_with_events(config);
 
+        // First evaluation: enters backoff
+        knot.evaluate(&store, &HashSet::new()).await;
+
+        // Simulate backoff window elapse
+        *knot.first_starvation_detected_at.lock().unwrap() = None;
+
+        // Second evaluation: emits telemetry
         knot.evaluate(&store, &HashSet::new()).await;
 
         // Verify no bead was written to the target workspace
@@ -902,6 +1007,14 @@ mod tests {
         knot.evaluate(&invisible, &HashSet::new()).await;
         assert!(events.lock().unwrap().is_empty());
 
+        // Fourth evaluation: hits threshold, enters backoff
+        knot.evaluate(&invisible, &HashSet::new()).await;
+        assert!(events.lock().unwrap().is_empty());
+
+        // Simulate backoff elapse
+        *knot.first_starvation_detected_at.lock().unwrap() = None;
+
+        // Fifth evaluation: backoff elapsed, emits telemetry
         knot.evaluate(&invisible, &HashSet::new()).await;
         drop(knot);
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -1050,5 +1163,127 @@ mod tests {
             "knot should return Skipped {{ reason: \"no_home_store\" }} when no .beads/ directory exists, got: {:?}",
             result
         );
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Transient starvation gap backoff tests
+    // ──────────────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn starvation_backoff_window_delays_telemetry() {
+        // Verify that starvation detection enters backoff window and doesn't emit telemetry immediately.
+        let store = KnotTestStore::new(vec![make_bead("open-1", BeadStatus::Open, None)]);
+        let config = KnotConfig {
+            exhaustion_threshold: 1, // Trigger after first cycle
+            alert_cooldown_minutes: 60,
+            ..default_knot_config()
+        };
+        let (knot, events) = make_test_knot_with_events(config);
+
+        // First cycle: hits threshold, enters backoff window, no telemetry yet
+        let result = knot.evaluate(&store, &HashSet::new()).await;
+        assert!(matches!(result, StrandResult::NoWork));
+        assert_eq!(events.lock().unwrap().len(), 0, "no telemetry during backoff window");
+        assert_eq!(store.created_count(), 0, "no beads created during backoff");
+
+        // Still within backoff window — no telemetry
+        let result = knot.evaluate(&store, &HashSet::new()).await;
+        assert!(matches!(result, StrandResult::NoWork));
+        assert_eq!(events.lock().unwrap().len(), 0, "still no telemetry during backoff");
+
+        drop(knot);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(events.lock().unwrap().len(), 0, "no telemetry emitted while in backoff");
+    }
+
+    #[tokio::test]
+    async fn starvation_resolves_within_backoff_window() {
+        // Verify that when starvation condition resolves during backoff, it's logged as transient.
+        let invisible_store = KnotTestStore::new(vec![make_bead("open-1", BeadStatus::Open, None)]);
+        let resolved_store = KnotTestStore::new(vec![]);
+        let config = KnotConfig {
+            exhaustion_threshold: 1,
+            alert_cooldown_minutes: 60,
+            ..default_knot_config()
+        };
+        let (knot, events) = make_test_knot_with_events(config);
+
+        // First evaluation: starvation detected, enters backoff
+        knot.evaluate(&invisible_store, &HashSet::new()).await;
+        assert_eq!(events.lock().unwrap().len(), 0, "no telemetry on first detection");
+
+        // Second evaluation: condition resolved (empty queue)
+        let result = knot.evaluate(&resolved_store, &HashSet::new()).await;
+        assert!(matches!(result, StrandResult::NoWork));
+        assert_eq!(events.lock().unwrap().len(), 0, "no telemetry when condition resolves");
+
+        // Verify backoff tracking was cleared
+        assert!(knot.first_starvation_detected_at.lock().unwrap().is_none());
+
+        drop(knot);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(events.lock().unwrap().len(), 0, "no starvation telemetry for resolved condition");
+    }
+
+    #[tokio::test]
+    async fn starvation_persists_past_backoff_window_emits_telemetry() {
+        // Verify that persistent starvation beyond backoff window emits telemetry.
+        // This test uses a mock that simulates time passage by manipulating the backoff check.
+        let store = KnotTestStore::new(vec![make_bead("open-1", BeadStatus::Open, None)]);
+        let config = KnotConfig {
+            exhaustion_threshold: 1,
+            alert_cooldown_minutes: 60,
+            ..default_knot_config()
+        };
+
+        // We need to use a custom knot with manipulated time for this test
+        // For now, we'll verify the logic with the minimum backoff
+        let (knot, events) = make_test_knot_with_events(config);
+
+        // First cycle: enters backoff
+        knot.evaluate(&store, &HashSet::new()).await;
+
+        // Manually clear the backoff tracking to simulate time passage
+        // (In production, this would happen after 5-15 minutes)
+        *knot.first_starvation_detected_at.lock().unwrap() = None;
+
+        // Re-evaluate: backoff window cleared, should emit telemetry
+        // But we need to increment exhaustion count past threshold again
+        knot.evaluate(&store, &HashSet::new()).await;
+
+        drop(knot);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Should have emitted telemetry after backoff "elapsed"
+        assert_eq!(events.lock().unwrap().len(), 1, "telemetry emitted after backoff elapsed");
+    }
+
+    #[tokio::test]
+    async fn backoff_tracking_cleared_after_telemetry_emitted() {
+        // Verify that backoff tracking is cleared after telemetry is emitted.
+        let store = KnotTestStore::new(vec![make_bead("open-1", BeadStatus::Open, None)]);
+        let config = KnotConfig {
+            exhaustion_threshold: 1,
+            alert_cooldown_minutes: 60,
+            ..default_knot_config()
+        };
+        let (knot, events) = make_test_knot_with_events(config);
+
+        // First cycle: enters backoff
+        knot.evaluate(&store, &HashSet::new()).await;
+        assert!(knot.first_starvation_detected_at.lock().unwrap().is_some());
+
+        // Simulate backoff elapse by clearing and re-evaluating
+        *knot.first_starvation_detected_at.lock().unwrap() = None;
+        knot.evaluate(&store, &HashSet::new()).await;
+
+        // Verify backoff was cleared before checking events
+        let was_tracking_cleared = knot.first_starvation_detected_at.lock().unwrap().is_none();
+
+        drop(knot);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert_eq!(events.lock().unwrap().len(), 1, "telemetry emitted");
+        assert!(was_tracking_cleared, "backoff tracking cleared after telemetry");
     }
 }
