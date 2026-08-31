@@ -1,4 +1,389 @@
-# NEEDLE Implementation Plan
+# NEEDLE Software Factory Plan
+
+> **N**avigates **E**very **E**nqueued **D**eliverable, **L**ogs **E**ffort
+
+Plan revision: 20
+
+As of: 2026-08-31
+
+Status owner: NEEDLE maintainers
+
+Status: current-state re-baseline accepted; transition implementation pending
+
+## 0. How to read this plan
+
+Sections 0–9 are the current normative product and transition plan. The
+original implementation plan and Phases 1–19 follow as a historical appendix.
+The appendix explains how the present system arose, but its architecture,
+status checkboxes, command examples, completion claims, and statements of
+authority are not current policy unless sections 0–9 or an accepted ADR
+explicitly preserve them.
+
+Current behavior is established by released source and verified artifacts.
+`AGENTS.md` governs repository work, accepted ADRs explain architectural
+decisions, normative schemas define data contracts, and this plan defines the
+intended product and transition. A plan checkbox is never implementation or
+verification evidence.
+
+This re-baseline accepts:
+
+- [ADR-024: Attempt, evidence, and resolution are the unit of factory work](../adr/024-attempt-evidence-resolution-is-the-unit-of-work.md)
+- [ADR-025: Independent reconciling controllers replace idle-waterfall coupling](../adr/025-independent-reconciling-controllers-over-idle-waterfall.md)
+- [ADR-026: Reflection produces evidence-gated lessons and derived memory](../adr/026-evidence-gated-reflection-and-derived-memory.md)
+- [ADR-027: Policy has explicit authority and every attempt records its context](../adr/027-policy-authority-and-context-manifests.md)
+
+## 1. Product boundary and current reality
+
+NEEDLE 0.6 is a Rust orchestration worker. It discovers eligible work, claims
+it through a configured bead CLI, builds an agent prompt, dispatches a headless
+agent, executes validation gates, reconciles bead lifecycle, and emits local
+JSONL and optional OTLP telemetry. It also contains operational strands for
+repair, work discovery/proposal, loop detection, escalation, and reflection.
+
+bead-rs is the primary backend and durable work-state authority. NEEDLE owns
+execution policy, context construction, verification, reflection, and learning.
+bead-rs owns atomic local task state, revisions, claims, leases, fencing,
+dependencies, audit events, and durable checkpoints. Neither product should
+duplicate the other's authority.
+
+### 1.1 Artifact baseline
+
+| Artifact | Current behavior on 2026-08-31 | Status for this plan |
+| --- | --- | --- |
+| `Cargo.toml` | Rust package `needle` 0.6.0, edition 2021, MSRV 1.75; OTLP is a default feature | Shipped baseline |
+| `src/worker/` and `src/types/` | Explicit worker state machine; process exits are classified before semantic outcome resolution | Shipped, truth-model transition required |
+| `src/strand/` | Pluck, Mend, Explore, Weave, Unravel, Pulse, Reflect, Splice, and Knot are ordered through a waterfall; generation work is under active development | Shipped architecture with in-flight additions; controller transition required |
+| `src/bead_store/` | CLI abstraction with bead-rs as the configured primary backend; legacy `bf`/`br` descriptors and compatibility prose remain in source | bead-rs is authoritative for active work; legacy removal is incomplete |
+| `src/outcome/` and `src/resolve/` | Re-read and Resolve paths exist, and NEEDLE can apply lifecycle mutations; exit 0 and `bead.completed` still carry ambiguous success semantics | Must migrate to verified Resolution |
+| `src/validation/` and workspace `gates` | Verification gates run against configured workspace or clean committed state; gate execution errors are infrastructure failures | Retain and attach results to EvidenceBundle |
+| `src/telemetry/`, `src/trace/`, `src/stats/` | JSONL/OTLP events, traces, token/cost data, and aggregate statistics exist; bead ID is the main correlation key and action counters remain prominent | Add attempt/policy correlation and outcome-derived metrics |
+| `src/learning/`, `src/strand/reflect.rs`, `.beads/learnings.md` | Transcript/closure extraction, text reinforcement, local/global promotion paths, drift/ADR detection, and CLAUDE placement paths exist | Experimental and untrusted; direct policy promotion must be disabled |
+| `src/prompt/`, `CLAUDE.md`, `AGENTS.md`, memory files | Prompt context combines explicit configuration with adapter- and working-directory-dependent instruction/memory loading | Add policy doctor and ContextManifest |
+| `.needle.yaml` and configuration modules | Layered configuration, routing, gates, strands, learning, telemetry, and disabled self-modification are implemented; some settings remain global-only | Preserve compatibility while adding versioned transition controls |
+| release/canary/hot reload | Upgrade, canary, and hot-reload machinery exists; workspace self-modification is configured off | Keep off until learning and rollback gates pass |
+
+### 1.2 Known mismatches that this plan does not conceal
+
+- Process exit 0 is not proof of task completion, yet legacy types and events
+  still use success/completion language derived from it.
+- `beads_processed` can count completed handling cycles rather than unique
+  verified closures.
+- Multiple attempts for one bead are not represented by a durable shared
+  attempt identity across claim, prompt, trace, gates, telemetry, and resolve.
+- Reflect can reinforce generic observations and repeated executions; its
+  promotion count is not evidence of effectiveness.
+- Health, loop detection, and reflection can be delayed behind productive
+  strands because they share the idle waterfall.
+- AGENTS.md, CLAUDE.md, the historical plan, memory files, configuration, and
+  executable gates have no machine-checked precedence or consistency model.
+- Operational policy has retired `br` and active `bf` use, while compatibility
+  code and historical documentation still mention both.
+- New backlog generation or self-modification would amplify these weaknesses
+  if enabled before work truth and evaluation are repaired.
+
+These are transition inputs, not acceptable steady-state properties.
+
+## 2. Current design principles
+
+1. **Durable truth before activity.** A process, note, commit, retry, split, or
+   generated bead is activity. Credit is based on an authoritative Resolution
+   with accepted evidence and confirmed bead state.
+2. **Every dispatch is an attempt.** Attempts are immutable, uniquely
+   identified, replay-safe episodes. Bead IDs identify desired work, not an
+   execution.
+3. **Evidence precedes closure.** Exit codes and agent assertions are
+   observations. Verifiers decide whether the configured acceptance contract
+   is met; the bead store decides whether the lifecycle mutation committed.
+4. **Fail quiet under ambiguity.** Unknown ownership, missing evidence,
+   conflicting policy, stale fencing, or partial effects cause safe release,
+   quarantine, or admission failure—never nominal success.
+5. **Controllers reconcile independently.** Correctness, health, and learning
+   are not idle work and cannot depend on the ready queue becoming empty.
+6. **Learning changes hypotheses before policy.** A lesson is promoted only
+   after independent evidence, evaluation, guardrails, and rollback exist.
+7. **Memory augments but does not govern.** Retrieved memory is scoped,
+   content-addressed, advisory, expirable, and traceable to source artifacts.
+8. **Human authority is a safety boundary.** Automation is preferred for
+   reversible, authorized actions. A safe stop or explicit handoff is correct
+   when authority, evidence, or impact requires it; a target of zero human
+   escalations is not a license to guess.
+9. **Capabilities, not version folklore.** NEEDLE negotiates backend features
+   and records the result. Unsupported behavior fails closed or uses an
+   explicitly tested compatibility path.
+10. **Improvement is measured against outcomes.** The factory optimizes
+   verified-closure yield, recurrence, retry amplification, latency, cost, and
+   regression rate—not volume of procedural artifacts.
+
+## 3. Target factory model
+
+### 3.1 Durable execution episode
+
+```text
+Desired work (bead)
+        |
+        v
+Claim + Attempt ID -----> ContextManifest
+        |                       |
+        v                       v
+Agent execution --------> ExecutionTrace
+        |                       |
+        +----------------> EvidenceBundle
+                                |
+                                v
+                         Resolution reducer
+                                |
+                    +-----------+-----------+
+                    |                       |
+                    v                       v
+             bead-rs transition      immutable telemetry
+                    |                       |
+                    +-----------+-----------+
+                                v
+                       confirmed Resolution
+```
+
+The Attempt schema and transition invariants are defined by ADR-024. NEEDLE
+may initially persist its own versioned attempt journal, but bead-rs support
+for an atomic, idempotent attempt outcome must become the preferred path once
+advertised by capabilities.
+
+### 3.2 Resolution contract
+
+The resolver is split into a pure decision and an effectful application:
+
+1. Observe process result, authoritative bead revision/state, verification
+   results, diff/commit evidence, declared external receipts, and ownership.
+2. Produce one typed resolution proposal without mutating files or work state.
+3. Validate the proposal against policy, revision, fencing, idempotency, and
+   evidence requirements.
+4. Apply one atomic backend transition when supported, otherwise use the
+   versioned compatibility sequence and immediate reconciliation.
+5. Re-read the bead and record the resulting authoritative state.
+6. Emit `attempt.resolved`; emit `bead.completed` only for a newly confirmed
+   close with accepted evidence.
+
+The minimum semantic outcomes are `verified_success`, `work_failure`,
+`infrastructure_failure`, `cancelled`, `stale_ownership`, and `indeterminate`.
+They are independent of the requested lifecycle action (`close`, `release`,
+`block`, `quarantine`, `split`, or `none`).
+
+### 3.3 Controller architecture
+
+ADR-025 replaces idle-waterfall coupling with independently scheduled
+controllers. The migration preserves strand configuration aliases while
+moving behavior behind controller contracts.
+
+| Controller | Trigger | Mutation authority |
+| --- | --- | --- |
+| Claim scheduler | Ready-frontier change or bounded poll | Claim only |
+| Executor | Claimed-attempt queue | Workspace execution artifacts only |
+| Resolver | Agent termination or evidence update | Resolution intent |
+| Lifecycle reconciler | Attempt/state event and bounded poll | Repair/release/complete through guarded backend operations |
+| Workspace health | Gate, backend, provider, worker, or loop events | Workspace condition; no task-content rewrite |
+| Work proposers | Budget and domain-specific trigger | Proposal records; bead creation through admission controller |
+| Reflector | Selected reflection trigger | Lesson/proposal records only |
+| Escalation | Failure/quarantine transition or expiry | Bounded lifecycle escalation within declared authority |
+
+Each controller has a versioned input/output schema, scoped lease, idempotency
+key, retry budget, backoff, telemetry, and crash-recovery test. A single owner
+applies each mutation class.
+
+## 4. Self-improvement and learning
+
+### 4.1 Trusted inputs
+
+Learning may consume:
+
+- versioned Attempt and Resolution records;
+- verifier and gate results;
+- diffs, commits, test reports, and external-effect receipts referenced by an
+  EvidenceBundle;
+- explicit incidents, rollbacks, reopens, bypasses, quarantines, and policy
+  conflicts;
+- concise rationales deliberately written for audit.
+
+Raw hidden model reasoning is neither required nor retained. Legacy transcripts
+and `.beads/learnings.md` may seed untrusted candidates but cannot be treated
+as validated knowledge.
+
+### 4.2 Reflection primitives
+
+| Primitive | Required contents |
+| --- | --- |
+| `ReflectionTrigger` | trigger type, attempt/resolution IDs, scope, dedupe key |
+| `FailureFingerprint` | normalized observable cause, component, gate/provider class, version |
+| `ReflectionEpisode` | problem, hypothesis, intervention, evidence, counterexample, scope, confidence, expiry |
+| `CandidateLesson` | stable ID, independent supporting attempts, conflicts, proposed retrieval scope |
+| `PolicyProposal` | exact policy diff, authority required, expected benefit, risks, rollback |
+| `PolicyExperiment` | baseline/candidate versions, assignment, primary metric, guardrails, stop condition |
+| `LessonEffectiveness` | recurrence, verified yield, retry amplification, cost, regressions after exposure |
+
+One attempt can reinforce one candidate only once. Text similarity may propose
+a merge but cannot establish truth. Candidate lessons expire without evidence
+and are demoted when their exposed cohort performs worse than the baseline.
+
+### 4.3 Promotion and rollback
+
+```text
+observation
+  -> candidate lesson
+  -> validated runbook
+  -> reviewed policy proposal
+  -> canary experiment
+  -> promote | revise | reject | expire
+```
+
+No reflector writes directly to AGENTS.md, CLAUDE.md, gates, configuration, or
+code. A separate audited promotion operation applies an approved, marker-owned
+change and records its policy version. Emergency mitigations must be reversible,
+time-bounded, and evaluated after application.
+
+Within a pre-approved experiment envelope, NEEDLE may adapt automatically by
+re-ranking derived memory, selecting among already approved prompt/policy
+variants, tuning controller cadence or retry budgets inside configured bounds,
+and promoting a candidate from observation to experiment. Each exposure is
+versioned and reversible. Creating a new authoritative rule, widening mutation
+authority, editing source, weakening a gate, or changing a safety limit remains
+outside that envelope and requires the review authority declared in the policy
+manifest.
+
+Self-modifying code and autonomous fleet promotion remain disabled until the
+truth-model, policy-manifest, experiment, rollback, and outcome-SLO gates in
+section 8 pass.
+
+## 5. Extended memory architecture
+
+The existing memory files remain useful episodic sources, but working-directory
+loading is insufficient for a multi-adapter factory. NEEDLE will add a
+rebuildable `MemoryCatalog`; it is an index over authoritative source
+artifacts, not a new authority.
+
+Each catalog entry contains:
+
+- stable memory ID, type, repository/path/component scope, and applicable
+  adapters;
+- source path/URI, content hash, source authority, and evidence links;
+- creation, validity, expiry, supersession, and review information;
+- failure fingerprints, tags, sensitivity, confidence, and retrieval budget;
+- policy/lesson version and exposure/effectiveness counters.
+
+At dispatch, NEEDLE resolves policy, retrieves a small relevant memory bundle,
+injects it explicitly, and records its exact IDs and hashes in the
+ContextManifest. Semantic indexes or embeddings may improve lookup but are
+disposable caches. Deleting the index must not delete source memory or work
+truth.
+
+`needle doctor policy` will diagnose conflicting or stale policy and memory,
+missing adapter projections, backend mismatches, and unresolved supersession.
+Fatal conflicts prevent admission before claim.
+
+## 6. Combined NEEDLE and bead-rs contract
+
+| Concern | NEEDLE owns | bead-rs owns |
+| --- | --- | --- |
+| Desired work | Interpretation, execution plan, acceptance evidence | Task fields, lifecycle, dependencies, revision |
+| Claim | Worker selection request and attempt ID | Atomic selection/claim, lease, fencing, resource locks |
+| Attempt | Context, execution, verifier evidence, semantic proposal | Portable immutable receipt and deduplication when capability exists |
+| Resolution | Classification policy and requested transition | Atomic event, attempt-tier update, lifecycle mutation, audit, checkpoint |
+| Scheduling | Fleet/provider/workspace admission and controller budgets | Deterministic ready-frontier policy and bead failure tiers |
+| Reflection | Episodes, candidates, experiments, promotion decisions | No learning policy; only durable opaque fact references if specified |
+| Memory and policy | Source catalog, resolution, injection, lint, promotion | None |
+| Recovery | Controller reconciliation and external-effect checks | Store integrity, restore, checkpoints, guarded mutations |
+
+NEEDLE must not maintain label-encoded copies of native bead-rs revision,
+lease, fencing, failure-tier, resource-lock, or manual-block state when the
+backend advertises those capabilities. bead-rs must not interpret prompts,
+verification meaning, policy authority, memory, or lesson quality.
+
+## 7. Artifact-by-artifact transition ledger
+
+Status vocabulary: `current`, `transition`, `blocked`, and `verified`. An item
+is not `verified` until its acceptance evidence is linked from this plan or a
+generated conformance report.
+
+| ID | Artifact(s) | Change | Acceptance evidence | Status |
+| --- | --- | --- | --- | --- |
+| N-T01 | `docs/plan/plan.md`, ADRs | Re-baseline current architecture and demote phases to history | Plan/ADR link check and maintainer review | current |
+| N-T02 | `src/types/`, `src/dispatch/` | Add versioned Attempt, ContextManifest, EvidenceBundle, Resolution, and IDs | Serialization compatibility and invariant tests | transition |
+| N-T03 | `src/claim/`, `src/worker/`, `src/prompt/` | Generate and propagate attempt ID, revision/fencing, tool/policy/memory hashes | One-ID end-to-end dispatch test across every adapter | transition |
+| N-T04 | `src/outcome/`, `src/resolve/`, `src/bead_store/` | Split pure resolution decision from guarded application; confirm durable state before completion | crash-boundary, stale-owner, replay, and false-close tests | transition |
+| N-T05 | `src/telemetry/`, `src/trace/`, `src/stats/`, registry/health fields | Version events; correlate by attempt; replace action-credit metrics with outcome metrics | migration fixtures and unique-resolution dashboard checks | transition |
+| N-T06 | `src/strand/mod.rs`, worker scheduling | Introduce controller scheduler and migrate Resolve, lifecycle repair, health, and Splice first | starvation and controller idempotence tests | blocked by N-T02–N-T05 |
+| N-T07 | Explore/Weave/Unravel/Pulse/Generation/Mitosis | Convert automatic backlog changes to budgeted proposals plus an admission controller | duplicate, conflict, backlog-budget, and human-intent preservation tests | blocked by N-T06 |
+| N-T08 | `src/learning/`, `src/strand/reflect.rs`, learning files | Disable direct promotion/count reinforcement; add reflection and evaluation records | one-attempt-one-reinforcement and harmful-lesson demotion tests | blocked by N-T02–N-T05 |
+| N-T09 | new memory catalog plus prompt/context code | Index scoped source memory, explicitly inject bounded results, record manifest | cold rebuild, supersession, sensitivity, and adapter-parity tests | blocked by N-T03, N-T08 |
+| N-T10 | policy resolver, `needle doctor policy`, AGENTS/CLAUDE/templates/config | Define precedence, find contradictions, and produce content-addressed manifests | fixture suite for conflicts and repository/nested scope | transition |
+| N-T11 | config schemas and capability negotiation | Add feature flags and backend capability gates; default new behavior off until verified | old-config compatibility and unsupported-backend fail-closed tests | transition |
+| N-T12 | eval/canary/release machinery | Add policy experiments, outcome SLOs, rollback, and promotion receipts | canary proves improvement without guardrail regression | blocked by N-T05, N-T08–N-T11 |
+| N-T13 | historical telemetry/learnings | Mark legacy events non-authoritative; import learnings only as candidates | deterministic migration report with no invented attempts | blocked by N-T02, N-T08 |
+| N-T14 | combined consumer conformance | Exercise bead-rs atomic attempt resolution with fallback for older capabilities | pinned old/new bead-rs matrix, crash/replay tests | blocked by bead-rs transition |
+
+## 8. Transition gates and order
+
+### Gate A — truthful accounting
+
+- Every new dispatch has one attempt ID across claim, prompt, trace, gates,
+  telemetry, and resolution.
+- No completion event exists without accepted evidence and confirmed close.
+- Retry, release, quarantine, and infrastructure failure do not increase
+  durable completion.
+- Old telemetry is visibly legacy and excluded from authoritative SLOs.
+
+### Gate B — resilient control plane
+
+- Resolver, lifecycle reconciliation, and workspace health run independently
+  of ready-queue exhaustion.
+- Controllers are leased, idempotent, budgeted, and crash-tested.
+- Work proposers cannot bypass backlog, duplicate, dependency, or authority
+  admission checks.
+
+### Gate C — trustworthy learning
+
+- Reflection uses identified attempts and selected triggers.
+- Candidate support is deduplicated by independent attempt.
+- Policy and memory exposure are recorded in ContextManifest.
+- Experiments have baseline, guardrails, stop condition, and rollback.
+- Direct Reflect-to-policy and Reflect-to-code writes are impossible.
+- Automatic adaptation is confined to declared variants and numeric envelopes;
+  it cannot create new authority, weaken gates, or edit source/policy files.
+
+### Gate D — autonomous improvement
+
+- A canary cohort shows improved verified-closure yield or reduced recurrence
+  without exceeding retry, cost, latency, bypass, or regression guardrails.
+- Policy rollback is tested and produces an auditable receipt.
+- Memory/policy conflicts fail admission or receive explicit authority.
+- Only after these checks may bounded automatic policy promotion or
+  self-modification be considered in a new ADR.
+
+Implementation order is A, then the correctness portion of B, then C, then D.
+Backlog generation may continue only under an explicit fixed budget and cannot
+be used as evidence that the factory is improving.
+
+## 9. Success measures
+
+The combined factory reports at least:
+
+- unique attempts and unique authoritative resolutions;
+- verified closures and verified-closure yield per attempt;
+- false-close/reopen and post-close regression rate;
+- retry amplification and repeated-fingerprint recurrence;
+- infrastructure-failure and stale-ownership rates;
+- time and cost to durable resolution;
+- quarantine age and bounded human-handoff quality;
+- policy/memory exposure cohorts and lesson effectiveness;
+- bypass, rollback, and policy-conflict rates.
+
+Tool calls, commits, notes, generated beads, reflection documents, and worker
+loops remain diagnostic dimensions. None is a productivity objective by
+itself.
+
+---
+
+# Historical Implementation and Phase Record (Superseded)
+
+> The remainder of this file is retained for provenance. It is not the current
+> implementation status, authority model, command reference, or roadmap.
 
 > **N**avigates **E**very **E**nqueued **D**eliverable, **L**ogs **E**ffort
 
