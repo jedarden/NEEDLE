@@ -4,7 +4,7 @@ This file shows what a healthy NEEDLE quickstart run looks like, including the `
 
 ## `needle doctor` Output (All Checks Pass)
 
-Real output from needle 0.6.0 with bead 0.2.2, immediately after Step 4 (paths
+Real output from needle 0.6.0 with bead 0.2.4, immediately after Step 4 (paths
 shortened, disk figure elided). The two `WARN` rows are normal on a fresh host:
 `sqlite3` is optional, and the heartbeat directory appears when the first worker
 starts.
@@ -50,7 +50,7 @@ binary to install.
 ### Starting the Worker
 
 ```bash
-$ needle run --agent claude --identity alpha
+$ needle run --agent claude -i alpha
 
 [2026-08-29 12:34:56] NEEDLE worker starting...
 [2026-08-29 12:34:56] Worker identity: needle-claude-alpha
