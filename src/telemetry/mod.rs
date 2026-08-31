@@ -285,6 +285,15 @@ pub enum EventKind {
         excluded_count: usize,
         candidate_exclusion_reasons: Vec<String>,
     },
+    /// Pluck automatic bypass activated: returned oldest open bead despite all filters.
+    PluckBypassActivated {
+        workspace: String,
+        bead_id: String,
+        bead_title: String,
+        open_count: usize,
+        created_at: String,
+        dropped_constraints: Vec<String>,
+    },
     /// The complete strand waterfall reached Knot with open work still
     /// invisible. This is the sole terminal starvation verdict.
     KnotStarvationDetected {
@@ -1148,6 +1157,7 @@ impl EventKind {
             EventKind::QueueEmpty => "worker.queue_empty",
             EventKind::PluckStarvationDetected { .. } => "strand.pluck.starvation_detected",
             EventKind::PluckNoCandidate { .. } => "strand.pluck.no_candidate",
+            EventKind::PluckBypassActivated { .. } => "strand.pluck.bypass_activated",
             EventKind::KnotStarvationDetected { .. } => "strand.knot.starvation_detected",
             EventKind::PluckOrderingDegraded { .. } => "strand.pluck.ordering_degraded",
             EventKind::MendCycleBroken { .. } => "mend.cycle_broken",
@@ -1381,6 +1391,7 @@ impl EventKind {
             | EventKind::QueueEmpty
             | EventKind::PluckStarvationDetected { .. }
             | EventKind::PluckNoCandidate { .. }
+            | EventKind::PluckBypassActivated { .. }
             | EventKind::KnotStarvationDetected { .. }
             | EventKind::AlertDeduplicated { .. }
             | EventKind::GatePathMissing { .. }
@@ -1664,6 +1675,23 @@ impl EventKind {
                     "open_count": open_count,
                     "excluded_count": excluded_count,
                     "candidate_exclusion_reasons": candidate_exclusion_reasons,
+                })
+            }
+            EventKind::PluckBypassActivated {
+                workspace,
+                bead_id,
+                bead_title,
+                open_count,
+                created_at,
+                dropped_constraints,
+            } => {
+                serde_json::json!({
+                    "workspace": workspace,
+                    "bead_id": bead_id,
+                    "bead_title": bead_title,
+                    "open_count": open_count,
+                    "created_at": created_at,
+                    "dropped_constraints": dropped_constraints,
                 })
             }
             EventKind::AlertDeduplicated {
@@ -2949,6 +2977,7 @@ impl EventKind {
             | EventKind::QueueEmpty
             | EventKind::PluckStarvationDetected { .. }
             | EventKind::PluckNoCandidate { .. }
+            | EventKind::PluckBypassActivated { .. }
             | EventKind::KnotStarvationDetected { .. }
             | EventKind::AlertDeduplicated { .. }
             | EventKind::ClaimAttempt { .. }
