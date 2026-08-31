@@ -14,6 +14,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
@@ -240,7 +241,10 @@ impl KnotStrand {
     ///
     /// Returns true if we're still waiting for the backoff period to elapse.
     fn is_within_backoff_window(&self) -> bool {
-        let guard = self.first_starvation_detected_at.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = self
+            .first_starvation_detected_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(first_detected) = *guard {
             // Use a random backoff between 5-15 minutes (jittered)
             let backoff_minutes = 5 + (first_detected.timestamp() % 10); // 5-14 minutes based on timestamp
@@ -253,7 +257,10 @@ impl KnotStrand {
 
     /// Record that starvation was first detected (start the backoff window).
     fn record_first_starvation_detection(&self) {
-        let mut guard = self.first_starvation_detected_at.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self
+            .first_starvation_detected_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if guard.is_none() {
             *guard = Some(Utc::now());
         }
@@ -261,18 +268,95 @@ impl KnotStrand {
 
     /// Clear the starvation detection timestamp (when condition resolves).
     fn clear_starvation_detection(&self) {
-        let mut guard = self.first_starvation_detected_at.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self
+            .first_starvation_detected_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         *guard = None;
     }
 
     /// Get the backoff window duration in minutes (for logging).
     fn backoff_window_minutes(&self) -> i64 {
-        let guard = self.first_starvation_detected_at.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = self
+            .first_starvation_detected_at
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if let Some(first_detected) = *guard {
             5 + (first_detected.timestamp() % 10)
         } else {
             0
         }
+    }
+
+    /// Run cross-repo precondition validation before emitting starvation alert.
+    ///
+    /// Returns (beads_marked, success, details) where:
+    /// - beads_marked: number of beads marked as manual_blocked
+    /// - success: whether validation ran without error
+    /// - details: human-readable description of what happened
+    fn run_cross_repo_validation(&self, workspace_path: &Path) -> (usize, bool, String) {
+        // Try to find the validation script
+        // First, check if SEAM workspace exists and has the script
+        let seam_path = Path::new("/home/coding/SEAM");
+        let script_path = seam_path.join("tools/validate_cross_repo_preconditions.sh");
+
+        if !script_path.exists() {
+            return (
+                0,
+                true,
+                "Cross-repo validation script not found, skipping".to_string(),
+            );
+        }
+
+        // Run the validation script in the workspace directory
+        let output = match Command::new(&script_path)
+            .arg("--verbose")
+            .current_dir(workspace_path)
+            .output()
+        {
+            Ok(output) => output,
+            Err(e) => {
+                return (
+                    0,
+                    false,
+                    format!("Failed to run validation script: {}", e),
+                )
+            }
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // Parse output to count beads marked as manual_blocked
+        // The script prints "✓ Marked <bead_id> as manual_blocked" for each bead
+        let beads_marked = stdout
+            .lines()
+            .filter(|line| line.contains("Marked") && line.contains("as manual_blocked"))
+            .count();
+
+        let success = output.status.success();
+
+        let details = if success {
+            if beads_marked > 0 {
+                format!(
+                    "Cross-repo validation marked {} beads as manual_blocked",
+                    beads_marked
+                )
+            } else {
+                "Cross-repo validation completed, no unmet preconditions found".to_string()
+            }
+        } else {
+            format!(
+                "Cross-repo validation failed: {}",
+                if stderr.is_empty() {
+                    &stdout
+                } else {
+                    &stderr
+                }
+            )
+        };
+
+        (beads_marked, success, details)
     }
 }
 
@@ -386,7 +470,58 @@ impl super::Strand for KnotStrand {
                             workspace = %workspace,
                             diagnosis = diagnosis.as_str(),
                             open_count,
-                            "starvation persisted through backoff window — emitting telemetry"
+                            "starvation persisted through backoff window — running cross-repo precondition validation"
+                        );
+
+                        // Run cross-repo precondition validation before emitting alert
+                        let workspace_path = Path::new(workspace);
+                        let (beads_marked, validation_success, validation_details) =
+                            self.run_cross_repo_validation(workspace_path);
+
+                        tracing::info!(
+                            workspace = %workspace,
+                            diagnosis = diagnosis.as_str(),
+                            open_count,
+                            beads_marked,
+                            validation_details,
+                            "cross-repo validation completed"
+                        );
+
+                        // If validation marked beads as manual_blocked, the ready frontier
+                        // is empty due to unmet cross-repo preconditions, not a system error.
+                        // Log instead of emitting a starvation alert.
+                        if beads_marked > 0 {
+                            tracing::warn!(
+                                workspace = %workspace,
+                                diagnosis = diagnosis.as_str(),
+                                open_count,
+                                beads_marked,
+                                "starvation due to unmet cross-repo preconditions — {} beads marked as manual_blocked, not emitting alert",
+                                beads_marked
+                            );
+                            // Reset exhaustion tracking since this is a legitimate waiting state
+                            self.reset_exhaustion();
+                            self.clear_starvation_detection();
+                            return StrandResult::NoWork;
+                        }
+
+                        // If validation failed but we're still starving, proceed with alert
+                        // but note that validation could not run
+                        if !validation_success {
+                            tracing::warn!(
+                                workspace = %workspace,
+                                diagnosis = diagnosis.as_str(),
+                                open_count,
+                                validation_details,
+                                "cross-repo validation failed, proceeding with starvation alert"
+                            );
+                        }
+
+                        tracing::info!(
+                            workspace = %workspace,
+                            diagnosis = diagnosis.as_str(),
+                            open_count,
+                            "starvation confirmed after cross-repo validation — emitting telemetry"
                         );
 
                         // Calculate excluded beads: those that are neither open nor in progress.
@@ -753,7 +888,11 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let events_guard = events.lock().unwrap();
-        assert_eq!(events_guard.len(), 1, "telemetry emitted after backoff elapsed");
+        assert_eq!(
+            events_guard.len(),
+            1,
+            "telemetry emitted after backoff elapsed"
+        );
         let event = &events_guard[0];
         assert_eq!(event.event_type, "strand.knot.starvation_detected");
         assert_eq!(event.data["workspace"], "/tmp/test");
@@ -1183,17 +1322,29 @@ mod tests {
         // First cycle: hits threshold, enters backoff window, no telemetry yet
         let result = knot.evaluate(&store, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::NoWork));
-        assert_eq!(events.lock().unwrap().len(), 0, "no telemetry during backoff window");
+        assert_eq!(
+            events.lock().unwrap().len(),
+            0,
+            "no telemetry during backoff window"
+        );
         assert_eq!(store.created_count(), 0, "no beads created during backoff");
 
         // Still within backoff window — no telemetry
         let result = knot.evaluate(&store, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::NoWork));
-        assert_eq!(events.lock().unwrap().len(), 0, "still no telemetry during backoff");
+        assert_eq!(
+            events.lock().unwrap().len(),
+            0,
+            "still no telemetry during backoff"
+        );
 
         drop(knot);
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert_eq!(events.lock().unwrap().len(), 0, "no telemetry emitted while in backoff");
+        assert_eq!(
+            events.lock().unwrap().len(),
+            0,
+            "no telemetry emitted while in backoff"
+        );
     }
 
     #[tokio::test]
@@ -1210,19 +1361,31 @@ mod tests {
 
         // First evaluation: starvation detected, enters backoff
         knot.evaluate(&invisible_store, &HashSet::new()).await;
-        assert_eq!(events.lock().unwrap().len(), 0, "no telemetry on first detection");
+        assert_eq!(
+            events.lock().unwrap().len(),
+            0,
+            "no telemetry on first detection"
+        );
 
         // Second evaluation: condition resolved (empty queue)
         let result = knot.evaluate(&resolved_store, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::NoWork));
-        assert_eq!(events.lock().unwrap().len(), 0, "no telemetry when condition resolves");
+        assert_eq!(
+            events.lock().unwrap().len(),
+            0,
+            "no telemetry when condition resolves"
+        );
 
         // Verify backoff tracking was cleared
         assert!(knot.first_starvation_detected_at.lock().unwrap().is_none());
 
         drop(knot);
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert_eq!(events.lock().unwrap().len(), 0, "no starvation telemetry for resolved condition");
+        assert_eq!(
+            events.lock().unwrap().len(),
+            0,
+            "no starvation telemetry for resolved condition"
+        );
     }
 
     #[tokio::test]
@@ -1255,7 +1418,11 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         // Should have emitted telemetry after backoff "elapsed"
-        assert_eq!(events.lock().unwrap().len(), 1, "telemetry emitted after backoff elapsed");
+        assert_eq!(
+            events.lock().unwrap().len(),
+            1,
+            "telemetry emitted after backoff elapsed"
+        );
     }
 
     #[tokio::test]
@@ -1284,6 +1451,9 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         assert_eq!(events.lock().unwrap().len(), 1, "telemetry emitted");
-        assert!(was_tracking_cleared, "backoff tracking cleared after telemetry");
+        assert!(
+            was_tracking_cleared,
+            "backoff tracking cleared after telemetry"
+        );
     }
 }
