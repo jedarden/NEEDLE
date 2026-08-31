@@ -118,7 +118,7 @@ This ensures the same verification that runs in pre-commit hooks and CI gates.
 ### Definition of Done
 
 NEEDLE uses a unified definition-of-done system invoked identically by:
-- **Pre-commit hook**: `scripts/definition-of-done.sh --fast --count-bypass`
+- **Pre-commit hook**: `scripts/definition-of-done.sh --fast --count-bypass --changed-only`
 - **NEEDLE validation gate**: `scripts/definition-of-done.sh --fast` (configured in `.needle.yaml`)
 - **CI verify step**: `scripts/definition-of-done.sh --all` (runs both lanes)
 - **Agent completion**: `scripts/definition-of-done.sh --fast` (run before closing beads)
@@ -130,9 +130,20 @@ This single source of truth prevents drift between surfaces and ensures "what is
 The unified script splits checks by COST, not by tool:
 
 **Fast lane** (seconds, runs locally under cgroup):
-- `cargo fmt --check`
+- `cargo fmt --check` (`rustfmt --check` on the staged files under `--changed-only`)
 - `cargo clippy --all-targets -- -D warnings`
 - `cargo check`
+- `tests/dod-attribution/run.sh` (guards the attribution rule below)
+
+**Attribution (`--changed-only`, pre-commit only).** This checkout is shared
+with other agents, so the tree usually holds somebody else's half-finished
+file. clippy and check have no per-file mode, so the lane still compiles the
+whole crate — but a failure only BLOCKS when a diagnostic names a path the
+commit stages. A failure anywhere else is printed in full and reported as a
+pre-existing tree failure, because blocking on it only produces a
+`--no-verify`. An unattributable failure (a link error, a bare "could not
+compile") still blocks: it may be yours. CI keeps running the unscoped lane —
+`main` must compile as a whole, and that is the gate that enforces it.
 
 **Slow lane** (tests, may submit to iad-ci):
 - `cargo test --lib` (unit tests)
@@ -150,18 +161,27 @@ The unified script aggregates ALL failures rather than aborting on the first. Th
 
 ### Bypass Counting
 
-Pre-commit bypasses are recorded in `.beads/bypasses.jsonl`. Each `git commit --no-verify` increments the count, making invisible bypasses impossible. Monitor this file to detect when quality gates are being skipped.
+Pre-commit bypasses are recorded in `.beads/bypasses.jsonl` — only records
+carrying a `commit_sha` are bypasses; the same log holds a legacy
+`{timestamp, lane, pwd}` row that is not one, and counting every line
+overstates the figure roughly eightfold.
 
 **A bypass is a failed dispatch (2026-08-30).** The `no-dod-bypass` gate in
 `.needle.yaml` (`scripts/gate-no-dod-bypass.sh`) fails any bead whose commits
-are listed in `bypasses.jsonl`: the bead is released and the failure counts
-toward quarantine. On 2026-08-28..30 needle-ci was red for 36 h; every worker
-bypassed the hook "because CI is red anyway", ~225 commits landed unverified,
-78 tests drifted and `main` stopped compiling (fdb5730b). If the hook is red
-because of another worker's edits in the shared checkout, verify on a clean
-extraction (`git archive HEAD | tar -x -C "$(mktemp -d)"`) and commit with the
-hook enabled. The other two gates (`definition-of-done.sh --fast` and
-`cargo test --lib`) run on a clean extraction for the same reason.
+are listed there: the bead is released and the failure counts toward
+quarantine. `needle doctor` also reports any bypass from the last 7 days.
+
+**"The hook is red because of another worker's file" is no longer a reason to
+bypass (2026-08-31).** That was the cause of all 78 recorded bypasses — 62 on
+2026-08-30 alone, nearly all of them clean changes blocked by an unrelated
+file — and `--changed-only` removes it. If the lane now blocks you, the
+diagnostic is in a file *you* staged. Fix it, or if you genuinely believe the
+gate is wrong, say so in the commit message; do not reach for `--no-verify`
+and leave the reason implicit.
+
+Two things still legitimately need it: a checkpoint-only commit touching just
+`.beads/` (nothing to lint), and a genuine gate defect. Both are rare enough
+to be worth explaining when they happen.
 
 ### On this Host
 

@@ -22,7 +22,10 @@ done
 if [ ${#bad[@]} -gt 0 ]; then
   echo "gate-no-dod-bypass: bead $bead has commit(s) that bypassed the Definition of Done:"
   for sha in "${bad[@]}"; do echo "  $sha  $(git -C "$ws" log -1 --format=%s "$sha" | cut -c1-90)"; done
-  echo "A --no-verify commit is a failed dispatch. Re-run scripts/definition-of-done.sh --fast, fix what it reports, and commit again with the hook enabled."
+  echo "A --no-verify commit is a failed dispatch. The fast lane is scoped to the"
+  echo "paths a commit stages (--changed-only), so another worker's in-flight file"
+  echo "is no longer a reason to bypass: re-run scripts/definition-of-done.sh --fast"
+  echo "--changed-only, fix what it names in YOUR files, and commit with the hook on."
   exit 1
 fi
 echo "gate-no-dod-bypass: no bypassed commits for $bead"
