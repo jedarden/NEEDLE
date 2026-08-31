@@ -16,19 +16,28 @@ cd "$repo_root"
 # shellcheck source=../scripts/bypass-detection.sh
 source "$repo_root/scripts/bypass-detection.sh"
 
-echo "=== Running Definition of Done (fast lane) ==="
+echo "=== Running Definition of Done (fast lane, this commit's paths) ==="
 
-# Run the fast lane checks with bypass counting
+# --changed-only: this checkout is shared with other workers, so the tree
+# routinely contains somebody else's half-finished file. Without it the hook
+# fails for reasons the committer did not cause and cannot fix without editing
+# in-flight work that is not theirs, and the only way out is --no-verify —
+# which is how .beads/bypasses.jsonl reached 607 entries. A pre-existing
+# failure elsewhere is still printed in full; it just does not block.
 export NEEDLE_PRE_COMMIT=1
-if ! scripts/definition-of-done.sh --fast --count-bypass; then
+if ! scripts/definition-of-done.sh --fast --count-bypass --changed-only; then
   echo ""
   echo "❌ Pre-commit check failed"
   echo ""
   echo "Your changes do not meet the Definition of Done."
   echo "Please fix the issues above before committing."
   echo ""
+  echo "Every failure listed above is in a file THIS commit stages — the lane"
+  echo "no longer blocks on other workers' in-flight files, so this is yours."
+  echo ""
   echo "To bypass (not recommended), use: git commit --no-verify"
-  echo "This will be recorded in .beads/bypasses.jsonl"
+  echo "This is recorded in .beads/bypasses.jsonl, and gate-no-dod-bypass.sh"
+  echo "fails the dispatch of any bead whose commit appears there."
   exit 1
 fi
 

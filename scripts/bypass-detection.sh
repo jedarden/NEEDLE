@@ -161,13 +161,43 @@ needle_append_bypass_event() {
     return "$status"
 }
 
+# Count the bypasses already recorded, in total and since midnight UTC.
+#
+# A single warning line is easy to scroll past. Showing the running total makes
+# an isolated bypass read differently from a habit.
+#
+# Only events carrying a commit_sha are bypasses. The log also holds a legacy
+# {timestamp, lane, pwd} record (529 of them, all 2026-08-17) that is NOT a
+# bypass — counting every line reports roughly 8x the real figure.
+needle_bypass_counts() {
+    local log
+    log="$(git rev-parse --show-toplevel 2>/dev/null)/.beads/bypasses.jsonl"
+    [[ -f "$log" ]] || { printf '0 0'; return 0; }
+    local total today_count today
+    today="$(date -u +%Y-%m-%d)"
+    total="$(grep -c '"commit_sha"' "$log" 2>/dev/null || printf 0)"
+    today_count="$(grep '"commit_sha"' "$log" 2>/dev/null | grep -c "\"timestamp\":\"${today}" || printf 0)"
+    printf '%s %s' "$total" "$today_count"
+}
+
 needle_warn_bypass() {
     local pattern="$1"
     local lanes_csv="$2"
+    local counts total today
+    counts="$(needle_bypass_counts)"
+    total="${counts% *}"
+    today="${counts#* }"
     printf '\n⚠ WARNING: Definition of Done bypass detected.\n' >&2
     printf '  Pattern: %s\n' "$pattern" >&2
     printf '  Verification lanes skipped: %s\n' "${lanes_csv//,/, }" >&2
-    printf '  This bypass will be recorded in .beads/bypasses.jsonl.\n\n' >&2
+    printf '  This bypass will be recorded in .beads/bypasses.jsonl.\n' >&2
+    printf '  Recorded so far: %s total, %s today.\n' "$total" "$today" >&2
+    printf '\n' >&2
+    printf '  The fast lane is scoped to the paths a commit stages, so it no\n' >&2
+    printf '  longer fails for another worker'"'"'s in-flight file. A bypass now\n' >&2
+    printf '  means skipping checks on YOUR OWN changes, and\n' >&2
+    printf '  gate-no-dod-bypass.sh fails the dispatch of any bead whose commit\n' >&2
+    printf '  is in that log.\n\n' >&2
 }
 
 needle_git_state_dir() {

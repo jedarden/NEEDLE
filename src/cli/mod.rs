@@ -4283,6 +4283,86 @@ fn doctor_check_sqlite(beads_dir: &Path) -> CheckResult {
     }
 }
 
+/// Surface Definition-of-Done bypasses recorded for this workspace.
+///
+/// `.beads/bypasses.jsonl` is written by the post-commit hook whenever a commit
+/// was made with `--no-verify`. Nothing read it: the warning scrolls past in a
+/// worker transcript and the file is not something anyone opens. A bypass is
+/// supposed to be exceptional, so doctor reports it — recent ones as a warning,
+/// older ones as context.
+///
+/// Only records carrying a `commit_sha` are bypasses. The same log holds a
+/// legacy `{timestamp, lane, pwd}` record that is not one; counting every line
+/// overstates the figure several times over.
+fn doctor_check_dod_bypasses(beads_dir: &Path) -> CheckResult {
+    let path = beads_dir.join("bypasses.jsonl");
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return CheckResult::pass("DoD bypasses", "none recorded");
+        }
+        Err(e) => {
+            return CheckResult::warn("DoD bypasses", format!("cannot read bypasses.jsonl: {e}"));
+        }
+    };
+
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(7);
+    let mut total = 0usize;
+    let mut recent: Vec<(String, String)> = Vec::new();
+    for line in contents.lines().filter(|l| !l.trim().is_empty()) {
+        let value: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let sha = match value.get("commit_sha").and_then(|v| v.as_str()) {
+            Some(sha) => sha,
+            None => continue,
+        };
+        total += 1;
+        let ts = value
+            .get("timestamp")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let is_recent = chrono::DateTime::parse_from_rfc3339(ts)
+            .map(|t| t.with_timezone(&chrono::Utc) >= cutoff)
+            .unwrap_or(false);
+        if is_recent {
+            recent.push((ts.to_string(), sha.chars().take(8).collect()));
+        }
+    }
+
+    if total == 0 {
+        return CheckResult::pass("DoD bypasses", "none recorded");
+    }
+    if recent.is_empty() {
+        return CheckResult::pass(
+            "DoD bypasses",
+            format!("{total} recorded, none in the last 7 days"),
+        );
+    }
+
+    let mut result = CheckResult::warn(
+        "DoD bypasses",
+        format!(
+            "{} in the last 7 days ({total} recorded in total)",
+            recent.len()
+        ),
+    );
+    recent.sort();
+    for (ts, sha) in recent.iter().rev().take(5) {
+        result.detail.push(format!("{ts}  {sha}"));
+    }
+    if recent.len() > 5 {
+        result
+            .detail
+            .push(format!("... and {} more", recent.len() - 5));
+    }
+    result
+        .detail
+        .push("a bypass skips the checks on the committing agent's own changes".to_string());
+    result
+}
+
 fn doctor_check_lock_files(beads_dir: &Path, lock_ttl_secs: u64, repair: bool) -> CheckResult {
     let entries = match std::fs::read_dir(beads_dir) {
         Ok(e) => e,
@@ -4980,6 +5060,11 @@ fn cmd_doctor(repair: bool, workspace: Option<PathBuf>, json: bool) -> Result<()
             config.strands.mend.lock_ttl_secs,
             repair,
         ));
+    }
+
+    // Definition-of-Done bypasses recorded for this workspace.
+    if beads_dir.is_dir() {
+        results.push(doctor_check_dod_bypasses(&beads_dir));
     }
 
     // Resolved descriptor, binary, and declared safety gaps.
@@ -7547,6 +7632,72 @@ mod tests {
         let r = doctor_check_jsonl(tmp.path());
         assert_eq!(r.status, CheckStatus::Pass);
         assert!(r.message.contains("0 records"));
+    }
+
+    #[test]
+    fn doctor_check_dod_bypasses_missing_file_passes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let r = doctor_check_dod_bypasses(tmp.path());
+        assert_eq!(r.status, CheckStatus::Pass);
+        assert!(r.message.contains("none recorded"), "{}", r.message);
+    }
+
+    #[test]
+    fn doctor_check_dod_bypasses_ignores_legacy_records() {
+        // {timestamp, lane, pwd} rows are not bypasses; counting them
+        // overstates the figure several times over.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("bypasses.jsonl"),
+            "{\"timestamp\":\"2026-08-17T14:32:46Z\",\"lane\":\"fast\",\"pwd\":\"/x\"}\n",
+        )
+        .unwrap();
+        let r = doctor_check_dod_bypasses(tmp.path());
+        assert_eq!(r.status, CheckStatus::Pass);
+        assert!(r.message.contains("none recorded"), "{}", r.message);
+    }
+
+    #[test]
+    fn doctor_check_dod_bypasses_warns_on_recent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let recent = chrono::Utc::now() - chrono::Duration::days(1);
+        std::fs::write(
+            tmp.path().join("bypasses.jsonl"),
+            format!(
+                "{{\"timestamp\":\"{}\",\"commit_sha\":\"abcdef1234567890\"}}\n",
+                recent.to_rfc3339()
+            ),
+        )
+        .unwrap();
+        let r = doctor_check_dod_bypasses(tmp.path());
+        assert_eq!(r.status, CheckStatus::Warn);
+        assert!(r.message.contains("1 in the last 7 days"), "{}", r.message);
+        assert!(
+            r.detail.iter().any(|d| d.contains("abcdef12")),
+            "{:?}",
+            r.detail
+        );
+    }
+
+    #[test]
+    fn doctor_check_dod_bypasses_old_only_passes_with_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let old = chrono::Utc::now() - chrono::Duration::days(30);
+        std::fs::write(
+            tmp.path().join("bypasses.jsonl"),
+            format!(
+                "{{\"timestamp\":\"{}\",\"commit_sha\":\"deadbeefcafe\"}}\n",
+                old.to_rfc3339()
+            ),
+        )
+        .unwrap();
+        let r = doctor_check_dod_bypasses(tmp.path());
+        assert_eq!(r.status, CheckStatus::Pass);
+        assert!(
+            r.message.contains("none in the last 7 days"),
+            "{}",
+            r.message
+        );
     }
 
     #[test]
