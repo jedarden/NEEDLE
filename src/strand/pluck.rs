@@ -532,6 +532,170 @@ fn write_repair_failure_diagnostic(
     Ok(())
 }
 
+/// Structured pluck evaluation diagnostic for monitoring and debugging.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PluckDiagnostic {
+    /// Event type for filtering.
+    event: &'static str,
+    /// UTC timestamp of the evaluation.
+    timestamp: chrono::DateTime<chrono::Utc>,
+    /// Worker that performed this evaluation.
+    worker_id: String,
+    /// Workspace being evaluated.
+    workspace: String,
+    /// Relaxation tier used for this query.
+    relaxation_tier: String,
+    /// Total open beads before any filtering.
+    total_open_beads: usize,
+    /// Beads excluded by each criterion.
+    filtering_breakdown: FilteringBreakdown,
+    /// Final candidate count after all filtering.
+    final_candidate_count: usize,
+    /// Detailed per-bead exclusion reasons (when no candidates found).
+    per_bead_exclusions: Vec<PerBeadExclusion>,
+}
+
+/// Breakdown of filtering by each exclusion criterion.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FilteringBreakdown {
+    /// Beads excluded due to unfinished blocking dependencies.
+    dependency_blocked: usize,
+    /// Beads excluded by manual block status or label.
+    manual_blocked: usize,
+    /// Beads excluded by human-owned or human-review labels.
+    human: usize,
+    /// Beads excluded by deferred status or labels.
+    deferred: usize,
+    /// Beads excluded by existing assignee (in-progress or stale).
+    assignee_held: usize,
+    /// Beads excluded by configured label filters.
+    label_filtered: usize,
+    /// Total excluded count (sum of all above).
+    total_excluded: usize,
+}
+
+/// Per-bead exclusion details for deep debugging.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PerBeadExclusion {
+    /// Bead identifier.
+    bead_id: String,
+    /// Bead title.
+    bead_title: String,
+    /// All reasons this bead was excluded.
+    exclusion_reasons: Vec<String>,
+}
+
+/// Write pluck evaluation diagnostic to .beads/pluck-diagnostics.json.
+///
+/// This file provides a persistent, machine-readable log of every Pluck
+/// evaluation, showing exactly why beads were or were not selected. A
+/// monitoring system can tail this file and alert on patterns like
+/// "all beads excluded by assignee" (stale worker crash) or "all beads
+/// blocked by dependencies" (genuine dependency wait vs. missing blocker).
+fn write_pluck_diagnostic(
+    workspace: &str,
+    stats: &FilteringStats,
+    candidate_count: usize,
+    relaxation_tier: RelaxationTier,
+    worker_id: &str,
+    exclude_labels: &[String],
+    candidates: &[Bead],
+    all_beads: &[Bead],
+    exclude_ids: &HashSet<BeadId>,
+) -> Result<()> {
+    let target_workspace = if workspace.is_empty() {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
+    } else {
+        PathBuf::from(workspace)
+    };
+
+    let diagnostics_dir = target_workspace.join(".beads");
+    std::fs::create_dir_all(&diagnostics_dir).with_context(|| {
+        format!(
+            "failed to create diagnostics directory: {}",
+            diagnostics_dir.display()
+        )
+    })?;
+
+    let diagnostic_path = diagnostics_dir.join("pluck-diagnostics.json");
+
+    // Build per-bead exclusion details when no candidates found (starvation case)
+    let per_bead_exclusions: Vec<PerBeadExclusion> = if candidate_count == 0 {
+        all_beads
+            .iter()
+            .filter(|bead| is_open_work_bead(bead))
+            .map(|bead| {
+                let reasons = exclusion_reasons_for_bead(bead, all_beads, exclude_labels, exclude_ids);
+                PerBeadExclusion {
+                    bead_id: bead.id.to_string(),
+                    bead_title: bead.title.clone(),
+                    exclusion_reasons: reasons,
+                }
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    // Build filtering breakdown from exclusion counts
+    let filtering_breakdown = FilteringBreakdown {
+        dependency_blocked: stats.exclusion_counts.blocked,
+        manual_blocked: stats.exclusion_counts.manual_blocked,
+        human: stats.exclusion_counts.human,
+        deferred: stats.exclusion_counts.deferred_assignee,
+        assignee_held: all_beads
+            .iter()
+            .filter(|b| b.status == crate::types::BeadStatus::Open && b.assignee.is_some())
+            .count(),
+        label_filtered: all_beads
+            .iter()
+            .filter(|b| {
+                b.labels.iter().any(|l| exclude_labels.contains(l))
+                    && is_open_work_bead(b)
+            })
+            .count(),
+        total_excluded: stats.excluded_count,
+    };
+
+    let diagnostic = PluckDiagnostic {
+        event: "pluck.evaluation",
+        timestamp: Utc::now(),
+        worker_id: worker_id.to_string(),
+        workspace: workspace.to_string(),
+        relaxation_tier: relaxation_tier.name().to_string(),
+        total_open_beads: stats.open_count,
+        filtering_breakdown,
+        final_candidate_count: candidate_count,
+        per_bead_exclusions,
+    };
+
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&diagnostic_path)
+        .with_context(|| {
+            format!(
+                "failed to open pluck diagnostics file: {}",
+                diagnostic_path.display()
+            )
+        })?;
+
+    use std::io::Write;
+    writeln!(file, "{}", serde_json::to_string(&diagnostic)?)?;
+    file.sync_all()?;
+
+    tracing::debug!(
+        path = %diagnostic_path.display(),
+        workspace = %workspace,
+        total_open = stats.open_count,
+        candidates = candidate_count,
+        excluded = stats.excluded_count,
+        "Wrote pluck evaluation diagnostic"
+    );
+
+    Ok(())
+}
+
 /// Extract workspace path from beads, handling NULL/empty workspace columns.
 ///
 /// In bead-rs stores, the workspace column is NULL for every row, which parses
@@ -1769,6 +1933,27 @@ impl super::Strand for PluckStrand {
                 }
             }
 
+            // Write pluck diagnostic to target workspace for monitoring
+            if let Some(beads) = all_beads.as_deref() {
+                if let Err(e) = write_pluck_diagnostic(
+                    &workspace_path,
+                    &stats,
+                    0, // No candidates found
+                    relaxation_tier,
+                    self.telemetry.worker_id(),
+                    &self.exclude_labels,
+                    &[], // No candidates
+                    beads,
+                    exclusions,
+                ) {
+                    tracing::warn!(
+                        error = %e,
+                        workspace = %workspace_path,
+                        "Failed to write pluck diagnostic to target workspace"
+                    );
+                }
+            }
+
             tracing::debug!(
                 workspace = %workspace_path,
                 open_count = stats.open_count,
@@ -1777,13 +1962,37 @@ impl super::Strand for PluckStrand {
             );
             StrandResult::NoWork
         } else {
+            let candidate_count = candidates.len();
             let candidate_ids: Vec<&str> = candidates.iter().map(|b| b.id.as_ref()).collect();
             tracing::info!(
-                count = candidates.len(),
+                count = candidate_count,
                 candidates = ?candidate_ids,
                 "Returning {} candidates for processing",
-                candidates.len()
+                candidate_count
             );
+
+            // Write pluck diagnostic to target workspace for monitoring
+            if let Some(ref all_beads) = all_beads {
+                let workspace_path = extract_workspace_path(all_beads);
+                if let Err(e) = write_pluck_diagnostic(
+                    &workspace_path,
+                    &stats,
+                    candidate_count,
+                    relaxation_tier,
+                    self.telemetry.worker_id(),
+                    &self.exclude_labels,
+                    &candidates,
+                    all_beads,
+                    exclusions,
+                ) {
+                    tracing::warn!(
+                        error = %e,
+                        workspace = %workspace_path,
+                        "Failed to write pluck diagnostic to target workspace"
+                    );
+                }
+            }
+
             StrandResult::BeadFound(candidates)
         }
     }
