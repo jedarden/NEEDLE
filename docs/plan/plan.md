@@ -2,17 +2,18 @@
 
 > **N**avigates **E**very **E**nqueued **D**eliverable, **L**ogs **E**ffort
 
-Plan revision: 20
+Plan revision: 21
 
 As of: 2026-08-31
 
 Status owner: NEEDLE maintainers
 
-Status: current-state re-baseline accepted; transition implementation pending
+Status: current-state re-baseline and in-process learning-kernel boundary
+accepted; transition implementation pending
 
 ## 0. How to read this plan
 
-Sections 0–9 are the current normative product and transition plan. The
+Sections 0–10 are the current normative product and transition plan. The
 original implementation plan and Phases 1–19 follow as a historical appendix.
 The appendix explains how the present system arose, but its architecture,
 status checkboxes, command examples, completion claims, and statements of
@@ -31,6 +32,12 @@ This re-baseline accepts:
 - [ADR-025: Independent reconciling controllers replace idle-waterfall coupling](../adr/025-independent-reconciling-controllers-over-idle-waterfall.md)
 - [ADR-026: Reflection produces evidence-gated lessons and derived memory](../adr/026-evidence-gated-reflection-and-derived-memory.md)
 - [ADR-027: Policy has explicit authority and every attempt records its context](../adr/027-policy-authority-and-context-manifests.md)
+
+Revision 21 locates the evaluation, reflection, replay, competence, memory,
+experiment, and promotion logic in a dependency-isolated learning kernel inside
+the NEEDLE repository and release artifact. It is a logical primitive, not a
+third deployed service. Section 5 defines its complete input, component,
+storage, output, autonomy, and future-extraction boundaries.
 
 ## 1. Product boundary and current reality
 
@@ -249,9 +256,203 @@ manifest.
 
 Self-modifying code and autonomous fleet promotion remain disabled until the
 truth-model, policy-manifest, experiment, rollback, and outcome-SLO gates in
-section 8 pass.
+section 9 pass.
 
-## 5. Extended memory architecture
+## 5. In-process learning kernel
+
+### 5.1 Deployment decision and dependency rule
+
+The self-learning control plane lives in NEEDLE. Its target package boundary is
+an internal Rust library crate, `crates/needle-learning`, built, versioned,
+tested, and released with the NEEDLE binary. It is not a daemon, remote API,
+shared mutable database, or independently deployed product.
+
+The kernel owns pure schemas and decisions. It accepts immutable observations
+and returns typed recommendations or plans. It cannot claim or mutate beads,
+spawn agents, edit a workspace, invoke gates, publish policy, deploy a binary,
+or execute an external side effect. NEEDLE controllers own all such effects and
+return their receipts to the next evaluation episode.
+
+The dependency direction is one-way:
+
+```text
+needle binary / controllers / adapters / stores
+                    |
+                    v
+             needle-learning
+        (types + pure decision logic)
+```
+
+`needle-learning` must not depend on worker, strand, adapter, process-spawning,
+bead-store CLI, or deployment modules. Integration occurs through versioned
+input/output types and narrow read-only source traits implemented by NEEDLE;
+effect requests are return values executed by controllers outside the kernel.
+This keeps the kernel extractable without paying the operational cost of a
+third service before independent reuse exists.
+
+### 5.2 Complete feedback loop
+
+```text
+ bead-rs work and attempt receipts ----+
+ ContextManifest and policy exposure --+
+ traces, evidence, gates, costs --------+
+ mature outcomes and regressions -------+----> Episode assembler
+ OutcomeContracts and EvalCases --------+              |
+ memory sources and prior lessons ------+              v
+ tool/model/repository version drift ---+       normalized episode
+ authority and experiment envelopes ----+              |
+                                                        v
+                        +---------------- needle-learning ----------------+
+                        | outcome evaluator and credit assignment         |
+                        | reflection and failure fingerprinting           |
+                        | competence and uncertainty model                |
+                        | memory retrieval and lesson effectiveness       |
+                        | replay/counterfactual planner and eval corpus    |
+                        | experiment analysis, drift, curriculum, rollback|
+                        +-------------------------+------------------------+
+                                                  |
+                         recommendations and plans only
+                                                  |
+                                                  v
+              routing / prompt / replay / admission / promotion controllers
+                                                  |
+                       guarded effects and immutable receipts
+                                                  |
+                                                  +----> next episode
+```
+
+The closed loop learns from the mature result of a change, not from the amount
+of process generated while making it.
+
+### 5.3 Inputs and producers
+
+| Input | Producer and authority | Kernel use |
+| --- | --- | --- |
+| `Attempt`, `Resolution`, bead revision/state, attempt receipt | NEEDLE episode types plus bead-rs durable facts | Correlation, outcome identity, retry and ownership truth |
+| `ContextManifest` and policy exposure | Policy resolver and prompt builder | Attribute results to exact instructions, tools, memory, and variants |
+| `ExecutionTrace` and `EvidenceBundle` | Dispatcher, gates, Git/external-effect collectors | Observable action/result evidence; never hidden chain-of-thought |
+| Mature outcome observations | CI, reopen/revert detector, deployment/canary and incident controllers | Correct an initially successful resolution when delayed regressions appear |
+| `OutcomeContract` | Reviewed repository policy and task-type registry | Define verifier, evidence, observation horizon, cost, and regression criteria by work type |
+| `EvalCase` corpus | Minimized incidents, regressions, representative successes, and reviewed synthetic cases | Replay, holdout evaluation, and prevention of repeated failures |
+| Reflection triggers and failure fingerprints | Resolver, health, bypass, quarantine, rollback, and drift controllers | Select high-value episodes without mandatory retrospective churn |
+| Memory sources and supersession graph | Reviewed memory leaves, incidents, ADRs, runbooks, and policies | Scoped retrieval and candidate comparison |
+| Adapter/model/tool/repository versions | Context manifest and build metadata | Invalidate or decay competence and lessons after material drift |
+| Resource and economic observations | Token/cost, latency, retry, provider and worker telemetry | Measure learning return and enforce experiment budgets |
+| Authority and experiment envelope | Policy manifest and operator-approved configuration | Bound which adaptations may be automatic and which require review |
+
+Outcome maturity is explicit. An attempt may have immediate, post-CI,
+time-window, and post-deployment observations. A later reopen, revert,
+regression, or duplicated external effect amends the evaluated outcome without
+rewriting the immutable original Resolution.
+
+### 5.4 Kernel components
+
+| Component | Responsibility | Required output |
+| --- | --- | --- |
+| `factory_types` | Versioned inputs, outputs, IDs, schemas, redaction and compatibility | Deterministic canonical records |
+| `episode` | Assemble and validate one learning episode from immutable references | Complete episode or explicit missing-evidence result |
+| `outcome_contracts` | Match task type/scope to evidence, maturity horizon, SLO and guardrails | Versioned evaluation contract |
+| `evaluator` | Score mature outcomes, assign bounded credit, and compare cohorts | Evaluation with uncertainty and confounders |
+| `reflection` | Build fingerprints, episodes, candidate lessons and counterexamples | Candidate records, never policy mutation |
+| `competence` | Track performance/calibration by adapter, model, version, repository and task class | Routing score, uncertainty and expiry |
+| `replay` | Select/minimize EvalCases and construct shadow/counterfactual plans | Side-effect-free replay plan and comparison criteria |
+| `memory` | Index, retrieve, rank, supersede, expire and measure source-backed memory | Bounded memory selection with source hashes |
+| `experiments` | Assign baseline/candidate cohorts and evaluate primary metric/guardrails | Continue, stop, roll back or propose-promotion decision |
+| `drift` | Detect material environment, version, distribution and effectiveness change | Invalidation, confidence decay or re-evaluation request |
+| `curriculum` | Identify capability gaps from failed/uncertain EvalCases | Budgeted eval/work proposal; never direct bead creation |
+| `promotion` | Package exact candidate diff, authority, evidence and rollback | Auditable proposal or allowed in-envelope adaptation |
+
+Uncertainty is first-class. The evaluator may return insufficient evidence;
+the competence model must be calibrated against held-out outcomes; disagreement
+may request independent verification for high-impact work. Agreement among
+agents is evidence about confidence, not proof of correctness.
+
+### 5.5 Outputs and effect owners
+
+| Kernel output | NEEDLE consumer | Permitted effect |
+| --- | --- | --- |
+| Routing/competence score | Claim and dispatch controllers | Choose among admitted workers/variants within policy |
+| Memory selection | Prompt/context builder | Inject bounded source-backed context and record exposure |
+| Candidate lesson/runbook | Reflection review queue | Persist candidate only |
+| Replay/evaluation plan | Shadow evaluation controller | Execute in an isolated non-mutating environment |
+| Capability-gap proposal | Work-proposal admission controller | Admit, reject, merge, budget, or create declared work |
+| Experiment decision | Experiment controller | Continue/stop cohort, or roll back an exposed variant |
+| Policy proposal | Audited promotion controller | Apply only with required authority and reversible receipt |
+| Drift/invalidation decision | Health, memory and routing controllers | Decay confidence, stop experiment, or schedule re-evaluation |
+
+No output is itself a side effect. Every consumer revalidates current authority,
+revision, budget, and guardrails immediately before acting.
+
+### 5.6 Storage ownership
+
+| Store | Contents | Authority |
+| --- | --- | --- |
+| bead-rs | Work lifecycle, revisions, claims/fencing and portable attempt receipts | Durable work truth |
+| Telemetry and evidence/object storage | Traces, gate reports, diffs, external receipts and mature observations | Immutable evidence referenced by ID/hash |
+| Git in the applicable repository | Reviewed OutcomeContracts, EvalCases, policies, runbooks and executable checks | Reviewed source authority |
+| NEEDLE runtime state | Experiment assignments, exposure receipts and controller leases | Operational state with recovery contract |
+| Derived SQLite/search/embedding indexes | Memory ranking, competence aggregates, fingerprints and caches | Rebuildable and never authoritative |
+
+A central global “brain” database is not introduced. Cross-workspace learning
+uses scoped, source-addressed artifacts plus derived indexes. Loss of any
+derived index must be recoverable without losing work truth, policy, evidence,
+or reviewed memory.
+
+### 5.7 Autonomy levels
+
+| Level | Capability | Default authority |
+| --- | --- | --- |
+| L0 | Retrieve reviewed memory and report evaluation | Automatic |
+| L1 | Re-rank memory, routing and EvalCase selection | Automatic with exposure receipt |
+| L2 | Canary an already approved prompt/policy variant | Automatic within declared cohort and budget |
+| L3 | Tune cadence, retry or numeric parameters inside approved bounds | Automatic with guardrails and rollback |
+| L4 | Propose a new policy, gate, OutcomeContract or source change | Evidence-gated review required |
+| L5 | Apply/deploy new policy or code, widen authority or weaken a safety bound | Separately authorized release/promotion |
+
+An experiment cannot promote itself to a higher authority level. The current
+level, envelope version, decision, exposure, and rollback receipt are part of
+the ContextManifest and evaluation record.
+
+Version-control delivery is orthogonal to the learning authority that approves
+content. Once a task, policy variant, or promotion has the authority required by
+this table, NEEDLE may commit and push it automatically when all of the
+following are true:
+
+- the changed paths and intended remote/ref are explicit, and no unrelated
+  user or worker changes are staged or included;
+- the applicable repository instructions permit direct delivery and every
+  required attributed verification gate passes;
+- the commit contains no credential, sensitive evidence, generated secret, or
+  unreviewed policy escalation;
+- the push uses the configured authoritative `origin`, advances the permitted
+  branch normally, and requires no force, history rewrite, tag, or release;
+- a normal forward revert commit can restore the prior repository state, and
+  the commit/push receipt records the parent, commit, remote/ref, verification,
+  authority, and rollback plan.
+
+A push is classified by its downstream effect, not merely by Git mechanics. If
+it triggers a deployment, publication, migration, notification, destructive
+operation, or other effect that cannot be fully reversed by a repository
+revert, that effect requires its own declared authority and guardrails. The
+learning kernel never invokes Git; an audited delivery controller performs the
+authorized commit/push and returns its receipt as evidence.
+
+### 5.8 Future extraction criteria
+
+`needle-learning` becomes a separately deployed product only through a future
+ADR after at least one of these conditions is demonstrated:
+
+- two or more independent orchestrators require the same stable kernel API;
+- multiple independently deployed fleets require coordinated shared learning;
+- evidence/index scale needs an independent storage and availability SLO;
+- sensitive evidence requires a distinct security or data-residency boundary;
+- the learning engine has an independent release cadence and accountable owner.
+
+Extraction must preserve the versioned episode/result contracts and must not
+turn derived memory into hidden policy authority. Architectural neatness alone
+is not sufficient justification for another service.
+
+## 6. Extended memory architecture
 
 The existing memory files remain useful episodic sources, but working-directory
 loading is insufficient for a multi-adapter factory. NEEDLE will add a
@@ -277,7 +478,7 @@ truth.
 missing adapter projections, backend mismatches, and unresolved supersession.
 Fatal conflicts prevent admission before claim.
 
-## 6. Combined NEEDLE and bead-rs contract
+## 7. Combined NEEDLE and bead-rs contract
 
 | Concern | NEEDLE owns | bead-rs owns |
 | --- | --- | --- |
@@ -295,7 +496,7 @@ lease, fencing, failure-tier, resource-lock, or manual-block state when the
 backend advertises those capabilities. bead-rs must not interpret prompts,
 verification meaning, policy authority, memory, or lesson quality.
 
-## 7. Artifact-by-artifact transition ledger
+## 8. Artifact-by-artifact transition ledger
 
 Status vocabulary: `current`, `transition`, `blocked`, and `verified`. An item
 is not `verified` until its acceptance evidence is linked from this plan or a
@@ -304,21 +505,21 @@ generated conformance report.
 | ID | Artifact(s) | Change | Acceptance evidence | Status |
 | --- | --- | --- | --- | --- |
 | N-T01 | `docs/plan/plan.md`, ADRs | Re-baseline current architecture and demote phases to history | Plan/ADR link check and maintainer review | current |
-| N-T02 | `src/types/`, `src/dispatch/` | Add versioned Attempt, ContextManifest, EvidenceBundle, Resolution, and IDs | Serialization compatibility and invariant tests | transition |
+| N-T02 | `crates/needle-learning` factory types plus transition adapters in `src/types/`, `src/dispatch/` | Add versioned Attempt, ContextManifest, EvidenceBundle, Resolution, learning input/output records, and IDs | Serialization compatibility, dependency-direction and invariant tests | transition |
 | N-T03 | `src/claim/`, `src/worker/`, `src/prompt/` | Generate and propagate attempt ID, revision/fencing, tool/policy/memory hashes | One-ID end-to-end dispatch test across every adapter | transition |
 | N-T04 | `src/outcome/`, `src/resolve/`, `src/bead_store/` | Split pure resolution decision from guarded application; confirm durable state before completion | crash-boundary, stale-owner, replay, and false-close tests | transition |
 | N-T05 | `src/telemetry/`, `src/trace/`, `src/stats/`, registry/health fields | Version events; correlate by attempt; replace action-credit metrics with outcome metrics | migration fixtures and unique-resolution dashboard checks | transition |
 | N-T06 | `src/strand/mod.rs`, worker scheduling | Introduce controller scheduler and migrate Resolve, lifecycle repair, health, and Splice first | starvation and controller idempotence tests | blocked by N-T02–N-T05 |
 | N-T07 | Explore/Weave/Unravel/Pulse/Generation/Mitosis | Convert automatic backlog changes to budgeted proposals plus an admission controller | duplicate, conflict, backlog-budget, and human-intent preservation tests | blocked by N-T06 |
-| N-T08 | `src/learning/`, `src/strand/reflect.rs`, learning files | Disable direct promotion/count reinforcement; add reflection and evaluation records | one-attempt-one-reinforcement and harmful-lesson demotion tests | blocked by N-T02–N-T05 |
-| N-T09 | new memory catalog plus prompt/context code | Index scoped source memory, explicitly inject bounded results, record manifest | cold rebuild, supersession, sensitivity, and adapter-parity tests | blocked by N-T03, N-T08 |
+| N-T08 | `crates/needle-learning` reflection/evaluator plus adapters for `src/learning/`, `src/strand/reflect.rs`, learning files | Disable direct promotion/count reinforcement; add mature reflection, uncertainty, counterexample and evaluation records | one-attempt-one-reinforcement, delayed-outcome correction and harmful-lesson demotion tests | blocked by N-T02–N-T05 |
+| N-T09 | kernel memory module, derived catalog store, prompt/context adapter | Index scoped source memory, explicitly inject bounded results, record exposure, expiry and effectiveness | cold rebuild, supersession, sensitivity, source-loss and adapter-parity tests | blocked by N-T03, N-T08 |
 | N-T10 | policy resolver, `needle doctor policy`, AGENTS/CLAUDE/templates/config | Define precedence, find contradictions, and produce content-addressed manifests | fixture suite for conflicts and repository/nested scope | transition |
 | N-T11 | config schemas and capability negotiation | Add feature flags and backend capability gates; default new behavior off until verified | old-config compatibility and unsupported-backend fail-closed tests | transition |
-| N-T12 | eval/canary/release machinery | Add policy experiments, outcome SLOs, rollback, and promotion receipts | canary proves improvement without guardrail regression | blocked by N-T05, N-T08–N-T11 |
+| N-T12 | `crates/needle-learning` outcome contracts, evaluator, competence, replay, experiments, drift, curriculum and promotion modules plus effect/delivery-controller adapters | Add reviewed OutcomeContracts/EvalCases, mature outcome evaluation, calibrated competence, shadow replay plans, experiments, bounded adaptation, audited reversible commit/push, rollback and promotion receipts | pure-kernel/no-side-effect conformance, scoped-index/push/revert tests, holdout/replay coverage and canary improvement without guardrail regression | blocked by N-T05, N-T08–N-T11 |
 | N-T13 | historical telemetry/learnings | Mark legacy events non-authoritative; import learnings only as candidates | deterministic migration report with no invented attempts | blocked by N-T02, N-T08 |
 | N-T14 | combined consumer conformance | Exercise bead-rs atomic attempt resolution with fallback for older capabilities | pinned old/new bead-rs matrix, crash/replay tests | blocked by bead-rs transition |
 
-## 8. Transition gates and order
+## 9. Transition gates and order
 
 ### Gate A — truthful accounting
 
@@ -346,6 +547,12 @@ generated conformance report.
 - Direct Reflect-to-policy and Reflect-to-code writes are impossible.
 - Automatic adaptation is confined to declared variants and numeric envelopes;
   it cannot create new authority, weaken gates, or edit source/policy files.
+- The learning kernel has no dependency or code path to worker mutation,
+  process spawning, bead CLI, policy-file writes, or deployment.
+- OutcomeContracts and EvalCases are reviewed, versioned, and source-addressed;
+  held-out cases are not visible to the policy optimizer.
+- Competence and lesson confidence decay on material version/drift signals and
+  are calibrated against mature outcomes rather than initial closure.
 
 ### Gate D — autonomous improvement
 
@@ -353,6 +560,11 @@ generated conformance report.
   without exceeding retry, cost, latency, bypass, or regression guardrails.
 - Policy rollback is tested and produces an auditable receipt.
 - Memory/policy conflicts fail admission or receive explicit authority.
+- Shadow replay agrees with bounded canary behavior within declared tolerance,
+  and delayed outcome horizons show no guardrail regression.
+- Automatic commit/push is path-scoped, hook-gated and receipt-backed; tests
+  cover shared dirty indexes, remote rejection, non-fast-forward refusal and a
+  normal forward revert without force or history rewriting.
 - Only after these checks may bounded automatic policy promotion or
   self-modification be considered in a new ADR.
 
@@ -360,7 +572,7 @@ Implementation order is A, then the correctness portion of B, then C, then D.
 Backlog generation may continue only under an explicit fixed budget and cannot
 be used as evidence that the factory is improving.
 
-## 9. Success measures
+## 10. Success measures
 
 The combined factory reports at least:
 
@@ -372,6 +584,10 @@ The combined factory reports at least:
 - time and cost to durable resolution;
 - quarantine age and bounded human-handoff quality;
 - policy/memory exposure cohorts and lesson effectiveness;
+- mature-outcome correction rate and OutcomeContract/EvalCase coverage;
+- competence calibration error, routing regret and confidence invalidation;
+- replay-to-canary agreement and held-out regression rate;
+- reflection/evaluation cost versus retries and regressions prevented;
 - bypass, rollback, and policy-conflict rates.
 
 Tool calls, commits, notes, generated beads, reflection documents, and worker
