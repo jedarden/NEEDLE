@@ -592,6 +592,9 @@ struct PerBeadExclusion {
 /// monitoring system can tail this file and alert on patterns like
 /// "all beads excluded by assignee" (stale worker crash) or "all beads
 /// blocked by dependencies" (genuine dependency wait vs. missing blocker).
+// A diagnostic writer that reports nine distinct things; splitting it into a
+// struct would only move the same nine across the call.
+#[allow(clippy::too_many_arguments)]
 fn write_pluck_diagnostic(
     workspace: &str,
     stats: &FilteringStats,
@@ -599,7 +602,9 @@ fn write_pluck_diagnostic(
     relaxation_tier: RelaxationTier,
     worker_id: &str,
     exclude_labels: &[String],
-    candidates: &[Bead],
+    // Kept in the signature for the two call sites; the count above is what
+    // the diagnostic records.
+    _candidates: &[Bead],
     all_beads: &[Bead],
     exclude_ids: &HashSet<BeadId>,
 ) -> Result<()> {
@@ -625,7 +630,8 @@ fn write_pluck_diagnostic(
             .iter()
             .filter(|bead| is_open_work_bead(bead))
             .map(|bead| {
-                let reasons = exclusion_reasons_for_bead(bead, all_beads, exclude_labels, exclude_ids);
+                let reasons =
+                    exclusion_reasons_for_bead(bead, all_beads, exclude_labels, exclude_ids);
                 PerBeadExclusion {
                     bead_id: bead.id.to_string(),
                     bead_title: bead.title.clone(),
@@ -649,10 +655,7 @@ fn write_pluck_diagnostic(
             .count(),
         label_filtered: all_beads
             .iter()
-            .filter(|b| {
-                b.labels.iter().any(|l| exclude_labels.contains(l))
-                    && is_open_work_bead(b)
-            })
+            .filter(|b| b.labels.iter().any(|l| exclude_labels.contains(l)) && is_open_work_bead(b))
             .count(),
         total_excluded: stats.excluded_count,
     };
@@ -1050,16 +1053,13 @@ impl PluckStrand {
             .collect();
 
         if open_beads.is_empty() {
-            tracing::debug!(
-                tier = tier.name(),
-                "No open beads found for bypass"
-            );
+            tracing::debug!(tier = tier.name(), "No open beads found for bypass");
             return Ok((vec![], tier));
         }
 
         // Sort by created_at to find the oldest bead
         let mut sorted_beads: Vec<&Bead> = open_beads.clone();
-        sorted_beads.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        sorted_beads.sort_by_key(|bead| bead.created_at);
         let oldest_bead = sorted_beads.first().cloned().cloned();
 
         match oldest_bead {
@@ -1105,10 +1105,20 @@ impl PluckStrand {
                     );
 
                     if let Some(needle_workspace) = &self.needle_workspace {
-                        let log_path = needle_workspace.join(".beads").join("diagnostics").join("pluck-bypass.log");
-                        let log_dir = log_path.parent().unwrap_or_else(|| std::path::Path::new("."));
+                        let log_path = needle_workspace
+                            .join(".beads")
+                            .join("diagnostics")
+                            .join("pluck-bypass.log");
+                        let log_dir = log_path
+                            .parent()
+                            .unwrap_or_else(|| std::path::Path::new("."));
                         if let Err(e) = std::fs::create_dir_all(log_dir)
-                            .and_then(|_| std::fs::OpenOptions::new().create(true).append(true).open(&log_path))
+                            .and_then(|_| {
+                                std::fs::OpenOptions::new()
+                                    .create(true)
+                                    .append(true)
+                                    .open(&log_path)
+                            })
                             .and_then(|mut file| {
                                 use std::io::Write;
                                 writeln!(file, "{}", log_entry)
@@ -1126,10 +1136,7 @@ impl PluckStrand {
                 Ok((vec![bead], tier))
             }
             None => {
-                tracing::debug!(
-                    tier = tier.name(),
-                    "No bead available for bypass"
-                );
+                tracing::debug!(tier = tier.name(), "No bead available for bypass");
                 Ok((vec![], tier))
             }
         }
