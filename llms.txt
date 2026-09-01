@@ -1,0 +1,33 @@
+# NEEDLE: Deterministic bead processing for headless coding CLI agents
+
+## Quickstart (install to first closed bead)
+
+curl -fsSL https://github.com/jedarden/NEEDLE/releases/latest/download/install.sh | bash
+cd <your-repo> && needle init --backend bead-rs
+bead init --prefix <name>
+bead create --title "Add a CONTRIBUTING.md" --priority 2
+needle doctor
+needle run --agent claude --identifier alpha
+needle status
+tmux attach -t needle-claude-alpha
+bead list --status closed
+
+## Expected outcomes
+- Install: binaries in ~/.local/bin (override with NEEDLE_INSTALL_PATH)
+- init: creates .needle.yaml and ~/.config/needle/config.yaml
+- bead init: creates .beads/ with beads.db (SQLite) and .beads/checkpoint/
+- bead create: prints bead ID (e.g., abc123def)
+- doctor: all PASS or WARN rows, exit code 0
+- run: starts worker in tmux session, processes beads
+- status: lists active workers and session names
+- list --status closed: shows completed beads
+
+## Failure modes (2026-08-29)
+- No `bead` on PATH: install.sh failed or NEEDLE_INSTALL_PATH not on PATH → rerun install.sh
+- `unknown adapter` (claude): agent CLI not installed or not on PATH → install agent CLI
+- doctor FAIL rows: each names its fix (e.g., "set bead_cli.backend in .needle.yaml") → follow the fix
+
+## Learn more
+- https://github.com/jedarden/NEEDLE/blob/main/docs/agent-onboarding.md (full walkthrough with expected output)
+- https://github.com/jedarden/NEEDLE/blob/main/docs/configuration.md (adapter YAML schema, all config options)
+- https://github.com/jedarden/NEEDLE/blob/main/docs/README.md (complete documentation index)
