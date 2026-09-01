@@ -1535,6 +1535,16 @@ impl super::Strand for PluckStrand {
             "Pluck candidate query completed"
         );
 
+        // Initialize query execution diagnostic tracking
+        let database_result_count = candidates.len();
+        let mut filter_stages: Vec<FilterStage> = Vec::new();
+        let query_params = QueryParameters {
+            assignee: None,
+            exclude_labels: self.exclude_labels.clone(),
+            exclude_ids: exclusions.iter().map(|id| id.to_string()).collect(),
+            relaxation_tier: relaxation_tier.name().to_string(),
+        };
+
         // Initialize filtering statistics for starvation telemetry.
         let mut stats = FilteringStats {
             open_count: candidates.len(),
@@ -1600,11 +1610,38 @@ impl super::Strand for PluckStrand {
                     stats.exclusion_reasons.push(format!("label:{}", label));
                 }
             }
+
+            // Record filter stage for diagnostic logging
+            let filter_reasons: Vec<String> = excluded_beads
+                .iter()
+                .flat_map(|(id, labels)| {
+                    let id_clone = id.clone();
+                    labels
+                        .iter()
+                        .map(move |l| format!("{}:label:{}", id_clone, l))
+                })
+                .collect();
+            filter_stages.push(FilterStage {
+                stage_name: "label_filter".to_string(),
+                before_count: before_label_filter,
+                after_count: after_label_filter,
+                filtered_count: label_excluded_count,
+                filter_reasons,
+            });
         } else {
             tracing::debug!(
                 count = after_label_filter,
                 "No beads excluded by label filter"
             );
+
+            // Record filter stage even when no items are filtered
+            filter_stages.push(FilterStage {
+                stage_name: "label_filter".to_string(),
+                before_count: before_label_filter,
+                after_count: after_label_filter,
+                filtered_count: 0,
+                filter_reasons: vec!["no_label_matches".to_string()],
+            });
         }
 
         // 3. Apply the normal readiness guards unless the final fallback was
@@ -1669,11 +1706,33 @@ impl super::Strand for PluckStrand {
                 // Add to exclusion reasons for telemetry.
                 stats.exclusion_reasons.push(reason.clone());
             }
+
+            // Record filter stage for diagnostic logging
+            let filter_reasons: Vec<String> = excluded_by_status
+                .iter()
+                .map(|(id, reason)| format!("{}:{}", id, reason))
+                .collect();
+            filter_stages.push(FilterStage {
+                stage_name: "status_assignee_filter".to_string(),
+                before_count: before_status_filter,
+                after_count: after_status_filter,
+                filtered_count: status_excluded_count,
+                filter_reasons,
+            });
         } else {
             tracing::debug!(
                 count = after_status_filter,
                 "No beads excluded by status/assignee filter"
             );
+
+            // Record filter stage even when no items are filtered
+            filter_stages.push(FilterStage {
+                stage_name: "status_assignee_filter".to_string(),
+                before_count: before_status_filter,
+                after_count: after_status_filter,
+                filtered_count: 0,
+                filter_reasons: vec!["no_status_assignee_matches".to_string()],
+            });
         }
 
         // 4. Sort: deterministic with dependency awareness.
@@ -1959,6 +2018,22 @@ impl super::Strand for PluckStrand {
                         "Failed to write pluck diagnostic to target workspace"
                     );
                 }
+
+                // Write query execution diagnostic even when no candidates found
+                if let Err(e) = write_query_execution_diagnostic(
+                    &workspace_path,
+                    &query_params,
+                    database_result_count,
+                    &filter_stages,
+                    0, // No candidates
+                    self.telemetry.worker_id(),
+                ) {
+                    tracing::warn!(
+                        error = %e,
+                        workspace = %workspace_path,
+                        "Failed to write query execution diagnostic for no-candidate case"
+                    );
+                }
             }
 
             tracing::debug!(
@@ -1977,6 +2052,25 @@ impl super::Strand for PluckStrand {
                 "Returning {} candidates for processing",
                 candidate_count
             );
+
+            // Write query execution diagnostic to target workspace
+            if let Some(ref all_beads) = all_beads {
+                let workspace_path = extract_workspace_path(all_beads);
+                if let Err(e) = write_query_execution_diagnostic(
+                    &workspace_path,
+                    &query_params,
+                    database_result_count,
+                    &filter_stages,
+                    candidate_count,
+                    self.telemetry.worker_id(),
+                ) {
+                    tracing::warn!(
+                        error = %e,
+                        workspace = %workspace_path,
+                        "Failed to write query execution diagnostic"
+                    );
+                }
+            }
 
             // Write pluck diagnostic to target workspace for monitoring
             if let Some(ref all_beads) = all_beads {
@@ -2003,6 +2097,126 @@ impl super::Strand for PluckStrand {
             StrandResult::BeadFound(candidates)
         }
     }
+}
+
+// ─── Enhanced Query Execution Diagnostics ─────────────────────────────────────
+
+/// Complete query execution chain diagnostic for automated analysis.
+///
+/// Captures the full journey from query parameters to final candidates,
+/// enabling automated detection of where candidates are lost in the filtering pipeline.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct QueryExecutionDiagnostic {
+    /// Event type for filtering.
+    event: &'static str,
+    /// UTC timestamp of the evaluation.
+    timestamp: chrono::DateTime<chrono::Utc>,
+    /// Worker that performed this evaluation.
+    worker_id: String,
+    /// Workspace being evaluated.
+    workspace: String,
+    /// Query parameters sent to the bead store.
+    query_parameters: QueryParameters,
+    /// Raw database result count (before any Pluck-side filtering).
+    database_result_count: usize,
+    /// Filter application steps with counts at each stage.
+    filter_stages: Vec<FilterStage>,
+    /// Final candidate list size.
+    final_candidate_count: usize,
+}
+
+/// Query parameters sent to the bead store.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct QueryParameters {
+    /// Assignee filter (None = unassigned work).
+    assignee: Option<String>,
+    /// Labels excluded from the query.
+    exclude_labels: Vec<String>,
+    /// Bead IDs explicitly excluded.
+    exclude_ids: Vec<String>,
+    /// Relaxation tier used for this query.
+    relaxation_tier: String,
+}
+
+/// Individual filter stage with before/after counts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FilterStage {
+    /// Stage name for identification.
+    stage_name: String,
+    /// Count before this filter.
+    before_count: usize,
+    /// Count after this filter.
+    after_count: usize,
+    /// Number of items filtered out.
+    filtered_count: usize,
+    /// Detailed reasons for filtering (when applicable).
+    filter_reasons: Vec<String>,
+}
+
+/// Write query execution diagnostic to .beads/query-execution-diagnostics.jsonl.
+///
+/// This provides a complete audit trail showing exactly where candidates are
+/// lost in the filtering pipeline, enabling automated analysis of starvation alerts.
+fn write_query_execution_diagnostic(
+    workspace: &str,
+    query_params: &QueryParameters,
+    database_result_count: usize,
+    filter_stages: &[FilterStage],
+    final_candidate_count: usize,
+    worker_id: &str,
+) -> Result<()> {
+    let target_workspace = if workspace.is_empty() {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
+    } else {
+        PathBuf::from(workspace)
+    };
+
+    let diagnostics_dir = target_workspace.join(".beads");
+    std::fs::create_dir_all(&diagnostics_dir).with_context(|| {
+        format!(
+            "failed to create diagnostics directory: {}",
+            diagnostics_dir.display()
+        )
+    })?;
+
+    let diagnostic_path = diagnostics_dir.join("query-execution-diagnostics.jsonl");
+
+    let diagnostic = QueryExecutionDiagnostic {
+        event: "query.execution",
+        timestamp: Utc::now(),
+        worker_id: worker_id.to_string(),
+        workspace: workspace.to_string(),
+        query_parameters: query_params.clone(),
+        database_result_count,
+        filter_stages: filter_stages.to_vec(),
+        final_candidate_count,
+    };
+
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&diagnostic_path)
+        .with_context(|| {
+            format!(
+                "failed to open query execution diagnostics file: {}",
+                diagnostic_path.display()
+            )
+        })?;
+
+    use std::io::Write;
+    writeln!(file, "{}", serde_json::to_string(&diagnostic)?)?;
+    file.sync_all()?;
+
+    tracing::debug!(
+        path = %diagnostic_path.display(),
+        workspace = %workspace,
+        database_results = database_result_count,
+        final_candidates = final_candidate_count,
+        filter_stages = filter_stages.len(),
+        "Wrote query execution diagnostic"
+    );
+
+    Ok(())
 }
 
 // ─── Unit tests ──────────────────────────────────────────────────────────────
