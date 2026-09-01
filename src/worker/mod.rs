@@ -1652,13 +1652,14 @@ impl Worker {
         )?;
         let step_start = Instant::now();
         let qualified_id = format!("{}-{}", self.config.agent.default, self.worker_name);
+        let (model, provider) = self.registry_adapter_identity();
         let entry = WorkerEntry {
             id: qualified_id.clone(),
             pid: std::process::id(),
             workspace: self.config.workspace.default.clone(),
             agent: self.config.agent.default.clone(),
-            model: None,
-            provider: self.resolve_provider(),
+            model,
+            provider,
             started_at: chrono::Utc::now(),
             beads_processed: 0,
             config_reload_generation: self.config_reload_generation,
@@ -6014,13 +6015,14 @@ impl Worker {
     /// `config_reload_generation` field in the registry, so external tools
     /// like `needle config --dump --live` can see the current reload generation.
     fn update_registry_entry(&self) -> Result<()> {
+        let (model, provider) = self.registry_adapter_identity();
         let entry = crate::registry::WorkerEntry {
             id: self.qualified_id(),
             pid: std::process::id(),
             workspace: self.config.workspace.default.clone(),
             agent: self.config.agent.default.clone(),
-            model: None,
-            provider: self.resolve_provider(),
+            model,
+            provider,
             started_at: chrono::Utc::now(),
             beads_processed: self.beads_processed,
             config_reload_generation: self.config_reload_generation,
@@ -6505,6 +6507,25 @@ impl Worker {
         self.dispatcher
             .adapter(adapter_name)
             .and_then(|a| a.provider.clone())
+    }
+
+    /// Resolve the identity used by registry-backed provider/model limits.
+    ///
+    /// Registry writes happen before adapter preflight during boot, so keep the
+    /// existing preflight error path authoritative. A resolution failure here
+    /// falls back to the default adapter's provider and is rejected by the
+    /// later preflight before any bead can be claimed.
+    fn registry_adapter_identity(&self) -> (Option<String>, Option<String>) {
+        match self.resolve_adapter() {
+            Ok(adapter) => (adapter.model, adapter.provider),
+            Err(error) => {
+                tracing::debug!(
+                    error = %error,
+                    "could not resolve routed adapter identity for worker registry"
+                );
+                (None, self.resolve_provider())
+            }
+        }
     }
 
     /// Check if a bead should use SPLIT mode based on consecutive failures.
@@ -9562,6 +9583,30 @@ mod tests {
 
         // Default adapter not found → provider is None.
         assert!(worker.resolve_provider().is_none());
+    }
+
+    #[tokio::test]
+    async fn registry_entry_tracks_resolved_adapter_model_and_provider() {
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut worker = make_worker(store);
+        worker.boot().await.unwrap();
+
+        let entries = worker.registry.list().unwrap();
+        let entry = entries
+            .iter()
+            .find(|entry| entry.id == worker.qualified_id())
+            .expect("booted worker should be registered");
+        assert_eq!(entry.model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(entry.provider.as_deref(), Some("anthropic"));
+
+        worker.update_registry_entry().unwrap();
+        let entries = worker.registry.list().unwrap();
+        let entry = entries
+            .iter()
+            .find(|entry| entry.id == worker.qualified_id())
+            .expect("updated worker should remain registered");
+        assert_eq!(entry.model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(entry.provider.as_deref(), Some("anthropic"));
     }
 
     // ── restore_home_store tests ──

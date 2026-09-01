@@ -5,6 +5,8 @@ agent:
   adapters_dir: /home/coding/.config/needle/adapters
   routing:
     rules:
+    - match_model: glm.*
+      adapter: claude-code-glm-4.7
     - match_model: (claude-)?(sonnet|opus|fable|haiku).*
       adapter: claude
     default_adapter: claude
