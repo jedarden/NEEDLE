@@ -242,6 +242,14 @@ static TIER_TABLE: &[(&str, ReloadTier)] = &[
     ("strands.knot.alert_cooldown_minutes", ReloadTier::Live),
     ("strands.knot.exhaustion_threshold", ReloadTier::Live),
     ("strands.knot.retry_backoff_secs", ReloadTier::Live),
+    (
+        "strands.learning.trace_retention_failed_days",
+        ReloadTier::Live,
+    ),
+    (
+        "strands.learning.trace_retention_success_days",
+        ReloadTier::Live,
+    ),
     // Mitosis (live)
     ("strands.mitosis.enabled", ReloadTier::Live),
     ("strands.mitosis.first_failure_only", ReloadTier::Live),
@@ -346,6 +354,14 @@ mod tests {
         assert_eq!(
             get_tier_for_key("worker.config_reload_check_interval_secs"),
             Some(ReloadTier::RestartRequired)
+        );
+        assert_eq!(
+            get_tier_for_key("strands.learning.trace_retention_failed_days"),
+            Some(ReloadTier::Live)
+        );
+        assert_eq!(
+            get_tier_for_key("strands.learning.trace_retention_success_days"),
+            Some(ReloadTier::Live)
         );
     }
 
