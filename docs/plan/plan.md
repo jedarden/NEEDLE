@@ -2,9 +2,9 @@
 
 > **N**avigates **E**very **E**nqueued **D**eliverable, **L**ogs **E**ffort
 
-Plan revision: 22
+Plan revision: 23
 
-As of: 2026-09-01
+As of: 2026-09-02
 
 Status owner: NEEDLE maintainers
 
@@ -317,6 +317,39 @@ stack join), git-activity-exporter and argo-workflows-exporter (join sources),
 dashboard-site (factory panel), agent-transcript-archive (episode
 materialization), jeds-curated-skills and utilities (operator-side loop).
 
+### 4.5 Lessons of 2026-09-02 (revision 23)
+
+The first dispatches against section 4.4 produced two incidents and a lost
+hour of work, each exposing a gap the ledger alone would not close. Each is a
+transition-ledger row (N-T22 to N-T30) and one bead.
+
+- **Infrastructure is a signal, not noise.** Every clean-gate verification in
+  two workspaces failed with one identical message for two days and each was
+  booked as a bead failure; the GLM gateway restarted 13 times an hour for a
+  day; the collector was down 25 minutes. A shared failure fingerprint across
+  beads means the workspace is degraded, not the beads (N-T22). Provider
+  errors seen in the agent stream must be counted per attempt and aggregated
+  into a live provider-health state (N-T23) that adapter selection consumes,
+  excluding degraded windows from evidence (N-T27). Infra signals join the
+  ledger on the declarative-config side.
+- **Preserve work before judging it.** A 60-minute productive attempt was
+  killed by the hard cap 4 s after its next request, with no commit; the
+  edits were later swept by another bead's stash. Timeouts, crashes and
+  interruptions capture the attempt's own diff before release (N-T24); the
+  prompt states the deadline and asks for a checkpoint commit (N-T25);
+  shared-checkout mutations by workers are detected and forbidden (N-T29).
+- **Quarantine must expire.** A bare `deferred` from a timeout is excluded by
+  Pluck forever and removed by nothing; a P1 sat parked while bead-rs called it
+  ready. Timeouts use the ADR-022 expiring form (N-T26).
+- **Operator-only work is a resolution, not a retry.** A bead whose next step
+  is an OpenBao write only an operator can make was dispatched six times and
+  split into duplicate children. needs_human parks it with a reason and a queue
+  (N-T28).
+- **Lessons must reach the workers.** Everything learned that day lived in an
+  interactive session's memory. Reviewed lessons are promoted into the target
+  repo's AGENTS.md through a marker-fenced, receipted, reversible operation
+  (N-T30).
+
 ## 5. In-process learning kernel
 
 ### 5.1 Deployment decision and dependency rule
@@ -584,6 +617,15 @@ generated conformance report.
 | N-T19 | `src/prompt/` variants, experiment controller | Template canary: bounded exposure, verified-success metric, automatic stop, receipt | experiment fixture covering promote, stop and rollback | blocked by N-T16 |
 | N-T20 | override detector, telemetry | Record operator reopen, revert and interrupt as attempt evidence and reflection trigger | detector tests against forensic and git fixtures; no false positives on fleet-internal reopen | blocked by N-T16 |
 | N-T21 | workspace health, learning consumers | Freeze adaptation, experiments and promotion while a workspace is gate-degraded | degraded workspace produces no exposure change in tests | blocked by N-T18, ADR-023 wiring |
+| N-T22 | workspace-health controller | Verification-failure fingerprint shared across beads trips gate-degraded and files one infra bead | replay of 2026-09-01/02 JSONL trips within 5 failures; mixed fingerprints never trip | blocked by needle-0abc120d |
+| N-T23 | stream transform, telemetry | Per-attempt provider error counts and max response gap; provider.degraded/restored state | 2026-09-02 transcript replays to 15 errors / 613 s gap; hysteresis tests | blocked by N-T16 |
+| N-T24 | `src/outcome/` timeout/crash/interrupt paths | Capture the attempt's own diff to trace + named stash before release; redispatch prompt names it | patch re-applies; unrelated dirty files excluded | transition |
+| N-T25 | prompt templates, outcome | Deadline stated in prompt; checkpoint-commit request at 75%; commits_before_deadline recorded | template snapshot; counter present | transition |
+| N-T26 | `src/outcome/` handle_timeout, Pluck exclusion | Expiring `deferred:<expiry>` instead of bare label; doctor lists bare ones | timed-out fixture claimable after expiry | blocked by needle-40c6c60e |
+| N-T27 | `src/routing/`, selection | Degraded provider windows excluded from evidence; fallback adapter while degraded | replay keeps GLM evidence unchanged by outage attempts | blocked by N-T23, N-T18 |
+| N-T28 | outcome classification, `needle human-queue` | needs_human resolution from handoff marker / permission denial / operator step; no failure count; queue command | fixture markers resolve without penalty | blocked by N-T16 |
+| N-T29 | workspace-health, prompt | Detect stash/reset/checkout in the shared checkout during attempts; forbid in prompt; report stale dirty files | fixture stash binds to the overlapping attempt | transition |
+| N-T30 | `needle lesson promote/demote`, policy doctor | Receipted marker-fenced promotion of a reviewed CandidateLesson into AGENTS.md; demote restores | promote/demote round-trip byte-identical; unreviewed refused | blocked by N-T10 |
 
 ## 9. Transition gates and order
 
