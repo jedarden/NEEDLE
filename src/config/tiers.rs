@@ -244,11 +244,11 @@ static TIER_TABLE: &[(&str, ReloadTier)] = &[
     ("strands.knot.retry_backoff_secs", ReloadTier::Live),
     (
         "strands.learning.trace_retention_failed_days",
-        ReloadTier::Live,
+        ReloadTier::Rebuild,
     ),
     (
         "strands.learning.trace_retention_success_days",
-        ReloadTier::Live,
+        ReloadTier::Rebuild,
     ),
     // Mitosis (live)
     ("strands.mitosis.enabled", ReloadTier::Live),
@@ -357,11 +357,11 @@ mod tests {
         );
         assert_eq!(
             get_tier_for_key("strands.learning.trace_retention_failed_days"),
-            Some(ReloadTier::Live)
+            Some(ReloadTier::Rebuild)
         );
         assert_eq!(
             get_tier_for_key("strands.learning.trace_retention_success_days"),
-            Some(ReloadTier::Live)
+            Some(ReloadTier::Rebuild)
         );
     }
 
