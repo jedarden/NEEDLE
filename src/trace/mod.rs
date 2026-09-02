@@ -6,8 +6,8 @@
 //!
 //! ## Trace Retention Policy
 //!
-//! - **Failed beads**: 30 days (full trace retained)
-//! - **Successful beads**: metadata-only after 7 days (trace data pruned)
+//! - **Failed beads**: 7 days (full trace retained)
+//! - **Successful beads**: metadata-only after 1 day (trace data pruned)
 //!
 //! ## Directory Structure
 //!
@@ -400,8 +400,9 @@ pub struct TraceCleanupSummary {
 
 /// Clean up old traces based on retention policy.
 ///
-/// - Failed beads (non-zero exit): delete after 30 days
-/// - Successful beads (exit 0): prune data after 7 days, keep metadata only
+/// - Failed beads (non-zero exit): delete after the configured failure retention
+/// - Successful beads (exit 0): prune data after the configured success retention,
+///   keeping metadata only
 pub fn cleanup_traces(
     traces_dir: &Path,
     retention_days_failed: u32,
@@ -463,11 +464,9 @@ pub fn cleanup_traces(
             .any(|file| path.join(file).exists());
 
         let should_delete = is_failed && age_days > retention_days_failed as u64;
-        // Only prune if metadata says not pruned AND data files actually exist.
-        // If files are gone but metadata says not pruned, we have a partial
-        // state from an interrupted run - fix the metadata and skip counting.
-        let should_prune =
-            !is_failed && !is_pruned && has_data_files && age_days > retention_days_success as u64;
+        // A trace marked pruned may still contain data when a prior cleanup was
+        // interrupted after updating metadata. Finish removing those files too.
+        let should_prune = !is_failed && has_data_files && age_days > retention_days_success as u64;
 
         // Fix up metadata for traces that were partially pruned (files gone
         // but metadata not updated). This prevents infinite loops.
@@ -500,7 +499,7 @@ pub fn cleanup_traces(
                     error = %e,
                     "failed to prune trace data"
                 );
-            } else {
+            } else if !is_pruned {
                 summary.traces_pruned += 1;
             }
         }
@@ -1246,5 +1245,51 @@ mod tests {
             summary2.traces_pruned, 0,
             "fixed trace should not be counted again"
         );
+    }
+
+    #[test]
+    fn trace_cleanup_finishes_interrupted_metadata_first_prune() {
+        let temp_dir = TempDir::new().unwrap();
+        let traces_dir = temp_dir.path().join("traces");
+        let bead_dir = traces_dir.join("needle-interrupted");
+        std::fs::create_dir_all(&bead_dir).unwrap();
+
+        std::fs::write(bead_dir.join("stdout.txt"), "stdout").unwrap();
+        std::fs::write(bead_dir.join("stderr.txt"), "stderr").unwrap();
+        std::fs::write(bead_dir.join("trace.jsonl"), "{\"event\":\"test\"}").unwrap();
+        std::fs::write(bead_dir.join(TEST_OUTPUT_FILE), "test output").unwrap();
+
+        let metadata = TraceMetadata {
+            bead_id: BeadId::from("needle-interrupted"),
+            agent: "test".to_string(),
+            provider: None,
+            model: None,
+            exit_code: 0,
+            outcome: "success".to_string(),
+            duration_ms: 100,
+            input_tokens: None,
+            output_tokens: None,
+            cost_usd: None,
+            captured_at: Utc::now() - chrono::Duration::days(8),
+            trace_format: TraceFormat::RawText,
+            pruned: true,
+            template_version: None,
+            timeout_reason: None,
+        };
+        std::fs::write(
+            bead_dir.join("metadata.json"),
+            serde_json::to_string(&metadata).unwrap(),
+        )
+        .unwrap();
+
+        let summary = cleanup_traces(&traces_dir, 30, 7).unwrap();
+
+        assert_eq!(summary.traces_deleted, 0);
+        assert_eq!(summary.traces_pruned, 0);
+        assert!(!bead_dir.join("stdout.txt").exists());
+        assert!(!bead_dir.join("stderr.txt").exists());
+        assert!(!bead_dir.join("trace.jsonl").exists());
+        assert!(!bead_dir.join(TEST_OUTPUT_FILE).exists());
+        assert!(bead_dir.join("metadata.json").exists());
     }
 }

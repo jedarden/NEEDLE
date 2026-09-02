@@ -4747,11 +4747,11 @@ impl TraceSanitizationConfig {
 /// Learning and trace retention configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LearningConfig {
-    /// Retention days for failed bead traces (default: 30).
+    /// Retention days for failed bead traces (default: 7).
     #[serde(default = "LearningConfig::default_trace_retention_failed")]
     pub trace_retention_failed_days: u32,
 
-    /// Retention days for successful bead traces (default: 7).
+    /// Retention days for successful bead traces (default: 1).
     #[serde(default = "LearningConfig::default_trace_retention_success")]
     pub trace_retention_success_days: u32,
 
@@ -4795,11 +4795,11 @@ impl Default for LearningConfig {
 
 impl LearningConfig {
     fn default_trace_retention_failed() -> u32 {
-        30
+        7
     }
 
     fn default_trace_retention_success() -> u32 {
-        7
+        1
     }
 
     fn default_max_learnings() -> usize {

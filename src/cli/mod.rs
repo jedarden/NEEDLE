@@ -2592,8 +2592,8 @@ strands:
 
   # Learning and trace retention.
   learning:
-    trace_retention_failed_days: 30
-    trace_retention_success_days: 7
+    trace_retention_failed_days: 7
+    trace_retention_success_days: 1
     max_learnings: 80
     trace_sanitization:
       enabled: true

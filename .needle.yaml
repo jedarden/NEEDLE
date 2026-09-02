@@ -115,8 +115,8 @@ strands:
     log_runaway_bytes: 10485760
     live_loop_window_secs: 300
   learning:
-    trace_retention_failed_days: 30
-    trace_retention_success_days: 7
+    trace_retention_failed_days: 7
+    trace_retention_success_days: 1
     max_learnings: 80
     trace_sanitization:
       enabled: true
