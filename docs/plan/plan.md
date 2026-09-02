@@ -2,14 +2,15 @@
 
 > **N**avigates **E**very **E**nqueued **D**eliverable, **L**ogs **E**ffort
 
-Plan revision: 21
+Plan revision: 22
 
-As of: 2026-08-31
+As of: 2026-09-01
 
 Status owner: NEEDLE maintainers
 
 Status: current-state re-baseline and in-process learning-kernel boundary
-accepted; transition implementation pending
+accepted; transition implementation pending; revision 22 fixes the
+ledger-first build order (section 4.4)
 
 ## 0. How to read this plan
 
@@ -257,6 +258,64 @@ manifest.
 Self-modifying code and autonomous fleet promotion remain disabled until the
 truth-model, policy-manifest, experiment, rollback, and outcome-SLO gates in
 section 9 pass.
+
+### 4.4 Ledger-first sequencing (revision 22, 2026-09-01)
+
+An assessment on 2026-09-01 found that sections 3 to 5 are designed but that
+nothing durable yet records what an attempt was, in what context it ran, and
+whether it verifiably worked: outcomes exist only as per-host JSONL and
+`failure-count` labels, the dashboard's per-bead cost is a volatile ring
+buffer, bead lifecycle events carry actor `system`, and the prompt A/B
+statistics in `src/stats/` have no consumer. Meanwhile the running Reflect
+strand injects count-reinforced, unverified text into every prompt and into
+CLAUDE.md. Revision 22 therefore fixes the build order below. Each step is a
+transition-ledger row (N-T15 to N-T21 in section 8) and one bead; the order is
+a dependency, not a preference.
+
+0. **Stop the negative loop first.** Legacy learnings prompt injection and
+   `claude_md_placement` default to off and Reflect's reinforcement path is
+   disabled; existing `.beads/learnings.md` content is candidate input only
+   (N-T13). Nothing else in this section may ship before this does.
+1. **Durable attempt ledger before any learning consumer.** Every dispatch
+   emits exactly one `attempt.resolved` event carrying the full ledger row:
+   attempt, bead, workspace, worker, adapter, model, provider, prompt-template
+   version, ContextManifest hash, gate results, semantic outcome, requested
+   and confirmed lifecycle action, tokens, cost, commits, and duration. The
+   durable copy lives *outside the worker host*: the fleet OTLP collector
+   writes attempt, effort, quarantine, false-close and gate-health events to
+   object storage, and the data stack exposes them joined to CI runs and
+   bead events. NEEDLE owns the event schema; `declarative-config` owns the
+   sink; the exporters own the joins. Until N-T03 lands, `attempt_id` is a
+   dispatch-local UUID flagged `provisional: true`, and such rows are excluded
+   from authoritative SLOs (Gate A).
+2. **Attribution.** NEEDLE passes the worker identity as actor on every
+   bead-rs mutation once the backend accepts it (bead-rs BR-T12), so
+   `closed`, `released` and `reopened` events stop reading actor `system`.
+3. **Verified-outcome metrics** (section 10) are computed from the ledger and
+   never from an agent's own report, commit message, or close reason.
+4. **Adapter selection inside the envelope.** Choosing among already
+   configured adapters by verified success per unit cost, with a
+   minimum-evidence floor and bounded exploration, is an L1 adaptation
+   (section 5.7). Static routing rules remain the fallback and the default
+   when evidence is insufficient; the mature form is N-T12 competence.
+5. **Prompt-template canaries.** `prompt.variants` becomes the exposure
+   mechanism of a `PolicyExperiment` whose primary metric is verified
+   success from the ledger, with automatic stop on regression and a receipt.
+6. **Human overrides are first-class evidence.** Operator reopen of a
+   quarantined bead, revert of a fleet-authored commit, and interruption of a
+   running dispatch are recorded against the attempt and are reflection
+   triggers. Today none of them is recorded anywhere.
+7. **Learning consumers freeze in gate-degraded workspaces** (ADR-023). A red
+   gate carries no information, so adapter selection, experiments and
+   promotion hold their last state until the gate is restored.
+
+Cross-repository dependencies are expressed as `cross-repo-gate` beads in the
+downstream repository naming the upstream bead; they are closed by the
+upstream's release, never by the downstream worker. Related repositories:
+bead-rs (BR-T12 actor attribution), declarative-config (ledger sink and data
+stack join), git-activity-exporter and argo-workflows-exporter (join sources),
+dashboard-site (factory panel), agent-transcript-archive (episode
+materialization), jeds-curated-skills and utilities (operator-side loop).
 
 ## 5. In-process learning kernel
 
@@ -518,6 +577,13 @@ generated conformance report.
 | N-T12 | `crates/needle-learning` outcome contracts, evaluator, competence, replay, experiments, drift, curriculum and promotion modules plus effect/delivery-controller adapters | Add reviewed OutcomeContracts/EvalCases, mature outcome evaluation, calibrated competence, shadow replay plans, experiments, bounded adaptation, audited reversible commit/push, rollback and promotion receipts | pure-kernel/no-side-effect conformance, scoped-index/push/revert tests, holdout/replay coverage and canary improvement without guardrail regression | blocked by N-T05, N-T08–N-T11 |
 | N-T13 | historical telemetry/learnings | Mark legacy events non-authoritative; import learnings only as candidates | deterministic migration report with no invented attempts | blocked by N-T02, N-T08 |
 | N-T14 | combined consumer conformance | Exercise bead-rs atomic attempt resolution with fallback for older capabilities | pinned old/new bead-rs matrix, crash/replay tests | blocked by bead-rs transition |
+| N-T15 | `src/config/mod.rs`, `src/prompt/mod.rs`, `src/claude_md_placement.rs`, `src/strand/reflect.rs` | Default legacy learnings injection, reinforcement and CLAUDE.md placement off; files stay as candidate input | `PromptBuilder::with_workspace` emits no learnings section by default; placement removes its marker section when disabled; fixture test | transition (first; 4.4 step 0) |
+| N-T16 | `src/telemetry/`, `src/outcome/` | Emit one `attempt.resolved` ledger event per dispatch with a provisional attempt ID until N-T03 | versioned schema fixture; exactly one event per dispatch in the file sink across success/failure/timeout/crash | transition (4.4 step 1) |
+| N-T17 | `src/bead_store/backend.rs`, `src/bead_store/cli_store.rs` | Pass worker identity as actor on every mutation when the backend advertises it | forensic events carry the worker actor; graceful fallback on older bead-rs | blocked by bead-rs BR-T12 |
+| N-T18 | `src/routing.rs`, `src/dispatch/mod.rs`, `src/stats/mod.rs` | Evidence-based selection among configured adapters with evidence floor, exploration share and static fallback | replay test: selection changes only with sufficient evidence; regex fallback when insufficient | blocked by N-T16 |
+| N-T19 | `src/prompt/` variants, experiment controller | Template canary: bounded exposure, verified-success metric, automatic stop, receipt | experiment fixture covering promote, stop and rollback | blocked by N-T16 |
+| N-T20 | override detector, telemetry | Record operator reopen, revert and interrupt as attempt evidence and reflection trigger | detector tests against forensic and git fixtures; no false positives on fleet-internal reopen | blocked by N-T16 |
+| N-T21 | workspace health, learning consumers | Freeze adaptation, experiments and promotion while a workspace is gate-degraded | degraded workspace produces no exposure change in tests | blocked by N-T18, ADR-023 wiring |
 
 ## 9. Transition gates and order
 
@@ -529,6 +595,9 @@ generated conformance report.
 - Retry, release, quarantine, and infrastructure failure do not increase
   durable completion.
 - Old telemetry is visibly legacy and excluded from authoritative SLOs.
+- A durable copy of every `attempt.resolved` event exists outside the worker
+  host and is joinable to CI runs and bead lifecycle events (section 4.4).
+- Legacy learnings injection and CLAUDE.md placement are off by default.
 
 ### Gate B — resilient control plane
 
@@ -553,6 +622,8 @@ generated conformance report.
   held-out cases are not visible to the policy optimizer.
 - Competence and lesson confidence decay on material version/drift signals and
   are calibrated against mature outcomes rather than initial closure.
+- Adapter selection, experiments and promotion are frozen in gate-degraded
+  workspaces, and human overrides are recorded as attempt evidence.
 
 ### Gate D — autonomous improvement
 
@@ -569,6 +640,8 @@ generated conformance report.
   self-modification be considered in a new ADR.
 
 Implementation order is A, then the correctness portion of B, then C, then D.
+Within A, N-T15 ships first and the ledger sink (N-T16 plus the
+`declarative-config` sink) precedes every consumer in C (section 4.4).
 Backlog generation may continue only under an explicit fixed budget and cannot
 be used as evidence that the factory is improving.
 
