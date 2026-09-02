@@ -395,7 +395,7 @@ If you want to run NEEDLE in your own workflow, open an issue and I'll help.
 
 ## 📚 Documentation
 
-- **[Agent Onboarding](docs/agent-onboarding.md)** — Complete walkthrough from install to first closed bead, with expected output and failure modes
+- **[Agent Onboarding](docs/agent-onboarding.md)** — Complete walkthrough from install to first closed bead, with expected output and failure modes (see also `llms.txt` for the agent-readable quickstart)
 - **[Documentation Index](docs/README.md)** — Complete index of all 148 documentation files (ADRs, architecture, operations, investigations, reference)
 - **[Configuration Reference](docs/configuration.md)** — Adapter YAML schema, all config options
 - **[Binary Freshness Verification](docs/binary-freshness-verification.md)** — Guide for verifying automatic worker rotation when new binaries are deployed
