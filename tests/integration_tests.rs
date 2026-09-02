@@ -78,6 +78,7 @@ mod isolation {
     /// let (temp_dir, _original_home) = setup_isolated_home()?;
     /// cmd.env("HOME", temp_dir.path());
     /// ```
+    #[allow(dead_code)] // HOME-isolation helper from needle-bfd7b135; not yet called by a test
     pub fn setup_isolated_home() -> anyhow::Result<(TempDir, String)> {
         let temp_dir = tempfile::tempdir()?;
         let original_home = env::var("HOME").unwrap_or_else(|_| "/nonexistent".to_string());
@@ -96,6 +97,7 @@ mod isolation {
     /// // ... test code ...
     /// restore_home(&original_home);
     /// ```
+    #[allow(dead_code)] // HOME-isolation helper from needle-bfd7b135; not yet called by a test
     pub fn restore_home(original_home: &str) {
         env::set_var("HOME", original_home);
     }
@@ -117,6 +119,7 @@ mod isolation {
     /// let (mut cmd, _temp_dir) = isolate_command(Command::new("needle"))?;
     /// cmd.arg("list").status()?;
     /// ```
+    #[allow(dead_code)] // HOME-isolation helper from needle-bfd7b135; not yet called by a test
     pub fn isolate_command(mut cmd: Command) -> anyhow::Result<(Command, TempDir)> {
         let (temp_dir, _original_home) = setup_isolated_home()?;
         cmd.env("HOME", temp_dir.path());
@@ -140,6 +143,7 @@ mod isolation {
     /// let (config, _temp_dir) = isolated_config()?;
     /// let worker = Worker::new(config);
     /// ```
+    #[allow(dead_code)] // HOME-isolation helper from needle-bfd7b135; not yet called by a test
     pub fn isolated_config() -> anyhow::Result<(needle::config::Config, TempDir)> {
         let temp_dir = tempfile::tempdir()?;
         let mut config = needle::config::Config::default();
@@ -149,7 +153,6 @@ mod isolation {
         config.strands.explore.workspaces = Vec::new();
 
         // Disable other strands for test isolation
-        config.strands.knot.enabled = false;
         config.strands.pulse.enabled = false;
 
         Ok((config, temp_dir))
@@ -211,6 +214,7 @@ impl QuarantineTestStore {
     }
 
     /// Get the workspace path (for isolation)
+    #[allow(dead_code)]
     fn workspace_path(&self) -> PathBuf {
         self.workspace_dir.path().to_path_buf()
     }
@@ -231,28 +235,19 @@ impl BeadStore for QuarantineTestStore {
         Ok(self.get_all_beads())
     }
 
-    async fn claim(
-        &self,
-        _bead_id: &str,
-        _assignee: &str,
-        _version: Option<i32>,
-    ) -> anyhow::Result<()> {
+    async fn claim(&self, id: &BeadId, _actor: &str) -> anyhow::Result<needle::types::ClaimResult> {
+        let beads = self.beads.lock().unwrap();
+        match beads.iter().find(|b| b.id == *id) {
+            Some(bead) => Ok(needle::types::ClaimResult::Claimed(bead.clone())),
+            None => anyhow::bail!("bead {id} not found in test store"),
+        }
+    }
+
+    async fn release(&self, _id: &BeadId) -> anyhow::Result<()> {
         Ok(())
     }
 
-    async fn release(&self, _bead_id: &str) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    async fn update_status(&self, _bead_id: &str, _status: BeadStatus) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    async fn add_comment(&self, _bead_id: &str, _comment: String) -> anyhow::Result<()> {
-        Ok(())
-    }
-
-    async fn clear_assignee(&self, _bead_id: &str) -> anyhow::Result<()> {
+    async fn clear_assignee(&self, _id: &BeadId) -> anyhow::Result<()> {
         Ok(())
     }
 
@@ -469,7 +464,7 @@ async fn test_quarantine_labels_applied_at_failure_threshold() {
     let bead_id = "quarantine-test-001";
 
     // Create a test bead
-    let mut bead = create_test_bead(bead_id);
+    let bead = create_test_bead(bead_id);
     store.add_bead(bead.clone());
 
     println!("=== QUARANTINE LABELING TEST ===");
@@ -569,7 +564,7 @@ async fn test_quarantine_labels_exact_at_five_failures() {
     let store = QuarantineTestStore::new().expect("failed to create test store");
     let bead_id = "quarantine-test-002";
 
-    let mut bead = create_test_bead(bead_id);
+    let bead = create_test_bead(bead_id);
     store.add_bead(bead.clone());
 
     println!("=== EXACT FAILURE THRESHOLD TEST ===");
@@ -646,7 +641,7 @@ async fn test_quarantine_round_increment() {
     let store = QuarantineTestStore::new().expect("failed to create test store");
     let bead_id = "quarantine-test-003";
 
-    let mut bead = create_test_bead(bead_id);
+    let bead = create_test_bead(bead_id);
     store.add_bead(bead.clone());
 
     println!("=== QUARANTINE ROUND INCREMENT TEST ===");
@@ -722,7 +717,7 @@ async fn test_quarantine_until_timestamp_format() {
     let store = QuarantineTestStore::new().expect("failed to create test store");
     let bead_id = "quarantine-test-004";
 
-    let mut bead = create_test_bead(bead_id);
+    let bead = create_test_bead(bead_id);
     store.add_bead(bead.clone());
 
     println!("=== TIMESTAMP FORMAT VALIDATION TEST ===");
@@ -824,7 +819,7 @@ async fn test_pluck_filters_quarantined_beads() {
     let result = pluck.evaluate(&store, &exclusions).await;
 
     match result {
-        needle::strand::StrandResult::BeadFound(candidates) => {
+        needle::types::StrandResult::BeadFound(candidates) => {
             println!("\nPluck returned {} candidates", candidates.len());
 
             // Verify normal bead is in candidates
@@ -850,7 +845,7 @@ async fn test_pluck_filters_quarantined_beads() {
             // the filtering logic based on timestamp
             println!("  Note: Expired quarantine handling verified in separate test");
         }
-        needle::strand::StrandResult::NoWork => {
+        needle::types::StrandResult::NoWork => {
             panic!("Pluck should have found at least the normal bead");
         }
         _ => {
