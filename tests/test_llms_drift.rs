@@ -1,69 +1,63 @@
-//! Test that ensures commands in llms.txt appear verbatim in README.md Quickstart
-//! This prevents documentation drift between agent-facing and human-facing docs.
+//! Drift check: every command line in llms.txt must appear verbatim as a command
+//! line in README.md's Quickstart block, so the agent-facing quickstart cannot
+//! diverge from the human-facing one.
 
+use std::fs;
 use std::path::Path;
+
+/// First word of a line that counts as a runnable quickstart command.
+const COMMANDS: [&str; 6] = ["curl", "cd", "bead", "needle", "tmux", "git"];
+
+fn command_lines(text: &str) -> Vec<&str> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| match line.split_whitespace().next() {
+            Some(first) => COMMANDS.contains(&first),
+            None => false,
+        })
+        .collect()
+}
 
 #[test]
 fn llms_txt_commands_match_readme_quickstart() {
-    let llms_path = Path::new("llms.txt");
-    let readme_path = Path::new("README.md");
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let llms = fs::read_to_string(repo_root.join("llms.txt")).expect("llms.txt must exist");
+    let readme = fs::read_to_string(repo_root.join("README.md")).expect("README.md must exist");
 
-    // Read both files
-    let llms_content = std::fs::read_to_string(llms_path).expect("llms.txt must exist");
-    let readme_content = std::fs::read_to_string(readme_path).expect("README.md must exist");
+    // llms.txt is meant to stay a single-screen runbook.
+    assert!(
+        llms.lines().count() <= 40,
+        "llms.txt must stay at or under 40 lines (it is {})",
+        llms.lines().count()
+    );
 
-    // Extract executable commands from llms.txt (lines that start with a command)
-    let llms_commands: Vec<&str> = llms_content
-        .lines()
-        .filter(|line| {
-            // Skip comments, empty lines, and section headers
-            !line.trim().is_empty()
-                && !line.trim().starts_with('#')
-                && !line.trim().starts_with('-')
-                && !line.trim().starts_with('*')
-        })
-        .map(|line| line.trim())
+    // Scope the comparison to README's Quickstart bash block, so a command that
+    // merely appears elsewhere in the README does not satisfy the check.
+    let (_, quickstart) = readme
+        .split_once("## 🚀 Quickstart")
+        .expect("README must contain a '## 🚀 Quickstart' section");
+    let opened = quickstart
+        .find("```bash")
+        .expect("Quickstart must contain a bash code block");
+    let body = &quickstart[opened + "```bash".len()..];
+    let (block, _) = body
+        .split_once("```")
+        .expect("Quickstart bash code block must be closed");
+
+    let readme_commands = command_lines(block);
+    assert!(
+        !readme_commands.is_empty(),
+        "Quickstart bash block must contain at least one command"
+    );
+
+    let missing: Vec<&str> = command_lines(&llms)
+        .into_iter()
+        .filter(|cmd| !readme_commands.contains(cmd))
         .collect();
 
-    // Extract commands from README Quickstart section
-    let quickstart_start = readme_content
-        .find("## 🚀 Quickstart")
-        .expect("README must contain Quickstart section");
-
-    let readme_after_quickstart = &readme_content[quickstart_start..];
-
-    // Check each llms.txt command appears verbatim in README Quickstart
-    let mut missing_commands = Vec::new();
-    for command in llms_commands {
-        // Skip descriptive-only lines from llms.txt (like "## Install")
-        if command.starts_with("##") || command.starts_with("*") {
-            continue;
-        }
-
-        // Handle multi-line commands (tmux attach -t appears on separate line in README)
-        if command.contains("tmux attach") {
-            // Check for either combined or separate format
-            let combined_check = readme_after_quickstart.contains(command);
-            let separate_check = command.contains("needle status")
-                && readme_after_quickstart.contains("needle status")
-                && readme_after_quickstart.contains("tmux attach");
-
-            if !combined_check && !separate_check {
-                missing_commands.push(command);
-            }
-        } else if !readme_after_quickstart.contains(command) {
-            missing_commands.push(command);
-        }
-    }
-
-    if !missing_commands.is_empty() {
-        panic!(
-            "Commands in llms.txt not found in README Quickstart:\n\
-             {}\n\
-             \n\
-             Keep llms.txt and README Quickstart in sync. The agent-facing docs must \
-             match the human-facing docs exactly.",
-            missing_commands.join("\n")
-        );
-    }
+    assert!(
+        missing.is_empty(),
+        "llms.txt commands missing from README Quickstart:\n  {}",
+        missing.join("\n  ")
+    );
 }

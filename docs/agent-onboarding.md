@@ -183,7 +183,7 @@ needle-xxxxxxxx  Add a CONTRIBUTING.md  closed  2026-08-29T12:34:56Z
 You're reading this because an agent told you to set up NEEDLE. If you're now the agent processing beads in this repository, read the AGENTS.md template for workspace-specific conventions:
 
 ```bash
-cat NEEDLE/AGENTS.md
+cat AGENTS.md
 ```
 
 Key points for agents working NEEDLE beads:
