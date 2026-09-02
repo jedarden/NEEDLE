@@ -150,9 +150,17 @@ pub struct FleetStateSnapshot {
 
 // ─── EventKind ───────────────────────────────────────────────────────────────
 
+/// Gate result entry for AttemptResolved events.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GateResultEntry {
+    pub name: String,
+    pub status: String,
+    pub duration_ms: u64,
+}
+
 /// Typed event variants emitted by all NEEDLE components.
 ///
-/// Every variant maps to a `TelemetryEvent` with `event_type` matching
+/// Every variant maps to a a `TelemetryEvent` with `event_type` matching
 /// the snake_case discriminant name.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -391,8 +399,12 @@ pub enum EventKind {
     },
     BeadQuarantined {
         bead_id: BeadId,
+        round: u32,
+        until: String,
         failure_count: u32,
-        threshold: u32,
+    },
+    QuarantineExpired {
+        bead_id: BeadId,
     },
     /// False close detected: bead appeared closed but shipped-work verification failed.
     /// This indicates the agent closed the bead without actually shipping work (e.g.,
@@ -461,6 +473,34 @@ pub enum EventKind {
         bead_id: BeadId,
         outcome: String,
         action: String,
+    },
+    /// Single canonical record of a dispatch attempt with its verified outcome.
+    /// Emitted exactly once per dispatch from OutcomeHandler::handle.
+    /// Provisional attempt IDs are UUIDv7; replaced by real IDs when needle-cafdd3af lands.
+    AttemptResolved {
+        attempt_id: String,
+        provisional: bool,
+        bead_id: BeadId,
+        workspace: String,
+        bead_revision_start: Option<String>,
+        worker: String,
+        adapter: String,
+        model: Option<String>,
+        provider: Option<String>,
+        prompt_template: String,
+        template_version: String,
+        context_manifest_hash: Option<String>,
+        gate_results: Vec<GateResultEntry>,
+        outcome: String,
+        requested_action: String,
+        confirmed_state: Option<String>,
+        tokens_in: Option<u64>,
+        tokens_out: Option<u64>,
+        estimated_cost_usd: Option<f64>,
+        commits: Vec<String>,
+        duration_ms: u64,
+        terminal_reason: Option<String>,
+        exit_code: i32,
     },
     WorkerHandlingTimeout {
         bead_id: BeadId,
@@ -1181,6 +1221,7 @@ impl EventKind {
             EventKind::BeadCompleted { .. } => "bead.completed",
             EventKind::BeadOrphaned { .. } => "bead.orphaned",
             EventKind::BeadQuarantined { .. } => "bead.quarantined",
+            EventKind::QuarantineExpired { .. } => "bead.quarantine_expired",
             EventKind::FalseCloseDetected { .. } => "bead.false_close_detected",
             EventKind::DispatchStarted { .. } => "agent.dispatched",
             EventKind::DispatchCompleted { .. } => "agent.completed",
@@ -1191,6 +1232,7 @@ impl EventKind {
             EventKind::BuildHeartbeat { .. } => "build.heartbeat",
             EventKind::OutcomeClassified { .. } => "outcome.classified",
             EventKind::OutcomeHandled { .. } => "outcome.handled",
+            EventKind::AttemptResolved { .. } => "attempt.resolved",
             EventKind::WorkerHandlingTimeout { .. } => "worker.handling.timeout",
             EventKind::HeartbeatEmitted { .. } => "heartbeat.emitted",
             EventKind::StuckDetected { .. } => "peer.stale",
@@ -1489,6 +1531,8 @@ impl EventKind {
             EventKind::UpgradeCheckFailed { .. } => None,
             EventKind::PluckOrderingDegraded { .. } => None,
             EventKind::MendCycleBroken { .. } => None,
+            EventKind::QuarantineExpired { .. } => None,
+            EventKind::AttemptResolved { bead_id, .. } => Some(bead_id.clone()),
         }
     }
 
@@ -2829,12 +2873,14 @@ impl EventKind {
             }),
             EventKind::BeadQuarantined {
                 bead_id,
+                round,
+                until,
                 failure_count,
-                threshold,
             } => serde_json::json!({
                 "bead_id": bead_id,
+                "round": round,
+                "until": until,
                 "failure_count": failure_count,
-                "threshold": threshold,
             }),
             EventKind::FalseCloseDetected {
                 bead_id,
@@ -2946,6 +2992,82 @@ impl EventKind {
                 "blocker_id": blocker_id,
                 "cycle_len": cycle_len,
             }),
+            EventKind::QuarantineExpired { bead_id } => serde_json::json!({
+                "bead_id": bead_id,
+            }),
+            EventKind::AttemptResolved {
+                attempt_id,
+                provisional,
+                bead_id,
+                workspace,
+                bead_revision_start,
+                worker,
+                adapter,
+                model,
+                provider,
+                prompt_template,
+                template_version,
+                context_manifest_hash,
+                gate_results,
+                outcome,
+                requested_action,
+                confirmed_state,
+                tokens_in,
+                tokens_out,
+                estimated_cost_usd,
+                commits,
+                duration_ms,
+                terminal_reason,
+                exit_code,
+            } => {
+                let mut data = serde_json::json!({
+                    "attempt_id": attempt_id,
+                    "provisional": provisional,
+                    "bead_id": bead_id,
+                    "workspace": workspace,
+                    "worker": worker,
+                    "adapter": adapter,
+                    "prompt_template": prompt_template,
+                    "template_version": template_version,
+                    "gate_results": gate_results,
+                    "outcome": outcome,
+                    "requested_action": requested_action,
+                    "commits": commits,
+                    "duration_ms": duration_ms,
+                    "exit_code": exit_code,
+                });
+
+                // Add optional fields if present
+                if let Some(rev) = bead_revision_start {
+                    data["bead_revision_start"] = serde_json::json!(rev);
+                }
+                if let Some(m) = model {
+                    data["model"] = serde_json::json!(m);
+                }
+                if let Some(p) = provider {
+                    data["provider"] = serde_json::json!(p);
+                }
+                if let Some(hash) = context_manifest_hash {
+                    data["context_manifest_hash"] = serde_json::json!(hash);
+                }
+                if let Some(state) = confirmed_state {
+                    data["confirmed_state"] = serde_json::json!(state);
+                }
+                if let Some(tin) = tokens_in {
+                    data["tokens_in"] = serde_json::json!(tin);
+                }
+                if let Some(tout) = tokens_out {
+                    data["tokens_out"] = serde_json::json!(tout);
+                }
+                if let Some(cost) = estimated_cost_usd {
+                    data["estimated_cost_usd"] = serde_json::json!(cost);
+                }
+                if let Some(reason) = terminal_reason {
+                    data["terminal_reason"] = serde_json::json!(reason);
+                }
+
+                data
+            }
         }
     }
 
@@ -2963,7 +3085,8 @@ impl EventKind {
             }
             | EventKind::CargoTestCompleted { duration_ms, .. }
             | EventKind::ExploreScanSummary { duration_ms, .. }
-            | EventKind::TransformCompleted { duration_ms, .. } => Some(*duration_ms),
+            | EventKind::TransformCompleted { duration_ms, .. }
+            | EventKind::AttemptResolved { duration_ms, .. } => Some(*duration_ms),
             EventKind::WorkerBooting { .. }
             | EventKind::WorkerStarted { .. }
             | EventKind::WorkerStopped { .. }
@@ -3128,7 +3251,8 @@ impl EventKind {
             | EventKind::GatePathMissing { .. }
             | EventKind::MendCycleBroken { .. }
             | EventKind::AuditBeadClosedAsVerification { .. }
-            | EventKind::AuditBeadDeferredOverBudget { .. } => None,
+            | EventKind::AuditBeadDeferredOverBudget { .. }
+            | EventKind::QuarantineExpired { .. } => None,
         }
     }
 }
