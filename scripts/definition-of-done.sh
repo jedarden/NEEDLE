@@ -31,7 +31,15 @@ set -euo pipefail
 
 # Script directory for path resolution
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(git rev-parse --show-toplevel)"
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [[ -z "$REPO_ROOT" ]]; then
+  # Not inside a git work tree. NEEDLE's clean gate (ADR-020) runs this script
+  # from a `git archive HEAD` extraction, which has no .git directory; there the
+  # extraction root is the script's parent. Before 2026-09-02 this line was a
+  # hard `git rev-parse` and every clean-mode gate died with "not a git
+  # repository" before checking anything (42 failures on 2026-09-02 alone).
+  REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+fi
 cd "$REPO_ROOT"
 
 # Default to fast lane
