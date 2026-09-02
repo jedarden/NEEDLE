@@ -315,13 +315,7 @@ impl KnotStrand {
             .output()
         {
             Ok(output) => output,
-            Err(e) => {
-                return (
-                    0,
-                    false,
-                    format!("Failed to run validation script: {}", e),
-                )
-            }
+            Err(e) => return (0, false, format!("Failed to run validation script: {}", e)),
         };
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -348,11 +342,7 @@ impl KnotStrand {
         } else {
             format!(
                 "Cross-repo validation failed: {}",
-                if stderr.is_empty() {
-                    &stdout
-                } else {
-                    &stderr
-                }
+                if stderr.is_empty() { &stdout } else { &stderr }
             )
         };
 
