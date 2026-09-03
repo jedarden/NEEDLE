@@ -2,15 +2,16 @@
 
 > **N**avigates **E**very **E**nqueued **D**eliverable, **L**ogs **E**ffort
 
-Plan revision: 23
+Plan revision: 24
 
-As of: 2026-09-02
+As of: 2026-09-03
 
 Status owner: NEEDLE maintainers
 
 Status: current-state re-baseline and in-process learning-kernel boundary
 accepted; transition implementation pending; revision 22 fixes the
-ledger-first build order (section 4.4)
+ledger-first build order (section 4.4); revision 24 makes selection accounting
+and admission-blocked worker state explicit (section 4.6)
 
 ## 0. How to read this plan
 
@@ -86,6 +87,12 @@ duplicate the other's authority.
   executable gates have no machine-checked precedence or consistency model.
 - Operational policy has retired `br` and active `bf` use, while compatibility
   code and historical documentation still mention both.
+- Strand claim counters currently credit a claim that is immediately released
+  exactly like a claim that reaches agent dispatch, so one poison candidate can
+  dominate the dashboard without producing useful work.
+- A launch deferred by CPU or memory admission is currently presented as an
+  idle/booting worker and can be restarted repeatedly by a service manager;
+  neither state describes the actual capacity block.
 - New backlog generation or self-modification would amplify these weaknesses
   if enabled before work truth and evaluation are repaired.
 
@@ -349,6 +356,56 @@ transition-ledger row (N-T22 to N-T30) and one bead.
   interactive session's memory. Reviewed lessons are promoted into the target
   repo's AGENTS.md through a marker-fenced, receipted, reversible operation
   (N-T30).
+
+### 4.6 Selection truth and admission state (revision 24, 2026-09-03)
+
+A fleet inspection on 2026-09-03 found that the dashboard's large Explore bar
+combined three different facts into one misleading number. Since the dashboard
+backend restart, Explore had won 814 of 863 claims, while Pluck returned
+`no_work` in 772 of 927 evaluations. In the fixed 13:30--13:45 UTC evidence
+window, however, 242 of 248 Explore claims were the same internal-alert bead;
+241 were immediately released as `split_out_of_scope`, and only seven total
+claims reached agent dispatch. At the same time all 15 lab workers appeared
+idle even though 68 launches had been admission-blocked in 15 minutes by a
+saturated 7-core cgroup. The fleet had sparse local eligible work, globally
+discoverable work, one poison-candidate loop, and a capacity block -- not one
+generic kind of starvation.
+
+Revision 24 makes the following decisions normative:
+
+1. **Evaluation, candidate discovery, claim, dispatch, release, and resolution
+   are separate facts.** A claim is concurrency control, not productive work
+   and not proof that an agent is active. Selection accounting keys unique work
+   by bead ID plus revision and correlates the eventual dispatch/release through
+   an attempt ID when available. Raw event volume is diagnostic only.
+2. **Every selector applies one shared eligibility boundary before ranking and
+   claim.** Explore must apply the same internal-control-plane and
+   split-out-of-scope classification as Pluck, skip the rejected candidate, and
+   continue to the next candidate. A late post-claim rejection is an invariant
+   fallback: it adds a revision-scoped exclusion for the rest of selection and
+   may not immediately reselect the unchanged bead. Regression evidence uses a
+   poison candidate sorted before a valid candidate and proves the valid one is
+   dispatched without a claim/release loop.
+3. **Admission-blocked is a first-class worker state.** A service-managed worker
+   that cannot launch because CPU or memory is above policy remains resident,
+   emits bounded `worker.admission_blocked` heartbeats, and retries with capped
+   jittered backoff. It does not repeatedly exit into `Restart=always`, claim a
+   bead, call itself idle, or silently relax the safety threshold. Recovery
+   emits `worker.admission_restored` before normal selection resumes.
+4. **The fleet dashboard reports conversion and causes, not just actions.** For
+   each strand it exposes evaluations by result, claims, unique bead revisions,
+   dispatches, releases by reason, and claim-to-dispatch conversion over named
+   rolling windows (at least 15 minutes, 1 hour, and 24 hours) plus the explicit
+   backend-lifetime period. Worker cards distinguish `agent_active`,
+   `selecting`, `idle`, `admission_blocked`, and `stopped`; only a dispatch can
+   enter `agent_active`. The UI labels the period and never presents cumulative
+   raw claims as completed or active work.
+
+N-T31 through N-T33 in section 8 carry these decisions. Dashboard delivery is
+cross-repository: NEEDLE owns event and selection semantics,
+`declarative-config` owns the dashboard aggregation API, and `dashboard-site`
+owns presentation. The downstream UI uses a `cross-repo-gate` bead for the API
+contract, per section 4.4.
 
 ## 5. In-process learning kernel
 
@@ -626,6 +683,9 @@ generated conformance report.
 | N-T28 | outcome classification, `needle human-queue` | needs_human resolution from handoff marker / permission denial / operator step; no failure count; queue command | fixture markers resolve without penalty | blocked by N-T16 |
 | N-T29 | workspace-health, prompt | Detect stash/reset/checkout in the shared checkout during attempts; forbid in prompt; report stale dirty files | fixture stash binds to the overlapping attempt | transition |
 | N-T30 | `needle lesson promote/demote`, policy doctor | Receipted marker-fenced promotion of a reviewed CandidateLesson into AGENTS.md; demote restores | promote/demote round-trip byte-identical; unreviewed refused | blocked by N-T10 |
+| N-T31 | shared candidate eligibility, `src/strand/explore.rs`, worker post-claim rejection | Filter internal/split-out-of-scope candidates before claim, continue ranking, and revision-scope any late rejection so an unchanged bead cannot spin | poison-first/valid-second multi-worker fixture reaches one valid dispatch with no repeated poison claim | transition; part of the starvation-remediation incident |
+| N-T32 | NEEDLE selection events, `declarative-config` dashboard API, `dashboard-site` fleet panel | Report evaluations, unique bead revisions, claims, dispatches, release reasons, conversion, and explicit rolling/lifetime periods; derive active state from dispatch, not claim | event-sequence contract fixture plus browser/API check showing claim-release churn without false active/productive credit | blocked by N-T05 event versioning; cross-repo delivery |
+| N-T33 | launch resource gate, worker registry/state, service-managed run loop | Replace sustained-saturation exit/restart churn with resident `admission_blocked` state, capped jittered retry, restoration event, and dashboard mapping | saturated-host fixture has one stable worker process, bounded retries, zero claims, then resumes after load clears | transition; supersedes historical Phase 12's terminal launch failure |
 
 ## 9. Transition gates and order
 
@@ -636,6 +696,8 @@ generated conformance report.
 - No completion event exists without accepted evidence and confirmed close.
 - Retry, release, quarantine, and infrastructure failure do not increase
   durable completion.
+- Claim without dispatch does not increase active-work, attempt, or productivity
+  counters; every claim is reconciled to dispatch or a named release cause.
 - Old telemetry is visibly legacy and excluded from authoritative SLOs.
 - A durable copy of every `attempt.resolved` event exists outside the worker
   host and is joinable to CI runs and bead lifecycle events (section 4.4).
@@ -648,6 +710,10 @@ generated conformance report.
 - Controllers are leased, idempotent, budgeted, and crash-tested.
 - Work proposers cannot bypass backlog, duplicate, dependency, or authority
   admission checks.
+- A rejected candidate cannot pin a selector: every strand continues to the
+  next eligible candidate, and an unchanged post-claim rejection cannot spin.
+- Admission-blocked service workers remain observable with bounded retry and no
+  process-restart storm or automatic weakening of resource thresholds.
 
 ### Gate C — trustworthy learning
 
@@ -696,6 +762,10 @@ The combined factory reports at least:
 - false-close/reopen and post-close regression rate;
 - retry amplification and repeated-fingerprint recurrence;
 - infrastructure-failure and stale-ownership rates;
+- claim-to-dispatch conversion, unique claimed bead revisions, and releases by
+  reason per strand and time window;
+- admission-blocked duration, retry cadence, restoration latency, and worker
+  process restart rate;
 - time and cost to durable resolution;
 - quarantine age and bounded human-handoff quality;
 - policy/memory exposure cohorts and lesson effectiveness;
