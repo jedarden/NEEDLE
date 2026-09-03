@@ -184,7 +184,13 @@ pub fn classify_timeout_eligibility(
                 ),
             };
         }
-        Outcome::Success | Outcome::Failure | Outcome::AgentNotFound | Outcome::GateError => {
+        // GateUnsatisfiable is a gate-side attribution, never a timeout, so
+        // timeout-triggered decomposition can never apply to it.
+        Outcome::Success
+        | Outcome::Failure
+        | Outcome::AgentNotFound
+        | Outcome::GateError
+        | Outcome::GateUnsatisfiable => {
             return TimeoutEligibility::NotEligible {
                 reason: format!(
                     "exit code {} is not a timeout (expected 124)",

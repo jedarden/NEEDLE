@@ -373,6 +373,18 @@ pub enum Outcome {
     /// while a gate that could not run at all is `GateError`. Gate errors release the bead
     /// without incrementing the failure count.
     GateError,
+    /// Gate precondition unsatisfiable — the gate ran, failed verification, and would fail
+    /// for any possible work because its precondition cannot be met.
+    ///
+    /// This is the third attribution, distinct from both `Failure` (the gate ran and the
+    /// work did not satisfy it — attributable to the work) and `GateError` (the gate could
+    /// not run at all). Here the gate ran and failed correctly, but no work could ever
+    /// pass it, so the failure is attributable to the gate/configuration rather than to
+    /// the bead. Retrying the same bead cannot change the result.
+    ///
+    /// Not produced by `Outcome::classify()` — an exit code alone cannot carry this
+    /// attribution. It is assigned from gate-report analysis at outcome handling.
+    GateUnsatisfiable,
 }
 
 impl Outcome {
@@ -430,6 +442,7 @@ impl Outcome {
             Outcome::Interrupted => "interrupted",
             Outcome::Crash(_) => "crash",
             Outcome::GateError => "gate_error",
+            Outcome::GateUnsatisfiable => "gate_unsatisfiable",
         }
     }
 }

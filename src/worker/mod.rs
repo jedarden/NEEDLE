@@ -3694,6 +3694,7 @@ impl Worker {
                 crate::types::Outcome::Crash(_) => "crash",
                 crate::types::Outcome::Interrupted => "release",
                 crate::types::Outcome::GateError => "gate_error",
+                crate::types::Outcome::GateUnsatisfiable => "gate_unsatisfiable",
             };
             let mut extra = serde_json::json!({
                 "outcome": outcome_str,

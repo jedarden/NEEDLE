@@ -316,6 +316,18 @@ impl OutcomeHandler {
                 );
                 self.handle_failure(store, bead).await?
             }
+            Outcome::GateUnsatisfiable => {
+                // Not reachable yet: no classification path produces GateUnsatisfiable —
+                // it is assigned from gate-report analysis (precondition unsatisfiable),
+                // which lands separately. Placeholder follows the GateError precedent;
+                // the real handling must NOT attribute the failure to the work or retry
+                // the bead, since no work can satisfy the gate.
+                tracing::error!(
+                    bead_id = %bead.id,
+                    "unexpected GateUnsatisfiable outcome — treating as regular failure"
+                );
+                self.handle_failure(store, bead).await?
+            }
         };
 
         // Emit sub-handler events (e.g. BeadCompleted, BeadOrphaned) to the
@@ -1867,6 +1879,7 @@ impl fmt::Display for Outcome {
             Outcome::Interrupted => write!(f, "Interrupted"),
             Outcome::Crash(code) => write!(f, "Crash({})", code),
             Outcome::GateError => write!(f, "GateError"),
+            Outcome::GateUnsatisfiable => write!(f, "GateUnsatisfiable"),
         }
     }
 }
