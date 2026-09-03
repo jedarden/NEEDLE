@@ -3618,6 +3618,39 @@ path: /path/to/./bead
     }
 }
 
+/// Circuit breaker configuration for build-failing workspaces.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CircuitBreakerConfig {
+    /// Enable circuit breaker (default: true).
+    #[serde(default = "CircuitBreakerConfig::default_enabled")]
+    pub enabled: bool,
+
+    /// Labels that bypass the circuit breaker (default: ["fix-build", "ci-red"]).
+    ///
+    /// Beads with these labels are claimable even when the workspace build is failing.
+    #[serde(default = "CircuitBreakerConfig::default_labels")]
+    pub labels: Vec<String>,
+}
+
+impl Default for CircuitBreakerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+            labels: Self::default_labels(),
+        }
+    }
+}
+
+impl CircuitBreakerConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+
+    fn default_labels() -> Vec<String> {
+        vec!["fix-build".to_string(), "ci-red".to_string()]
+    }
+}
+
 /// Pluck strand configuration (primary bead selection).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluckConfig {
@@ -3643,6 +3676,14 @@ pub struct PluckConfig {
     /// starvation verdicts and are never written to target workspaces.
     #[serde(default = "PluckConfig::default_persistent_starvation_records")]
     pub persistent_starvation_records: bool,
+
+    /// Circuit breaker configuration (default: enabled).
+    ///
+    /// When enabled, Pluck only claims beads labeled with circuit-breaker bypass
+    /// labels from workspaces with failing builds. This prevents workers from
+    /// churning on broken repos.
+    #[serde(default)]
+    pub circuit_breaker: CircuitBreakerConfig,
 }
 
 impl Default for PluckConfig {
@@ -3655,6 +3696,7 @@ impl Default for PluckConfig {
             ],
             split_after_failures: Self::default_split_after_failures(),
             persistent_starvation_records: Self::default_persistent_starvation_records(),
+            circuit_breaker: CircuitBreakerConfig::default(),
         }
     }
 }
@@ -5835,6 +5877,40 @@ impl ConfigTier for ValidationConfig {
     }
 }
 
+/// Shutdown polling for `needle stop` (GitHub issues jedarden/NEEDLE#21).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StopConfig {
+    /// Seconds `needle stop` waits for a signalled process tree to drain,
+    /// polling at a short interval, before naming the PIDs that are still
+    /// alive. Killed workers exit gracefully over a few seconds, so
+    /// verifying a kill without a grace period reports cleanly-dying
+    /// processes as orphans (GitHub issues jedarden/NEEDLE#21).
+    #[serde(default = "StopConfig::default_grace_period_secs")]
+    pub grace_period_secs: u64,
+}
+
+impl Default for StopConfig {
+    fn default() -> Self {
+        StopConfig {
+            grace_period_secs: Self::default_grace_period_secs(),
+        }
+    }
+}
+
+impl StopConfig {
+    pub fn default_grace_period_secs() -> u64 {
+        10
+    }
+}
+
+impl ConfigTier for StopConfig {
+    fn reload_tier(&self) -> ReloadTier {
+        // Read once per `needle stop` invocation; nothing in a running worker
+        // consumes it, so a change needs no rebuild or restart.
+        ReloadTier::Live
+    }
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Config Source Tracking
 // ──────────────────────────────────────────────────────────────────────────────
@@ -5942,7 +6018,14 @@ pub struct WorkspaceStrandsOverrides {
 ///
 /// Note: `workspace` is intentionally absent — `workspace.labels` IS overridable
 /// per-workspace. The path fields (`default`, `home`) are simply ignored if set.
-const NON_OVERRIDABLE_KEYS: &[&str] = &["worker", "limits", "health", "telemetry", "validation"];
+const NON_OVERRIDABLE_KEYS: &[&str] = &[
+    "worker",
+    "limits",
+    "health",
+    "telemetry",
+    "validation",
+    "stop",
+];
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Top-level Config
@@ -6007,6 +6090,9 @@ pub struct Config {
     /// Validation gate execution configuration (timeout, stderr cap).
     #[serde(default)]
     pub validation: ValidationConfig,
+    /// `needle stop` shutdown polling (grace period for killed processes).
+    #[serde(default)]
+    pub stop: StopConfig,
 }
 
 impl Config {
@@ -10522,6 +10608,34 @@ agent:
     #[test]
     fn validation_is_non_overridable_at_workspace_level() {
         assert!(NON_OVERRIDABLE_KEYS.contains(&"validation"));
+    }
+
+    // ── StopConfig tests (GitHub issues jedarden/NEEDLE#21) ──
+
+    #[test]
+    fn stop_config_grace_period_defaults_to_ten_seconds() {
+        assert_eq!(StopConfig::default().grace_period_secs, 10);
+    }
+
+    #[test]
+    fn stop_config_parses_from_yaml() {
+        let yaml = "stop:\n  grace_period_secs: 3\n";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.stop.grace_period_secs, 3);
+    }
+
+    #[test]
+    fn stop_config_absent_from_yaml_uses_default() {
+        // A config file that predates this feature must still parse and get
+        // the documented default, not an error or zeroed value.
+        let yaml = "agent:\n  default: claude\n";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.stop.grace_period_secs, 10);
+    }
+
+    #[test]
+    fn stop_is_non_overridable_at_workspace_level() {
+        assert!(NON_OVERRIDABLE_KEYS.contains(&"stop"));
     }
 
     // ── MitosisConfig.max_depth (fixes pre-existing compile breakage) ──

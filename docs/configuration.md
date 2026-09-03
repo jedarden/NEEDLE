@@ -66,6 +66,9 @@ This guide covers the most commonly used configuration options.
 **Outcome handling:**
 - `outcome.quarantine_after_failures` — Quarantine bead after N failures
 
+**Stop command:**
+- `stop.grace_period_secs` — Grace period for killed processes to exit
+
 ### Tier B (Rebuild) — Component Reconstruction
 
 **These keys trigger component rebuild at the cycle boundary.** No restart needed.
@@ -738,6 +741,22 @@ validation:
 
 ---
 
+## Stop Configuration
+
+```yaml
+stop:
+  # Seconds `needle stop` waits for a signalled process tree to drain,
+  # polling at a short interval, before naming the PIDs that are still
+  # alive (default: 10).
+  #
+  # Killed workers exit gracefully over a few seconds, so verifying a kill
+  # with no grace period reports cleanly-dying processes as orphans. Only
+  # processes still alive after this window are reported — and exit non-zero.
+  grace_period_secs: 10
+```
+
+---
+
 ## Supervisor Configuration
 
 ```yaml
@@ -845,6 +864,9 @@ health:
 validation:
   outcome_timeout_seconds: 50
   stderr_cap_bytes: 4096
+
+stop:
+  grace_period_secs: 10
 ```
 
 ---

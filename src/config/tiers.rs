@@ -86,6 +86,7 @@ fn assert_all_config_fields_have_tiers(config: &Config) {
         ref supervisor,
         ref outcome,
         ref post_push_ci,
+        ref stop,
     } = config;
 
     // Verify tier A assignments
@@ -95,6 +96,7 @@ fn assert_all_config_fields_have_tiers(config: &Config) {
     let _ = budget.reload_tier();
     let _ = pricing.reload_tier();
     let _ = post_push_ci.reload_tier();
+    let _ = stop.reload_tier();
 
     // Verify tier B assignments
     let _ = telemetry.reload_tier();
@@ -326,6 +328,8 @@ static TIER_TABLE: &[(&str, ReloadTier)] = &[
     ("self_modification", ReloadTier::RestartRequired),
     // Supervisor (Tier C - daemon lifecycle)
     ("supervisor", ReloadTier::RestartRequired),
+    // Stop (Tier A - read once per `needle stop` invocation, never by the worker)
+    ("stop.grace_period_secs", ReloadTier::Live),
 ];
 
 #[cfg(test)]
@@ -362,6 +366,10 @@ mod tests {
         assert_eq!(
             get_tier_for_key("strands.learning.trace_retention_success_days"),
             Some(ReloadTier::Rebuild)
+        );
+        assert_eq!(
+            get_tier_for_key("stop.grace_period_secs"),
+            Some(ReloadTier::Live)
         );
     }
 
