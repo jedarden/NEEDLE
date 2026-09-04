@@ -56,27 +56,55 @@ repo_root="$(git -C "$script_dir/.." rev-parse --show-toplevel 2>/dev/null)" \
 config_path="$repo_root/config/gitleaks.toml"
 [[ -f "$config_path" ]] || die "missing vendored config: $config_path"
 
-gitleaks_bin="${GITLEAKS_BIN:-gitleaks}"
-if [[ "$gitleaks_bin" == */* ]]; then
-    [[ -x "$gitleaks_bin" ]] || die "scanner is not executable: $gitleaks_bin"
-else
-    command -v "$gitleaks_bin" >/dev/null 2>&1 \
-        || die "scanner is not available: $gitleaks_bin"
-fi
-
 minimum_raw="$(sed -nE 's/^[[:space:]]*minVersion[[:space:]]*=[[:space:]]*"v?([0-9]+\.[0-9]+\.[0-9]+)".*/\1/p' "$config_path" | head -n 1)"
 minimum_version="$(parse_semver "$minimum_raw")" \
     || die 'vendored config has no supported semantic minVersion'
-scanner_output="$("$gitleaks_bin" version 2>&1)" \
-    || die 'scanner version probe failed'
-scanner_version="$(parse_semver "$scanner_output")" \
-    || die 'scanner returned an unrecognized version'
 
-version_at_least "$scanner_version" "$minimum_version" \
-    || die "gitleaks $scanner_version is older than required $minimum_version"
+gitleaks_bin=''
+scanner_version=''
+select_supported_scanner() {
+    local candidate="$1"
+    local scanner_output candidate_version
+
+    [[ -x "$candidate" ]] || return 1
+    scanner_output="$("$candidate" version 2>&1)" || return 1
+    candidate_version="$(parse_semver "$scanner_output")" || return 1
+    version_at_least "$candidate_version" "$minimum_version" || return 1
+
+    gitleaks_bin="$candidate"
+    scanner_version="$candidate_version"
+}
+
+if [[ -n "${GITLEAKS_BIN:-}" ]]; then
+    gitleaks_bin="$GITLEAKS_BIN"
+    if [[ "$gitleaks_bin" != */* ]]; then
+        gitleaks_bin="$(command -v "$gitleaks_bin" 2>/dev/null)" \
+            || die "scanner is not available: $GITLEAKS_BIN"
+    fi
+    [[ -x "$gitleaks_bin" ]] || die "scanner is not executable: $gitleaks_bin"
+    scanner_output="$("$gitleaks_bin" version 2>&1)" \
+        || die 'scanner version probe failed'
+    scanner_version="$(parse_semver "$scanner_output")" \
+        || die 'scanner returned an unrecognized version'
+    version_at_least "$scanner_version" "$minimum_version" \
+        || die "gitleaks $scanner_version is older than required $minimum_version"
+else
+    declare -A seen_candidates=()
+    while IFS= read -r candidate; do
+        [[ -n "$candidate" && -z "${seen_candidates[$candidate]:-}" ]] || continue
+        seen_candidates["$candidate"]=1
+        if select_supported_scanner "$candidate"; then
+            break
+        fi
+    done < <(type -a -p gitleaks 2>/dev/null || true)
+    [[ -n "$gitleaks_bin" ]] \
+        || die "no gitleaks on PATH meets required version $minimum_version"
+fi
 
 config_sha256="$(sha256sum "$config_path" | awk '{print $1}')" \
     || die 'could not hash the vendored config'
+scanner_sha256="$(sha256sum "$gitleaks_bin" | awk '{print $1}')" \
+    || die 'could not hash the scanner executable'
 mode="$1"
 shift
 
@@ -96,8 +124,8 @@ case "$mode" in
         ;;
 esac
 
-printf 'secret-scan: mode=%s scanner=gitleaks version=%s config_sha256=%s\n' \
-    "$mode" "$scanner_version" "$config_sha256" >&2
+printf 'secret-scan: mode=%s scanner=gitleaks version=%s scanner_sha256=%s config_sha256=%s\n' \
+    "$mode" "$scanner_version" "$scanner_sha256" "$config_sha256" >&2
 
 "$gitleaks_bin" "${scan_args[@]}"
 scan_status=$?

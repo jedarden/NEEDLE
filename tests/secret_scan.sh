@@ -8,7 +8,7 @@ tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 
 mkdir -p "$tmp_dir/repo/scripts" "$tmp_dir/repo/config" "$tmp_dir/bin" \
-    "$tmp_dir/scan-target"
+    "$tmp_dir/stale-bin" "$tmp_dir/supported-bin" "$tmp_dir/scan-target"
 cp "$repo_root/scripts/secret-scan.sh" "$tmp_dir/repo/scripts/"
 cp "$repo_root/config/gitleaks.toml" "$tmp_dir/repo/config/"
 chmod +x "$tmp_dir/repo/scripts/secret-scan.sh"
@@ -55,8 +55,38 @@ grep -Fxq -- --staged "$calls"
 grep -Fxq -- --redact "$calls"
 grep -Fxq -- --config "$calls"
 grep -Fxq "$tmp_dir/repo/config/gitleaks.toml" "$calls"
-grep -Fq 'scanner=gitleaks version=8.25.0 config_sha256=' "$staged_log"
+grep -Fq 'scanner=gitleaks version=8.25.0 scanner_sha256=' "$staged_log"
+grep -Fq 'config_sha256=' "$staged_log"
 grep -Fq 'result=0' "$staged_log"
+
+cat > "$tmp_dir/stale-bin/gitleaks" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == version ]]; then
+    printf '8.21.2\n'
+    exit 0
+fi
+touch "${STALE_SCANNER_RAN:?}"
+exit 99
+EOF
+cat > "$tmp_dir/supported-bin/gitleaks" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == version ]]; then
+    printf '8.30.1\n'
+    exit 0
+fi
+printf '%s\n' "$@" > "${SUPPORTED_SCANNER_CALLS:?}"
+exit 0
+EOF
+chmod +x "$tmp_dir/stale-bin/gitleaks" "$tmp_dir/supported-bin/gitleaks"
+
+auto_log="$tmp_dir/auto.log"
+STALE_SCANNER_RAN="$tmp_dir/stale-ran" SUPPORTED_SCANNER_CALLS="$calls" \
+    PATH="$tmp_dir/stale-bin:$tmp_dir/supported-bin:$PATH" \
+    ./scripts/secret-scan.sh staged > /dev/null 2>"$auto_log"
+[[ ! -e "$tmp_dir/stale-ran" ]]
+grep -Fxq git "$calls"
+grep -Fq 'version=8.30.1' "$auto_log"
+grep -Fq 'scanner_sha256=' "$auto_log"
 
 printf 'generated candidate exists only in this temporary directory\n' \
     > "$tmp_dir/scan-target/candidate.txt"
