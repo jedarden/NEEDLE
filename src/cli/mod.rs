@@ -1722,12 +1722,14 @@ fn find_all_descendants(root_pid: u32) -> Vec<u32> {
                 continue;
             }
 
-            // Read /proc/[pid]/status to get PPID
+            // Linux spells this field `PPid:` (lowercase `id`), not `PPID:`.
+            // Using the wrong spelling makes every process tree appear to have
+            // no descendants, so stop signals only its root.
             let status_path = entry.path().join("status");
             if let Ok(content) = fs::read_to_string(&status_path) {
                 let ppid = content
                     .lines()
-                    .find(|line| line.starts_with("PPID:\t"))
+                    .find(|line| line.starts_with("PPid:\t"))
                     .and_then(|line| line.split(':').nth(1))
                     .and_then(|v| v.trim().parse().ok());
 
@@ -7985,6 +7987,39 @@ mod tests {
         // Should find 2, then stop when it encounters 1 again (already visited)
         assert_eq!(descendants.len(), 1);
         assert!(descendants.contains(&2));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn find_all_descendants_reads_linux_ppid_field() {
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("sleep should spawn");
+        let child_pid = child.id();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let discovered = loop {
+            if find_all_descendants(std::process::id()).contains(&child_pid) {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(
+            discovered,
+            "a direct child must be discoverable through /proc/PID/status PPid"
+        );
     }
 
     #[test]
