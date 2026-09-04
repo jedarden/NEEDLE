@@ -16,6 +16,7 @@
 #
 # Usage:
 #   scripts/definition-of-done.sh [--fast|--slow|--all] [--count-bypass]
+#                                 [--changed-only] [--gate] [--target <name>]
 #
 # Flags:
 #   --fast          Run fast lane only (default for NEEDLE gate)
@@ -26,6 +27,16 @@
 #   --changed-only   Hold this commit responsible only for the paths it stages.
 #                    A problem in a file this commit does not touch is reported
 #                    loudly but does not block. See "Attribution" below.
+#   --gate           Short-circuit: a failed fast lane returns before the slow
+#                    lane starts, so CI never compiles test targets for code
+#                    already known to be rejected. Default behaviour is
+#                    unchanged -- aggregation is right for a human at a
+#                    terminal, who wants every failure in one pass -- because
+#                    CI is the only caller that passes this. See "Gating" below.
+#   --target <name>  Run exactly one slow-lane target instead of all of them.
+#                    Implies the slow lane. Valid names are printed by
+#                    needle_slow_targets(). CI uses this to give each test
+#                    target its own pod. See "Per-target runs" below.
 
 set -euo pipefail
 
@@ -46,6 +57,8 @@ cd "$REPO_ROOT"
 LANE="fast"
 COUNT_BYPASS=false
 CHANGED_ONLY=false
+GATE=false
+SLOW_TARGET=""
 NEEDLE_BYPASS_ARGUMENT=""
 
 # Parse arguments
@@ -71,17 +84,78 @@ while [[ $# -gt 0 ]]; do
       CHANGED_ONLY=true
       shift
       ;;
+    --gate)
+      GATE=true
+      shift
+      ;;
+    --target)
+      [[ $# -ge 2 ]] || { echo "Error: --target requires a name" >&2; exit 1; }
+      SLOW_TARGET="$2"
+      shift 2
+      ;;
     --no-verify)
       NEEDLE_BYPASS_ARGUMENT="--no-verify"
       shift
       ;;
     *)
       echo "Error: Unknown argument: $1" >&2
-      echo "Usage: $0 [--fast|--slow|--all] [--count-bypass] [--changed-only] [--no-verify]" >&2
+      echo "Usage: $0 [--fast|--slow|--all] [--count-bypass] [--changed-only] [--gate] [--target <name>] [--no-verify]" >&2
       exit 1
       ;;
   esac
 done
+
+# ── Slow-lane target table ───────────────────────────────────────────────────
+#
+# The slow lane's targets are named in ONE place so the build step and the run
+# step can never disagree about what counts as a target, and so `--target` has
+# something to validate against.
+#
+# needle_slow_targets lists every accepted `--target` value, `installer`
+# included. needle_cargo_selector maps a name to the cargo selector that runs
+# it, and fails for anything else -- including `installer`, which is a shell
+# suite with no cargo target. Both are extracted and unit-tested by
+# tests/dod-modes/run.sh rather than copied, so they cannot drift from what
+# actually runs.
+needle_slow_targets() {
+  printf '%s\n' lib integration_tests p2_integration_tests \
+    p3_integration_tests real_br_integration_tests installer
+}
+
+needle_cargo_selector() {
+  case "$1" in
+    lib)                       printf '%s\n' --lib ;;
+    integration_tests)         printf '%s\n' --test integration_tests ;;
+    p2_integration_tests)      printf '%s\n' --test p2_integration_tests ;;
+    p3_integration_tests)      printf '%s\n' --test p3_integration_tests ;;
+    real_br_integration_tests) printf '%s\n' --test real_br_integration_tests ;;
+    *)                         return 1 ;;
+  esac
+}
+
+# --target runs exactly one slow-lane check, so it implies the slow lane even
+# though `--fast` is the default.
+if [[ -n "$SLOW_TARGET" ]]; then
+  LANE="slow"
+  if ! needle_slow_targets | grep -qx -- "$SLOW_TARGET"; then
+    echo "Error: unknown --target '$SLOW_TARGET'. Valid targets:" >&2
+    needle_slow_targets | sed 's/^/  /' >&2
+    exit 1
+  fi
+fi
+
+# Which cargo targets this invocation covers. --target installer names no
+# cargo target at all, so this yields nothing rather than every target.
+selected_cargo_targets() {
+  if [[ -n "$SLOW_TARGET" && "$SLOW_TARGET" != "installer" ]]; then
+    printf '%s\n' "$SLOW_TARGET"
+    return 0
+  fi
+  if [[ "$SLOW_TARGET" == "installer" ]]; then
+    return 0
+  fi
+  needle_slow_targets | grep -vx installer
+}
 
 # Bypass detection.  A pre-commit invocation writes a marker keyed by the
 # candidate tree; post-commit attaches the final commit SHA.  A direct script
@@ -290,6 +364,10 @@ if [[ "$LANE" == "fast" ]] || [[ "$LANE" == "all" ]]; then
   # else's breakage, so it is itself part of the gate. Pure bash, milliseconds.
   run_check "attribution tests" bash tests/dod-attribution/run.sh
 
+  # Same for the CI modes: --gate and --target are what keep a rejected change
+  # from paying to compile a test suite. Pure bash, milliseconds.
+  run_check "dod mode tests" bash tests/dod-modes/run.sh
+
   # cargo clippy --all-targets -- -D warnings
   #
   # `--message-format short` in --changed-only mode: the one-line-per-diagnostic
@@ -305,8 +383,39 @@ if [[ "$LANE" == "fast" ]] || [[ "$LANE" == "all" ]]; then
   fi
 fi
 
-# Slow lane checks (tests)
+# ── Gating (--gate) ──────────────────────────────────────────────────────────
+#
+# A failed fast lane is a verdict: the code this run is for has already been
+# rejected. Compiling every test target afterwards cannot change it, and in CI
+# that is not free -- needle-ci-r97zq spent its slow lane compiling targets for
+# a clippy failure decided at the five-minute mark. So --gate returns before
+# the slow lane, with the same failure summary the aggregate path would print.
+#
+# The default stays aggregate. A human at a terminal wants every failure in one
+# pass, and --gate is passed only by CI callers that have already got a verdict.
+#
+# Extracted and tested by tests/dod-modes/run.sh rather than left inline.
+needle_gate_skips_slow_lane() {
+  [[ "$GATE" == true && ${#FAILURES[@]} -gt 0 ]]
+}
+
+RUN_SLOW=false
 if [[ "$LANE" == "slow" ]] || [[ "$LANE" == "all" ]]; then
+  RUN_SLOW=true
+fi
+
+if needle_gate_skips_slow_lane; then
+  RUN_SLOW=false
+  if [[ "$LANE" == "slow" ]] || [[ "$LANE" == "all" ]]; then
+    echo ""
+    echo "=== Slow Lane Skipped (--gate) ==="
+    echo "The fast lane already failed; no test target is compiled."
+    echo "Run without --gate locally to see every failure in one pass."
+  fi
+fi
+
+# Slow lane checks (tests)
+if [[ "$RUN_SLOW" == true ]]; then
   echo "=== Slow Lane Checks ==="
 
   # Compile every test target BEFORE the timed checks below.
@@ -325,13 +434,34 @@ if [[ "$LANE" == "slow" ]] || [[ "$LANE" == "all" ]]; then
   #
   # This does not add work -- it moves compilation out of windows that were
   # never meant to measure it.
-  run_check "cargo test --no-run (build all test targets)" \
-    timeout --kill-after=30 1800 cargo test --no-run \
-      --lib \
-      --test integration_tests \
-      --test p2_integration_tests \
-      --test p3_integration_tests \
-      --test real_br_integration_tests
+  #
+  # With --target, only the selected target is built: each of CI's per-target
+  # pods compiles its own target's dependencies and nothing else, so five pods
+  # do not each pay for five targets.
+  #
+  # ── Per-target runs (--target) ────────────────────────────────────────────
+  #
+  BUILD_LABEL="all test targets"
+  BUILD_SELECTORS=()
+  if [[ "$SLOW_TARGET" != "installer" ]]; then
+    if [[ -n "$SLOW_TARGET" ]]; then
+      BUILD_LABEL="$SLOW_TARGET"
+      while IFS= read -r arg; do
+        BUILD_SELECTORS+=("$arg")
+      done < <(needle_cargo_selector "$SLOW_TARGET")
+    else
+      # No --target: build every cargo target.
+      while IFS= read -r t; do
+        while IFS= read -r arg; do
+          BUILD_SELECTORS+=("$arg")
+        done < <(needle_cargo_selector "$t")
+      done < <(selected_cargo_targets)
+    fi
+
+    run_check "cargo test --no-run (build $BUILD_LABEL)" \
+      timeout --kill-after=30 1800 cargo test --no-run \
+        ${BUILD_SELECTORS[@]+"${BUILD_SELECTORS[@]}"}
+  fi
 
   # Every test target runs with its own TMPDIR, created outside /tmp and
   # outside this checkout. bead-rs workspace discovery stops at the first
@@ -352,19 +482,34 @@ if [[ "$LANE" == "slow" ]] || [[ "$LANE" == "all" ]]; then
   cleanup_lane_tmps() { [ "${#LANE_TMPS[@]}" -gt 0 ] && rm -rf "${LANE_TMPS[@]}" 2>/dev/null || true; }
   trap cleanup_lane_tmps EXIT
 
-  # cargo test --lib (unit tests)
-  run_check "cargo test --lib" env TMPDIR="$(lane_tmp lib)" timeout --kill-after=30 900 cargo test --lib
+  # Core integration coverage. Each target is run from the table above, so the
+  # check name stays derived from the same place the build step got its
+  # selector -- the two cannot disagree. Keep each target separately named so
+  # CI reports which strand phase failed, and bound every target to fit the
+  # verify-step deadline while still allowing the shared debug build to
+  # complete.
+  #
+  # The loop reads a process substitution, NOT a pipe: `run_check` appends to
+  # FAILURES, and a piped `while` would do that in a subshell and lose every
+  # failure it recorded.
+  while IFS= read -r target; do
+    SELECTOR=()
+    while IFS= read -r arg; do
+      SELECTOR+=("$arg")
+    done < <(needle_cargo_selector "$target")
+    if [[ ${#SELECTOR[@]} -eq 0 ]]; then
+      echo "ERROR: no cargo selector for target '$target'" >&2
+      exit 1
+    fi
+    run_check "cargo test ${SELECTOR[*]}" \
+      env TMPDIR="$(lane_tmp "$target")" timeout --kill-after=30 900 cargo test "${SELECTOR[@]}"
+  done < <(selected_cargo_targets)
 
-  # Core integration coverage. Keep each target separately named so CI reports
-  # which strand phase failed, and bound every target to fit the verify-step
-  # deadline while still allowing the shared debug build to complete.
-  run_check "cargo test --test integration_tests" env TMPDIR="$(lane_tmp integration_tests)" timeout --kill-after=30 900 cargo test --test integration_tests
-  run_check "cargo test --test p2_integration_tests" env TMPDIR="$(lane_tmp p2_integration_tests)" timeout --kill-after=30 900 cargo test --test p2_integration_tests
-  run_check "cargo test --test p3_integration_tests" env TMPDIR="$(lane_tmp p3_integration_tests)" timeout --kill-after=30 900 cargo test --test p3_integration_tests
-  run_check "cargo test --test real_br_integration_tests" env TMPDIR="$(lane_tmp real_br_integration_tests)" timeout --kill-after=30 900 cargo test --test real_br_integration_tests
-
-  # Installer tests (isolated, shell-level regression tests)
-  run_check "installer tests" timeout --kill-after=30 60 bash tests/installer/run.sh
+  # Installer tests (isolated, shell-level regression tests). Not a cargo
+  # target, so a per-target run only reaches it when it is the one asked for.
+  if [[ -z "$SLOW_TARGET" || "$SLOW_TARGET" == "installer" ]]; then
+    run_check "installer tests" timeout --kill-after=30 60 bash tests/installer/run.sh
+  fi
 fi
 
 # Summary report
