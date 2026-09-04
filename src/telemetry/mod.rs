@@ -158,6 +158,39 @@ pub struct GateResultEntry {
     pub duration_ms: u64,
 }
 
+/// Payload of [`EventKind::AttemptResolved`], boxed inside the variant.
+///
+/// Held behind a `Box` because these 23 fields total ~470 bytes, and an enum is
+/// as large as its largest variant: inlining them made every `EventKind` value
+/// — including the one-word ones on the worker's hot path — pay that cost, and
+/// tripped `clippy::large_enum_variant` under `-D warnings`.
+#[derive(Debug, Clone)]
+pub struct AttemptResolvedFields {
+    pub attempt_id: String,
+    pub provisional: bool,
+    pub bead_id: BeadId,
+    pub workspace: String,
+    pub bead_revision_start: Option<String>,
+    pub worker: String,
+    pub adapter: String,
+    pub model: Option<String>,
+    pub provider: Option<String>,
+    pub prompt_template: String,
+    pub template_version: String,
+    pub context_manifest_hash: Option<String>,
+    pub gate_results: Vec<GateResultEntry>,
+    pub outcome: String,
+    pub requested_action: String,
+    pub confirmed_state: Option<String>,
+    pub tokens_in: Option<u64>,
+    pub tokens_out: Option<u64>,
+    pub estimated_cost_usd: Option<f64>,
+    pub commits: Vec<String>,
+    pub duration_ms: u64,
+    pub terminal_reason: Option<String>,
+    pub exit_code: i32,
+}
+
 /// Typed event variants emitted by all NEEDLE components.
 ///
 /// Every variant maps to a a `TelemetryEvent` with `event_type` matching
@@ -477,31 +510,7 @@ pub enum EventKind {
     /// Single canonical record of a dispatch attempt with its verified outcome.
     /// Emitted exactly once per dispatch from OutcomeHandler::handle.
     /// Provisional attempt IDs are UUIDv7; replaced by real IDs when needle-cafdd3af lands.
-    AttemptResolved {
-        attempt_id: String,
-        provisional: bool,
-        bead_id: BeadId,
-        workspace: String,
-        bead_revision_start: Option<String>,
-        worker: String,
-        adapter: String,
-        model: Option<String>,
-        provider: Option<String>,
-        prompt_template: String,
-        template_version: String,
-        context_manifest_hash: Option<String>,
-        gate_results: Vec<GateResultEntry>,
-        outcome: String,
-        requested_action: String,
-        confirmed_state: Option<String>,
-        tokens_in: Option<u64>,
-        tokens_out: Option<u64>,
-        estimated_cost_usd: Option<f64>,
-        commits: Vec<String>,
-        duration_ms: u64,
-        terminal_reason: Option<String>,
-        exit_code: i32,
-    },
+    AttemptResolved(Box<AttemptResolvedFields>),
     WorkerHandlingTimeout {
         bead_id: BeadId,
         outcome: String,
@@ -1232,7 +1241,7 @@ impl EventKind {
             EventKind::BuildHeartbeat { .. } => "build.heartbeat",
             EventKind::OutcomeClassified { .. } => "outcome.classified",
             EventKind::OutcomeHandled { .. } => "outcome.handled",
-            EventKind::AttemptResolved { .. } => "attempt.resolved",
+            EventKind::AttemptResolved(..) => "attempt.resolved",
             EventKind::WorkerHandlingTimeout { .. } => "worker.handling.timeout",
             EventKind::HeartbeatEmitted { .. } => "heartbeat.emitted",
             EventKind::StuckDetected { .. } => "peer.stale",
@@ -1532,7 +1541,7 @@ impl EventKind {
             EventKind::PluckOrderingDegraded { .. } => None,
             EventKind::MendCycleBroken { .. } => None,
             EventKind::QuarantineExpired { .. } => None,
-            EventKind::AttemptResolved { bead_id, .. } => Some(bead_id.clone()),
+            EventKind::AttemptResolved(f) => Some(f.bead_id.clone()),
         }
     }
 
@@ -2995,31 +3004,32 @@ impl EventKind {
             EventKind::QuarantineExpired { bead_id } => serde_json::json!({
                 "bead_id": bead_id,
             }),
-            EventKind::AttemptResolved {
-                attempt_id,
-                provisional,
-                bead_id,
-                workspace,
-                bead_revision_start,
-                worker,
-                adapter,
-                model,
-                provider,
-                prompt_template,
-                template_version,
-                context_manifest_hash,
-                gate_results,
-                outcome,
-                requested_action,
-                confirmed_state,
-                tokens_in,
-                tokens_out,
-                estimated_cost_usd,
-                commits,
-                duration_ms,
-                terminal_reason,
-                exit_code,
-            } => {
+            EventKind::AttemptResolved(fields) => {
+                let AttemptResolvedFields {
+                    attempt_id,
+                    provisional,
+                    bead_id,
+                    workspace,
+                    bead_revision_start,
+                    worker,
+                    adapter,
+                    model,
+                    provider,
+                    prompt_template,
+                    template_version,
+                    context_manifest_hash,
+                    gate_results,
+                    outcome,
+                    requested_action,
+                    confirmed_state,
+                    tokens_in,
+                    tokens_out,
+                    estimated_cost_usd,
+                    commits,
+                    duration_ms,
+                    terminal_reason,
+                    exit_code,
+                } = &**fields;
                 let mut data = serde_json::json!({
                     "attempt_id": attempt_id,
                     "provisional": provisional,
@@ -3085,8 +3095,8 @@ impl EventKind {
             }
             | EventKind::CargoTestCompleted { duration_ms, .. }
             | EventKind::ExploreScanSummary { duration_ms, .. }
-            | EventKind::TransformCompleted { duration_ms, .. }
-            | EventKind::AttemptResolved { duration_ms, .. } => Some(*duration_ms),
+            | EventKind::TransformCompleted { duration_ms, .. } => Some(*duration_ms),
+            EventKind::AttemptResolved(f) => Some(f.duration_ms),
             EventKind::WorkerBooting { .. }
             | EventKind::WorkerStarted { .. }
             | EventKind::WorkerStopped { .. }
