@@ -1938,6 +1938,20 @@ fn stop_result(had_survivors: bool) -> Result<()> {
     Ok(())
 }
 
+fn stop_survivor_header(count: usize, session: &str, grace_period: Duration) -> String {
+    format!(
+        "Error: {count} process(es) were still alive after the {}s stop grace period for session '{session}':",
+        grace_period.as_secs()
+    )
+}
+
+fn stop_survivor_pid_line(pid: u32, grace_period: Duration) -> String {
+    format!(
+        "  PID {pid} was alive at the end of the {}s grace period",
+        grace_period.as_secs()
+    )
+}
+
 /// `needle stop` — kill the full process tree for worker processes.
 ///
 /// This command kills the parent needle run process, its bash -c prompt wrapper,
@@ -2036,12 +2050,15 @@ fn cmd_stop(all: bool, identifier: Option<String>) -> Result<()> {
         if any_remaining {
             had_survivors = true;
             println!(
-                "Error: {} needle process(es) still running after kill attempt for session '{}':",
-                remaining_processes.len(),
-                session.name
+                "{}",
+                stop_survivor_header(remaining_processes.len(), &session.name, grace_period)
             );
-            for (pid, cmdline) in &remaining_processes {
-                println!("  PID {}: {}", pid, cmdline);
+            for (pid, _cmdline) in &remaining_processes {
+                // State what was observed and when. Do not suggest that the
+                // PID is still safe to signal after returning: it may exit and
+                // the kernel may recycle the number. Avoid echoing argv too;
+                // command lines may carry credentials.
+                println!("{}", stop_survivor_pid_line(*pid, grace_period));
             }
         }
 
@@ -2096,15 +2113,17 @@ fn cmd_stop(all: bool, identifier: Option<String>) -> Result<()> {
             }
             (false, true, _) => {
                 println!(
-                    "Error: failed to stop {} (processes still running)",
-                    session.name
+                    "Error: failed to stop {} (processes survived the {}s grace period)",
+                    session.name,
+                    grace_period.as_secs()
                 );
             }
             (true, true, _) => {
                 println!(
-                    "Error: {} - kill attempt reported success but {} process(es) still running",
+                    "Error: {} - kill reported success but {} process(es) survived the {}s grace period",
                     session.name,
-                    remaining_processes.len()
+                    remaining_processes.len(),
+                    grace_period.as_secs()
                 );
             }
             (false, false, _) => {
@@ -8139,6 +8158,19 @@ mod tests {
             stop_result(true).is_err(),
             "a tree still alive after the grace period must exit non-zero"
         );
+    }
+
+    #[test]
+    fn stop_survivor_output_names_the_observation_window_without_echoing_argv() {
+        let grace = Duration::from_secs(10);
+        let header = stop_survivor_header(1, "needle-test-alpha", grace);
+        let pid_line = stop_survivor_pid_line(4242, grace);
+
+        assert!(header.contains("after the 10s stop grace period"));
+        assert!(header.contains("needle-test-alpha"));
+        assert!(pid_line.contains("PID 4242 was alive at the end"));
+        assert!(pid_line.contains("10s grace period"));
+        assert!(!pid_line.contains("--"), "argv must not be echoed");
     }
 
     // ──────────────────────────────────────────────────────────────────────────────
