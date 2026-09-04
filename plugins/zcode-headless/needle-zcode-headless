@@ -1,0 +1,293 @@
+#!/usr/bin/env bash
+# Run the ZCode desktop bundle's CLI as a one-shot, non-interactive agent.
+set -euo pipefail
+
+PROGRAM="${0##*/}"
+
+usage() {
+    cat <<'EOF'
+Usage:
+  needle-zcode-headless --prompt-file FILE --workspace DIR [options]
+  needle-zcode-headless --preflight
+  needle-zcode-headless --version
+
+Options:
+  --prompt-file FILE   Read the complete task prompt from FILE.
+  --workspace DIR      Run ZCode in this workspace.
+  --mode MODE          ZCode permission mode: build, edit, plan, or yolo.
+                       Default: yolo.
+  --max-turns N        Maximum model turns. Default: 100.
+  --settings FILE      Load a specific ZCode settings file.
+  --preflight          Locate and identify the bundled ZCode CLI, then exit.
+  -h, --help           Show this help.
+
+Runtime discovery order:
+  1. NEEDLE_ZCODE_CLI or ZCODE_CLI_PATH
+  2. the path stored in $XDG_CONFIG_HOME/needle/zcode-cli-path
+  3. a genuine `zcode` command on PATH
+  4. common ZCode desktop installation paths
+
+The wrapper never accepts credentials. Authenticate with ZCode separately and
+select the desired model in ZCode settings before dispatching NEEDLE workers.
+EOF
+}
+
+die() {
+    printf '%s: %s\n' "$PROGRAM" "$*" >&2
+    exit 2
+}
+
+config_root() {
+    if [[ -n "${NEEDLE_CONFIG_DIR:-}" ]]; then
+        printf '%s\n' "$NEEDLE_CONFIG_DIR"
+    elif [[ -n "${XDG_CONFIG_HOME:-}" ]]; then
+        printf '%s/needle\n' "$XDG_CONFIG_HOME"
+    elif [[ -n "${HOME:-}" ]]; then
+        printf '%s/.config/needle\n' "$HOME"
+    fi
+}
+
+configured_runtime() {
+    local root path_file configured=""
+
+    if [[ -n "${NEEDLE_ZCODE_CLI:-}" ]]; then
+        printf '%s\n' "$NEEDLE_ZCODE_CLI"
+        return
+    fi
+    if [[ -n "${ZCODE_CLI_PATH:-}" ]]; then
+        printf '%s\n' "$ZCODE_CLI_PATH"
+        return
+    fi
+
+    root="$(config_root)"
+    if [[ -n "$root" ]]; then
+        path_file="$root/zcode-cli-path"
+        if [[ -r "$path_file" ]]; then
+            IFS= read -r configured < "$path_file" || true
+            if [[ -n "$configured" ]]; then
+                printf '%s\n' "$configured"
+            fi
+        fi
+    fi
+}
+
+resolve_runtime() {
+    local configured command_path candidate user_root=""
+    local -a candidates=()
+
+    configured="$(configured_runtime)"
+    if [[ -n "$configured" ]]; then
+        if [[ "$configured" == */* ]]; then
+            [[ -f "$configured" ]] || die "configured ZCode CLI not found: $configured"
+            printf '%s\n' "$configured"
+            return
+        fi
+        command_path="$(command -v "$configured" 2>/dev/null || true)"
+        [[ -n "$command_path" ]] || die "configured ZCode command not found: $configured"
+        printf '%s\n' "$command_path"
+        return
+    fi
+
+    command_path="$(command -v zcode 2>/dev/null || true)"
+    if [[ -n "$command_path" ]]; then
+        printf '%s\n' "$command_path"
+        return
+    fi
+
+    if [[ -n "${HOME:-}" ]]; then
+        user_root="$HOME"
+        candidates+=(
+            "$user_root/.local/share/zcode/resources/glm/zcode.cjs"
+            "$user_root/.local/opt/zcode/resources/glm/zcode.cjs"
+            "$user_root/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs"
+        )
+    fi
+    candidates+=(
+        "/opt/ZCode/resources/glm/zcode.cjs"
+        "/opt/zcode/resources/glm/zcode.cjs"
+        "/usr/lib/zcode/resources/glm/zcode.cjs"
+        "/usr/share/zcode/resources/glm/zcode.cjs"
+        "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs"
+    )
+
+    for candidate in "${candidates[@]}"; do
+        if [[ -f "$candidate" ]]; then
+            printf '%s\n' "$candidate"
+            return
+        fi
+    done
+
+    die "ZCode CLI not found; install ZCode, or set NEEDLE_ZCODE_CLI to its bundled resources/glm/zcode.cjs"
+}
+
+runtime_command() {
+    local runtime="$1"
+    RUNTIME_COMMAND=()
+    if [[ "$runtime" == *.cjs ]]; then
+        command -v node >/dev/null 2>&1 || die "node is required to run the bundled ZCode CLI: $runtime"
+        RUNTIME_COMMAND=(node "$runtime")
+    else
+        [[ -x "$runtime" ]] || die "ZCode CLI is not executable: $runtime"
+        RUNTIME_COMMAND=("$runtime")
+    fi
+}
+
+identify_runtime() {
+    local version first_line help help_first_line normalized
+    if ! version="$("${RUNTIME_COMMAND[@]}" --version 2>&1)"; then
+        die "failed to execute the configured ZCode CLI"
+    fi
+    first_line="${version%%$'\n'*}"
+    if [[ "$first_line" =~ ^zcode[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+) ]]; then
+        printf '%s\n' "$first_line"
+        return
+    fi
+    if [[ "$first_line" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        if ! help="$("${RUNTIME_COMMAND[@]}" --help 2>&1)"; then
+            die "configured command returned a version but its help command failed"
+        fi
+        help_first_line="${help%%$'\n'*}"
+        normalized="zcode $first_line"
+        if [[ "$help_first_line" == "$normalized" ]]; then
+            printf '%s\n' "$normalized"
+            return
+        fi
+    fi
+    die "configured command is not the ZCode desktop CLI (reported: ${first_line:-no version})"
+}
+
+validate_capabilities() {
+    local help required
+    if ! help="$("${RUNTIME_COMMAND[@]}" --help 2>&1)"; then
+        die "failed to inspect ZCode CLI capabilities"
+    fi
+    for required in --prompt --cwd --surface --mode --max-turns --json; do
+        if [[ "$help" != *"$required"* ]]; then
+            die "ZCode CLI does not support required headless option: $required"
+        fi
+    done
+    if [[ -n "$settings" && "$help" != *"--settings"* ]]; then
+        die "ZCode CLI does not support --settings"
+    fi
+}
+
+prompt_file=""
+workspace=""
+mode="${NEEDLE_ZCODE_MODE:-yolo}"
+max_turns="${NEEDLE_ZCODE_MAX_TURNS:-100}"
+settings="${NEEDLE_ZCODE_SETTINGS:-}"
+action="run"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --prompt-file)
+            [[ $# -ge 2 ]] || die "--prompt-file requires a value"
+            prompt_file="$2"
+            shift 2
+            ;;
+        --workspace|--cwd)
+            [[ $# -ge 2 ]] || die "$1 requires a value"
+            workspace="$2"
+            shift 2
+            ;;
+        --mode)
+            [[ $# -ge 2 ]] || die "--mode requires a value"
+            mode="$2"
+            shift 2
+            ;;
+        --max-turns)
+            [[ $# -ge 2 ]] || die "--max-turns requires a value"
+            max_turns="$2"
+            shift 2
+            ;;
+        --settings)
+            [[ $# -ge 2 ]] || die "--settings requires a value"
+            settings="$2"
+            shift 2
+            ;;
+        --preflight)
+            action="preflight"
+            shift
+            ;;
+        --version|-v)
+            action="version"
+            shift
+            ;;
+        --help|-h)
+            usage
+            exit 0
+            ;;
+        --api-key|--token|--auth-token)
+            die "credentials are not accepted on the command line; authenticate with ZCode separately"
+            ;;
+        *)
+            die "unknown option: $1"
+            ;;
+    esac
+done
+
+runtime="$(resolve_runtime)"
+declare -a RUNTIME_COMMAND
+runtime_command "$runtime"
+
+if [[ "$action" == "version" ]]; then
+    identify_runtime
+    exit 0
+fi
+
+if [[ "$action" == "preflight" ]]; then
+    version="$(identify_runtime)"
+    validate_capabilities
+    printf 'ZCode CLI: %s\n' "$runtime"
+    printf 'Version:   %s\n' "$version"
+    if [[ -n "$settings" ]]; then
+        [[ -r "$settings" ]] || die "ZCode settings file is not readable: $settings"
+        printf 'Settings:  %s\n' "$settings"
+    else
+        printf '%s\n' "Settings:  ZCode default"
+    fi
+    exit 0
+fi
+
+# Do not trust an arbitrary executable named `zcode` found on PATH. This also
+# catches desktop upgrades that remove or change the bundled runtime before a
+# bead is dispatched.
+identify_runtime >/dev/null
+validate_capabilities
+
+[[ -n "$prompt_file" ]] || die "--prompt-file is required"
+[[ -r "$prompt_file" ]] || die "prompt file is not readable: $prompt_file"
+[[ -n "$workspace" ]] || die "--workspace is required"
+[[ -d "$workspace" ]] || die "workspace is not a directory: $workspace"
+case "$mode" in
+    build|edit|plan|yolo) ;;
+    *) die "invalid --mode '$mode'; expected build, edit, plan, or yolo" ;;
+esac
+[[ "$max_turns" =~ ^[1-9][0-9]*$ ]] || die "--max-turns must be a positive integer"
+if [[ -n "$settings" ]]; then
+    [[ -r "$settings" ]] || die "ZCode settings file is not readable: $settings"
+fi
+
+# ZCode 0.16.5 exposes no stdin prompt mode. Reading the already-sanitized
+# NEEDLE prompt into one argv element preserves whitespace and prevents shell
+# evaluation. `read -d ''` retains trailing newlines (command substitution does
+# not). NEEDLE prompts are text and therefore contain no NUL delimiter.
+prompt=""
+IFS= read -r -d '' prompt < "$prompt_file" || true
+
+args=(
+    --prompt "$prompt"
+    --cwd "$workspace"
+    --surface terminal
+    --mode "$mode"
+    --max-turns "$max_turns"
+    --json
+    --no-color
+)
+if [[ -n "$settings" ]]; then
+    args+=(--settings "$settings")
+fi
+
+# Replacing the wrapper process gives NEEDLE the real ZCode status and lets its
+# process-group timeout/cancellation signals reach the runtime directly.
+exec "${RUNTIME_COMMAND[@]}" "${args[@]}"

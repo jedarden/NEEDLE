@@ -255,6 +255,7 @@ NEEDLE is agent-agnostic. Any CLI that accepts a prompt and exits works.
 |-------|-----|-------------|-------|
 | Claude Code (interactive) | `claude-interactive` | stdin | **Recommended** — uses subscription billing; see [plugin](#-claude-interactive-plugin) |
 | Claude Code (API) | `claude --print` | stdin | Uses programmatic/API billing |
+| ZCode Agent (headless) | `zcode-headless` | file | Uses the CLI bundled with ZCode; see [`plugins/zcode-headless/`](plugins/zcode-headless/) |
 | OpenCode | `opencode` | file | |
 | Codex CLI | `codex` | args | |
 | Aider | `aider --message` | args | |
