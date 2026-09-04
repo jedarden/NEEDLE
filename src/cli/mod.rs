@@ -1907,13 +1907,18 @@ fn process_cmdline(pid: u32) -> String {
     }
 }
 
-/// Return only live PIDs from the process tree that was just signalled.
-fn find_surviving_processes(signalled_pids: &[u32]) -> Vec<(u32, String)> {
-    survivors_in_pid_set(signalled_pids, &|pid| !process_is_gone(pid))
+/// Wait for the signalled process tree to drain, then return only the PIDs
+/// still alive after the configured grace period.
+fn find_surviving_processes(signalled_pids: &[u32], grace_period: Duration) -> Vec<(u32, String)> {
+    crate::process_guard::wait_for_exit(signalled_pids, grace_period, &|pid| !process_is_gone(pid))
+        .into_iter()
+        .map(|pid| (pid, process_cmdline(pid)))
+        .collect()
 }
 
 /// Injectable core used to prove that per-session checks cannot report PIDs
 /// belonging to another live session.
+#[cfg(test)]
 fn survivors_in_pid_set(
     signalled_pids: &[u32],
     is_alive: &dyn Fn(u32) -> bool,
@@ -1924,6 +1929,13 @@ fn survivors_in_pid_set(
         .filter(|pid| is_alive(*pid))
         .map(|pid| (pid, process_cmdline(pid)))
         .collect()
+}
+
+fn stop_result(had_survivors: bool) -> Result<()> {
+    if had_survivors {
+        bail!("one or more worker process trees survived the stop grace period");
+    }
+    Ok(())
 }
 
 /// `needle stop` — kill the full process tree for worker processes.
@@ -1959,6 +1971,10 @@ fn cmd_stop(all: bool, identifier: Option<String>) -> Result<()> {
         println!("No matching sessions found.");
         return Ok(());
     }
+
+    let stop_config = ConfigLoader::load_global()?.stop;
+    let grace_period = Duration::from_secs(stop_config.grace_period_secs);
+    let mut had_survivors = false;
 
     for session in &targets {
         tracing::info!(session = %session.name, "stopping worker");
@@ -2014,10 +2030,11 @@ fn cmd_stop(all: bool, identifier: Option<String>) -> Result<()> {
 
         // Verify only this session's signalled tree. A different live worker is
         // not an orphan of the session being stopped.
-        let remaining_processes = find_surviving_processes(&signalled_pids);
+        let remaining_processes = find_surviving_processes(&signalled_pids, grace_period);
         let any_remaining = !remaining_processes.is_empty();
 
         if any_remaining {
+            had_survivors = true;
             println!(
                 "Error: {} needle process(es) still running after kill attempt for session '{}':",
                 remaining_processes.len(),
@@ -2096,7 +2113,7 @@ fn cmd_stop(all: bool, identifier: Option<String>) -> Result<()> {
         }
     }
 
-    Ok(())
+    stop_result(had_survivors)
 }
 
 /// Filter sessions for cleanup based on liveness and flags.
@@ -8112,6 +8129,15 @@ mod tests {
         assert_eq!(
             forced.iter().map(|(pid, _)| *pid).collect::<Vec<_>>(),
             vec![1002]
+        );
+    }
+
+    #[test]
+    fn stop_exit_status_depends_on_post_grace_survivors() {
+        assert!(stop_result(false).is_ok(), "a drained tree must exit zero");
+        assert!(
+            stop_result(true).is_err(),
+            "a tree still alive after the grace period must exit non-zero"
         );
     }
 
