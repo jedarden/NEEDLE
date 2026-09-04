@@ -8089,6 +8089,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn stop_three_session_regression_reports_zero_or_only_target_orphans() {
+        let alpha = [1001, 1002];
+        let bravo = [2001, 2002];
+        let charlie = [3001, 3002];
+
+        // Alpha drained after its kill while the other two sessions remain
+        // healthy. Its stop result must be empty, not four false orphans.
+        let alive_after_clean_alpha_stop = |pid| bravo.contains(&pid) || charlie.contains(&pid);
+        let clean = survivors_in_pid_set(&alpha, &alive_after_clean_alpha_stop);
+        assert!(
+            clean.is_empty(),
+            "a drained target must report zero orphans"
+        );
+
+        // Force one alpha child to survive while every PID in the other two
+        // sessions is also alive. Only the target child may be reported.
+        let alive_with_one_alpha_orphan =
+            |pid| pid == 1002 || bravo.contains(&pid) || charlie.contains(&pid);
+        let forced = survivors_in_pid_set(&alpha, &alive_with_one_alpha_orphan);
+        assert_eq!(
+            forced.iter().map(|(pid, _)| *pid).collect::<Vec<_>>(),
+            vec![1002]
+        );
+    }
+
     // ──────────────────────────────────────────────────────────────────────────────
     // Mock process inspector for testing
     // ──────────────────────────────────────────────────────────────────────────────
