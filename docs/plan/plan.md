@@ -2,7 +2,7 @@
 
 > **N**avigates **E**very **E**nqueued **D**eliverable, **L**ogs **E**ffort
 
-Plan revision: 25
+Plan revision: 26
 
 As of: 2026-09-04
 
@@ -12,8 +12,9 @@ Status: current-state re-baseline, in-process learning-kernel boundary, and
 fenced attempt ownership accepted; transition implementation pending. Revision
 22 fixes the ledger-first build order (section 4.4), revision 24 makes
 selection accounting and admission-blocked worker state explicit (section
-4.6), and revision 25 carries a renewable claim capability through dispatch
-and resolution (section 4.7).
+4.6), revision 25 carries a renewable claim capability through dispatch and
+resolution (section 4.7), and revision 26 makes the repository secret gate use
+the same explicit, supported ruleset as NEEDLE's sanitizer.
 
 ## 0. How to read this plan
 
@@ -65,7 +66,7 @@ duplicate the other's authority.
 
 ### 1.1 Artifact baseline
 
-| Artifact | Current behavior on 2026-08-31 | Status for this plan |
+| Artifact | Current behavior on 2026-09-04 | Status for this plan |
 | --- | --- | --- |
 | `Cargo.toml` | Rust package `needle` 0.6.0, edition 2021, MSRV 1.75; OTLP is a default feature | Shipped baseline |
 | `src/worker/` and `src/types/` | Explicit worker state machine; process exits are classified before semantic outcome resolution | Shipped, truth-model transition required |
@@ -73,6 +74,7 @@ duplicate the other's authority.
 | `src/bead_store/` | CLI abstraction with bead-rs as the configured primary backend; legacy `bf`/`br` descriptors and compatibility prose remain in source | bead-rs is authoritative for active work; legacy removal is incomplete |
 | `src/outcome/` and `src/resolve/` | Re-read and Resolve paths exist, and NEEDLE can apply lifecycle mutations; exit 0 and `bead.completed` still carry ambiguous success semantics | Must migrate to verified Resolution |
 | `src/validation/` and workspace `gates` | Verification gates run against configured workspace or clean committed state; gate execution errors are infrastructure failures | Retain and attach results to EvidenceBundle |
+| `config/gitleaks.toml` and repository secret scans | The sanitizer embeds the vendored ruleset, including a narrow nonsecret release-digest allowance; ad hoc repository scans can silently use gitleaks defaults, and the installed 8.21.2 binary is older than the config's declared 8.25.0 minimum | Pin one supported scanner and pass the vendored config explicitly in every gate |
 | `src/telemetry/`, `src/trace/`, `src/stats/` | JSONL/OTLP events, traces, token/cost data, and aggregate statistics exist; bead ID is the main correlation key and action counters remain prominent | Add attempt/policy correlation and outcome-derived metrics |
 | `src/learning/`, `src/strand/reflect.rs`, `.beads/learnings.md` | Transcript/closure extraction, text reinforcement, local/global promotion paths, drift/ADR detection, and CLAUDE placement paths exist | Experimental and untrusted; direct policy promotion must be disabled |
 | `src/prompt/`, `CLAUDE.md`, `AGENTS.md`, memory files | Prompt context combines explicit configuration with adapter- and working-directory-dependent instruction/memory loading | Add policy doctor and ContextManifest |
@@ -105,6 +107,11 @@ duplicate the other's authority.
   full attempt. On 2026-09-04 two live worker processes executed the same bead
   in one checkout while its assignee changed and then cleared; both processes
   outlived the store state that had authorized their dispatch.
+- Repository secret verification is not one reproducible gate: invoking
+  gitleaks without `config/gitleaks.toml` disagrees with NEEDLE's embedded
+  rules and allowlists, while the host binary is older than the ruleset's
+  declared minimum. A clean ad hoc scan is therefore not release evidence
+  unless both config identity and scanner version are recorded.
 - New backlog generation or self-modification would amplify these weaknesses
   if enabled before work truth and evaluation are repaired.
 
@@ -741,6 +748,7 @@ generated conformance report.
 | N-T34 | claim adapter, worker state, prompt/dispatch, gates and resolution | Carry a renewable fenced ClaimHandle through one attempt; cancel and reject semantic effects on ownership loss | old handle cannot mutate after release/expiry/reassignment; one live claim epoch reaches resolution | blocked by bead-rs `beadrs-8c343a7c`; `needle-cd169aa6` |
 | N-T35 | Mend and lifecycle reconciler | Replace age/PID-only release with lease-aware compare-and-reap that produces a newer epoch | valid lease never reaped; expired lease reaped once; stale worker fenced | blocked by N-T34; `needle-8d14d0d1` |
 | N-T36 | concurrent worker integration fixture and release canary | Replay the 2026-09-04 duplicate-dispatch incident in one shared checkout | two workers contend; exactly one epoch dispatches/resolves and the stale process cannot mutate | blocked by N-T14, N-T34–N-T35; `needle-7e56d009` |
+| N-T37 | `config/gitleaks.toml`, commit/release verification and scanner provisioning | Pin a gitleaks version meeting the vendored config minimum and make every repository scan pass that config explicitly; record scanner/config identity with the result | an ephemeral generated-secret fixture is rejected, the documented nonsecret release digest passes, unsupported scanner versions fail closed, and no fixture credential enters Git | transition; `needle-a8bdfe3a` |
 
 ## 9. Transition gates and order
 
@@ -759,6 +767,9 @@ generated conformance report.
 - A durable copy of every `attempt.resolved` event exists outside the worker
   host and is joinable to CI runs and bead lifecycle events (section 4.4).
 - Legacy learnings injection and CLAUDE.md placement are off by default.
+- Persisted source, bead checkpoints, traces and release artifacts pass the
+  same explicitly configured secret ruleset with a supported scanner; the
+  receipt records both scanner and ruleset identity.
 
 ### Gate B — resilient control plane
 
