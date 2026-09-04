@@ -73,7 +73,7 @@ if NEEDLE_CONFIG_DIR="$CONFIG_DIR" PATH="$BIN_DIR:$PATH" \
     printf '%s\n' "Run: needle test-agent zcode-headless"
 else
     printf '%s\n' "Adapter installed, but ZCode is not ready." >&2
-    printf '%s\n' "Install and authenticate ZCode, then rerun this installer with:" >&2
+    printf '%s\n' "Install and configure ZCode, then rerun this installer with:" >&2
     printf '%s\n' "  --zcode-cli /path/to/ZCode/resources/glm/zcode.cjs" >&2
     exit 1
 fi

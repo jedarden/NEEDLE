@@ -5,13 +5,13 @@ version_command: "needle-zcode-headless --version"
 input_method:
   method: file
   path_template: "{prompt_file}"
-invoke_template: "needle-zcode-headless --workspace '{workspace}' --prompt-file '{prompt_file}' --mode yolo --max-turns 100"
+invoke_template: "needle-zcode-headless --workspace '{workspace}' --prompt-file '{prompt_file}' --mode yolo"
 environment: {}
 timeout_secs: 0
 idle_timeout_secs: 900
 hard_timeout_secs: 7200
 provider: zai
-model: zcode-selected
+model: glm-5.3-flash
 token_extraction:
   method: none
 harness: zcode

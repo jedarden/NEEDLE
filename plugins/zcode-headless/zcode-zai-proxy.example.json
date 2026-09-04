@@ -1,0 +1,25 @@
+{
+  "provider": {
+    "needle-zai-proxy": {
+      "kind": "anthropic",
+      "name": "NEEDLE Z.AI Proxy",
+      "options": {
+        "apiKey": "proxy-handles-auth",
+        "apiKeyRequired": true,
+        "baseURL": "https://zai-proxy-mcp-apexalgo-iad-ts.ardenone.com:8444"
+      },
+      "models": {
+        "glm-5.3-flash": {
+          "name": "GLM-5.3-Flash"
+        }
+      }
+    }
+  },
+  "model": {
+    "main": "needle-zai-proxy/glm-5.3-flash",
+    "lite": "needle-zai-proxy/glm-5.3-flash"
+  },
+  "network": {
+    "caCertFile": "/path/to/ardenone-cluster-ca.pem"
+  }
+}

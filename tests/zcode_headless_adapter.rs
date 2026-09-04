@@ -13,7 +13,7 @@ fn shipped_zcode_adapter_matches_the_headless_contract() {
     assert_eq!(adapter.name, "zcode-headless");
     assert_eq!(adapter.agent_cli, "needle-zcode-headless");
     assert_eq!(adapter.provider.as_deref(), Some("zai"));
-    assert_eq!(adapter.model.as_deref(), Some("zcode-selected"));
+    assert_eq!(adapter.model.as_deref(), Some("glm-5.3-flash"));
     assert_eq!(adapter.harness.as_deref(), Some("zcode"));
     assert!(matches!(adapter.input_method, InputMethod::File { .. }));
     assert_eq!(
@@ -24,17 +24,14 @@ fn shipped_zcode_adapter_matches_the_headless_contract() {
         }
     );
 
-    for required in [
-        "--workspace",
-        "--prompt-file",
-        "--mode yolo",
-        "--max-turns 100",
-    ] {
+    for required in ["--workspace", "--prompt-file", "--mode yolo"] {
         assert!(
             adapter.invoke_template.contains(required),
             "invoke template omitted {required}"
         );
     }
     assert!(!adapter.invoke_template.contains("| cat"));
+    assert!(!adapter.invoke_template.contains("--max-turns"));
+    assert!(!adapter.invoke_template.contains("--settings"));
     assert!(adapter.output_transform.is_none());
 }

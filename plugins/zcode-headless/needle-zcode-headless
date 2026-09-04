@@ -16,8 +16,6 @@ Options:
   --workspace DIR      Run ZCode in this workspace.
   --mode MODE          ZCode permission mode: build, edit, plan, or yolo.
                        Default: yolo.
-  --max-turns N        Maximum model turns. Default: 100.
-  --settings FILE      Load a specific ZCode settings file.
   --preflight          Locate and identify the bundled ZCode CLI, then exit.
   -h, --help           Show this help.
 
@@ -27,8 +25,8 @@ Runtime discovery order:
   3. a genuine `zcode` command on PATH
   4. common ZCode desktop installation paths
 
-The wrapper never accepts credentials. Authenticate with ZCode separately and
-select the desired model in ZCode settings before dispatching NEEDLE workers.
+The wrapper never accepts credentials. Configure the provider and selected
+model in ZCode's default config before dispatching NEEDLE workers.
 EOF
 }
 
@@ -161,21 +159,22 @@ validate_capabilities() {
     if ! help="$("${RUNTIME_COMMAND[@]}" --help 2>&1)"; then
         die "failed to inspect ZCode CLI capabilities"
     fi
-    for required in --prompt --cwd --surface --mode --max-turns --json; do
+    for required in --prompt --cwd --surface --mode --no-color; do
         if [[ "$help" != *"$required"* ]]; then
             die "ZCode CLI does not support required headless option: $required"
         fi
     done
-    if [[ -n "$settings" && "$help" != *"--settings"* ]]; then
-        die "ZCode CLI does not support --settings"
+    # CLI 0.16.5 accepts --output-format but omits it from help, while listing
+    # other options that its parser rejects. Probe the real parser on the
+    # read-only doctor command instead of trusting the generated help text.
+    if ! "${RUNTIME_COMMAND[@]}" doctor --output-format stream-json --no-color >/dev/null 2>&1; then
+        die "ZCode CLI does not accept required stream-json output options"
     fi
 }
 
 prompt_file=""
 workspace=""
 mode="${NEEDLE_ZCODE_MODE:-yolo}"
-max_turns="${NEEDLE_ZCODE_MAX_TURNS:-100}"
-settings="${NEEDLE_ZCODE_SETTINGS:-}"
 action="run"
 
 while [[ $# -gt 0 ]]; do
@@ -193,16 +192,6 @@ while [[ $# -gt 0 ]]; do
         --mode)
             [[ $# -ge 2 ]] || die "--mode requires a value"
             mode="$2"
-            shift 2
-            ;;
-        --max-turns)
-            [[ $# -ge 2 ]] || die "--max-turns requires a value"
-            max_turns="$2"
-            shift 2
-            ;;
-        --settings)
-            [[ $# -ge 2 ]] || die "--settings requires a value"
-            settings="$2"
             shift 2
             ;;
         --preflight)
@@ -240,12 +229,7 @@ if [[ "$action" == "preflight" ]]; then
     validate_capabilities
     printf 'ZCode CLI: %s\n' "$runtime"
     printf 'Version:   %s\n' "$version"
-    if [[ -n "$settings" ]]; then
-        [[ -r "$settings" ]] || die "ZCode settings file is not readable: $settings"
-        printf 'Settings:  %s\n' "$settings"
-    else
-        printf '%s\n' "Settings:  ZCode default"
-    fi
+    printf '%s\n' "Settings:  ZCode default"
     exit 0
 fi
 
@@ -263,10 +247,6 @@ case "$mode" in
     build|edit|plan|yolo) ;;
     *) die "invalid --mode '$mode'; expected build, edit, plan, or yolo" ;;
 esac
-[[ "$max_turns" =~ ^[1-9][0-9]*$ ]] || die "--max-turns must be a positive integer"
-if [[ -n "$settings" ]]; then
-    [[ -r "$settings" ]] || die "ZCode settings file is not readable: $settings"
-fi
 
 # ZCode 0.16.5 exposes no stdin prompt mode. Reading the already-sanitized
 # NEEDLE prompt into one argv element preserves whitespace and prevents shell
@@ -276,17 +256,13 @@ prompt=""
 IFS= read -r -d '' prompt < "$prompt_file" || true
 
 args=(
-    --prompt "$prompt"
     --cwd "$workspace"
     --surface terminal
     --mode "$mode"
-    --max-turns "$max_turns"
-    --json
+    --output-format stream-json
     --no-color
+    --prompt "$prompt"
 )
-if [[ -n "$settings" ]]; then
-    args+=(--settings "$settings")
-fi
 
 # Replacing the wrapper process gives NEEDLE the real ZCode status and lets its
 # process-group timeout/cancellation signals reach the runtime directly.

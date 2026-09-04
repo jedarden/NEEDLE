@@ -11,7 +11,6 @@ FAKE_ARGS="$TEST_ROOT/args"
 FAKE_PROMPT="$TEST_ROOT/prompt"
 WORKSPACE="$TEST_ROOT/workspace"
 PROMPT_FILE="$TEST_ROOT/prompt.md"
-SETTINGS_FILE="$TEST_ROOT/settings.json"
 mkdir -p "$WORKSPACE"
 
 cat > "$FAKE_ZCODE" <<'EOF'
@@ -22,7 +21,10 @@ if (args.length === 1 && args[0] === "--version") {
   process.exit(0);
 }
 if (args.length === 1 && args[0] === "--help") {
-  process.stdout.write("zcode 0.16.5\n\nUsage: zcode --prompt --cwd --surface --mode --max-turns --json --settings\n");
+  process.stdout.write("zcode 0.16.5\n\nUsage: zcode --prompt --cwd --surface --mode --no-color\n");
+  process.exit(0);
+}
+if (args[0] === "doctor") {
   process.exit(0);
 }
 fs.writeFileSync(process.env.FAKE_ARGS, args.map((value) => JSON.stringify(value)).join("\n"));
@@ -33,8 +35,6 @@ process.exit(Number(process.env.FAKE_EXIT_CODE || "0"));
 EOF
 
 printf 'Line one\nLine two with $(printf not-executed) and `backticks`\n' > "$PROMPT_FILE"
-printf '{}\n' > "$SETTINGS_FILE"
-
 export NEEDLE_ZCODE_CLI="$FAKE_ZCODE"
 export FAKE_ARGS FAKE_PROMPT
 export ZCODE_API_KEY="credential-must-not-appear"
@@ -45,21 +45,20 @@ version="$($PLUGIN_DIR/needle-zcode-headless --version)"
 output="$($PLUGIN_DIR/needle-zcode-headless \
     --prompt-file "$PROMPT_FILE" \
     --workspace "$WORKSPACE" \
-    --mode edit \
-    --max-turns 17 \
-    --settings "$SETTINGS_FILE")"
+    --mode edit)"
 [[ "$output" == *'"model":"glm-5.3-flash"'* ]]
 cmp "$PROMPT_FILE" "$FAKE_PROMPT"
 grep -Fx -- '"--cwd"' "$FAKE_ARGS" >/dev/null
 grep -Fx -- "\"$WORKSPACE\"" "$FAKE_ARGS" >/dev/null
 grep -Fx -- '"--mode"' "$FAKE_ARGS" >/dev/null
 grep -Fx -- '"edit"' "$FAKE_ARGS" >/dev/null
-grep -Fx -- '"--max-turns"' "$FAKE_ARGS" >/dev/null
-grep -Fx -- '"17"' "$FAKE_ARGS" >/dev/null
-grep -Fx -- '"--json"' "$FAKE_ARGS" >/dev/null
+grep -Fx -- '"--output-format"' "$FAKE_ARGS" >/dev/null
+grep -Fx -- '"stream-json"' "$FAKE_ARGS" >/dev/null
 grep -Fx -- '"--no-color"' "$FAKE_ARGS" >/dev/null
-grep -Fx -- '"--settings"' "$FAKE_ARGS" >/dev/null
-grep -Fx -- "\"$SETTINGS_FILE\"" "$FAKE_ARGS" >/dev/null
+if grep -Eq '"--(max-turns|settings)"' "$FAKE_ARGS"; then
+    printf '%s\n' "unsupported ZCode option reached argv" >&2
+    exit 1
+fi
 if grep -Fq "$ZCODE_API_KEY" "$FAKE_ARGS"; then
     printf '%s\n' "credential leaked into ZCode argv" >&2
     exit 1
