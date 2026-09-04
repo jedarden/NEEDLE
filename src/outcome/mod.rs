@@ -1871,10 +1871,14 @@ impl OutcomeHandler {
         }
 
         // Emit the BeadQuarantined event.
+        // The legacy quarantine path has no rounds ladder or expiry yet — that
+        // is the expiring-quarantine work (needle-40c6c60e). Report round 1
+        // with no expiry rather than blocking on fields this path cannot fill.
         events.push(EventKind::BeadQuarantined {
             bead_id: bead.id.clone(),
+            round: 1,
+            until: String::new(),
             failure_count,
-            threshold,
         });
 
         // Emit the FalseCloseDetected event for observability.
@@ -2404,7 +2408,6 @@ mod tests {
                 e,
                 EventKind::BeadQuarantined {
                     failure_count: 5,
-                    threshold: 5,
                     ..
                 }
             )),
