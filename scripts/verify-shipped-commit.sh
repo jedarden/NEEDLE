@@ -46,6 +46,14 @@ export CARGO_TARGET_DIR="${REPO_ROOT}/target"
 echo "Verifying shipped commit builds..."
 cd "$WORKTREE_DIR"
 
+# Verify the exact committed source and vendored rules before compiling it.
+echo "Verifying shipped commit contains no detected secrets..."
+if ! "$WORKTREE_DIR/scripts/secret-scan.sh" directory "$WORKTREE_DIR"; then
+    echo "✗ Shipped commit failed secret verification"
+    echo "Bead will be reopened and released"
+    exit 1
+fi
+
 # Check all targets (lib, bins, tests, examples)
 # Use --all-targets to catch test compilation failures like needle-04df9025
 if cargo check --all-targets 2>&1; then

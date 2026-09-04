@@ -7,9 +7,11 @@ repo_root="$(git rev-parse --show-toplevel)"
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 
-mkdir -p "$tmp_dir/repo/scripts" "$tmp_dir/repo/.githooks" \
+mkdir -p "$tmp_dir/repo/scripts" "$tmp_dir/repo/config" "$tmp_dir/repo/.githooks" \
     "$tmp_dir/repo/.beads/checkpoint/objects"
 cp "$repo_root/scripts/checkpoint-publish.sh" "$tmp_dir/repo/scripts/"
+cp "$repo_root/scripts/secret-scan.sh" "$tmp_dir/repo/scripts/"
+cp "$repo_root/config/gitleaks.toml" "$tmp_dir/repo/config/"
 cp "$repo_root/.githooks/pre-commit" "$tmp_dir/repo/.githooks/"
 cat > "$tmp_dir/repo/scripts/bypass-detection.sh" <<'EOF'
 needle_clear_index_state() {
@@ -20,9 +22,20 @@ cat > "$tmp_dir/repo/scripts/definition-of-done.sh" <<'EOF'
 #!/usr/bin/env bash
 exit 0
 EOF
+cat > "$tmp_dir/repo/scripts/fake-gitleaks" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == version ]]; then
+    printf '8.30.1\n'
+    exit 0
+fi
+exit 0
+EOF
 chmod +x "$tmp_dir/repo/scripts/checkpoint-publish.sh" \
+    "$tmp_dir/repo/scripts/secret-scan.sh" \
+    "$tmp_dir/repo/scripts/fake-gitleaks" \
     "$tmp_dir/repo/scripts/definition-of-done.sh" \
     "$tmp_dir/repo/.githooks/pre-commit"
+export GITLEAKS_BIN="$tmp_dir/repo/scripts/fake-gitleaks"
 
 cd "$tmp_dir/repo"
 git init -q

@@ -41,6 +41,12 @@ if ! scripts/definition-of-done.sh --fast --count-bypass --changed-only; then
   exit 1
 fi
 
+echo "=== Running secret verification ==="
+if ! "$repo_root/scripts/secret-scan.sh" staged; then
+  needle_clear_index_state
+  exit 1
+fi
+
 echo "=== Running checkpoint verification ==="
 if ! "$repo_root/scripts/checkpoint-publish.sh" verify-index; then
   # Do not leave an environment-bypass marker behind if this later hook check

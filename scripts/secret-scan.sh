@@ -51,9 +51,9 @@ version_at_least() {
 [[ $# -ge 1 ]] || usage
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(git -C "$script_dir/.." rev-parse --show-toplevel 2>/dev/null)" \
-    || die 'cannot resolve the NEEDLE repository root'
-config_path="$repo_root/config/gitleaks.toml"
+source_root="$(cd "$script_dir/.." && pwd)" \
+    || die 'cannot resolve the NEEDLE source root'
+config_path="$source_root/config/gitleaks.toml"
 [[ -f "$config_path" ]] || die "missing vendored config: $config_path"
 
 minimum_raw="$(sed -nE 's/^[[:space:]]*minVersion[[:space:]]*=[[:space:]]*"v?([0-9]+\.[0-9]+\.[0-9]+)".*/\1/p' "$config_path" | head -n 1)"
@@ -111,6 +111,8 @@ shift
 case "$mode" in
     staged)
         [[ $# -eq 0 ]] || usage
+        repo_root="$(git -C "$source_root" rev-parse --show-toplevel 2>/dev/null)" \
+            || die 'staged mode requires a Git worktree'
         scan_args=(git --staged --redact --no-banner --config "$config_path" "$repo_root")
         ;;
     directory)
