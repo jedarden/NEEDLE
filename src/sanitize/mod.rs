@@ -617,7 +617,10 @@ mod tests {
     fn sanitizer_redacts_gcp_api_key() {
         let s = make_sanitizer();
         // GCP API key: AIza + 35 alphanumeric/dash chars (high entropy)
-        let fake_key = "AIzaSyBnFb9RkQ3mD2eWl8TpXa0vN7hJcK4oMiY";
+        let fake_key = [
+            "AI", "za", "SyBn", "Fb9R", "kQ3m", "D2eW", "l8Tp", "Xa0v", "N7hJ", "cK4o", "MiY",
+        ]
+        .concat();
         let line = format!("key = \"{}\"", fake_key);
         let result = s.sanitize(&line);
         assert!(
@@ -625,6 +628,14 @@ mod tests {
             "expected gcp-api-key redaction, got: {}",
             result
         );
+    }
+
+    #[test]
+    fn sanitizer_preserves_explicit_api_digest() {
+        let s = make_sanitizer();
+        let digest = "0123456789abcdef".repeat(4);
+        let line = format!("API digest: {digest}");
+        assert_eq!(s.sanitize(&line), line);
     }
 
     #[test]

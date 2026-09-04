@@ -656,6 +656,12 @@ regexes = [
     '''^[a-zA-Z_.-]+$''',
 ]
 [[rules.allowlists]]
+description = "NEEDLE nonsecret API digest classification"
+regexTarget = "match"
+regexes = [
+    '''(?i)\bAPI[ \t]+digest:[ \t]*[0-9a-f]{64}\b''',
+]
+[[rules.allowlists]]
 description = "Allowlist for Generic API Keys"
 regexTarget = "match"
 regexes = [
@@ -3206,4 +3212,3 @@ id = "zendesk-secret-key"
 description = "Detected a Zendesk Secret Key, risking unauthorized access to customer support services and sensitive ticketing data."
 regex = '''(?i)[\w.-]{0,50}?(?:zendesk)(?:[ \t\w.-]{0,20})[\s'"]{0,3}(?:=|>|:{1,3}=|\|\||:|=>|\?=|,)[\x60'"\s=]{0,5}([a-z0-9]{40})(?:[\x60'"\s;]|\\[nr]|$)'''
 keywords = ["zendesk"]
-
