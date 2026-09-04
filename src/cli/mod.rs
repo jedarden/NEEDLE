@@ -1870,49 +1870,60 @@ fn find_needle_process_in_tree(root_pid: u32) -> Option<u32> {
         .find(|&pid| is_needle_run_process(pid))
 }
 
-/// Check if any needle processes are still running after a kill attempt.
-///
-/// This function scans the process table to find all needle run processes
-/// and their descendants. This is used after a kill attempt to verify that
-/// ALL processes (needle run + dispatched agent + any descendants) are
-/// actually gone, not just the original PID we tried to kill.
-///
-/// Returns a vector of PIDs that are still running, along with their command lines.
-#[cfg(unix)]
-fn verify_no_needle_processes_remaining() -> Vec<(u32, String)> {
-    use std::fs;
-
-    let proc_dir = Path::new("/proc");
-    let mut remaining = Vec::new();
-
-    if let Ok(entries) = fs::read_dir(proc_dir) {
-        for entry in entries.flatten() {
-            let pid_str = entry.file_name();
-            let pid: u32 = match pid_str.to_string_lossy().parse() {
-                Ok(p) => p,
-                Err(_) => continue,
-            };
-
-            // Use strict matching to avoid false positives from child processes
-            // that inherited NEEDLE_INNER from their parent
-            if is_needle_run_process(pid) {
-                // Read cmdline for reporting
-                let cmdline_path = entry.path().join("cmdline");
-                if let Ok(cmdline_bytes) = fs::read(&cmdline_path) {
-                    let cmdline: String = cmdline_bytes
-                        .split(|&b| b == 0)
-                        .map(|args| String::from_utf8_lossy(args))
-                        .collect::<Vec<_>>()
-                        .join(" ");
-                    remaining.push((pid, cmdline));
-                } else {
-                    remaining.push((pid, "<cmdline unreadable>".to_string()));
-                }
-            }
+/// Check whether `pid` has exited. Zombies are already terminated and count as
+/// gone even if their parent has not reaped them yet.
+fn process_is_gone(pid: u32) -> bool {
+    unsafe {
+        if libc::kill(pid as libc::pid_t, 0) != 0 {
+            return std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
         }
     }
 
-    remaining
+    let status_path = Path::new("/proc").join(pid.to_string()).join("status");
+    std::fs::read_to_string(status_path)
+        .ok()
+        .and_then(|status| {
+            status
+                .lines()
+                .find(|line| line.starts_with("State:"))
+                .and_then(|line| line.split_whitespace().nth(1))
+                .and_then(|state| state.chars().next())
+        })
+        == Some('Z')
+}
+
+fn process_cmdline(pid: u32) -> String {
+    use std::fs;
+
+    let cmdline_path = Path::new("/proc").join(pid.to_string()).join("cmdline");
+    match fs::read(cmdline_path) {
+        Ok(cmdline_bytes) => cmdline_bytes
+            .split(|&byte| byte == 0)
+            .filter(|arg| !arg.is_empty())
+            .map(|arg| String::from_utf8_lossy(arg))
+            .collect::<Vec<_>>()
+            .join(" "),
+        Err(_) => "<cmdline unreadable>".to_string(),
+    }
+}
+
+/// Return only live PIDs from the process tree that was just signalled.
+fn find_surviving_processes(signalled_pids: &[u32]) -> Vec<(u32, String)> {
+    survivors_in_pid_set(signalled_pids, &|pid| !process_is_gone(pid))
+}
+
+/// Injectable core used to prove that per-session checks cannot report PIDs
+/// belonging to another live session.
+fn survivors_in_pid_set(
+    signalled_pids: &[u32],
+    is_alive: &dyn Fn(u32) -> bool,
+) -> Vec<(u32, String)> {
+    signalled_pids
+        .iter()
+        .copied()
+        .filter(|pid| is_alive(*pid))
+        .map(|pid| (pid, process_cmdline(pid)))
+        .collect()
 }
 
 /// `needle stop` — kill the full process tree for worker processes.
@@ -1990,7 +2001,7 @@ fn cmd_stop(all: bool, identifier: Option<String>) -> Result<()> {
         };
 
         // Kill the entire process tree rooted at the needle run process
-        let (killed, _signalled_pids) = match kill_process_tree(needle_pid) {
+        let (killed, signalled_pids) = match kill_process_tree(needle_pid) {
             Ok(outcome) => (outcome.all_terminated, outcome.signalled),
             Err(e) => {
                 println!(
@@ -2001,10 +2012,9 @@ fn cmd_stop(all: bool, identifier: Option<String>) -> Result<()> {
             }
         };
 
-        // Verify ALL needle processes are actually gone (not just the root PID).
-        // This catches the case where new processes were spawned during the kill
-        // window or where the kill attempt didn't fully terminate the tree.
-        let remaining_processes = verify_no_needle_processes_remaining();
+        // Verify only this session's signalled tree. A different live worker is
+        // not an orphan of the session being stopped.
+        let remaining_processes = find_surviving_processes(&signalled_pids);
         let any_remaining = !remaining_processes.is_empty();
 
         if any_remaining {
@@ -8060,6 +8070,23 @@ mod tests {
         // Test with a PID that doesn't exist
         let result = find_needle_process_in_tree(9999999);
         assert!(result.is_none(), "non-existent PID should return None");
+    }
+
+    #[test]
+    fn stop_orphan_scan_is_scoped_to_the_signalled_pid_set() {
+        let alive = |pid| matches!(pid, 1001 | 2001 | 3001);
+
+        let alpha = survivors_in_pid_set(&[1001], &alive);
+        assert_eq!(
+            alpha.iter().map(|(pid, _)| *pid).collect::<Vec<_>>(),
+            vec![1001]
+        );
+
+        let bravo = survivors_in_pid_set(&[2001], &alive);
+        assert_eq!(
+            bravo.iter().map(|(pid, _)| *pid).collect::<Vec<_>>(),
+            vec![2001]
+        );
     }
 
     // ──────────────────────────────────────────────────────────────────────────────
