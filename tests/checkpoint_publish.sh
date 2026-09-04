@@ -50,6 +50,7 @@ printf 'old generation\n' > .beads/checkpoint/objects/aaaaaaaaaaaaaaaaaaaaaaaaaa
 printf 'previous generation\n' > .beads/checkpoint/objects/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.jsonl
 printf 'current generation\n' > .beads/checkpoint/objects/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.jsonl
 printf 'legacy generation\n' > .beads/checkpoint/objects/gen-ffffffffffffffffffffffffffffffff.jsonl
+printf 'already removed generation\n' > .beads/checkpoint/objects/9999999999999999999999999999999999999999999999999999999999999999.jsonl
 printf 'view\n' > .beads/checkpoint/forensic.jsonl
 write_pointer .beads/checkpoint/current.json objects/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.jsonl
 write_pointer .beads/checkpoint/previous.json objects/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.jsonl
@@ -57,6 +58,7 @@ write_pointer .beads/checkpoint/previous.json objects/bbbbbbbbbbbbbbbbbbbbbbbbbb
 git add .
 git commit -qm initial
 
+rm .beads/checkpoint/objects/9999999999999999999999999999999999999999999999999999999999999999.jsonl
 printf 'new current generation\n' > .beads/checkpoint/objects/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd.jsonl
 write_pointer .beads/checkpoint/current.json objects/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd.jsonl
 printf 'new view\n' > .beads/checkpoint/forensic.jsonl
@@ -69,6 +71,7 @@ grep -Fxq .beads/checkpoint/current.json <<<"$staged"
 grep -Fxq .beads/checkpoint/objects/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd.jsonl <<<"$staged"
 git ls-files --error-unmatch .beads/checkpoint/objects/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.jsonl >/dev/null
 ! git ls-files --error-unmatch .beads/checkpoint/objects/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.jsonl >/dev/null 2>&1
+! git ls-files --error-unmatch .beads/checkpoint/objects/9999999999999999999999999999999999999999999999999999999999999999.jsonl >/dev/null 2>&1
 ! git ls-files --error-unmatch .beads/checkpoint/objects/gen-ffffffffffffffffffffffffffffffff.jsonl >/dev/null 2>&1
 ! grep -Fxq .beads/checkpoint/objects/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.jsonl <<<"$staged"
 [[ ! -e .beads/checkpoint/objects/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.jsonl ]]

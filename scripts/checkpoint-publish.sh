@@ -156,21 +156,28 @@ stage_checkpoint() {
         || die "missing checkpoint view: $CHECKPOINT_DIR/forensic.jsonl"
 
     local stale_count=0
-    local object_file object_name object_path
+    local object_file object_path
     local -a tracked_stale=()
+    local -A object_candidates=()
     while IFS= read -r -d '' object_file; do
-        object_name="${object_file##*/}"
-        object_path="$objects_dir/$object_name"
-        if [[ "$object_file" == "$current_root" || "$object_file" == "$previous_root" ]]; then
+        object_candidates["$object_file"]=1
+    done < <(find "$objects_dir" -maxdepth 1 -type f -name '*.jsonl' -print0)
+    while IFS= read -r -d '' object_file; do
+        [[ "$object_file" == *.jsonl ]] || continue
+        object_candidates["$object_file"]=1
+    done < <(git ls-files -z -- "$objects_dir")
+
+    for object_path in "${!object_candidates[@]}"; do
+        if [[ "$object_path" == "$current_root" || "$object_path" == "$previous_root" ]]; then
             continue
         fi
 
         if git ls-files --error-unmatch -- "$object_path" >/dev/null 2>&1; then
             tracked_stale+=("$object_path")
         fi
-        rm -f -- "$object_file"
+        rm -f -- "$object_path"
         stale_count=$((stale_count + 1))
-    done < <(find "$objects_dir" -maxdepth 1 -type f -name '*.jsonl' -print0)
+    done
 
     local -a checkpoint_paths=(
         "$CURRENT_POINTER"
