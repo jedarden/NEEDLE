@@ -1566,15 +1566,24 @@ fn launch_in_tmux(
     Ok(())
 }
 
+/// Result of signalling a process tree.
+#[derive(Debug)]
+struct TreeKillOutcome {
+    /// PIDs traversed and signalled, with the root first.
+    signalled: Vec<u32>,
+    /// Whether every signalled PID terminated within the bounded waits.
+    all_terminated: bool,
+}
+
 /// Kill the entire process tree rooted at the given PID.
 ///
 /// This function recursively finds all child processes and sends SIGTERM,
 /// waits for processes to exit, and sends SIGKILL to any remaining processes.
-/// Returns true if all processes were successfully terminated.
+/// Returns both the signalled PID set and whether all of them terminated.
 ///
 /// This is necessary because agents are spawned with setpgid(0,0), creating
 /// new process groups that are not reachable via killpg() on the parent PGID.
-fn kill_process_tree(pid: u32) -> Result<bool> {
+fn kill_process_tree(pid: u32) -> Result<TreeKillOutcome> {
     use std::thread;
 
     tracing::info!(pid, "finding all descendant processes to terminate");
@@ -1626,7 +1635,10 @@ fn kill_process_tree(pid: u32) -> Result<bool> {
                 "process tree terminated gracefully after {}ms",
                 (i + 1) * 100
             );
-            return Ok(true);
+            return Ok(TreeKillOutcome {
+                signalled: all_pids,
+                all_terminated: true,
+            });
         }
     }
 
@@ -1657,7 +1669,10 @@ fn kill_process_tree(pid: u32) -> Result<bool> {
                 "process tree terminated by SIGKILL after {}ms",
                 (i + 1) * 100
             );
-            return Ok(true);
+            return Ok(TreeKillOutcome {
+                signalled: all_pids,
+                all_terminated: true,
+            });
         }
     }
 
@@ -1677,7 +1692,10 @@ fn kill_process_tree(pid: u32) -> Result<bool> {
         );
     }
 
-    Ok(still_alive.is_empty())
+    Ok(TreeKillOutcome {
+        signalled: all_pids,
+        all_terminated: still_alive.is_empty(),
+    })
 }
 
 /// Recursively find all descendant processes of the given PID.
@@ -1970,14 +1988,14 @@ fn cmd_stop(all: bool, identifier: Option<String>) -> Result<()> {
         };
 
         // Kill the entire process tree rooted at the needle run process
-        let killed = match kill_process_tree(needle_pid) {
-            Ok(k) => k,
+        let (killed, _signalled_pids) = match kill_process_tree(needle_pid) {
+            Ok(outcome) => (outcome.all_terminated, outcome.signalled),
             Err(e) => {
                 println!(
                     "Warning: failed to kill process tree for session '{}': {}",
                     session.name, e
                 );
-                false
+                (false, Vec::new())
             }
         };
 
@@ -7972,14 +7990,19 @@ mod tests {
     #[test]
     fn kill_process_tree_handles_nonexistent_pid() {
         // Test that killing a non-existent PID doesn't panic
-        // and returns Ok(true) since the PID is already gone
+        // and reports success since the PID is already gone.
         let result = kill_process_tree(9999999);
         assert!(
             result.is_ok(),
             "kill_process_tree should not panic on non-existent PID"
         );
-        // A non-existent PID is considered "successfully killed" (it's gone)
-        assert!(result.unwrap(), "non-existent PID should return true");
+        let outcome = result.expect("checked is_ok above");
+        // A non-existent PID is considered "successfully killed" (it's gone).
+        assert!(
+            outcome.all_terminated,
+            "non-existent PID should report all_terminated"
+        );
+        assert_eq!(outcome.signalled, vec![9999999]);
     }
 
     #[test]
