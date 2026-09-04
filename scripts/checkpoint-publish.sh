@@ -170,7 +170,7 @@ stage_checkpoint() {
         fi
         rm -f -- "$object_file"
         stale_count=$((stale_count + 1))
-    done < <(find "$objects_dir" -maxdepth 1 -type f -name 'gen-*.jsonl' -print0)
+    done < <(find "$objects_dir" -maxdepth 1 -type f -name '*.jsonl' -print0)
 
     local -a checkpoint_paths=(
         "$CURRENT_POINTER"

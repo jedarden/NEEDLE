@@ -11,7 +11,18 @@ mkdir -p "$tmp_dir/repo/scripts" "$tmp_dir/repo/.githooks" \
     "$tmp_dir/repo/.beads/checkpoint/objects"
 cp "$repo_root/scripts/checkpoint-publish.sh" "$tmp_dir/repo/scripts/"
 cp "$repo_root/.githooks/pre-commit" "$tmp_dir/repo/.githooks/"
-chmod +x "$tmp_dir/repo/scripts/checkpoint-publish.sh" "$tmp_dir/repo/.githooks/pre-commit"
+cat > "$tmp_dir/repo/scripts/bypass-detection.sh" <<'EOF'
+needle_clear_index_state() {
+    :
+}
+EOF
+cat > "$tmp_dir/repo/scripts/definition-of-done.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$tmp_dir/repo/scripts/checkpoint-publish.sh" \
+    "$tmp_dir/repo/scripts/definition-of-done.sh" \
+    "$tmp_dir/repo/.githooks/pre-commit"
 
 cd "$tmp_dir/repo"
 git init -q
@@ -35,30 +46,34 @@ with open(pointer_file, "w", encoding="utf-8") as stream:
 PY
 }
 
-printf 'old generation\n' > .beads/checkpoint/objects/gen-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.jsonl
-printf 'previous generation\n' > .beads/checkpoint/objects/gen-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.jsonl
-printf 'current generation\n' > .beads/checkpoint/objects/gen-cccccccccccccccccccccccccccccccc.jsonl
+printf 'old generation\n' > .beads/checkpoint/objects/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.jsonl
+printf 'previous generation\n' > .beads/checkpoint/objects/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.jsonl
+printf 'current generation\n' > .beads/checkpoint/objects/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.jsonl
+printf 'legacy generation\n' > .beads/checkpoint/objects/gen-ffffffffffffffffffffffffffffffff.jsonl
 printf 'view\n' > .beads/checkpoint/forensic.jsonl
-write_pointer .beads/checkpoint/current.json objects/gen-cccccccccccccccccccccccccccccccc.jsonl
-write_pointer .beads/checkpoint/previous.json objects/gen-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.jsonl
+write_pointer .beads/checkpoint/current.json objects/cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc.jsonl
+write_pointer .beads/checkpoint/previous.json objects/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.jsonl
 
 git add .
 git commit -qm initial
 
-printf 'new current generation\n' > .beads/checkpoint/objects/gen-dddddddddddddddddddddddddddddddd.jsonl
-write_pointer .beads/checkpoint/current.json objects/gen-dddddddddddddddddddddddddddddddd.jsonl
+printf 'new current generation\n' > .beads/checkpoint/objects/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd.jsonl
+write_pointer .beads/checkpoint/current.json objects/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd.jsonl
 printf 'new view\n' > .beads/checkpoint/forensic.jsonl
-printf 'superseded generation\n' > .beads/checkpoint/objects/gen-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.jsonl
+printf 'superseded generation\n' > .beads/checkpoint/objects/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.jsonl
 
 ./scripts/checkpoint-publish.sh stage
 
 staged="$(git diff --cached --name-only)"
 grep -Fxq .beads/checkpoint/current.json <<<"$staged"
-grep -Fxq .beads/checkpoint/objects/gen-dddddddddddddddddddddddddddddddd.jsonl <<<"$staged"
-git ls-files --error-unmatch .beads/checkpoint/objects/gen-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.jsonl >/dev/null
-! grep -Fxq .beads/checkpoint/objects/gen-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.jsonl <<<"$staged"
-[[ ! -e .beads/checkpoint/objects/gen-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.jsonl ]]
-[[ ! -e .beads/checkpoint/objects/gen-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.jsonl ]]
+grep -Fxq .beads/checkpoint/objects/dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd.jsonl <<<"$staged"
+git ls-files --error-unmatch .beads/checkpoint/objects/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.jsonl >/dev/null
+! git ls-files --error-unmatch .beads/checkpoint/objects/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.jsonl >/dev/null 2>&1
+! git ls-files --error-unmatch .beads/checkpoint/objects/gen-ffffffffffffffffffffffffffffffff.jsonl >/dev/null 2>&1
+! grep -Fxq .beads/checkpoint/objects/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.jsonl <<<"$staged"
+[[ ! -e .beads/checkpoint/objects/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.jsonl ]]
+[[ ! -e .beads/checkpoint/objects/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee.jsonl ]]
+[[ ! -e .beads/checkpoint/objects/gen-ffffffffffffffffffffffffffffffff.jsonl ]]
 
 git config core.hooksPath .githooks
 git commit -qm dynamic-roots
