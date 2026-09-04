@@ -2,16 +2,18 @@
 
 > **N**avigates **E**very **E**nqueued **D**eliverable, **L**ogs **E**ffort
 
-Plan revision: 24
+Plan revision: 25
 
-As of: 2026-09-03
+As of: 2026-09-04
 
 Status owner: NEEDLE maintainers
 
-Status: current-state re-baseline and in-process learning-kernel boundary
-accepted; transition implementation pending; revision 22 fixes the
-ledger-first build order (section 4.4); revision 24 makes selection accounting
-and admission-blocked worker state explicit (section 4.6)
+Status: current-state re-baseline, in-process learning-kernel boundary, and
+fenced attempt ownership accepted; transition implementation pending. Revision
+22 fixes the ledger-first build order (section 4.4), revision 24 makes
+selection accounting and admission-blocked worker state explicit (section
+4.6), and revision 25 carries a renewable claim capability through dispatch
+and resolution (section 4.7).
 
 ## 0. How to read this plan
 
@@ -34,12 +36,18 @@ This re-baseline accepts:
 - [ADR-025: Independent reconciling controllers replace idle-waterfall coupling](../adr/025-independent-reconciling-controllers-over-idle-waterfall.md)
 - [ADR-026: Reflection produces evidence-gated lessons and derived memory](../adr/026-evidence-gated-reflection-and-derived-memory.md)
 - [ADR-027: Policy has explicit authority and every attempt records its context](../adr/027-policy-authority-and-context-manifests.md)
+- [ADR-028: Carry a renewable fenced claim handle through every attempt](../adr/028-renewable-fenced-claim-handle.md)
 
 Revision 21 locates the evaluation, reflection, replay, competence, memory,
 experiment, and promotion logic in a dependency-isolated learning kernel inside
 the NEEDLE repository and release artifact. It is a logical primitive, not a
 third deployed service. Section 5 defines its complete input, component,
 storage, output, autonomy, and future-extraction boundaries.
+
+Revision 25 retains shared repository checkouts and rejects worktree-based
+isolation, but replaces claim-time-only protection with a renewable fenced
+`ClaimHandle`. A process is not authoritative merely because it is alive or
+was once dispatched.
 
 ## 1. Product boundary and current reality
 
@@ -93,6 +101,10 @@ duplicate the other's authority.
 - A launch deferred by CPU or memory admission is currently presented as an
   idle/booting worker and can be restarted repeatedly by a service manager;
   neither state describes the actual capacity block.
+- Claim ownership is not carried as a renewable fenced capability through the
+  full attempt. On 2026-09-04 two live worker processes executed the same bead
+  in one checkout while its assignee changed and then cleared; both processes
+  outlived the store state that had authorized their dispatch.
 - New backlog generation or self-modification would amplify these weaknesses
   if enabled before work truth and evaluation are repaired.
 
@@ -407,6 +419,37 @@ cross-repository: NEEDLE owns event and selection semantics,
 owns presentation. The downstream UI uses a `cross-repo-gate` bead for the API
 contract, per section 4.4.
 
+### 4.7 Claim ownership through the full attempt (revision 25, 2026-09-04)
+
+Atomic selection protects only the instant at which one worker wins a claim.
+It does not stop that worker from continuing after a release, lease expiry,
+reassignment, or recovery pass. Process liveness also cannot answer whether a
+worker remains authorized. The bead store owns that fact.
+
+Revision 25 adopts ADR-028 and makes these rules normative:
+
+1. A claim produces a typed `ClaimHandle` binding workspace, bead, revision,
+   worker, attempt ID, claim epoch/fencing token, lease, and negotiated backend
+   capability.
+2. Prompt construction and dispatch require the current handle. Renewal runs
+   independently of the agent; loss or mismatch cancels local execution before
+   any semantic outcome is applied.
+3. Every claimant mutation and atomic resolution presents the handle's
+   revision and fencing credential. A stale worker may preserve a scoped diff
+   as non-authoritative recovery evidence, but cannot close, release, update,
+   attach evidence, or resolve the bead.
+4. Mend uses lease-aware compare-and-reap and never treats age or PID state as
+   authority by itself. Reassignment creates a strictly newer claim epoch.
+5. Backends without equivalent fencing enter an explicit conservative mode:
+   one executor per workspace and no concurrent roaming dispatch there.
+6. Shared checkouts and the no-worktree rule remain. Resource keys and blocking
+   dependencies serialize different overlapping beads; fencing prevents
+   duplicate authority for the same bead.
+
+N-T34 through N-T36 carry the NEEDLE implementation and replay evidence. The
+upstream claim-epoch primitive is bead-rs `beadrs-8c343a7c`; its exact release,
+not a mutable development checkout, gates activation.
+
 ## 5. In-process learning kernel
 
 ### 5.1 Deployment decision and dependency rule
@@ -632,7 +675,7 @@ Fatal conflicts prevent admission before claim.
 | Concern | NEEDLE owns | bead-rs owns |
 | --- | --- | --- |
 | Desired work | Interpretation, execution plan, acceptance evidence | Task fields, lifecycle, dependencies, revision |
-| Claim | Worker selection request and attempt ID | Atomic selection/claim, lease, fencing, resource locks |
+| Claim | Worker selection request, renewable ClaimHandle, renewal/cancellation, conservative fallback | Atomic selection, claim epoch, lease, fencing rejection, resource locks |
 | Attempt | Context, execution, verifier evidence, semantic proposal | Portable immutable receipt and deduplication when capability exists |
 | Resolution | Classification policy and requested transition | Atomic event, attempt-tier update, lifecycle mutation, audit, checkpoint |
 | Scheduling | Fleet/provider/workspace admission and controller budgets | Deterministic ready-frontier policy and bead failure tiers |
@@ -644,6 +687,15 @@ NEEDLE must not maintain label-encoded copies of native bead-rs revision,
 lease, fencing, failure-tier, resource-lock, or manual-block state when the
 backend advertises those capabilities. bead-rs must not interpret prompts,
 verification meaning, policy authority, memory, or lesson quality.
+
+The current bead-rs `main` implements atomic attempt resolution and ruleset-v3
+historical redaction, but its latest tag remains 0.2.4 and BR-T18 release
+conformance is open. NEEDLE must keep capability-gated fallback behavior until
+one exact source commit, pinned binary, recovery rehearsal, and consumer matrix
+agree. Current upstream blockers include hermetic integration fixtures
+(`beadrs-94fd9fc2`), exhaustive command audit coverage (`beadrs-d0cd90d1`),
+pending-migration reporting (`beadrs-5c27b273`), multi-redaction stale merge
+handling (`beadrs-b162fc90`), and fenced claim epochs (`beadrs-8c343a7c`).
 
 ## 8. Artifact-by-artifact transition ledger
 
@@ -666,7 +718,7 @@ generated conformance report.
 | N-T11 | config schemas and capability negotiation | Add feature flags and backend capability gates; default new behavior off until verified | old-config compatibility and unsupported-backend fail-closed tests | transition |
 | N-T12 | `crates/needle-learning` outcome contracts, evaluator, competence, replay, experiments, drift, curriculum and promotion modules plus effect/delivery-controller adapters | Add reviewed OutcomeContracts/EvalCases, mature outcome evaluation, calibrated competence, shadow replay plans, experiments, bounded adaptation, audited reversible commit/push, rollback and promotion receipts | pure-kernel/no-side-effect conformance, scoped-index/push/revert tests, holdout/replay coverage and canary improvement without guardrail regression | blocked by N-T05, N-T08–N-T11 |
 | N-T13 | historical telemetry/learnings | Mark legacy events non-authoritative; import learnings only as candidates | deterministic migration report with no invented attempts | blocked by N-T02, N-T08 |
-| N-T14 | combined consumer conformance | Exercise bead-rs atomic attempt resolution with fallback for older capabilities | pinned old/new bead-rs matrix, crash/replay tests | blocked by bead-rs transition |
+| N-T14 | combined consumer conformance | Exercise bead-rs atomic attempt resolution with fallback for older capabilities | pinned old/new bead-rs matrix, crash/replay tests | blocked by bead-rs BR-T18 and exact-release blockers |
 | N-T15 | `src/config/mod.rs`, `src/prompt/mod.rs`, `src/claude_md_placement.rs`, `src/strand/reflect.rs` | Default legacy learnings injection, reinforcement and CLAUDE.md placement off; files stay as candidate input | `PromptBuilder::with_workspace` emits no learnings section by default; placement removes its marker section when disabled; fixture test | transition (first; 4.4 step 0) |
 | N-T16 | `src/telemetry/`, `src/outcome/` | Emit one `attempt.resolved` ledger event per dispatch with a provisional attempt ID until N-T03 | versioned schema fixture; exactly one event per dispatch in the file sink across success/failure/timeout/crash | transition (4.4 step 1) |
 | N-T17 | `src/bead_store/backend.rs`, `src/bead_store/cli_store.rs` | Pass worker identity as actor on every mutation when the backend advertises it | forensic events carry the worker actor; graceful fallback on older bead-rs | blocked by bead-rs BR-T12 |
@@ -686,6 +738,9 @@ generated conformance report.
 | N-T31 | shared candidate eligibility, `src/strand/explore.rs`, worker post-claim rejection | Filter internal/split-out-of-scope candidates before claim, continue ranking, and revision-scope any late rejection so an unchanged bead cannot spin | poison-first/valid-second multi-worker fixture reaches one valid dispatch with no repeated poison claim | transition; part of the starvation-remediation incident |
 | N-T32 | NEEDLE selection events, `declarative-config` dashboard API, `dashboard-site` fleet panel | Report evaluations, unique bead revisions, claims, dispatches, release reasons, conversion, and explicit rolling/lifetime periods; derive active state from dispatch, not claim | event-sequence contract fixture plus browser/API check showing claim-release churn without false active/productive credit | blocked by N-T05 event versioning; cross-repo delivery |
 | N-T33 | launch resource gate, worker registry/state, service-managed run loop | Replace sustained-saturation exit/restart churn with resident `admission_blocked` state, capped jittered retry, restoration event, and dashboard mapping | saturated-host fixture has one stable worker process, bounded retries, zero claims, then resumes after load clears | transition; supersedes historical Phase 12's terminal launch failure |
+| N-T34 | claim adapter, worker state, prompt/dispatch, gates and resolution | Carry a renewable fenced ClaimHandle through one attempt; cancel and reject semantic effects on ownership loss | old handle cannot mutate after release/expiry/reassignment; one live claim epoch reaches resolution | blocked by bead-rs `beadrs-8c343a7c`; `needle-cd169aa6` |
+| N-T35 | Mend and lifecycle reconciler | Replace age/PID-only release with lease-aware compare-and-reap that produces a newer epoch | valid lease never reaped; expired lease reaped once; stale worker fenced | blocked by N-T34; `needle-8d14d0d1` |
+| N-T36 | concurrent worker integration fixture and release canary | Replay the 2026-09-04 duplicate-dispatch incident in one shared checkout | two workers contend; exactly one epoch dispatches/resolves and the stale process cannot mutate | blocked by N-T14, N-T34–N-T35; `needle-7e56d009` |
 
 ## 9. Transition gates and order
 
@@ -694,6 +749,8 @@ generated conformance report.
 - Every new dispatch has one attempt ID across claim, prompt, trace, gates,
   telemetry, and resolution.
 - No completion event exists without accepted evidence and confirmed close.
+- No dispatch exists without a current ClaimHandle, and no two attempts for one
+  bead claim epoch are simultaneously authoritative.
 - Retry, release, quarantine, and infrastructure failure do not increase
   durable completion.
 - Claim without dispatch does not increase active-work, attempt, or productivity
@@ -707,6 +764,8 @@ generated conformance report.
 
 - Resolver, lifecycle reconciliation, and workspace health run independently
   of ready-queue exhaustion.
+- Lease renewal is independent of the agent process; ownership loss cancels
+  local execution, and Mend reaps only through a fenced compare-and-reap.
 - Controllers are leased, idempotent, budgeted, and crash-tested.
 - Work proposers cannot bypass backlog, duplicate, dependency, or authority
   admission checks.
