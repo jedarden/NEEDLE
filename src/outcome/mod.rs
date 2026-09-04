@@ -33,11 +33,32 @@ use crate::validation::{verify_shipped_work, GateConfig, GateReport, GateResult,
 /// Interruption takes precedence. Otherwise, failed verification is always a
 /// failure; only verified results are delegated to the exit-code classifier.
 pub fn classify(exit_code: i32, was_interrupted: bool, verified: bool) -> Outcome {
+    classify_with_stream(exit_code, was_interrupted, verified, "")
+}
+
+/// Like [`classify`], but also consults the agent stream's final
+/// `type="result"` envelope.
+///
+/// The claude CLI exits 0 even when the session terminated on an API error, so
+/// an envelope carrying `is_error` or an error `terminal_reason` is a failure
+/// regardless of the exit code. Streams without a result envelope (other trace
+/// formats, or a run killed before the envelope was emitted) fall back to the
+/// exit-code classifier.
+pub fn classify_with_stream(
+    exit_code: i32,
+    was_interrupted: bool,
+    verified: bool,
+    stdout: &str,
+) -> Outcome {
     if was_interrupted {
         return Outcome::Interrupted;
     }
 
     if !verified {
+        return Outcome::Failure;
+    }
+
+    if crate::trace::stream_indicates_failure(stdout) {
         return Outcome::Failure;
     }
 
@@ -246,7 +267,10 @@ impl OutcomeHandler {
             (true, None)
         };
 
-        let outcome = classify(output.exit_code, was_interrupted, verified);
+        // Classification consults the stream's result envelope in addition to
+        // the exit code: a terminal API error exits 0 but is not a success.
+        let outcome =
+            classify_with_stream(output.exit_code, was_interrupted, verified, &output.stdout);
 
         // Set outcome as span attribute
         tracing::Span::current().record("needle.outcome", outcome.as_str());
@@ -2161,6 +2185,69 @@ mod tests {
             Outcome::Success,
             "exit_code=0, verified=true must return Success"
         );
+    }
+
+    // ── classify_with_stream tests ──
+
+    /// The 2026-09-02 zai-proxy outage shape: exit 0, subtype "success",
+    /// is_error true, terminal_reason "api_error", num_turns 1.
+    fn api_error_stream() -> String {
+        concat!(
+            "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s1\"}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,",
+            "\"api_error_status\":503,\"terminal_reason\":\"api_error\",\"num_turns\":1,",
+            "\"result\":\"API Error: 503 no available server\"}\n"
+        )
+        .to_string()
+    }
+
+    #[test]
+    fn classify_with_stream_api_error_envelope_is_failure_despite_exit_zero() {
+        // The claude CLI exits 0 when the session ends on an API error — the
+        // envelope, not the exit code, decides.
+        assert_eq!(
+            classify_with_stream(0, false, true, &api_error_stream()),
+            Outcome::Failure
+        );
+    }
+
+    #[test]
+    fn classify_with_stream_error_terminal_reason_is_failure_despite_exit_zero() {
+        let stdout = r#"{"type":"result","subtype":"success","terminal_reason":"api_error"}"#;
+        assert_eq!(
+            classify_with_stream(0, false, true, stdout),
+            Outcome::Failure
+        );
+    }
+
+    #[test]
+    fn classify_with_stream_clean_envelope_exit_zero_is_success() {
+        let stdout = r#"{"type":"result","subtype":"success","is_error":false}"#;
+        assert_eq!(
+            classify_with_stream(0, false, true, stdout),
+            Outcome::Success
+        );
+    }
+
+    #[test]
+    fn classify_with_stream_without_envelope_falls_back_to_exit_code() {
+        // Formats without a result envelope keep the exit-code classifier.
+        assert_eq!(classify_with_stream(0, false, true, ""), Outcome::Success);
+        assert_eq!(classify_with_stream(1, false, true, ""), Outcome::Failure);
+        assert_eq!(classify_with_stream(124, false, true, ""), Outcome::Timeout);
+    }
+
+    #[test]
+    fn classify_with_stream_interruption_still_takes_precedence() {
+        assert_eq!(
+            classify_with_stream(0, true, true, &api_error_stream()),
+            Outcome::Interrupted
+        );
+    }
+
+    #[test]
+    fn classify_with_stream_unverified_still_fails() {
+        assert_eq!(classify_with_stream(0, false, false, ""), Outcome::Failure);
     }
 
     // ── handle tests ──

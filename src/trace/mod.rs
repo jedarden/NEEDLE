@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use crate::cargo_test::TestMetrics;
 use crate::dispatch::TimeoutReason;
 use crate::sanitize::Sanitizer;
-use crate::types::BeadId;
+use crate::types::{BeadId, Outcome};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Constants
@@ -383,6 +383,110 @@ pub fn detect_trace_format(agent_name: &str) -> TraceFormat {
         n if n.contains("aider") => TraceFormat::AiderMarkdown,
         _ => TraceFormat::RawText,
     }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Result envelope (claude_json)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// The final `type="result"` envelope of a Claude Code stream-json run.
+///
+/// The claude CLI exits 0 even when the session terminated on an API error,
+/// and the envelope's own `subtype` can still read `"success"` in that case
+/// (observed across the commitgraph workspace during the 2026-09-02 zai-proxy
+/// outage) — so `is_error` and `terminal_reason` are the only usable failure
+/// signals.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ClaudeResultEnvelope {
+    /// Envelope `is_error` flag.
+    pub is_error: bool,
+    /// Envelope `subtype`. Kept for diagnostics only — it is NOT a usable
+    /// failure signal (see the struct doc).
+    pub subtype: Option<String>,
+    /// Envelope `terminal_reason`, when the CLI reports why the session ended
+    /// (e.g. `"api_error"`).
+    pub terminal_reason: Option<String>,
+}
+
+impl ClaudeResultEnvelope {
+    /// Whether the envelope reports a run that ended in a terminal failure.
+    ///
+    /// `is_error` is authoritative. `terminal_reason` is only trusted when it
+    /// names a recognized error, so an unrecognized reason string can never
+    /// turn a clean run into a failure — the failure path releases the bead and
+    /// increments its failure count, and a false positive eventually quarantines
+    /// a healthy bead.
+    pub fn indicates_failure(&self) -> bool {
+        if self.is_error {
+            return true;
+        }
+        match self.terminal_reason.as_deref() {
+            Some(reason) if !reason.is_empty() => is_error_terminal_reason(reason),
+            _ => false,
+        }
+    }
+}
+
+/// Terminal reasons this code recognizes as errors. Anything unrecognized
+/// (including empty) is treated as a non-error reason — see
+/// [`ClaudeResultEnvelope::indicates_failure`].
+fn is_error_terminal_reason(reason: &str) -> bool {
+    let lower = reason.to_ascii_lowercase();
+    lower.contains("error") || matches!(lower.as_str(), "rate_limited" | "overloaded")
+}
+
+/// Parse the final `type="result"` envelope from a Claude stream-json stdout.
+///
+/// Scans backwards for the last result line, skipping lines that are not valid
+/// JSON. Returns `None` when the stream carries no result envelope — other
+/// trace formats, or a run killed before the envelope was emitted.
+pub fn parse_result_envelope(stdout: &str) -> Option<ClaudeResultEnvelope> {
+    stdout
+        .lines()
+        .rev()
+        .filter(|line| line.contains("\"result\""))
+        .find_map(|line| {
+            let value: serde_json::Value = serde_json::from_str(line).ok()?;
+            if value.get("type").and_then(|t| t.as_str()) != Some("result") {
+                return None;
+            }
+            Some(ClaudeResultEnvelope {
+                is_error: value
+                    .get("is_error")
+                    .and_then(|e| e.as_bool())
+                    .unwrap_or(false),
+                subtype: value
+                    .get("subtype")
+                    .and_then(|s| s.as_str())
+                    .map(str::to_owned),
+                terminal_reason: value
+                    .get("terminal_reason")
+                    .and_then(|s| s.as_str())
+                    .map(str::to_owned),
+            })
+        })
+}
+
+/// Whether a stream's final result envelope reports a terminal failure.
+///
+/// `false` when the stream carries no result envelope — callers without one
+/// fall back to the exit code.
+pub fn stream_indicates_failure(stdout: &str) -> bool {
+    parse_result_envelope(stdout)
+        .map(|envelope| envelope.indicates_failure())
+        .unwrap_or(false)
+}
+
+/// Classify an outcome from the result envelope when the trace format carries
+/// one, falling back to the exit code for formats that do not.
+///
+/// The exit code alone misclassifies claude runs that ended on a terminal API
+/// error — the CLI exits 0 — so the envelope wins whenever it exists.
+pub fn classify_from_stream(exit_code: i32, stdout: &str, format: &TraceFormat) -> Outcome {
+    if *format == TraceFormat::ClaudeJson && stream_indicates_failure(stdout) {
+        return Outcome::Failure;
+    }
+    Outcome::classify(exit_code, false)
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -872,6 +976,173 @@ mod tests {
     #[test]
     fn detect_trace_format_generic() {
         assert_eq!(detect_trace_format("generic"), TraceFormat::RawText);
+    }
+
+    // ── Result envelope (claude_json) tests ──
+
+    /// The exact failure shape observed during the 2026-09-02 zai-proxy
+    /// outage: exit 0, subtype "success", is_error true, terminal_reason set.
+    const API_ERROR_RESULT_LINE: &str = r#"{"type":"result","subtype":"success","is_error":true,"api_error_status":503,"terminal_reason":"api_error","num_turns":1,"result":"API Error: 503 no available server","session_id":"s1"}"#;
+
+    fn result_stream(result_line: &str) -> String {
+        format!(
+            "{{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s1\"}}\n\
+             {{\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"content\":[]}}}}\n\
+             {result_line}\n"
+        )
+    }
+
+    #[test]
+    fn parse_result_envelope_finds_the_final_result_line() {
+        let stdout = result_stream(API_ERROR_RESULT_LINE);
+        let envelope = parse_result_envelope(&stdout).expect("envelope should parse");
+
+        assert!(envelope.is_error);
+        assert_eq!(envelope.subtype.as_deref(), Some("success"));
+        assert_eq!(envelope.terminal_reason.as_deref(), Some("api_error"));
+    }
+
+    #[test]
+    fn parse_result_envelope_prefers_the_last_envelope() {
+        let stdout = format!(
+            "{}{}",
+            result_stream(r#"{"type":"result","subtype":"success","is_error":false}"#),
+            result_stream(API_ERROR_RESULT_LINE),
+        );
+        let envelope = parse_result_envelope(&stdout).expect("envelope should parse");
+        assert!(envelope.is_error, "the final envelope must win");
+    }
+
+    #[test]
+    fn parse_result_envelope_returns_none_without_an_envelope() {
+        assert_eq!(parse_result_envelope(""), None);
+        assert_eq!(parse_result_envelope("plain text output\n"), None);
+        // stream-json lines that are not result envelopes
+        assert_eq!(
+            parse_result_envelope(
+                r#"{"type":"assistant","message":{"role":"assistant","content":[]}}"#
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_result_envelope_skips_unparseable_lines() {
+        let stdout = format!("{{\"result\": truncated\n{API_ERROR_RESULT_LINE}\n");
+        let envelope = parse_result_envelope(&stdout).expect("envelope should parse");
+        assert!(envelope.is_error);
+    }
+
+    #[test]
+    fn envelope_is_error_indicates_failure_even_with_success_subtype() {
+        let envelope = parse_result_envelope(API_ERROR_RESULT_LINE).expect("envelope should parse");
+        assert!(envelope.indicates_failure());
+    }
+
+    #[test]
+    fn envelope_error_terminal_reason_indicates_failure() {
+        let envelope = ClaudeResultEnvelope {
+            is_error: false,
+            subtype: Some("success".to_string()),
+            terminal_reason: Some("api_error".to_string()),
+        };
+        assert!(envelope.indicates_failure());
+    }
+
+    #[test]
+    fn envelope_success_is_not_a_failure() {
+        let envelope = ClaudeResultEnvelope {
+            is_error: false,
+            subtype: Some("success".to_string()),
+            terminal_reason: None,
+        };
+        assert!(!envelope.indicates_failure());
+    }
+
+    #[test]
+    fn envelope_unrecognized_terminal_reason_is_not_a_failure() {
+        // A terminal reason we do not recognize must never turn a clean run
+        // into a failure: the failure path increments the bead's failure count.
+        let envelope = ClaudeResultEnvelope {
+            is_error: false,
+            subtype: Some("success".to_string()),
+            terminal_reason: Some("user_exit".to_string()),
+        };
+        assert!(!envelope.indicates_failure());
+    }
+
+    #[test]
+    fn envelope_empty_terminal_reason_is_not_a_failure() {
+        let envelope = ClaudeResultEnvelope {
+            is_error: false,
+            subtype: Some("success".to_string()),
+            terminal_reason: Some(String::new()),
+        };
+        assert!(!envelope.indicates_failure());
+    }
+
+    #[test]
+    fn stream_indicates_failure_false_without_an_envelope() {
+        assert!(!stream_indicates_failure(""));
+        assert!(!stream_indicates_failure(
+            r#"{"type":"assistant","message":{"role":"assistant","content":[]}}"#
+        ));
+    }
+
+    #[test]
+    fn classify_from_stream_overrides_a_zero_exit_code() {
+        // The 2026-09-02 shape: exit 0, is_error true, terminal_reason api_error.
+        let stdout = result_stream(API_ERROR_RESULT_LINE);
+        assert_eq!(
+            classify_from_stream(0, &stdout, &TraceFormat::ClaudeJson),
+            Outcome::Failure
+        );
+    }
+
+    #[test]
+    fn classify_from_stream_keeps_success_for_a_clean_envelope() {
+        let stdout = result_stream(r#"{"type":"result","subtype":"success","is_error":false}"#);
+        assert_eq!(
+            classify_from_stream(0, &stdout, &TraceFormat::ClaudeJson),
+            Outcome::Success
+        );
+    }
+
+    #[test]
+    fn classify_from_stream_falls_back_to_exit_code_without_an_envelope() {
+        // Formats with no result envelope (or a stream cut short before one
+        // was emitted) keep the exit-code classification.
+        assert_eq!(
+            classify_from_stream(0, "", &TraceFormat::ClaudeJson),
+            Outcome::Success
+        );
+        assert_eq!(
+            classify_from_stream(1, "", &TraceFormat::ClaudeJson),
+            Outcome::Failure
+        );
+    }
+
+    #[test]
+    fn classify_from_stream_ignores_envelope_for_non_claude_formats() {
+        let stdout = result_stream(API_ERROR_RESULT_LINE);
+        assert_eq!(
+            classify_from_stream(0, &stdout, &TraceFormat::OpenaiJsonl),
+            Outcome::Success
+        );
+        assert_eq!(
+            classify_from_stream(0, &stdout, &TraceFormat::RawText),
+            Outcome::Success
+        );
+    }
+
+    #[test]
+    fn classify_from_stream_nonzero_exit_code_still_wins_for_non_error_envelope() {
+        // An envelope that reports no failure leaves the exit-code mapping intact.
+        let stdout = result_stream(r#"{"type":"result","subtype":"error_max_turns"}"#);
+        assert_eq!(
+            classify_from_stream(124, &stdout, &TraceFormat::ClaudeJson),
+            Outcome::Timeout
+        );
     }
 
     #[test]
