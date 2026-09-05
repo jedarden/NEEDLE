@@ -2,7 +2,7 @@
 
 > **N**avigates **E**very **E**nqueued **D**eliverable, **L**ogs **E**ffort
 
-Plan revision: 29
+Plan revision: 30
 
 As of: 2026-09-05
 
@@ -22,6 +22,11 @@ selection accounting.
 Revision 29 records that bead-rs already exposes atomic versioned manifests and
 adds the missing NEEDLE adapter migration so mitosis does not retain a
 sequential create-then-link race.
+Revision 30 embeds learning in the operational attempt lifecycle (section 4.8):
+observable execution checkpoints, changed-intervention retries, durable episode
+delivery, delayed feedback, evaluated guidance, executable-check proposals, and
+one bounded end-to-end pilot. Existing component beads retain their ownership;
+N-T39 through N-T44 implement the missing operational connections.
 
 ## 0. How to read this plan
 
@@ -338,9 +343,12 @@ a dependency, not a preference.
    quarantined bead, revert of a fleet-authored commit, and interruption of a
    running dispatch are recorded against the attempt and are reflection
    triggers. Today none of them is recorded anywhere.
-7. **Learning consumers freeze in gate-degraded workspaces** (ADR-023). A red
-   gate carries no information, so adapter selection, experiments and
-   promotion hold their last state until the gate is restored.
+7. **Adaptive changes freeze in gate-degraded workspaces** (ADR-023). Adapter
+   selection experiments and promotion hold their last approved state until
+   the gate is restored. Infrastructure failures remain evidence for health
+   and recovery; a gate that executes and rejects work remains task evidence.
+   Neither class is discarded, and infrastructure faults do not penalize task
+   quality or reinforce a lesson about implementation correctness.
 
 Cross-repository dependencies are expressed as `cross-repo-gate` beads in the
 downstream repository naming the upstream bead; they are closed by the
@@ -463,6 +471,177 @@ Revision 25 adopts ADR-028 and makes these rules normative:
 N-T34 through N-T36 carry the NEEDLE implementation and replay evidence. The
 upstream claim-epoch primitive is bead-rs `beadrs-8c343a7c`; its exact release,
 not a mutable development checkout, gates activation.
+
+### 4.8 Learning embedded in factory operation (revision 30)
+
+Learning is part of the attempt protocol. Every execution records bounded
+observable evidence; selected episodes receive asynchronous reflection. A busy
+ready frontier must not suppress collection, recovery, reflection, or delayed
+outcome evaluation. Section 5 owns the kernel and authority boundaries; this
+section specifies where its inputs and outputs enter the running factory.
+
+#### 4.8.1 Operational hooks and effect owners
+
+| Hook | Required operation | Durable result and owner |
+| --- | --- | --- |
+| Before dispatch | Resolve the OutcomeContract, policy, previous recovery evidence, and bounded applicable lessons; choose an admitted execution variant | ContextManifest and intended/actual exposure receipt, written by the context/dispatch controllers before execution |
+| During execution | Capture initial plan, first verification result, recovery decision, and final handoff at meaningful boundaries | Versioned ExecutionCheckpoint observations from dispatcher/tool/gate adapters; concise agent rationale only when interpretation is needed |
+| At resolution | Bind evidence to the tested artifact and resolve through the current fenced claim; assemble the episode from immutable references | bead-rs resolution receipt plus NEEDLE episode or explicit incomplete-episode state |
+| After resolution | Join CI, observation-horizon, deployment, incident, reopen, revert, and operator feedback to the originating attempt/artifact | Append-only outcome observations; evaluator revisions without rewriting the original Resolution |
+| Between attempts | Lease and consume selected reflection triggers regardless of queue depth; evaluate candidates within budget | CandidateLesson, counterexample, evaluation, and experiment decision records |
+| On later eligible work | Inject validated guidance or execute an approved recovery; measure its subsequent result | Actual exposure and effect receipts that feed the next episode |
+
+The loop is: bead -> context -> execution -> verification -> resolution ->
+episode -> evaluation -> versioned guidance -> a later eligible attempt.
+Evaluated code/check improvements enter the same loop through proposal
+admission and ordinary implementation beads.
+
+#### 4.8.2 Execution checkpoints and changed-intervention retries
+
+An ExecutionCheckpoint binds schema version, checkpoint ID, attempt ID, claim
+epoch, timestamp, intended result, observable result, evidence references, and
+next intervention. Optional rationale is deliberately written for the record;
+hidden model reasoning is neither requested nor retained. Capture tool/gate
+observations automatically; do not require a retrospective essay per tool call.
+
+A checkpoint distinguishes uncommitted attributable recovery material from a
+verified commit/artifact. Shared-checkout capture must exclude unrelated worker
+edits; ambiguous attribution stays explicit and cannot authorize automatic
+reapplication. Checkpoint persistence does not make stale ownership valid.
+
+Before retry, a RecoveryPlan references the previous attempt, normalized failure
+fingerprint, prior interventions, preserved evidence, proposed changed action,
+expected observable improvement, and retry/time/cost budget. Infrastructure
+retries may follow an approved deterministic backoff/runbook. An unchanged
+task failure cannot repeatedly redispatch without a new intervention or new
+evidence; exhausted or uncertain recovery follows the existing bounded
+decomposition, quarantine, or human-handoff policy. Actual interventions and
+results are recorded so the next worker can continue verified progress.
+
+#### 4.8.3 Durable delivery, replay, and missing evidence
+
+Controllers must not rely on a best-effort telemetry callback to trigger
+learning. NEEDLE journals the attempt/context before dispatch and persists
+evidence references before resolution. A durable consumer reconciles bead-rs
+attempt receipts/change-feed events with the attempt journal and externally
+retained evidence/ledger. A crash between these stores is recoverable; there
+is no claimed cross-store atomic transaction.
+
+Use at-least-once delivery with stable source/store identity, event ID, schema
+version, and attempt ID. In NEEDLE's runtime store, persist the consumer cursor
+and inbox insertion together, deduplicate episode inputs, and acknowledge
+processing only after its result is durable. Scoped leases and bounded batches
+allow takeover. A cursor discontinuity or unavailable source triggers explicit
+reconciliation rather than silent advancement or invented events.
+
+Missing/conflicting evidence creates an incomplete episode with named missing
+references and a retry/retention policy. Late evidence may complete it; it is
+excluded from authoritative effectiveness cohorts until its contract is met.
+Protect referenced evidence through its observation horizon and pending work.
+Host loss recovery uses the externally retained attempt ledger and evidence;
+loss of a derived index must not lose episodes or change work truth. Duplicate,
+out-of-order, post-resolution/pre-enqueue crash, acknowledgement crash, and
+lease-takeover cases require replay tests.
+
+#### 4.8.4 Evaluation, delayed feedback, and exposure
+
+Gate reports identify the exact tested commit/artifact, relevant environment,
+tool version, and OutcomeContract. Evidence from a moving shared checkout with
+ambiguous attribution cannot certify another artifact. Later CI/GitOps,
+reopen/revert, incident, or operator observations append source-addressed
+corrections; they do not rewrite initial resolutions or automatically infer
+causation from a coincident event.
+
+Each lesson states applicability, intervention, supporting and contradictory
+evidence, expected metric, and expiry/re-evaluation condition. Repeated runs of
+one incident are correlated evidence. Count an attempt's support at most once;
+text similarity never establishes independent support. Insufficient evidence
+is a normal decision, and expired/harmful lessons can be demoted automatically
+within the declared envelope.
+
+Evaluate saved incidents and representative held-out cases before a bounded
+canary. Persist baseline/candidate assignment before dispatch and distinguish
+intended exposure from guidance actually supplied or actions actually taken.
+Assignment must survive retries and controller restarts. If a code, gate, or
+workspace change affects multiple attempts, assign at that shared scope so the
+baseline is not exposed to treatment. Record version/confounding changes and
+count recurrence only among eligible comparable attempts. Observation horizons,
+minimum evidence, independent verifiers, guardrails, and rollback conditions
+are fixed before analysis; the optimizer cannot alter its own acceptance test.
+
+#### 4.8.5 Improvements return through normal factory operations
+
+Kernel outputs are consumed by context, recovery, routing, admission, and
+promotion controllers. A validated diagnostic becomes scoped guidance; a
+repeatable procedure becomes a versioned runbook; a reliably detectable failure
+can become a proposed preflight, invariant, or regression check. These proposals
+name the evidence, exact intended behavior, affected resources, expected
+benefit, acceptance test, authority, and rollback conditions.
+
+The normal admission controller checks existing work, duplicate references,
+dependencies/resource overlap, authority, and generated-work budget, then creates
+the bead and graph atomically. Implementation uses the shared checkout, precise
+staging, required verification, main/origin delivery, and the configured Argo
+Workflows/GitOps release path where applicable. Only NEEDLE implementation work
+is created in this repository; external collector/exporter/deployment changes
+use their owning repositories and existing cross-repository release gates.
+
+Reflection never installs a check, changes policy, or deploys code directly.
+Approved executable checks retain provenance to their lesson/EvalCase; redundant
+prompt guidance can be retired after the check's verified rollout. Generated
+beads, runbooks, and tests earn no improvement credit until mature outcomes
+support benefit. Existing authority levels in section 5.7 remain unchanged.
+
+#### 4.8.6 Cadence, budgets, and operational visibility
+
+Collection is cheap and mandatory for new attempts; reflection is selective
+and asynchronous. Controllers have explicit batch, wall-clock, model-cost,
+queue, retry/backoff, and generated-work limits. Record incomplete episodes,
+oldest pending input, source/cursor lag, next retry, reflection cost, lesson
+state, exposure, delayed corrections, and guardrail/rollback state in a
+sanitized machine-readable operational view. Bounded retention cannot silently
+discard evidence still required by an active experiment or outcome horizon.
+
+A learning outage leaves work truth and ownership intact. Continue with the
+last applicable approved guidance or declared static policy when recording the
+required attempt facts remains possible; freeze adaptation and report degraded
+learning. Failure to persist mandatory attempt/context evidence fails admission
+or resolution safely. A component's presence in a binary or configuration does
+not prove its lifecycle hook runs; tests must exercise real call sites.
+
+#### 4.8.7 First operational pilot and implementation ownership
+
+The first pilot covers one repository, one recurring failure class, and one
+approved intervention. Deliver an opt-in configuration, deterministic isolated
+fixture, and result report linking failure -> recovery -> evaluated lesson ->
+later actual exposure -> mature outcome. It must run with a continuously ready
+queue, recover from delivery crashes, and withdraw guidance after a controlled
+counterexample. Fixtures isolate HOME and discovery roots, never production
+stores or external side effects. Live canary execution remains subject to the
+existing release, authority, evidence, cost, and rollback gates.
+
+Existing beads retain component ownership: attempt types/identity N-T02–03,
+controllers N-T06, admission N-T07, reflection N-T08, retrieval N-T09, policy
+N-T10, outcome/evaluation/experiments N-T12, and operator observations N-T20.
+N-T39–44 add checkpoints, retry integration, durable delivery, executable-check
+proposals, operational inspection, and the first pilot respectively. Each new
+bead has a stable unique reference, concrete acceptance criteria, resource keys,
+and blocking dependencies on its existing owners and overlapping new work.
+
+The existing owners receiving revision-30 acceptance additions are:
+
+| Operational contract | Existing implementation bead |
+| --- | --- |
+| Pre-dispatch attempt/context identity | `needle-cafdd3af` |
+| Scoped guidance and actual exposure | `needle-12d1c934` |
+| Artifact-bound episodes and delayed outcomes | `needle-900c51fb` |
+| Selective reflection and independent evidence | `needle-1a9331cc` |
+| Stable experiment assignment and shared-scope cohorts | `needle-0dad44d1` |
+| Saved incidents, holdouts and replay evidence | `needle-d2bc101a` |
+| Independent cadence, budgets and degraded operation | `needle-06f1cf67` |
+| Atomic improvement-work admission | `needle-688944b7` |
+| Operator corrections as source-addressed evidence | `needle-9a94c2f8` |
+| Freeze adaptation while retaining infrastructure observations | `needle-276f95cf` |
 
 ## 5. In-process learning kernel
 
@@ -757,6 +936,12 @@ generated conformance report.
 | N-T36 | concurrent worker integration fixture and release canary | Replay the 2026-09-04 duplicate-dispatch incident in one shared checkout | two workers contend; exactly one epoch dispatches/resolves and the stale process cannot mutate | blocked by N-T14, N-T34–N-T35; `needle-7e56d009` |
 | N-T37 | `config/gitleaks.toml`, `scripts/secret-scan.sh`, commit/release verification and scanner provisioning | Pin a gitleaks version meeting the vendored config minimum and make every repository scan pass that config explicitly; record scanner/config identity with the result | an ephemeral generated-secret fixture is rejected, the documented nonsecret release digest passes, unsupported scanner versions fail closed, and archived HEAD scans clean without placing fixture material in Git | verified; `needle-a8bdfe3a`; commits `c062b792`, `f81f2e20`, `ca5623f4` |
 | N-T38 | bead-rs backend descriptor, `CliBeadStore::split_bead`, capability projection and mitosis fixtures | Replace bead-rs's stale sequential split declaration with its existing versioned manifest transaction; keep older backend behavior explicit and fail closed when atomic splitting is required | concurrent claimer sees no child before all parent-blocking edges commit; rollback, checkpoint/event parity, capability snapshots, pinned old/new matrix and disposable-workspace canary pass before default enablement | blocked by N-T11; `needle-21b7d5a5`; coordinates with bead-rs BR-T28 (`beadrs-57c668be`) |
+| N-T39 | dispatcher/tool/gate adapters and execution checkpoint journal | Capture meaningful versioned execution checkpoints and attributable recovery evidence (4.8.1–2) | real lifecycle call-site, adapter parity, redaction, size-bound, and stale-owner fixtures | blocked by existing identity, telemetry, capture, deadline and claim work; `needle-272c7faa` |
+| N-T40 | retry/recovery controller and prompt adapter | Require a changed intervention or new evidence for repeated task failures; deliver a bounded RecoveryPlan to the next worker (4.8.2) | unchanged-failure loop stops; approved infrastructure backoff, resume, exhausted-budget and handoff fixtures | blocked by N-T39, N-T41, N-T08–09 and existing resolution/controllers/handoff; `needle-5dda045b` |
+| N-T41 | runtime learning inbox/outbox and source reconciliation | Persist cursors, deduplicated inputs, episode work and acknowledgements with crash/host-loss recovery (4.8.3) | crash-boundary, duplicate/out-of-order, incomplete-to-complete and source-discontinuity tests | blocked by N-T39, N-T04–06, N-T16 and N-T12 episode assembly; `needle-fe42db64` |
+| N-T42 | lesson-to-check proposal adapter and admission integration | Turn evaluated runbooks into ordinary deduplicated preflight/invariant/regression-check work with provenance (4.8.5) | concurrent admission creates one fully linked bead; budget/authority refusal and verified-check handoff | blocked by N-T07, N-T12 and N-T38; `needle-590a556a` |
+| N-T43 | read-only learning operational view and diagnostics | Expose episode lag, incomplete evidence, controller budgets, lesson/exposure/correction and rollback state (4.8.6) | schema, redaction, restart continuity and degraded-learning fixtures; no state mutation | blocked by N-T40–42, N-T05 and N-T21; `needle-8e5db2e6` |
+| N-T44 | opt-in operational learning-loop pilot and integration fixture | Connect one failure class to recovery, evaluated guidance, later exposure and mature feedback (4.8.7) | nonempty queue, replay, restart, harmful-guidance withdrawal and receipt-backed pilot report | blocked by N-T39–43 and existing evaluation, retrieval, replay, fencing and transition controls; Gates A–C before live activation; `needle-10fc7f48` |
 
 ## 9. Transition gates and order
 
@@ -810,6 +995,12 @@ generated conformance report.
   are calibrated against mature outcomes rather than initial closure.
 - Adapter selection, experiments and promotion are frozen in gate-degraded
   workspaces, and human overrides are recorded as attempt evidence.
+- Post-resolution delivery and acknowledgement crashes lose no eligible
+  episode; duplicate/reordered inputs do not add support or outcome credit.
+- Execution checkpoints and RecoveryPlans reach real dispatch/retry call sites;
+  unchanged task failures cannot create an unbounded retry loop.
+- Incomplete episodes, delayed evidence, actual exposures and cohort scope are
+  explicit; adaptation freezes on unavailable evidence or contaminated cohorts.
 
 ### Gate D — autonomous improvement
 
@@ -824,6 +1015,10 @@ generated conformance report.
   normal forward revert without force or history rewriting.
 - Only after these checks may bounded automatic policy promotion or
   self-modification be considered in a new ADR.
+- The section 4.8 pilot demonstrates a later worker consuming validated
+  guidance and returning attributable mature evidence, with busy-queue progress,
+  crash recovery, and harmful-guidance withdrawal. Its fixture/configuration
+  delivery is distinct from evidence that a live canary improved outcomes.
 
 Implementation order is A, then the correctness portion of B, then C, then D.
 Within A, N-T15 ships first and the ledger sink (N-T16 plus the
@@ -851,6 +1046,11 @@ The combined factory reports at least:
 - competence calibration error, routing regret and confidence invalidation;
 - replay-to-canary agreement and held-out regression rate;
 - reflection/evaluation cost versus retries and regressions prevented;
+- incomplete-episode age, delivery/cursor lag and replay/deduplication counts;
+- unchanged-intervention retries, recovery success and time to verified resume;
+- intended versus actual guidance exposure and comparable eligible recurrence;
+- accepted deliverables per human hour, with explicit observation horizon and
+  available intervention-time evidence; missing human-time data stays unknown;
 - bypass, rollback, and policy-conflict rates.
 
 Tool calls, commits, notes, generated beads, reflection documents, and worker
