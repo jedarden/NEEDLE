@@ -13,11 +13,18 @@
 //! the test isolation policy to prevent incidents like the 2026-07-20
 //! contamination where non-isolated tests created ~284 phantom beads.
 //!
-//! For subprocess tests (spawning needle binary), always set:
-//! ```cmd.env("HOME", temp_dir.path())```
+//! Use the helpers in the `isolation` module below rather than hand-rolling
+//! the setup:
 //!
-//! For in-process tests, pin the Explore scan root:
-//! ```config.strands.explore.workspace_root = temp_home.to_path_buf();```
+//! - In-process tests: `isolation::setup_isolated_home()` pins this process's
+//!   HOME to a temp directory and restores the original value when the returned
+//!   guard drops. Call it as the first statement of the test, before anything
+//!   reads HOME — `Telemetry::new` writes to `$HOME/.needle/logs/`, and both
+//!   tilde expansion and `Config::default()` resolve paths from HOME.
+//! - Subprocess tests: `isolation::isolate_command(cmd)` sets HOME on the
+//!   child's environment only, leaving this process's HOME untouched.
+//! - In-process Worker tests: `isolation::isolated_config()` combines the HOME
+//!   guard with a config whose Explore scan root is pinned to the temp directory.
 
 use chrono::{DateTime, Duration, Utc};
 use needle::bead_store::{BeadStore, Filters};
@@ -61,57 +68,85 @@ mod isolation {
     use super::*;
     use std::env;
 
+    /// Process-wide mutex serializing HOME isolation.
+    ///
+    /// HOME is process-global state, so two tests isolating at once clobber each
+    /// other and whichever sets HOME last wins for both, making `~` expand to the
+    /// other test's tempdir. `#[serial]` cannot prevent this -- it only orders
+    /// serial-marked tests against each other, so any non-serial test racing one
+    /// still corrupts it. The lock makes isolation exclusive for as long as the
+    /// guard is alive.
+    static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Guard pinning this process's HOME to a temporary directory.
+    ///
+    /// Restores the original HOME value (including the unset case) when dropped,
+    /// so a panicking test cannot leak an isolated HOME into the tests that run
+    /// after it.
+    pub struct IsolatedHome {
+        temp_dir: TempDir,
+        original_home: Option<std::ffi::OsString>,
+        // Declared last so it is released only after Drop::drop has restored HOME.
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl IsolatedHome {
+        /// The temporary directory HOME currently points at.
+        pub fn path(&self) -> &std::path::Path {
+            self.temp_dir.path()
+        }
+    }
+
+    impl Drop for IsolatedHome {
+        fn drop(&mut self) {
+            match &self.original_home {
+                Some(home) => env::set_var("HOME", home),
+                None => env::remove_var("HOME"),
+            }
+        }
+    }
+
     /// Create an isolated test environment with HOME set to a temporary directory.
     ///
     /// This prevents the Explore strand from scanning the real user's home
-    /// directory and contaminating production bead stores.
+    /// directory and contaminating production bead stores, and keeps state that
+    /// code derives from HOME (telemetry logs, heartbeat dirs, tilde-expanded
+    /// paths) inside the temp directory.
     ///
-    /// # Returns
-    ///
-    /// A tuple of (temp_dir, original_home) where:
-    /// - `temp_dir` is the temporary directory to use as HOME
-    /// - `original_home` is the original HOME value (for restoration if needed)
+    /// Call this as the first statement of a test and keep the returned guard
+    /// alive for the duration of the test; HOME is restored on drop, including
+    /// when the test panics.
     ///
     /// # Example
     ///
     /// ```rust
-    /// let (temp_dir, _original_home) = setup_isolated_home()?;
-    /// cmd.env("HOME", temp_dir.path());
+    /// let home = isolation::setup_isolated_home().expect("failed to isolate HOME");
+    /// assert_eq!(env::var("HOME").unwrap(), home.path().to_str().unwrap());
     /// ```
-    #[allow(dead_code)] // HOME-isolation helper from needle-bfd7b135; not yet called by a test
-    pub fn setup_isolated_home() -> anyhow::Result<(TempDir, String)> {
+    pub fn setup_isolated_home() -> anyhow::Result<IsolatedHome> {
+        // Recover from poisoning rather than propagating it: one panicking test
+        // must not cascade into every other test that isolates HOME.
+        let lock = HOME_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let original_home = env::var_os("HOME");
         let temp_dir = tempfile::tempdir()?;
-        let original_home = env::var("HOME").unwrap_or_else(|_| "/nonexistent".to_string());
-        Ok((temp_dir, original_home))
+        env::set_var("HOME", temp_dir.path());
+
+        Ok(IsolatedHome {
+            temp_dir,
+            original_home,
+            _lock: lock,
+        })
     }
 
-    /// Restore the original HOME environment variable.
+    /// Configure a Command with an isolated HOME environment.
     ///
-    /// This is typically not needed as temp directories are cleaned up
-    /// automatically when dropped, but can be useful in cleanup scenarios.
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// let (_temp_dir, original_home) = setup_isolated_home()?;
-    /// // ... test code ...
-    /// restore_home(&original_home);
-    /// ```
-    #[allow(dead_code)] // HOME-isolation helper from needle-bfd7b135; not yet called by a test
-    pub fn restore_home(original_home: &str) {
-        env::set_var("HOME", original_home);
-    }
-
-    /// Configure a Command with isolated HOME environment.
-    ///
-    /// This is a convenience function that combines setup_isolated_home
-    /// with setting the HOME environment variable on a Command.
-    ///
-    /// # Returns
-    ///
-    /// A tuple of (command, temp_dir) where:
-    /// - `command` has HOME set to the temp directory
-    /// - `temp_dir` is kept alive to prevent cleanup during execution
+    /// Unlike [`setup_isolated_home`] this never mutates this process's HOME:
+    /// the child gets its own environment, so no locking is needed and tests
+    /// running concurrently are unaffected. The returned temp_dir must be kept
+    /// alive so it is not deleted while the child is running.
     ///
     /// # Example
     ///
@@ -119,43 +154,39 @@ mod isolation {
     /// let (mut cmd, _temp_dir) = isolate_command(Command::new("needle"))?;
     /// cmd.arg("list").status()?;
     /// ```
-    #[allow(dead_code)] // HOME-isolation helper from needle-bfd7b135; not yet called by a test
+    #[allow(dead_code)] // Subprocess variant from needle-bfd7b135; this file has no subprocess test yet
     pub fn isolate_command(mut cmd: Command) -> anyhow::Result<(Command, TempDir)> {
-        let (temp_dir, _original_home) = setup_isolated_home()?;
+        let temp_dir = tempfile::tempdir()?;
         cmd.env("HOME", temp_dir.path());
         Ok((cmd, temp_dir))
     }
 
     /// Create a test config with isolated Explore strand settings.
     ///
-    /// For in-process tests that build a Worker directly, use this to
-    /// pin the Explore strand's scan root to a temporary directory.
-    ///
-    /// # Returns
-    ///
-    /// A tuple of (config, temp_dir) where:
-    /// - `config` has Explore workspace_root set to temp_dir
-    /// - `temp_dir` is kept alive to prevent cleanup during test
+    /// For in-process tests that build a Worker directly, use this to isolate
+    /// HOME *and* pin the Explore strand's scan root to a temporary directory.
+    /// HOME is set before `Config::default()` runs, so workspace paths derived
+    /// from HOME resolve into the temp directory too.
     ///
     /// # Example
     ///
     /// ```rust
-    /// let (config, _temp_dir) = isolated_config()?;
+    /// let (config, _home) = isolated_config()?;
     /// let worker = Worker::new(config);
     /// ```
-    #[allow(dead_code)] // HOME-isolation helper from needle-bfd7b135; not yet called by a test
-    pub fn isolated_config() -> anyhow::Result<(needle::config::Config, TempDir)> {
-        let temp_dir = tempfile::tempdir()?;
+    #[allow(dead_code)] // Worker-config variant from needle-bfd7b135; this file has no in-process Worker test yet
+    pub fn isolated_config() -> anyhow::Result<(needle::config::Config, IsolatedHome)> {
+        let home = setup_isolated_home()?;
         let mut config = needle::config::Config::default();
 
-        // Pin Explore strand to temp directory
-        config.strands.explore.workspace_root = temp_dir.path().to_path_buf();
+        // Pin Explore strand to the isolated HOME
+        config.strands.explore.workspace_root = home.path().to_path_buf();
         config.strands.explore.workspaces = Vec::new();
 
         // Disable other strands for test isolation
         config.strands.pulse.enabled = false;
 
-        Ok((config, temp_dir))
+        Ok((config, home))
     }
 }
 
@@ -460,6 +491,7 @@ async fn test_quarantine_labels_applied_at_failure_threshold() {
     // This test verifies that when a bead reaches exactly 5 failures,
     // all three quarantine labels are applied with correct format.
 
+    let _home = isolation::setup_isolated_home().expect("failed to isolate HOME");
     let store = QuarantineTestStore::new().expect("failed to create test store");
     let bead_id = "quarantine-test-001";
 
@@ -561,6 +593,7 @@ async fn test_quarantine_labels_exact_at_five_failures() {
     // This test verifies that quarantine labeling happens EXACTLY at 5 failures,
     // not before and not after.
 
+    let _home = isolation::setup_isolated_home().expect("failed to isolate HOME");
     let store = QuarantineTestStore::new().expect("failed to create test store");
     let bead_id = "quarantine-test-002";
 
@@ -638,6 +671,7 @@ async fn test_quarantine_labels_exact_at_five_failures() {
 async fn test_quarantine_round_increment() {
     // This test verifies that quarantine round increments correctly on subsequent quarantines.
 
+    let _home = isolation::setup_isolated_home().expect("failed to isolate HOME");
     let store = QuarantineTestStore::new().expect("failed to create test store");
     let bead_id = "quarantine-test-003";
 
@@ -714,6 +748,7 @@ async fn test_quarantine_round_increment() {
 async fn test_quarantine_until_timestamp_format() {
     // This test verifies that the quarantine-until timestamp is a valid ISO 8601/RFC 3339 timestamp.
 
+    let _home = isolation::setup_isolated_home().expect("failed to isolate HOME");
     let store = QuarantineTestStore::new().expect("failed to create test store");
     let bead_id = "quarantine-test-004";
 
@@ -770,6 +805,8 @@ async fn test_quarantine_until_timestamp_format() {
 async fn test_pluck_filters_quarantined_beads() {
     // This test verifies that Pluck strand filters out beads with active quarantine.
 
+    // Isolate HOME before Telemetry::new, which writes to $HOME/.needle/logs/.
+    let _home = isolation::setup_isolated_home().expect("failed to isolate HOME");
     let store = QuarantineTestStore::new().expect("failed to create test store");
 
     println!("=== PLUCK QUARANTINE FILTERING TEST ===");
@@ -852,6 +889,62 @@ async fn test_pluck_filters_quarantined_beads() {
             panic!("Unexpected Pluck result: {:?}", result);
         }
     }
+
+    println!("\n=== TEST PASSED ===");
+}
+
+/// The isolation helper must actually pin HOME to the temp directory and put the
+/// original value back afterwards. An earlier revision of `setup_isolated_home`
+/// only created the tempdir and handed it back, leaving every HOME-derived path
+/// (telemetry logs, heartbeat dirs, tilde expansion) in the real user
+/// environment.
+#[tokio::test]
+async fn test_setup_isolated_home_pins_and_restores_home() {
+    let original_home = std::env::var_os("HOME");
+
+    let home = isolation::setup_isolated_home().expect("failed to isolate HOME");
+
+    // HOME is pinned to the guard's temp directory, never the real user home.
+    let current_home = std::env::var("HOME").expect("HOME should be set while a guard is alive");
+    assert_eq!(
+        PathBuf::from(&current_home),
+        home.path().to_path_buf(),
+        "HOME should point at the isolated temp directory"
+    );
+    if let Some(real_home) = &original_home {
+        assert_ne!(
+            PathBuf::from(&current_home),
+            PathBuf::from(real_home),
+            "isolated HOME must not be the real user home"
+        );
+    }
+
+    // State derived from HOME lands inside it: Telemetry writes
+    // $HOME/.needle/logs/<worker>-<session>-<date>.jsonl on construction.
+    let _telemetry = Telemetry::new("isolation-probe-worker".to_string());
+    let logs_dir = home.path().join(".needle").join("logs");
+    let log_entries = std::fs::read_dir(&logs_dir)
+        .expect("telemetry should create $HOME/.needle/logs under the isolated HOME")
+        .filter_map(|entry| entry.ok())
+        .count();
+    assert!(
+        log_entries > 0,
+        "expected telemetry log files under the isolated HOME at {}",
+        logs_dir.display()
+    );
+    println!(
+        "✓ Telemetry wrote {} file(s) under the isolated HOME",
+        log_entries
+    );
+
+    drop(home);
+
+    // The original HOME is restored, including the unset case.
+    assert_eq!(
+        std::env::var_os("HOME"),
+        original_home,
+        "dropping the guard must restore the original HOME"
+    );
 
     println!("\n=== TEST PASSED ===");
 }

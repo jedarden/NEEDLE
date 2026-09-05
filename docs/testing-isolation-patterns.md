@@ -82,6 +82,35 @@ let mut guard = ProcessGuard::new(child);
   - Auto-cleanup on drop
   - Useful for test prompts and configs
 
+### Isolation helpers in `tests/integration_tests.rs`
+
+The `mod isolation` block in that file exposes three helpers. Each integration
+test file is its own crate, so reuse means copying the module — keep copies
+identical.
+
+- **`setup_isolated_home() -> IsolatedHome`** — pins *this process's* HOME to a
+  temp directory and restores the original value (including the unset case) when
+  the returned guard drops, which also happens on panic. Use it for in-process
+  tests that read HOME: `Telemetry::new` writes `$HOME/.needle/logs/`, and both
+  `Config::default()` and tilde expansion resolve paths from HOME. Call it as
+  the first statement of the test and keep the guard alive until the end.
+
+  Isolation is exclusive via a process-wide `HOME_LOCK` mutex held by the guard:
+  HOME is process-global state, so two tests isolating concurrently corrupt each
+  other, and `#[serial]` cannot prevent that (it only orders serial-marked tests
+  against each other, leaving any non-serial test free to race).
+
+- **`isolate_command(cmd) -> (Command, TempDir)`** — sets HOME on the child's
+  environment only and never mutates this process's HOME, so it needs no
+  locking. Use it for subprocess tests; keep the returned `TempDir` alive while
+  the child runs.
+
+- **`isolated_config() -> (Config, IsolatedHome)`** — the HOME guard plus a
+  config whose Explore scan root is pinned to the temp directory and whose pulse
+  strand is disabled. Use it when building a `Worker` in-process; HOME is set
+  before `Config::default()` runs, so HOME-derived defaults land in the temp
+  directory too.
+
 ### Process Management in `tests/process_guard.rs`
 
 - **`ProcessGuard`**: Child process cleanup guard
