@@ -10021,8 +10021,7 @@ attempt_archive:
     fn attempt_archive_rejects_unknown_keys_at_parse_time() {
         let bad = "attempt_archive:\n  enabled: true\n  uplaod: true\n";
         let err = serde_yaml::from_str::<Config>(bad)
-            .err()
-            .expect("unknown attempt_archive key must fail strict parsing");
+            .expect_err("unknown attempt_archive key must fail strict parsing");
         assert!(
             err.to_string().contains("uplaod"),
             "error should name the key: {err}"
@@ -10030,8 +10029,7 @@ attempt_archive:
 
         let bad_include = "attempt_archive:\n  include:\n    transcript: true\n";
         let err = serde_yaml::from_str::<Config>(bad_include)
-            .err()
-            .expect("unknown attempt_archive.include key must fail strict parsing");
+            .expect_err("unknown attempt_archive.include key must fail strict parsing");
         assert!(err.to_string().contains("transcript"), "{err}");
     }
 
