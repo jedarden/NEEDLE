@@ -27,6 +27,7 @@
 //! Workspace-specific rules live in `.needle.yaml` under
 //! `learning.trace_sanitization.custom_patterns`.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 
 use aho_corasick::AhoCorasick;
@@ -199,7 +200,7 @@ impl Sanitizer {
             .regexes
             .iter()
             .filter_map(|r| {
-                let normalized = normalize_regex(r);
+                let normalized = normalize_gitleaks_regex(r);
                 Regex::new(&normalized)
                     .map_err(|e| {
                         tracing::debug!(
@@ -294,23 +295,30 @@ impl Sanitizer {
         }
 
         let mut result = line.to_string();
+        let mut lower = result.to_ascii_lowercase();
         for rule in &self.rules {
-            result = self.apply_rule(rule, &result, line);
+            if let Some(ref ac) = rule.keywords {
+                if !ac.is_match(lower.as_bytes()) {
+                    continue;
+                }
+            }
+            if let Cow::Owned(redacted) = self.apply_rule(rule, &result, line) {
+                lower = redacted.to_ascii_lowercase();
+                result = redacted;
+            }
         }
         result
     }
 
-    fn apply_rule(&self, rule: &CompiledRule, text: &str, original_line: &str) -> String {
-        // Keyword pre-filter: if the rule declares keywords and none appear in
-        // the lowercased text, skip the regex entirely.
-        if let Some(ref ac) = rule.keywords {
-            let lower = text.to_ascii_lowercase();
-            if !ac.is_match(lower.as_bytes()) {
-                return text.to_string();
-            }
-        }
-
-        let mut result = text.to_string();
+    fn apply_rule<'a>(
+        &self,
+        rule: &CompiledRule,
+        text: &'a str,
+        original_line: &str,
+    ) -> Cow<'a, str> {
+        // Most rules do not match. Borrow the input until a redaction actually
+        // changes it, rather than copying every line for every compiled rule.
+        let mut result = Cow::Borrowed(text);
         let mut scan_start = 0usize;
 
         loop {
@@ -405,12 +413,12 @@ impl Sanitizer {
             let abs_secret_end = scan_start + secret_m.end();
             let abs_full_end = scan_start + full_match.end();
 
-            result = format!(
+            result = Cow::Owned(format!(
                 "{}{}{}",
                 &result[..abs_secret_start],
                 redaction,
                 &result[abs_secret_end..]
-            );
+            ));
 
             // Advance past the (now possibly length-changed) full match.
             let delta = redaction.len() as isize - (abs_secret_end - abs_secret_start) as isize;
@@ -475,7 +483,7 @@ impl Sanitizer {
 fn compile_rule(spec: &RuleSpec) -> Option<CompiledRule> {
     // Path-only rules (e.g. pkcs12-file) have no regex — skip them silently.
     let raw_regex = spec.regex.as_deref()?;
-    let normalized = normalize_regex(raw_regex);
+    let normalized = normalize_gitleaks_regex(raw_regex);
     let regex = Regex::new(&normalized)
         .map_err(|e| {
             tracing::debug!(
@@ -507,7 +515,7 @@ fn compile_rule(spec: &RuleSpec) -> Option<CompiledRule> {
 
     for al in &spec.allowlists {
         for re_str in &al.regexes {
-            let normalized = normalize_regex(re_str);
+            let normalized = normalize_gitleaks_regex(re_str);
             match Regex::new(&normalized) {
                 Ok(re) => allowlist_regexes.push((re, al.regex_target)),
                 Err(e) => tracing::debug!(
@@ -534,10 +542,50 @@ fn compile_rule(spec: &RuleSpec) -> Option<CompiledRule> {
     })
 }
 
-/// Normalize a gitleaks regex for compatibility with the Rust `regex` crate.
+/// Preserve Go/RE2's ASCII Perl classes when importing Gitleaks patterns.
 ///
-/// Converts POSIX character class syntax (`[[:alnum:]]` etc.) to equivalent
-/// Rust regex syntax, which is RE2-based and does not support POSIX classes.
+/// Rust's default `\w` expands to Unicode word characters. Repeating it in
+/// hundreds of rules made the vendored sanitizer allocate about 440 MiB per
+/// worker and caused three rules to exceed the regex compilation size limit.
+/// Explicit ASCII classes retain Gitleaks semantics and reduce that to about
+/// 16 MiB. Keep Unicode mode enabled for dots, negated classes, properties, and
+/// case folding; disabling it for the whole regex changes those semantics.
+///
+/// Consume escapes together so a literal `\\w` is not rewritten. Nested
+/// character classes are supported by Rust regex, so these expansions also
+/// work inside a class such as `[\w.-]`. Workspace custom patterns use Rust
+/// syntax and deliberately do not pass through this conversion.
+fn normalize_gitleaks_regex(pattern: &str) -> String {
+    let mut result = String::with_capacity(pattern.len());
+    let mut chars = pattern.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            result.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('w') => result.push_str("[[:word:]]"),
+            Some('W') => result.push_str("[[:^word:]]"),
+            Some('d') => result.push_str("[0-9]"),
+            Some('D') => result.push_str("[^0-9]"),
+            Some('s') => result.push_str(r"[\t\n\f\r ]"),
+            Some('S') => result.push_str(r"[^\t\n\f\r ]"),
+            Some('b') => result.push_str(r"(?-u:\b)"),
+            Some('B') => result.push_str(r"(?-u:\B)"),
+            Some(escaped) => {
+                result.push('\\');
+                result.push(escaped);
+            }
+            None => result.push('\\'),
+        }
+    }
+    result
+}
+
+/// Normalize legacy POSIX class spellings in workspace custom patterns.
+///
+/// Keep custom-pattern behavior separate from the Go/RE2 import conversion:
+/// their Perl classes and word boundaries remain Unicode-aware Rust regexes.
 fn normalize_regex(pattern: &str) -> String {
     pattern
         .replace("[[:alnum:]]", "[a-zA-Z0-9]")
@@ -587,11 +635,165 @@ mod tests {
     #[test]
     fn sanitizer_builds_from_vendored_toml() {
         let s = make_sanitizer();
-        // Vendored config has 222 rules; allow for minor variation if updated.
+        let config: GitleaksToml = toml::from_str(GITLEAKS_TOML).unwrap();
+        let expected = config.rules.iter().filter(|r| r.regex.is_some()).count();
+        assert_eq!(s.rule_count(), expected, "every content rule must compile");
+    }
+
+    #[test]
+    fn gitleaks_perl_classes_follow_go_semantics() {
+        // Go's Perl classes are ASCII-only, even inside another class.
+        for (pattern, matching, nonmatching) in [
+            (r"^\w+$", "abc_123", "café"),
+            (r"^[\w.-]+$", "api.key-123", "clé"),
+            (r"^\W+$", "é!", "A"),
+            (r"^\d+$", "123", "١٢٣"),
+            (r"^\D+$", "١٢٣", "123"),
+            (r"^\s+$", "\t\n\u{c}\r ", "\u{b}\u{a0}"),
+            (r"^\S+$", "\u{b}\u{a0}", "\t "),
+            (r"\btoken\b", "étokené", "xtokenx"),
+            (r"\Btoken\B", "xtokenx", "étokené"),
+            // Dots, negated classes, Unicode properties, and case folding
+            // still operate on Unicode characters, as they do in Go.
+            (r"^.$", "é", "ab"),
+            (r"^[^x]$", "é", "x"),
+            (r"^\p{Greek}+$", "αβ", "ab"),
+            (r"(?i)^k$", "K", "x"),
+        ] {
+            let re = Regex::new(&normalize_gitleaks_regex(pattern)).unwrap();
+            assert!(re.is_match(matching), "pattern {pattern}");
+            assert!(!re.is_match(nonmatching), "pattern {pattern}");
+        }
+        // POSIX whitespace includes vertical tab; Perl whitespace does not.
+        let re = Regex::new(&normalize_gitleaks_regex(r"^[[:space:]]+$")).unwrap();
+        assert!(re.is_match("\u{b}\u{c}"));
+    }
+
+    #[test]
+    fn gitleaks_normalization_preserves_literal_escapes_and_capture_groups() {
+        let re = Regex::new(&normalize_gitleaks_regex(r"^(\\w):(\w+):(\\d)$")).unwrap();
+        let caps = re.captures(r"\w:abc_123:\d").unwrap();
+        assert_eq!(&caps[1], r"\w");
+        assert_eq!(&caps[2], "abc_123");
+        assert_eq!(&caps[3], r"\d");
+    }
+
+    #[test]
+    fn custom_patterns_keep_unicode_semantics() {
+        let custom = [CustomPattern {
+            id: "unicode-test".into(),
+            pattern: r"credential=(\w+)".into(),
+            entropy: None,
+        }];
+        let s = Sanitizer::from_toml("", &custom).unwrap();
+        assert_eq!(
+            s.sanitize("credential=秘密é١"),
+            "credential=[REDACTED:unicode-test]"
+        );
+    }
+
+    #[test]
+    fn gitleaks_allowlists_use_ascii_classes() {
+        let s = Sanitizer::from_toml(
+            r#"
+                [allowlist]
+                regexes = ['^\w+$']
+                [[rules]]
+                id = 'allowlist-test'
+                regex = 'credential=(\S+)'
+            "#,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(s.sanitize("credential=abc_123"), "credential=abc_123");
+        assert_eq!(
+            s.sanitize("credential=秘密١"),
+            "credential=[REDACTED:allowlist-test]"
+        );
+        let s = Sanitizer::from_toml(
+            r#"
+                [[rules]]
+                id = 'allowlist-test'
+                regex = 'credential=(\S+)'
+                [[rules.allowlists]]
+                regexes = ['^\d+$']
+            "#,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(s.sanitize("credential=123"), "credential=123");
+        assert_eq!(
+            s.sanitize("credential=١٢٣"),
+            "credential=[REDACTED:allowlist-test]"
+        );
+    }
+
+    #[test]
+    fn keyword_filter_tracks_redactions_from_previous_rules() {
+        let s = Sanitizer::from_toml(
+            r#"
+                [[rules]]
+                id = 'markerword'
+                regex = 'first=(\w+)'
+                keywords = ['first']
+                [[rules]]
+                id = 'second-rule'
+                regex = 'second=(\w+)'
+                keywords = ['markerword']
+            "#,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            s.sanitize("first=example second=another"),
+            "first=[REDACTED:markerword] second=[REDACTED:second-rule]"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn sanitizer_memory_budget() {
+        // Run alone in a child test process so parallel tests and allocator
+        // reuse cannot hide the startup peak. This never starts a worker.
+        const PROBE: &str = "NEEDLE_SANITIZER_MEMORY_PROBE";
+        if std::env::var_os(PROBE).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "sanitize::tests::sanitizer_memory_budget",
+                    "--nocapture",
+                ])
+                .env(PROBE, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "memory probe failed:\n{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let peak_kib = || {
+            std::fs::read_to_string("/proc/self/status")
+                .unwrap()
+                .lines()
+                .find_map(|line| line.strip_prefix("VmHWM:"))
+                .unwrap()
+                .split_whitespace()
+                .next()
+                .unwrap()
+                .parse::<usize>()
+                .unwrap()
+        };
+        let before = peak_kib();
+        let s = make_sanitizer();
+        let after = peak_kib();
+        assert!(s.rule_count() >= 200);
         assert!(
-            s.rule_count() >= 200,
-            "expected >= 200 compiled rules, got {}",
-            s.rule_count()
+            after.saturating_sub(before) < 64 * 1024,
+            "sanitizer startup grew peak RSS by {} KiB; budget is 64 MiB",
+            after.saturating_sub(before)
         );
     }
 
