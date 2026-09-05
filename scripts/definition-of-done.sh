@@ -37,6 +37,9 @@
 #                    Implies the slow lane. Valid names are printed by
 #                    needle_slow_targets(). CI uses this to give each test
 #                    target its own pod. See "Per-target runs" below.
+#                    Both the space form and the equals form are accepted;
+#                    needle-workflowtemplate.yml passes the equals form, so
+#                    that one is the one CI actually exercises.
 
 set -euo pipefail
 
@@ -92,6 +95,15 @@ while [[ $# -gt 0 ]]; do
       [[ $# -ge 2 ]] || { echo "Error: --target requires a name" >&2; exit 1; }
       SLOW_TARGET="$2"
       shift 2
+      ;;
+    --target=*)
+      # The equals form is what needle-workflowtemplate.yml passes
+      # (`--target={{inputs.parameters.target}}`), and Argo renders it
+      # verbatim — an unparsed equals form failed every slow-lane pod in CI
+      # with "Unknown argument" while the fast lane stayed green.
+      [[ -n "${1#--target=}" ]] || { echo "Error: --target requires a name" >&2; exit 1; }
+      SLOW_TARGET="${1#--target=}"
+      shift
       ;;
     --no-verify)
       NEEDLE_BYPASS_ARGUMENT="--no-verify"

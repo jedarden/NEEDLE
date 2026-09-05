@@ -96,6 +96,25 @@ assert_lines "--target installer selects no cargo target" 0 selected_cargo_targe
 
 SLOW_TARGET=""
 
+# ── argument parsing: both --target forms must reach target validation ───────
+# needle-workflowtemplate.yml passes the equals form
+# (`--target={{inputs.parameters.target}}`). A parser that accepted only the
+# space form let every slow-lane pod die on "Unknown argument" while the fast
+# lane stayed green (2026-09-05), so the forms themselves are tested here —
+# against the real script, since the parser is inline rather than extracted.
+# An unknown name keeps the run cheap: the script rejects it before any cargo
+# or git work happens.
+for form in "--target=nope" "--target nope"; do
+  # shellcheck disable=SC2086 # deliberate word split for the space form
+  if OUT="$(bash "$DOD" --slow $form 2>&1)"; then
+    bad "$form should fail on an unknown target, not run"
+  elif grep -q "Unknown argument" <<<"$OUT"; then
+    bad "$form must parse: 'Unknown argument' means the form was not accepted"
+  else
+    ok "$form parses and is rejected for an unknown target"
+  fi
+done
+
 # ── needle_gate_skips_slow_lane ──────────────────────────────────────────────
 FAILURES=("cargo clippy: exit code 101")
 GATE=true
