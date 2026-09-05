@@ -318,26 +318,31 @@ async fn verification_beads_are_closed_and_folded_into_parent() {
             .contains(&parent_id.to_string());
 
         if is_verification_shaped && references_parent {
-            // Close the bead
+            // Phase 19.4 is close-AND-fold: the fold is the step that preserves
+            // the content, so it runs first and the close is gated on it. When
+            // the fold cannot be performed (a backend that cannot update
+            // descriptions) the bead is left open rather than closed with its
+            // body dropped.
+            let folded_content = format!(
+                "\n\n## folded: {}\n{}\n",
+                bead.title,
+                bead.body.as_deref().unwrap_or("(no body)")
+            );
+            let parent_before = store.show(&parent_id).await.unwrap();
+            let updated_body = format!(
+                "{}{}",
+                parent_before.body.as_deref().unwrap_or(""),
+                folded_content
+            );
+            store
+                .update_description(&parent_id, &updated_body)
+                .await
+                .unwrap();
+
             store
                 .close(&bead.id, "verification is the gate's job (Phase 19.4)")
                 .await
                 .unwrap();
-
-            // Update parent description with folded content
-            if let Ok(p) = store.show(&parent_id).await {
-                let folded_content = format!(
-                    "\n\n## folded: {}\n{}\n",
-                    bead.title,
-                    bead.body.as_deref().unwrap_or("(no body)")
-                );
-                let current_body = p.body.as_deref().unwrap_or("").to_string();
-                let updated_body = format!("{}{}", current_body, folded_content);
-                store
-                    .update_description(&parent_id, &updated_body)
-                    .await
-                    .unwrap();
-            }
         }
     }
 
@@ -558,26 +563,31 @@ async fn task_19_4_scenario_verification_closed_normal_untouched() {
             .contains(&parent_id.to_string());
 
         if is_verification_shaped && references_parent {
-            // Close the bead
+            // Phase 19.4 is close-AND-fold: the fold is the step that preserves
+            // the content, so it runs first and the close is gated on it. When
+            // the fold cannot be performed (a backend that cannot update
+            // descriptions) the bead is left open rather than closed with its
+            // body dropped.
+            let folded_content = format!(
+                "\n\n## folded: {}\n{}\n",
+                bead.title,
+                bead.body.as_deref().unwrap_or("(no body)")
+            );
+            let parent_before = store.show(&parent_id).await.unwrap();
+            let updated_body = format!(
+                "{}{}",
+                parent_before.body.as_deref().unwrap_or(""),
+                folded_content
+            );
+            store
+                .update_description(&parent_id, &updated_body)
+                .await
+                .unwrap();
+
             store
                 .close(&bead.id, "verification is the gate's job (Phase 19.4)")
                 .await
                 .unwrap();
-
-            // Update parent description with folded content
-            if let Ok(p) = store.show(&parent_id).await {
-                let folded_content = format!(
-                    "\n\n## folded: {}\n{}\n",
-                    bead.title,
-                    bead.body.as_deref().unwrap_or("(no body)")
-                );
-                let current_body = p.body.as_deref().unwrap_or("").to_string();
-                let updated_body = format!("{}{}", current_body, folded_content);
-                store
-                    .update_description(&parent_id, &updated_body)
-                    .await
-                    .unwrap();
-            }
         }
     }
 

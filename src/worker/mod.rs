@@ -4123,7 +4123,9 @@ impl Worker {
             let references_parent = self.bead_references_parent(bead, parent_bead).await;
 
             if is_verification_shaped && references_parent {
-                // Close verification-shaped bead and fold into parent.
+                // Fold verification-shaped bead into parent, then close it.
+                // An Err here means the fold failed and the bead was left
+                // open — it is never closed with its content dropped.
                 if let Err(e) = self
                     .close_and_fold_verification_bead(bead, parent_bead)
                     .await
@@ -4131,7 +4133,7 @@ impl Worker {
                     tracing::warn!(
                         bead_id = %bead.id,
                         error = %e,
-                        "failed to close verification-shaped bead"
+                        "verification bead not folded, left open"
                     );
                 } else {
                     folded_count += 1;
@@ -4217,7 +4219,19 @@ impl Worker {
         false
     }
 
-    /// Close a verification-shaped bead and fold its content into the parent's notes.
+    /// Fold a verification-shaped bead's content into its parent, then close it.
+    ///
+    /// Phase 19.4 is close-AND-fold: the fold is the step that preserves the
+    /// bead's body, so it runs first and the close — the destructive step — is
+    /// gated on it. Closing first and only warning about a failed fold threw
+    /// the body away on every backend that cannot update a description
+    /// (bead-rs `update` only carries status/assignee), so a fold failure now
+    /// propagates and the bead is left open with its content intact.
+    ///
+    /// The parent's body is re-read from the store rather than reused from the
+    /// in-memory copy: `update_description` replaces the whole description, so
+    /// writing back a stale body would revert whatever landed on the parent
+    /// since this dispatch started.
     async fn close_and_fold_verification_bead(&self, bead: &Bead, parent: &Bead) -> Result<()> {
         tracing::info!(
             bead_id = %bead.id,
@@ -4225,54 +4239,80 @@ impl Worker {
             "closing verification-shaped bead and folding into parent"
         );
 
-        // Close the verification bead.
-        let _ = tokio::time::timeout(
+        // Since the Bead struct doesn't have a separate notes field, the fold
+        // appends to the parent's body (description) with a "folded:" marker.
+        let fold_marker = format!("## folded: {}", bead.title);
+
+        // Read the parent's current body. Without it there is no safe body to
+        // write back, so the fold fails and the bead stays open.
+        let current_body = match tokio::time::timeout(
             std::time::Duration::from_secs(30),
-            self.store
-                .close(&bead.id, "verification is the gate's job (Phase 19.4)"),
-        )
-        .await;
-
-        // Append folded content to parent's description.
-        // Since the Bead struct doesn't have a separate notes field, we append
-        // to the body (description) with a "folded:" marker.
-        let folded_content = format!(
-            "\n\n## folded: {}\n{}\n",
-            bead.title,
-            bead.body.as_deref().unwrap_or("(no body)")
-        );
-
-        // Try to get the current parent body
-        let current_body = parent.body.as_deref().unwrap_or("").to_string();
-        let updated_body = format!("{}{}", current_body, folded_content);
-
-        // Use the bead store's update command if available (bead-rs backend).
-        // For backends that don't support update, we log a warning but don't fail.
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            self.store.update_description(&parent.id, &updated_body),
+            self.store.show(&parent.id),
         )
         .await
         {
-            Ok(Ok(())) => {
-                // Successfully updated
-            }
-            Ok(Err(update_err)) => {
-                tracing::warn!(
-                    parent_id = %parent.id,
-                    error = %update_err,
-                    "failed to append folded content to parent (backend may not support update)"
-                );
+            Ok(Ok(fresh)) => fresh.body.unwrap_or_default(),
+            Ok(Err(read_err)) => {
+                return Err(anyhow::anyhow!(
+                    "cannot read parent {} to fold into, {} left open: {read_err}",
+                    parent.id,
+                    bead.id
+                ));
             }
             Err(_elapsed) => {
-                tracing::warn!(
-                    parent_id = %parent.id,
-                    "update_description timed out after 30s"
-                );
+                return Err(anyhow::anyhow!(
+                    "timed out reading parent {} to fold into, {} left open",
+                    parent.id,
+                    bead.id
+                ));
+            }
+        };
+
+        // A previous pass may have folded this bead and then failed to close
+        // it. The content is already preserved, so closing now loses nothing.
+        if current_body.contains(&fold_marker) {
+            tracing::debug!(
+                bead_id = %bead.id,
+                parent_id = %parent.id,
+                "parent already holds the folded content for this bead"
+            );
+        } else {
+            let folded_content = format!(
+                "\n\n{fold_marker}\n{}\n",
+                bead.body.as_deref().unwrap_or("(no body)")
+            );
+            let updated_body = format!("{}{}", current_body, folded_content);
+
+            // The fold must succeed before the close. Any failure here is
+            // returned, never downgraded to a warning: a close after a failed
+            // fold is exactly the content loss Phase 19.4 exists to prevent.
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                self.store.update_description(&parent.id, &updated_body),
+            )
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(update_err)) => {
+                    return Err(anyhow::anyhow!(
+                        "failed to fold {} into parent {}, bead left open: {update_err}",
+                        bead.id,
+                        parent.id
+                    ));
+                }
+                Err(_elapsed) => {
+                    return Err(anyhow::anyhow!(
+                        "update_description timed out after 30s, {} left open",
+                        bead.id
+                    ));
+                }
             }
         }
 
-        Ok(())
+        // Content is durably preserved on the parent — now the close is safe.
+        self.store
+            .close(&bead.id, "verification is the gate's job (Phase 19.4)")
+            .await
     }
 
     /// Defer a bead that exceeded the generation budget.
@@ -7858,17 +7898,29 @@ mod tests {
 
     struct MockStore {
         beads: Mutex<Vec<Bead>>,
+        /// When set, `update_description` fails, emulating a backend that
+        /// cannot change a description (bead-rs `update` only carries
+        /// status/assignee).
+        fail_update_description: bool,
+        /// Every `close` the store was asked to perform, in order.
+        close_calls: Mutex<Vec<BeadId>>,
     }
 
     impl MockStore {
         fn new(beads: Vec<Bead>) -> Self {
             MockStore {
                 beads: Mutex::new(beads),
+                fail_update_description: false,
+                close_calls: Mutex::new(Vec::new()),
             }
         }
 
         fn empty() -> Self {
             Self::new(vec![])
+        }
+
+        fn close_calls(&self) -> Vec<BeadId> {
+            self.close_calls.lock().unwrap().clone()
         }
     }
 
@@ -7985,6 +8037,7 @@ mod tests {
         }
 
         async fn close(&self, id: &BeadId, _reason: &str) -> Result<()> {
+            self.close_calls.lock().unwrap().push(id.clone());
             let mut beads = self.beads.lock().unwrap();
             let bead = beads
                 .iter_mut()
@@ -7995,6 +8048,9 @@ mod tests {
         }
 
         async fn update_description(&self, id: &BeadId, description: &str) -> Result<()> {
+            if self.fail_update_description {
+                bail!("configured bead backend does not implement update_description");
+            }
             let mut beads = self.beads.lock().unwrap();
             let bead = beads
                 .iter_mut()
@@ -8074,6 +8130,148 @@ mod tests {
         // their own `RoutingConfig`.
         config.agent.routing = None;
         config
+    }
+
+    // ── Post-dispatch audit: close is gated on the fold (Phase 19.4) ──
+
+    fn verification_bead(id: &str) -> Bead {
+        let mut bead = make_test_bead(id);
+        bead.title = format!("Verify the endpoint works ({id})");
+        bead.body = Some("evidence that must survive the audit".to_string());
+        bead
+    }
+
+    #[tokio::test]
+    async fn fold_failure_leaves_verification_bead_open() {
+        let parent = make_test_bead("fold-fail-parent");
+        let verify = verification_bead("fold-fail-verify");
+
+        let mut store = MockStore::new(vec![parent.clone(), verify.clone()]);
+        // bead-rs `update` cannot change a description, so on the live backend
+        // the fold can never succeed. Content must not be dropped for that.
+        store.fail_update_description = true;
+        let store = Arc::new(store);
+        let worker = make_worker(store.clone());
+
+        let result = worker
+            .close_and_fold_verification_bead(&verify, &parent)
+            .await;
+
+        let error = result.expect_err("a failed fold must not close the bead");
+        assert!(
+            error.to_string().contains("bead left open"),
+            "error should say the bead was left open, got: {error}"
+        );
+
+        // No destructive step ran: the close was never attempted and the bead
+        // still holds its own content.
+        assert!(
+            store.close_calls().is_empty(),
+            "close must not be attempted when the fold fails"
+        );
+        let bead = store.show(&verify.id).await.unwrap();
+        assert_eq!(bead.status, BeadStatus::Open);
+        assert_eq!(
+            bead.body.as_deref(),
+            Some("evidence that must survive the audit")
+        );
+        // The parent is untouched too.
+        let parent_after = store.show(&parent.id).await.unwrap();
+        assert_eq!(parent_after.body.as_deref(), Some("Do the thing"));
+    }
+
+    #[tokio::test]
+    async fn verification_bead_is_folded_before_it_is_closed() {
+        let mut parent = make_test_bead("fold-ok-parent");
+        parent.body = Some("original parent body".to_string());
+        let verify = verification_bead("fold-ok-verify");
+
+        let store = Arc::new(MockStore::new(vec![parent.clone(), verify.clone()]));
+        let worker = make_worker(store.clone());
+
+        worker
+            .close_and_fold_verification_bead(&verify, &parent)
+            .await
+            .expect("fold and close should succeed");
+
+        assert_eq!(
+            store.close_calls(),
+            vec![verify.id.clone()],
+            "exactly one close, after the fold"
+        );
+        let parent_after = store.show(&parent.id).await.unwrap();
+        let body = parent_after.body.as_deref().unwrap();
+        assert!(
+            body.starts_with("original parent body"),
+            "the parent's own content is preserved: {body}"
+        );
+        assert!(body.contains("## folded: Verify the endpoint works"));
+        assert!(body.contains("evidence that must survive the audit"));
+        assert_eq!(
+            store.show(&verify.id).await.unwrap().status,
+            BeadStatus::Closed
+        );
+    }
+
+    #[tokio::test]
+    async fn fold_appends_to_the_parent_body_currently_in_the_store() {
+        let mut parent = make_test_bead("fold-stale-parent");
+        parent.body = Some("stale snapshot".to_string());
+        let verify = verification_bead("fold-stale-verify");
+
+        let store = Arc::new(MockStore::new(vec![parent.clone(), verify.clone()]));
+        let worker = make_worker(store.clone());
+
+        // The parent changed since this dispatch started. The fold replaces
+        // the whole description, so appending to the stale snapshot would
+        // revert this edit.
+        store
+            .update_description(&parent.id, "a concurrent edit landed here")
+            .await
+            .unwrap();
+
+        worker
+            .close_and_fold_verification_bead(&verify, &parent)
+            .await
+            .expect("fold and close should succeed");
+
+        let body = store.show(&parent.id).await.unwrap().body.unwrap();
+        assert!(
+            body.contains("a concurrent edit landed here"),
+            "the concurrent edit must survive the fold: {body}"
+        );
+        assert!(body.contains("## folded: Verify the endpoint works"));
+        assert!(!body.contains("stale snapshot"));
+    }
+
+    #[tokio::test]
+    async fn already_folded_bead_is_closed_without_duplicating_content() {
+        let mut parent = make_test_bead("fold-twice-parent");
+        parent.body = Some(
+            "parent body\n\n## folded: Verify the endpoint works (fold-twice-verify)\nkept evidence\n"
+                .to_string(),
+        );
+        let verify = verification_bead("fold-twice-verify");
+
+        let store = Arc::new(MockStore::new(vec![parent.clone(), verify.clone()]));
+        let worker = make_worker(store.clone());
+
+        worker
+            .close_and_fold_verification_bead(&verify, &parent)
+            .await
+            .expect("content already preserved, so the close should proceed");
+
+        let body = store.show(&parent.id).await.unwrap().body.unwrap();
+        assert_eq!(
+            body.matches("## folded:").count(),
+            1,
+            "the fold must not be appended twice: {body}"
+        );
+        assert_eq!(
+            store.close_calls(),
+            vec![verify.id.clone()],
+            "the close still happens"
+        );
     }
 
     #[tokio::test]
