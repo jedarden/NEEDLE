@@ -95,6 +95,14 @@ mod isolation {
         pub fn path(&self) -> &std::path::Path {
             self.temp_dir.path()
         }
+
+        /// The HOME that was in effect when this guard took the lock — the value
+        /// `Drop` restores. Read it from here, not from `env::var_os` before
+        /// calling `setup_isolated_home`: that read races with another test's
+        /// guard and can capture *its* temp HOME instead of the real one.
+        pub fn original_home(&self) -> Option<&std::ffi::OsStr> {
+            self.original_home.as_deref()
+        }
     }
 
     impl Drop for IsolatedHome {
@@ -916,9 +924,11 @@ async fn test_pluck_filters_quarantined_beads() {
 /// environment.
 #[tokio::test]
 async fn test_setup_isolated_home_pins_and_restores_home() {
-    let original_home = std::env::var_os("HOME");
-
     let home = isolation::setup_isolated_home().expect("failed to isolate HOME");
+    // Take the baseline from inside the lock. Reading env HOME before the guard
+    // exists races with a concurrent test's guard (needle-ci-cmm2m captured the
+    // other test's temp dir as "original" and then failed the restore check).
+    let original_home = home.original_home().map(|h| h.to_os_string());
 
     // HOME is pinned to the guard's temp directory, never the real user home.
     let current_home = std::env::var("HOME").expect("HOME should be set while a guard is alive");
