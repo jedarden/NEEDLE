@@ -15,7 +15,8 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DOD="$REPO_ROOT/scripts/definition-of-done.sh"
 [[ -f "$DOD" ]] || { echo "missing $DOD" >&2; exit 1; }
 
-extracted="$(mktemp "${TMPDIR:-/tmp}/dod-modes-XXXXXX.sh")"
+extracted="$(mktemp "${TMPDIR:-/tmp}/dod-modes.XXXXXX")"
+trap 'rm -f "$extracted"' EXIT
 for fn in needle_slow_targets needle_cargo_selector selected_cargo_targets needle_gate_skips_slow_lane; do
   awk -v f="^${fn}\\\\(\\\\)" '$0 ~ f, /^}/' "$DOD" >> "$extracted"
 done

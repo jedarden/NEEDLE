@@ -767,15 +767,11 @@ impl OtlpSink {
         // but Linux provides a PATH_MAX upper bound. Use 1024 as a conservative
         // minimum (POSIX) and 16384 as a safe maximum.
         let mut buf = vec![0u8; 16384];
-        let mut pwd = libc::passwd {
-            pw_name: std::ptr::null_mut(),
-            pw_passwd: std::ptr::null_mut(),
-            pw_uid: 0,
-            pw_gid: 0,
-            pw_gecos: std::ptr::null_mut(),
-            pw_dir: std::ptr::null_mut(),
-            pw_shell: std::ptr::null_mut(),
-        };
+        // SAFETY: `passwd` is a C record of integer and pointer fields. A
+        // zeroed value is the required empty initialization for getpwuid_r and
+        // remains portable when libc exposes target-specific fields (Darwin
+        // also carries pw_change, pw_class, and pw_expire).
+        let mut pwd: libc::passwd = unsafe { std::mem::zeroed() };
         let mut result = std::ptr::null_mut();
 
         // SAFETY: getpwuid_r writes into buffers we own and checks bounds.
