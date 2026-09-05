@@ -1826,7 +1826,20 @@ esac
 
         // Mock a bead binary
         let bead_path = tmp.path().join("bead");
-        std::fs::write(&bead_path, "#!/bin/sh\nexit 0").unwrap();
+        std::fs::write(
+            &bead_path,
+            r#"#!/bin/sh
+case "$1" in
+  capabilities)
+    printf '%s\n' '{"implementation":"bead-rs","atomic_claim":true,"statuses":["open","in_progress","deferred","closed"],"schemas":[{"schema_ref":"urn:bead-rs:schema:issue:native-v1"},{"schema_ref":"urn:bead-rs:schema:event:native-v1"},{"schema_ref":"urn:bead-rs:schema:field-guide:native-v1"}],"commands":["ref","data","query"]}'
+    ;;
+  --version)
+    printf 'bead 0.1.0\n'
+    ;;
+esac
+"#,
+        )
+        .unwrap();
 
         #[cfg(unix)]
         {
@@ -1848,17 +1861,12 @@ esac
 
         let runner = CanaryRunner::new(PathBuf::from("/tmp/.needle"), workspace.to_path_buf(), 300);
 
-        // Should succeed when bead backend is explicitly set and binary exists
+        // Should succeed when the explicitly bound binary reports the expected
+        // backend identity.
         let result = runner.validate_bead_backend_binding();
-        // This will fail because bead is not on PATH, but we're testing that
-        // it passes the auto check at least
-        // In a real scenario, we'd need to set up PATH or use explicit path
         assert!(
-            match &result {
-                Ok(()) => true,
-                Err(err) => err.to_string().contains("binary not found"),
-            },
-            "should accept bead-rs backend or fail only with binary not found: {:?}",
+            result.is_ok(),
+            "should accept bead-rs backend: {:?}",
             result
         );
     }
