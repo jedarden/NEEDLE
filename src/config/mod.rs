@@ -5912,6 +5912,121 @@ impl ConfigTier for StopConfig {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Attempt archive (needle-1bf0b908; umbrella needle-d70f78cd)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Compression applied to an attempt bundle before it is spooled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ArchiveCompression {
+    /// `<attempt-id>.tar.zst` (default).
+    #[default]
+    Zstd,
+    /// `<attempt-id>.tar` — for sinks or debugging that want plain tar.
+    None,
+}
+
+/// Which artifacts enter an attempt bundle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttemptArchiveInclude {
+    /// `stdout.txt`, `stderr.txt`, `trace.jsonl` and `metadata.json` from the
+    /// attempt's trace directory.
+    #[serde(default = "AttemptArchiveInclude::default_true")]
+    pub trace: bool,
+    /// The harness's own session transcript(s), located by the `session_id`
+    /// recorded in the attempt metadata.
+    #[serde(default = "AttemptArchiveInclude::default_true")]
+    pub harness_transcript: bool,
+    /// The exact prompt bytes NEEDLE dispatched (`prompt.md`).
+    #[serde(default = "AttemptArchiveInclude::default_true")]
+    pub prompt: bool,
+}
+
+impl Default for AttemptArchiveInclude {
+    fn default() -> Self {
+        AttemptArchiveInclude {
+            trace: true,
+            harness_transcript: true,
+            prompt: true,
+        }
+    }
+}
+
+impl AttemptArchiveInclude {
+    fn default_true() -> bool {
+        true
+    }
+}
+
+/// Attempt archive: capture each dispatch attempt's transcript, trace and prompt
+/// as one bundle and hand it to a local spool directory for an *external* drain.
+///
+/// **Default off.** With `enabled: false` NEEDLE behaves exactly as it did
+/// before this section existed: no spool directory is created and trace
+/// retention is unchanged. With `enabled: true` NEEDLE only ever writes to
+/// `spool_dir` — it never uploads, never holds a sink credential, and never
+/// deletes from the spool. Uploading is a separate, optional, operator-installed
+/// step (`docs/attempt-archive.md`); the spool layout is the only contract.
+///
+/// Global only — not overridable per workspace (see `NON_OVERRIDABLE_KEYS`): the
+/// spool is a host-level resource and whether a host archives at all is an
+/// operator decision, not a repository's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttemptArchiveConfig {
+    /// Master switch. `false` (default) means this section has no effect at all.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Where finished bundles are written for the drain to pick up. Tilde is
+    /// expanded by `Config::expand_tildes`.
+    #[serde(default = "AttemptArchiveConfig::default_spool_dir")]
+    pub spool_dir: PathBuf,
+    /// Which artifacts go into each bundle.
+    #[serde(default)]
+    pub include: AttemptArchiveInclude,
+    /// Bundle compression.
+    #[serde(default)]
+    pub compression: ArchiveCompression,
+    /// When `true`, trace retention may delete an attempt directory once its
+    /// bundle has been accepted by the spool. When `false`, retention behaves
+    /// exactly as it does with the archive disabled.
+    #[serde(default = "AttemptArchiveConfig::default_prune_local_after_spool")]
+    pub prune_local_after_spool: bool,
+}
+
+impl Default for AttemptArchiveConfig {
+    fn default() -> Self {
+        AttemptArchiveConfig {
+            enabled: false,
+            spool_dir: Self::default_spool_dir(),
+            include: AttemptArchiveInclude::default(),
+            compression: ArchiveCompression::default(),
+            prune_local_after_spool: Self::default_prune_local_after_spool(),
+        }
+    }
+}
+
+impl AttemptArchiveConfig {
+    pub fn default_spool_dir() -> PathBuf {
+        PathBuf::from("~/.needle/spool")
+    }
+
+    pub fn default_prune_local_after_spool() -> bool {
+        true
+    }
+}
+
+impl ConfigTier for AttemptArchiveConfig {
+    fn reload_tier(&self) -> ReloadTier {
+        // Tier B: the spool writer and the retention gate are constructed once
+        // per worker build; changing the section rebuilds them at the next
+        // cycle boundary. Nothing needs a restart.
+        ReloadTier::Rebuild
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Config Source Tracking
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -6025,6 +6140,8 @@ const NON_OVERRIDABLE_KEYS: &[&str] = &[
     "telemetry",
     "validation",
     "stop",
+    // The spool is a host resource; archiving is an operator decision per host.
+    "attempt_archive",
 ];
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -6093,6 +6210,11 @@ pub struct Config {
     /// `needle stop` shutdown polling (grace period for killed processes).
     #[serde(default)]
     pub stop: StopConfig,
+
+    /// Attempt archive: per-attempt transcript/trace/prompt bundles handed to a
+    /// local spool for an external drain. Default off (no behavior change).
+    #[serde(default)]
+    pub attempt_archive: AttemptArchiveConfig,
 }
 
 impl Config {
@@ -6129,6 +6251,9 @@ impl Config {
 
         // asynchronous CI ledger location
         self.post_push_ci.state_dir = expand_tilde_option(&self.post_push_ci.state_dir);
+
+        // attempt archive spool
+        self.attempt_archive.spool_dir = expand_tilde(&self.attempt_archive.spool_dir);
 
         // strands.pulse.scanners[].command paths are strings, not PathBuf, so skip
 
@@ -6269,6 +6394,10 @@ impl Config {
         // Legacy fields
         hashes.insert("verification".to_string(), hash_section(&self.verification));
         hashes.insert("fabric".to_string(), hash_section(&self.fabric));
+        hashes.insert(
+            "attempt_archive".to_string(),
+            hash_section(&self.attempt_archive),
+        );
 
         hashes
     }
@@ -6567,6 +6696,7 @@ pub fn validate_key_path(key_path: &str) -> Result<(), ConfigError> {
         "tsnet",
         "validation",
         "post_push_ci",
+        "attempt_archive",
     ];
 
     if !valid_top_level.contains(&root) {
@@ -6592,6 +6722,7 @@ pub fn validate_key_path(key_path: &str) -> Result<(), ConfigError> {
         "telemetry" => validate_telemetry_field(second, &segments[2..], key_path),
         "prompt" => validate_prompt_field(second, key_path),
         "post_push_ci" => validate_post_push_ci_field(second, key_path),
+        "attempt_archive" => validate_attempt_archive_field(second, &segments[2..], key_path),
         _ => {
             // For other top-level configs, accept any nested field for now
             // This can be extended later with specific validation
@@ -7050,6 +7181,51 @@ fn validate_otlp_field(field: &str, key_path: &str) -> Result<(), ConfigError> {
 }
 
 /// Validate PromptConfig field names.
+fn validate_attempt_archive_field(
+    field: &str,
+    rest: &[&str],
+    key_path: &str,
+) -> Result<(), ConfigError> {
+    let valid_fields = [
+        "enabled",
+        "spool_dir",
+        "include",
+        "compression",
+        "prune_local_after_spool",
+    ];
+    if !valid_fields.contains(&field) {
+        return Err(ConfigError::new(
+            key_path.to_string(),
+            format!(
+                "unknown attempt_archive field '{}'. Valid fields are: {}",
+                field,
+                valid_fields.join(", ")
+            ),
+        ));
+    }
+    if field == "include" {
+        if let Some(sub) = rest.first() {
+            let valid_include = ["trace", "harness_transcript", "prompt"];
+            if !valid_include.contains(sub) {
+                return Err(ConfigError::new(
+                    key_path.to_string(),
+                    format!(
+                        "unknown attempt_archive.include field '{}'. Valid fields are: {}",
+                        sub,
+                        valid_include.join(", ")
+                    ),
+                ));
+            }
+        }
+    } else if !rest.is_empty() {
+        return Err(ConfigError::new(
+            key_path.to_string(),
+            format!("attempt_archive.{field} has no nested fields"),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_prompt_field(field: &str, key_path: &str) -> Result<(), ConfigError> {
     let valid_fields = ["context_files", "instructions", "templates"];
     if !valid_fields.contains(&field) {
@@ -7906,6 +8082,38 @@ impl ConfigLoader {
                     .timeout_triggered
                     .min_elapsed_fraction
                     .to_string(),
+            ),
+            (
+                "attempt_archive.enabled",
+                config.attempt_archive.enabled.to_string(),
+            ),
+            (
+                "attempt_archive.spool_dir",
+                config.attempt_archive.spool_dir.display().to_string(),
+            ),
+            (
+                "attempt_archive.include.trace",
+                config.attempt_archive.include.trace.to_string(),
+            ),
+            (
+                "attempt_archive.include.harness_transcript",
+                config
+                    .attempt_archive
+                    .include
+                    .harness_transcript
+                    .to_string(),
+            ),
+            (
+                "attempt_archive.include.prompt",
+                config.attempt_archive.include.prompt.to_string(),
+            ),
+            (
+                "attempt_archive.compression",
+                format!("{:?}", config.attempt_archive.compression).to_lowercase(),
+            ),
+            (
+                "attempt_archive.prune_local_after_spool",
+                config.attempt_archive.prune_local_after_spool.to_string(),
             ),
         ];
 
@@ -9751,6 +9959,141 @@ worker:
     }
 
     // ── dump_with_sources coverage ──
+
+    // ── attempt_archive (needle-1bf0b908) ──────────────────────────────────
+
+    #[test]
+    fn attempt_archive_absent_section_is_off_with_documented_defaults() {
+        // A config with no `attempt_archive:` at all must parse to the defaults,
+        // and the default must be OFF — the section's presence changes nothing.
+        let config: Config = serde_yaml::from_str("agent:\n  default: claude\n").unwrap();
+        let a = &config.attempt_archive;
+        assert!(!a.enabled, "attempt_archive must default to disabled");
+        assert_eq!(a.spool_dir, PathBuf::from("~/.needle/spool"));
+        assert!(a.include.trace);
+        assert!(a.include.harness_transcript);
+        assert!(a.include.prompt);
+        assert_eq!(a.compression, ArchiveCompression::Zstd);
+        assert!(a.prune_local_after_spool);
+        assert_eq!(*a, AttemptArchiveConfig::default());
+    }
+
+    #[test]
+    fn attempt_archive_round_trips_and_expands_tilde() {
+        let yaml = "\
+attempt_archive:
+  enabled: true
+  spool_dir: ~/spool-here
+  include:
+    trace: true
+    harness_transcript: false
+    prompt: true
+  compression: none
+  prune_local_after_spool: false
+";
+        let mut config: Config = serde_yaml::from_str(yaml).unwrap();
+        let a = config.attempt_archive.clone();
+        assert!(a.enabled);
+        assert!(!a.include.harness_transcript);
+        assert_eq!(a.compression, ArchiveCompression::None);
+        assert!(!a.prune_local_after_spool);
+
+        // Serialize -> deserialize is identity.
+        let dumped = serde_yaml::to_string(&a).unwrap();
+        let back: AttemptArchiveConfig = serde_yaml::from_str(&dumped).unwrap();
+        assert_eq!(back, a);
+        assert!(dumped.contains("compression: none"), "{dumped}");
+
+        // Tilde expansion covers the spool dir.
+        config.expand_tildes();
+        assert!(
+            !config
+                .attempt_archive
+                .spool_dir
+                .to_string_lossy()
+                .starts_with('~'),
+            "spool_dir should be expanded, got {}",
+            config.attempt_archive.spool_dir.display()
+        );
+    }
+
+    #[test]
+    fn attempt_archive_rejects_unknown_keys_at_parse_time() {
+        let bad = "attempt_archive:\n  enabled: true\n  uplaod: true\n";
+        let err = serde_yaml::from_str::<Config>(bad)
+            .err()
+            .expect("unknown attempt_archive key must fail strict parsing");
+        assert!(
+            err.to_string().contains("uplaod"),
+            "error should name the key: {err}"
+        );
+
+        let bad_include = "attempt_archive:\n  include:\n    transcript: true\n";
+        let err = serde_yaml::from_str::<Config>(bad_include)
+            .err()
+            .expect("unknown attempt_archive.include key must fail strict parsing");
+        assert!(err.to_string().contains("transcript"), "{err}");
+    }
+
+    #[test]
+    fn attempt_archive_key_paths_validate() {
+        for ok in [
+            "attempt_archive",
+            "attempt_archive.enabled",
+            "attempt_archive.spool_dir",
+            "attempt_archive.include",
+            "attempt_archive.include.trace",
+            "attempt_archive.include.harness_transcript",
+            "attempt_archive.include.prompt",
+            "attempt_archive.compression",
+            "attempt_archive.prune_local_after_spool",
+        ] {
+            assert!(
+                validate_key_path(ok).is_ok(),
+                "{ok} should be a valid key path"
+            );
+        }
+        for bad in [
+            "attempt_archive.upload",
+            "attempt_archive.include.transcript",
+            "attempt_archive.enabled.nested",
+        ] {
+            let err = validate_key_path(bad).expect_err(bad);
+            assert!(err.to_string().contains("attempt_archive"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn attempt_archive_is_not_workspace_overridable() {
+        assert!(NON_OVERRIDABLE_KEYS.contains(&"attempt_archive"));
+    }
+
+    #[test]
+    fn attempt_archive_appears_in_dump_and_section_hashes() {
+        let config = Config::default();
+        let lines = ConfigLoader::dump_with_sources(&config, &SourceMap::new());
+        for prefix in [
+            "attempt_archive.enabled: false",
+            "attempt_archive.spool_dir: ~/.needle/spool",
+            "attempt_archive.include.trace: true",
+            "attempt_archive.compression: zstd",
+            "attempt_archive.prune_local_after_spool: true",
+        ] {
+            assert!(
+                lines.iter().any(|l| l.starts_with(prefix)),
+                "dump should include '{prefix}', got: {lines:?}"
+            );
+        }
+        let hashes = config.section_hashes();
+        assert!(hashes.contains_key("attempt_archive"));
+        let mut changed = config.clone();
+        changed.attempt_archive.enabled = true;
+        assert_ne!(
+            hashes["attempt_archive"],
+            changed.section_hashes()["attempt_archive"],
+            "flipping enabled must change the section hash so tier-B reload notices"
+        );
+    }
 
     #[test]
     fn dump_with_sources_includes_all_fields() {

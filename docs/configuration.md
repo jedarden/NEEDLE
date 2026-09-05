@@ -105,6 +105,9 @@ This guide covers the most commonly used configuration options.
 - `validation.outcome_timeout_seconds` — Gate execution timeout
 - `validation.stderr_cap_bytes` — Stderr capture limit
 
+**Attempt archive:**
+- `attempt_archive.*` — Per-attempt transcript/trace/prompt bundling to the local spool (all keys; default off)
+
 ### Tier C (Restart Required) — Process Identity
 
 **These keys cannot be changed without restarting the worker process.** Changes here emit `config.reload.restart_required` and **do not take effect**.
@@ -757,6 +760,63 @@ stop:
 
 ---
 
+## Attempt Archive Configuration
+
+**Default off. NEEDLE users are not required to run any archive sink.** With
+`attempt_archive.enabled: false` (the default) this section has no effect at
+all: no spool directory is created and trace retention behaves exactly as it
+did before the section existed.
+
+When enabled, NEEDLE bundles each finished dispatch attempt — the agent
+transcript captured in the trace directory, the harness's own session
+transcript when it can be located, and the exact prompt that was dispatched —
+into one archive and writes it to a **local spool directory**. That is the
+whole of NEEDLE's involvement: it never uploads, never holds a sink credential,
+and never deletes from the spool. Uploading is a separate, optional,
+operator-installed drain (`contrib/attempt-archive/`, see
+`docs/attempt-archive.md`), and the spool layout is the only contract between
+the two. ARMOR is the reference sink in this fleet; any S3-compatible endpoint,
+or none, works.
+
+```yaml
+attempt_archive:
+  # Master switch. false (default) means nothing below has any effect.
+  enabled: false
+
+  # Where finished bundles are written for the drain to pick up. NEEDLE only
+  # ever writes here; the drain reads and deletes. Tilde is expanded.
+  spool_dir: ~/.needle/spool
+
+  # What goes into each bundle.
+  include:
+    trace: true               # stdout.txt, stderr.txt, trace.jsonl, metadata.json
+    harness_transcript: true  # the harness's own session file(s), by session_id
+    prompt: true              # the exact BuiltPrompt bytes that were dispatched
+
+  # zstd -> <attempt-id>.tar.zst (default); none -> <attempt-id>.tar
+  compression: zstd
+
+  # When true, trace retention may delete an attempt directory once its bundle
+  # has been accepted by the spool. When false, retention is unchanged.
+  prune_local_after_spool: true
+```
+
+**Reload tier:** B (rebuild) for every key — a change takes effect at the next
+cycle boundary, no restart.
+
+**Scope:** global only. `attempt_archive` is not overridable from a workspace
+`.needle.yaml` (it is listed in the non-overridable keys and produces a warning
+there). The spool is a host resource, and whether a host archives at all is an
+operator decision, not a repository's.
+
+**Validation:** unknown keys anywhere under `attempt_archive` (including
+`include.*`) are rejected when the configuration is loaded — the error names the
+offending key — so a typo such as `uplaod:` fails fast instead of silently doing
+nothing. The same key paths are accepted by the override key-path validator
+(`validate_key_path`).
+
+---
+
 ## Supervisor Configuration
 
 ```yaml
@@ -867,6 +927,10 @@ validation:
 
 stop:
   grace_period_secs: 10
+
+attempt_archive:
+  enabled: false            # default off; see "Attempt Archive Configuration"
+  spool_dir: ~/.needle/spool
 ```
 
 ---

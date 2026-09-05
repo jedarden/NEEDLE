@@ -87,6 +87,7 @@ fn assert_all_config_fields_have_tiers(config: &Config) {
         ref outcome,
         ref post_push_ci,
         ref stop,
+        ref attempt_archive,
     } = config;
 
     // Verify tier A assignments
@@ -104,6 +105,7 @@ fn assert_all_config_fields_have_tiers(config: &Config) {
     let _ = limits.reload_tier();
     let _ = gates.reload_tier();
     let _ = validation.reload_tier();
+    let _ = attempt_archive.reload_tier();
 
     // Verify tier C assignments
     let _ = workspace.reload_tier();
@@ -330,6 +332,20 @@ static TIER_TABLE: &[(&str, ReloadTier)] = &[
     ("supervisor", ReloadTier::RestartRequired),
     // Stop (Tier A - read once per `needle stop` invocation, never by the worker)
     ("stop.grace_period_secs", ReloadTier::Live),
+    // Attempt archive (Tier B - spool writer and retention gate are rebuilt at the cycle boundary)
+    ("attempt_archive.enabled", ReloadTier::Rebuild),
+    ("attempt_archive.spool_dir", ReloadTier::Rebuild),
+    ("attempt_archive.include.trace", ReloadTier::Rebuild),
+    (
+        "attempt_archive.include.harness_transcript",
+        ReloadTier::Rebuild,
+    ),
+    ("attempt_archive.include.prompt", ReloadTier::Rebuild),
+    ("attempt_archive.compression", ReloadTier::Rebuild),
+    (
+        "attempt_archive.prune_local_after_spool",
+        ReloadTier::Rebuild,
+    ),
 ];
 
 #[cfg(test)]
@@ -367,6 +383,17 @@ mod tests {
             get_tier_for_key("strands.learning.trace_retention_success_days"),
             Some(ReloadTier::Rebuild)
         );
+        for key in [
+            "attempt_archive.enabled",
+            "attempt_archive.spool_dir",
+            "attempt_archive.include.trace",
+            "attempt_archive.include.harness_transcript",
+            "attempt_archive.include.prompt",
+            "attempt_archive.compression",
+            "attempt_archive.prune_local_after_spool",
+        ] {
+            assert_eq!(get_tier_for_key(key), Some(ReloadTier::Rebuild), "{key}");
+        }
         assert_eq!(
             get_tier_for_key("stop.grace_period_secs"),
             Some(ReloadTier::Live)
