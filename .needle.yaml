@@ -6,7 +6,7 @@ agent:
   routing:
     rules:
     - match_model: glm.*
-      adapter: claude-code-glm-4.7
+      adapter: claude-code-glm-5.3-flash
     - match_model: (claude-)?(sonnet|opus|fable|haiku).*
       adapter: claude
     default_adapter: claude
