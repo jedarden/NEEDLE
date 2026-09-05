@@ -30,6 +30,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // CanaryTestResult
@@ -351,14 +352,16 @@ impl CanaryRunner {
         let backend = &bead_cli.backend;
 
         // Verify the backend binary exists
-        let (backend_type, binary_path, _source) = crate::config::resolve_bead_cli(bead_cli)
-            .with_context(|| {
+        let resolved =
+            crate::bead_store::resolve_configured_backend(bead_cli).with_context(|| {
                 format!(
                     "failed to resolve bead CLI backend '{}' for canary workspace {}",
                     backend,
                     self.canary_workspace.display()
                 )
             })?;
+        crate::bead_store::verify_resolved_backend(&resolved, &self.canary_workspace)?;
+        let binary_path = resolved.binary;
 
         if !binary_path.exists() {
             bail!(
@@ -366,7 +369,7 @@ impl CanaryRunner {
                  Ensure the backend is installed and accessible, or update bead_cli.path in {}/.needle.yaml",
                 backend,
                 binary_path.display(),
-                backend_type,
+                resolved.descriptor.name,
                 self.canary_workspace.display()
             );
         }
@@ -374,7 +377,7 @@ impl CanaryRunner {
         tracing::info!(
             backend = %backend,
             binary = %binary_path.display(),
-            resolved_backend = %backend_type,
+            resolved_backend = %resolved.descriptor.name,
             "canary workspace bead backend validated"
         );
 
@@ -603,18 +606,29 @@ impl CanaryRunner {
                 self.canary_workspace.display()
             )
         })?;
-        let (_, binary, _source) =
-            crate::config::resolve_bead_cli(&bead_cli).with_context(|| {
+        let resolved =
+            crate::bead_store::resolve_configured_backend(&bead_cli).with_context(|| {
                 format!(
                     "failed to resolve canary workspace bead backend '{}'",
                     bead_cli.backend
                 )
             })?;
+        crate::bead_store::verify_resolved_backend(&resolved, &self.canary_workspace)?;
+        let store = crate::bead_store::CliBeadStore::new(
+            resolved.descriptor,
+            resolved.binary,
+            self.canary_workspace.clone(),
+            None,
+            None,
+            None,
+        )?;
+        let values = HashMap::from([("id", bead_id.to_string())]);
+        let show_args = store.render_operation("show", &values)?;
 
         let output = crate::bead_store::spawn_with_etxtbsy_retry_sync(
             || {
-                Command::new(&binary)
-                    .args(["show", bead_id, "--json"])
+                Command::new(store.binary())
+                    .args(&show_args)
                     .current_dir(&self.canary_workspace)
                     .output()
             },
@@ -624,7 +638,7 @@ impl CanaryRunner {
         .with_context(|| {
             format!(
                 "failed to run {} show for backend '{}'",
-                binary.display(),
+                store.binary().display(),
                 bead_cli.backend
             )
         })?;
@@ -946,7 +960,21 @@ mod tests {
         let binary = root.path().join("bound-backend");
         std::fs::write(
             &binary,
-            format!("#!/bin/sh\nprintf '%s\\n' '{projection}'\n"),
+            format!(
+                r#"#!/bin/sh
+case "$1" in
+  --version)
+    echo 'bead 0.1.3'
+    ;;
+  capabilities)
+    echo '{{"implementation":"bead-rs","atomic_claim":true,"statuses":["open","in_progress","deferred","closed"],"schemas":[{{"schema_ref":"urn:bead-rs:schema:issue:native-v1"}},{{"schema_ref":"urn:bead-rs:schema:event:native-v1"}},{{"schema_ref":"urn:bead-rs:schema:field-guide:native-v1"}}],"commands":["ref","data","query"]}}'
+    ;;
+  show)
+    printf '%s\n' '{projection}'
+    ;;
+esac
+"#
+            ),
         )
         .unwrap();
         let mut permissions = std::fs::metadata(&binary).unwrap().permissions();

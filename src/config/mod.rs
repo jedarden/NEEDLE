@@ -39,7 +39,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, bail, Context, Result};
-use serde::{de::Visitor, Deserialize, Deserializer, Serialize};
+use serde::{de::Visitor, Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 
 use crate::cost::{BudgetConfig, PricingConfig};
@@ -695,17 +695,27 @@ pub struct WorkspaceLabelsOverride {
 /// Bead CLI backend enumeration.
 ///
 /// Represents the available bead CLI backends that can be configured.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BeadBackend {
     /// Auto-detect the appropriate backend
-    #[serde(rename = "auto")]
     Auto,
     /// br - deprecated alias for bead (legacy support)
-    #[serde(rename = "br")]
     Br,
     /// bead (bead-rs alias for backward compatibility) - native CLI
-    #[serde(rename = "bead-rs", alias = "bead")]
     Bead,
+    /// Operator-provided descriptor loaded from the configured descriptor directory.
+    External(String),
+}
+
+impl BeadBackend {
+    /// Descriptor name selected by this configuration value.
+    pub fn descriptor_name(&self) -> Option<&str> {
+        match self {
+            BeadBackend::Auto => None,
+            BeadBackend::Br | BeadBackend::Bead => Some("bead-rs"),
+            BeadBackend::External(name) => Some(name),
+        }
+    }
 }
 
 impl std::fmt::Display for BeadBackend {
@@ -714,6 +724,34 @@ impl std::fmt::Display for BeadBackend {
             BeadBackend::Auto => write!(f, "auto"),
             BeadBackend::Br => write!(f, "br"),
             BeadBackend::Bead => write!(f, "bead-rs"),
+            BeadBackend::External(name) => write!(f, "{name}"),
+        }
+    }
+}
+
+impl Serialize for BeadBackend {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for BeadBackend {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        match value.as_str() {
+            "auto" => Ok(BeadBackend::Auto),
+            "br" => Ok(BeadBackend::Br),
+            "bead" | "bead-rs" => Ok(BeadBackend::Bead),
+            _ if value.trim().is_empty() => Err(serde::de::Error::custom(
+                "bead_cli.backend must not be empty",
+            )),
+            _ => Ok(BeadBackend::External(value)),
         }
     }
 }
@@ -766,12 +804,15 @@ impl ConfigTier for BeadCliConfig {
 pub enum Backend {
     /// bead-rs native CLI
     Bead,
+    /// Operator-provided CLI descriptor.
+    External(String),
 }
 
 impl std::fmt::Display for Backend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Backend::Bead => write!(f, "bead"),
+            Backend::External(name) => write!(f, "{name}"),
         }
     }
 }
@@ -903,6 +944,7 @@ pub fn resolve_bead_cli(config: &BeadCliConfig) -> Result<(Backend, PathBuf, Bac
             let backend = match config.backend {
                 BeadBackend::Bead | BeadBackend::Br => Backend::Bead,
                 BeadBackend::Auto => detect_backend_from_path(path)?,
+                BeadBackend::External(ref name) => Backend::External(name.clone()),
             };
             return Ok((backend, path.clone(), BackendSource::ExplicitPath));
         } else {
@@ -959,6 +1001,9 @@ pub fn resolve_bead_cli(config: &BeadCliConfig) -> Result<(Backend, PathBuf, Bac
             bail!(
                 "no bead CLI found (tried: bead on PATH, {home}/.local/bin/bead, /usr/local/cargo/bin/bead)"
             )
+        }
+        BeadBackend::External(ref name) => {
+            bail!("external bead backend '{name}' must be resolved with its descriptor binding")
         }
     }
 }
@@ -1074,7 +1119,7 @@ pub fn detect_bead_backend(workspace_root: &Path) -> Result<(Backend, PathBuf)> 
                         ),
                         "br" => Some(BeadBackend::Bead),
                         "auto" => Some(BeadBackend::Auto),
-                        other => bail!("unknown bead_cli.backend value: '{}'", other),
+                        other => Some(BeadBackend::External(other.to_string())),
                     }
                 } else {
                     None
@@ -1143,6 +1188,9 @@ pub fn detect_bead_backend(workspace_root: &Path) -> Result<(Backend, PathBuf)> 
             bail!(
                 "no bead CLI found (tried: bead on PATH, {home}/.local/bin/bead, /usr/local/cargo/bin/bead, br on PATH)"
             )
+        }
+        BeadBackend::External(name) => {
+            bail!("external bead backend '{name}' requires descriptor-aware resolution")
         }
     }
 }
@@ -2466,11 +2514,9 @@ mod tests {
     }
 
     #[test]
-    fn test_bead_backend_deserialize_invalid_value() {
-        // Invalid values should fail deserialization
-        let yaml = "invalid-backend";
-        let result: Result<BeadBackend, _> = serde_yaml::from_str(yaml);
-        assert!(result.is_err());
+    fn test_bead_backend_deserializes_external_descriptor_name() {
+        let backend: BeadBackend = serde_yaml::from_str("fixture-remote").unwrap();
+        assert_eq!(backend, BeadBackend::External("fixture-remote".to_string()));
     }
 
     // ─── BeadCliConfig path alias tests ───────────────────────────────────────────
@@ -2905,7 +2951,7 @@ path: /path with spaces/to/bead
         let result = detect_bead_backend(ws_root);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("unknown bead_cli.backend"));
+        assert!(err_msg.contains("requires descriptor-aware resolution"));
     }
 
     #[serial]
@@ -3030,12 +3076,13 @@ path: /path/to/./bead
 
     #[test]
     fn test_bead_backend_case_sensitivity() {
-        // Backend names should be case-sensitive
-        let result: Result<BeadBackend, _> = serde_yaml::from_str("Auto");
-        assert!(result.is_err(), "Uppercase 'Auto' should fail");
+        // Reserved names remain case-sensitive; differently cased values are
+        // external descriptor names rather than aliases for `auto`.
+        let backend: BeadBackend = serde_yaml::from_str("Auto").unwrap();
+        assert_eq!(backend, BeadBackend::External("Auto".to_string()));
 
-        let result: Result<BeadBackend, _> = serde_yaml::from_str("AUTO");
-        assert!(result.is_err(), "Uppercase 'AUTO' should fail");
+        let backend: BeadBackend = serde_yaml::from_str("AUTO").unwrap();
+        assert_eq!(backend, BeadBackend::External("AUTO".to_string()));
 
         // Lowercase should work
         let backend: BeadBackend = serde_yaml::from_str("auto").unwrap();
@@ -3124,16 +3171,12 @@ path: /path/to/./bead
     // ─── Error handling and edge case tests ──────────────────────────────────────
 
     #[test]
-    fn test_bead_backend_invalid_string_rejects() {
-        let invalid_inputs = vec!["invalid", "unknown", "foo", "bar", ""];
-        for input in invalid_inputs {
-            let result: Result<BeadBackend, _> = serde_yaml::from_str(input);
-            assert!(
-                result.is_err(),
-                "Should reject invalid backend: '{}'",
-                input
-            );
+    fn test_bead_backend_external_strings_are_descriptor_names() {
+        for input in ["invalid", "unknown", "foo", "bar"] {
+            let backend: BeadBackend = serde_yaml::from_str(input).unwrap();
+            assert_eq!(backend, BeadBackend::External(input.to_string()));
         }
+        assert!(serde_yaml::from_str::<BeadBackend>("''").is_err());
     }
 
     #[test]
@@ -13605,6 +13648,7 @@ agent:
                 BeadBackend::Auto => "auto",
                 BeadBackend::Br => "br",
                 BeadBackend::Bead => "bead-rs",
+                BeadBackend::External(ref name) => name,
             };
             assert_eq!(
                 backend_str, expected_backend,

@@ -550,7 +550,7 @@ fn extra_vars_for_template(name: &str) -> Option<&'static [&'static str]> {
     }
 }
 
-fn bead_commands_for_workspace(workspace: &Path) -> (&'static str, &'static str) {
+fn bead_commands_for_workspace(workspace: &Path) -> (String, String) {
     let backend = std::fs::read_to_string(workspace.join(".needle.yaml"))
         .ok()
         .and_then(|text| serde_yaml::from_str::<serde_yaml::Value>(&text).ok())
@@ -565,14 +565,14 @@ fn bead_commands_for_workspace(workspace: &Path) -> (&'static str, &'static str)
     if matches!(backend.as_deref(), Some("bf")) {
         // Explicit bf request (now unsupported) still defaults to bead-rs
         (
-            "bead",
-            "bead dep add <blocked-id> <blocker-id> --kind blocks",
+            "bead".to_string(),
+            "bead dep add <blocked-id> <blocker-id> --kind blocks".to_string(),
         )
     } else {
         // bead, bead-rs, or undeclared all default to bead-rs
         (
-            "bead",
-            "bead dep add <blocked-id> <blocker-id> --kind blocks",
+            "bead".to_string(),
+            "bead dep add <blocked-id> <blocker-id> --kind blocks".to_string(),
         )
     }
 }
@@ -643,6 +643,8 @@ pub struct PromptBuilder {
     skill_library: Option<SkillLibrary>,
     /// A/B test variant configurations per template name.
     variants: BTreeMap<String, Vec<VariantConfig>>,
+    /// CLI grammar supplied by the already resolved store binding.
+    bead_commands: Option<crate::bead_store::BeadPromptCommands>,
 }
 
 impl PromptBuilder {
@@ -677,7 +679,24 @@ impl PromptBuilder {
             global_learnings_content: None,
             skill_library: None,
             variants: config.variants.clone(),
+            bead_commands: None,
         }
+    }
+
+    /// Use the same descriptor/executable binding as the worker store rather
+    /// than independently inferring commands from workspace text.
+    pub fn with_bead_commands(
+        mut self,
+        commands: Option<crate::bead_store::BeadPromptCommands>,
+    ) -> Self {
+        self.bead_commands = commands;
+        self
+    }
+
+    /// Replace the command binding when a roaming worker enters or leaves a
+    /// workspace with its own explicitly selected backend.
+    pub fn set_bead_commands(&mut self, commands: Option<crate::bead_store::BeadPromptCommands>) {
+        self.bead_commands = commands;
     }
 
     /// Create a new `PromptBuilder` with workspace-specific learnings.
@@ -861,7 +880,11 @@ impl PromptBuilder {
         let comments_section = format_comments(&bead.comments);
 
         // Substitute common variables.
-        let (bead_cli, dep_add_command) = bead_commands_for_workspace(workspace);
+        let (bead_cli, dep_add_command) = self
+            .bead_commands
+            .as_ref()
+            .map(|commands| (commands.cli.clone(), commands.dep_add.clone()))
+            .unwrap_or_else(|| bead_commands_for_workspace(workspace));
         let mut content = template_content
             .replace("{bead_id}", bead.id.as_ref())
             .replace("{bead_title}", &bead.title)
@@ -871,8 +894,8 @@ impl PromptBuilder {
             .replace("{context_file_contents}", &context_file_contents)
             .replace("{workspace_instructions}", instructions)
             .replace("{worker_id}", worker_id)
-            .replace("{bead_cli}", bead_cli)
-            .replace("{dep_add_command}", dep_add_command);
+            .replace("{bead_cli}", &bead_cli)
+            .replace("{dep_add_command}", &dep_add_command);
 
         // Substitute strand-specific variables.
         for (var, value) in extra_vars {

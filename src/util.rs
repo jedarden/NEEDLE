@@ -772,6 +772,10 @@ pub fn detect_bead_cli_backend(
                 crate::config::BackendDetection::new(cli.backend_name().to_string(), cli.path)
             })
         }
+        BeadBackend::External(name) => {
+            debug!(backend = %name, "external backend requires descriptor-aware resolution");
+            None
+        }
     }
 }
 

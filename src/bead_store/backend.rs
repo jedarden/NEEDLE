@@ -134,6 +134,15 @@ pub struct BeadBackend {
     pub error_markers: BeadBackendErrorMarkers,
 }
 
+/// One validated descriptor together with the operator-controlled source that
+/// supplied it. Runtime consumers retain this provenance instead of
+/// rediscovering a similarly named descriptor later.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadedBeadBackend {
+    pub descriptor: BeadBackend,
+    pub source: PathBuf,
+}
+
 fn default_version_command() -> Vec<String> {
     vec!["--version".to_string()]
 }
@@ -409,16 +418,35 @@ fn allowed_placeholders(operation: &str) -> &'static [&'static str] {
     }
 }
 
-/// Load built-ins plus user YAML descriptors, overriding built-ins by name.
+/// Load built-ins plus user YAML descriptors. A user descriptor may override a
+/// built-in by name, but two operator files defining the same name are
+/// rejected as ambiguous.
 pub fn load_bead_backends(
     dir: &Path,
     built_ins: &[BeadBackend],
 ) -> Result<HashMap<String, BeadBackend>> {
+    Ok(load_bead_backends_with_sources(dir, built_ins)?
+        .into_iter()
+        .map(|(name, loaded)| (name, loaded.descriptor))
+        .collect())
+}
+
+/// Load and validate backend descriptors while preserving their source.
+pub fn load_bead_backends_with_sources(
+    dir: &Path,
+    built_ins: &[BeadBackend],
+) -> Result<HashMap<String, LoadedBeadBackend>> {
     let mut backends = HashMap::new();
     for backend in built_ins {
         let source = PathBuf::from(format!("<builtin:{}>", backend.name));
         backend.validate(&source)?;
-        backends.insert(backend.name.clone(), backend.clone());
+        backends.insert(
+            backend.name.clone(),
+            LoadedBeadBackend {
+                descriptor: backend.clone(),
+                source,
+            },
+        );
     }
 
     if !dir.exists() {
@@ -449,9 +477,31 @@ pub fn load_bead_backends(
         let backend: BeadBackend = serde_yaml::from_str(&text)
             .with_context(|| format!("invalid YAML in bead backend file: {}", path.display()))?;
         backend.validate(&path)?;
-        backends.insert(backend.name.clone(), backend);
+        if let Some(previous) = backends.get(&backend.name) {
+            if !is_builtin_source(&previous.source) {
+                bail!(
+                    "ambiguous bead backend descriptor '{}': defined by both {} and {}",
+                    backend.name,
+                    previous.source.display(),
+                    path.display()
+                );
+            }
+        }
+        backends.insert(
+            backend.name.clone(),
+            LoadedBeadBackend {
+                descriptor: backend,
+                source: path,
+            },
+        );
     }
     Ok(backends)
+}
+
+fn is_builtin_source(source: &Path) -> bool {
+    source
+        .to_str()
+        .is_some_and(|value| value.starts_with("<builtin:") && value.ends_with('>'))
 }
 
 /// Shipped descriptors. User files can replace this descriptor by name.
