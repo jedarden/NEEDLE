@@ -2,7 +2,7 @@
 
 > **N**avigates **E**very **E**nqueued **D**eliverable, **L**ogs **E**ffort
 
-Plan revision: 28
+Plan revision: 29
 
 As of: 2026-09-05
 
@@ -19,6 +19,9 @@ that gate as implemented and verified.
 Revision 28 completes the native bead anchors for every pending transition row
 and records the separate API and presentation consumers for cross-repository
 selection accounting.
+Revision 29 records that bead-rs already exposes atomic versioned manifests and
+adds the missing NEEDLE adapter migration so mitosis does not retain a
+sequential create-then-link race.
 
 ## 0. How to read this plan
 
@@ -753,6 +756,7 @@ generated conformance report.
 | N-T35 | Mend and lifecycle reconciler | Replace age/PID-only release with lease-aware compare-and-reap that produces a newer epoch | valid lease never reaped; expired lease reaped once; stale worker fenced | blocked by N-T34; `needle-8d14d0d1` |
 | N-T36 | concurrent worker integration fixture and release canary | Replay the 2026-09-04 duplicate-dispatch incident in one shared checkout | two workers contend; exactly one epoch dispatches/resolves and the stale process cannot mutate | blocked by N-T14, N-T34–N-T35; `needle-7e56d009` |
 | N-T37 | `config/gitleaks.toml`, `scripts/secret-scan.sh`, commit/release verification and scanner provisioning | Pin a gitleaks version meeting the vendored config minimum and make every repository scan pass that config explicitly; record scanner/config identity with the result | an ephemeral generated-secret fixture is rejected, the documented nonsecret release digest passes, unsupported scanner versions fail closed, and archived HEAD scans clean without placing fixture material in Git | verified; `needle-a8bdfe3a`; commits `c062b792`, `f81f2e20`, `ca5623f4` |
+| N-T38 | bead-rs backend descriptor, `CliBeadStore::split_bead`, capability projection and mitosis fixtures | Replace bead-rs's stale sequential split declaration with its existing versioned manifest transaction; keep older backend behavior explicit and fail closed when atomic splitting is required | concurrent claimer sees no child before all parent-blocking edges commit; rollback, checkpoint/event parity, capability snapshots, pinned old/new matrix and disposable-workspace canary pass before default enablement | blocked by N-T11; `needle-21b7d5a5`; coordinates with bead-rs BR-T28 (`beadrs-57c668be`) |
 
 ## 9. Transition gates and order
 
