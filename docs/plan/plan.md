@@ -2,9 +2,9 @@
 
 > **N**avigates **E**very **E**nqueued **D**eliverable, **L**ogs **E**ffort
 
-Plan revision: 27
+Plan revision: 28
 
-As of: 2026-09-04
+As of: 2026-09-05
 
 Status owner: NEEDLE maintainers
 
@@ -16,6 +16,9 @@ selection accounting and admission-blocked worker state explicit (section
 resolution (section 4.7), and revision 26 makes the repository secret gate use
 the same explicit, supported ruleset as NEEDLE's sanitizer. Revision 27 records
 that gate as implemented and verified.
+Revision 28 completes the native bead anchors for every pending transition row
+and records the separate API and presentation consumers for cross-repository
+selection accounting.
 
 ## 0. How to read this plan
 
@@ -723,9 +726,9 @@ generated conformance report.
 | N-T08 | `crates/needle-learning` reflection/evaluator plus adapters for `src/learning/`, `src/strand/reflect.rs`, learning files | Disable direct promotion/count reinforcement; add mature reflection, uncertainty, counterexample and evaluation records | one-attempt-one-reinforcement, delayed-outcome correction and harmful-lesson demotion tests | blocked by N-T02–N-T05 |
 | N-T09 | kernel memory module, derived catalog store, prompt/context adapter | Index scoped source memory, explicitly inject bounded results, record exposure, expiry and effectiveness | cold rebuild, supersession, sensitivity, source-loss and adapter-parity tests | blocked by N-T03, N-T08 |
 | N-T10 | policy resolver, `needle doctor policy`, AGENTS/CLAUDE/templates/config | Define precedence, find contradictions, and produce content-addressed manifests | fixture suite for conflicts and repository/nested scope | transition |
-| N-T11 | config schemas and capability negotiation | Add feature flags and backend capability gates; default new behavior off until verified | old-config compatibility and unsupported-backend fail-closed tests | transition |
+| N-T11 | config schemas and capability negotiation | Add feature flags and backend capability gates; default new behavior off until verified | old-config compatibility and unsupported-backend fail-closed tests | transition; `needle-64db5118` |
 | N-T12 | `crates/needle-learning` outcome contracts, evaluator, competence, replay, experiments, drift, curriculum and promotion modules plus effect/delivery-controller adapters | Add reviewed OutcomeContracts/EvalCases, mature outcome evaluation, calibrated competence, shadow replay plans, experiments, bounded adaptation, audited reversible commit/push, rollback and promotion receipts | pure-kernel/no-side-effect conformance, scoped-index/push/revert tests, holdout/replay coverage and canary improvement without guardrail regression | blocked by N-T05, N-T08–N-T11 |
-| N-T13 | historical telemetry/learnings | Mark legacy events non-authoritative; import learnings only as candidates | deterministic migration report with no invented attempts | blocked by N-T02, N-T08 |
+| N-T13 | historical telemetry/learnings | Mark legacy events non-authoritative; import learnings only as candidates | deterministic migration report with no invented attempts | blocked by N-T02, N-T08; `needle-62e80c13` |
 | N-T14 | combined consumer conformance | Exercise bead-rs atomic attempt resolution with fallback for older capabilities | pinned old/new bead-rs matrix, crash/replay tests | blocked by bead-rs BR-T18 and exact-release blockers |
 | N-T15 | `src/config/mod.rs`, `src/prompt/mod.rs`, `src/claude_md_placement.rs`, `src/strand/reflect.rs` | Default legacy learnings injection, reinforcement and CLAUDE.md placement off; files stay as candidate input | `PromptBuilder::with_workspace` emits no learnings section by default; placement removes its marker section when disabled; fixture test | transition (first; 4.4 step 0) |
 | N-T16 | `src/telemetry/`, `src/outcome/` | Emit one `attempt.resolved` ledger event per dispatch with a provisional attempt ID until N-T03 | versioned schema fixture; exactly one event per dispatch in the file sink across success/failure/timeout/crash | transition (4.4 step 1) |
@@ -744,7 +747,7 @@ generated conformance report.
 | N-T29 | workspace-health, prompt | Detect stash/reset/checkout in the shared checkout during attempts; forbid in prompt; report stale dirty files | fixture stash binds to the overlapping attempt | transition |
 | N-T30 | `needle lesson promote/demote`, policy doctor | Receipted marker-fenced promotion of a reviewed CandidateLesson into AGENTS.md; demote restores | promote/demote round-trip byte-identical; unreviewed refused | blocked by N-T10 |
 | N-T31 | shared candidate eligibility, `src/strand/explore.rs`, worker post-claim rejection | Filter internal/split-out-of-scope candidates before claim, continue ranking, and revision-scope any late rejection so an unchanged bead cannot spin | poison-first/valid-second multi-worker fixture reaches one valid dispatch with no repeated poison claim | transition; part of the starvation-remediation incident |
-| N-T32 | NEEDLE selection events, `declarative-config` dashboard API, `dashboard-site` fleet panel | Report evaluations, unique bead revisions, claims, dispatches, release reasons, conversion, and explicit rolling/lifetime periods; derive active state from dispatch, not claim | event-sequence contract fixture plus browser/API check showing claim-release churn without false active/productive credit | blocked by N-T05 event versioning; cross-repo delivery |
+| N-T32 | NEEDLE selection events, `declarative-config` dashboard API, `dashboard-site` fleet panel | Report evaluations, unique bead revisions, claims, dispatches, release reasons, conversion, and explicit rolling/lifetime periods; derive active state from dispatch, not claim | event-sequence contract fixture plus browser/API check showing claim-release churn without false active/productive credit | blocked by N-T05 event versioning; `needle-dd46ed56`, `declarat-81788aec`, `dash-af465242` |
 | N-T33 | launch resource gate, worker registry/state, service-managed run loop | Replace sustained-saturation exit/restart churn with resident `admission_blocked` state, capped jittered retry, restoration event, and dashboard mapping | saturated-host fixture has one stable worker process, bounded retries, zero claims, then resumes after load clears | transition; supersedes historical Phase 12's terminal launch failure |
 | N-T34 | claim adapter, worker state, prompt/dispatch, gates and resolution | Carry a renewable fenced ClaimHandle through one attempt; cancel and reject semantic effects on ownership loss | old handle cannot mutate after release/expiry/reassignment; one live claim epoch reaches resolution | blocked by bead-rs `beadrs-8c343a7c`; `needle-cd169aa6` |
 | N-T35 | Mend and lifecycle reconciler | Replace age/PID-only release with lease-aware compare-and-reap that produces a newer epoch | valid lease never reaped; expired lease reaped once; stale worker fenced | blocked by N-T34; `needle-8d14d0d1` |
