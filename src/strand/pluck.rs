@@ -83,6 +83,8 @@ struct ExclusionCounts {
     human: usize,
     /// Beads deferred by status/label or held by an existing assignee.
     deferred_assignee: usize,
+    /// Beads under an active ADR-022 expiring quarantine (`quarantine-until` in the future).
+    quarantined: usize,
 }
 
 impl ExclusionCounts {
@@ -101,6 +103,9 @@ impl ExclusionCounts {
         }
         if self.deferred_assignee > 0 {
             reasons.push(format!("deferred_assignee={}", self.deferred_assignee));
+        }
+        if self.quarantined > 0 {
+            reasons.push(format!("quarantined={}", self.quarantined));
         }
         if reasons.is_empty() {
             "none identified".to_string()
@@ -134,6 +139,7 @@ impl FilteringStats {
     /// the full issue set. Dependency edges from bead-rs are lean and only carry
     /// the blocker ID/kind, so blocker status is resolved from the inventory map.
     fn from_inventory(beads: &[Bead], exclude_labels: &[String]) -> Self {
+        let inventory_now = Utc::now();
         let finished_by_id: HashMap<BeadId, bool> = beads
             .iter()
             .map(|bead| (bead.id.clone(), bead.status.is_done()))
@@ -188,6 +194,10 @@ impl FilteringStats {
                 || bead.assignee.is_some()
             {
                 stats.exclusion_counts.deferred_assignee += 1;
+            }
+
+            if active_quarantine_until(bead, inventory_now).is_some() {
+                stats.exclusion_counts.quarantined += 1;
             }
 
             // Collect beads with stale assignees for potential auto-repair
@@ -418,6 +428,42 @@ fn is_manual_block_label(label: &str) -> bool {
 fn is_deferred_label(label: &str) -> bool {
     let label = normalized_label(label);
     label == "deferred" || label.starts_with("deferred:")
+}
+
+/// Parse a `quarantine-until:<rfc3339>` label into its expiry instant.
+///
+/// ADR-022 quarantine is an *expiring label*, not a status: once the instant
+/// passes the bead is claimable again without anyone editing it. A label whose
+/// timestamp does not parse is treated as absent — never as an active
+/// quarantine — so a malformed label cannot starve a bead forever. The prefix
+/// is matched case-insensitively; the timestamp is passed to the parser as
+/// written.
+pub(crate) fn quarantine_until(label: &str) -> Option<chrono::DateTime<Utc>> {
+    const PREFIX: &str = "quarantine-until:";
+    let trimmed = label.trim();
+    if trimmed.len() < PREFIX.len() || !trimmed[..PREFIX.len()].eq_ignore_ascii_case(PREFIX) {
+        return None;
+    }
+    chrono::DateTime::parse_from_rfc3339(trimmed[PREFIX.len()..].trim())
+        .ok()
+        .map(|dt| dt.with_timezone(&Utc))
+}
+
+/// The bead's active quarantine expiry, if any.
+///
+/// When several `quarantine-until` labels are present (a round was applied
+/// without removing the previous one) the latest instant governs, matching how
+/// `quarantine-round` is read as the maximum. Returns `None` once the latest
+/// window has passed.
+pub(crate) fn active_quarantine_until(
+    bead: &Bead,
+    now: chrono::DateTime<Utc>,
+) -> Option<chrono::DateTime<Utc>> {
+    bead.labels
+        .iter()
+        .filter_map(|label| quarantine_until(label))
+        .max()
+        .filter(|until| *until > now)
 }
 
 fn is_human_like_label(label: &str, exclude_labels: &[String]) -> bool {
@@ -1644,6 +1690,53 @@ impl super::Strand for PluckStrand {
             });
         }
 
+        // 2b. Filter: drop beads under an active expiring quarantine (ADR-022).
+        //     Quarantine is a property of the work, not of this worker's
+        //     preferences, so no relaxation tier drops it. An expired window
+        //     makes the bead eligible again with no label edit — that is the
+        //     point of the expiring form — so only the *latest* future
+        //     `quarantine-until` excludes.
+        let quarantine_now = Utc::now();
+        let before_quarantine_filter = candidates.len();
+        let quarantined: Vec<(String, chrono::DateTime<Utc>)> = candidates
+            .iter()
+            .filter_map(|b| {
+                active_quarantine_until(b, quarantine_now)
+                    .map(|until| (b.id.as_ref().to_string(), until))
+            })
+            .collect();
+        candidates.retain(|b| active_quarantine_until(b, quarantine_now).is_none());
+        let after_quarantine_filter = candidates.len();
+        let quarantine_excluded_count = before_quarantine_filter - after_quarantine_filter;
+        if quarantine_excluded_count > 0 {
+            stats.excluded_count += quarantine_excluded_count;
+            for (id, until) in &quarantined {
+                tracing::debug!(
+                    bead_id = %id,
+                    quarantine_until = %until.to_rfc3339(),
+                    "Excluded bead under active quarantine"
+                );
+                stats
+                    .exclusion_reasons
+                    .push(format!("quarantine-until:{}", until.to_rfc3339()));
+            }
+        } else {
+            tracing::debug!(
+                count = after_quarantine_filter,
+                "No beads excluded by quarantine filter"
+            );
+        }
+        filter_stages.push(FilterStage {
+            stage_name: "quarantine_filter".to_string(),
+            before_count: before_quarantine_filter,
+            after_count: after_quarantine_filter,
+            filtered_count: quarantine_excluded_count,
+            filter_reasons: quarantined
+                .iter()
+                .map(|(id, until)| format!("{}:quarantine-until:{}", id, until.to_rfc3339()))
+                .collect(),
+        });
+
         // 3. Apply the normal readiness guards unless the final fallback was
         // selected. The status-only tier intentionally keeps `status=open` as
         // its sole filter, including beads with stale assignees.
@@ -1902,6 +1995,11 @@ impl super::Strand for PluckStrand {
                     // Re-query candidates after successful repair
                     match self.query_with_relaxation(store).await {
                         Ok((mut repaired_candidates, repaired_tier)) => {
+                            // The quarantine filter is never relaxed; apply it to the
+                            // re-queried set exactly as to the first query.
+                            let repaired_now = Utc::now();
+                            repaired_candidates
+                                .retain(|b| active_quarantine_until(b, repaired_now).is_none());
                             if !repaired_candidates.is_empty() {
                                 tracing::info!(
                                     candidate_count = repaired_candidates.len(),
@@ -2865,6 +2963,117 @@ mod tests {
     // ──────────────────────────────────────────────────────────────────────────
     // Filtering
     // ──────────────────────────────────────────────────────────────────────────
+
+    // ── ADR-022 expiring-label quarantine (needle-40c6c60e, Pluck half) ──────
+
+    #[test]
+    fn quarantine_until_parses_rfc3339_and_ignores_malformed() {
+        let ts = "2026-09-05T22:00:00+00:00";
+        assert_eq!(
+            quarantine_until(&format!("quarantine-until:{ts}")).map(|d| d.to_rfc3339()),
+            Some(ts.to_string())
+        );
+        // prefix is case-insensitive, surrounding whitespace tolerated
+        assert!(quarantine_until(&format!("  Quarantine-Until: {ts} ")).is_some());
+        // not this label at all
+        assert!(quarantine_until("quarantined").is_none());
+        assert!(quarantine_until("quarantine-round:2").is_none());
+        // malformed timestamp is ABSENT, never active (cannot starve a bead)
+        assert!(quarantine_until("quarantine-until:tomorrow").is_none());
+        assert!(quarantine_until("quarantine-until:").is_none());
+    }
+
+    #[test]
+    fn active_quarantine_until_uses_latest_label_and_expires() {
+        let now = Utc::now();
+        let past = (now - chrono::Duration::hours(1)).to_rfc3339();
+        let soon = (now + chrono::Duration::hours(2)).to_rfc3339();
+        let later = (now + chrono::Duration::hours(4)).to_rfc3339();
+
+        let expired = make_bead_with_labels(
+            "expired",
+            1,
+            vec![
+                "quarantined",
+                &format!("quarantine-until:{past}"),
+                "quarantine-round:1",
+            ],
+        );
+        assert!(
+            active_quarantine_until(&expired, now).is_none(),
+            "expired window frees the bead"
+        );
+
+        // a bare `quarantined` label without a window never excludes on its own
+        let bare = make_bead_with_labels("bare", 1, vec!["quarantined"]);
+        assert!(active_quarantine_until(&bare, now).is_none());
+
+        let active = make_bead_with_labels("active", 1, vec![&format!("quarantine-until:{soon}")]);
+        assert!(active_quarantine_until(&active, now).is_some());
+
+        // two windows present: the latest governs (round applied without removing the old label)
+        let stacked = make_bead_with_labels(
+            "stacked",
+            1,
+            vec![
+                &format!("quarantine-until:{soon}"),
+                &format!("quarantine-until:{later}"),
+            ],
+        );
+        assert_eq!(
+            active_quarantine_until(&stacked, now).map(|d| d.to_rfc3339()),
+            Some(later)
+        );
+    }
+
+    #[tokio::test]
+    async fn beads_under_active_quarantine_are_filtered_and_expired_ones_return() {
+        let now = Utc::now();
+        let future = (now + chrono::Duration::hours(2)).to_rfc3339();
+        let past = (now - chrono::Duration::hours(1)).to_rfc3339();
+        let store = MemoryStore {
+            beads: vec![
+                make_bead_with_labels("normal-bead", 1, vec![]),
+                make_bead_with_labels(
+                    "quarantined-bead",
+                    1,
+                    vec![
+                        "quarantined",
+                        &format!("quarantine-until:{future}"),
+                        "quarantine-round:1",
+                    ],
+                ),
+                make_bead_with_labels(
+                    "expired-quarantine-bead",
+                    1,
+                    vec![
+                        "quarantined",
+                        &format!("quarantine-until:{past}"),
+                        "quarantine-round:1",
+                    ],
+                ),
+            ],
+        };
+
+        let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()));
+        let result = strand.evaluate(&store, &HashSet::new()).await;
+
+        match result {
+            StrandResult::BeadFound(beads) => {
+                let ids: Vec<&str> = beads.iter().map(|b| b.id.as_ref()).collect();
+                assert!(ids.contains(&"normal-bead"), "{ids:?}");
+                assert!(
+                    ids.contains(&"expired-quarantine-bead"),
+                    "an expired quarantine must make the bead claimable again without a label edit: {ids:?}"
+                );
+                assert!(
+                    !ids.contains(&"quarantined-bead"),
+                    "an active quarantine must be filtered: {ids:?}"
+                );
+            }
+            other => panic!("expected BeadFound, got: {other:?}"),
+        }
+    }
 
     #[tokio::test]
     async fn beads_with_excluded_labels_are_filtered() {
@@ -4499,6 +4708,7 @@ mod tests {
                 manual_blocked: 0,
                 human: 0,
                 deferred_assignee: 3,
+                quarantined: 0,
             },
             stale_assignee_beads: vec![],
         };
@@ -4524,6 +4734,7 @@ mod tests {
                 manual_blocked: 1,
                 human: 0,
                 deferred_assignee: 1,
+                quarantined: 0,
             },
             stale_assignee_beads: vec![],
         };
@@ -4545,6 +4756,7 @@ mod tests {
                 manual_blocked: 0,
                 human: 0,
                 deferred_assignee: 0,
+                quarantined: 0,
             },
             stale_assignee_beads: vec![],
         };
@@ -4570,6 +4782,7 @@ mod tests {
                 manual_blocked: 0,
                 human: 0,
                 deferred_assignee: 2,
+                quarantined: 0,
             },
             stale_assignee_beads: vec![],
         };
