@@ -41,6 +41,10 @@ pub trait OperationStrategy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClaimStrategy {
+    /// One descriptor-rendered command performs the explicit claim atomically
+    /// and returns the normalized claim response contract.
+    AtomicCommand,
+
     /// Compare-and-set claim: read current state, verify assignee is unset or
     /// matches the expected actor, then update.
     ///
@@ -213,6 +217,7 @@ macro_rules! impl_operation_strategy {
 }
 
 impl_operation_strategy!(ClaimStrategy, "claim", {
+    ClaimStrategy::AtomicCommand => "atomic_command",
     ClaimStrategy::CompareAndSet => "compare_and_set",
     ClaimStrategy::BatchOp => "batch_op",
 });
@@ -337,6 +342,11 @@ pub trait ClaimStrategyOperations: Send + Sync {
     /// Claim one explicit issue in a single backend transaction.
     async fn batch_claim(&self, bead_id: &BeadId, actor: &str) -> anyhow::Result<ClaimResult>;
 
+    /// Claim one explicit issue through a descriptor-rendered atomic command.
+    async fn atomic_claim(&self, _bead_id: &BeadId, _actor: &str) -> anyhow::Result<ClaimResult> {
+        anyhow::bail!("atomic command claim is not implemented by this store")
+    }
+
     /// Atomically select and claim the next ready issue.
     async fn atomic_claim_auto(&self, actor: &str) -> anyhow::Result<ClaimResult>;
 
@@ -392,6 +402,7 @@ pub async fn execute_claim_strategy(
     actor: &str,
 ) -> anyhow::Result<ClaimResult> {
     match strategy {
+        ClaimStrategy::AtomicCommand => operations.atomic_claim(bead_id, actor).await,
         ClaimStrategy::CompareAndSet => {
             for _ in 0..MAX_COMPARE_AND_SET_ATTEMPTS {
                 let bead = operations.show_for_claim(bead_id).await?;
@@ -933,6 +944,10 @@ mod tests {
     fn claim_strategy_serializes_correctly() {
         // Verify snake_case serialization for descriptor YAML compatibility
         assert_eq!(
+            serde_json::to_string(&ClaimStrategy::AtomicCommand).unwrap(),
+            r#""atomic_command""#
+        );
+        assert_eq!(
             serde_json::to_string(&ClaimStrategy::CompareAndSet).unwrap(),
             r#""compare_and_set""#
         );
@@ -945,6 +960,10 @@ mod tests {
     #[test]
     fn claim_strategy_deserializes_from_snake_case() {
         // Verify we can deserialize from the snake_case form used in descriptors
+        assert_eq!(
+            serde_json::from_str::<ClaimStrategy>(r#""atomic_command""#).unwrap(),
+            ClaimStrategy::AtomicCommand
+        );
         assert_eq!(
             serde_json::from_str::<ClaimStrategy>(r#""compare_and_set""#).unwrap(),
             ClaimStrategy::CompareAndSet
@@ -1456,7 +1475,11 @@ mod tests {
     #[test]
     fn claim_strategy_all_variants_documented() {
         // Verify all claim strategy variants are documented with race semantics
-        let variants = [ClaimStrategy::CompareAndSet, ClaimStrategy::BatchOp];
+        let variants = [
+            ClaimStrategy::AtomicCommand,
+            ClaimStrategy::CompareAndSet,
+            ClaimStrategy::BatchOp,
+        ];
 
         for variant in variants {
             // Each variant should serialize correctly for YAML descriptors

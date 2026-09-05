@@ -309,7 +309,7 @@ pub enum CliCommand {
     /// Explicitly bind one repository to a bead backend descriptor.
     #[command(name = "bead-backend-bind")]
     BeadBackendBind {
-        /// Builtin backend name (`bead-rs` or `bead-forge`).
+        /// Loaded backend descriptor name (for example `bead-rs`).
         backend: String,
         /// Repository to update.
         #[arg(default_value = ".")]
@@ -2926,29 +2926,27 @@ fn cmd_test_agent(name: &str) -> Result<()> {
 }
 
 fn cmd_bead_backend(name: &str, workspace: &Path) -> Result<()> {
-    if !matches!(name, "bead-rs" | "bead-forge") {
-        bail!("unknown builtin bead backend '{name}'");
-    }
     let workspace = workspace
         .canonicalize()
         .with_context(|| format!("workspace does not exist: {}", workspace.display()))?;
     let backend = match name {
-        "bead-rs" => crate::config::BeadBackend::Bead,
-        "bead-forge" => bail!("bead-forge backend is no longer supported; use 'bead-rs' instead"),
-        _ => bail!("unknown builtin bead backend '{name}'"),
+        "bead-rs" | "bead" => crate::config::BeadBackend::Bead,
+        "auto" => bail!("auto is diagnostic-only; name a descriptor explicitly"),
+        other => crate::config::BeadBackend::External(other.to_string()),
     };
     let config = crate::config::BeadCliConfig {
         backend,
         path: None,
     };
-    let (_, binary, _source) = crate::config::resolve_bead_cli(&config)?;
-    crate::bead_store::open_configured(&config, workspace.clone(), None, None, None)?;
-    let descriptor = crate::bead_store::builtin_bead_backends()
-        .into_iter()
-        .find(|descriptor| descriptor.name == name)
-        .ok_or_else(|| anyhow::anyhow!("builtin descriptor '{name}' is missing"))?;
+    let resolved = crate::bead_store::resolve_configured_backend(&config)?;
+    crate::bead_store::verify_resolved_backend(&resolved, &workspace)?;
+    let descriptor = resolved.descriptor;
     println!("backend: {}", descriptor.name);
-    println!("binary: {}", binary.display());
+    println!("binary: {}", resolved.binary.display());
+    println!(
+        "descriptor_source: {}",
+        resolved.descriptor_source.display()
+    );
     println!("verified_against: {}", descriptor.verified_against);
     println!("atomic_claim: {}", descriptor.capabilities.atomic_claim);
     println!(
@@ -3015,15 +3013,21 @@ fn cmd_bead_backend_audit(root: &Path) -> Result<()> {
 }
 
 fn cmd_bead_backend_bind(backend: &str, workspace: &Path) -> Result<()> {
-    if !matches!(backend, "bead-rs" | "bead-forge") {
-        bail!("unknown builtin bead backend '{backend}'");
-    }
     let workspace = workspace
         .canonicalize()
         .with_context(|| format!("workspace does not exist: {}", workspace.display()))?;
     if !workspace.join(".beads").is_dir() {
         bail!("{} is not a bead workspace", workspace.display());
     }
+    let backend_config = match backend {
+        "bead-rs" | "bead" => crate::config::BeadBackend::Bead,
+        "auto" => bail!("auto is diagnostic-only; name a descriptor explicitly"),
+        other => crate::config::BeadBackend::External(other.to_string()),
+    };
+    crate::bead_store::resolve_configured_backend(&crate::config::BeadCliConfig {
+        backend: backend_config,
+        path: None,
+    })?;
     let path = workspace.join(".needle.yaml");
     let mut root = if path.exists() {
         serde_yaml::from_str::<serde_yaml::Value>(&std::fs::read_to_string(&path)?)
@@ -4530,7 +4534,7 @@ fn doctor_check_bead_store(
 }
 
 fn doctor_check_bead_backend(config: &Config) -> CheckResult {
-    let (backend, path, source) = match crate::config::resolve_bead_cli(&config.bead_cli) {
+    let resolved = match crate::bead_store::resolve_configured_backend(&config.bead_cli) {
         Ok(resolved) => resolved,
         Err(error) => {
             let checked = bead_cli_candidates_checked(&config.bead_cli);
@@ -4548,19 +4552,22 @@ fn doctor_check_bead_backend(config: &Config) -> CheckResult {
             return CheckResult::fail("Bead backend", message).with_fix(fix);
         }
     };
-    let name = match backend {
-        crate::config::Backend::Bead => "bead-rs",
-    };
-    let Some(descriptor) = crate::bead_store::builtin_bead_backends()
-        .into_iter()
-        .find(|descriptor| descriptor.name == name)
-    else {
-        return CheckResult::fail("Bead backend", format!("descriptor {name} is missing"))
-            .with_fix("cargo install --git https://github.com/jedarden/bead-rs --bin bead");
-    };
+    if let Err(error) =
+        crate::bead_store::verify_resolved_backend(&resolved, &config.workspace.default)
+    {
+        return CheckResult::fail(
+            "Bead backend",
+            format!("configured backend failed identity verification: {error:#}"),
+        );
+    }
+    let descriptor = resolved.descriptor;
     let mut detail = vec![
-        format!("CLI path: {}", path.display()),
-        format!("source: {}", source),
+        format!("CLI path: {}", resolved.binary.display()),
+        format!(
+            "descriptor source: {}",
+            resolved.descriptor_source.display()
+        ),
+        format!("binary source: {:?}", resolved.binary_source),
         format!("verified against: {}", descriptor.verified_against),
     ];
     if !descriptor.capabilities.transactional_batch {
@@ -4585,6 +4592,13 @@ fn bead_cli_candidates_checked(config: &crate::config::BeadCliConfig) -> String 
         crate::config::BeadBackend::Auto => "bead, bf, br".to_string(),
         crate::config::BeadBackend::Bead => "bead".to_string(),
         crate::config::BeadBackend::Br => "br".to_string(),
+        crate::config::BeadBackend::External(ref name) => {
+            format!(
+                "descriptor '{}' in {}",
+                name,
+                crate::bead_store::bead_backend_descriptor_dir().display()
+            )
+        }
     }
 }
 

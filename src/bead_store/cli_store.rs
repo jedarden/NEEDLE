@@ -16,8 +16,8 @@ use crate::types::{Bead, BeadId, BeadStatus, ClaimResult};
 
 use super::{
     execute_create_id_strategy, execute_labels_strategy, spawn_with_etxtbsy_retry_child,
-    validate_strategy_name, BeadBackend, BeadOperationSpec, BeadStore, ClaimStrategy, Filters,
-    NewChild, ParseShape, ParsedStrategy, RepairReport,
+    validate_strategy_name, BeadBackend, BeadOperationSpec, BeadPromptCommands, BeadStore,
+    ClaimStrategy, Filters, NewChild, ParseShape, ParsedStrategy, RepairReport,
 };
 
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -323,19 +323,77 @@ impl CliBeadStore {
 
     async fn claim_auto_inner(&self, actor: &str) -> Result<ClaimResult> {
         let values = HashMap::from([("actor", actor.to_string())]);
-        let stdout = self.run_operation("claim_auto", &values).await?;
+        self.claim_from_operation("claim_auto", &values).await
+    }
+
+    async fn claim_from_operation(
+        &self,
+        operation: &str,
+        values: &HashMap<&str, String>,
+    ) -> Result<ClaimResult> {
+        let stdout = self.run_operation(operation, values).await?;
         let json: serde_json::Value = serde_json::from_str(&stdout)
-            .with_context(|| format!("{} claim returned invalid JSON", self.backend.name))?;
+            .with_context(|| format!("{} {operation} returned invalid JSON", self.backend.name))?;
         let bead_id = json
             .get("bead_id")
             .or_else(|| json.pointer("/data/bead_id"))
             .and_then(serde_json::Value::as_str)
             .filter(|id| !id.is_empty());
-        match bead_id {
-            Some(id) => Ok(ClaimResult::Claimed(self.show(&BeadId::from(id)).await?)),
-            None => Ok(ClaimResult::NotClaimable {
-                reason: "no beads available".to_string(),
+        match json.get("outcome").and_then(serde_json::Value::as_str) {
+            Some("claimed") => {
+                let id = bead_id.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "{} {operation} claimed response omitted bead_id",
+                        self.backend.name
+                    )
+                })?;
+                Ok(ClaimResult::Claimed(self.show(&BeadId::from(id)).await?))
+            }
+            Some("race_lost") => {
+                let claimed_by = json
+                    .get("claimed_by")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "{} {operation} race_lost response omitted claimed_by",
+                            self.backend.name
+                        )
+                    })?;
+                Ok(ClaimResult::RaceLost {
+                    claimed_by: claimed_by.to_string(),
+                })
+            }
+            Some("not_claimable") => Ok(ClaimResult::NotClaimable {
+                reason: json
+                    .get("reason")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("no work is currently claimable")
+                    .to_string(),
             }),
+            Some("error") => Ok(ClaimResult::ClaimError {
+                reason: json
+                    .get("reason")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("backend rejected claim")
+                    .to_string(),
+            }),
+            Some(other) => bail!(
+                "{} {operation} returned unknown claim outcome '{other}'",
+                self.backend.name
+            ),
+            None if bead_id.is_some() => Ok(ClaimResult::Claimed(
+                self.show(&BeadId::from(bead_id.unwrap())).await?,
+            )),
+            None if json.get("bead_id").is_some() || json.pointer("/data/bead_id").is_some() => {
+                Ok(ClaimResult::NotClaimable {
+                    reason: "no beads available".to_string(),
+                })
+            }
+            None => bail!(
+                "{} {operation} response omitted normalized outcome",
+                self.backend.name
+            ),
         }
     }
 
@@ -399,6 +457,22 @@ impl CliBeadStore {
 
 #[async_trait]
 impl BeadStore for CliBeadStore {
+    fn prompt_commands(&self) -> Option<BeadPromptCommands> {
+        let values = HashMap::from([
+            ("blocked", "<blocked-id>".to_string()),
+            ("blocker", "<blocker-id>".to_string()),
+        ]);
+        let dep_add = self.render_operation("dep_add", &values).ok()?;
+        let cli = shell_quote(&self.binary.display().to_string());
+        Some(BeadPromptCommands {
+            dep_add: std::iter::once(cli.clone())
+                .chain(dep_add)
+                .collect::<Vec<_>>()
+                .join(" "),
+            cli,
+        })
+    }
+
     fn is_corruption_error(&self, message: &str) -> bool {
         self.backend
             .error_contains_any(message, &self.backend.error_markers.corruption)
@@ -612,11 +686,16 @@ impl BeadStore for CliBeadStore {
     }
 
     async fn claim(&self, id: &BeadId, actor: &str) -> Result<ClaimResult> {
-        if matches!(
-            self.strategy("claim")?,
-            ParsedStrategy::Claim(ClaimStrategy::BatchOp)
-        ) {
-            return self.claim_via_batch(id, actor).await;
+        match self.strategy("claim")? {
+            ParsedStrategy::Claim(ClaimStrategy::AtomicCommand) => {
+                let values = HashMap::from([("id", id.to_string()), ("actor", actor.to_string())]);
+                return self.claim_from_operation("claim", &values).await;
+            }
+            ParsedStrategy::Claim(ClaimStrategy::BatchOp) => {
+                return self.claim_via_batch(id, actor).await;
+            }
+            ParsedStrategy::Claim(ClaimStrategy::CompareAndSet) => {}
+            _ => bail!("backend '{}' has invalid claim strategy", self.backend.name),
         }
         let shown = self.show(id).await?;
         if shown.status != BeadStatus::Open {
@@ -985,6 +1064,18 @@ impl BeadStore for CliBeadStore {
     }
     fn has_valid_store(&self) -> bool {
         self.workspace.join(".beads").is_dir()
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    if !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_@%+=:,./-".contains(&byte))
+    {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
     }
 }
 

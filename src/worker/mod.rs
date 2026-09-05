@@ -875,7 +875,8 @@ impl Worker {
             &config.strands.explore.workspaces,
             &config.workspace.labels,
         )
-        .with_global_learnings(&config.strands.learning.global_learnings_file);
+        .with_global_learnings(&config.strands.learning.global_learnings_file)
+        .with_bead_commands(store.prompt_commands());
         let _ = telemetry.emit(
             EventKind::InitStepCompleted {
                 step: "prompt_builder_setup".to_string(),
@@ -2267,6 +2268,8 @@ impl Worker {
             Some(env!("CARGO_PKG_VERSION").to_string()),
         )
         .context("failed to create bead store for remote workspace")?;
+        self.prompt_builder
+            .set_bead_commands(remote_store.prompt_commands());
         self.store = remote_store.clone();
         self.current_workspace = workspace.to_path_buf();
         self.claimer = Claimer::new(
@@ -2290,6 +2293,8 @@ impl Worker {
     fn restore_home_store(&mut self) {
         if !Arc::ptr_eq(&self.store, &self.home_store) {
             tracing::debug!("restoring home workspace store");
+            self.prompt_builder
+                .set_bead_commands(self.home_store.prompt_commands());
             self.store = self.home_store.clone();
             self.current_workspace = self.config.workspace.default.clone();
             self.claimer = Claimer::new(
@@ -5006,6 +5011,7 @@ impl Worker {
                             .with_global_learnings(
                                 &self.config.strands.learning.global_learnings_file,
                             )
+                            .with_bead_commands(self.store.prompt_commands())
                     })
                     .and_then(|builder| {
                         builder.validate()?;

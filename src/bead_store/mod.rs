@@ -34,10 +34,145 @@ use tracing::{debug, warn};
 
 // Re-export the implementations so consumers don't need to change their imports
 pub use backend::{
-    builtin_bead_backends, load_bead_backends, BeadBackend, BeadBackendCapabilities,
-    BeadBackendErrorMarkers, BeadBackendQuirk, BeadOperationSpec, ParseShape,
+    builtin_bead_backends, load_bead_backends, load_bead_backends_with_sources, BeadBackend,
+    BeadBackendCapabilities, BeadBackendErrorMarkers, BeadBackendQuirk, BeadOperationSpec,
+    LoadedBeadBackend, ParseShape,
 };
 pub use cli_store::CliBeadStore;
+
+/// How the executable in a resolved backend binding was selected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BackendBinarySource {
+    ExplicitPath,
+    Path,
+    DescriptorPath(PathBuf),
+}
+
+/// Immutable descriptor/executable binding shared by runtime consumers.
+#[derive(Debug, Clone)]
+pub struct ResolvedBeadBackend {
+    pub descriptor: BeadBackend,
+    pub binary: PathBuf,
+    pub descriptor_source: PathBuf,
+    pub binary_source: BackendBinarySource,
+}
+
+/// Backend-derived command fragments exposed to prompt construction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BeadPromptCommands {
+    pub cli: String,
+    pub dep_add: String,
+}
+
+/// Operator-owned descriptor directory. Workspace content selects a descriptor
+/// by name but cannot redirect where descriptor code is loaded from.
+pub fn bead_backend_descriptor_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".config/needle/bead-backends")
+}
+
+pub fn resolve_configured_backend(
+    config: &crate::config::BeadCliConfig,
+) -> Result<ResolvedBeadBackend> {
+    resolve_configured_backend_in(config, &bead_backend_descriptor_dir())
+}
+
+/// Resolve one configured descriptor and executable. Descriptor loading and
+/// binary selection happen exactly once so downstream call sites cannot mix a
+/// command grammar with a different installed CLI.
+pub fn resolve_configured_backend_in(
+    config: &crate::config::BeadCliConfig,
+    descriptor_dir: &Path,
+) -> Result<ResolvedBeadBackend> {
+    let name = config.backend.descriptor_name().ok_or_else(|| {
+        anyhow::anyhow!(
+            "auto bead backend selection is diagnostic-only; configure bead_cli.backend explicitly"
+        )
+    })?;
+    let loaded = load_bead_backends_with_sources(descriptor_dir, &builtin_bead_backends())?;
+    let selected = loaded.get(name).ok_or_else(|| {
+        let mut available = loaded.keys().cloned().collect::<Vec<_>>();
+        available.sort();
+        anyhow::anyhow!(
+            "configured bead backend descriptor '{name}' was not found in {} (available: {})",
+            descriptor_dir.display(),
+            available.join(", ")
+        )
+    })?;
+
+    let (binary, binary_source) = if let Some(path) = &config.path {
+        if !is_executable(path) {
+            bail!(
+                "configured bead backend executable is missing or not executable: {}",
+                path.display()
+            );
+        }
+        (path.clone(), BackendBinarySource::ExplicitPath)
+    } else if let Some(path) = find_executable_on_path(&selected.descriptor.binary) {
+        (path, BackendBinarySource::Path)
+    } else if let Some(path) = selected
+        .descriptor
+        .detect_paths
+        .iter()
+        .map(|path| expand_home_path(path))
+        .find(|path| is_executable(path))
+    {
+        let source = BackendBinarySource::DescriptorPath(path.clone());
+        (path, source)
+    } else {
+        bail!(
+            "executable '{}' for bead backend '{}' was not found on PATH or in its descriptor paths",
+            selected.descriptor.binary,
+            selected.descriptor.name
+        );
+    };
+
+    Ok(ResolvedBeadBackend {
+        descriptor: selected.descriptor.clone(),
+        binary,
+        descriptor_source: selected.source.clone(),
+        binary_source,
+    })
+}
+
+fn find_executable_on_path(binary: &str) -> Option<PathBuf> {
+    let path = Path::new(binary);
+    if path.components().count() > 1 {
+        return is_executable(path).then(|| path.to_path_buf());
+    }
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
+        .map(|directory| directory.join(binary))
+        .find(|candidate| is_executable(candidate))
+}
+
+fn expand_home_path(path: &Path) -> PathBuf {
+    let Some(text) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    if text == "~" || text.starts_with("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home).join(text.trim_start_matches("~/"));
+        }
+    }
+    path.to_path_buf()
+}
+
+#[cfg(unix)]
+fn is_executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    path.metadata()
+        .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(unix))]
+fn is_executable(path: &Path) -> bool {
+    path.is_file()
+}
 
 /// Open the bead store explicitly bound by the target workspace's resolved
 /// configuration. This is the production entry point: executable discovery
@@ -49,6 +184,26 @@ pub fn open_configured(
     harness: Option<String>,
     harness_version: Option<String>,
 ) -> Result<Arc<dyn BeadStore>> {
+    open_configured_in(
+        config,
+        workspace,
+        model,
+        harness,
+        harness_version,
+        &bead_backend_descriptor_dir(),
+    )
+}
+
+/// Descriptor-directory-injected form used by hermetic tests and embedders.
+/// Production callers use [`open_configured`] and the operator-owned directory.
+pub fn open_configured_in(
+    config: &crate::config::BeadCliConfig,
+    workspace: PathBuf,
+    model: Option<String>,
+    harness: Option<String>,
+    harness_version: Option<String>,
+    descriptor_dir: &Path,
+) -> Result<Arc<dyn BeadStore>> {
     if matches!(config.backend, crate::config::BeadBackend::Auto) {
         bail!(
             "workspace {} has no authoritative bead backend binding; set bead_cli.backend in {}",
@@ -57,59 +212,58 @@ pub fn open_configured(
         );
     }
 
-    let (backend, binary, _source) =
-        crate::config::resolve_bead_cli(config).with_context(|| {
-            format!(
-                "failed to resolve bead_cli.backend for workspace {}",
-                workspace.display()
-            )
-        })?;
-    verify_backend_identity(&backend, &binary, &workspace)?;
-    if backend == crate::config::Backend::Bead {
-        verify_bead_rs_capabilities(&binary, &workspace)?;
-    }
+    let resolved = resolve_configured_backend_in(config, descriptor_dir).with_context(|| {
+        format!(
+            "failed to resolve bead_cli.backend for workspace {}",
+            workspace.display()
+        )
+    })?;
+    verify_resolved_backend(&resolved, &workspace)?;
+    Ok(Arc::new(CliBeadStore::new(
+        resolved.descriptor,
+        resolved.binary,
+        workspace,
+        model,
+        harness,
+        harness_version,
+    )?))
+}
 
-    match backend {
-        crate::config::Backend::Bead => {
-            let descriptor = builtin_bead_backends()
-                .into_iter()
-                .find(|candidate| candidate.name == "bead-rs")
-                .ok_or_else(|| anyhow::anyhow!("built-in bead-rs descriptor is missing"))?;
-            Ok(Arc::new(CliBeadStore::new(
-                descriptor,
-                binary,
-                workspace,
-                model,
-                harness,
-                harness_version,
-            )?))
-        }
+/// Verify the executable side of an immutable binding before any store
+/// operation. Runtime consumers that need the concrete descriptor retain and
+/// verify the same value rather than resolving a second binding.
+pub(crate) fn verify_resolved_backend(
+    resolved: &ResolvedBeadBackend,
+    workspace: &Path,
+) -> Result<()> {
+    verify_backend_identity(&resolved.descriptor, &resolved.binary, workspace)?;
+    if resolved.descriptor.name == "bead-rs" {
+        verify_bead_rs_capabilities(&resolved.binary, workspace)?;
     }
+    Ok(())
 }
 
 fn verify_backend_identity(
-    backend: &crate::config::Backend,
+    descriptor: &BeadBackend,
     binary: &Path,
     workspace: &Path,
 ) -> Result<()> {
+    verify_backend_identity_with_timeout(
+        descriptor,
+        binary,
+        workspace,
+        std::time::Duration::from_secs(5),
+    )
+}
+
+fn verify_backend_identity_with_timeout(
+    descriptor: &BeadBackend,
+    binary: &Path,
+    workspace: &Path,
+    timeout: std::time::Duration,
+) -> Result<()> {
     use regex::Regex;
-    use std::io::Read;
     use std::process::Stdio;
-
-    // Get the backend descriptor for this backend type
-    let descriptor_name = match backend {
-        crate::config::Backend::Bead => "bead-rs",
-    };
-
-    let descriptor = builtin_bead_backends()
-        .into_iter()
-        .find(|d| d.name == descriptor_name)
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "built-in backend descriptor '{}' not found",
-                descriptor_name
-            )
-        })?;
 
     let child = spawn_with_etxtbsy_retry_sync_child(
         || {
@@ -129,7 +283,15 @@ fn verify_backend_identity(
         )
     })?;
     let mut guard = ProcessGuardSync::new(child);
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let stdout_reader = guard
+        .get_mut()
+        .and_then(|child| child.stdout.take())
+        .map(spawn_bounded_reader);
+    let stderr_reader = guard
+        .get_mut()
+        .and_then(|child| child.stderr.take())
+        .map(spawn_bounded_reader);
+    let deadline = std::time::Instant::now() + timeout;
     let status = loop {
         match guard.get_mut().map(|c| c.try_wait()) {
             Some(Ok(Some(status))) => {
@@ -163,13 +325,14 @@ fn verify_backend_identity(
         }
         std::thread::sleep(std::time::Duration::from_millis(10));
     };
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-    if let Some(mut stream) = guard.get_mut().and_then(|c| c.stdout.take()) {
-        stream.read_to_end(&mut stdout)?;
-    }
-    if let Some(mut stream) = guard.get_mut().and_then(|c| c.stderr.take()) {
-        stream.read_to_end(&mut stderr)?;
+    let (stdout, stdout_truncated) = join_bounded_reader(stdout_reader)?;
+    let (stderr, stderr_truncated) = join_bounded_reader(stderr_reader)?;
+    if stdout_truncated || stderr_truncated {
+        bail!(
+            "bead backend identity output exceeded 65536 bytes for workspace {} at {}",
+            workspace.display(),
+            binary.display()
+        );
     }
     let stdout = String::from_utf8_lossy(&stdout);
     let stderr = String::from_utf8_lossy(&stderr);
@@ -205,39 +368,41 @@ fn verify_backend_identity(
         );
     }
 
-    // Extract the backend name from the version output
-    // The pattern captures the name at the start (e.g., "bf " or "bead ")
-    let captured_name = trimmed_output
-        .split_whitespace()
-        .next()
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "bead backend identity extraction failed for workspace {}: binary at {} reported empty version output",
-                workspace.display(),
-                binary.display()
-            )
-        })?;
-
-    // Map the captured name to the expected backend name
-    // Both "bf" and "bead" should map to their respective backend names
-    let expected_names = match descriptor.name.as_str() {
-        "bead-forge" => vec!["bf", "bead-forge"],
-        "bead-rs" => vec!["bead", "bead-rs"],
-        _ => vec![descriptor.name.as_str()],
-    };
-
-    if !expected_names.contains(&captured_name) {
-        bail!(
-            "bead backend identity mismatch for workspace {}: binary at {} reported name {:?}, but expected one of {:?} for backend '{}'",
-            workspace.display(),
-            binary.display(),
-            captured_name,
-            expected_names,
-            descriptor.name
-        );
-    }
-
     Ok(())
+}
+
+const MAX_IDENTITY_OUTPUT_BYTES: usize = 64 * 1024;
+type BoundedReader = std::thread::JoinHandle<std::io::Result<(Vec<u8>, bool)>>;
+
+fn spawn_bounded_reader<R>(mut reader: R) -> BoundedReader
+where
+    R: std::io::Read + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let mut retained = Vec::new();
+        let mut chunk = [0_u8; 8192];
+        let mut truncated = false;
+        loop {
+            let read = reader.read(&mut chunk)?;
+            if read == 0 {
+                break;
+            }
+            let remaining = MAX_IDENTITY_OUTPUT_BYTES.saturating_sub(retained.len());
+            retained.extend_from_slice(&chunk[..read.min(remaining)]);
+            truncated |= read > remaining;
+        }
+        Ok((retained, truncated))
+    })
+}
+
+fn join_bounded_reader(reader: Option<BoundedReader>) -> Result<(Vec<u8>, bool)> {
+    match reader {
+        Some(reader) => reader
+            .join()
+            .map_err(|_| anyhow::anyhow!("bead backend identity output reader panicked"))?
+            .context("failed to read bead backend identity output"),
+        None => Ok((Vec::new(), false)),
+    }
 }
 
 /// Derive the expected backend name from the binary filename.
@@ -1144,6 +1309,12 @@ pub struct NewChild<'a> {
 /// Abstract interface to the bead backend.
 #[async_trait]
 pub trait BeadStore: Send + Sync {
+    /// Render the command grammar agents should see in prompts. Stores without
+    /// an agent-facing CLI may return `None` and require custom templates.
+    fn prompt_commands(&self) -> Option<BeadPromptCommands> {
+        None
+    }
+
     /// Whether an error indicates corruption according to this store's backend.
     fn is_corruption_error(&self, _message: &str) -> bool {
         false
@@ -1428,6 +1599,43 @@ mod tests {
             path: Some(binary),
         };
         assert!(open_configured(&config, workspace.path().to_path_buf(), None, None, None).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configured_store_opens_external_descriptor_from_operator_directory() {
+        let _environment = crate::util::test_env::isolate_env();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("HOME", home.path());
+        let descriptor_dir = home.path().join(".config/needle/bead-backends");
+        std::fs::create_dir_all(&descriptor_dir).unwrap();
+
+        let workspace = tempfile::tempdir().unwrap();
+        let binary = version_fixture(workspace.path(), "fixture-cli", "fixture-cli 1.0.0");
+        let mut descriptor = builtin_bead_backends().remove(0);
+        descriptor.name = "fixture-external".to_string();
+        descriptor.binary = "fixture-cli".to_string();
+        descriptor.detect_paths = vec![binary.clone()];
+        descriptor.identity_pattern = r"^fixture-cli 1\.0\.0".to_string();
+        descriptor.verified_against = "fixture-cli 1.0.0".to_string();
+        descriptor.verified_on = "2026-09-05".to_string();
+        std::fs::write(
+            descriptor_dir.join("fixture-external.yaml"),
+            serde_yaml::to_string(&descriptor).unwrap(),
+        )
+        .unwrap();
+
+        let config = crate::config::BeadCliConfig {
+            backend: crate::config::BeadBackend::External("fixture-external".to_string()),
+            path: None,
+        };
+        let store =
+            open_configured(&config, workspace.path().to_path_buf(), None, None, None).unwrap();
+
+        assert_eq!(
+            store.prompt_commands().unwrap().cli,
+            binary.display().to_string()
+        );
     }
 
     #[cfg(unix)]
@@ -3095,8 +3303,8 @@ esac
         std::fs::set_permissions(&bead_rs, perm).unwrap();
 
         // Test that verify_backend_identity succeeds immediately for healthy binary
-        let result =
-            verify_backend_identity(&crate::config::Backend::Bead, &bead_rs, workspace.path());
+        let descriptor = builtin_bead_backends().remove(0);
+        let result = verify_backend_identity(&descriptor, &bead_rs, workspace.path());
 
         assert!(
             result.is_ok(),
@@ -3126,11 +3334,8 @@ echo "bf 0.4.1"
         std::fs::set_permissions(&wrong_binary, perm).unwrap();
 
         // Test that identity mismatch is caught and properly reported
-        let result = verify_backend_identity(
-            &crate::config::Backend::Bead,
-            &wrong_binary,
-            workspace.path(),
-        );
+        let descriptor = builtin_bead_backends().remove(0);
+        let result = verify_backend_identity(&descriptor, &wrong_binary, workspace.path());
 
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
@@ -3139,6 +3344,40 @@ echo "bf 0.4.1"
             "Error should mention identity mismatch, got: {}",
             err_msg
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_backend_identity_times_out_and_terminates_the_probe() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let slow_binary = workspace.path().join("slow-backend-fixture");
+        std::fs::write(
+            &slow_binary,
+            r#"#!/bin/sh
+sleep 5
+echo "bead-rs 0.1.0"
+"#,
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&slow_binary).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&slow_binary, permissions).unwrap();
+
+        let descriptor = builtin_bead_backends().remove(0);
+        let started = std::time::Instant::now();
+        let error = verify_backend_identity_with_timeout(
+            &descriptor,
+            &slow_binary,
+            workspace.path(),
+            std::time::Duration::from_millis(30),
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("timed out"), "{error}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
     }
 
     #[cfg(unix)]
@@ -3163,11 +3402,8 @@ exit 1
         std::fs::set_permissions(&failing_binary, perm).unwrap();
 
         // Test that spawn failure is properly propagated
-        let result = verify_backend_identity(
-            &crate::config::Backend::Bead,
-            &failing_binary,
-            workspace.path(),
-        );
+        let descriptor = builtin_bead_backends().remove(0);
+        let result = verify_backend_identity(&descriptor, &failing_binary, workspace.path());
 
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
@@ -3186,11 +3422,8 @@ exit 1
         let nonexistent = workspace.path().join("nonexistent-binary");
 
         // Test that missing binary error is properly propagated
-        let result = verify_backend_identity(
-            &crate::config::Backend::Bead,
-            &nonexistent,
-            workspace.path(),
-        );
+        let descriptor = builtin_bead_backends().remove(0);
+        let result = verify_backend_identity(&descriptor, &nonexistent, workspace.path());
 
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
