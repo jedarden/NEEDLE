@@ -55,14 +55,13 @@ impl RelaxationTier {
                 "worker label constraints",
                 "priority constraints",
                 "backend ready-frontier constraints",
-                "assignee constraints",
             ],
+            // Never dropped by any tier: assignee (claim ownership, ADR-018),
+            // dependency safety, blocked/deferred/human labels, active quarantine.
             Self::OldestOpen => &[
                 "worker label constraints",
                 "priority constraints",
                 "backend ready-frontier constraints",
-                "assignee constraints",
-                "dependency safety constraints",
             ],
         }
     }
@@ -252,6 +251,34 @@ fn dependency_is_blocking(
         // a partially synced store is represented honestly in the snapshot.
         None => !is_finished_status(&dependency.status),
     }
+}
+
+/// Constraints that no relaxation tier may drop.
+///
+/// These are properties of the work, not of this worker's preferences.
+/// Relaxing any of them hands out a bead another worker holds (assignee is
+/// claim ownership, ADR-018), one whose blocker is still open (dependency
+/// safety), one an operator or human took out of the queue (blocked /
+/// deferred / human labels), or one under an active ADR-022 quarantine. The
+/// fallback tiers may drop configured worker-label exclusions, priority and
+/// the backend's own ready-frontier computation — nothing in this list.
+fn passes_never_relaxed_constraints(
+    bead: &Bead,
+    finished_by_id: &HashMap<BeadId, bool>,
+    now: chrono::DateTime<Utc>,
+) -> bool {
+    bead.status == crate::types::BeadStatus::Open
+        && bead.assignee.is_none()
+        && !bead
+            .dependencies
+            .iter()
+            .any(|dependency| dependency_is_blocking(dependency, finished_by_id))
+        && !bead.labels.iter().any(|label| {
+            is_manual_block_label(label)
+                || is_deferred_label(label)
+                || is_human_like_label(label, &[])
+        })
+        && active_quarantine_until(bead, now).is_none()
 }
 
 /// Explain every exclusion that can be inferred from the inventory and the
@@ -520,20 +547,42 @@ fn collect_stale_assignee_beads(beads: &[Bead]) -> Vec<BeadId> {
         .collect()
 }
 
-/// Write auto-repair failure diagnostic to the target workspace.
+/// Where Pluck's per-workspace diagnostics live: under NEEDLE's own home,
+/// never inside the target repository.
+///
+/// Pluck evaluates every workspace in the fleet; writing `.beads/*.json` into
+/// each of them leaves untracked files in shared checkouts (that is exactly
+/// what happened to NEEDLE's own tree) and violates the long-standing contract
+/// that starvation detection does not modify the workspace it is reporting on.
+/// The layout mirrors the harness convention of one directory per workspace
+/// path, slugged: `~/.needle/diagnostics/<slug>/`.
+fn needle_diagnostics_dir(workspace: &str) -> PathBuf {
+    let target = if workspace.is_empty() {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
+    } else {
+        PathBuf::from(workspace)
+    };
+    let slug: String = target
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp"));
+    home.join(".needle")
+        .join("diagnostics")
+        .join(slug.trim_matches('-'))
+}
+
+/// Write the auto-repair failure diagnostic under NEEDLE's diagnostics dir for this workspace.
 fn write_repair_failure_diagnostic(
     workspace: &str,
     error: &anyhow::Error,
     stats: &FilteringStats,
     worker_id: &str,
 ) -> Result<()> {
-    let target_workspace = if workspace.is_empty() {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
-    } else {
-        PathBuf::from(workspace)
-    };
-
-    let failure_dir = target_workspace.join(".beads").join("starvation-failures");
+    let failure_dir = needle_diagnostics_dir(workspace).join("starvation-failures");
     std::fs::create_dir_all(&failure_dir).with_context(|| {
         format!(
             "failed to create starvation failure directory: {}",
@@ -654,13 +703,7 @@ fn write_pluck_diagnostic(
     all_beads: &[Bead],
     exclude_ids: &HashSet<BeadId>,
 ) -> Result<()> {
-    let target_workspace = if workspace.is_empty() {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
-    } else {
-        PathBuf::from(workspace)
-    };
-
-    let diagnostics_dir = target_workspace.join(".beads");
+    let diagnostics_dir = needle_diagnostics_dir(workspace);
     std::fs::create_dir_all(&diagnostics_dir).with_context(|| {
         format!(
             "failed to create diagnostics directory: {}",
@@ -1058,15 +1101,10 @@ impl PluckStrand {
             .iter()
             .map(|bead| (bead.id.clone(), bead.status.is_done()))
             .collect();
+        let status_only_now = Utc::now();
         let candidates: Vec<Bead> = inventory
             .into_iter()
-            .filter(|bead| {
-                bead.status == crate::types::BeadStatus::Open
-                    && !bead
-                        .dependencies
-                        .iter()
-                        .any(|dependency| dependency_is_blocking(dependency, &finished_by_id))
-            })
+            .filter(|bead| passes_never_relaxed_constraints(bead, &finished_by_id, status_only_now))
             .collect();
         tracing::debug!(
             tier = tier.name(),
@@ -1090,12 +1128,17 @@ impl PluckStrand {
         tracing::warn!(
             tier = tier.name(),
             dropped_constraints = ?tier.dropped_constraints(),
-            "Pluck returned zero candidates but open beads exist; activating automatic bypass to surface oldest open bead"
+            "Pluck returned zero candidates but open beads exist; surfacing the oldest open bead that still passes the never-relaxed constraints"
         );
         let inventory = store.starvation_inventory().await?;
+        let finished_by_id: HashMap<BeadId, bool> = inventory
+            .iter()
+            .map(|bead| (bead.id.clone(), bead.status.is_done()))
+            .collect();
+        let oldest_open_now = Utc::now();
         let open_beads: Vec<&Bead> = inventory
             .iter()
-            .filter(|bead| is_open_work_bead(bead))
+            .filter(|bead| passes_never_relaxed_constraints(bead, &finished_by_id, oldest_open_now))
             .collect();
 
         if open_beads.is_empty() {
@@ -1742,39 +1785,26 @@ impl super::Strand for PluckStrand {
         // its sole filter, including beads with stale assignees.
         let before_status_filter = candidates.len();
 
-        let excluded_by_status: Vec<_> = if relaxation_tier == RelaxationTier::StatusOnly {
-            candidates
-                .iter()
-                .filter(|b| b.status != crate::types::BeadStatus::Open)
-                .map(|b| (b.id.as_ref().to_string(), format!("status:{}", b.status)))
-                .collect()
-        } else {
-            candidates
-                .iter()
-                .filter(|b| {
-                    matches!(b.status, crate::types::BeadStatus::InProgress)
-                        || (b.status == crate::types::BeadStatus::Open && b.assignee.is_some())
-                })
-                .map(|b| {
-                    let reason = if matches!(b.status, crate::types::BeadStatus::InProgress) {
-                        "status:in_progress".to_string()
-                    } else {
-                        format!("assignee:{}", b.assignee.as_ref().unwrap())
-                    };
-                    (b.id.as_ref().to_string(), reason)
-                })
-                .collect()
-        };
+        // One rule for every tier, relaxation included: a candidate must be Open
+        // and unassigned. Status and assignee are properties of the work — an
+        // assignee is claim ownership (ADR-018) — so no tier may drop them.
+        // The backend's ready frontier normally guarantees this; the guard
+        // exists for backends that do not.
+        let excluded_by_status: Vec<_> = candidates
+            .iter()
+            .filter(|b| b.status != crate::types::BeadStatus::Open || b.assignee.is_some())
+            .map(|b| {
+                let reason = if b.status != crate::types::BeadStatus::Open {
+                    format!("status:{}", b.status)
+                } else {
+                    format!("assignee:{}", b.assignee.as_deref().unwrap_or("?"))
+                };
+                (b.id.as_ref().to_string(), reason)
+            })
+            .collect();
 
         // Second pass: perform the actual filtering.
-        if relaxation_tier == RelaxationTier::StatusOnly {
-            candidates.retain(|b| b.status == crate::types::BeadStatus::Open);
-        } else {
-            candidates.retain(|b| {
-                !(matches!(b.status, crate::types::BeadStatus::InProgress)
-                    || (b.status == crate::types::BeadStatus::Open && b.assignee.is_some()))
-            });
-        }
+        candidates.retain(|b| b.status == crate::types::BeadStatus::Open && b.assignee.is_none());
         let after_status_filter = candidates.len();
 
         if before_status_filter != after_status_filter {
@@ -1945,6 +1975,21 @@ impl super::Strand for PluckStrand {
                 stats.excluded_count = inventory_stats.excluded_count;
                 stats.exclusion_counts = inventory_stats.exclusion_counts;
                 stats.stale_assignee_beads = inventory_stats.stale_assignee_beads;
+
+                // The candidate-stage filters only explain beads the backend
+                // returned. Beads the backend itself withheld (excluded label,
+                // open blocker, assignee) never reached them, so the starvation
+                // report would name one cause and omit the others. Explain
+                // every open bead from the inventory instead.
+                for bead in beads.iter().filter(|b| is_open_work_bead(b)) {
+                    for reason in
+                        exclusion_reasons_for_bead(bead, beads, &self.exclude_labels, exclusions)
+                    {
+                        if !stats.exclusion_reasons.contains(&reason) {
+                            stats.exclusion_reasons.push(reason);
+                        }
+                    }
+                }
             }
 
             // Refresh the strand's observable statistics after the inventory
@@ -1995,11 +2040,17 @@ impl super::Strand for PluckStrand {
                     // Re-query candidates after successful repair
                     match self.query_with_relaxation(store).await {
                         Ok((mut repaired_candidates, repaired_tier)) => {
-                            // The quarantine filter is never relaxed; apply it to the
-                            // re-queried set exactly as to the first query.
+                            // The re-queried set must pass the same guards as the first
+                            // query. A repair that did not actually release a bead
+                            // (store refused, race, mock) must not turn into a claim on
+                            // a bead another worker still holds.
                             let repaired_now = Utc::now();
-                            repaired_candidates
-                                .retain(|b| active_quarantine_until(b, repaired_now).is_none());
+                            repaired_candidates.retain(|b| {
+                                b.status == crate::types::BeadStatus::Open
+                                    && b.assignee.is_none()
+                                    && !b.labels.iter().any(|l| label_exclusions.contains(l))
+                                    && active_quarantine_until(b, repaired_now).is_none()
+                            });
                             if !repaired_candidates.is_empty() {
                                 tracing::info!(
                                     candidate_count = repaired_candidates.len(),
@@ -2263,13 +2314,7 @@ fn write_query_execution_diagnostic(
     final_candidate_count: usize,
     worker_id: &str,
 ) -> Result<()> {
-    let target_workspace = if workspace.is_empty() {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
-    } else {
-        PathBuf::from(workspace)
-    };
-
-    let diagnostics_dir = target_workspace.join(".beads");
+    let diagnostics_dir = needle_diagnostics_dir(workspace);
     std::fs::create_dir_all(&diagnostics_dir).with_context(|| {
         format!(
             "failed to create diagnostics directory: {}",
@@ -3155,13 +3200,26 @@ mod tests {
             RelaxationTier::Priority.dropped_constraints(),
             &["worker label constraints", "priority constraints"]
         );
+        // Expectation updated with the fix for needle-b69a8466: no tier drops
+        // the assignee constraint any more. An assignee is claim ownership
+        // (ADR-018); relaxing it hands a bead another worker holds to this one,
+        // which is the duplicate-claim incident class, not starvation relief.
+        // The same holds for dependency safety, blocked/deferred/human labels
+        // and active quarantine — see `passes_never_relaxed_constraints`.
         assert_eq!(
             RelaxationTier::StatusOnly.dropped_constraints(),
             &[
                 "worker label constraints",
                 "priority constraints",
                 "backend ready-frontier constraints",
-                "assignee constraints"
+            ]
+        );
+        assert_eq!(
+            RelaxationTier::OldestOpen.dropped_constraints(),
+            &[
+                "worker label constraints",
+                "priority constraints",
+                "backend ready-frontier constraints",
             ]
         );
     }
@@ -4516,7 +4574,8 @@ mod tests {
         assert_eq!(
             initial_files.len(),
             final_files.len(),
-            "starvation detection should not create files in workspace"
+            "starvation detection should not create files in workspace; created: {:?}",
+            final_files
         );
 
         // Verify no state directory was created in the workspace
