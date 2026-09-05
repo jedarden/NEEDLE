@@ -2,7 +2,7 @@
 
 > **N**avigates **E**very **E**nqueued **D**eliverable, **L**ogs **E**ffort
 
-Plan revision: 30
+Plan revision: 31
 
 As of: 2026-09-05
 
@@ -27,6 +27,10 @@ observable execution checkpoints, changed-intervention retries, durable episode
 delivery, delayed feedback, evaluated guidance, executable-check proposals, and
 one bounded end-to-end pilot. Existing component beads retain their ownership;
 N-T39 through N-T44 implement the missing operational connections.
+Revision 31 decomposes N-T39–43 into single-task implementation leaves and
+extracts the N-T44 pilot profile from its integration task. Section 4.8.8 is
+the dispatch ownership map; the five original broad beads remain manually
+blocked tracking records, with executable dependents routed to the leaves.
 
 ## 0. How to read this plan
 
@@ -624,9 +628,10 @@ Existing beads retain component ownership: attempt types/identity N-T02–03,
 controllers N-T06, admission N-T07, reflection N-T08, retrieval N-T09, policy
 N-T10, outcome/evaluation/experiments N-T12, and operator observations N-T20.
 N-T39–44 add checkpoints, retry integration, durable delivery, executable-check
-proposals, operational inspection, and the first pilot respectively. Each new
-bead has a stable unique reference, concrete acceptance criteria, resource keys,
-and blocking dependencies on its existing owners and overlapping new work.
+proposals, operational inspection, and the first pilot respectively. Revision
+31 assigns their worker-sized execution units in section 4.8.8. Each leaf has a
+stable unique reference, concrete acceptance criteria, resource keys, and
+blocking dependencies on its existing owners and overlapping work.
 
 The existing owners receiving revision-30 acceptance additions are:
 
@@ -642,6 +647,81 @@ The existing owners receiving revision-30 acceptance additions are:
 | Atomic improvement-work admission | `needle-688944b7` |
 | Operator corrections as source-addressed evidence | `needle-9a94c2f8` |
 | Freeze adaptation while retaining infrastructure observations | `needle-276f95cf` |
+
+#### 4.8.8 Single-task dispatch ownership (revision 31)
+
+One executable bead delivers one independently verifiable behavior, including
+the focused tests and documentation needed for that behavior. A checkpoint
+record API, one lifecycle producer, one source ingester, and one CLI consumer
+are separate tasks. Tests for a behavior stay with its implementation; this
+decomposition creates no verification-only or implementation-mirroring beads.
+
+The original N-T39–43 beads are aggregate tracking records. Their descriptions
+remain as the original scope/audit trail; revision-31 notes and this map assign
+implementation ownership to children. The tracking records carry a native
+manual block and `planning-parent` label and must not be dispatched when the
+children finish. They can be closed only after actual child evidence meets
+the applicable completion rules, never merely because this graph was created.
+No executable leaf or retained integration task waits on such a parent to
+close: dependencies on aggregate parents are replaced by their child work.
+
+N-T44 (`needle-10fc7f48`) remains one integration task: deliver the executable
+scenario connecting completed components from a recurring failure to a later
+eligible worker's mature outcome, together with its result report. F1 owns
+the profile/configuration artifact. Busy-queue, restart, replay, ineligible
+cohort and harmful-guidance-withdrawal cases are acceptance variants of that
+same scenario. The pilot does not reimplement prerequisite components or
+authorize live activation.
+
+The existing attempt-archive work remains authoritative for attempt trace
+layout (`needle-2c273c10`), bundle/spool production (`needle-af8e7b7d`), external
+drain (`needle-b5c5572b`), and spool diagnostics (`needle-d7b946f1`). The learning
+leaves consume these contracts; they do not introduce another uploader,
+credential path, archive layout, or spool dashboard. Existing kernel, context,
+gate, episode, scheduler, admission and experiment beads retain their scope.
+
+The native graph includes behavioral prerequisites and blocking edges between
+leaves sharing an editing surface, in addition to resource declarations. All
+children, graph rewiring and parent holds are published in one manifest
+transaction. Stable references use `needle-plan:learning-r31-<leaf-key>`.
+Existing unrelated labels, including operational budget labels, are retained;
+decomposition does not bypass admission, release or verification policy.
+
+<!-- learning-r31-leaf-map -->
+| Leaf | Bead | One behavior to deliver |
+| --- | --- | --- |
+| C1 | `needle-9295ead6` | Append-once persistence of a bounded execution checkpoint |
+| C2 | `needle-f3056349` | Initial-plan capture at the real dispatch boundary |
+| C3 | `needle-272252f9` | First artifact-bound verification checkpoint |
+| C4 | `needle-d3b6b473` | Checkpoint of the reducer's selected recovery action |
+| C5 | `needle-3b539e70` | Durable terminal handoff before attempt release |
+| D1 | `needle-6109ee91` | Atomic learning-input insertion with its source cursor |
+| D2 | `needle-4317f725` | Resumable native attempt-receipt ingestion |
+| D3 | `needle-08f14897` | Input reconstruction from retained archive bundles |
+| D4 | `needle-e259057f` | Leased episode consumption with durable acknowledgement |
+| D5 | `needle-a6ff59c4` | Requeue of incomplete episodes when evidence arrives |
+| D6 | `needle-03e7645a` | Retention protection for referenced evidence |
+| R1 | `needle-d6c5397a` | Pure bounded RecoveryPlan decision |
+| R2 | `needle-7b9718bc` | Retry eligibility enforcement before redispatch |
+| R3 | `needle-60163eac` | Injection of the admitted recovery into the next context |
+| R4 | `needle-e820851a` | Evidence of the intervention actually performed |
+| P1 | `needle-16672f3f` | Evaluated-lesson to executable-check proposal construction |
+| P2 | `needle-e0d97a83` | Atomic admission of a lesson-to-check proposal |
+| P3 | `needle-fbd3c5f2` | Guidance-retirement recommendation after verified check rollout |
+| O1 | `needle-76bb46fe` | Read-only operational learning snapshot |
+| O2 | `needle-f965e857` | One JSON/human CLI consumer of that snapshot |
+| O3 | `needle-8e82200b` | Bounded progress-metric export from that snapshot |
+| F1 | `needle-a1894b5f` | Opt-in profile for one fixed pilot scenario |
+| N-T44 | `needle-10fc7f48` | One end-to-end integration scenario and its result report |
+
+C1–C5 roll up to N-T39, D1–D6 to N-T41, R1–R4 to N-T40, P1–P3 to
+N-T42, and O1–O3 to N-T43. F1 is a prerequisite of the retained N-T44
+integration task. The native graph is the source of exact prerequisite IDs;
+it includes existing component/archival work and orders every pair of new
+leaves sharing a declared editing surface. All 22 new leaves include their
+own behavioral tests and necessary documentation; the 23 executable tasks
+remain implementation work pending completion, not release evidence.
+<!-- /learning-r31-leaf-map -->
 
 ## 5. In-process learning kernel
 
@@ -936,12 +1016,12 @@ generated conformance report.
 | N-T36 | concurrent worker integration fixture and release canary | Replay the 2026-09-04 duplicate-dispatch incident in one shared checkout | two workers contend; exactly one epoch dispatches/resolves and the stale process cannot mutate | blocked by N-T14, N-T34–N-T35; `needle-7e56d009` |
 | N-T37 | `config/gitleaks.toml`, `scripts/secret-scan.sh`, commit/release verification and scanner provisioning | Pin a gitleaks version meeting the vendored config minimum and make every repository scan pass that config explicitly; record scanner/config identity with the result | an ephemeral generated-secret fixture is rejected, the documented nonsecret release digest passes, unsupported scanner versions fail closed, and archived HEAD scans clean without placing fixture material in Git | verified; `needle-a8bdfe3a`; commits `c062b792`, `f81f2e20`, `ca5623f4` |
 | N-T38 | bead-rs backend descriptor, `CliBeadStore::split_bead`, capability projection and mitosis fixtures | Replace bead-rs's stale sequential split declaration with its existing versioned manifest transaction; keep older backend behavior explicit and fail closed when atomic splitting is required | concurrent claimer sees no child before all parent-blocking edges commit; rollback, checkpoint/event parity, capability snapshots, pinned old/new matrix and disposable-workspace canary pass before default enablement | blocked by N-T11; `needle-21b7d5a5`; coordinates with bead-rs BR-T28 (`beadrs-57c668be`) |
-| N-T39 | dispatcher/tool/gate adapters and execution checkpoint journal | Capture meaningful versioned execution checkpoints and attributable recovery evidence (4.8.1–2) | real lifecycle call-site, adapter parity, redaction, size-bound, and stale-owner fixtures | blocked by existing identity, telemetry, capture, deadline and claim work; `needle-272c7faa` |
-| N-T40 | retry/recovery controller and prompt adapter | Require a changed intervention or new evidence for repeated task failures; deliver a bounded RecoveryPlan to the next worker (4.8.2) | unchanged-failure loop stops; approved infrastructure backoff, resume, exhausted-budget and handoff fixtures | blocked by N-T39, N-T41, N-T08–09 and existing resolution/controllers/handoff; `needle-5dda045b` |
-| N-T41 | runtime learning inbox/outbox and source reconciliation | Persist cursors, deduplicated inputs, episode work and acknowledgements with crash/host-loss recovery (4.8.3) | crash-boundary, duplicate/out-of-order, incomplete-to-complete and source-discontinuity tests | blocked by N-T39, N-T04–06, N-T16 and N-T12 episode assembly; `needle-fe42db64` |
-| N-T42 | lesson-to-check proposal adapter and admission integration | Turn evaluated runbooks into ordinary deduplicated preflight/invariant/regression-check work with provenance (4.8.5) | concurrent admission creates one fully linked bead; budget/authority refusal and verified-check handoff | blocked by N-T07, N-T12 and N-T38; `needle-590a556a` |
-| N-T43 | read-only learning operational view and diagnostics | Expose episode lag, incomplete evidence, controller budgets, lesson/exposure/correction and rollback state (4.8.6) | schema, redaction, restart continuity and degraded-learning fixtures; no state mutation | blocked by N-T40–42, N-T05 and N-T21; `needle-8e5db2e6` |
-| N-T44 | opt-in operational learning-loop pilot and integration fixture | Connect one failure class to recovery, evaluated guidance, later exposure and mature feedback (4.8.7) | nonempty queue, replay, restart, harmful-guidance withdrawal and receipt-backed pilot report | blocked by N-T39–43 and existing evaluation, retrieval, replay, fencing and transition controls; Gates A–C before live activation; `needle-10fc7f48` |
+| N-T39 | dispatcher/tool/gate adapters and execution checkpoint journal | Capture meaningful versioned execution checkpoints and attributable recovery evidence (4.8.1–2) | real lifecycle call-site, adapter parity, redaction, size-bound, and stale-owner fixtures | tracking parent; manually blocked; C1–C5 own implementation (4.8.8); `needle-272c7faa` |
+| N-T40 | retry/recovery controller and prompt adapter | Require a changed intervention or new evidence for repeated task failures; deliver a bounded RecoveryPlan to the next worker (4.8.2) | unchanged-failure loop stops; approved infrastructure backoff, resume, exhausted-budget and handoff fixtures | tracking parent; manually blocked; R1–R4 own implementation (4.8.8); `needle-5dda045b` |
+| N-T41 | runtime learning inbox/outbox and source reconciliation | Persist cursors, deduplicated inputs, episode work and acknowledgements with crash/host-loss recovery (4.8.3) | crash-boundary, duplicate/out-of-order, incomplete-to-complete and source-discontinuity tests | tracking parent; manually blocked; D1–D6 own implementation (4.8.8); `needle-fe42db64` |
+| N-T42 | lesson-to-check proposal adapter and admission integration | Turn evaluated runbooks into ordinary deduplicated preflight/invariant/regression-check work with provenance (4.8.5) | concurrent admission creates one fully linked bead; budget/authority refusal and verified-check handoff | tracking parent; manually blocked; P1–P3 own implementation (4.8.8); `needle-590a556a` |
+| N-T43 | read-only learning operational view and diagnostics | Expose episode lag, incomplete evidence, controller budgets, lesson/exposure/correction and rollback state (4.8.6) | schema, redaction, restart continuity and degraded-learning fixtures; no state mutation | tracking parent; manually blocked; O1–O3 own implementation (4.8.8); `needle-8e5db2e6` |
+| N-T44 | opt-in operational learning-loop pilot and integration fixture | Connect one failure class to recovery, evaluated guidance, later exposure and mature feedback (4.8.7) | nonempty queue, replay, restart, harmful-guidance withdrawal and receipt-backed pilot report | one integration task; depends directly on child work and F1, never on held parents (4.8.8); Gates A–C before live activation; `needle-10fc7f48` |
 
 ## 9. Transition gates and order
 
