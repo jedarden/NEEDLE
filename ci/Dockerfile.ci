@@ -10,6 +10,13 @@
 # step only rebuilds when the pushed commit touches Cargo.toml, Cargo.lock,
 # ci/Dockerfile.ci, ci/Dockerfile.ci-deps or ci/VERSION. A no-op edit to this
 # file is therefore the way to force a rebuild without disturbing that contract.
+#
+# After triggering, confirm BOTH tags moved -- the template runs docker-build-base
+# and docker-build-with-deps as separate kaniko steps, and a run that is stopped
+# between them (or whose workflow object is reaped mid-flight) leaves
+# ronaldraygun/needle-ci-builder:<version>-with-deps pointing at an older image.
+# `docker manifest inspect <image>:<tag>` reports the config blob's `created`
+# timestamp, which is the cheapest way to check.
 
 FROM debian:bookworm
 
