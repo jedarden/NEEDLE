@@ -30,6 +30,7 @@ pub struct CliBeadStore {
     model: Option<String>,
     harness: Option<String>,
     harness_version: Option<String>,
+    sync_pause: std::sync::Mutex<Option<String>>,
 }
 
 impl CliBeadStore {
@@ -52,6 +53,7 @@ impl CliBeadStore {
             model,
             harness,
             harness_version,
+            sync_pause: std::sync::Mutex::new(None),
         })
     }
 
@@ -65,6 +67,23 @@ impl CliBeadStore {
 
     pub fn workspace(&self) -> &Path {
         &self.workspace
+    }
+
+    pub(super) fn set_sync_pause(&self, reason: Option<String>) {
+        let mut state = self
+            .sync_pause
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if *state != reason {
+            if let Some(reason) = &reason {
+                tracing::warn!(workspace = %self.workspace.display(), reason = %reason,
+                    event_type = "workspace.sync.paused", "workspace dispatch paused");
+            } else if state.is_some() {
+                tracing::info!(workspace = %self.workspace.display(),
+                    event_type = "workspace.sync.recovered", "workspace checkpoint recovered");
+            }
+            *state = reason;
+        }
     }
 
     fn operation(&self, name: &str) -> Result<&BeadOperationSpec> {
@@ -189,6 +208,46 @@ impl CliBeadStore {
     }
 
     pub(super) async fn run_argv(
+        &self,
+        name: &str,
+        args: &[String],
+        timeout_secs: u64,
+    ) -> Result<String> {
+        let guard = if super::sync_guard::guarded_operation(name) {
+            self.prepare_checkpoint().await?
+        } else {
+            None
+        };
+        let result = self.run_argv_unchecked(name, args, timeout_secs).await;
+        if guard.is_some() && name == "flush" {
+            match result {
+                Ok(output) => {
+                    if let Err(error) = self.verify_checkpoint_published().await {
+                        self.set_sync_pause(Some(format!("{error:#}")));
+                        return Err(error);
+                    }
+                    return Ok(output);
+                }
+                Err(error) => {
+                    self.set_sync_pause(Some(format!("{error:#}")));
+                    return Err(error);
+                }
+            }
+        }
+        if let Err(error) = &result {
+            let text = format!("{error:#}");
+            if text.contains("checkpoint_integrity_failure")
+                || text.contains("checkpoint_remote_advanced")
+                || text.contains("covered-ahead integrity failure")
+                || text.contains("checkpoint publication failed")
+            {
+                self.set_sync_pause(Some(text));
+            }
+        }
+        result
+    }
+
+    pub(super) async fn run_argv_unchecked(
         &self,
         name: &str,
         args: &[String],
@@ -399,6 +458,15 @@ impl CliBeadStore {
 
 #[async_trait]
 impl BeadStore for CliBeadStore {
+    fn pause_workspace(&self, reason: String) {
+        self.set_sync_pause(Some(reason));
+    }
+    fn workspace_pause_reason(&self) -> Option<String> {
+        self.sync_pause
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
     fn is_corruption_error(&self, message: &str) -> bool {
         self.backend
             .error_contains_any(message, &self.backend.error_markers.corruption)
@@ -844,6 +912,7 @@ impl BeadStore for CliBeadStore {
         Ok(parse_doctor_output(&stdout))
     }
     async fn full_rebuild(&self) -> Result<()> {
+        let _sync_guard = self.prepare_checkpoint().await?;
         if !matches!(self.backend.name.as_str(), "bead-rs") {
             bail!(
                 "descriptor-driven full rebuild is not enabled for backend '{}'",

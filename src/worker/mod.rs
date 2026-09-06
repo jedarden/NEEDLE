@@ -4351,6 +4351,14 @@ impl Worker {
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("applying bead action without current_bead"))?;
 
+        if let Some(reason) = self.store.workspace_pause_reason() {
+            tracing::warn!(workspace = %bead.workspace.display(), bead_id = %bead.id,
+                reason = %reason, "preserving bead state while workspace synchronization is paused");
+            self.last_outcome = Some("infrastructure_failure".to_string());
+            self.set_state(WorkerState::Logging)?;
+            return Ok(());
+        }
+
         tracing::debug!(
             bead_id = %bead.id,
             action = %action,

@@ -118,20 +118,19 @@ impl OutcomeHandler {
     /// method is the ONLY place that calls store.release().
     ///
     /// Flow:
-    /// 1. Run `br sync --flush-only` to push local writes to JSONL first.
+    /// 1. Flush the configured backend's durable checkpoint.
     /// 2. Return telemetry events that would be emitted during release.
     ///
-    /// This method never returns an error — flush failures are non-fatal.
-    /// The worker can continue processing other beads even if flush fails.
+    /// A flush failure pauses the workspace and leaves the bead untouched.
     async fn prepare_release_events(
         &self,
         store: &dyn BeadStore,
         bead: &Bead,
     ) -> Result<Vec<EventKind>> {
-        let mut events = Vec::new();
+        let events = Vec::new();
 
-        // Flush local writes to JSONL before the release happens in apply_bead_action().
-        // Emit heartbeat before br call to track where hang occurs.
+        // Flush before apply_bead_action() releases the bead. A heartbeat
+        // identifies where an unresponsive backend operation is waiting.
         let _ = self.telemetry.emit_try_lock(
             EventKind::HeartbeatEmitted {
                 bead_id: Some(bead.id.clone()),
@@ -160,12 +159,8 @@ impl OutcomeHandler {
                     bead_id = %bead.id,
                     "flush timed out before release will be attempted by apply_bead_action()"
                 );
-                events.push(EventKind::WorkerHandlingTimeout {
-                    bead_id: bead.id.clone(),
-                    outcome: "release".to_string(),
-                    operation: "flush".to_string(),
-                    error: "timeout after 30s".to_string(),
-                });
+                store.pause_workspace("checkpoint flush timed out before release".to_string());
+                anyhow::bail!("checkpoint flush timed out; preserving bead state");
             }
             Err(e) => {
                 tracing::warn!(
@@ -173,12 +168,8 @@ impl OutcomeHandler {
                     error = %e,
                     "flush failed before release will be attempted by apply_bead_action()"
                 );
-                events.push(EventKind::WorkerHandlingTimeout {
-                    bead_id: bead.id.clone(),
-                    outcome: "release".to_string(),
-                    operation: "flush".to_string(),
-                    error: e.to_string(),
-                });
+                store.pause_workspace(format!("checkpoint flush failed before release: {e:#}"));
+                return Err(e.context("checkpoint flush failed; preserving bead state"));
             }
         }
 
@@ -769,18 +760,25 @@ impl OutcomeHandler {
             }
         }
 
-        // Flush SQLite state to JSONL so the closed/orphaned bead is captured in
-        // the git-committed backup. Non-fatal: a flush failure is logged but does
-        // not block the worker from picking up the next bead.
+        // Completion requires a durable checkpoint. A workspace sync failure
+        // must not emit the queued BeadCompleted event or retry finished work.
         match self.timeout_op(|| store.flush(), "flush").await {
             Ok(Some(())) => {
                 tracing::debug!(bead_id = %bead.id, "flushed bead state to JSONL after success");
             }
             Ok(None) => {
-                tracing::warn!(bead_id = %bead.id, "flush timed out after success — JSONL may lag SQLite");
+                store.pause_workspace("checkpoint publication timed out after success".to_string());
+                anyhow::bail!(
+                    "checkpoint publication timed out after success; completion is unverified"
+                );
             }
             Err(e) => {
-                tracing::warn!(bead_id = %bead.id, error = %e, "flush failed after success — JSONL may lag SQLite");
+                store.pause_workspace(format!(
+                    "checkpoint publication failed after success: {e:#}"
+                ));
+                return Err(e.context(
+                    "checkpoint publication failed after success; completion is unverified",
+                ));
             }
         }
 
@@ -1947,6 +1945,7 @@ mod tests {
         actions: Mutex<Vec<StoreAction>>,
         show_status: BeadStatus,
         labels: Vec<String>,
+        fail_flush: bool,
     }
 
     impl MockBeadStore {
@@ -1955,6 +1954,7 @@ mod tests {
                 actions: Mutex::new(Vec::new()),
                 show_status,
                 labels: Vec::new(),
+                fail_flush: false,
             }
         }
 
@@ -2032,6 +2032,9 @@ mod tests {
             Ok(())
         }
         async fn flush(&self) -> Result<()> {
+            if self.fail_flush {
+                anyhow::bail!("fixture checkpoint publication failure");
+            }
             Ok(())
         }
         async fn reopen(&self, id: &BeadId) -> Result<()> {
@@ -2762,6 +2765,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_completion_flush_does_not_report_success_or_release_finished_work() {
+        let handler = test_handler_without_shipped_work();
+        let mut store = test_store(BeadStatus::Done);
+        store.fail_flush = true;
+        let result = handler
+            .handle(
+                &store,
+                &test_bead(BeadStatus::InProgress),
+                &test_output(0),
+                false,
+            )
+            .await;
+        assert!(result.is_err());
+        assert!(store
+            .actions()
+            .iter()
+            .all(|action| !matches!(action, StoreAction::Release(_))));
+    }
+
+    #[tokio::test]
     async fn handle_success_verification_passes_accepts_closure() {
         // Verification passes → bead closure accepted.
         // Disable shipped-work enforcement since this test doesn't mock predispatch snapshots.
@@ -2877,7 +2900,7 @@ mod tests {
     // ── timeout and resilience tests ──
 
     #[tokio::test]
-    async fn handle_failure_with_flush_timeout_continues_gracefully() {
+    async fn handle_failure_with_flush_timeout_preserves_bead_state() {
         // Test that flush timeout doesn't block the worker in HANDLING state.
         struct SlowFlushStore {
             inner: MockBeadStore,
@@ -2970,23 +2993,22 @@ mod tests {
 
         let result = handler
             .handle(store.as_ref(), &bead, &test_output(1), false)
-            .await
-            .unwrap();
+            .await;
 
-        // Should still complete with Released action despite flush timeout.
-        assert_eq!(result.outcome, Outcome::Failure);
-        assert_eq!(result.bead_action, BeadAction::Released);
-
-        // Should emit a timeout event.
         assert!(result
-            .telemetry_events
+            .unwrap_err()
+            .to_string()
+            .contains("preserving bead state"));
+        assert!(store
+            .inner
+            .actions()
             .iter()
-            .any(|e| matches!(e, EventKind::WorkerHandlingTimeout { operation, .. } if operation == "flush")));
+            .all(|action| !matches!(action, StoreAction::Release(_))));
     }
 
     #[tokio::test]
-    async fn handle_failure_with_release_timeout_continues_gracefully() {
-        // Test that release timeout doesn't block the worker in HANDLING state.
+    async fn handle_failure_defers_release_until_worker_applies_action() {
+        // The handler prepares an action; the worker performs the release.
         struct SlowReleaseStore {
             inner: MockBeadStore,
         }
@@ -3024,11 +3046,7 @@ mod tests {
                 self.inner.block(id).await
             }
             async fn flush(&self) -> Result<()> {
-                // The pre-release flush is now the slow operation the handler performs,
-                // so this is where the timeout must be exercised. timeout_op() caps at
-                // 30s, so sleep past it.
-                tokio::time::sleep(std::time::Duration::from_secs(35)).await;
-                Ok(())
+                self.inner.flush().await
             }
             async fn reopen(&self, id: &BeadId) -> Result<()> {
                 self.inner.reopen(id).await
@@ -3086,19 +3104,13 @@ mod tests {
             .await
             .unwrap();
 
-        // Should still complete despite release timeout.
         assert_eq!(result.outcome, Outcome::Failure);
-        // The bead action should still be Released (best-effort).
         assert_eq!(result.bead_action, BeadAction::Released);
-
-        // Should report the failed prepare step. This is WorkerHandlingTimeout rather
-        // than BeadReleaseFailed: the release itself has not been attempted yet at this
-        // point (apply_bead_action() performs it), so what timed out is the pre-release
-        // flush, and claiming "release failed" here would be inaccurate.
-        assert!(result
-            .telemetry_events
+        assert!(store
+            .inner
+            .actions()
             .iter()
-            .any(|e| matches!(e, EventKind::WorkerHandlingTimeout { .. })));
+            .all(|action| !matches!(action, StoreAction::Release(_))));
     }
 
     #[tokio::test]

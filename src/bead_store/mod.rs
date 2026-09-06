@@ -19,6 +19,7 @@
 pub mod backend;
 mod cli_store;
 mod strategies;
+mod sync_guard;
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -1376,6 +1377,15 @@ pub trait BeadStore: Send + Sync {
     /// This is used by strands to distinguish between "no home store configured" (expected,
     /// benign for roam-only workers) and "home store is broken" (unexpected, problem).
     fn has_valid_store(&self) -> bool;
+
+    /// An infrastructure pause preserves the current bead instead of trying
+    /// to release or rework it against an untrusted checkpoint history.
+    fn workspace_pause_reason(&self) -> Option<String> {
+        None
+    }
+
+    /// Preserve a pause even when a caller cancels a timed-out flush future.
+    fn pause_workspace(&self, _reason: String) {}
 }
 
 // ─── Unit tests ──────────────────────────────────────────────────────────────
