@@ -1366,11 +1366,16 @@ fn run_worker(config: Config, worker_name: String, config_sources: SourceMap) ->
         ))
     })?;
 
-    // Boot timeout guard: self-abort if init took >60 s.
-    let elapsed_ms = boot_start
-        .elapsed()
-        .saturating_sub(scratch_sweep_elapsed)
-        .as_millis() as u64;
+    // Boot timeout guard: self-abort if active initialization took >60 s.
+    // The bounded resource backoff is an intentional precondition wait, just
+    // like the scratch sweep is intentional housekeeping; neither measures a
+    // stuck initialization step and neither belongs in this watchdog.
+    let elapsed_ms = effective_boot_elapsed(
+        boot_start.elapsed(),
+        scratch_sweep_elapsed,
+        Duration::from_secs(resource_wait_total),
+    )
+    .as_millis() as u64;
     if elapsed_ms > 60_000 {
         telemetry.emit(
             EventKind::WorkerBootTimeout { elapsed_ms },
@@ -1386,6 +1391,16 @@ fn run_worker(config: Config, worker_name: String, config_sources: SourceMap) ->
 
     tracing::info!(final_state = %result, "worker finished");
     Ok(())
+}
+
+fn effective_boot_elapsed(
+    total_elapsed: Duration,
+    scratch_sweep_elapsed: Duration,
+    resource_wait_elapsed: Duration,
+) -> Duration {
+    total_elapsed
+        .saturating_sub(scratch_sweep_elapsed)
+        .saturating_sub(resource_wait_elapsed)
 }
 
 fn record_scratch_sweep_outcome(
@@ -6630,6 +6645,28 @@ mod tests {
     #[test]
     fn last_nato_is_zulu() {
         assert_eq!(NATO_ALPHABET[25], "zulu");
+    }
+
+    #[test]
+    fn boot_watchdog_excludes_intentional_resource_backoff() {
+        let effective = effective_boot_elapsed(
+            Duration::from_millis(125_312),
+            Duration::ZERO,
+            Duration::from_secs(125),
+        );
+
+        assert_eq!(effective, Duration::from_millis(312));
+    }
+
+    #[test]
+    fn boot_watchdog_exclusions_saturate_at_zero() {
+        let effective = effective_boot_elapsed(
+            Duration::from_secs(1),
+            Duration::from_secs(2),
+            Duration::from_secs(3),
+        );
+
+        assert_eq!(effective, Duration::ZERO);
     }
 
     #[test]
