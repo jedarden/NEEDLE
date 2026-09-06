@@ -8,8 +8,9 @@
 #
 # Build trigger: the needle-ci-builder WorkflowTemplate's check-changed-files
 # step only rebuilds when the pushed commit touches Cargo.toml, Cargo.lock,
-# ci/Dockerfile.ci, ci/Dockerfile.ci-deps or ci/VERSION. A no-op edit to this
-# file is therefore the way to force a rebuild without disturbing that contract.
+# rust-toolchain.toml, ci/Dockerfile.ci, ci/Dockerfile.ci-deps or ci/VERSION.
+# A no-op edit to this file is therefore the way to force a rebuild without
+# disturbing that contract.
 #
 # After triggering, confirm BOTH tags moved -- the template runs docker-build-base
 # and docker-build-with-deps as separate kaniko steps, and a run that is stopped
@@ -20,9 +21,13 @@
 
 FROM debian:bookworm
 
-# System deps
+# System deps. gcc-aarch64-linux-gnu is the release stage's aarch64
+# cross-linker: the needle-ci workflow used to apt-get it at run time, which
+# is exactly the from-scratch provisioning this image exists to remove
+# (bead needle-be43ddfa). Bake it here instead.
 RUN apt-get update && apt-get install -y \
     git curl jq build-essential pkg-config libssl-dev \
+    gcc-aarch64-linux-gnu \
     && rm -rf /var/lib/apt/lists/*
 
 # Install gh CLI
@@ -36,5 +41,34 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 # Install Rust stable
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
 ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Bake the toolchain NEEDLE actually builds with, so the first cargo call in
+# a NEEDLE checkout resolves offline instead of rustup-downloading the
+# toolchain, its components and its targets separately in every CI pod --
+# verify-fast plus all five test pods each paid that on every run.
+#
+# This MUST mirror rust-toolchain.toml at the repo root: channel, components
+# and targets. rustup re-checks all three against that file on every
+# invocation and downloads whatever is missing, so a bake that drifts from
+# the file is silently undone per pod. aarch64-unknown-linux-gnu is not in
+# rust-toolchain.toml but is what the release stage's cross-build links
+# against -- previously installed at run time by `rustup target add` in the
+# workflow, which is gone for the same reason the apt-get is.
+#
+# `stable` stays the default above on purpose: rust-verify and rust-ci point
+# arbitrary repos at this image, and a repo without a rust-toolchain.toml
+# should keep building on stable rather than on NEEDLE's pin.
+#
+# If rust-toolchain.toml moves, change the pin here AND bump ci/VERSION in
+# the same commit -- rust-toolchain.toml is in the builder template's
+# check-changed-files trigger list precisely so a pin move rebuilds this
+# image; without the bump the pins in declarative-config keep pointing at a
+# tag that was never rebuilt.
+RUN rustup toolchain install 1.95.0 \
+    --profile minimal \
+    --component rustfmt --component clippy \
+    --target x86_64-unknown-linux-gnu \
+    --target aarch64-apple-darwin \
+    --target aarch64-unknown-linux-gnu
 
 WORKDIR /workspace
