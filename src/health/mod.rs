@@ -9,6 +9,7 @@
 //!
 //! Depends on: `config`, `types`.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -679,6 +680,100 @@ impl HealthMonitor {
         Ok(stale)
     }
 
+    /// Look up, per qualified worker ID, which bead that worker is executing —
+    /// the heartbeat-backed counterpart of `Bead.assignee`, for claim reaping.
+    ///
+    /// Keys are the requested `qualified_id` values and match `Bead.assignee`
+    /// exactly (both use the `{adapter}-{worker_id}` form), so a caller compares
+    /// an assignee directly against the keys with no name-prefix matching.
+    ///
+    /// The heartbeat reader is the same one `peer::PeerMonitor::check_peers()`
+    /// uses ([`HealthMonitor::read_all_heartbeats`]) — no second parser. That
+    /// reader silently skips files it cannot read or parse, so this lookup
+    /// probes the worker's expected heartbeat path when a requested ID is absent
+    /// from the parse results and reports [`ExecutorLookup::Unparseable`] rather
+    /// than letting "unreadable" collapse into "absent".
+    ///
+    /// `heartbeat_ttl` is the worker's configured `health.heartbeat_ttl_secs`.
+    ///
+    /// All filesystem access runs under `tokio::task::spawn_blocking`, for the
+    /// same reason `strand::mend::cleanup_in_progress` wraps `Registry::list()`.
+    pub async fn lookup_bead_executors(
+        heartbeat_dir: &Path,
+        qualified_ids: &[String],
+        heartbeat_ttl: Duration,
+    ) -> Result<HashMap<String, ExecutorLookup>> {
+        let dir = heartbeat_dir.to_path_buf();
+        let ids = qualified_ids.to_vec();
+        tokio::task::spawn_blocking(move || {
+            Self::lookup_bead_executors_blocking(&dir, &ids, heartbeat_ttl)
+        })
+        .await
+        .context("spawn_blocking task for heartbeat bead-executor lookup failed")?
+        .context("heartbeat bead-executor lookup failed")
+    }
+
+    /// Blocking core of [`HealthMonitor::lookup_bead_executors`]. Not public —
+    /// callers must go through the `spawn_blocking` wrapper above.
+    fn lookup_bead_executors_blocking(
+        heartbeat_dir: &Path,
+        qualified_ids: &[String],
+        heartbeat_ttl: Duration,
+    ) -> Result<HashMap<String, ExecutorLookup>> {
+        let mut lookup: HashMap<String, ExecutorLookup> = HashMap::new();
+        if qualified_ids.is_empty() {
+            return Ok(lookup);
+        }
+
+        let heartbeats: HashMap<String, HeartbeatData> = Self::read_all_heartbeats(heartbeat_dir)?
+            .into_iter()
+            .map(|hb| (hb.qualified_id.clone(), hb))
+            .collect();
+
+        for qualified_id in qualified_ids {
+            if let Some(hb) = heartbeats.get(qualified_id) {
+                lookup.insert(
+                    qualified_id.clone(),
+                    ExecutorLookup::Present(BeadExecution {
+                        current_bead: hb.current_bead.clone(),
+                        last_heartbeat: hb.last_heartbeat,
+                        heartbeat_fresh: !Self::is_stale(hb, heartbeat_ttl),
+                        pid_alive: Self::check_pid_alive(hb.pid),
+                    }),
+                );
+                continue;
+            }
+
+            // The heartbeat reader skips files it cannot read or parse, so
+            // absence from the map above is ambiguous. Probe the expected path
+            // so "unreadable" stays distinct from "absent": a reaping caller
+            // treats the former as unknown and the latter as an orphan.
+            let path = heartbeat_dir.join(format!("{}.json", qualified_id));
+            let absent = match check_heartbeat_file_exists(&path) {
+                Ok(exists) => !exists,
+                Err(e) => {
+                    tracing::warn!(
+                        worker = %qualified_id,
+                        path = %path.display(),
+                        error = %e,
+                        "heartbeat existence probe failed; reporting unreadable rather than missing"
+                    );
+                    false
+                }
+            };
+            lookup.insert(
+                qualified_id.clone(),
+                if absent {
+                    ExecutorLookup::Missing
+                } else {
+                    ExecutorLookup::Unparseable
+                },
+            );
+        }
+
+        Ok(lookup)
+    }
+
     /// Detect whether a supervisor is actively managing the worker fleet.
     ///
     /// A supervisor is considered present when:
@@ -1223,6 +1318,47 @@ pub struct StalePeer {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// BeadExecution / ExecutorLookup — heartbeat-backed bead-executor lookup
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// What one worker's heartbeat says it is executing, plus liveness signals.
+///
+/// Produced by [`HealthMonitor::lookup_bead_executors`] for claim reaping: an
+/// assignee whose heartbeat reports this exact bead is actively working on it,
+/// while an assignee reporting a different (or no) bead has moved on from the
+/// claim the store still shows against its name.
+#[derive(Debug, Clone)]
+pub struct BeadExecution {
+    /// The bead the worker last announced as its current work, if any.
+    pub current_bead: Option<BeadId>,
+    /// Timestamp of the worker's last heartbeat write.
+    pub last_heartbeat: DateTime<Utc>,
+    /// Whether the heartbeat is within the configured TTL (`false` = stale).
+    pub heartbeat_fresh: bool,
+    /// Whether the process that wrote the heartbeat is still alive.
+    pub pid_alive: bool,
+}
+
+/// Outcome of the bead-executor lookup for one qualified worker ID.
+///
+/// The three variants are deliberately distinct so a reaping caller never has
+/// to guess: [`ExecutorLookup::Missing`] means no heartbeat file exists for
+/// the worker at all, [`ExecutorLookup::Unparseable`] means a file exists but
+/// could not be read or parsed (crashed mid-write, corrupt, unreadable) and
+/// must be treated as unknown rather than as a dead worker, and
+/// [`ExecutorLookup::Present`] carries the parsed heartbeat even when it is
+/// stale — freshness is a field, not a filter.
+#[derive(Debug, Clone)]
+pub enum ExecutorLookup {
+    /// Heartbeat read and parsed (fresh or stale — see `BeadExecution`).
+    Present(BeadExecution),
+    /// A heartbeat file exists at the expected path but could not be read or parsed.
+    Unparseable,
+    /// No heartbeat file exists for this worker.
+    Missing,
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Emitter loop (runs in a dedicated std::thread)
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -1636,6 +1772,141 @@ mod tests {
         let result = HealthMonitor::read_all_heartbeats(Path::new("/nonexistent/dir"));
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
+    }
+
+    /// The three lookup verdicts must stay distinct: a parsed heartbeat is
+    /// `Present` (with the bead it announces), a file that exists but cannot be
+    /// parsed is `Unparseable` (unknown, not absent), and no file at all is
+    /// `Missing`. A reaping caller treats those last two differently, so a
+    /// corrupt file must never collapse into a missing worker.
+    #[tokio::test]
+    async fn lookup_bead_executors_separates_present_unparseable_and_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path();
+
+        let hb = HeartbeatData {
+            worker_id: "worker-a".to_string(),
+            qualified_id: "claude-worker-a".to_string(),
+            pid: std::process::id(),
+            state: WorkerState::Executing,
+            current_bead: Some(BeadId::from("nd-live")),
+            workspace: PathBuf::from("/tmp"),
+            last_heartbeat: Utc::now(),
+            started_at: Utc::now(),
+            beads_processed: 1,
+            session: "worker-a".to_string(),
+            is_idle: false,
+            current_task: Some("nd-live".to_string()),
+            model: "claude-sonnet-4".to_string(),
+            heartbeat_file: None,
+        };
+        std::fs::write(
+            hb_dir.join("claude-worker-a.json"),
+            serde_json::to_string(&hb).unwrap(),
+        )
+        .unwrap();
+
+        // A file that exists but is not a heartbeat: the reader skips it, so
+        // only the path probe can tell this apart from a missing worker.
+        std::fs::write(hb_dir.join("claude-worker-b.json"), "{not json").unwrap();
+
+        let mut idle = hb.clone();
+        idle.worker_id = "worker-idle".to_string();
+        idle.qualified_id = "claude-worker-idle".to_string();
+        idle.current_bead = None;
+        idle.current_task = None;
+        std::fs::write(
+            hb_dir.join("claude-worker-idle.json"),
+            serde_json::to_string(&idle).unwrap(),
+        )
+        .unwrap();
+
+        let mut stale = hb.clone();
+        stale.worker_id = "worker-stale".to_string();
+        stale.qualified_id = "claude-worker-stale".to_string();
+        stale.last_heartbeat = Utc::now() - chrono::Duration::seconds(600);
+        std::fs::write(
+            hb_dir.join("claude-worker-stale.json"),
+            serde_json::to_string(&stale).unwrap(),
+        )
+        .unwrap();
+
+        let lookup = HealthMonitor::lookup_bead_executors(
+            hb_dir,
+            &[
+                "claude-worker-a".to_string(),
+                "claude-worker-b".to_string(),
+                "claude-worker-c".to_string(),
+                "claude-worker-idle".to_string(),
+                "claude-worker-stale".to_string(),
+            ],
+            Duration::from_secs(300),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(lookup.len(), 5, "every requested id gets a verdict");
+
+        match lookup.get("claude-worker-a") {
+            Some(ExecutorLookup::Present(execution)) => {
+                assert_eq!(
+                    execution.current_bead,
+                    Some(BeadId::from("nd-live")),
+                    "the lookup must surface the bead the heartbeat announces"
+                );
+                assert!(
+                    execution.heartbeat_fresh,
+                    "a just-written heartbeat is fresh"
+                );
+                assert!(execution.pid_alive, "the pid this test runs under is alive");
+            }
+            other => panic!("worker-a should be Present, got {other:?}"),
+        }
+
+        assert!(
+            matches!(
+                lookup.get("claude-worker-b"),
+                Some(ExecutorLookup::Unparseable)
+            ),
+            "an unparseable heartbeat must stay distinct from a missing one, got {:?}",
+            lookup.get("claude-worker-b")
+        );
+        assert!(
+            matches!(lookup.get("claude-worker-c"), Some(ExecutorLookup::Missing)),
+            "no file at all is Missing, got {:?}",
+            lookup.get("claude-worker-c")
+        );
+
+        match lookup.get("claude-worker-idle") {
+            Some(ExecutorLookup::Present(execution)) => {
+                assert!(execution.current_bead.is_none());
+                assert!(execution.heartbeat_fresh);
+                assert!(execution.pid_alive);
+            }
+            other => panic!("idle worker should be Present, got {other:?}"),
+        }
+
+        match lookup.get("claude-worker-stale") {
+            Some(ExecutorLookup::Present(execution)) => {
+                assert_eq!(execution.current_bead, Some(BeadId::from("nd-live")));
+                assert!(!execution.heartbeat_fresh);
+                assert!(execution.pid_alive);
+            }
+            other => panic!("stale worker should remain Present, got {other:?}"),
+        }
+    }
+
+    /// An empty request must not touch the filesystem at all — mend calls this
+    /// once per candidate assignee list, and an empty list is the common case
+    /// for a workspace with no orphaned claims.
+    #[tokio::test]
+    async fn lookup_bead_executors_with_no_ids_is_an_empty_map() {
+        let dir = tempfile::tempdir().unwrap();
+        let lookup =
+            HealthMonitor::lookup_bead_executors(dir.path(), &[], Duration::from_secs(300))
+                .await
+                .unwrap();
+        assert!(lookup.is_empty());
     }
 
     #[test]
