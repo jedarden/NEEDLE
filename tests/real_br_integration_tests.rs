@@ -1405,12 +1405,11 @@ fn real_bead_rs_provider_concurrency_limit_enforced() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// Test 10: Database corruption — corrupt SQLite, verify auto-repair and
-//          continued operation
+// Test 10: An unreadable live store pauses dispatch without automatic rebuild.
 // ═════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn real_bead_rs_database_corruption_auto_recovery() {
+async fn real_bead_rs_database_corruption_preserves_evidence_and_pauses() {
     use needle::bead_store::RecoveryOutcome;
 
     let workspace = create_test_workspace("corruption").unwrap();
@@ -1418,7 +1417,7 @@ async fn real_bead_rs_database_corruption_auto_recovery() {
 
     // Create 2 beads so we can verify data integrity after recovery.
     let bead_a = create_bead(workspace.path(), "survive-corruption-a", 1).unwrap();
-    let bead_b = create_bead(workspace.path(), "survive-corruption-b", 2).unwrap();
+    create_bead(workspace.path(), "survive-corruption-b", 2).unwrap();
 
     // Verify normal operations work before corruption.
     let beads_before = store.ready(&Filters::default()).await.unwrap();
@@ -1446,8 +1445,9 @@ async fn real_bead_rs_database_corruption_auto_recovery() {
     let db_path = workspace.path().join(".beads/beads.db");
     assert!(db_path.exists(), "database file should exist");
 
-    // Record the original db size for comparison after recovery.
-    let original_db_size = std::fs::metadata(&db_path).unwrap().len();
+    let checkpoint = workspace.path().join(".beads/checkpoint");
+    let pointer_before = std::fs::read(checkpoint.join("current.json")).unwrap();
+    let forensic_before = std::fs::read(checkpoint.join("forensic.jsonl")).unwrap();
 
     // Write garbage bytes to corrupt the SQLite header. The first 16 bytes
     // of a valid SQLite file contain the magic string "SQLite format 3\000".
@@ -1455,75 +1455,20 @@ async fn real_bead_rs_database_corruption_auto_recovery() {
     let garbage = b"THIS_IS_CORRUPT_DATA_NOT_SQLITE_AT_ALL____";
     std::fs::write(&db_path, garbage).unwrap();
 
-    // Recovery must use bead-rs doctor and its checkpoint import contract; it
-    // must never apply a flat-JSONL repair procedure to this native database.
-
-    // ── Run auto-recovery ────────────────────────────────────────────────
+    // An unreadable database cannot prove that the checkpoint covers every
+    // live mutation. Preserve both artifacts for explicit reviewed recovery.
     let recovery = store.recover_db().await;
-
-    match &recovery {
-        RecoveryOutcome::Repaired(report) => {
-            // Native doctor housekeeping repaired the database.
-            eprintln!(
-                "  Recovery via repair: {} warnings, {} fixed",
-                report.warnings.len(),
-                report.fixed.len()
-            );
-        }
-        RecoveryOutcome::Rebuilt => {
-            // Full rebuild from the bead-rs checkpoint succeeded.
-            eprintln!("  Recovery via native checkpoint rebuild");
-        }
-        RecoveryOutcome::Failed(e) => {
-            panic!("database recovery should succeed; got Failed: {e}");
-        }
-    }
-
-    // ── Verify operations work after recovery ────────────────────────────
-    let beads_after = store.ready(&Filters::default()).await.unwrap();
-    assert!(
-        beads_after.len() >= 2,
-        "should still have at least 2 ready beads after recovery; got {}",
-        beads_after.len()
-    );
-
-    // Verify both original beads survived (data integrity from JSONL).
-    let shown_a = store.show(&bead_a).await.unwrap();
+    assert!(matches!(recovery, RecoveryOutcome::Failed(_)));
+    assert!(store.workspace_pause_reason().is_some());
+    assert!(store.ready(&Filters::default()).await.is_err());
+    assert_eq!(std::fs::read(&db_path).unwrap(), garbage);
     assert_eq!(
-        shown_a.title, "survive-corruption-a",
-        "bead A should survive corruption recovery"
+        std::fs::read(checkpoint.join("current.json")).unwrap(),
+        pointer_before
     );
-
-    let shown_b = store.show(&bead_b).await.unwrap();
     assert_eq!(
-        shown_b.title, "survive-corruption-b",
-        "bead B should survive corruption recovery"
-    );
-
-    // Verify the database file was properly rebuilt (not our garbage data).
-    assert!(
-        db_path.exists(),
-        "database file should exist after recovery"
-    );
-
-    let recovered_db_size = std::fs::metadata(&db_path).unwrap().len();
-    assert!(
-        recovered_db_size > garbage.len() as u64,
-        "rebuilt database ({recovered_db_size}B) should be larger than garbage ({}B)",
-        garbage.len()
-    );
-
-    // The rebuilt database should be roughly the same size as the original.
-    assert!(
-        recovered_db_size >= original_db_size / 2,
-        "rebuilt database ({recovered_db_size}B) should be at least half the original ({original_db_size}B)"
-    );
-
-    // Verify the database file starts with the SQLite magic string.
-    let db_header = std::fs::read(&db_path).unwrap();
-    assert!(
-        db_header.starts_with(b"SQLite format 3"),
-        "rebuilt database should be a valid SQLite file"
+        std::fs::read(checkpoint.join("forensic.jsonl")).unwrap(),
+        forensic_before
     );
 }
 

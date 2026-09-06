@@ -337,6 +337,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_extract_clean_workspace() {
+        let _env = crate::util::test_env::isolate_env();
         // Create a temporary git repository
         let temp_repo = tempfile::tempdir().unwrap();
         let repo_path = temp_repo.path();
