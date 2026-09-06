@@ -5,22 +5,26 @@ FROM ${BASE_IMAGE}
 # Copy only Cargo.toml/Cargo.lock first, create dummy source, build deps.
 # This layer is cached unless Cargo.toml/Cargo.lock change.
 #
-# Every target Cargo.toml declares needs a stub here, including [[bench]]
-# entries -- `cargo build` fails to even parse the manifest if a declared
-# target's source file is missing (confirmed live 2026-08-12: "can't find
-# `sanitize` bench at `benches/sanitize.rs`"), not just the lib/bin targets
-# that were stubbed before.
+# Every target Cargo.toml declares needs a stub here, including [[bench]] and
+# [[test]] entries -- cargo fails to load the manifest if a declared target's
+# source file is missing: "can't find `sanitize` bench at `benches/sanitize.rs`"
+# (confirmed live 2026-08-12), "can't find integration-test `integration_spawn`
+# at path `tests/integration_spawn.rs`" (confirmed live 2026-09-06, target added
+# by 3bec5897 on 2026-08-17; it made every docker-build-with-deps run fail with
+# cargo's exit 101). Plain `cargo build` does NOT catch a missing [[test]] stub
+# -- only `cargo build --tests`, which is why it is the second command here.
 COPY Cargo.toml Cargo.lock ./
 COPY src/bin/needle_transform_claude.rs ./src/bin/needle_transform_claude.rs
 COPY src/bin/needle_transform_codex.rs ./src/bin/needle_transform_codex.rs
-RUN mkdir -p src benches && \
+RUN mkdir -p src benches tests && \
     echo "pub fn _dummy() {}" > src/lib.rs && \
     echo "fn main() {}" > src/main.rs && \
     echo "fn main() {}" > src/bin/needle_transform_claude.rs && \
     echo "fn main() {}" > src/bin/needle_transform_codex.rs && \
     echo "fn main() {}" > benches/sanitize.rs && \
+    echo "fn main() {}" > tests/integration_spawn.rs && \
     cargo build && \
     cargo build --tests && \
-    rm -rf src benches
+    rm -rf src benches tests
 
 WORKDIR /workspace
