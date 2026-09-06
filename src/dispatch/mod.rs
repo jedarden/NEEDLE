@@ -126,9 +126,9 @@ use crate::process_guard::{ProcessGroupKillGuard, ProcessGuard};
 use crate::prompt::BuiltPrompt;
 use crate::sanitize::{CustomPattern, Sanitizer};
 use crate::telemetry::{EventKind, Telemetry};
-use crate::trace::{detect_trace_format, TraceCapture, TraceMetadata};
+use crate::trace::{classify_from_stream, detect_trace_format, TraceCapture, TraceMetadata};
 use crate::tsnet::{inject_identity_env, IdentityRegistry, TsnetConfig};
-use crate::types::{BeadId, InputMethod, Outcome};
+use crate::types::{BeadId, InputMethod};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Extraction module
@@ -2147,7 +2147,13 @@ impl Dispatcher {
             }
 
             // Create and write metadata.
-            let outcome = Outcome::classify(exit_code, false);
+            // The exit code alone misclassifies runs the claude CLI ended on a
+            // terminal API error (it still exits 0). Only the claude stream
+            // format carries a result envelope, so classification consults the
+            // envelope when this trace format has one and keeps the exit code
+            // as the verdict for every other format.
+            let trace_format = detect_trace_format(&adapter.name);
+            let outcome = classify_from_stream(exit_code, &stdout, &trace_format);
             let metadata = TraceMetadata {
                 bead_id: bead_id.clone(),
                 agent: adapter.name.clone(),
@@ -2160,7 +2166,7 @@ impl Dispatcher {
                 output_tokens: None,
                 cost_usd: None,
                 captured_at: chrono::Utc::now(),
-                trace_format: detect_trace_format(&adapter.name),
+                trace_format,
                 pruned: false,
                 template_version: None,
                 timeout_reason: timeout_reason.clone(),

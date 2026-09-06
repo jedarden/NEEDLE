@@ -955,6 +955,13 @@ mod tests {
         let snapshot = PreDispatch {
             head_sha: Some(run_git(&repo_path, &["rev-parse", "HEAD"])),
             notes_hash: None,
+            // A fresh timestamp, deliberately: the foreign-file check compares
+            // blob hashes and never reads this field, and this pins that — a
+            // consumer elsewhere may now read `captured_at` (dod_bypass does),
+            // so a timestamp pointing at "now" must not change this verdict.
+            // The legacy None shape is covered by
+            // predispatch::snapshot_without_captured_at_loads_as_none.
+            captured_at: Some(chrono::Utc::now()),
             dirty_files: vec![DirtyFile {
                 path: "foreign.txt".to_string(),
                 blob_hash: dirty_hash.clone(),
@@ -1028,6 +1035,7 @@ mod tests {
         let snapshot = PreDispatch {
             head_sha: Some(run_git(&repo_path, &["rev-parse", "HEAD"])),
             notes_hash: None,
+            captured_at: None,
             dirty_files: vec![DirtyFile {
                 path: "shared.txt".to_string(),
                 blob_hash: original_hash,
@@ -1082,6 +1090,7 @@ mod tests {
         let snapshot = PreDispatch {
             head_sha: Some(run_git(&repo_path, &["rev-parse", "HEAD"])),
             notes_hash: None,
+            captured_at: None,
             dirty_files: vec![],
         };
 
@@ -1139,6 +1148,7 @@ mod tests {
         let snapshot = PreDispatch {
             head_sha: Some(run_git(&repo_path, &["rev-parse", "HEAD"])),
             notes_hash: None,
+            captured_at: None,
             dirty_files: vec![], // Not relevant for this test
         };
 

@@ -182,19 +182,16 @@ budget:
 # ensuring a single source of truth for "is this work acceptable?"
 # See scripts/definition-of-done.sh for the unified verification command.
 # The fast lane runs locally in seconds: fmt, clippy, check.
-# Three gates, in order. All three must pass for a bead to close; a failure
+# Two gates, in order. Both must pass for a bead to close; a failure
 # releases the bead and counts toward quarantine.
-#   1. no-dod-bypass (workspace): a `git commit --no-verify` on this bead's
-#      commits is a failed dispatch — the hook logs every bypass with its sha.
-#   2. definition-of-done --fast (clean): fmt, clippy, check on a clean
+#   1. definition-of-done --fast (clean): fmt, clippy, check on a clean
 #      extraction of HEAD, not the shared tree with other workers' edits.
-#   3. cargo test --lib (clean): the lane needle-ci runs; ~6 min warm.
-# validation.outcome_timeout_seconds (global config) is 1800 to fit 2 and 3.
+#   2. cargo test --lib (clean): the lane needle-ci runs; ~6 min warm.
+# validation.outcome_timeout_seconds (global config) is 1800 to fit 1 and 2.
+# The former third/first gate (`scripts/gate-no-dod-bypass.sh`) is now a
+# native check in the outcome handler (src/validation/dod_bypass.rs): it keys
+# on the pre-dispatch snapshot rather than a commit message naming the bead.
 gates:
-  - type: command
-    run_in: workspace
-    commands:
-      - scripts/gate-no-dod-bypass.sh
   - type: command
     run_in: clean
     commands:
