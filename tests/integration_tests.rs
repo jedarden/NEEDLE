@@ -95,6 +95,14 @@ mod isolation {
         pub fn path(&self) -> &std::path::Path {
             self.temp_dir.path()
         }
+
+        /// The HOME that was in effect when this guard took the lock — the value
+        /// `Drop` restores. Read it from here, not from `env::var_os` before
+        /// calling `setup_isolated_home`: that read races with another test's
+        /// guard and can capture *its* temp HOME instead of the real one.
+        pub fn original_home(&self) -> Option<&std::ffi::OsStr> {
+            self.original_home.as_deref()
+        }
     }
 
     impl Drop for IsolatedHome {
@@ -387,12 +395,22 @@ fn create_test_bead(id: &str) -> Bead {
 
 /// Extract the quarantine-until timestamp from a bead's labels
 fn extract_quarantine_until(bead: &Bead) -> Option<DateTime<Utc>> {
+    // The latest window governs, matching `extract_quarantine_round`'s `.max()`
+    // and Pluck's `active_quarantine_until`.
     bead.labels
         .iter()
         .filter_map(|l| l.strip_prefix("quarantine-until:"))
         .filter_map(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
         .map(|dt| dt.with_timezone(&chrono::Utc))
-        .next()
+        .max()
+}
+
+/// Whole hours between `now` and `until`, rounded to the nearest hour.
+///
+/// The labels are stamped a few milliseconds before they are read back, so
+/// `Duration::num_hours()` on `now + 2h` truncates to 1. Round instead.
+fn hours_until_rounded(until: DateTime<Utc>, now: DateTime<Utc>) -> i64 {
+    ((until - now).num_minutes() as f64 / 60.0).round() as i64
 }
 
 /// Extract the quarantine round from a bead's labels
@@ -453,7 +471,7 @@ fn verify_quarantine_labels(bead: &Bead, expected_round: u32) -> anyhow::Result<
     // Verify the timestamp is reasonable (between 2 hours and 48 hours in future)
     let min_hours = 2;
     let max_hours = 48;
-    let hours_until = (quarantine_until - now).num_hours();
+    let hours_until = hours_until_rounded(quarantine_until, now);
     if hours_until < min_hours || hours_until > max_hours {
         anyhow::bail!(
             "Bead {} has quarantine-until timestamp outside expected range ({} hours, expected {}-{}h)",
@@ -706,7 +724,8 @@ async fn test_quarantine_round_increment() {
     // Simulate quarantine expiring and bead failing again
     // Remove old quarantine labels and add new ones with incremented round
     println!("\nSecond quarantine (round 2 - after expiration and more failures)");
-    store.remove_label_from_bead(bead_id, "quarantine-until");
+    // `remove_label_from_bead` is an exact match: name the label that was added.
+    store.remove_label_from_bead(bead_id, &q1_label);
     store.remove_label_from_bead(bead_id, "quarantine-round:1");
 
     store.add_label_to_bead(bead_id, "failure-count:10"); // More failures
@@ -731,7 +750,7 @@ async fn test_quarantine_round_increment() {
 
     // Verify the quarantine until is 4 hours (2 * 2^(2-1))
     let q2_timestamp = extract_quarantine_until(&bead_q2).expect("no quarantine-until");
-    let q2_hours_from_now = (q2_timestamp - Utc::now()).num_hours();
+    let q2_hours_from_now = hours_until_rounded(q2_timestamp, Utc::now());
     println!(
         "Quarantine duration for round 2: {} hours",
         q2_hours_from_now
@@ -876,10 +895,15 @@ async fn test_pluck_filters_quarantined_beads() {
             );
             println!("✓ Active quarantined bead correctly filtered out");
 
-            // Verify expired quarantine bead IS in candidates
-            // Note: In the actual implementation, the expired quarantine label
-            // would be removed by the store, but for this test we just verify
-            // the filtering logic based on timestamp
+            // Verify expired quarantine bead IS in candidates: an expired window
+            // frees the bead with no label edit (ADR-022 expiring form).
+            let has_expired = candidates
+                .iter()
+                .any(|b| b.id.as_ref() == "expired-quarantine-001");
+            assert!(
+                has_expired,
+                "Expired quarantine bead should be selectable again"
+            );
             println!("  Note: Expired quarantine handling verified in separate test");
         }
         needle::types::StrandResult::NoWork => {
@@ -900,9 +924,11 @@ async fn test_pluck_filters_quarantined_beads() {
 /// environment.
 #[tokio::test]
 async fn test_setup_isolated_home_pins_and_restores_home() {
-    let original_home = std::env::var_os("HOME");
-
     let home = isolation::setup_isolated_home().expect("failed to isolate HOME");
+    // Take the baseline from inside the lock. Reading env HOME before the guard
+    // exists races with a concurrent test's guard (needle-ci-cmm2m captured the
+    // other test's temp dir as "original" and then failed the restore check).
+    let original_home = home.original_home().map(|h| h.to_os_string());
 
     // HOME is pinned to the guard's temp directory, never the real user home.
     let current_home = std::env::var("HOME").expect("HOME should be set while a guard is alive");

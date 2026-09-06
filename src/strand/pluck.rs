@@ -55,14 +55,13 @@ impl RelaxationTier {
                 "worker label constraints",
                 "priority constraints",
                 "backend ready-frontier constraints",
-                "assignee constraints",
             ],
+            // Never dropped by any tier: assignee (claim ownership, ADR-018),
+            // dependency safety, blocked/deferred/human labels, active quarantine.
             Self::OldestOpen => &[
                 "worker label constraints",
                 "priority constraints",
                 "backend ready-frontier constraints",
-                "assignee constraints",
-                "dependency safety constraints",
             ],
         }
     }
@@ -83,6 +82,8 @@ struct ExclusionCounts {
     human: usize,
     /// Beads deferred by status/label or held by an existing assignee.
     deferred_assignee: usize,
+    /// Beads under an active ADR-022 expiring quarantine (`quarantine-until` in the future).
+    quarantined: usize,
 }
 
 impl ExclusionCounts {
@@ -101,6 +102,9 @@ impl ExclusionCounts {
         }
         if self.deferred_assignee > 0 {
             reasons.push(format!("deferred_assignee={}", self.deferred_assignee));
+        }
+        if self.quarantined > 0 {
+            reasons.push(format!("quarantined={}", self.quarantined));
         }
         if reasons.is_empty() {
             "none identified".to_string()
@@ -134,6 +138,7 @@ impl FilteringStats {
     /// the full issue set. Dependency edges from bead-rs are lean and only carry
     /// the blocker ID/kind, so blocker status is resolved from the inventory map.
     fn from_inventory(beads: &[Bead], exclude_labels: &[String]) -> Self {
+        let inventory_now = Utc::now();
         let finished_by_id: HashMap<BeadId, bool> = beads
             .iter()
             .map(|bead| (bead.id.clone(), bead.status.is_done()))
@@ -190,6 +195,10 @@ impl FilteringStats {
                 stats.exclusion_counts.deferred_assignee += 1;
             }
 
+            if active_quarantine_until(bead, inventory_now).is_some() {
+                stats.exclusion_counts.quarantined += 1;
+            }
+
             // Collect beads with stale assignees for potential auto-repair
             if bead.status == crate::types::BeadStatus::Open && bead.assignee.is_some() {
                 stats.stale_assignee_beads.push(bead.id.clone());
@@ -242,6 +251,34 @@ fn dependency_is_blocking(
         // a partially synced store is represented honestly in the snapshot.
         None => !is_finished_status(&dependency.status),
     }
+}
+
+/// Constraints that no relaxation tier may drop.
+///
+/// These are properties of the work, not of this worker's preferences.
+/// Relaxing any of them hands out a bead another worker holds (assignee is
+/// claim ownership, ADR-018), one whose blocker is still open (dependency
+/// safety), one an operator or human took out of the queue (blocked /
+/// deferred / human labels), or one under an active ADR-022 quarantine. The
+/// fallback tiers may drop configured worker-label exclusions, priority and
+/// the backend's own ready-frontier computation — nothing in this list.
+fn passes_never_relaxed_constraints(
+    bead: &Bead,
+    finished_by_id: &HashMap<BeadId, bool>,
+    now: chrono::DateTime<Utc>,
+) -> bool {
+    bead.status == crate::types::BeadStatus::Open
+        && bead.assignee.is_none()
+        && !bead
+            .dependencies
+            .iter()
+            .any(|dependency| dependency_is_blocking(dependency, finished_by_id))
+        && !bead.labels.iter().any(|label| {
+            is_manual_block_label(label)
+                || is_deferred_label(label)
+                || is_human_like_label(label, &[])
+        })
+        && active_quarantine_until(bead, now).is_none()
 }
 
 /// Explain every exclusion that can be inferred from the inventory and the
@@ -420,6 +457,42 @@ fn is_deferred_label(label: &str) -> bool {
     label == "deferred" || label.starts_with("deferred:")
 }
 
+/// Parse a `quarantine-until:<rfc3339>` label into its expiry instant.
+///
+/// ADR-022 quarantine is an *expiring label*, not a status: once the instant
+/// passes the bead is claimable again without anyone editing it. A label whose
+/// timestamp does not parse is treated as absent — never as an active
+/// quarantine — so a malformed label cannot starve a bead forever. The prefix
+/// is matched case-insensitively; the timestamp is passed to the parser as
+/// written.
+pub(crate) fn quarantine_until(label: &str) -> Option<chrono::DateTime<Utc>> {
+    const PREFIX: &str = "quarantine-until:";
+    let trimmed = label.trim();
+    if trimmed.len() < PREFIX.len() || !trimmed[..PREFIX.len()].eq_ignore_ascii_case(PREFIX) {
+        return None;
+    }
+    chrono::DateTime::parse_from_rfc3339(trimmed[PREFIX.len()..].trim())
+        .ok()
+        .map(|dt| dt.with_timezone(&Utc))
+}
+
+/// The bead's active quarantine expiry, if any.
+///
+/// When several `quarantine-until` labels are present (a round was applied
+/// without removing the previous one) the latest instant governs, matching how
+/// `quarantine-round` is read as the maximum. Returns `None` once the latest
+/// window has passed.
+pub(crate) fn active_quarantine_until(
+    bead: &Bead,
+    now: chrono::DateTime<Utc>,
+) -> Option<chrono::DateTime<Utc>> {
+    bead.labels
+        .iter()
+        .filter_map(|label| quarantine_until(label))
+        .max()
+        .filter(|until| *until > now)
+}
+
 fn is_human_like_label(label: &str, exclude_labels: &[String]) -> bool {
     let label = normalized_label(label);
     if is_deferred_label(&label) || is_manual_block_label(&label) {
@@ -474,20 +547,42 @@ fn collect_stale_assignee_beads(beads: &[Bead]) -> Vec<BeadId> {
         .collect()
 }
 
-/// Write auto-repair failure diagnostic to the target workspace.
+/// Where Pluck's per-workspace diagnostics live: under NEEDLE's own home,
+/// never inside the target repository.
+///
+/// Pluck evaluates every workspace in the fleet; writing `.beads/*.json` into
+/// each of them leaves untracked files in shared checkouts (that is exactly
+/// what happened to NEEDLE's own tree) and violates the long-standing contract
+/// that starvation detection does not modify the workspace it is reporting on.
+/// The layout mirrors the harness convention of one directory per workspace
+/// path, slugged: `~/.needle/diagnostics/<slug>/`.
+fn needle_diagnostics_dir(workspace: &str) -> PathBuf {
+    let target = if workspace.is_empty() {
+        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
+    } else {
+        PathBuf::from(workspace)
+    };
+    let slug: String = target
+        .to_string_lossy()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/tmp"));
+    home.join(".needle")
+        .join("diagnostics")
+        .join(slug.trim_matches('-'))
+}
+
+/// Write the auto-repair failure diagnostic under NEEDLE's diagnostics dir for this workspace.
 fn write_repair_failure_diagnostic(
     workspace: &str,
     error: &anyhow::Error,
     stats: &FilteringStats,
     worker_id: &str,
 ) -> Result<()> {
-    let target_workspace = if workspace.is_empty() {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
-    } else {
-        PathBuf::from(workspace)
-    };
-
-    let failure_dir = target_workspace.join(".beads").join("starvation-failures");
+    let failure_dir = needle_diagnostics_dir(workspace).join("starvation-failures");
     std::fs::create_dir_all(&failure_dir).with_context(|| {
         format!(
             "failed to create starvation failure directory: {}",
@@ -608,13 +703,7 @@ fn write_pluck_diagnostic(
     all_beads: &[Bead],
     exclude_ids: &HashSet<BeadId>,
 ) -> Result<()> {
-    let target_workspace = if workspace.is_empty() {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
-    } else {
-        PathBuf::from(workspace)
-    };
-
-    let diagnostics_dir = target_workspace.join(".beads");
+    let diagnostics_dir = needle_diagnostics_dir(workspace);
     std::fs::create_dir_all(&diagnostics_dir).with_context(|| {
         format!(
             "failed to create diagnostics directory: {}",
@@ -1012,15 +1101,10 @@ impl PluckStrand {
             .iter()
             .map(|bead| (bead.id.clone(), bead.status.is_done()))
             .collect();
+        let status_only_now = Utc::now();
         let candidates: Vec<Bead> = inventory
             .into_iter()
-            .filter(|bead| {
-                bead.status == crate::types::BeadStatus::Open
-                    && !bead
-                        .dependencies
-                        .iter()
-                        .any(|dependency| dependency_is_blocking(dependency, &finished_by_id))
-            })
+            .filter(|bead| passes_never_relaxed_constraints(bead, &finished_by_id, status_only_now))
             .collect();
         tracing::debug!(
             tier = tier.name(),
@@ -1044,12 +1128,17 @@ impl PluckStrand {
         tracing::warn!(
             tier = tier.name(),
             dropped_constraints = ?tier.dropped_constraints(),
-            "Pluck returned zero candidates but open beads exist; activating automatic bypass to surface oldest open bead"
+            "Pluck returned zero candidates but open beads exist; surfacing the oldest open bead that still passes the never-relaxed constraints"
         );
         let inventory = store.starvation_inventory().await?;
+        let finished_by_id: HashMap<BeadId, bool> = inventory
+            .iter()
+            .map(|bead| (bead.id.clone(), bead.status.is_done()))
+            .collect();
+        let oldest_open_now = Utc::now();
         let open_beads: Vec<&Bead> = inventory
             .iter()
-            .filter(|bead| is_open_work_bead(bead))
+            .filter(|bead| passes_never_relaxed_constraints(bead, &finished_by_id, oldest_open_now))
             .collect();
 
         if open_beads.is_empty() {
@@ -1644,44 +1733,78 @@ impl super::Strand for PluckStrand {
             });
         }
 
+        // 2b. Filter: drop beads under an active expiring quarantine (ADR-022).
+        //     Quarantine is a property of the work, not of this worker's
+        //     preferences, so no relaxation tier drops it. An expired window
+        //     makes the bead eligible again with no label edit — that is the
+        //     point of the expiring form — so only the *latest* future
+        //     `quarantine-until` excludes.
+        let quarantine_now = Utc::now();
+        let before_quarantine_filter = candidates.len();
+        let quarantined: Vec<(String, chrono::DateTime<Utc>)> = candidates
+            .iter()
+            .filter_map(|b| {
+                active_quarantine_until(b, quarantine_now)
+                    .map(|until| (b.id.as_ref().to_string(), until))
+            })
+            .collect();
+        candidates.retain(|b| active_quarantine_until(b, quarantine_now).is_none());
+        let after_quarantine_filter = candidates.len();
+        let quarantine_excluded_count = before_quarantine_filter - after_quarantine_filter;
+        if quarantine_excluded_count > 0 {
+            stats.excluded_count += quarantine_excluded_count;
+            for (id, until) in &quarantined {
+                tracing::debug!(
+                    bead_id = %id,
+                    quarantine_until = %until.to_rfc3339(),
+                    "Excluded bead under active quarantine"
+                );
+                stats
+                    .exclusion_reasons
+                    .push(format!("quarantine-until:{}", until.to_rfc3339()));
+            }
+        } else {
+            tracing::debug!(
+                count = after_quarantine_filter,
+                "No beads excluded by quarantine filter"
+            );
+        }
+        filter_stages.push(FilterStage {
+            stage_name: "quarantine_filter".to_string(),
+            before_count: before_quarantine_filter,
+            after_count: after_quarantine_filter,
+            filtered_count: quarantine_excluded_count,
+            filter_reasons: quarantined
+                .iter()
+                .map(|(id, until)| format!("{}:quarantine-until:{}", id, until.to_rfc3339()))
+                .collect(),
+        });
+
         // 3. Apply the normal readiness guards unless the final fallback was
         // selected. The status-only tier intentionally keeps `status=open` as
         // its sole filter, including beads with stale assignees.
         let before_status_filter = candidates.len();
 
-        let excluded_by_status: Vec<_> = if relaxation_tier == RelaxationTier::StatusOnly {
-            candidates
-                .iter()
-                .filter(|b| b.status != crate::types::BeadStatus::Open)
-                .map(|b| (b.id.as_ref().to_string(), format!("status:{}", b.status)))
-                .collect()
-        } else {
-            candidates
-                .iter()
-                .filter(|b| {
-                    matches!(b.status, crate::types::BeadStatus::InProgress)
-                        || (b.status == crate::types::BeadStatus::Open && b.assignee.is_some())
-                })
-                .map(|b| {
-                    let reason = if matches!(b.status, crate::types::BeadStatus::InProgress) {
-                        "status:in_progress".to_string()
-                    } else {
-                        format!("assignee:{}", b.assignee.as_ref().unwrap())
-                    };
-                    (b.id.as_ref().to_string(), reason)
-                })
-                .collect()
-        };
+        // One rule for every tier, relaxation included: a candidate must be Open
+        // and unassigned. Status and assignee are properties of the work — an
+        // assignee is claim ownership (ADR-018) — so no tier may drop them.
+        // The backend's ready frontier normally guarantees this; the guard
+        // exists for backends that do not.
+        let excluded_by_status: Vec<_> = candidates
+            .iter()
+            .filter(|b| b.status != crate::types::BeadStatus::Open || b.assignee.is_some())
+            .map(|b| {
+                let reason = if b.status != crate::types::BeadStatus::Open {
+                    format!("status:{}", b.status)
+                } else {
+                    format!("assignee:{}", b.assignee.as_deref().unwrap_or("?"))
+                };
+                (b.id.as_ref().to_string(), reason)
+            })
+            .collect();
 
         // Second pass: perform the actual filtering.
-        if relaxation_tier == RelaxationTier::StatusOnly {
-            candidates.retain(|b| b.status == crate::types::BeadStatus::Open);
-        } else {
-            candidates.retain(|b| {
-                !(matches!(b.status, crate::types::BeadStatus::InProgress)
-                    || (b.status == crate::types::BeadStatus::Open && b.assignee.is_some()))
-            });
-        }
+        candidates.retain(|b| b.status == crate::types::BeadStatus::Open && b.assignee.is_none());
         let after_status_filter = candidates.len();
 
         if before_status_filter != after_status_filter {
@@ -1852,6 +1975,21 @@ impl super::Strand for PluckStrand {
                 stats.excluded_count = inventory_stats.excluded_count;
                 stats.exclusion_counts = inventory_stats.exclusion_counts;
                 stats.stale_assignee_beads = inventory_stats.stale_assignee_beads;
+
+                // The candidate-stage filters only explain beads the backend
+                // returned. Beads the backend itself withheld (excluded label,
+                // open blocker, assignee) never reached them, so the starvation
+                // report would name one cause and omit the others. Explain
+                // every open bead from the inventory instead.
+                for bead in beads.iter().filter(|b| is_open_work_bead(b)) {
+                    for reason in
+                        exclusion_reasons_for_bead(bead, beads, &self.exclude_labels, exclusions)
+                    {
+                        if !stats.exclusion_reasons.contains(&reason) {
+                            stats.exclusion_reasons.push(reason);
+                        }
+                    }
+                }
             }
 
             // Refresh the strand's observable statistics after the inventory
@@ -1902,6 +2040,17 @@ impl super::Strand for PluckStrand {
                     // Re-query candidates after successful repair
                     match self.query_with_relaxation(store).await {
                         Ok((mut repaired_candidates, repaired_tier)) => {
+                            // The re-queried set must pass the same guards as the first
+                            // query. A repair that did not actually release a bead
+                            // (store refused, race, mock) must not turn into a claim on
+                            // a bead another worker still holds.
+                            let repaired_now = Utc::now();
+                            repaired_candidates.retain(|b| {
+                                b.status == crate::types::BeadStatus::Open
+                                    && b.assignee.is_none()
+                                    && !b.labels.iter().any(|l| label_exclusions.contains(l))
+                                    && active_quarantine_until(b, repaired_now).is_none()
+                            });
                             if !repaired_candidates.is_empty() {
                                 tracing::info!(
                                     candidate_count = repaired_candidates.len(),
@@ -2165,13 +2314,7 @@ fn write_query_execution_diagnostic(
     final_candidate_count: usize,
     worker_id: &str,
 ) -> Result<()> {
-    let target_workspace = if workspace.is_empty() {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
-    } else {
-        PathBuf::from(workspace)
-    };
-
-    let diagnostics_dir = target_workspace.join(".beads");
+    let diagnostics_dir = needle_diagnostics_dir(workspace);
     std::fs::create_dir_all(&diagnostics_dir).with_context(|| {
         format!(
             "failed to create diagnostics directory: {}",
@@ -2866,6 +3009,117 @@ mod tests {
     // Filtering
     // ──────────────────────────────────────────────────────────────────────────
 
+    // ── ADR-022 expiring-label quarantine (needle-40c6c60e, Pluck half) ──────
+
+    #[test]
+    fn quarantine_until_parses_rfc3339_and_ignores_malformed() {
+        let ts = "2026-09-05T22:00:00+00:00";
+        assert_eq!(
+            quarantine_until(&format!("quarantine-until:{ts}")).map(|d| d.to_rfc3339()),
+            Some(ts.to_string())
+        );
+        // prefix is case-insensitive, surrounding whitespace tolerated
+        assert!(quarantine_until(&format!("  Quarantine-Until: {ts} ")).is_some());
+        // not this label at all
+        assert!(quarantine_until("quarantined").is_none());
+        assert!(quarantine_until("quarantine-round:2").is_none());
+        // malformed timestamp is ABSENT, never active (cannot starve a bead)
+        assert!(quarantine_until("quarantine-until:tomorrow").is_none());
+        assert!(quarantine_until("quarantine-until:").is_none());
+    }
+
+    #[test]
+    fn active_quarantine_until_uses_latest_label_and_expires() {
+        let now = Utc::now();
+        let past = (now - chrono::Duration::hours(1)).to_rfc3339();
+        let soon = (now + chrono::Duration::hours(2)).to_rfc3339();
+        let later = (now + chrono::Duration::hours(4)).to_rfc3339();
+
+        let expired = make_bead_with_labels(
+            "expired",
+            1,
+            vec![
+                "quarantined",
+                &format!("quarantine-until:{past}"),
+                "quarantine-round:1",
+            ],
+        );
+        assert!(
+            active_quarantine_until(&expired, now).is_none(),
+            "expired window frees the bead"
+        );
+
+        // a bare `quarantined` label without a window never excludes on its own
+        let bare = make_bead_with_labels("bare", 1, vec!["quarantined"]);
+        assert!(active_quarantine_until(&bare, now).is_none());
+
+        let active = make_bead_with_labels("active", 1, vec![&format!("quarantine-until:{soon}")]);
+        assert!(active_quarantine_until(&active, now).is_some());
+
+        // two windows present: the latest governs (round applied without removing the old label)
+        let stacked = make_bead_with_labels(
+            "stacked",
+            1,
+            vec![
+                &format!("quarantine-until:{soon}"),
+                &format!("quarantine-until:{later}"),
+            ],
+        );
+        assert_eq!(
+            active_quarantine_until(&stacked, now).map(|d| d.to_rfc3339()),
+            Some(later)
+        );
+    }
+
+    #[tokio::test]
+    async fn beads_under_active_quarantine_are_filtered_and_expired_ones_return() {
+        let now = Utc::now();
+        let future = (now + chrono::Duration::hours(2)).to_rfc3339();
+        let past = (now - chrono::Duration::hours(1)).to_rfc3339();
+        let store = MemoryStore {
+            beads: vec![
+                make_bead_with_labels("normal-bead", 1, vec![]),
+                make_bead_with_labels(
+                    "quarantined-bead",
+                    1,
+                    vec![
+                        "quarantined",
+                        &format!("quarantine-until:{future}"),
+                        "quarantine-round:1",
+                    ],
+                ),
+                make_bead_with_labels(
+                    "expired-quarantine-bead",
+                    1,
+                    vec![
+                        "quarantined",
+                        &format!("quarantine-until:{past}"),
+                        "quarantine-round:1",
+                    ],
+                ),
+            ],
+        };
+
+        let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()));
+        let result = strand.evaluate(&store, &HashSet::new()).await;
+
+        match result {
+            StrandResult::BeadFound(beads) => {
+                let ids: Vec<&str> = beads.iter().map(|b| b.id.as_ref()).collect();
+                assert!(ids.contains(&"normal-bead"), "{ids:?}");
+                assert!(
+                    ids.contains(&"expired-quarantine-bead"),
+                    "an expired quarantine must make the bead claimable again without a label edit: {ids:?}"
+                );
+                assert!(
+                    !ids.contains(&"quarantined-bead"),
+                    "an active quarantine must be filtered: {ids:?}"
+                );
+            }
+            other => panic!("expected BeadFound, got: {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn beads_with_excluded_labels_are_filtered() {
         let store = MemoryStore {
@@ -2946,13 +3200,26 @@ mod tests {
             RelaxationTier::Priority.dropped_constraints(),
             &["worker label constraints", "priority constraints"]
         );
+        // Expectation updated with the fix for needle-b69a8466: no tier drops
+        // the assignee constraint any more. An assignee is claim ownership
+        // (ADR-018); relaxing it hands a bead another worker holds to this one,
+        // which is the duplicate-claim incident class, not starvation relief.
+        // The same holds for dependency safety, blocked/deferred/human labels
+        // and active quarantine — see `passes_never_relaxed_constraints`.
         assert_eq!(
             RelaxationTier::StatusOnly.dropped_constraints(),
             &[
                 "worker label constraints",
                 "priority constraints",
                 "backend ready-frontier constraints",
-                "assignee constraints"
+            ]
+        );
+        assert_eq!(
+            RelaxationTier::OldestOpen.dropped_constraints(),
+            &[
+                "worker label constraints",
+                "priority constraints",
+                "backend ready-frontier constraints",
             ]
         );
     }
@@ -4307,7 +4574,8 @@ mod tests {
         assert_eq!(
             initial_files.len(),
             final_files.len(),
-            "starvation detection should not create files in workspace"
+            "starvation detection should not create files in workspace; created: {:?}",
+            final_files
         );
 
         // Verify no state directory was created in the workspace
@@ -4499,6 +4767,7 @@ mod tests {
                 manual_blocked: 0,
                 human: 0,
                 deferred_assignee: 3,
+                quarantined: 0,
             },
             stale_assignee_beads: vec![],
         };
@@ -4524,6 +4793,7 @@ mod tests {
                 manual_blocked: 1,
                 human: 0,
                 deferred_assignee: 1,
+                quarantined: 0,
             },
             stale_assignee_beads: vec![],
         };
@@ -4545,6 +4815,7 @@ mod tests {
                 manual_blocked: 0,
                 human: 0,
                 deferred_assignee: 0,
+                quarantined: 0,
             },
             stale_assignee_beads: vec![],
         };
@@ -4570,6 +4841,7 @@ mod tests {
                 manual_blocked: 0,
                 human: 0,
                 deferred_assignee: 2,
+                quarantined: 0,
             },
             stale_assignee_beads: vec![],
         };

@@ -73,6 +73,14 @@ prevent duplicated work.
    claim, real work, closure and aligned checkpoint. Restore the remaining
    workers only after that cycle succeeds without a repeated task or sync error.
 
+The installed fleet also needs the live-claim reaping fixes tracked by
+`needle-a7372f9b`, `needle-8d14d0d1` and `needle-47a0afca` before rollout. During
+this implementation, cleanup released an active interactive claim and five
+running workers simultaneously reported that same bead. Checkpoint alignment
+cannot make an incorrect release safe. Reaping must verify current execution
+and claim ownership atomically; claim age or an absent fleet registration alone
+is insufficient evidence that an interactive owner has stopped working.
+
 Checkpoint transport must be coordinated with writers. bead-rs's
 `.beads/operation.lock` protects validation and ordinary mutations; checkpoint
 publication uses `.beads/checkpoint/publish.lock`. A transport replacing

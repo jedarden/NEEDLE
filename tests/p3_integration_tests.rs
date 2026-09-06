@@ -722,6 +722,9 @@ async fn knot_emits_starvation_telemetry_for_open_beads() {
         KnotConfig {
             exhaustion_threshold: 1,
             alert_cooldown_minutes: 60,
+            // This test asserts the terminal verdict on the threshold cycle;
+            // the transient-starvation backoff has its own unit tests in knot.rs.
+            starvation_backoff_minutes: 0,
             ..KnotConfig::default()
         },
         telemetry.clone(),

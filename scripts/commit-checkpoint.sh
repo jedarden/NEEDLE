@@ -21,6 +21,11 @@ fi
 
 COMMIT_MSG="$1"
 CHECKPOINT_DIR="$(git rev-parse --show-toplevel)/.beads/checkpoint"
+# Resolve $0-relative paths BEFORE the `cd "$CHECKPOINT_DIR"` below. $0 is
+# relative to the invoking shell's cwd, so after that cd it would resolve to
+# .beads/checkpoint/scripts/ and the cleanup call near the end would fail
+# with "No such file or directory" — aborting the whole run before staging.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # Verify we're in a git repo
 if ! git rev-parse --git-dir > /dev/null 2>&1; then
@@ -87,7 +92,6 @@ validate_object_exists "$PREVIOUS_ROOT"
 # Cleanup superseded checkpoint objects
 echo ""
 echo "Cleaning up superseded checkpoint objects..."
-SCRIPT_DIR="$(dirname "$0")"
 "$SCRIPT_DIR/cleanup-superseded-checkpoint-objects.sh"
 
 # Stage files for commit

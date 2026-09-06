@@ -245,6 +245,7 @@ static TIER_TABLE: &[(&str, ReloadTier)] = &[
     ("strands.splice.live_loop_window_secs", ReloadTier::Live),
     ("strands.knot.alert_cooldown_minutes", ReloadTier::Live),
     ("strands.knot.exhaustion_threshold", ReloadTier::Live),
+    ("strands.knot.starvation_backoff_minutes", ReloadTier::Live),
     ("strands.knot.retry_backoff_secs", ReloadTier::Live),
     (
         "strands.learning.trace_retention_failed_days",

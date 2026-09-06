@@ -1042,6 +1042,9 @@ async fn real_bead_rs_strand_waterfall_exhaustion() {
     config.workspace.default = workspace.path().to_path_buf();
     config.strands.explore.workspace_root = workspace.path().to_path_buf();
     config.strands.knot.exhaustion_threshold = 1;
+    // These tests assert the terminal verdict on the threshold cycle; the
+    // transient-starvation backoff has its own unit tests in knot.rs.
+    config.strands.knot.starvation_backoff_minutes = 0;
     let registry = Registry::new(workspace.path());
     let telemetry = test_telemetry("test-waterfall-exhaustion", workspace.path());
     let runner = StrandRunner::from_config(&config, "test-worker", registry, telemetry);
@@ -1146,6 +1149,9 @@ async fn real_bead_rs_strand_waterfall_exhaustion_with_telemetry_jsonl() {
     config.workspace.default = workspace.path().to_path_buf();
     config.strands.explore.workspace_root = workspace.path().to_path_buf();
     config.strands.knot.exhaustion_threshold = 1;
+    // These tests assert the terminal verdict on the threshold cycle; the
+    // transient-starvation backoff has its own unit tests in knot.rs.
+    config.strands.knot.starvation_backoff_minutes = 0;
     let registry = Registry::new(workspace.path());
     let worker_id = "test-waterfall-jsonl".to_string();
     let log_dir = workspace.path().join(".needle/logs");

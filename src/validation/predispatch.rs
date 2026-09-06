@@ -19,6 +19,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -49,6 +50,14 @@ pub struct PreDispatch {
     /// Used by the commit hook to detect when an agent sweeps in another
     /// worker's in-flight edit without modifying it.
     pub dirty_files: Vec<DirtyFile>,
+    /// Wall-clock moment the snapshot was taken, when known.
+    ///
+    /// Snapshots written before this field existed deserialize as `None`;
+    /// consumers treat that as "no time baseline" and fall back to their other
+    /// filters rather than failing. First consumer: `validation::dod_bypass`,
+    /// which ignores bypass-log entries recorded before the dispatch started.
+    #[serde(default)]
+    pub captured_at: Option<DateTime<Utc>>,
 }
 
 /// Hash a bead's `notes` field for comparison across a dispatch.
@@ -93,6 +102,9 @@ pub fn snapshot_path(workspace: &Path, bead_id: &BeadId) -> PathBuf {
 /// gate falls back to its conservative path later.
 pub async fn record(workspace: &Path, bead_id: &BeadId, store: &dyn BeadStore) -> Result<()> {
     let snapshot = PreDispatch {
+        // Captured first: this timestamp bounds which bypass-log entries can be
+        // attributed to this dispatch, so it must predate the agent's run.
+        captured_at: Some(Utc::now()),
         head_sha: git_head(workspace).await,
         notes_hash: read_notes(store, bead_id).await.map(|n| hash_notes(&n)),
         dirty_files: capture_dirty_files(workspace).await.unwrap_or_default(),
@@ -296,6 +308,36 @@ mod tests {
         serde_json::from_slice(&raw).ok()
     }
 
+    /// Snapshots written before `captured_at` existed must keep loading: the
+    /// field is `#[serde(default)]`, so a pre-upgrade file round-trips as
+    /// `None` and consumers treat that as "no time baseline" rather than
+    /// failing to read the baseline at all.
+    #[tokio::test]
+    async fn snapshot_without_captured_at_loads_as_none() {
+        let root = TempDir::new().unwrap();
+        let ws = TempDir::new().unwrap();
+        let bead = BeadId::from("bf-old");
+        let path = snapshot_path_in(root.path(), ws.path(), &bead);
+        tokio::fs::create_dir_all(path.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(
+            &path,
+            br#"{"head_sha":"abc123","notes_hash":"def456","dirty_files":[]}"#,
+        )
+        .await
+        .unwrap();
+
+        let loaded = load_at(root.path(), ws.path(), &bead).await.unwrap();
+        assert_eq!(loaded.head_sha.as_deref(), Some("abc123"));
+        // The known fields must survive alongside the defaulted one — a
+        // snapshot that loads but loses its baseline fields is worse than one
+        // that fails to load, because consumers cannot tell the difference.
+        assert_eq!(loaded.notes_hash.as_deref(), Some("def456"));
+        assert!(loaded.dirty_files.is_empty());
+        assert!(loaded.captured_at.is_none());
+    }
+
     #[tokio::test]
     async fn roundtrips_a_snapshot() {
         let root = TempDir::new().unwrap();
@@ -306,6 +348,7 @@ mod tests {
             head_sha: Some("deadbeef".to_string()),
             notes_hash: Some(hash_notes("investigated, nothing to change")),
             dirty_files: vec![],
+            captured_at: Some(Utc::now()),
         };
         write_at(root.path(), ws.path(), &bead, &snapshot).await;
 
@@ -364,6 +407,7 @@ mod tests {
                 head_sha: None,
                 notes_hash: None,
                 dirty_files: vec![],
+                captured_at: None,
             },
         )
         .await;
@@ -828,6 +872,7 @@ mod tests {
                     blob_hash: "789xyz012".to_string(),
                 },
             ],
+            captured_at: Some(Utc::now()),
         };
 
         write_at(root.path(), ws.path(), &bead, &snapshot).await;

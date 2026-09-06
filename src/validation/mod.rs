@@ -12,8 +12,15 @@
 //!
 //! Custom gates can be registered at runtime by calling [`GateRegistry::register`].
 //!
+//! # Native checks
+//!
+//! [`dod_bypass`] is not a configured gate: the outcome handler runs it
+//! directly after the shipped-work check, so it needs no entry in
+//! `.needle.yaml` and never depends on a commit message naming the bead.
+//!
 //! Inspired by bg-gate (docs/research/bg-gate-validation.md).
 
+pub mod dod_bypass;
 pub mod predispatch;
 mod shipped_work;
 pub mod worker_config;

@@ -246,8 +246,10 @@ impl KnotStrand {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         if let Some(first_detected) = *guard {
-            // Use a random backoff between 5-15 minutes (jittered)
-            let backoff_minutes = 5 + (first_detected.timestamp() % 10); // 5-14 minutes based on timestamp
+            let backoff_minutes = self.backoff_minutes_for(first_detected);
+            if backoff_minutes == 0 {
+                return false;
+            }
             let backoff_duration = chrono::Duration::minutes(backoff_minutes);
             Utc::now() - first_detected < backoff_duration
         } else {
@@ -275,16 +277,29 @@ impl KnotStrand {
         *guard = None;
     }
 
+    /// Backoff window for a detection made at `first_detected`, in minutes.
+    ///
+    /// `starvation_backoff_minutes` plus 0–9 minutes of deterministic jitter
+    /// (derived from the detection timestamp so it is stable across cycles),
+    /// or exactly 0 when the backoff is disabled in config.
+    fn backoff_minutes_for(&self, first_detected: DateTime<Utc>) -> i64 {
+        let base = self.config.starvation_backoff_minutes as i64;
+        if base == 0 {
+            0
+        } else {
+            base + (first_detected.timestamp() % 10)
+        }
+    }
+
     /// Get the backoff window duration in minutes (for logging).
     fn backoff_window_minutes(&self) -> i64 {
         let guard = self
             .first_starvation_detected_at
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if let Some(first_detected) = *guard {
-            5 + (first_detected.timestamp() % 10)
-        } else {
-            0
+        match *guard {
+            Some(first_detected) => self.backoff_minutes_for(first_detected),
+            None => 0,
         }
     }
 
@@ -435,8 +450,12 @@ impl super::Strand for KnotStrand {
             } = &diagnosis
             {
                 if cycle >= self.config.exhaustion_threshold && !self.is_within_cooldown() {
-                    // First time reaching threshold - record detection and enter backoff
-                    if cycle == self.config.exhaustion_threshold {
+                    // First time reaching threshold - record detection and enter backoff.
+                    // With the backoff disabled (starvation_backoff_minutes = 0) the
+                    // verdict is terminal on this very cycle: fall through to emit.
+                    if cycle == self.config.exhaustion_threshold
+                        && self.config.starvation_backoff_minutes > 0
+                    {
                         self.record_first_starvation_detection();
                         tracing::info!(
                             workspace = %workspace,
@@ -445,7 +464,9 @@ impl super::Strand for KnotStrand {
                             backoff_window_minutes = self.backoff_window_minutes(),
                             "starvation threshold reached — entering backoff window to confirm persistence"
                         );
-                    } else if self.is_within_backoff_window() {
+                    } else if self.config.starvation_backoff_minutes > 0
+                        && self.is_within_backoff_window()
+                    {
                         // Still within backoff window - continue waiting
                         tracing::info!(
                             workspace = %workspace,
@@ -772,6 +793,8 @@ mod tests {
             alert_destination: None,
             alert_cooldown_minutes: 60,
             exhaustion_threshold: 3,
+            // The backoff unit tests below exercise the default (jittered) window.
+            starvation_backoff_minutes: KnotConfig::default().starvation_backoff_minutes,
         }
     }
 

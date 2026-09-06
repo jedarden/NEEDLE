@@ -21,7 +21,10 @@ use crate::fingerprint::{
 use crate::gate_health;
 use crate::telemetry::{EventKind, Telemetry};
 use crate::types::{AgentOutcome, Bead, BeadAction, BeadId, BeadStatus, HandlerResult, Outcome};
-use crate::validation::{verify_shipped_work, GateConfig, GateReport, GateResult, ValidationGate};
+use crate::validation::{
+    dod_bypass, predispatch, verify_shipped_work, GateConfig, GateReport, GateResult,
+    ValidationGate,
+};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // classify (convenience re-export)
@@ -557,22 +560,67 @@ impl OutcomeHandler {
                             return self.handle_gate_failure(store, bead, &report).await;
                         }
                         Ok(crate::validation::GateResult::Pass) => {
+                            // Shipped work verified — but a bypass of the
+                            // Definition-of-Done hook during this dispatch is
+                            // still a failed gate, whatever the commit
+                            // contains. Checked here rather than as a
+                            // configured gate so it never depends on a commit
+                            // message naming the bead; it routes through the
+                            // same failure path and counts toward quarantine
+                            // like any other gate failure.
+                            let snapshot = predispatch::load(&bead.workspace, &bead.id).await;
+                            match dod_bypass::check_dod_bypass(&bead.workspace, snapshot.as_ref())
+                                .await
+                            {
+                                Ok(GateResult::Fail(reason)) => {
+                                    tracing::warn!(
+                                        bead_id = %bead.id,
+                                        reason = %reason,
+                                        "bead closed but a DoD bypass was recorded during \
+                                         dispatch — failing the dispatch"
+                                    );
+                                    let report =
+                                        GateReport::single_failure(dod_bypass::GATE_NAME, reason);
+                                    return self.handle_gate_failure(store, bead, &report).await;
+                                }
+                                Ok(_) => {}
+                                Err(e) => {
+                                    tracing::warn!(
+                                        bead_id = %bead.id,
+                                        error = %e,
+                                        "DoD bypass check errored — failing open"
+                                    );
+                                }
+                            }
+
                             // Shipped-work check passed — reset failure count now that we're
                             // certain the bead is properly closed and shipped.
                             let _ = self.reset_failure_count(store, bead).await;
                         }
                         Ok(crate::validation::GateResult::ExecutionError { command, reason }) => {
+                            // A gate that could not run is not a gate that
+                            // failed (needle-4aaa010c): release without touching
+                            // the failure count, so an unsatisfiable check —
+                            // e.g. a workspace with no upstream configured
+                            // (GitHub issue #18) — cannot burn the retry counter
+                            // toward quarantine or feed mitosis on work the gate
+                            // never judged.
                             tracing::warn!(
                                 bead_id = %bead.id,
                                 command = %command,
                                 reason = %reason,
-                                "shipped-work gate execution error — releasing without incrementing failure count"
+                                "shipped-work gate could not run — releasing without incrementing failure count"
                             );
-                            let report = GateReport::single_failure(
-                                "shipped_work",
-                                format!("execution error: {}", reason),
-                            );
-                            return self.handle_gate_failure(store, bead, &report).await;
+                            return self
+                                .handle_gate_error(
+                                    store,
+                                    bead,
+                                    &bead.workspace.display().to_string(),
+                                    "shipped_work",
+                                    &command,
+                                    &reason,
+                                )
+                                .await;
                         }
                         Err(e) => {
                             tracing::warn!(
@@ -2598,6 +2646,105 @@ mod tests {
                 |a| matches!(a, StoreAction::RemoveLabel(_, label) if label == "failure-count:1")
             ),
             "should remove old failure-count:1"
+        );
+    }
+
+    /// A shipped-work gate that CANNOT RUN must not be judged as a failure.
+    ///
+    /// GitHub issue #18: with no upstream configured, the shipped-work gate
+    /// cannot verify a push at all. Its `ExecutionError` must release the bead
+    /// WITHOUT incrementing the failure count (the needle-4aaa010c precedent)
+    /// — otherwise every closure in a workspace with no remote burns the
+    /// retry counter toward quarantine and feeds mitosis with work the gate
+    /// never judged. Regression: this arm routed to `handle_gate_failure`
+    /// while its own log line claimed otherwise.
+    #[tokio::test]
+    async fn shipped_work_execution_error_releases_without_incrementing_failure_count() {
+        // The gate reads its predispatch snapshot and records gate health under
+        // $HOME/.needle/state — pin HOME to a private dir for the whole body.
+        let _env = crate::util::test_env::isolate_env();
+        let home = tempfile::TempDir::new().unwrap();
+        std::env::set_var("HOME", home.path());
+
+        // A real repo with a substantial new commit and NO upstream: exactly
+        // the shape the gate cannot judge.
+        let repo = tempfile::TempDir::new().unwrap();
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .output()
+                .unwrap()
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "test@example.com"]);
+        run(&["config", "user.name", "test"]);
+        std::fs::write(repo.path().join("README.md"), "init\n").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "init"]);
+        let pre_sha = String::from_utf8(run(&["rev-parse", "HEAD"]).stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+        std::fs::write(repo.path().join("src.rs"), "fn main() {}\n").unwrap();
+        run(&["add", "-A"]);
+        run(&["commit", "-q", "-m", "real work"]);
+        // No remote, no `push -u` — `@{u}` does not resolve.
+
+        // The dispatch baseline: HEAD was pre_sha, notes were empty.
+        let mut bead = test_bead(BeadStatus::InProgress);
+        bead.workspace = repo.path().to_path_buf();
+        let snapshot = crate::validation::predispatch::PreDispatch {
+            head_sha: Some(pre_sha),
+            notes_hash: Some(crate::validation::predispatch::hash_notes("")),
+            dirty_files: Vec::new(),
+            captured_at: None,
+        };
+        let snap_path = crate::validation::predispatch::snapshot_path(repo.path(), &bead.id);
+        std::fs::create_dir_all(snap_path.parent().unwrap()).unwrap();
+        std::fs::write(&snap_path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+
+        let mut config = Config::default();
+        config.worker.enforce_shipped_work = true;
+        let helper = crate::telemetry::test_utils::TestHelper::new("shipped-gate-error-test");
+        let handler = OutcomeHandler::new(config, helper.telemetry().clone());
+        let store =
+            MockBeadStore::new(BeadStatus::Done).with_labels(vec!["failure-count:2".to_string()]);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+
+        assert_eq!(result.outcome, Outcome::Success);
+        // Released (the gate-error action), not reopened or quarantined.
+        assert_eq!(result.bead_action, BeadAction::Released);
+
+        // The unsatisfiable check must not burn the failure counter, label the
+        // bead as a verification failure, or cycle it.
+        let actions = store.actions();
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, StoreAction::AddLabel(_, label)
+                if label.starts_with("failure-count")
+                    || label == "cycling"
+                    || label == "deferred"
+                    || label == "verification-failed")),
+            "a gate that could not run must not increment the failure count \
+             or label the bead: {actions:?}"
+        );
+
+        // And it must have gone out through the gate-error path, not silently.
+        helper.sync().await;
+        assert!(
+            !helper.events_by_type("gate.execution_error").is_empty(),
+            "shipped-work gate that cannot run must emit gate.execution_error, got: {:?}",
+            helper
+                .all_events()
+                .iter()
+                .map(|e| e.event_type.clone())
+                .collect::<Vec<_>>()
         );
     }
 

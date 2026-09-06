@@ -195,9 +195,9 @@ needle_warn_bypass() {
     printf '\n' >&2
     printf '  The fast lane is scoped to the paths a commit stages, so it no\n' >&2
     printf '  longer fails for another worker'"'"'s in-flight file. A bypass now\n' >&2
-    printf '  means skipping checks on YOUR OWN changes, and\n' >&2
-    printf '  gate-no-dod-bypass.sh fails the dispatch of any bead whose commit\n' >&2
-    printf '  is in that log.\n\n' >&2
+    printf '  means skipping checks on YOUR OWN changes, and the DoD-bypass\n' >&2
+    printf '  check in the outcome handler fails the dispatch of any bead whose\n' >&2
+    printf '  commit is in that log.\n\n' >&2
 }
 
 needle_git_state_dir() {

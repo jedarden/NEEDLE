@@ -166,10 +166,13 @@ carrying a `commit_sha` are bypasses; the same log holds a legacy
 `{timestamp, lane, pwd}` row that is not one, and counting every line
 overstates the figure roughly eightfold.
 
-**A bypass is a failed dispatch (2026-08-30).** The `no-dod-bypass` gate in
-`.needle.yaml` (`scripts/gate-no-dod-bypass.sh`) fails any bead whose commits
-are listed there: the bead is released and the failure counts toward
-quarantine. `needle doctor` also reports any bypass from the last 7 days.
+**A bypass is a failed dispatch (2026-08-30).** The outcome handler runs a
+native DoD-bypass check (`src/validation/dod_bypass.rs`) after the
+shipped-work check: it fails any bead whose commits are listed in
+`.beads/bypasses.jsonl` with a sha committed since the dispatch started —
+keyed on the pre-dispatch snapshot, not on a commit message naming the bead.
+The bead is released and the failure counts toward quarantine. `needle doctor`
+also reports any bypass from the last 7 days.
 
 **"The hook is red because of another worker's file" is no longer a reason to
 bypass (2026-08-31).** That was the cause of all 78 recorded bypasses — 62 on

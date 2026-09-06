@@ -27,6 +27,18 @@
 //! version-bump commits. Recording that kind of status belongs on the bead
 //! through the workspace's configured backend, not in git history.
 //!
+//! # No upstream configured
+//!
+//! A workspace with no upstream for its branch (`git rev-parse @{u}` does not
+//! resolve — e.g. plain `git init`, or a remote added without `push -u`) gets
+//! `GateResult::ExecutionError`, not `Fail`. The gate literally cannot check a
+//! push there, so every closure would fail regardless of what the agent
+//! produced, burning the retry counter toward quarantine and mitosis splitting
+//! on unjudged work (GitHub issue #18: three correct commits rejected, parent
+//! split into seven children in ~70s). A gate that cannot run is not a gate
+//! that failed — the `handle_gate_error` precedent (needle-4aaa010c) releases
+//! without touching the failure count.
+//!
 //! # Why not `updated_at`
 //!
 //! The original fallback compared `post.updated_at > pre.updated_at`. That is
@@ -210,9 +222,20 @@ fn evaluate_external(snapshot: &predispatch::PreDispatch, post_notes: &str) -> R
     Ok(GateResult::Pass)
 }
 
+/// Probe that resolves the current branch's upstream ref, run on its own
+/// before the ancestry test. Failing here means "no upstream to compare
+/// against" (GitHub issue #18), which is a different verdict from "the commit
+/// is unpushed" and must not be reported as the latter.
+const UPSTREAM_PROBE_ARGS: &[&str] = &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"];
+
 /// Checks the git side. Returns `Ok(None)` to mean "no verdict from git,
 /// check the fallback" (no snapshot, no new commit, or only trivial paths
 /// changed) rather than a hard pass/fail.
+///
+/// A workspace with no upstream configured returns
+/// `GateResult::ExecutionError` instead of a verdict: the gate cannot run at
+/// all, and the caller releases without incrementing the failure count (see
+/// `outcome::handle_gate_error`).
 async fn check_commit(
     workspace: &Path,
     snapshot: Option<&predispatch::PreDispatch>,
@@ -241,15 +264,46 @@ async fn check_commit(
         return Ok(None); // Only notes/.beads touched — treat like no commit.
     }
 
-    let pushed = git_output(workspace, &["merge-base", "--is-ancestor", &head, "@{u}"])
-        .await
-        .is_ok();
+    // With no upstream configured, `@{u}` does not resolve and the ancestry
+    // test below would fail for ANY work: a workspace created with plain
+    // `git init` could never pass the gate, and every correct closure would be
+    // reported as "has not been pushed" (GitHub issue #18). Probe the upstream
+    // by name first and keep that outcome distinct — a gate that cannot run is
+    // not a gate that failed (needle-4aaa010c precedent).
+    let upstream = match git_output(workspace, UPSTREAM_PROBE_ARGS).await {
+        Ok(u) if !u.trim().is_empty() => u,
+        _ => {
+            let branch = git_output(workspace, &["rev-parse", "--abbrev-ref", "HEAD"])
+                .await
+                .unwrap_or_else(|_| "HEAD".to_string());
+            return Ok(Some(GateResult::ExecutionError {
+                command: format!("git {}", UPSTREAM_PROBE_ARGS.join(" ")),
+                reason: format!(
+                    "no upstream configured for branch '{}': the shipped-work gate cannot \
+                         verify that the commit was pushed, so this closure is not counted as a \
+                         failure. Remedy: `git push -u <remote> {}` — that publishes the branch \
+                         and sets its upstream in one step. If no remote exists yet, add one \
+                         first: `git remote add origin <url>` (adding a remote that already \
+                         exists is an error, so check `git remote -v` first).",
+                    branch, branch
+                ),
+            }));
+        }
+    };
+
+    let pushed = git_output(
+        workspace,
+        &["merge-base", "--is-ancestor", &head, &upstream],
+    )
+    .await
+    .is_ok();
     if pushed {
         Ok(Some(GateResult::Pass))
     } else {
         Ok(Some(GateResult::Fail(format!(
-            "commit {} has substantial changes but has not been pushed to the remote",
-            &head[..head.len().min(7)]
+            "commit {} has substantial changes but has not been pushed to its upstream {}",
+            &head[..head.len().min(7)],
+            upstream
         ))))
     }
 }
@@ -282,6 +336,7 @@ mod tests {
             head_sha: head.map(|s| s.to_string()),
             notes_hash: notes.map(hash_notes),
             dirty_files: Vec::new(),
+            captured_at: None,
         }
     }
 
@@ -447,11 +502,97 @@ mod tests {
 
         let snap = snapshot(Some(&head), Some(""));
         match evaluate(dir.path(), Some(&snap), "", false).await.unwrap() {
-            GateResult::Fail(reason) => assert!(reason.contains("not been pushed")),
+            GateResult::Fail(reason) => {
+                assert!(reason.contains("not been pushed"));
+                // The message names which upstream it was not pushed to.
+                assert!(
+                    reason.contains("origin/"),
+                    "failure reason should name the upstream ref: {reason}"
+                );
+            }
             GateResult::Pass => panic!("expected Fail for unpushed commit"),
             GateResult::ExecutionError { .. } => {
                 panic!("expected Pass or Fail, got ExecutionError")
             }
+        }
+    }
+
+    /// GitHub issue #18: a workspace with no remote at all (plain `git init`)
+    /// has no upstream, so `@{u}` does not resolve. That is a gate that cannot
+    /// run — `ExecutionError`, released without a failure increment — not a
+    /// `Fail` claiming the commit "has not been pushed".
+    #[tokio::test]
+    async fn no_upstream_reports_a_gate_that_cannot_run() {
+        let dir = TempDir::new().unwrap();
+        let head = init_repo(dir.path()).await; // no remote, no upstream
+        commit_files(dir.path(), &[("src.rs", "fn main() {}\n")], "real work");
+
+        let snap = snapshot(Some(&head), Some(""));
+        match evaluate(dir.path(), Some(&snap), "", false).await.unwrap() {
+            GateResult::ExecutionError { command, reason } => {
+                assert!(
+                    command.contains("@{u}"),
+                    "the probe that could not run should be named: {command}"
+                );
+                assert!(
+                    reason.contains("no upstream configured"),
+                    "reason should name the missing upstream: {reason}"
+                );
+                assert!(
+                    reason.contains("git remote add") && reason.contains("git push -u"),
+                    "reason should name the remedy: {reason}"
+                );
+                assert!(
+                    !reason.contains("has not been pushed"),
+                    "the missing-upstream verdict must not read as an unpushed commit: {reason}"
+                );
+            }
+            GateResult::Fail(reason) => {
+                panic!(
+                    "no-upstream workspace must not fail the gate (got: {reason}) — \
+                     an unverifiable push is not unshipped work"
+                );
+            }
+            GateResult::Pass => panic!("a gate that cannot run must not pass"),
+        }
+    }
+
+    /// A remote that was added but never pushed to (`git remote add` without
+    /// `push -u`) leaves the branch without an upstream too — same verdict as
+    /// having no remote at all.
+    #[tokio::test]
+    async fn remote_without_upstream_branch_also_reports_a_gate_that_cannot_run() {
+        let dir = TempDir::new().unwrap();
+        let bare = TempDir::new().unwrap();
+        let head = init_repo(dir.path()).await;
+        git(bare.path(), &["init", "-q", "--bare"]);
+        git(
+            dir.path(),
+            &["remote", "add", "origin", bare.path().to_str().unwrap()],
+        );
+        commit_files(dir.path(), &[("src.rs", "fn main() {}\n")], "real work");
+
+        let branch = git_output(dir.path(), &["rev-parse", "--abbrev-ref", "HEAD"])
+            .await
+            .unwrap();
+        let snap = snapshot(Some(&head), Some(""));
+        match evaluate(dir.path(), Some(&snap), "", false).await.unwrap() {
+            GateResult::ExecutionError { reason, .. } => {
+                assert!(
+                    reason.contains("no upstream configured"),
+                    "reason should name the missing upstream: {reason}"
+                );
+                // The message names the branch it could not check, so the
+                // remedy can be copied verbatim.
+                assert!(
+                    reason.contains(&format!("branch '{branch}'")),
+                    "reason should name the branch: {reason}"
+                );
+            }
+            GateResult::Fail(reason) => {
+                panic!("an unconfigured upstream must not read as an unpushed commit: {reason}")
+            }
+            GateResult::Pass => panic!("a gate that cannot run must not pass"),
         }
     }
 

@@ -36,8 +36,8 @@ if ! scripts/definition-of-done.sh --fast --count-bypass --changed-only; then
   echo "no longer blocks on other workers' in-flight files, so this is yours."
   echo ""
   echo "To bypass (not recommended), use: git commit --no-verify"
-  echo "This is recorded in .beads/bypasses.jsonl, and gate-no-dod-bypass.sh"
-  echo "fails the dispatch of any bead whose commit appears there."
+  echo "This is recorded in .beads/bypasses.jsonl, and the DoD-bypass check in"
+  echo "the outcome handler fails the dispatch of any bead whose commit is there."
   exit 1
 fi
 

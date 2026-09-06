@@ -4021,6 +4021,14 @@ pub struct KnotConfig {
     /// Number of consecutive terminal invisible-queue diagnoses before alerting.
     #[serde(default = "KnotConfig::default_exhaustion_threshold")]
     pub exhaustion_threshold: u64,
+    /// Transient-starvation backoff: once the exhaustion threshold is reached,
+    /// wait this many minutes (plus up to 9 minutes of deterministic jitter)
+    /// and re-confirm before emitting the terminal starvation verdict, so a
+    /// momentarily empty frontier (a claim in flight, a sync mid-way) does not
+    /// alert. `0` disables the backoff: the verdict is emitted on the cycle
+    /// that reaches the threshold. Default 5.
+    #[serde(default = "KnotConfig::default_starvation_backoff_minutes")]
+    pub starvation_backoff_minutes: u64,
 }
 
 impl Default for KnotConfig {
@@ -4029,6 +4037,7 @@ impl Default for KnotConfig {
             alert_destination: None,
             alert_cooldown_minutes: Self::default_alert_cooldown_minutes(),
             exhaustion_threshold: Self::default_exhaustion_threshold(),
+            starvation_backoff_minutes: Self::default_starvation_backoff_minutes(),
         }
     }
 }
@@ -4039,6 +4048,9 @@ impl KnotConfig {
     }
     fn default_exhaustion_threshold() -> u64 {
         3
+    }
+    fn default_starvation_backoff_minutes() -> u64 {
+        5
     }
 }
 

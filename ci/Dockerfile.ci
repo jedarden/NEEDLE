@@ -1,3 +1,16 @@
+# CI builder image for the NEEDLE Rust pipeline.
+#
+# Version contract: the tag produced from this image comes from ci/VERSION, and
+# every consumer template in declarative-config pins
+# ronaldraygun/needle-ci-builder:<ci/VERSION>-with-deps. Bump ci/VERSION only
+# together with those pins -- a VERSION bump without them, or a contents change
+# without a bump, leaves needle-ci pulling a tag that does not exist.
+#
+# Build trigger: the needle-ci-builder WorkflowTemplate's check-changed-files
+# step only rebuilds when the pushed commit touches Cargo.toml, Cargo.lock,
+# ci/Dockerfile.ci, ci/Dockerfile.ci-deps or ci/VERSION. A no-op edit to this
+# file is therefore the way to force a rebuild without disturbing that contract.
+
 FROM debian:bookworm
 
 # System deps
