@@ -273,11 +273,26 @@ fn passes_never_relaxed_constraints(
             .dependencies
             .iter()
             .any(|dependency| dependency_is_blocking(dependency, finished_by_id))
-        && !bead.labels.iter().any(|label| {
-            is_manual_block_label(label)
-                || is_deferred_label(label)
-                || is_human_like_label(label, &[])
-        })
+        && !bead
+            .labels
+            .iter()
+            .any(|label| is_never_relaxed_label(label))
+        && active_quarantine_until(bead, now).is_none()
+}
+
+/// Apply the never-relaxed guards that are not already inherent in the
+/// bead-store `ready()` contract.
+///
+/// `ready()` guarantees dependency safety, while this defensive filter keeps
+/// every ready-query tier from returning work that is assigned, non-open,
+/// operator-deferred, human-owned, manually blocked, or actively quarantined.
+fn passes_never_relaxed_ready_constraints(bead: &Bead, now: chrono::DateTime<Utc>) -> bool {
+    bead.status == crate::types::BeadStatus::Open
+        && bead.assignee.is_none()
+        && !bead
+            .labels
+            .iter()
+            .any(|label| is_never_relaxed_label(label))
         && active_quarantine_until(bead, now).is_none()
 }
 
@@ -508,6 +523,10 @@ fn is_human_like_label(label: &str, exclude_labels: &[String]) -> bool {
                 && !is_deferred_label(excluded)
                 && !is_manual_block_label(excluded)
         })
+}
+
+fn is_never_relaxed_label(label: &str) -> bool {
+    is_manual_block_label(label) || is_deferred_label(label) || is_human_like_label(label, &[])
 }
 
 fn workspace_from_inventory(beads: &[Bead]) -> String {
@@ -1073,7 +1092,12 @@ impl PluckStrand {
                 "Executing Pluck relaxation query"
             );
 
-            let candidates = store.ready(&relaxed_filters).await?;
+            let candidates: Vec<Bead> = store
+                .ready(&relaxed_filters)
+                .await?
+                .into_iter()
+                .filter(|bead| passes_never_relaxed_ready_constraints(bead, Utc::now()))
+                .collect();
             tracing::debug!(
                 tier = tier.name(),
                 count = candidates.len(),
@@ -1649,21 +1673,27 @@ impl super::Strand for PluckStrand {
         //    SELECTING→CLAIMING→RETRYING spin loop observed when br ready --json
         //    omits label fields for some beads.
         let before_label_filter = candidates.len();
-        let label_exclusions = if relaxation_tier.ignores_labels() {
+        let worker_label_exclusions = if relaxation_tier.ignores_labels() {
             &[]
         } else {
             self.exclude_labels.as_slice()
+        };
+        let label_is_excluded = |label: &str| {
+            is_never_relaxed_label(label)
+                || worker_label_exclusions
+                    .iter()
+                    .any(|excluded| excluded == label)
         };
 
         // First pass: collect excluded beads and their reasons for telemetry.
         let excluded_beads: Vec<_> = candidates
             .iter()
-            .filter(|b| b.labels.iter().any(|l| label_exclusions.contains(l)))
+            .filter(|b| b.labels.iter().any(|label| label_is_excluded(label)))
             .map(|b| {
                 let excluded_labels: Vec<_> = b
                     .labels
                     .iter()
-                    .filter(|l| label_exclusions.contains(l))
+                    .filter(|label| label_is_excluded(label))
                     .cloned()
                     .collect();
                 (b.id.as_ref().to_string(), excluded_labels)
@@ -1671,7 +1701,7 @@ impl super::Strand for PluckStrand {
             .collect();
 
         // Second pass: perform the actual filtering.
-        candidates.retain(|b| !b.labels.iter().any(|l| label_exclusions.contains(l)));
+        candidates.retain(|b| !b.labels.iter().any(|label| label_is_excluded(label)));
         let after_label_filter = candidates.len();
 
         if before_label_filter != after_label_filter {
@@ -1681,7 +1711,7 @@ impl super::Strand for PluckStrand {
             tracing::debug!(
                 excluded_count = label_excluded_count,
                 remaining = after_label_filter,
-                excluded_labels = ?label_exclusions,
+                worker_label_exclusions = ?worker_label_exclusions,
                 "Label filtering excluded {} beads",
                 label_excluded_count
             );
@@ -2045,11 +2075,19 @@ impl super::Strand for PluckStrand {
                             // (store refused, race, mock) must not turn into a claim on
                             // a bead another worker still holds.
                             let repaired_now = Utc::now();
+                            let repaired_worker_label_exclusions = if repaired_tier.ignores_labels()
+                            {
+                                &[]
+                            } else {
+                                self.exclude_labels.as_slice()
+                            };
                             repaired_candidates.retain(|b| {
-                                b.status == crate::types::BeadStatus::Open
-                                    && b.assignee.is_none()
-                                    && !b.labels.iter().any(|l| label_exclusions.contains(l))
-                                    && active_quarantine_until(b, repaired_now).is_none()
+                                passes_never_relaxed_ready_constraints(b, repaired_now)
+                                    && !b.labels.iter().any(|label| {
+                                        repaired_worker_label_exclusions
+                                            .iter()
+                                            .any(|excluded| excluded == label)
+                                    })
                             });
                             if !repaired_candidates.is_empty() {
                                 tracing::info!(
@@ -3144,7 +3182,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn custom_exclude_labels_override_defaults() {
+    async fn custom_exclude_labels_do_not_override_safety_defaults() {
         let store = MemoryStore {
             beads: vec![
                 make_bead_with_labels("deferred-bead", 1, vec!["deferred"]),
@@ -3153,7 +3191,8 @@ mod tests {
             ],
         };
 
-        // Custom excludes: only "wip" — "deferred" is NOT excluded.
+        // Custom worker preferences may replace other configured exclusions,
+        // but the operator-owned deferred quarantine is never relaxable.
         let strand = PluckStrand::new(
             vec!["wip".to_string()],
             Telemetry::new("test-worker".to_string()),
@@ -3163,8 +3202,8 @@ mod tests {
         match result {
             StrandResult::BeadFound(beads) => {
                 let ids: Vec<&str> = beads.iter().map(|b| b.id.as_ref()).collect();
-                assert!(ids.contains(&"deferred-bead"));
                 assert!(ids.contains(&"normal-bead"));
+                assert!(!ids.contains(&"deferred-bead"));
                 assert!(!ids.contains(&"custom-excluded"));
             }
             other => panic!("expected BeadFound, got: {other:?}"),
@@ -3174,19 +3213,41 @@ mod tests {
     #[tokio::test]
     async fn retries_with_worker_labels_relaxed_when_ready_is_empty() {
         let store = MemoryStore {
-            beads: vec![make_bead_with_labels("human-bead", 1, vec!["human"])],
+            beads: vec![make_bead_with_labels("wip-bead", 1, vec!["wip"])],
         };
 
-        let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()));
+        let strand = PluckStrand::new(
+            vec!["wip".to_string()],
+            Telemetry::new("test-worker".to_string()),
+        );
         let result = strand.evaluate(&store, &HashSet::new()).await;
 
         match result {
             StrandResult::BeadFound(beads) => {
                 assert_eq!(beads.len(), 1);
-                assert_eq!(beads[0].id.as_ref(), "human-bead");
+                assert_eq!(beads[0].id.as_ref(), "wip-bead");
             }
             other => panic!("expected relaxed query to find the bead, got: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn worker_label_relaxation_never_returns_safety_quarantined_beads() {
+        let store = MemoryStore {
+            beads: vec![
+                make_bead_with_labels("deferred-bead", 1, vec!["deferred"]),
+                make_bead_with_labels("human-bead", 1, vec!["human"]),
+                make_bead_with_labels("blocked-bead", 1, vec!["blocked"]),
+            ],
+        };
+
+        let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()));
+        let result = strand.evaluate(&store, &HashSet::new()).await;
+
+        assert!(
+            matches!(result, StrandResult::NoWork),
+            "safety-quarantined work escaped a relaxation tier: {result:?}"
+        );
     }
 
     #[test]
