@@ -1105,6 +1105,15 @@ impl Dispatcher {
         self
     }
 
+    /// Replace the bead store used by the final pre-spawn claim check.
+    ///
+    /// Roaming workers switch stores after Explore selects work from another
+    /// workspace. The dispatcher must follow that switch or its last claim
+    /// check queries the home workspace for a remote bead.
+    pub fn set_bead_store(&mut self, bead_store: Arc<dyn BeadStore>) {
+        self.bead_store = Some(bead_store);
+    }
+
     /// Set the worker ID for atomic claim verification.
     pub fn with_worker_id(mut self, worker_id: String) -> Self {
         self.worker_id = Some(worker_id);
@@ -1454,11 +1463,16 @@ impl Dispatcher {
                     );
                 }
                 Err(e) => {
-                    tracing::warn!(
+                    tracing::error!(
                         bead_id = %bead_id.as_ref(),
                         error = %e,
-                        "atomic claim verification query failed — proceeding with process spawn"
+                        "atomic claim verification query failed — aborting process spawn"
                     );
+                    return Err(anyhow::anyhow!(
+                        "claim verification query failed for bead {}: {}",
+                        bead_id,
+                        e
+                    ));
                 }
             }
         }

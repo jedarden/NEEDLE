@@ -2269,6 +2269,7 @@ impl Worker {
         .context("failed to create bead store for remote workspace")?;
         self.store = remote_store.clone();
         self.current_workspace = workspace.to_path_buf();
+        self.dispatcher.set_bead_store(remote_store.clone());
         self.claimer = Claimer::new(
             remote_store,
             std::path::PathBuf::from("/tmp"),
@@ -2292,6 +2293,7 @@ impl Worker {
             tracing::debug!("restoring home workspace store");
             self.store = self.home_store.clone();
             self.current_workspace = self.config.workspace.default.clone();
+            self.dispatcher.set_bead_store(self.home_store.clone());
             self.claimer = Claimer::new(
                 self.home_store.clone(),
                 std::path::PathBuf::from("/tmp"),
@@ -3020,7 +3022,8 @@ impl Worker {
         // This ensures the bead is still properly claimed by this worker and
         // hasn't been released, reassigned, or modified by another process.
         if let Some(ref bead) = self.current_bead {
-            if let Some(store) = self.dispatcher.bead_store() {
+            {
+                let store = &self.store;
                 let bead_id = bead.id.clone();
                 let worker_id = self.qualified_id();
 
@@ -3084,12 +3087,15 @@ impl Worker {
                         )?;
                     }
                     Err(e) => {
-                        // Failed to query claim status — log but proceed with dispatch.
-                        // This may be a transient error (store temporarily unavailable).
-                        tracing::warn!(
+                        tracing::error!(
                             bead_id = %bead_id.as_ref(),
                             error = %e,
-                            "failed to verify claim status against live store — proceeding with dispatch"
+                            "failed to verify claim status against live store — aborting dispatch"
+                        );
+                        bail!(
+                            "claim verification query failed for bead {}: {}",
+                            bead_id,
+                            e
                         );
                     }
                 }
@@ -9424,6 +9430,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn do_dispatch_fails_closed_when_live_claim_cannot_be_read() {
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut worker = make_worker(store);
+        worker.boot().await.unwrap();
+
+        let mut bead = make_test_bead("needle-unreadable-claim");
+        bead.status = BeadStatus::InProgress;
+        bead.assignee = Some(worker.qualified_id());
+        worker.current_bead = Some(bead);
+        worker.state = WorkerState::Dispatching;
+
+        let error = worker
+            .do_dispatch()
+            .await
+            .expect_err("an unreadable live claim must block dispatch");
+        assert!(error
+            .to_string()
+            .contains("claim verification query failed"));
+        assert_eq!(*worker.state(), WorkerState::Dispatching);
+    }
+
+    #[tokio::test]
     async fn do_execute_without_bead_is_invariant_error() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut worker = make_worker(store);
@@ -9828,6 +9856,30 @@ mod tests {
         assert!(Arc::ptr_eq(&worker.store, &worker.home_store));
         worker.restore_home_store();
         assert!(Arc::ptr_eq(&worker.store, &worker.home_store));
+        assert!(Arc::ptr_eq(
+            worker.dispatcher.bead_store().unwrap(),
+            &worker.home_store
+        ));
+    }
+
+    #[tokio::test]
+    async fn restore_home_store_also_resets_dispatch_verification_store() {
+        let home_store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut worker = make_worker(home_store.clone());
+        worker.boot().await.unwrap();
+
+        let remote_store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        worker.store = remote_store.clone();
+        worker.dispatcher.set_bead_store(remote_store);
+        worker.current_workspace = PathBuf::from("/tmp/remote-workspace");
+
+        worker.restore_home_store();
+
+        assert!(Arc::ptr_eq(&worker.store, &home_store));
+        assert!(Arc::ptr_eq(
+            worker.dispatcher.bead_store().unwrap(),
+            &home_store
+        ));
     }
 
     // ── do_select with exclusion set ──
