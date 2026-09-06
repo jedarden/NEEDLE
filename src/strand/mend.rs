@@ -8,7 +8,7 @@
 //! Depends on: `bead_store`, `config`, `health`, `peer`, `registry`,
 //!             `telemetry`, `types`, `trace`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
@@ -17,7 +17,7 @@ use chrono::{DateTime, Utc};
 
 use crate::bead_store::BeadStore;
 use crate::config::{LimitsConfig, MendConfig};
-use crate::health::HealthMonitor;
+use crate::health::{ExecutorLookup, HealthMonitor};
 use crate::learning::LearningsFile;
 use crate::peer::PeerMonitor;
 use crate::registry::Registry;
@@ -44,6 +44,7 @@ use crate::types::{Bead, BeadId, BeadStatus, StrandError, StrandResult};
 /// * `telemetry` - Telemetry emitter for orphan release events
 /// * `qualified_id` - This worker's fully-qualified identity (excluded from orphan detection)
 /// * `claim_ttl` - Optional claim TTL for age-based reclaim (None = dead-PID reclaim only)
+/// * `heartbeat_ttl` - Maximum heartbeat age that can prove a claim is active
 ///
 /// # Returns
 /// * `Ok(u32)` - Number of orphans released
@@ -54,8 +55,22 @@ pub async fn cleanup_orphaned_in_progress(
     telemetry: &Telemetry,
     qualified_id: &str,
     claim_ttl: Option<Duration>,
+    heartbeat_ttl: Duration,
 ) -> Result<u32> {
-    cleanup_in_progress(store, registry, telemetry, qualified_id, claim_ttl).await
+    let heartbeat_dir = registry
+        .path()
+        .parent()
+        .map(|state| state.join("heartbeats"));
+    cleanup_in_progress(
+        store,
+        registry,
+        telemetry,
+        qualified_id,
+        claim_ttl,
+        heartbeat_dir.as_deref(),
+        heartbeat_ttl,
+    )
+    .await
 }
 
 /// Test-only version that uses dead-PID reclaim only (no age-based threshold).
@@ -80,7 +95,16 @@ pub async fn cleanup_orphaned_in_progress_test_no_ttl(
     telemetry: &Telemetry,
     qualified_id: &str,
 ) -> Result<u32> {
-    cleanup_in_progress(store, registry, telemetry, qualified_id, None).await
+    cleanup_in_progress(
+        store,
+        registry,
+        telemetry,
+        qualified_id,
+        None,
+        None,
+        Duration::from_secs(300),
+    )
+    .await
 }
 
 /// Identify beads that are stale due to assignee overlap.
@@ -100,10 +124,20 @@ pub async fn cleanup_orphaned_in_progress_test_no_ttl(
 /// A `HashSet<BeadId>` containing the IDs of all beads that are stale due to
 /// assignee overlap (i.e., they are NOT the newest bead for their assignee).
 pub fn get_stale_by_assignee_overlap(all_beads: &[Bead]) -> HashSet<BeadId> {
+    get_stale_by_assignee_overlap_with_active(all_beads, &HashMap::new())
+}
+
+/// Identify superseded claims while preserving the claim a live worker's
+/// heartbeat says it is actually executing. The heartbeat wins over timestamp
+/// order because a leaked claim can be newer than the real long-running one.
+fn get_stale_by_assignee_overlap_with_active(
+    all_beads: &[Bead],
+    worker_current_beads: &HashMap<String, Option<BeadId>>,
+) -> HashSet<BeadId> {
     use std::collections::{HashMap, HashSet};
 
     // Step 1: For each assignee, find the newest (most recently updated) bead
-    let mut newest_bead_by_assignee: HashMap<String, (DateTime<Utc>, BeadId)> = HashMap::new();
+    let mut keeper_by_assignee: HashMap<String, (DateTime<Utc>, BeadId)> = HashMap::new();
     for bead in all_beads {
         if bead.status != BeadStatus::InProgress {
             continue;
@@ -112,12 +146,31 @@ pub fn get_stale_by_assignee_overlap(all_beads: &[Bead]) -> HashSet<BeadId> {
             Some(a) if !a.is_empty() => a,
             _ => continue,
         };
-        let entry = newest_bead_by_assignee
+        let entry = keeper_by_assignee
             .entry(assignee.clone())
             .or_insert((bead.updated_at, bead.id.clone()));
-        // Update if this bead is newer than the current newest for this assignee
-        if bead.updated_at > entry.0 {
+        // Use the newest bead as the fallback. Break timestamp ties by ID so
+        // duplicate claims with equal backend timestamps still have one keeper.
+        if bead.updated_at > entry.0
+            || (bead.updated_at == entry.0 && bead.id.as_ref() > entry.1.as_ref())
+        {
             *entry = (bead.updated_at, bead.id.clone());
+        }
+    }
+
+    // Exact live-heartbeat evidence is stronger than recency. Only accept the
+    // heartbeat's bead when it is present in this store and assigned to the
+    // same worker; a cross-workspace heartbeat must not protect an unrelated ID.
+    for (assignee, current_bead) in worker_current_beads {
+        let Some(current_bead) = current_bead else {
+            continue;
+        };
+        if let Some(active) = all_beads.iter().find(|bead| {
+            bead.status == BeadStatus::InProgress
+                && bead.assignee.as_deref() == Some(assignee.as_str())
+                && bead.id == *current_bead
+        }) {
+            keeper_by_assignee.insert(assignee.clone(), (active.updated_at, active.id.clone()));
         }
     }
 
@@ -133,9 +186,8 @@ pub fn get_stale_by_assignee_overlap(all_beads: &[Bead]) -> HashSet<BeadId> {
         };
 
         // Check if this bead is the newest for its assignee
-        if let Some((newest_updated, _newest_bead_id)) = newest_bead_by_assignee.get(assignee) {
-            // If this bead's updated_at is older than the newest, it's stale by overlap
-            if bead.updated_at < *newest_updated {
+        if let Some((_keeper_updated, keeper_bead_id)) = keeper_by_assignee.get(assignee) {
+            if bead.id != *keeper_bead_id {
                 stale_by_overlap.insert(bead.id.clone());
             }
         }
@@ -155,6 +207,8 @@ async fn cleanup_in_progress(
     telemetry: &Telemetry,
     qualified_id: &str,
     claim_ttl: Option<Duration>,
+    heartbeat_dir: Option<&Path>,
+    heartbeat_ttl: Duration,
 ) -> Result<u32> {
     let all_beads = store.list_all().await?;
 
@@ -176,16 +230,59 @@ async fn cleanup_in_progress(
         .context("registry.list() failed")?;
 
     // Build a set of fully-qualified worker IDs for registered, alive workers.
-    let live_worker_ids: std::collections::HashSet<String> = workers
+    let live_worker_ids: HashSet<String> = workers
         .iter()
         .filter(|w| HealthMonitor::check_pid_alive(w.pid))
         .map(|w| w.id.clone())
         .collect();
 
+    let assignee_ids: Vec<String> = all_beads
+        .iter()
+        .filter(|bead| bead.status == BeadStatus::InProgress)
+        .filter_map(|bead| bead.assignee.clone())
+        .filter(|assignee| !assignee.is_empty())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+
+    // Query the shared heartbeat projection once for every assignee. Missing,
+    // unreadable and stale heartbeats remain explicit outcomes; none of them
+    // may protect an age-stale claim.
+    let executor_lookup = if let Some(heartbeat_dir) = heartbeat_dir {
+        match HealthMonitor::lookup_bead_executors(heartbeat_dir, &assignee_ids, heartbeat_ttl)
+            .await
+        {
+            Ok(lookup) => lookup,
+            Err(error) => {
+                tracing::warn!(
+                    path = %heartbeat_dir.display(),
+                    error = %error,
+                    "failed to look up heartbeat claim ownership; no claim will be protected by unreadable evidence"
+                );
+                HashMap::new()
+            }
+        }
+    } else {
+        HashMap::new()
+    };
+
+    // Only a fresh heartbeat from a live PID can name the authoritative claim
+    // for overlap handling. This ensures a newer leaked claim never displaces
+    // the older bead the worker is actually executing.
+    let mut worker_current_beads: HashMap<String, Option<BeadId>> = HashMap::new();
+    for (assignee, lookup) in &executor_lookup {
+        if let ExecutorLookup::Present(execution) = lookup {
+            if execution.heartbeat_fresh && execution.pid_alive {
+                worker_current_beads.insert(assignee.clone(), execution.current_bead.clone());
+            }
+        }
+    }
+
     // Pass 1: Identify claims stale by assignee overlap.
     // For each assignee with multiple in_progress beads, only the newest is valid.
     // Older beads are stale regardless of worker liveness or claim age.
-    let stale_by_overlap = get_stale_by_assignee_overlap(&all_beads);
+    let stale_by_overlap =
+        get_stale_by_assignee_overlap_with_active(&all_beads, &worker_current_beads);
 
     let mut released = 0u32;
     let now = Utc::now();
@@ -210,6 +307,19 @@ async fn cleanup_in_progress(
         // Union of Pass 1 (overlap) and Pass 2 (threshold) for reap eligibility.
         // A bead is reap-eligible if it is stale by overlap OR stale by age.
         let is_superseded = stale_by_overlap.contains(&bead.id);
+
+        let worker_is_live =
+            assignee == qualified_id || live_worker_ids.contains(assignee.as_str());
+        let heartbeat_matches_claim = worker_current_beads
+            .get(assignee.as_str())
+            .and_then(Option::as_ref)
+            == Some(&bead.id);
+
+        // A live heartbeat naming this exact bead is authoritative. Neither a
+        // long dispatch nor a newer leaked claim may cause Mend to steal it.
+        if heartbeat_matches_claim {
+            continue;
+        }
 
         if is_superseded {
             // For beads stale by overlap, we need to find the newest bead for this assignee
@@ -236,15 +346,11 @@ async fn cleanup_in_progress(
         // Claim age is an independent release condition. A live worker may
         // still hold an abandoned claim, especially when --count 1 relaunches
         // under the same worker name indefinitely.
-        if !is_superseded && !stale_by_age && assignee == qualified_id {
-            continue;
-        }
-
         // Skip if the assignee matches a registered, alive worker unless the
-        // claim has exceeded its age limit. Workers register with fully-qualified
-        // IDs ({adapter}-{worker_id}), so this comparison prevents collisions
-        // when workers from different adapter pools share a NATO name.
-        if !is_superseded && !stale_by_age && live_worker_ids.contains(assignee.as_str()) {
+        // heartbeat proves this is a superseded or age-stale claim. Workers
+        // register with fully-qualified IDs ({adapter}-{worker_id}), so this
+        // comparison prevents collisions between adapter pools.
+        if !is_superseded && !stale_by_age && worker_is_live {
             continue;
         }
 
@@ -254,18 +360,33 @@ async fn cleanup_in_progress(
             .filter(|b| b.status == BeadStatus::InProgress && b.assignee.as_ref() == Some(assignee))
             .max_by_key(|b| b.updated_at);
 
+        let reap_signal = match executor_lookup.get(assignee.as_str()) {
+            Some(ExecutorLookup::Present(execution)) if !execution.pid_alive => "pid_dead",
+            Some(ExecutorLookup::Present(execution)) if !execution.heartbeat_fresh => {
+                "heartbeat_stale"
+            }
+            Some(ExecutorLookup::Present(execution)) if execution.current_bead.is_none() => {
+                "heartbeat_idle"
+            }
+            Some(ExecutorLookup::Present(_)) => "heartbeat_different_bead",
+            Some(ExecutorLookup::Missing) => "heartbeat_missing",
+            Some(ExecutorLookup::Unparseable) => "heartbeat_unparseable",
+            None if !worker_is_live => "pid_dead_or_unregistered",
+            None => "heartbeat_lookup_unavailable",
+        };
+
         let reason = match (is_superseded, newest_claim) {
             (true, Some(newest_bead)) => {
                 format!(
-                    "superseded by newer in-progress claim {} from same assignee",
-                    newest_bead.id
+                    "superseded by another in-progress claim {} from same assignee ({reap_signal})",
+                    newest_bead.id,
                 )
             }
             (false, _) if stale_by_age => {
                 let age_secs = claim_age.map_or(0, |age| age.as_secs());
-                format!("stale claim: age {age_secs}s exceeds configured claim TTL")
+                format!("stale claim: age {age_secs}s exceeds configured claim TTL ({reap_signal})")
             }
-            _ => format!("orphaned: assignee {assignee} has no live worker"),
+            _ => format!("orphaned: assignee {assignee} has no live worker ({reap_signal})"),
         };
 
         tracing::info!(
@@ -273,6 +394,7 @@ async fn cleanup_in_progress(
             assignee = %assignee,
             age_secs = claim_age.map_or(0, |age| age.as_secs()),
             stale_by_age,
+            reap_signal,
             workspace = %bead.workspace.display(),
             "releasing stale in-progress bead"
         );
@@ -504,6 +626,8 @@ impl MendStrand {
             &self.telemetry,
             &self.qualified_id,
             Some(Duration::from_secs(self.config.stuck_threshold_secs)),
+            Some(&self.heartbeat_dir),
+            self.heartbeat_ttl,
         )
         .await?;
         summary.beads_released += released;
@@ -2930,13 +3054,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_in_progress_bead_released_even_when_worker_is_alive() {
+    async fn stale_in_progress_bead_preserved_when_live_heartbeat_names_it() {
         let hb_dir = tempfile::tempdir().unwrap();
         let lock_dir = tempfile::tempdir().unwrap();
         let reg_dir = tempfile::tempdir().unwrap();
 
-        // The worker is alive, but the claim is far older than Mend's configured
-        // claim TTL. This is the failure mode that liveness-only cleanup misses.
+        // The worker is alive and its heartbeat names this exact bead. A long
+        // dispatch may legitimately exceed Mend's claim TTL.
         let bead = make_in_progress_bead("nd-stale-live", "alive-worker");
 
         let registry = Registry::new(reg_dir.path());
@@ -2953,6 +3077,12 @@ mod tests {
                 config_reload_generation: 0,
             })
             .unwrap();
+
+        let mut heartbeat =
+            make_stale_heartbeat("alive-worker", std::process::id(), Some("nd-stale-live"));
+        heartbeat.qualified_id = "alive-worker".to_string();
+        heartbeat.last_heartbeat = Utc::now();
+        write_heartbeat(hb_dir.path(), &heartbeat);
 
         let (store, release_count, _) = MockBeadStore::new(vec![bead]);
         let mend = MendStrand::new(
@@ -2979,10 +3109,108 @@ mod tests {
 
         let result = mend.evaluate(&store, &HashSet::new()).await;
         assert!(
-            matches!(result, StrandResult::WorkCreated),
-            "expected WorkCreated after reclaiming stale live claim, got: {result:?}"
+            matches!(result, StrandResult::NoWork),
+            "expected NoWork while a live heartbeat names the old claim, got: {result:?}"
         );
-        assert_eq!(release_count.load(Ordering::Relaxed), 1);
+        assert_eq!(release_count.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn stale_claim_is_released_for_every_non_active_heartbeat_verdict() {
+        #[derive(Clone, Copy, Debug)]
+        enum HeartbeatCase {
+            DifferentBead,
+            Idle,
+            Stale,
+            Missing,
+            Unparseable,
+        }
+
+        for case in [
+            HeartbeatCase::DifferentBead,
+            HeartbeatCase::Idle,
+            HeartbeatCase::Stale,
+            HeartbeatCase::Missing,
+            HeartbeatCase::Unparseable,
+        ] {
+            let hb_dir = tempfile::tempdir().unwrap();
+            let lock_dir = tempfile::tempdir().unwrap();
+            let reg_dir = tempfile::tempdir().unwrap();
+            let assignee = "claude-alive-worker";
+            let bead = make_in_progress_bead("nd-stale-candidate", assignee);
+
+            let registry = Registry::new(reg_dir.path());
+            registry
+                .register(crate::registry::WorkerEntry {
+                    id: assignee.to_string(),
+                    pid: std::process::id(),
+                    workspace: PathBuf::from("/tmp/test"),
+                    agent: "test".to_string(),
+                    model: None,
+                    provider: None,
+                    started_at: Utc::now(),
+                    beads_processed: 1,
+                    config_reload_generation: 0,
+                })
+                .unwrap();
+
+            match case {
+                HeartbeatCase::Missing => {}
+                HeartbeatCase::Unparseable => {
+                    std::fs::write(hb_dir.path().join(format!("{assignee}.json")), "{not json")
+                        .unwrap();
+                }
+                _ => {
+                    let current_bead = match case {
+                        HeartbeatCase::DifferentBead => Some("nd-other"),
+                        HeartbeatCase::Idle => None,
+                        HeartbeatCase::Stale => Some("nd-stale-candidate"),
+                        HeartbeatCase::Missing | HeartbeatCase::Unparseable => unreachable!(),
+                    };
+                    let mut heartbeat =
+                        make_stale_heartbeat("alive-worker", std::process::id(), current_bead);
+                    heartbeat.qualified_id = assignee.to_string();
+                    if !matches!(case, HeartbeatCase::Stale) {
+                        heartbeat.last_heartbeat = Utc::now();
+                    }
+                    write_heartbeat(hb_dir.path(), &heartbeat);
+                }
+            }
+
+            let (store, release_count, _) = MockBeadStore::new(vec![bead]);
+            let mend = MendStrand::new(
+                MendConfig {
+                    stuck_threshold_secs: 60,
+                    ..MendConfig::default()
+                },
+                hb_dir.path().to_path_buf(),
+                Duration::from_secs(300),
+                lock_dir.path().to_path_buf(),
+                "test-worker".to_string(),
+                registry,
+                Telemetry::new("test-worker".to_string()),
+                PathBuf::from("/tmp/needle-test-logs"),
+                0,
+                PathBuf::from("/tmp/test-traces"),
+                30,
+                7,
+                PathBuf::from("/tmp/test-workspace"),
+                80,
+                tempfile::tempdir().unwrap().path().to_path_buf(),
+                LimitsConfig::default(),
+            );
+
+            let result = mend.evaluate(&store, &HashSet::new()).await;
+            assert!(
+                matches!(result, StrandResult::WorkCreated),
+                "{case:?} must not protect an abandoned claim: {result:?}"
+            );
+            assert_eq!(
+                release_count.load(Ordering::Relaxed),
+                1,
+                "{case:?} must release exactly one stale claim"
+            );
+        }
     }
 
     #[tokio::test]
@@ -3097,6 +3325,11 @@ mod tests {
             })
             .unwrap();
 
+        let mut heartbeat = make_stale_heartbeat(assignee, std::process::id(), Some("nd-new"));
+        heartbeat.qualified_id = assignee.to_string();
+        heartbeat.last_heartbeat = Utc::now();
+        write_heartbeat(hb_dir.path(), &heartbeat);
+
         let (store, release_count, _) = MockBeadStore::new(vec![bead_old, bead_medium, bead_new]);
         let mend = MendStrand::new(
             MendConfig::default(),
@@ -3127,6 +3360,84 @@ mod tests {
             2,
             "should release exactly 2 older beads (newest bead should be untouched)"
         );
+    }
+
+    /// A heartbeat is stronger evidence than timestamp order. If a leaked
+    /// claim was written after the real dispatch began, preserve the older
+    /// active claim and reap the newer leak.
+    #[tokio::test]
+    async fn heartbeat_claim_wins_over_newer_overlapping_claim() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+        let assignee = "claude-code-glm-5-active";
+
+        let mut active = make_in_progress_bead("nd-active-older", assignee);
+        active.updated_at = Utc::now() - chrono::Duration::minutes(20);
+        let mut leaked = make_recent_in_progress_bead("nd-leaked-newer", assignee);
+        leaked.updated_at = Utc::now() - chrono::Duration::seconds(1);
+
+        let registry = Registry::new(reg_dir.path());
+        registry
+            .register(crate::registry::WorkerEntry {
+                id: assignee.to_string(),
+                pid: std::process::id(),
+                workspace: PathBuf::from("/tmp/test"),
+                agent: "test".to_string(),
+                model: None,
+                provider: None,
+                started_at: Utc::now(),
+                beads_processed: 1,
+                config_reload_generation: 0,
+            })
+            .unwrap();
+
+        let mut heartbeat =
+            make_stale_heartbeat(assignee, std::process::id(), Some("nd-active-older"));
+        heartbeat.qualified_id = assignee.to_string();
+        heartbeat.last_heartbeat = Utc::now();
+        write_heartbeat(hb_dir.path(), &heartbeat);
+
+        let (store, release_count, _) = MockBeadStore::new(vec![active, leaked]);
+        let mend = MendStrand::new(
+            MendConfig {
+                stuck_threshold_secs: 60,
+                ..MendConfig::default()
+            },
+            hb_dir.path().to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.path().to_path_buf(),
+            "test-worker".to_string(),
+            registry,
+            Telemetry::new("test-worker".to_string()),
+            PathBuf::from("/tmp/needle-test-logs"),
+            0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            LimitsConfig::default(),
+        );
+
+        let result = mend.evaluate(&store, &HashSet::new()).await;
+        assert!(matches!(result, StrandResult::WorkCreated));
+        assert_eq!(release_count.load(Ordering::Relaxed), 1);
+
+        let beads = store.all_beads.lock().unwrap();
+        let active = beads
+            .iter()
+            .find(|b| b.id.as_ref() == "nd-active-older")
+            .unwrap();
+        let leaked = beads
+            .iter()
+            .find(|b| b.id.as_ref() == "nd-leaked-newer")
+            .unwrap();
+        assert_eq!(active.status, BeadStatus::InProgress);
+        assert_eq!(active.assignee.as_deref(), Some(assignee));
+        assert_eq!(leaked.status, BeadStatus::Open);
+        assert!(leaked.assignee.is_none());
     }
 
     /// Single in_progress bead for assignee: NOT reaped if worker alive.

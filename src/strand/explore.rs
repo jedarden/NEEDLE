@@ -191,6 +191,8 @@ pub struct ExploreStrand {
     /// Cross-workspace cleanup threshold (seconds). Beads stuck in_progress
     /// longer than this are candidates for release during remote workspace scans.
     stuck_threshold_secs: u64,
+    /// Freshness bound for heartbeat evidence used by cross-workspace Mend.
+    heartbeat_ttl: Duration,
 }
 
 impl ExploreStrand {
@@ -269,6 +271,7 @@ impl ExploreStrand {
                 config.max_scan_interval_cycles,
             )),
             stuck_threshold_secs: config.stuck_threshold_secs,
+            heartbeat_ttl: Duration::from_secs(300),
         }
     }
 
@@ -303,6 +306,7 @@ impl ExploreStrand {
             last_scan_per_workspace: std::sync::Mutex::new(std::collections::HashMap::new()),
             scan_backoff: std::sync::Mutex::new(ExploreScanBackoff::new(1, 8)),
             stuck_threshold_secs: 300,
+            heartbeat_ttl: Duration::from_secs(300),
         }
     }
 
@@ -339,7 +343,15 @@ impl ExploreStrand {
             last_scan_per_workspace: std::sync::Mutex::new(std::collections::HashMap::new()),
             scan_backoff: std::sync::Mutex::new(ExploreScanBackoff::new(1, 8)),
             stuck_threshold_secs,
+            heartbeat_ttl: Duration::from_secs(300),
         }
+    }
+
+    /// Use the configured worker heartbeat TTL for cross-workspace claim
+    /// recovery. Kept as a builder so the public constructor remains stable.
+    pub fn with_heartbeat_ttl(mut self, heartbeat_ttl: Duration) -> Self {
+        self.heartbeat_ttl = heartbeat_ttl;
+        self
     }
 
     /// Return whether this cycle should perform the remote workspace scan.
@@ -890,6 +902,7 @@ impl super::Strand for ExploreStrand {
                             &self.telemetry,
                             &self.qualified_id,
                             Some(Duration::from_secs(self.stuck_threshold_secs)),
+                            self.heartbeat_ttl,
                         )
                         .await
                         {

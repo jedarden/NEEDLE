@@ -178,7 +178,8 @@ impl StrandRunner {
             explore_registry,
             telemetry.clone(),
             worker_id.to_string(),
-        );
+        )
+        .with_heartbeat_ttl(heartbeat_ttl);
 
         let weave = WeaveStrand::new(
             config.strands.weave.clone(),
