@@ -160,7 +160,7 @@ pub fn record_claim_result(span: &Span, result: &str) {
 /// // Guard dropped here, span unwinds
 /// ```
 pub struct ScopeGuard {
-    _guard: Option<tracing::span::Entered<'static>>,
+    _guard: Option<tracing::span::EnteredSpan>,
 }
 
 impl ScopeGuard {
@@ -170,20 +170,18 @@ impl ScopeGuard {
     ///
     /// # Panics
     ///
-    /// This function uses `span.enter()` which modifies thread-local state.
+    /// This function uses `span.entered()` which modifies thread-local state.
     /// Do not store the returned guard across an `.await` point.
     pub fn new(span: Span) -> Self {
-        // SAFETY: We transmute the lifetime to 'static because:
-        // 1. The guard is only used for synchronous code (no .await)
-        // 2. The guard is dropped before any .await point
-        // 3. This replaces in_scope() which had the same safety requirements
-        let guard = span.enter();
+        // `Span::entered` consumes the span and returns an `EnteredSpan` that
+        // OWNS it, so there is no borrow to outlive. The previous version
+        // entered a by-value local and transmuted the resulting
+        // `Entered<'_>` to `Entered<'static>`; the borrowed `Span` was then
+        // dropped at the end of this function, leaving the guard holding a
+        // dangling `&Span` that `Entered::drop` dereferenced to call `exit()`
+        // -- a null vtable dispatch (segfault at ip=0).
         Self {
-            _guard: Some(unsafe {
-                std::mem::transmute::<tracing::span::Entered<'_>, tracing::span::Entered<'static>>(
-                    guard,
-                )
-            }),
+            _guard: Some(span.entered()),
         }
     }
 
@@ -350,5 +348,74 @@ mod tests {
 
         // Unreachable code
         panic!("should not reach here");
+    }
+
+    /// Regression test for needle-6da00123.
+    ///
+    /// `ScopeGuard::new` used to enter a by-value `Span` and transmute the
+    /// resulting `Entered<'_>` to `Entered<'static>`, so the returned guard
+    /// carried a dangling `&Span` from the moment it was created. Every
+    /// existing test here dropped the guard while the dead stack slot still
+    /// held usable bytes, which is why they passed; dropping one after the
+    /// slot had been reused dispatched `exit()` through freed stack and
+    /// segfaulted (null vtable dispatch, fault at ip=0).
+    ///
+    /// This test reproduces that shape: the guards are created inside
+    /// `create_orphaned_guards` from *temporaries*, so the bytes they point
+    /// at belong to that function's stack frame, and the frame dies on
+    /// return. `smash_stack` then reuses that exact region with garbage, and
+    /// only afterwards are the guards dropped. A guard that still borrows a
+    /// dead temporary faults here; the owning `EnteredSpan` guard cannot.
+    ///
+    /// The two helpers are `#[inline(never)]` so the optimized test profile
+    /// (`opt-level = 2`) cannot collapse the frame boundaries this depends
+    /// on.
+    #[test]
+    fn scope_guard_survives_the_death_of_the_span_it_entered() {
+        const GUARDS: usize = 32;
+
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            // The temporary `Span`s handed to `ScopeGuard::new` die with this
+            // call's frame; the guards keep pointing into it.
+            let guards = create_orphaned_guards(GUARDS);
+
+            // Reuse the frame region the temporaries lived in.
+            smash_stack(0);
+            std::hint::black_box(&guards);
+
+            // Drop in LIFO order, per the guard's contract.
+            for guard in guards.into_iter().rev() {
+                drop(guard);
+            }
+        });
+    }
+
+    /// Build guards from temporary spans, so the spans' storage belongs to
+    /// this function's frame rather than to the caller's.
+    #[inline(never)]
+    fn create_orphaned_guards(count: usize) -> Vec<ScopeGuard> {
+        (0..count)
+            .map(|_| ScopeGuard::new(tracing::info_span!("scope_guard.orphaned_temporary")))
+            .collect()
+    }
+
+    /// Recurse shallowly, writing a non-canonical pointer pattern over every
+    /// frame, to overwrite whatever stack the temporaries handed to
+    /// `ScopeGuard::new` occupied. Dropping a guard that still borrows one
+    /// then dereferences garbage instead of a live `Span`.
+    #[inline(never)]
+    fn smash_stack(depth: usize) {
+        const TRASH: u64 = 0xA5A5_A5A5_A5A5_A5A5; // non-canonical on x86-64
+        const MAX_DEPTH: usize = 64;
+        let frame = [TRASH; 128]; // 1 KiB of garbage per frame
+        if depth < MAX_DEPTH {
+            smash_stack(depth + 1);
+        }
+        std::hint::black_box(&frame);
     }
 }
