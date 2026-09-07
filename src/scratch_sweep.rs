@@ -89,7 +89,12 @@ fn sweep_scratch_root(
         });
     }
 
-    let root_metadata = fs::symlink_metadata(scratch_root)
+    // Follow the root symlink deliberately.  Fleet hosts keep $HOME/scratch on
+    // a larger data volume and expose it through that stable path.  Candidate
+    // entries are still qualified from the canonical root below, so allowing
+    // the root itself to be a symlink does not relax any per-entry deletion
+    // guard.
+    let root_metadata = fs::metadata(scratch_root)
         .with_context(|| format!("failed to inspect {}", scratch_root.display()))?;
     if !root_metadata.file_type().is_dir() {
         bail!(
@@ -101,6 +106,14 @@ fn sweep_scratch_root(
     let canonical_root = scratch_root
         .canonicalize()
         .with_context(|| format!("failed to resolve {}", scratch_root.display()))?;
+    let canonical_metadata = fs::symlink_metadata(&canonical_root)
+        .with_context(|| format!("failed to inspect {}", canonical_root.display()))?;
+    if !canonical_metadata.file_type().is_dir() {
+        bail!(
+            "resolved scratch root is not a directory: {}",
+            canonical_root.display()
+        );
+    }
     let _sweep_lock = match acquire_sweep_lock(&canonical_root)? {
         Some(lock) => lock,
         None => return Ok(SweepOutcome::AlreadyRunning),
@@ -786,6 +799,48 @@ mod tests {
 
         assert!(candidate.exists());
         assert!(error.to_string().contains("at least one hour"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_symlink_to_directory_is_swept_from_canonical_target() {
+        use std::os::unix::fs::symlink;
+
+        let target = TempDir::new().unwrap();
+        let link_parent = TempDir::new().unwrap();
+        let link = link_parent.path().join("scratch");
+        symlink(target.path(), &link).unwrap();
+
+        let now = SystemTime::now();
+        let candidate = make_clone_marker(target.path(), "needle-symlink-root.abc123");
+        make_old(&candidate, now);
+
+        let report =
+            completed(sweep_scratch_root(&link, 48, &ClearProcesses, &SafeCheckout, now).unwrap());
+
+        assert!(!candidate.exists());
+        assert_eq!(report.removed.len(), 1);
+        assert!(link.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_symlink_to_file_is_rejected() {
+        use std::os::unix::fs::symlink;
+
+        let target_parent = TempDir::new().unwrap();
+        let target = target_parent.path().join("not-a-directory");
+        fs::write(&target, b"preserve\n").unwrap();
+        let link_parent = TempDir::new().unwrap();
+        let link = link_parent.path().join("scratch");
+        symlink(&target, &link).unwrap();
+
+        let error =
+            sweep_scratch_root(&link, 48, &ClearProcesses, &SafeCheckout, SystemTime::now())
+                .unwrap_err();
+
+        assert!(error.to_string().contains("not a directory"));
+        assert_eq!(fs::read(&target).unwrap(), b"preserve\n");
     }
 
     #[cfg(unix)]
