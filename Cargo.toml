@@ -22,6 +22,10 @@ path = "src/bin/needle_transform_claude.rs"
 name = "needle-transform-codex"
 path = "src/bin/needle_transform_codex.rs"
 
+[[bin]]
+name = "needle-transform-opencode"
+path = "src/bin/needle_transform_opencode.rs"
+
 [features]
 default = ["otlp"]
 otlp = [
@@ -103,6 +107,10 @@ libc = "0.2"
 
 # Random jitter (backoff desynchronization)
 rand = "0.8"
+
+# UUIDv7 provisional attempt IDs (plan 4.4 step 1; N-T16). v7 embeds a
+# unix-millisecond timestamp so ledger rows sort by dispatch start.
+uuid = { version = "1", features = ["v7"] }
 
 # Temporary directories (checkpoint test utilities)
 tempfile = "3"

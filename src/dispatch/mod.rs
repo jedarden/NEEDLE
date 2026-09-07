@@ -2611,6 +2611,63 @@ fn run_probe(agent_cli: &str) -> Result<ProbeResult> {
 /// Tokenizes the template by shell operators (`&&`, `||`, `|`, `;`), then
 /// extracts the first word from each segment that looks like a command name
 /// (skips shell builtins, variable assignments, and placeholders).
+/// Strip a token's surrounding quotes before classifying it.
+///
+/// Tokenization is whitespace-based, so a quoted word arrives with its quotes
+/// attached (`"{subst}"`). Without trimming, such a token matches none of the
+/// placeholder/assignment skips and is mistaken for a command name.
+fn unquote_token(token: &str) -> &str {
+    token.trim_matches(|c| c == '"' || c == '\'')
+}
+
+/// Replace every `$(…)` command substitution with the `{subst}` placeholder and
+/// return the substitutions' contents separately.
+///
+/// The contents are real commands and must be scanned for executables, but they
+/// must not be scanned *in place*: whitespace tokenization splits
+/// `ENRICHED=$(mktemp /tmp/x.XXXXXX)` into `ENRICHED=$(mktemp` and
+/// `/tmp/x.XXXXXX)`, the first is skipped as a variable assignment, and the
+/// second is then mistaken for the command being run. Substituting a
+/// placeholder that the existing `{…}` skip already recognises collapses the
+/// assignment back to `ENRICHED={subst}` and moves the inner command somewhere
+/// it can be parsed correctly.
+///
+/// Nested substitutions are matched by paren depth. An unterminated `$(` is
+/// left verbatim rather than swallowing the rest of the template.
+fn split_command_substitutions(template: &str) -> (String, Vec<String>) {
+    let mut outer = String::with_capacity(template.len());
+    let mut inner = Vec::new();
+    let chars: Vec<char> = template.chars().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        if chars[i] == '$' && chars.get(i + 1) == Some(&'(') {
+            let mut depth = 1usize;
+            let mut j = i + 2;
+            let start = j;
+            while j < chars.len() && depth > 0 {
+                match chars[j] {
+                    '(' => depth += 1,
+                    ')' => depth -= 1,
+                    _ => {}
+                }
+                j += 1;
+            }
+            if depth == 0 {
+                inner.push(chars[start..j - 1].iter().collect::<String>());
+                outer.push_str("{subst}");
+                i = j;
+                continue;
+            }
+            // Unbalanced — fall through and copy the '$' literally.
+        }
+        outer.push(chars[i]);
+        i += 1;
+    }
+
+    (outer, inner)
+}
+
 fn extract_executables_from_template(template: &str) -> Vec<String> {
     // Shell builtins to skip (not external binaries)
     const BUILTINS: &[&str] = &[
@@ -2679,6 +2736,16 @@ fn extract_executables_from_template(template: &str) -> Vec<String> {
 
     let mut executables = Vec::new();
 
+    // Lift `$(…)` out before tokenizing, then scan each substitution on its own.
+    let (template, substitutions) = split_command_substitutions(template);
+    for substitution in &substitutions {
+        for exe in extract_executables_from_template(substitution) {
+            if !executables.contains(&exe) {
+                executables.push(exe);
+            }
+        }
+    }
+
     // Split by shell operators: &&, ||, |, ;
     let segments = template
         .split("&&")
@@ -2701,7 +2768,7 @@ fn extract_executables_from_template(template: &str) -> Vec<String> {
         let mut command = None;
 
         for token in token_iter.by_ref() {
-            let token = *token;
+            let token = unquote_token(token);
 
             // Skip variable assignments at the start (KEY=VALUE or KEY="VALUE")
             if token.contains('=') {
@@ -2773,7 +2840,7 @@ fn extract_executables_from_template(template: &str) -> Vec<String> {
 
             // Continue searching in the same segment for the real command
             for token in token_iter {
-                let token = *token;
+                let token = unquote_token(token);
 
                 // Skip the next token if we marked it (wrapper-specific argument)
                 if skip_next {
@@ -5970,6 +6037,72 @@ output_transform: "needle-transform-custom"
 
         // ls should be present on all systems
         assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn command_substitution_args_are_not_mistaken_for_commands() {
+        // Regression: whitespace tokenization split `ENRICHED=$(mktemp
+        // /tmp/needle-zcode-prompt.XXXXXX.md)` into an assignment plus a bare
+        // path, and the path became the "command". Every adapter building a
+        // temp prompt file this way (zcode-headless, opencode-*) reported a
+        // permanently missing executable named after its own mktemp template.
+        let template =
+            "cd /tmp && ENRICHED=$(mktemp /tmp/needle-prompt.XXXXXX.md) && cat a b > \"$ENRICHED\"";
+        let found = extract_executables_from_template(template);
+
+        assert!(
+            !found.iter().any(|e| e.contains("XXXXXX")),
+            "mktemp's argument must not be treated as a command: {found:?}"
+        );
+        assert!(
+            found.iter().any(|e| e == "mktemp"),
+            "the substituted command itself must still be checked: {found:?}"
+        );
+        assert!(found.iter().any(|e| e == "cat"), "got {found:?}");
+    }
+
+    #[test]
+    fn quoted_substitution_in_argument_position_is_scanned() {
+        // The codex adapter's shape: the substitution is an argument, not the
+        // command. `codex` is the command, and `cat` inside the substitution
+        // still needs checking.
+        let template = "cd {workspace} && codex exec --json \"$(cat {prompt_file})\"";
+        let found = extract_executables_from_template(template);
+
+        assert!(found.iter().any(|e| e == "codex"), "got {found:?}");
+        assert!(found.iter().any(|e| e == "cat"), "got {found:?}");
+        assert!(
+            !found.iter().any(|e| e.contains('"') || e.contains("subst")),
+            "quotes and the placeholder must not leak into a name: {found:?}"
+        );
+    }
+
+    #[test]
+    fn nested_and_unterminated_substitutions_are_handled() {
+        let (outer, inner) = split_command_substitutions("a=$(foo $(bar baz)) end");
+        assert_eq!(outer, "a={subst} end");
+        assert_eq!(inner, vec!["foo $(bar baz)".to_string()]);
+
+        // An unbalanced `$(` must not swallow the remainder of the template.
+        let (outer, inner) = split_command_substitutions("x=$(oops && ls");
+        assert_eq!(outer, "x=$(oops && ls");
+        assert!(inner.is_empty());
+    }
+
+    #[test]
+    fn live_opencode_adapter_template_has_no_false_missing() {
+        // The exact shape shipped in opencode-ardenone-openai.yaml.
+        let template = "cd {workspace} && ENRICHED=$(mktemp /tmp/needle-opencode-prompt.XXXXXX.md) && cat /p/prefix.md '{prompt_file}' /p/suffix.md > \"$ENRICHED\"; OPENCODE_CONFIG=/p/c.json NEEDLE_OPENCODE_MODEL='{model}' opencode run --format json --auto --model '{model}' < \"$ENRICHED\"; STATUS=$?; rm -f \"$ENRICHED\"; exit $STATUS";
+        let found = extract_executables_from_template(template);
+
+        assert!(found.iter().any(|e| e == "opencode"), "got {found:?}");
+        assert!(found.iter().any(|e| e == "mktemp"), "got {found:?}");
+        assert!(
+            !found
+                .iter()
+                .any(|e| e.contains("XXXXXX") || e.contains(".md")),
+            "no path fragment may be reported as an executable: {found:?}"
+        );
     }
 
     #[test]
