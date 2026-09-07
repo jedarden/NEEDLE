@@ -2668,6 +2668,23 @@ fn split_command_substitutions(template: &str) -> (String, Vec<String>) {
     (outer, inner)
 }
 
+/// The value `check_template_executables` must validate for a command token.
+///
+/// A path-qualified command is returned VERBATIM. Dispatch execs exactly that
+/// path, so basenaming it and resolving the result through `PATH` validates a
+/// *different* binary: `needle test-agent` reported `READY` for an adapter whose
+/// template called `/home/coding/.local/bin/claude-print` (absent) while `which`
+/// happily found `~/.cargo/bin/claude-print`, and every dispatch died at exit
+/// 127 (needle-adef2ccd). Bare names are returned unchanged so they keep
+/// resolving through `PATH` as before.
+fn checked_executable<'a>(token: &'a str, cmd_name: &'a str) -> &'a str {
+    if token.contains('/') {
+        token
+    } else {
+        cmd_name
+    }
+}
+
 fn extract_executables_from_template(template: &str) -> Vec<String> {
     // Shell builtins to skip (not external binaries)
     const BUILTINS: &[&str] = &[
@@ -2811,9 +2828,11 @@ fn extract_executables_from_template(template: &str) -> Vec<String> {
             continue;
         }
 
-        // Add if not already present
-        if !executables.contains(&cmd_name.to_string()) {
-            executables.push(cmd_name.to_string());
+        // Add if not already present. Path-qualified commands are recorded
+        // verbatim so the existence check tests what dispatch will exec.
+        let checked = checked_executable(token, cmd_name);
+        if !executables.contains(&checked.to_string()) {
+            executables.push(checked.to_string());
         }
 
         // If this is a wrapper command, continue searching for the real command
@@ -2870,11 +2889,12 @@ fn extract_executables_from_template(template: &str) -> Vec<String> {
                     token
                 };
 
+                let actual_checked = checked_executable(token, actual_cmd);
                 if !actual_cmd.is_empty()
                     && !BUILTINS.contains(&actual_cmd)
-                    && !executables.contains(&actual_cmd.to_string())
+                    && !executables.contains(&actual_checked.to_string())
                 {
-                    executables.push(actual_cmd.to_string());
+                    executables.push(actual_checked.to_string());
                 }
                 break;
             }
@@ -2885,9 +2905,11 @@ fn extract_executables_from_template(template: &str) -> Vec<String> {
             continue;
         }
 
-        // Add if not already present
-        if !executables.contains(&cmd_name.to_string()) {
-            executables.push(cmd_name.to_string());
+        // Add if not already present. Path-qualified commands are recorded
+        // verbatim so the existence check tests what dispatch will exec.
+        let checked = checked_executable(token, cmd_name);
+        if !executables.contains(&checked.to_string()) {
+            executables.push(checked.to_string());
         }
     }
 
@@ -5938,9 +5960,71 @@ output_transform: "needle-transform-custom"
 
     #[test]
     fn extract_executables_with_full_path() {
+        // A path-qualified command is kept VERBATIM. This test previously
+        // asserted the basename ("my-agent"), which encoded the defect in
+        // needle-adef2ccd: the existence check then resolved a DIFFERENT binary
+        // through PATH, so an adapter naming a nonexistent absolute path was
+        // reported READY while every dispatch died at exit 127.
         let template = "/usr/local/bin/my-agent < {prompt_file}";
         let executables = extract_executables_from_template(template);
-        assert_eq!(executables, vec!["my-agent"]);
+        assert_eq!(executables, vec!["/usr/local/bin/my-agent"]);
+    }
+
+    #[test]
+    fn extract_executables_absolute_path_survives_preamble() {
+        // The real shape that broke: cd + a long unset list, then the binary by
+        // absolute path (claude-governor's claude-print-opus adapter).
+        let template = "cd {workspace} && unset CLAUDECODE VSCODE_PID && \
+                        /home/coding/.local/bin/claude-print --model {model} \
+                        --output-format stream-json < {prompt_file}";
+        let executables = extract_executables_from_template(template);
+        assert_eq!(executables, vec!["/home/coding/.local/bin/claude-print"]);
+    }
+
+    #[test]
+    fn extract_executables_bare_name_still_resolves_via_path() {
+        // Unqualified commands must be unchanged, so they keep resolving
+        // through PATH as before.
+        let template = "cd {workspace} && claude-print --model opus < {prompt_file}";
+        let executables = extract_executables_from_template(template);
+        assert_eq!(executables, vec!["claude-print"]);
+    }
+
+    #[test]
+    fn extract_executables_wrapped_absolute_path_kept_verbatim() {
+        // The wrapper branch has its own push site and must behave identically.
+        let template = "timeout 60 /opt/tools/my-agent < {prompt_file}";
+        let executables = extract_executables_from_template(template);
+        assert_eq!(executables, vec!["timeout", "/opt/tools/my-agent"]);
+    }
+
+    #[test]
+    fn check_template_executables_flags_missing_absolute_path() {
+        // End-to-end at the check layer: a nonexistent absolute path must be
+        // reported even when a same-named binary exists on PATH. Using `sh`
+        // guarantees the basename resolves, so a regression here silently
+        // returns empty.
+        let missing =
+            check_template_executables("cd {workspace} && /nonexistent/bin/sh < {prompt_file}");
+        assert_eq!(
+            missing.len(),
+            1,
+            "expected exactly one finding: {missing:?}"
+        );
+        assert!(
+            missing[0].contains("/nonexistent/bin/sh"),
+            "finding must name the absolute path: {missing:?}"
+        );
+    }
+
+    #[test]
+    fn check_template_executables_accepts_existing_absolute_path() {
+        let sh = which::which("sh").expect("sh must exist");
+        let template = format!("cd {{workspace}} && {} < {{prompt_file}}", sh.display());
+        assert!(
+            check_template_executables(&template).is_empty(),
+            "an existing absolute path must not be reported missing"
+        );
     }
 
     #[test]
