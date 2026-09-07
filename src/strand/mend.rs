@@ -1280,24 +1280,22 @@ impl MendStrand {
             // Extract worker ID from stem. Format is "{worker_id}-{bead_id}".
             // Worker IDs may contain dashes, so we try to find a match in the registry
             // by checking if any registered worker_id is a prefix of the stem.
-            let worker_id = registry_workers
-                .iter()
-                .find(|w| {
-                    // Stem format: "{worker_id}-{bead_id}"
-                    // If worker_id is a prefix of stem followed by a dash, it's a match.
-                    stem.starts_with(&format!("{}-", w.id))
-                })
-                .map(|w| w.id.clone());
+            let worker = registry_workers.iter().find(|w| {
+                // Stem format: "{worker_id}-{bead_id}"
+                // If worker_id is a prefix of stem followed by a dash, it's a match.
+                stem.starts_with(&format!("{}-", w.id))
+            });
+            let worker_id = worker.map(|w| w.id.clone());
 
             // Check if this is a zero-activity worker log.
-            let is_zero_activity = match worker_id {
-                Some(ref id) => {
-                    // Found in registry — check beads_processed count.
-                    registry_workers
-                        .iter()
-                        .find(|w| &w.id == id)
-                        .map(|w| w.beads_processed == 0)
-                        .unwrap_or(true)
+            let is_zero_activity = match worker {
+                // A freshly started or re-execed worker legitimately has zero
+                // completed beads while its first agent is still executing.
+                // Other workspaces' Mend strands cannot see that bead in
+                // their local store, so PID liveness is the cross-workspace
+                // guard that prevents them unlinking its live log.
+                Some(entry) => {
+                    entry.beads_processed == 0 && !crate::registry::is_pid_alive(entry.pid)
                 }
                 None => {
                     // Worker not in registry — treat as zero-activity (crashed before registering).
@@ -4462,7 +4460,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_log_cleanup_deletes_zero_activity_log_immediately() {
+    async fn agent_log_cleanup_preserves_live_zero_activity_log() {
         let hb_dir = tempfile::tempdir().unwrap();
         let lock_dir = tempfile::tempdir().unwrap();
         let reg_dir = tempfile::tempdir().unwrap();
@@ -4497,17 +4495,61 @@ mod tests {
             lock_dir.path(),
             reg_dir.path(),
             log_dir.path(),
-            7, // 7-day retention, but zero-activity logs are deleted immediately
+            7,
         );
 
         let result = mend.evaluate(&store, &HashSet::new()).await;
         assert!(
             matches!(result, StrandResult::NoWork),
-            "expected NoWork after cleaning zero-activity log, got: {result:?}"
+            "expected NoWork while preserving live worker log, got: {result:?}"
         );
         assert!(
+            log_path.exists(),
+            "a live worker's first agent log must not be unlinked"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_log_cleanup_deletes_dead_zero_activity_log_immediately() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+        let log_dir = tempfile::tempdir().unwrap();
+
+        let registry = Registry::new(reg_dir.path());
+        registry
+            .register(crate::registry::WorkerEntry {
+                id: "claude-dead-zero-worker".to_string(),
+                pid: 99_999_999,
+                workspace: PathBuf::from("/tmp/test"),
+                agent: "test".to_string(),
+                model: None,
+                provider: None,
+                started_at: Utc::now(),
+                beads_processed: 0,
+                config_reload_generation: 0,
+            })
+            .unwrap();
+
+        let log_path = log_dir
+            .path()
+            .join("claude-dead-zero-worker-nd-test.agent.jsonl");
+        std::fs::write(&log_path, b"{}").unwrap();
+
+        let (store, _, _) = MockBeadStore::new(vec![]);
+        let mend = make_mend_strand_with_logs(
+            hb_dir.path(),
+            lock_dir.path(),
+            reg_dir.path(),
+            log_dir.path(),
+            7,
+        );
+
+        let result = mend.evaluate(&store, &HashSet::new()).await;
+        assert!(matches!(result, StrandResult::NoWork));
+        assert!(
             !log_path.exists(),
-            "zero-activity agent log should be deleted immediately regardless of age"
+            "a dead zero-activity worker log should still be cleaned immediately"
         );
     }
 
