@@ -158,6 +158,10 @@ pub struct ExploreStrand {
     store_factory: Arc<dyn StoreFactory>,
     /// Cycles since last workspace re-discovery (for periodic refresh).
     cycles_since_rediscovery: std::sync::atomic::AtomicU32,
+    /// Auto-split threshold (`strands.pluck.split_after_failures`), used to
+    /// reject candidates that would be claimed and immediately released as
+    /// `split_out_of_scope`. Zero disables splitting and this rejection too.
+    split_after_failures: u32,
     /// Re-discovery interval, still parsed from config for backward
     /// compatibility with existing `.needle.yaml` files, but no longer read:
     /// re-discovery runs unconditionally every cycle as of bf-6anj4 (the
@@ -259,6 +263,7 @@ impl ExploreStrand {
             qualified_id,
             store_factory: Arc::new(DefaultStoreFactory),
             cycles_since_rediscovery: std::sync::atomic::AtomicU32::new(0),
+            split_after_failures: 0,
             rediscovery_cycles: config.rediscovery_cycles,
             workspace_root: config.workspace_root,
             auto_discovery_mode,
@@ -297,6 +302,7 @@ impl ExploreStrand {
             qualified_id,
             store_factory: Arc::new(DefaultStoreFactory),
             cycles_since_rediscovery: std::sync::atomic::AtomicU32::new(0),
+            split_after_failures: 0,
             rediscovery_cycles: 0,
             workspace_root: PathBuf::from("/tmp/needle-test-root"),
             auto_discovery_mode: false,
@@ -334,6 +340,7 @@ impl ExploreStrand {
             qualified_id,
             store_factory,
             cycles_since_rediscovery: std::sync::atomic::AtomicU32::new(0),
+            split_after_failures: 0,
             rediscovery_cycles: 0,
             workspace_root: PathBuf::from("/tmp/needle-test-root"),
             auto_discovery_mode: false,
@@ -349,6 +356,17 @@ impl ExploreStrand {
 
     /// Use the configured worker heartbeat TTL for cross-workspace claim
     /// recovery. Kept as a builder so the public constructor remains stable.
+    /// Set the auto-split threshold used to reject ineligible candidates before
+    /// ranking and claim (`strands.pluck.split_after_failures`).
+    ///
+    /// Left at 0 by the constructors, which disables the rejection — callers
+    /// that dispatch real work must set it, or Explore will claim beads the
+    /// worker immediately releases as `split_out_of_scope` (needle-ee024ae4).
+    pub fn with_split_after_failures(mut self, split_after_failures: u32) -> Self {
+        self.split_after_failures = split_after_failures;
+        self
+    }
+
     pub fn with_heartbeat_ttl(mut self, heartbeat_ttl: Duration) -> Self {
         self.heartbeat_ttl = heartbeat_ttl;
         self
@@ -856,6 +874,41 @@ impl super::Strand for ExploreStrand {
 
                     if filtered_count > 0 {
                         exclusion_reasons.insert(format!("filtered_{}", filtered_count));
+                    }
+
+                    // Reject candidates the worker would claim and then release
+                    // unchanged as `split_out_of_scope`. Without this the same
+                    // bead is reselected on the very next scan, because nothing
+                    // about it changed — a livelock that burned 1382
+                    // claim/release cycles across 3 beads and 15 workers in a
+                    // single day with zero dispatches (needle-ee024ae4).
+                    //
+                    // This runs BEFORE ranking and claim, and every worker
+                    // applies the same predicate, so concurrent workers cannot
+                    // form a claim/release storm on the same rejected bead.
+                    let before_ineligible = candidates.len();
+                    let split_after_failures = self.split_after_failures;
+                    candidates.retain(|b| {
+                        !crate::mitosis::would_release_as_split_out_of_scope(
+                            b,
+                            split_after_failures,
+                        )
+                    });
+                    let ineligible_count = before_ineligible - candidates.len();
+
+                    if ineligible_count > 0 {
+                        // Distinct from `filtered_*` so telemetry separates
+                        // rejected-before-claim from the worker's late
+                        // post-claim fallback.
+                        exclusion_reasons.insert(format!(
+                            "split_out_of_scope_ineligible_{}",
+                            ineligible_count
+                        ));
+                        tracing::info!(
+                            workspace = %workspace.display(),
+                            ineligible_count,
+                            "rejected candidates that would release as split_out_of_scope"
+                        );
                     }
 
                     if candidates.is_empty() {

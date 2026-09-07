@@ -1375,6 +1375,54 @@ pub fn detects_needle_internal_config(bead: &Bead) -> bool {
     false
 }
 
+/// Highest `failure-count:N` value encoded in a bead's labels.
+///
+/// Multiple such labels can accumulate from successive increments, so the max
+/// wins — matching the worker's own split-mode check.
+pub fn failure_count_from_labels(labels: &[String]) -> u32 {
+    labels
+        .iter()
+        .filter_map(|l| l.strip_prefix("failure-count:"))
+        .filter_map(|n| n.parse::<u32>().ok())
+        .max()
+        .unwrap_or(0)
+}
+
+/// Whether automatic split mode would run for this failure count.
+///
+/// A zero threshold explicitly disables splitting, matching `PluckConfig`.
+pub fn split_threshold_reached(failure_count: u32, threshold: u32) -> bool {
+    threshold > 0 && failure_count >= threshold
+}
+
+/// The shared eligibility predicate: would claiming this bead end in an
+/// immediate `split_out_of_scope` release?
+///
+/// True when the bead has reached the auto-split threshold *and* references
+/// NEEDLE-internal configuration — splitting such a bead has no legitimate
+/// resolution path inside a target repo, so the worker skips it and releases it
+/// unchanged.
+///
+/// Explore calls this **before ranking and claiming** so a poison candidate is
+/// never claimed at all; the worker calls it after claiming as a late invariant
+/// fallback. Both call the same function deliberately: when the two disagreed,
+/// Explore claimed a bead the worker then refused, released it unchanged, and
+/// reselected it on the very next scan — a livelock that produced 1382
+/// claim/release cycles across 3 beads and 15 workers in a single day
+/// (needle-ee024ae4), with zero dispatches from the workers caught in it.
+///
+/// Note for anyone adding an exclusion cache on top of this: do **not** key it
+/// on the bead revision. Claim and release each bump the revision, so a
+/// revision-keyed exclusion is invalidated by the very churn it is meant to
+/// stop — the worst offender reached revision 3158 in nine hours purely from
+/// this loop.
+pub fn would_release_as_split_out_of_scope(bead: &Bead, split_after_failures: u32) -> bool {
+    split_threshold_reached(
+        failure_count_from_labels(&bead.labels),
+        split_after_failures,
+    ) && detects_needle_internal_config(bead)
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Tests
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1588,6 +1636,123 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    // ── Split-out-of-scope eligibility (needle-ee024ae4) ──
+
+    /// A bead shaped like the real offender: an unravel proposal about a
+    /// starvation alert, already at the failure threshold.
+    fn poison_bead() -> Bead {
+        Bead {
+            id: BeadId::from("vista-68e9cef4"),
+            title: "[Unravel] Starvation alert: beads invisible — diagnose and unstick".to_string(),
+            body: Some("Run bead doctor and apply mechanical fixes; the configured exclude_labels already keep deferred beads out of dispatch.".to_string()),
+            priority: 2,
+            status: BeadStatus::Open,
+            assignee: None,
+            labels: vec!["failure-count:3".to_string(), "unravel-proposal".to_string()],
+            workspace: PathBuf::from("/tmp/test"),
+            dependencies: vec![],
+            dependents: vec![],
+            comments: vec![],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn failure_count_takes_the_max_label() {
+        let labels = vec![
+            "failure-count:1".to_string(),
+            "failure-count:3".to_string(),
+            "failure-count:2".to_string(),
+            "unrelated".to_string(),
+        ];
+        assert_eq!(failure_count_from_labels(&labels), 3);
+        assert_eq!(failure_count_from_labels(&[]), 0);
+        assert_eq!(
+            failure_count_from_labels(&["failure-count:not-a-number".to_string()]),
+            0
+        );
+    }
+
+    #[test]
+    fn zero_threshold_disables_splitting() {
+        assert!(!split_threshold_reached(99, 0));
+        assert!(split_threshold_reached(3, 3));
+        assert!(!split_threshold_reached(2, 3));
+    }
+
+    #[test]
+    fn poison_bead_is_ineligible_at_threshold() {
+        // The exact shape that livelocked the fleet: internal-config content
+        // plus failure-count:3 against a threshold of 3.
+        assert!(would_release_as_split_out_of_scope(&poison_bead(), 3));
+    }
+
+    #[test]
+    fn poison_bead_is_eligible_below_threshold() {
+        // Below the split threshold it dispatches normally as PLUCK — the
+        // rejection must not swallow ordinary work that merely mentions config.
+        assert!(!would_release_as_split_out_of_scope(&poison_bead(), 4));
+    }
+
+    #[test]
+    fn zero_threshold_never_rejects() {
+        // Splitting disabled means the worker never reaches the skip branch,
+        // so Explore must not reject the candidate either.
+        assert!(!would_release_as_split_out_of_scope(&poison_bead(), 0));
+    }
+
+    #[test]
+    fn ordinary_bead_at_threshold_stays_eligible() {
+        // High failure count alone is not disqualifying; only the combination
+        // with NEEDLE-internal content is.
+        let mut b = poison_bead();
+        b.title = "Fix the retry backoff in the HTTP client".to_string();
+        b.body = Some("Exponential backoff with jitter.".to_string());
+        assert!(!would_release_as_split_out_of_scope(&b, 3));
+    }
+
+    #[test]
+    fn explore_and_worker_agree_on_every_candidate() {
+        // The livelock was a disagreement between the two call sites: Explore
+        // claimed what the worker refused. Assert one predicate decides both,
+        // across the full threshold range.
+        let b = poison_bead();
+        for threshold in 0..=5u32 {
+            let worker_would_skip =
+                split_threshold_reached(failure_count_from_labels(&b.labels), threshold)
+                    && detects_needle_internal_config(&b);
+            assert_eq!(
+                would_release_as_split_out_of_scope(&b, threshold),
+                worker_would_skip,
+                "predicates diverged at threshold {threshold}"
+            );
+        }
+    }
+
+    #[test]
+    fn poison_sorted_first_does_not_hide_a_valid_candidate() {
+        // Regression for the reported shape: the poison candidate sorts ahead
+        // of a valid one (lower priority number wins). Filtering candidates
+        // with the shared predicate must leave exactly the valid bead.
+        let mut poison = poison_bead();
+        poison.priority = 0;
+        let mut valid = poison_bead();
+        valid.id = BeadId::from("vista-valid-001");
+        valid.title = "Add a retry test for the uploader".to_string();
+        valid.body = Some("Cover the 503 path.".to_string());
+        valid.priority = 2;
+
+        let mut candidates = vec![poison, valid];
+        candidates.sort_by_key(|b| b.priority);
+        assert_eq!(candidates[0].id.to_string(), "vista-68e9cef4");
+
+        candidates.retain(|b| !would_release_as_split_out_of_scope(b, 3));
+
+        assert_eq!(candidates.len(), 1, "exactly one candidate must survive");
+        assert_eq!(candidates[0].id.to_string(), "vista-valid-001");
     }
 
     // ── parse_mitosis_response tests ──

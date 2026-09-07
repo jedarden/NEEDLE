@@ -39,7 +39,7 @@ use crate::config::{CliOverrides, Config, ConfigLoader, ConfigSource, SourceMap}
 use crate::cost::{self, BudgetCheck, EffortData};
 use crate::dispatch::{self, Dispatcher};
 use crate::health::HealthMonitor;
-use crate::mitosis::{detects_needle_internal_config, MitosisEvaluator};
+use crate::mitosis::MitosisEvaluator;
 use crate::outcome::OutcomeHandler;
 use crate::prompt::{BuiltPrompt, PromptBuilder};
 use crate::rate_limit::RateLimiter;
@@ -2786,7 +2786,17 @@ impl Worker {
         // If SPLIT mode would be used, check if the bead references NEEDLE-internal
         // configuration. These tasks have no legitimate resolution path from inside
         // a target repo and should not be split into child beads there.
-        if template_name == "split" && detects_needle_internal_config(&bead) {
+        // Late invariant fallback. Explore already rejects these before ranking
+        // and claim; this catches a bead whose labels changed between selection
+        // and dispatch. Both paths call the same predicate on purpose — when
+        // they diverged, Explore claimed what the worker refused and the pair
+        // livelocked (needle-ee024ae4).
+        if template_name == "split"
+            && crate::mitosis::would_release_as_split_out_of_scope(
+                &bead,
+                self.config.strands.pluck.split_after_failures,
+            )
+        {
             heartbeat_handle.abort();
 
             tracing::info!(

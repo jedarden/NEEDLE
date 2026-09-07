@@ -179,7 +179,11 @@ impl StrandRunner {
             telemetry.clone(),
             worker_id.to_string(),
         )
-        .with_heartbeat_ttl(heartbeat_ttl);
+        .with_heartbeat_ttl(heartbeat_ttl)
+        // Explore must reject beads the worker would immediately release as
+        // split_out_of_scope; without the threshold it cannot tell which those
+        // are (needle-ee024ae4).
+        .with_split_after_failures(config.strands.pluck.split_after_failures);
 
         let weave = WeaveStrand::new(
             config.strands.weave.clone(),
