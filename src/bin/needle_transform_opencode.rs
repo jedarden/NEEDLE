@@ -276,13 +276,22 @@ pub(crate) fn process_line(line: &str, seen: &mut TransformState) -> Vec<AgentEv
             // Folding them into `output` keeps cost arithmetic downstream
             // consistent with what the provider actually charges.
             let output = get("output") + get("reasoning");
+            let input = get("input");
+            // A step that failed before reaching the model still emits
+            // step_finish, with every counter zero — opencode retries a
+            // retryable upstream error (a zai-proxy 503, say) and each attempt
+            // contributes one of these. They carry no cost information, so
+            // forwarding them just pads the stream with noise.
+            if input == 0 && output == 0 {
+                return vec![];
+            }
             let cache_read = tokens.pointer("/cache/read").and_then(Value::as_u64);
             let cache_write = tokens.pointer("/cache/write").and_then(Value::as_u64);
 
             vec![event(
                 ts,
                 EventPayload::Tokens(TokensEvent {
-                    input: get("input"),
+                    input,
                     output,
                     model: seen.model(),
                     cache_read,
@@ -488,6 +497,15 @@ mod tests {
             }
             other => panic!("expected tokens, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn all_zero_step_finish_is_dropped() {
+        // Observed live: opencode retries a retryable upstream failure (zai-proxy
+        // 503) and emits one all-zero step_finish per attempt. Those carry no
+        // cost information and must not reach the event stream.
+        let line = r#"{"type":"step_finish","timestamp":1,"part":{"tokens":{"total":0,"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}}}}"#;
+        assert!(process_line(line, &mut TransformState::default()).is_empty());
     }
 
     #[test]
