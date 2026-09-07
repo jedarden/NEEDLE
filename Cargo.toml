@@ -26,6 +26,10 @@ path = "src/bin/needle_transform_codex.rs"
 name = "needle-transform-opencode"
 path = "src/bin/needle_transform_opencode.rs"
 
+[[bin]]
+name = "needle-transform-omp"
+path = "src/bin/needle_transform_omp.rs"
+
 [features]
 default = ["otlp"]
 otlp = [
