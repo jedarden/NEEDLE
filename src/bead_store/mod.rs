@@ -40,6 +40,36 @@ pub use backend::{
 };
 pub use cli_store::CliBeadStore;
 
+/// Parse a `quarantine-until:<rfc3339>` label into its expiry instant.
+///
+/// Quarantine is an expiring readiness constraint, not a bead status. A
+/// malformed label is treated as absent so it cannot starve work forever.
+pub(crate) fn quarantine_until(label: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    const PREFIX: &str = "quarantine-until:";
+    let trimmed = label.trim();
+    if trimmed.len() < PREFIX.len() || !trimmed[..PREFIX.len()].eq_ignore_ascii_case(PREFIX) {
+        return None;
+    }
+    chrono::DateTime::parse_from_rfc3339(trimmed[PREFIX.len()..].trim())
+        .ok()
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+}
+
+/// Return the bead's latest active quarantine expiry, if any.
+///
+/// This lives at the bead-store boundary so Pluck, Explore, generation gates,
+/// and any future ready-queue consumer all enforce the same fleet-wide hold.
+pub(crate) fn active_quarantine_until(
+    bead: &Bead,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    bead.labels
+        .iter()
+        .filter_map(|label| quarantine_until(label))
+        .max()
+        .filter(|until| *until > now)
+}
+
 /// Open the bead store explicitly bound by the target workspace's resolved
 /// configuration. This is the production entry point: executable discovery
 /// alone is never treated as evidence of store ownership.

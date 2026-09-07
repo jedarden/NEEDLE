@@ -26,6 +26,22 @@ use crate::validation::{
     ValidationGate,
 };
 
+/// Fleet-wide cooling period after an unsuccessful attempt.  The window grows
+/// across consecutive failures so another ready bead can run instead of every
+/// worker immediately reclaiming the same deterministic frontier entry.
+const RETRY_COOLDOWN_BASE_SECS: u64 = 5 * 60;
+const RETRY_COOLDOWN_MAX_SECS: u64 = 30 * 60;
+
+/// ADR-022 quarantine windows.  A full quarantine begins at two hours and
+/// doubles by round, capped at two days.
+const QUARANTINE_BASE_SECS: u64 = 2 * 60 * 60;
+const QUARANTINE_MAX_SECS: u64 = 48 * 60 * 60;
+
+fn capped_exponential_backoff(base_secs: u64, exponent: u32, cap_secs: u64) -> u64 {
+    let multiplier = 1u64.checked_shl(exponent.min(20)).unwrap_or(u64::MAX);
+    base_secs.saturating_mul(multiplier).min(cap_secs)
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // classify (convenience re-export)
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1350,8 +1366,8 @@ impl OutcomeHandler {
         // If release succeeded, increment failure count and check the
         // quarantine threshold. A bead that has exceeded
         // `outcome.quarantine_after_failures` consecutive failures is
-        // quarantined (status=blocked) instead of being left released-to-open
-        // for the next cycle to re-claim and fail again indefinitely. This
+        // quarantined behind an expiring fleet-visible label instead of being
+        // left immediately claimable for the next cycle. This
         // also closes the mitosis `NotSplittable` fallthrough (worker/mod.rs):
         // that verdict no longer matters for beads at or past the ceiling,
         // since this check already ran before mitosis evaluation this cycle.
@@ -1732,10 +1748,79 @@ impl OutcomeHandler {
             }
         }
 
+        // The bead-rs ready frontier is deterministic.  Releasing a failed
+        // bead without changing its eligibility makes the very next worker
+        // select it again, which is retry churn rather than distribution.
+        // Persist a short expiring exclusion on the bead so every worker sees
+        // the same cooldown.  The full quarantine path below replaces this
+        // window when the configured failure ceiling is reached.
+        let threshold = self.config.outcome.quarantine_after_failures;
+        if threshold == 0 || new_count < threshold {
+            if let Err(error) = self.apply_retry_cooldown(store, bead, new_count).await {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    failure_count = new_count,
+                    error = %error,
+                    "failed to apply retry cooldown; bead remains eligible"
+                );
+            }
+        }
+
         Ok(new_count)
     }
 
-    /// Reset the failure count label on a bead by removing all `failure-count:N` labels.
+    /// Replace the bead's current expiry label with a bounded retry window.
+    ///
+    /// This is deliberately stored on the bead rather than in one worker's
+    /// memory: a local exclusion merely hands the same bead to a peer.  Pluck
+    /// already treats a future `quarantine-until` label as a never-relaxed
+    /// constraint and automatically admits it after expiry.
+    async fn apply_retry_cooldown(
+        &self,
+        store: &dyn BeadStore,
+        bead: &Bead,
+        failure_count: u32,
+    ) -> Result<()> {
+        let labels =
+            tokio::time::timeout(std::time::Duration::from_secs(30), store.labels(&bead.id))
+                .await
+                .context("labels() timed out while applying retry cooldown")??;
+
+        for label in labels
+            .iter()
+            .filter(|label| label.starts_with("quarantine-until:"))
+        {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                store.remove_label(&bead.id, label),
+            )
+            .await
+            .context("remove_label() timed out while applying retry cooldown")??;
+        }
+
+        let exponent = failure_count.saturating_sub(1);
+        let cooldown_secs =
+            capped_exponential_backoff(RETRY_COOLDOWN_BASE_SECS, exponent, RETRY_COOLDOWN_MAX_SECS);
+        let until = Utc::now() + chrono::Duration::seconds(cooldown_secs as i64);
+        let label = format!("quarantine-until:{}", until.to_rfc3339());
+        tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            store.add_label(&bead.id, &label),
+        )
+        .await
+        .context("add_label() timed out while applying retry cooldown")??;
+
+        tracing::info!(
+            bead_id = %bead.id,
+            failure_count,
+            cooldown_secs,
+            retry_after = %until.to_rfc3339(),
+            "deferred failed bead behind a fleet-wide retry cooldown"
+        );
+        Ok(())
+    }
+
+    /// Reset failure and retry state after verified shipped work.
     ///
     /// Called on success to clear the failure counter so the bead starts fresh
     /// on the next cycle.
@@ -1766,10 +1851,18 @@ impl OutcomeHandler {
                 }
             };
 
-        // Remove all failure-count labels.
+        // Remove every retry/quarantine label. A successful dispatch after an
+        // expired quarantine starts a fresh failure series; leaving an old
+        // future timestamp behind would hide otherwise healthy work.
         let mut removed_count = 0;
         for label in &labels {
-            if label.starts_with("failure-count:") {
+            if label.starts_with("failure-count:")
+                || label.starts_with("quarantine-until:")
+                || label.starts_with("quarantine-round:")
+                || label.starts_with("quarantine:")
+                || label == "quarantined"
+                || label == "cycling"
+            {
                 match tokio::time::timeout(
                     std::time::Duration::from_secs(30),
                     store.remove_label(&bead.id, label),
@@ -1784,14 +1877,14 @@ impl OutcomeHandler {
                             bead_id = %bead.id,
                             label,
                             error = %e,
-                            "failed to remove failure-count label"
+                            "failed to remove failure/quarantine label"
                         );
                     }
                     Err(_) => {
                         tracing::warn!(
                             bead_id = %bead.id,
                             label,
-                            "remove_label timed out after 30s"
+                        "remove_label timed out after 30s while resetting failure state"
                         );
                     }
                 }
@@ -1802,14 +1895,14 @@ impl OutcomeHandler {
             tracing::debug!(
                 bead_id = %bead.id,
                 removed_count,
-                "failure count reset"
+                "failure and quarantine state reset"
             );
         }
 
         Ok(())
     }
 
-    /// Quarantine a bead by setting it deferred with a quarantine reason label.
+    /// Quarantine a bead with an expiring, fleet-visible label window.
     ///
     /// This is called when a bead exceeds the configured failure threshold.
     /// Emits a BeadQuarantined telemetry event and a FalseCloseDetected event.
@@ -1823,117 +1916,79 @@ impl OutcomeHandler {
         failure_count: u32,
         threshold: u32,
     ) -> Result<Vec<EventKind>> {
-        let mut events = Vec::new();
+        let labels = self
+            .timeout_op(|| store.labels(&bead.id), "quarantine labels")
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("timed out reading labels for quarantine"))?;
+        let prior_round = labels
+            .iter()
+            .filter_map(|label| label.strip_prefix("quarantine-round:"))
+            .filter_map(|round| round.parse::<u32>().ok())
+            .max()
+            .unwrap_or(0);
+        let round = prior_round.saturating_add(1);
+        let quarantine_secs = capped_exponential_backoff(
+            QUARANTINE_BASE_SECS,
+            round.saturating_sub(1),
+            QUARANTINE_MAX_SECS,
+        );
+        let until = Utc::now() + chrono::Duration::seconds(quarantine_secs as i64);
+        let round_label = format!("quarantine-round:{round}");
+        let until_label = format!("quarantine-until:{}", until.to_rfc3339());
+        let reason_label = format!("quarantine:failure-count:{failure_count}");
 
         tracing::warn!(
             bead_id = %bead.id,
             failure_count,
             threshold,
+            round,
+            quarantine_secs,
+            until = %until.to_rfc3339(),
             "quarantining bead after exceeding failure threshold"
         );
 
-        // Add 'deferred' label to stop Pluck from re-selecting the bead.
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            store.add_label(&bead.id, "deferred"),
-        )
-        .await
-        {
-            Ok(Ok(())) => {
-                tracing::debug!(
-                    bead_id = %bead.id,
-                    "added 'deferred' label"
-                );
-            }
-            Ok(Err(e)) => {
-                tracing::warn!(
-                    bead_id = %bead.id,
-                    error = %e,
-                    "failed to add 'deferred' label during quarantine"
-                );
-                events.push(EventKind::WorkerHandlingTimeout {
-                    bead_id: bead.id.clone(),
-                    outcome: "quarantine".to_string(),
-                    operation: "add_label".to_string(),
-                    error: e.to_string(),
-                });
-            }
-            Err(_) => {
-                tracing::warn!(
-                    bead_id = %bead.id,
-                    "add_label timed out after 30s during quarantine"
-                );
-                events.push(EventKind::WorkerHandlingTimeout {
-                    bead_id: bead.id.clone(),
-                    outcome: "quarantine".to_string(),
-                    operation: "add_label".to_string(),
-                    error: "timeout after 30s".to_string(),
-                });
-            }
+        // Add the new exclusion before pruning old labels.  If a backend call
+        // fails midway, the bead remains excluded by either the prior retry
+        // window or the new one rather than briefly returning to the frontier.
+        for label in [
+            "quarantined".to_string(),
+            round_label.clone(),
+            until_label.clone(),
+            reason_label,
+        ] {
+            self.timeout_op(|| store.add_label(&bead.id, &label), "quarantine add_label")
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("timed out adding quarantine label"))?;
         }
 
-        // Add a quarantine reason label with the failure count and context.
-        let reason_label = format!(
-            "quarantine: false-close-detected-after-{}-tries",
-            failure_count
-        );
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            store.add_label(&bead.id, &reason_label),
-        )
-        .await
-        {
-            Ok(Ok(())) => {
-                tracing::debug!(
-                    bead_id = %bead.id,
-                    "added quarantine reason label"
-                );
-            }
-            Ok(Err(e)) => {
-                tracing::warn!(
-                    bead_id = %bead.id,
-                    error = %e,
-                    "failed to add quarantine reason label"
-                );
-                events.push(EventKind::WorkerHandlingTimeout {
-                    bead_id: bead.id.clone(),
-                    outcome: "quarantine".to_string(),
-                    operation: "add_label".to_string(),
-                    error: e.to_string(),
-                });
-            }
-            Err(_) => {
-                tracing::warn!(
-                    bead_id = %bead.id,
-                    "add_label timed out after 30s"
-                );
-                events.push(EventKind::WorkerHandlingTimeout {
-                    bead_id: bead.id.clone(),
-                    outcome: "quarantine".to_string(),
-                    operation: "add_label".to_string(),
-                    error: "timeout after 30s".to_string(),
-                });
-            }
+        for label in labels.iter().filter(|label| {
+            (label.starts_with("quarantine-round:") && label.as_str() != round_label)
+                || (label.starts_with("quarantine-until:") && label.as_str() != until_label)
+        }) {
+            self.timeout_op(
+                || store.remove_label(&bead.id, label),
+                "quarantine remove_label",
+            )
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("timed out pruning old quarantine label"))?;
         }
 
-        // Emit the BeadQuarantined event.
-        // The legacy quarantine path has no rounds ladder or expiry yet — that
-        // is the expiring-quarantine work (needle-40c6c60e). Report round 1
-        // with no expiry rather than blocking on fields this path cannot fill.
-        events.push(EventKind::BeadQuarantined {
-            bead_id: bead.id.clone(),
-            round: 1,
-            until: String::new(),
-            failure_count,
-        });
-
-        // Emit the FalseCloseDetected event for observability.
-        events.push(EventKind::FalseCloseDetected {
-            bead_id: bead.id.clone(),
-            failure_count,
-            threshold,
-            reason: "shipped-work-verification-failed".to_string(),
-        });
+        let events = vec![
+            EventKind::BeadQuarantined {
+                bead_id: bead.id.clone(),
+                round,
+                until: until.to_rfc3339(),
+                failure_count,
+            },
+            // Keep the pre-existing false-close signal for dashboards and
+            // operators alongside the more specific quarantine event.
+            EventKind::FalseCloseDetected {
+                bead_id: bead.id.clone(),
+                failure_count,
+                threshold,
+                reason: "shipped-work-verification-failed".to_string(),
+            },
+        ];
 
         Ok(events)
     }
@@ -2424,6 +2479,30 @@ mod tests {
 
     // ── ADR-012: failure-quarantine circuit breaker ──
 
+    #[test]
+    fn retry_and_quarantine_backoff_is_bounded() {
+        assert_eq!(
+            capped_exponential_backoff(RETRY_COOLDOWN_BASE_SECS, 0, RETRY_COOLDOWN_MAX_SECS),
+            300
+        );
+        assert_eq!(
+            capped_exponential_backoff(RETRY_COOLDOWN_BASE_SECS, 3, RETRY_COOLDOWN_MAX_SECS),
+            1800
+        );
+        assert_eq!(
+            capped_exponential_backoff(RETRY_COOLDOWN_BASE_SECS, 20, RETRY_COOLDOWN_MAX_SECS),
+            1800
+        );
+        assert_eq!(
+            capped_exponential_backoff(QUARANTINE_BASE_SECS, 0, QUARANTINE_MAX_SECS),
+            7200
+        );
+        assert_eq!(
+            capped_exponential_backoff(QUARANTINE_BASE_SECS, 10, QUARANTINE_MAX_SECS),
+            172800
+        );
+    }
+
     #[tokio::test]
     async fn handle_failure_quarantines_bead_at_threshold() {
         // Default quarantine_after_failures is 5. A bead already at
@@ -2440,13 +2519,23 @@ mod tests {
 
         assert_eq!(result.bead_action, BeadAction::Quarantined);
         let actions = store.actions();
-        // bead-rs 0.2.x has no stored 'blocked' status, so quarantine defers
-        // the bead with a 'deferred' label instead of calling block().
         assert!(
             actions
                 .iter()
-                .any(|a| matches!(a, StoreAction::AddLabel(id, label) if id == "needle-test" && label == "deferred")),
-            "5th consecutive failure must defer the bead"
+                .any(|a| matches!(a, StoreAction::AddLabel(id, label) if id == "needle-test" && label == "quarantined")),
+            "5th consecutive failure must mark the bead quarantined"
+        );
+        assert!(
+            actions.iter().any(
+                |a| matches!(a, StoreAction::AddLabel(_, label) if label == "quarantine-round:1")
+            ),
+            "first quarantine must record round 1, got: {actions:?}"
+        );
+        assert!(
+            actions.iter().any(
+                |a| matches!(a, StoreAction::AddLabel(_, label) if label.starts_with("quarantine-until:"))
+            ),
+            "quarantine must carry an expiry, got: {actions:?}"
         );
         assert!(
             actions.iter().any(
@@ -2464,6 +2553,37 @@ mod tests {
             )),
             "must emit BeadQuarantined with the crossing count and configured threshold"
         );
+    }
+
+    #[tokio::test]
+    async fn repeated_quarantine_advances_round_and_replaces_expiry() {
+        let handler = test_handler();
+        let old_until = "quarantine-until:2026-01-01T00:00:00+00:00";
+        let store = MockBeadStore::new(BeadStatus::InProgress).with_labels(vec![
+            "failure-count:4".to_string(),
+            "quarantined".to_string(),
+            "quarantine-round:2".to_string(),
+            old_until.to_string(),
+        ]);
+        let bead = test_bead(BeadStatus::InProgress);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(1), false)
+            .await
+            .unwrap();
+
+        assert_eq!(result.bead_action, BeadAction::Quarantined);
+        let actions = store.actions();
+        assert!(actions.iter().any(
+            |action| matches!(action, StoreAction::AddLabel(_, label) if label == "quarantine-round:3")
+        ));
+        assert!(actions.iter().any(
+            |action| matches!(action, StoreAction::RemoveLabel(_, label) if label == old_until)
+        ));
+        assert!(result.telemetry_events.iter().any(|event| matches!(
+            event,
+            EventKind::BeadQuarantined { round: 3, until, .. } if !until.is_empty()
+        )));
     }
 
     #[tokio::test]
@@ -2487,6 +2607,12 @@ mod tests {
         assert!(
             !actions.iter().any(|a| matches!(a, StoreAction::Block(_))),
             "4th consecutive failure must not yet quarantine"
+        );
+        assert!(
+            actions.iter().any(
+                |a| matches!(a, StoreAction::AddLabel(_, label) if label.starts_with("quarantine-until:"))
+            ),
+            "a below-threshold failure must receive a retry cooldown"
         );
     }
 
@@ -2561,12 +2687,12 @@ mod tests {
         // Should quarantine because shipped-work check fails
         assert_eq!(result.bead_action, BeadAction::Quarantined);
         let actions = store.actions();
-        assert!(
-            actions
-                .iter()
-                .any(|a| matches!(a, StoreAction::AddLabel(_, label) if label == "deferred")),
-            "quarantine must add the deferred label"
-        );
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, StoreAction::AddLabel(_, label) if label == "quarantined")));
+        assert!(actions.iter().any(
+            |a| matches!(a, StoreAction::AddLabel(_, label) if label.starts_with("quarantine-until:"))
+        ));
         assert!(
             actions.iter().any(
                 |a| matches!(a, StoreAction::AddLabel(_, label) if label.contains("quarantine:"))

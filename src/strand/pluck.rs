@@ -7,7 +7,7 @@
 //!
 //! Given the same queue state, every worker computes the same candidate list.
 
-use crate::bead_store::{BeadStore, Filters};
+use crate::bead_store::{active_quarantine_until, BeadStore, Filters};
 use crate::mitosis::detects_needle_internal_config;
 use crate::telemetry::Telemetry;
 use crate::types::{Bead, BeadId, BrDependency, Comment, StrandError, StrandResult};
@@ -470,42 +470,6 @@ fn is_manual_block_label(label: &str) -> bool {
 fn is_deferred_label(label: &str) -> bool {
     let label = normalized_label(label);
     label == "deferred" || label.starts_with("deferred:")
-}
-
-/// Parse a `quarantine-until:<rfc3339>` label into its expiry instant.
-///
-/// ADR-022 quarantine is an *expiring label*, not a status: once the instant
-/// passes the bead is claimable again without anyone editing it. A label whose
-/// timestamp does not parse is treated as absent — never as an active
-/// quarantine — so a malformed label cannot starve a bead forever. The prefix
-/// is matched case-insensitively; the timestamp is passed to the parser as
-/// written.
-pub(crate) fn quarantine_until(label: &str) -> Option<chrono::DateTime<Utc>> {
-    const PREFIX: &str = "quarantine-until:";
-    let trimmed = label.trim();
-    if trimmed.len() < PREFIX.len() || !trimmed[..PREFIX.len()].eq_ignore_ascii_case(PREFIX) {
-        return None;
-    }
-    chrono::DateTime::parse_from_rfc3339(trimmed[PREFIX.len()..].trim())
-        .ok()
-        .map(|dt| dt.with_timezone(&Utc))
-}
-
-/// The bead's active quarantine expiry, if any.
-///
-/// When several `quarantine-until` labels are present (a round was applied
-/// without removing the previous one) the latest instant governs, matching how
-/// `quarantine-round` is read as the maximum. Returns `None` once the latest
-/// window has passed.
-pub(crate) fn active_quarantine_until(
-    bead: &Bead,
-    now: chrono::DateTime<Utc>,
-) -> Option<chrono::DateTime<Utc>> {
-    bead.labels
-        .iter()
-        .filter_map(|label| quarantine_until(label))
-        .max()
-        .filter(|until| *until > now)
 }
 
 fn is_human_like_label(label: &str, exclude_labels: &[String]) -> bool {
@@ -2405,7 +2369,7 @@ fn write_query_execution_diagnostic(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bead_store::RepairReport;
+    use crate::bead_store::{quarantine_until, RepairReport};
     use crate::types::{BeadId, BeadStatus, BrDependency, ClaimResult};
 
     use anyhow::Result;

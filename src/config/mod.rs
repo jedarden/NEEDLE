@@ -5815,8 +5815,9 @@ pub struct OutcomeConfig {
     /// Consecutive failures before quarantining a bead (0 = disabled).
     ///
     /// When a bead accumulates this many consecutive failures, it is automatically
-    /// quarantined: status is set to `blocked`, a `cycling` label is added, and a
-    /// `BeadQuarantined` telemetry event is emitted.
+    /// quarantined with expiring `quarantine-until` / `quarantine-round` labels,
+    /// a `cycling` label, and a `BeadQuarantined` telemetry event. Ownership is
+    /// released rather than manually blocked so the bead returns after expiry.
     ///
     /// The default (5) is above Pluck's `split_after_failures` default (3) so
     /// mitosis gets first crack at splitting the bead before quarantine kicks in.

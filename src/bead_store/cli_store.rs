@@ -502,6 +502,8 @@ impl BeadStore for CliBeadStore {
                     .iter()
                     .any(|label| filters.exclude_labels.contains(label))
         });
+        let now = chrono::Utc::now();
+        beads.retain(|bead| super::active_quarantine_until(bead, now).is_none());
         Ok(beads)
     }
 
@@ -1434,7 +1436,7 @@ fn parse_beads_with_claim_history(
 #[cfg(test)]
 mod tests {
     use super::{parse_beads, parse_beads_with_claim_history, CliBeadStore, ParseShape};
-    use crate::bead_store::{builtin_bead_backends, BeadStore};
+    use crate::bead_store::{builtin_bead_backends, BeadStore, Filters};
     use std::collections::HashMap;
 
     #[test]
@@ -1516,6 +1518,48 @@ mod tests {
     fn claim_history_parser_reads_empty_array_as_no_beads() {
         let parsed = parse_beads_with_claim_history(ParseShape::JsonLines, "[]").unwrap();
         assert!(parsed.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ready_filters_active_quarantine_for_every_consumer() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let binary = workspace.path().join("fake-bead");
+        std::fs::write(
+            &binary,
+            concat!(
+                "#!/bin/sh\n",
+                "printf '%s\\n' '",
+                r#"{"id":"active","title":"active hold","priority":1,"status":"open","labels":["quarantine-until:2099-01-01T00:00:00Z"],"created_at":"2026-08-13T00:00:00Z"}"#,
+                "' '",
+                r#"{"id":"expired","title":"expired hold","priority":1,"status":"open","labels":["quarantine-until:2000-01-01T00:00:00Z"],"created_at":"2026-08-13T00:00:00Z"}"#,
+                "'\n"
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&binary).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&binary, permissions).unwrap();
+
+        let backend = builtin_bead_backends()
+            .into_iter()
+            .find(|backend| backend.name == "bead-rs")
+            .unwrap();
+        let store = CliBeadStore::new(
+            backend,
+            binary,
+            workspace.path().to_path_buf(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let ready = store.ready(&Filters::default()).await.unwrap();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].id.as_ref(), "expired");
     }
 
     #[cfg(unix)]

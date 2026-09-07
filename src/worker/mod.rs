@@ -4456,14 +4456,26 @@ impl Worker {
                 )?;
             }
             BeadAction::Quarantined => {
-                // Block the bead (status=blocked, labeled 'cycling').
-                // Note: Handler has already emitted BeadQuarantined telemetry with failure count.
-                tokio::time::timeout(Duration::from_secs(30), self.store.block(&bead.id)).await??;
+                // ADR-022 quarantine is an expiring label window, not a manual
+                // block.  The outcome handler has already installed the
+                // `quarantined`, `quarantine-round:N`, and future
+                // `quarantine-until:*` labels.  Release ownership so the bead
+                // becomes eligible automatically after that timestamp; a
+                // permanent manual block would make the expiry meaningless.
+                tokio::time::timeout(Duration::from_secs(30), self.store.release(&bead.id))
+                    .await??;
                 let _ = tokio::time::timeout(
                     Duration::from_secs(30),
                     self.store.add_label(&bead.id, "cycling"),
                 )
                 .await;
+                self.telemetry.emit(
+                    EventKind::BeadReleased {
+                        bead_id: bead.id.clone(),
+                        reason: "handler_action:quarantined".to_string(),
+                    },
+                    chrono::Utc::now(),
+                )?;
             }
             BeadAction::Interrupted => {
                 // Release due to worker interruption.
@@ -9523,6 +9535,28 @@ mod tests {
         worker.current_bead = Some(bead.clone());
 
         worker.apply_bead_action(BeadAction::Errored).await.unwrap();
+
+        assert_eq!(*worker.state(), WorkerState::Logging);
+        let current = store.show(&bead.id).await.unwrap();
+        assert_eq!(current.status, BeadStatus::Open);
+        assert_eq!(current.assignee, None);
+    }
+
+    #[tokio::test]
+    async fn apply_quarantined_action_releases_instead_of_manually_blocking() {
+        let mut bead = make_test_bead("needle-action-quarantined");
+        bead.status = BeadStatus::InProgress;
+        bead.assignee = Some("test-worker".to_string());
+        let store = Arc::new(MockStore::new(vec![bead.clone()]));
+        let mut worker = make_worker(store.clone());
+        worker.boot().await.unwrap();
+        worker.state = WorkerState::Handling;
+        worker.current_bead = Some(bead.clone());
+
+        worker
+            .apply_bead_action(BeadAction::Quarantined)
+            .await
+            .unwrap();
 
         assert_eq!(*worker.state(), WorkerState::Logging);
         let current = store.show(&bead.id).await.unwrap();
