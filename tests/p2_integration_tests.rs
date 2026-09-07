@@ -704,18 +704,21 @@ async fn mend_strand_removes_orphaned_lock_files() {
 }
 
 #[tokio::test]
-async fn mend_strand_cleans_zero_activity_worker_logs_immediately() {
+async fn mend_strand_cleans_dead_zero_activity_worker_logs_immediately() {
     let hb_dir = tempfile::tempdir().unwrap();
     let reg_dir = tempfile::tempdir().unwrap();
     let lock_dir = tempfile::tempdir().unwrap();
     let log_dir = tempfile::tempdir().unwrap();
 
-    // Register a worker with beads_processed = 0 (zero-activity worker).
+    // Register a worker with beads_processed = 0 and a PID that is not
+    // alive. A zero-activity worker that is still running must have its log
+    // preserved (see agent_log_cleanup_preserves_live_zero_activity_log in
+    // src/strand/mend.rs); only a DEAD one is cleaned up immediately.
     let registry = Registry::new(reg_dir.path());
     registry
         .register(WorkerEntry {
             id: "zero-activity-worker".to_string(),
-            pid: std::process::id(),
+            pid: 99_999_999,
             workspace: PathBuf::from("/tmp/test"),
             agent: "claude".to_string(),
             model: Some("sonnet".to_string()),
@@ -726,9 +729,9 @@ async fn mend_strand_cleans_zero_activity_worker_logs_immediately() {
         })
         .unwrap();
 
-    // Create a FRESH agent log for the zero-activity worker.
-    // This would normally be kept for retention_days, but zero-activity
-    // logs are cleaned up immediately.
+    // Create a FRESH agent log for the dead zero-activity worker.
+    // This would normally be kept for retention_days, but dead zero-activity
+    // logs are cleaned up immediately regardless of age.
     let log_path = log_dir
         .path()
         .join("zero-activity-worker-nd-test.agent.jsonl");
@@ -761,12 +764,12 @@ async fn mend_strand_cleans_zero_activity_worker_logs_immediately() {
 
     assert!(
         matches!(result, StrandResult::NoWork),
-        "mend should return NoWork after cleaning zero-activity log; got {:?}",
+        "mend should return NoWork after cleaning dead zero-activity log; got {:?}",
         result
     );
     assert!(
         !log_path.exists(),
-        "zero-activity agent log should be deleted immediately regardless of age"
+        "dead zero-activity agent log should be deleted immediately regardless of age"
     );
 }
 
