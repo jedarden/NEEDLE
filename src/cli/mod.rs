@@ -6289,7 +6289,13 @@ fn shell_escape(s: &str) -> String {
 
 /// `needle canary` — run canary tests or show channel status.
 fn cmd_canary(show_status: bool) -> Result<()> {
-    let config = ConfigLoader::load_global()?;
+    let mut config = ConfigLoader::load_global()?;
+    // `canary` is commonly enabled for one command while the fleet-wide
+    // self-modification switch remains off. `load_global()` intentionally
+    // reads only the file, so apply the same documented NEEDLE_* overrides
+    // used by worker configuration before enforcing the safety gate.
+    ConfigLoader::apply_env_overrides(&mut config, &mut SourceMap::new());
+    config.expand_tildes();
 
     let runner = crate::canary::CanaryRunner::new(
         config.workspace.home.clone(),
@@ -6367,12 +6373,25 @@ fn cmd_canary(show_status: bool) -> Result<()> {
 
     for result in &report.results {
         let (icon, bead_id, detail) = match result {
-            crate::canary::CanaryTestResult::Passed { bead_id, .. } => {
-                ("✓", bead_id.as_str(), String::new())
-            }
+            crate::canary::CanaryTestResult::Passed {
+                bead_id,
+                expected,
+                actual,
+            } => (
+                "✓",
+                bead_id.as_str(),
+                format!(" — expected {expected:?}; actual {actual:?}"),
+            ),
             crate::canary::CanaryTestResult::Failed {
-                bead_id, reason, ..
-            } => ("✗", bead_id.as_str(), format!(" — {reason}")),
+                bead_id,
+                expected,
+                actual,
+                reason,
+            } => (
+                "✗",
+                bead_id.as_str(),
+                format!(" — {reason}; expected {expected:?}; actual {actual:?}"),
+            ),
             crate::canary::CanaryTestResult::TimedOut {
                 bead_id,
                 elapsed_secs,

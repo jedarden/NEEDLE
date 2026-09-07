@@ -142,6 +142,89 @@ impl ExpectedOutcome {
     }
 }
 
+fn canary_adapter_name(expected: &ExpectedOutcome) -> &'static str {
+    match expected {
+        ExpectedOutcome::Success { .. } => "canary-success",
+        ExpectedOutcome::Failure { .. } => "canary-failure",
+        ExpectedOutcome::Timeout { .. } => "canary-timeout",
+        ExpectedOutcome::StateMachine { .. } => "canary-state-machine",
+    }
+}
+
+fn canary_adapter_yaml(expected: &ExpectedOutcome) -> &'static str {
+    match expected {
+        ExpectedOutcome::Success { .. } => {
+            "name: canary-success\nagent_cli: bead\ninvoke_template: \"cd '{workspace}' && bead close {bead_id} --reason 'Canary success fixture completed' --no-auto-flush\"\ntimeout_secs: 30\n"
+        }
+        ExpectedOutcome::Failure { .. } => {
+            "name: canary-failure\nagent_cli: sh\ninvoke_template: \"cd '{workspace}' && exit 42\"\ntimeout_secs: 30\n"
+        }
+        ExpectedOutcome::Timeout { .. } => {
+            "name: canary-timeout\nagent_cli: sh\ninvoke_template: \"cd '{workspace}' && sleep 10\"\ntimeout_secs: 0\nidle_timeout_secs: 1\nhard_timeout_secs: 3\n"
+        }
+        ExpectedOutcome::StateMachine { .. } => {
+            "name: canary-state-machine\nagent_cli: bead\ninvoke_template: \"cd '{workspace}' && bead close {bead_id} --reason 'Canary state-machine fixture completed' --no-auto-flush\"\ntimeout_secs: 30\n"
+        }
+    }
+}
+
+fn read_state_transitions(log_dir: &Path) -> Result<Vec<String>> {
+    if !log_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let mut transitions = Vec::new();
+    for entry in std::fs::read_dir(log_dir)
+        .with_context(|| format!("failed to read canary logs: {}", log_dir.display()))?
+    {
+        let path = entry?.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read canary log: {}", path.display()))?;
+        for line in content.lines().filter(|line| !line.trim().is_empty()) {
+            let event: serde_json::Value = serde_json::from_str(line)
+                .with_context(|| format!("invalid JSONL event in {}", path.display()))?;
+            if event["event_type"].as_str() != Some("worker.state_transition") {
+                continue;
+            }
+            let Some(timestamp) = event["timestamp"].as_str() else {
+                continue;
+            };
+            let (Some(from), Some(to)) =
+                (event["data"]["from"].as_str(), event["data"]["to"].as_str())
+            else {
+                continue;
+            };
+            transitions.push((
+                timestamp.to_string(),
+                from.to_ascii_uppercase(),
+                to.to_ascii_uppercase(),
+            ));
+        }
+    }
+
+    transitions.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut states = Vec::new();
+    for (_, from, to) in transitions {
+        if states.last() != Some(&from) {
+            states.push(from);
+        }
+        if states.last() != Some(&to) {
+            states.push(to);
+        }
+    }
+    Ok(states)
+}
+
+fn is_ordered_subsequence(expected: &[String], actual: &[String]) -> bool {
+    let mut actual = actual.iter();
+    expected
+        .iter()
+        .all(|wanted| actual.by_ref().any(|observed| observed == wanted))
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // ActualOutcome
 // ──────────────────────────────────────────────────────────────────────────────
@@ -277,6 +360,9 @@ impl CanaryRunner {
         let mut timed_out = 0;
         let mut errors = 0;
 
+        let mut test_beads = test_beads;
+        test_beads.sort();
+
         for bead_id in &test_beads {
             // Load expected outcome for this test.
             let expected = match self.load_expected_outcome(bead_id) {
@@ -290,6 +376,19 @@ impl CanaryRunner {
                     continue;
                 }
             };
+
+            // Make exactly this fixture claimable. Canary workspaces persist
+            // between runs, so relying on the state left by a prior canary
+            // turns the suite into a no-work smoke test instead of exercising
+            // claim, dispatch, and outcome handling.
+            if let Err(error) = self.reset_canary_frontier(bead_id, &test_beads) {
+                results.push(CanaryTestResult::Error {
+                    bead_id: bead_id.clone(),
+                    message: format!("failed to reset canary frontier: {error:#}"),
+                });
+                errors += 1;
+                continue;
+            }
 
             // Run the test.
             let result = self.run_test(bead_id, &expected, &testing_binary);
@@ -397,6 +496,13 @@ impl CanaryRunner {
             let path = entry.path();
             if path.extension().is_some_and(|e| e == "yaml") {
                 if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    if stem.is_empty()
+                        || !stem.chars().all(|character| {
+                            character.is_ascii_alphanumeric() || "-_".contains(character)
+                        })
+                    {
+                        bail!("unsafe canary bead ID derived from {}", path.display());
+                    }
                     bead_ids.push(stem.to_string());
                 }
             }
@@ -425,14 +531,16 @@ impl CanaryRunner {
 
     /// Validate that expected final_status values are valid bead-rs statuses.
     ///
-    /// bead-rs uses: open, in_progress, blocked, closed, deferred
+    /// bead-rs stores: open, in_progress, closed, deferred. `blocked` is a
+    /// derived presentation state and therefore cannot be an expected stored
+    /// final status.
     fn validate_expected_status(
         &self,
         expected: &ExpectedOutcome,
         _bead_id: &str,
         path: &Path,
     ) -> Result<()> {
-        // Valid stored statuses for bead-rs backend (blocked is a derived presentation status, not stored)
+        // Valid stored statuses for bead-rs backend.
         let valid_statuses = ["open", "in_progress", "deferred", "closed"];
 
         let status_to_check = match expected {
@@ -458,6 +566,217 @@ impl CanaryRunner {
         Ok(())
     }
 
+    /// Reset the persistent fixture store so only `target_id` is ready.
+    ///
+    /// This uses the workspace's explicitly bound backend CLI and public
+    /// lifecycle commands. No database file is copied or edited directly.
+    fn reset_canary_frontier(&self, target_id: &str, test_beads: &[String]) -> Result<()> {
+        if target_id.is_empty()
+            || !target_id
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || "-_".contains(character))
+        {
+            bail!("unsafe canary bead ID: {target_id}");
+        }
+        let (_, binary) = self.resolved_bead_cli()?;
+
+        // A persistent canary workspace may contain trace metadata from a
+        // previous run. Remove only this validated fixture's trace directory
+        // before dispatch so an absent agent execution cannot be scored using
+        // stale exit data.
+        let trace_dir = self.canary_workspace.join(".beads/traces").join(target_id);
+        if trace_dir.is_dir() {
+            std::fs::remove_dir_all(&trace_dir).with_context(|| {
+                format!(
+                    "failed to clear stale canary trace: {}",
+                    trace_dir.display()
+                )
+            })?;
+        }
+
+        for bead_id in test_beads {
+            let projection = self.show_bead(&binary, bead_id)?;
+            let status = projection["status"].as_str().unwrap_or("unknown");
+
+            if bead_id == target_id {
+                match status {
+                    "closed" => self.run_bead_command(&binary, &["reopen", bead_id])?,
+                    "in_progress" => self.run_bead_command(&binary, &["release", bead_id])?,
+                    "deferred" | "blocked" => {
+                        self.run_bead_command(&binary, &["update", bead_id, "--status", "open"])?
+                    }
+                    "open" => {
+                        if projection["assignee"].as_str().is_some() {
+                            self.run_bead_command(
+                                &binary,
+                                &["update", bead_id, "--clear-assignee"],
+                            )?;
+                        }
+                    }
+                    other => bail!("unsupported canary fixture status '{other}' for {bead_id}"),
+                }
+
+                for label in projection["labels"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(serde_json::Value::as_str)
+                {
+                    self.run_bead_command(
+                        &binary,
+                        &["label", "remove", bead_id, "--label", label],
+                    )?;
+                }
+            } else {
+                // Closed and deferred fixtures are already outside the ready
+                // frontier. Normalize open/in-progress peers to deferred so an
+                // orphan cleanup cannot make a different test bead claimable.
+                match status {
+                    "in_progress" => {
+                        self.run_bead_command(&binary, &["release", bead_id])?;
+                        self.run_bead_command(
+                            &binary,
+                            &["update", bead_id, "--status", "deferred"],
+                        )?;
+                    }
+                    "open" => self
+                        .run_bead_command(&binary, &["update", bead_id, "--status", "deferred"])?,
+                    "closed" | "deferred" | "blocked" => {}
+                    other => bail!("unsupported canary fixture status '{other}' for {bead_id}"),
+                }
+            }
+        }
+
+        let target = self.show_bead(&binary, target_id)?;
+        if target["status"].as_str() != Some("open")
+            || target["assignee"].as_str().is_some()
+            || target["labels"]
+                .as_array()
+                .is_some_and(|labels| !labels.is_empty())
+        {
+            bail!("fixture {target_id} did not reset to open, unassigned, and unlabeled");
+        }
+        Ok(())
+    }
+
+    fn resolved_bead_cli(&self) -> Result<(crate::config::Backend, PathBuf)> {
+        let workspace_config = crate::config::ConfigLoader::load_workspace(&self.canary_workspace)?
+            .with_context(|| {
+                format!(
+                    "canary workspace {} has no .needle.yaml",
+                    self.canary_workspace.display()
+                )
+            })?;
+        let bead_cli = workspace_config.bead_cli.with_context(|| {
+            format!(
+                "canary workspace {} has no authoritative bead_cli.backend binding",
+                self.canary_workspace.display()
+            )
+        })?;
+        let (backend, binary, _) = crate::config::resolve_bead_cli(&bead_cli)?;
+        Ok((backend, binary))
+    }
+
+    fn show_bead(&self, binary: &Path, bead_id: &str) -> Result<serde_json::Value> {
+        let output = crate::bead_store::spawn_with_etxtbsy_retry_sync(
+            || {
+                Command::new(binary)
+                    .args(["show", bead_id, "--json"])
+                    .current_dir(&self.canary_workspace)
+                    .output()
+            },
+            5,
+            20,
+        )?;
+        if !output.status.success() {
+            bail!(
+                "{} show failed for {bead_id}: {}",
+                binary.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        let projection: serde_json::Value = serde_json::from_slice(&output.stdout)
+            .with_context(|| format!("failed to parse show output for {bead_id}"))?;
+        Ok(projection
+            .as_array()
+            .and_then(|items| items.first())
+            .cloned()
+            .unwrap_or(projection))
+    }
+
+    fn run_bead_command(&self, binary: &Path, args: &[&str]) -> Result<()> {
+        let output = crate::bead_store::spawn_with_etxtbsy_retry_sync(
+            || {
+                Command::new(binary)
+                    .args(args)
+                    .arg("--no-auto-flush")
+                    .current_dir(&self.canary_workspace)
+                    .output()
+            },
+            5,
+            20,
+        )?;
+        if !output.status.success() {
+            bail!(
+                "{} {} failed: {}",
+                binary.display(),
+                args.first().copied().unwrap_or("command"),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(())
+    }
+
+    /// Create a per-test HOME containing only the hermetic adapter and any
+    /// host bead-wrapper policy needed to reach the already-selected backend.
+    fn prepare_isolated_home(&self, expected: &ExpectedOutcome) -> Result<tempfile::TempDir> {
+        let home = tempfile::Builder::new()
+            .prefix("needle-canary-home-")
+            .tempdir()
+            .context("failed to create canary HOME")?;
+        let adapter_dir = home.path().join(".config/needle/adapters");
+        std::fs::create_dir_all(&adapter_dir).context("failed to create canary adapter dir")?;
+        // The normal default routing table falls back to the `claude`
+        // adapter for models it does not recognize. Canary adapters are local
+        // commands without model identities, so disable routing inside this
+        // isolated process and honor the explicit `--agent` selection.
+        std::fs::write(
+            home.path().join(".config/needle/config.yaml"),
+            concat!(
+                "agent:\n  routing:\n    rules: []\n",
+                "worker:\n  enforce_shipped_work: false\n",
+            ),
+        )
+        .context("failed to write hermetic canary config")?;
+        std::fs::write(
+            adapter_dir.join(format!("{}.yaml", canary_adapter_name(expected))),
+            canary_adapter_yaml(expected),
+        )
+        .context("failed to write hermetic canary adapter")?;
+
+        // Some hosts wrap `bead` with a local queue-ownership fence. The
+        // wrapper reads this non-credential policy file from HOME even for
+        // `--version`; preserve that policy inside the otherwise isolated HOME
+        // rather than bypassing the wrapper or exposing the fleet config.
+        if let Some(operator_home) = std::env::var_os("HOME") {
+            let source = PathBuf::from(operator_home).join(".config/bead/queue-fence.json");
+            if source.is_file() {
+                let target = home.path().join(".config/bead/queue-fence.json");
+                std::fs::create_dir_all(target.parent().expect("queue fence has parent"))?;
+                std::fs::copy(&source, &target).context("failed to copy bead queue policy")?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mut permissions = std::fs::metadata(&target)?.permissions();
+                    permissions.set_mode(0o600);
+                    std::fs::set_permissions(&target, permissions)?;
+                }
+            }
+        }
+
+        Ok(home)
+    }
+
     /// Run a single canary test.
     ///
     /// Spawns the testing binary and polls for completion, killing the process
@@ -470,6 +789,16 @@ impl CanaryRunner {
     ) -> CanaryTestResult {
         let start = Instant::now();
         let timeout = Duration::from_secs(self.test_timeout);
+        let isolated_home = match self.prepare_isolated_home(expected) {
+            Ok(home) => home,
+            Err(error) => {
+                return CanaryTestResult::Error {
+                    bead_id: bead_id.to_string(),
+                    message: format!("failed to prepare isolated canary HOME: {error:#}"),
+                };
+            }
+        };
+        let adapter_name = canary_adapter_name(expected);
 
         // Spawn the testing binary against the canary workspace.
         //
@@ -494,10 +823,9 @@ impl CanaryRunner {
         // ~/.config/needle/config.yaml or ~/.needle/. This ensures the canary
         // worker only reads from the canary workspace's .needle.yaml.
         //
-        // CRITICAL: Use explicit adapter selection (echo) to avoid inheriting
-        // obsolete adapter names from global config (e.g., 'opus' which was
-        // deprecated in favor of 'claude-anthropic-opus'). The echo adapter is
-        // hermetic and always available for testing.
+        // CRITICAL: Use the per-test adapter written into the isolated HOME to
+        // avoid inheriting obsolete adapter names or invoking an external AI
+        // provider. Each scenario is a deterministic local shell command.
         //
         // Use retry wrapper to handle ETXTBSY (errno 26) which can occur when
         // spawning a testing binary that was written to disk immediately before
@@ -510,7 +838,7 @@ impl CanaryRunner {
                         "--workspace",
                         &self.canary_workspace.display().to_string(),
                         "--agent",
-                        "echo", // Use explicit hermetic adapter, not global default
+                        adapter_name,
                         "--identifier",
                         &format!("canary-{bead_id}"),
                         "--count",
@@ -522,7 +850,7 @@ impl CanaryRunner {
                         "NEEDLE_STRANDS__EXPLORE__WORKSPACE_ROOT",
                         &self.canary_workspace,
                     )
-                    .env("HOME", &self.canary_workspace)
+                    .env("HOME", isolated_home.path())
                     .spawn()
             },
             10,
@@ -537,13 +865,38 @@ impl CanaryRunner {
             }
         };
 
-        // Poll for completion, enforcing the timeout.
+        // `needle run --count 1` means one worker, not one bead, so it remains
+        // alive after processing the fixture. Poll until trace metadata exists
+        // and the state machine has left HANDLING, then stop the now-idle
+        // worker. Scoring the detached/long-lived launcher was the source of
+        // the old canary's false results.
+        let trace_metadata = self
+            .canary_workspace
+            .join(".beads/traces")
+            .join(bead_id)
+            .join("metadata.json");
+        let log_dir = isolated_home.path().join(".needle/logs");
         let exit_code = loop {
             match child.try_wait() {
                 Ok(Some(status)) => break status.code(),
                 Ok(None) => {
+                    let handling_complete = trace_metadata.is_file()
+                        && read_state_transitions(&log_dir)
+                            .is_ok_and(|states| states.iter().any(|state| state == "LOGGING"));
+                    if handling_complete {
+                        if let Err(error) = child.kill() {
+                            return CanaryTestResult::Error {
+                                bead_id: bead_id.to_string(),
+                                message: format!(
+                                    "fixture completed but canary worker could not be stopped: {error}"
+                                ),
+                            };
+                        }
+                        break child.wait().ok().and_then(|status| status.code());
+                    }
                     if start.elapsed() >= timeout {
                         child.kill().ok();
+                        child.wait().ok();
                         return CanaryTestResult::TimedOut {
                             bead_id: bead_id.to_string(),
                             elapsed_secs: start.elapsed().as_secs(),
@@ -560,7 +913,7 @@ impl CanaryRunner {
             }
         };
 
-        let actual = match self.get_actual_outcome(bead_id, exit_code) {
+        let actual = match self.get_actual_outcome(bead_id, exit_code, isolated_home.path()) {
             Ok(a) => a,
             Err(e) => {
                 return CanaryTestResult::Error {
@@ -589,63 +942,14 @@ impl CanaryRunner {
     }
 
     /// Get the actual outcome for a test bead by querying the bead store.
-    fn get_actual_outcome(&self, bead_id: &str, exit_code: Option<i32>) -> Result<ActualOutcome> {
-        let workspace_config = crate::config::ConfigLoader::load_workspace(&self.canary_workspace)?
-            .with_context(|| {
-                format!(
-                    "canary workspace {} has no .needle.yaml",
-                    self.canary_workspace.display()
-                )
-            })?;
-        let bead_cli = workspace_config.bead_cli.with_context(|| {
-            format!(
-                "canary workspace {} has no authoritative bead_cli.backend binding",
-                self.canary_workspace.display()
-            )
-        })?;
-        let (_, binary, _source) =
-            crate::config::resolve_bead_cli(&bead_cli).with_context(|| {
-                format!(
-                    "failed to resolve canary workspace bead backend '{}'",
-                    bead_cli.backend
-                )
-            })?;
-
-        let output = crate::bead_store::spawn_with_etxtbsy_retry_sync(
-            || {
-                Command::new(&binary)
-                    .args(["show", bead_id, "--json"])
-                    .current_dir(&self.canary_workspace)
-                    .output()
-            },
-            5,
-            20,
-        )
-        .with_context(|| {
-            format!(
-                "failed to run {} show for backend '{}'",
-                binary.display(),
-                bead_cli.backend
-            )
-        })?;
-
-        if !output.status.success() {
-            bail!(
-                "backend '{}' show failed for bead {}: {}",
-                bead_cli.backend,
-                bead_id,
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let projection: serde_json::Value = serde_json::from_str(&stdout)
-            .with_context(|| format!("failed to parse '{}' show output", bead_cli.backend))?;
-        // bead-rs returns a one-element array; bead-forge returns an object.
-        let bead = projection
-            .as_array()
-            .and_then(|items| items.first())
-            .unwrap_or(&projection);
+    fn get_actual_outcome(
+        &self,
+        bead_id: &str,
+        worker_exit_code: Option<i32>,
+        isolated_home: &Path,
+    ) -> Result<ActualOutcome> {
+        let (_, binary) = self.resolved_bead_cli()?;
+        let bead = self.show_bead(&binary, bead_id)?;
 
         let final_status = bead["status"].as_str().unwrap_or("unknown").to_string();
         let labels = bead["labels"]
@@ -657,11 +961,34 @@ impl CanaryRunner {
             })
             .unwrap_or_default();
 
+        // `needle run` normally exits successfully after it handles a failed
+        // or timed-out agent. The agent outcome belongs to the per-bead trace,
+        // not the outer worker process.
+        let metadata_path = self
+            .canary_workspace
+            .join(".beads/traces")
+            .join(bead_id)
+            .join("metadata.json");
+        let exit_code = if metadata_path.is_file() {
+            let metadata: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&metadata_path).with_context(|| {
+                    format!("failed to read trace metadata: {}", metadata_path.display())
+                })?)
+                .with_context(|| format!("invalid trace metadata: {}", metadata_path.display()))?;
+            metadata["exit_code"]
+                .as_i64()
+                .and_then(|code| i32::try_from(code).ok())
+                .or(worker_exit_code)
+        } else {
+            worker_exit_code
+        };
+        let state_transitions = read_state_transitions(&isolated_home.join(".needle/logs"))?;
+
         Ok(ActualOutcome {
             exit_code,
             final_status,
             labels,
-            state_transitions: Vec::new(), // Not tracked in basic canary tests
+            state_transitions,
         })
     }
 
@@ -685,15 +1012,10 @@ impl CanaryRunner {
                     && actual.exit_code.is_some_and(|c| c != 0)
             }
             ExpectedOutcome::Timeout { final_status } => {
-                // Timeout is harder to detect from exit code alone.
-                // We check that the bead was not closed (still open/in_progress).
-                actual.final_status == *final_status
+                actual.final_status == *final_status && actual.exit_code == Some(124)
             }
             ExpectedOutcome::StateMachine { transitions } => {
-                // Check that all expected transitions occurred.
-                transitions
-                    .iter()
-                    .all(|t| actual.state_transitions.contains(t))
+                is_ordered_subsequence(transitions, &actual.state_transitions)
             }
         }
     }
@@ -744,10 +1066,20 @@ impl CanaryRunner {
                 reasons.join("; ")
             }
             ExpectedOutcome::Timeout { final_status } => {
-                format!(
-                    "status mismatch: expected '{}', got '{}'",
-                    final_status, actual.final_status
-                )
+                let mut reasons = Vec::new();
+                if actual.final_status != *final_status {
+                    reasons.push(format!(
+                        "status mismatch: expected '{}', got '{}'",
+                        final_status, actual.final_status
+                    ));
+                }
+                if actual.exit_code != Some(124) {
+                    reasons.push(format!(
+                        "expected timeout exit 124, got {:?}",
+                        actual.exit_code
+                    ));
+                }
+                reasons.join("; ")
             }
             ExpectedOutcome::StateMachine { transitions } => {
                 let missing: Vec<_> = transitions
@@ -962,9 +1294,74 @@ mod tests {
         .unwrap();
 
         let runner = CanaryRunner::new(root.path().join("needle"), root.path().into(), 30);
-        let actual = runner.get_actual_outcome("example-1", Some(0)).unwrap();
+        let isolated_home = tempfile::tempdir().unwrap();
+        let actual = runner
+            .get_actual_outcome("example-1", Some(0), isolated_home.path())
+            .unwrap();
         assert_eq!(actual.final_status, "closed");
         assert_eq!(actual.labels, vec!["native"]);
+    }
+
+    #[test]
+    fn canary_scenarios_use_hermetic_adapters() {
+        let success = ExpectedOutcome::Success {
+            final_status: "closed".to_string(),
+            labels: vec![],
+        };
+        let failure = ExpectedOutcome::Failure {
+            final_status: "open".to_string(),
+            labels: vec![],
+        };
+        let timeout = ExpectedOutcome::Timeout {
+            final_status: "open".to_string(),
+        };
+
+        assert_eq!(canary_adapter_name(&success), "canary-success");
+        assert!(canary_adapter_yaml(&success).contains("bead close {bead_id}"));
+        assert!(canary_adapter_yaml(&failure).contains("exit 42"));
+        assert!(canary_adapter_yaml(&timeout).contains("idle_timeout_secs: 1"));
+
+        let runner = CanaryRunner::new(
+            PathBuf::from("/tmp/.needle"),
+            PathBuf::from("/tmp/canary"),
+            30,
+        );
+        let home = runner.prepare_isolated_home(&success).unwrap();
+        assert!(home
+            .path()
+            .join(".config/needle/adapters/canary-success.yaml")
+            .is_file());
+        assert!(
+            std::fs::read_to_string(home.path().join(".config/needle/config.yaml"))
+                .unwrap()
+                .contains("rules: []")
+        );
+    }
+
+    #[test]
+    fn reads_ordered_state_transitions_from_jsonl() {
+        let home = tempfile::tempdir().unwrap();
+        let log_dir = home.path().join(".needle/logs");
+        std::fs::create_dir_all(&log_dir).unwrap();
+        std::fs::write(
+            log_dir.join("canary.jsonl"),
+            concat!(
+                "{\"timestamp\":\"2026-09-07T00:00:02Z\",\"event_type\":\"worker.state_transition\",\"data\":{\"from\":\"selecting\",\"to\":\"claiming\"}}\n",
+                "{\"timestamp\":\"2026-09-07T00:00:01Z\",\"event_type\":\"worker.state_transition\",\"data\":{\"from\":\"booting\",\"to\":\"selecting\"}}\n",
+            ),
+        )
+        .unwrap();
+
+        let states = read_state_transitions(&log_dir).unwrap();
+        assert_eq!(states, ["BOOTING", "SELECTING", "CLAIMING"]);
+        assert!(is_ordered_subsequence(
+            &["BOOTING".into(), "CLAIMING".into()],
+            &states
+        ));
+        assert!(!is_ordered_subsequence(
+            &["CLAIMING".into(), "BOOTING".into()],
+            &states
+        ));
     }
 
     #[test]
@@ -1271,7 +1668,7 @@ mod tests {
         };
 
         let actual = ActualOutcome {
-            exit_code: None,
+            exit_code: Some(124),
             final_status: "open".to_string(),
             labels: vec![],
             state_transitions: vec![],
@@ -1493,11 +1890,16 @@ mod tests {
         std::fs::create_dir_all(&bin_dir).unwrap();
 
         std::fs::write(bin_dir.join("needle-testing"), b"bad-binary").unwrap();
+        std::fs::write(bin_dir.join("needle-stable"), b"known-good-stable").unwrap();
 
         let runner = CanaryRunner::new(needle_home.clone(), PathBuf::from("/tmp/canary"), 300);
 
         runner.reject().unwrap();
         assert!(!runner.testing_binary().exists());
+        assert_eq!(
+            std::fs::read(runner.stable_binary()).unwrap(),
+            b"known-good-stable"
+        );
     }
 
     #[test]
