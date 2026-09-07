@@ -45,7 +45,12 @@ the installer at the official runtime when automatic discovery cannot find it:
 ```
 
 The installer stores that path—not any credential—in
-`~/.config/needle/zcode-cli-path` with mode `0600`.
+`~/.config/needle/zcode-cli-path` with mode `0600`. It also stores only the
+SHA-256 digest of `~/.zcode/cli/config.json` in
+`~/.config/needle/zcode-settings.sha256`. Every dispatch verifies that digest,
+the exact supported CLI version, and both configured model slots before it
+starts model execution. After an intentional ZCode settings or desktop upgrade, inspect
+the change and rerun the installer to accept it.
 
 Verify the adapter before dispatch:
 
@@ -72,10 +77,15 @@ zcode --prompt <prompt> --cwd <workspace> --surface terminal \
 The prompt is read from NEEDLE's temporary prompt file and passed as one argv
 element without shell evaluation. ZCode 0.16.5 does not offer prompt input on
 stdin. Consequently, prompt text is visible to same-user process inspection
-while a task runs; do not put credentials in bead text. Stream JSON keeps
-NEEDLE's idle watchdog informed during model and tool activity. The wrapper
-replaces itself with the ZCode process so NEEDLE observes the real exit status
-and its timeout or cancellation signal reaches ZCode's process group.
+while a task runs; do not put credentials in bead text. The wrapper rejects
+prompts larger than 128 KiB by default (override deliberately with
+`NEEDLE_ZCODE_MAX_PROMPT_BYTES`) so this CLI limitation cannot run into the
+host's argument-size ceiling. Stream JSON keeps NEEDLE's idle watchdog informed
+during model and tool activity. The adapter also tees those events through
+`cat` into NEEDLE's per-bead `.agent.jsonl` while the process is running;
+NEEDLE sanitizes every line before it reaches disk. The wrapper replaces itself
+with the ZCode process so NEEDLE observes the real exit status and its timeout
+or cancellation signal reaches ZCode's process group.
 
 Although 0.16.5's help lists `--settings` and `--max-turns`, its actual parser
 rejects both. The adapter therefore uses the default config path and relies on

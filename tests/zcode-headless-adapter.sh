@@ -11,13 +11,16 @@ FAKE_ARGS="$TEST_ROOT/args"
 FAKE_PROMPT="$TEST_ROOT/prompt"
 WORKSPACE="$TEST_ROOT/workspace"
 PROMPT_FILE="$TEST_ROOT/prompt.md"
+SETTINGS_FILE="$TEST_ROOT/zcode-settings.json"
+CONFIG_ROOT="$TEST_ROOT/config"
 mkdir -p "$WORKSPACE"
+mkdir -p "$CONFIG_ROOT"
 
 cat > "$FAKE_ZCODE" <<'EOF'
 const fs = require("fs");
 const args = process.argv.slice(2);
 if (args.length === 1 && args[0] === "--version") {
-  process.stdout.write("0.16.5\n");
+  process.stdout.write(`${process.env.FAKE_ZCODE_VERSION || "0.16.5"}\n`);
   process.exit(0);
 }
 if (args.length === 1 && args[0] === "--help") {
@@ -35,7 +38,12 @@ process.exit(Number(process.env.FAKE_EXIT_CODE || "0"));
 EOF
 
 printf 'Line one\nLine two with $(printf not-executed) and `backticks`\n' > "$PROMPT_FILE"
+printf '%s\n' '{"model":{"main":"test/glm-5.3-flash","lite":"test/glm-5.3-flash"}}' > "$SETTINGS_FILE"
+sha256sum -- "$SETTINGS_FILE" | awk '{print $1}' > "$CONFIG_ROOT/zcode-settings.sha256"
+chmod 0600 "$CONFIG_ROOT/zcode-settings.sha256"
 export NEEDLE_ZCODE_CLI="$FAKE_ZCODE"
+export NEEDLE_ZCODE_SETTINGS_FILE="$SETTINGS_FILE"
+export NEEDLE_CONFIG_DIR="$CONFIG_ROOT"
 export FAKE_ARGS FAKE_PROMPT
 export ZCODE_API_KEY="credential-must-not-appear"
 
@@ -71,6 +79,19 @@ exit_code=$?
 set -e
 [[ "$exit_code" -eq 23 ]]
 
+set +e
+FAKE_ZCODE_VERSION=0.17.0 "$PLUGIN_DIR/needle-zcode-headless" --preflight >/dev/null 2>&1
+exit_code=$?
+set -e
+[[ "$exit_code" -eq 2 ]]
+
+set +e
+NEEDLE_ZCODE_MAX_PROMPT_BYTES=8 "$PLUGIN_DIR/needle-zcode-headless" \
+    --prompt-file "$PROMPT_FILE" --workspace "$WORKSPACE" >/dev/null 2>&1
+exit_code=$?
+set -e
+[[ "$exit_code" -eq 2 ]]
+
 INSTALL_BIN="$TEST_ROOT/install/bin"
 INSTALL_ADAPTERS="$TEST_ROOT/install/adapters"
 INSTALL_CONFIG="$TEST_ROOT/install/config"
@@ -78,6 +99,7 @@ INSTALL_CONFIG="$TEST_ROOT/install/config"
     --bin-dir "$INSTALL_BIN" \
     --adapter-dir "$INSTALL_ADAPTERS" \
     --config-dir "$INSTALL_CONFIG" \
+    --settings-file "$SETTINGS_FILE" \
     --zcode-cli "$FAKE_ZCODE" >/dev/null
 
 [[ -x "$INSTALL_BIN/needle-zcode-headless" ]]
@@ -85,6 +107,18 @@ INSTALL_CONFIG="$TEST_ROOT/install/config"
 [[ "$(stat -c '%a' "$INSTALL_CONFIG/zcode-cli-path")" == "600" ]]
 [[ "$(<"$INSTALL_CONFIG/zcode-cli-path")" == "$FAKE_ZCODE" ]]
 NEEDLE_ZCODE_CLI= NEEDLE_CONFIG_DIR="$INSTALL_CONFIG" \
+    NEEDLE_ZCODE_SETTINGS_FILE="$SETTINGS_FILE" \
     "$INSTALL_BIN/needle-zcode-headless" --preflight >/dev/null
+
+# Any settings change fails closed until the operator reviews it and reruns
+# the installer, which refreshes the pinned digest.
+printf '\n' >> "$SETTINGS_FILE"
+set +e
+NEEDLE_ZCODE_CLI= NEEDLE_CONFIG_DIR="$INSTALL_CONFIG" \
+    NEEDLE_ZCODE_SETTINGS_FILE="$SETTINGS_FILE" \
+    "$INSTALL_BIN/needle-zcode-headless" --preflight >/dev/null 2>&1
+exit_code=$?
+set -e
+[[ "$exit_code" -eq 2 ]]
 
 printf '%s\n' "zcode-headless adapter tests passed"

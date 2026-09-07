@@ -91,6 +91,8 @@ pub struct TraceMetadata {
 pub enum TraceFormat {
     /// Claude Code JSON output format.
     ClaudeJson,
+    /// ZCode desktop CLI stream-json output.
+    ZcodeJsonl,
     /// OpenAI/Codex JSONL format.
     OpenaiJsonl,
     /// Aider markdown chat history.
@@ -379,6 +381,7 @@ impl TraceCapture {
 pub fn detect_trace_format(agent_name: &str) -> TraceFormat {
     match agent_name {
         n if n.starts_with("claude-") => TraceFormat::ClaudeJson,
+        n if n.contains("zcode") => TraceFormat::ZcodeJsonl,
         n if n.contains("codex") || n.contains("openai") => TraceFormat::OpenaiJsonl,
         n if n.contains("aider") => TraceFormat::AiderMarkdown,
         _ => TraceFormat::RawText,
@@ -472,9 +475,29 @@ pub fn parse_result_envelope(stdout: &str) -> Option<ClaudeResultEnvelope> {
 /// `false` when the stream carries no result envelope — callers without one
 /// fall back to the exit code.
 pub fn stream_indicates_failure(stdout: &str) -> bool {
-    parse_result_envelope(stdout)
+    let claude_failure = parse_result_envelope(stdout)
         .map(|envelope| envelope.indicates_failure())
-        .unwrap_or(false)
+        .unwrap_or(false);
+    claude_failure || zcode_stream_indicates_failure(stdout)
+}
+
+/// Whether the last terminal ZCode turn event reports failure.
+///
+/// ZCode normally preserves a failing exit code, but treating its structured
+/// terminal event as authoritative prevents a future wrapper/CLI regression
+/// from turning `turn.failed` plus exit 0 into a successful bead.
+fn zcode_stream_indicates_failure(stdout: &str) -> bool {
+    stdout.lines().rev().find_map(|line| {
+        if !line.contains("\"turn.") {
+            return None;
+        }
+        let value: serde_json::Value = serde_json::from_str(line).ok()?;
+        match value.get("type").and_then(|kind| kind.as_str()) {
+            Some("turn.failed") => Some(true),
+            Some("turn.completed") => Some(false),
+            _ => None,
+        }
+    }) == Some(true)
 }
 
 /// Classify an outcome from the result envelope when the trace format carries
@@ -483,7 +506,9 @@ pub fn stream_indicates_failure(stdout: &str) -> bool {
 /// The exit code alone misclassifies claude runs that ended on a terminal API
 /// error — the CLI exits 0 — so the envelope wins whenever it exists.
 pub fn classify_from_stream(exit_code: i32, stdout: &str, format: &TraceFormat) -> Outcome {
-    if *format == TraceFormat::ClaudeJson && stream_indicates_failure(stdout) {
+    if matches!(format, TraceFormat::ClaudeJson | TraceFormat::ZcodeJsonl)
+        && stream_indicates_failure(stdout)
+    {
         return Outcome::Failure;
     }
     Outcome::classify(exit_code, false)
@@ -963,6 +988,14 @@ mod tests {
     }
 
     #[test]
+    fn detect_trace_format_zcode() {
+        assert_eq!(
+            detect_trace_format("zcode-headless"),
+            TraceFormat::ZcodeJsonl
+        );
+    }
+
+    #[test]
     fn detect_trace_format_openai() {
         assert_eq!(detect_trace_format("codex"), TraceFormat::OpenaiJsonl);
         assert_eq!(detect_trace_format("openai-gpt"), TraceFormat::OpenaiJsonl);
@@ -1087,6 +1120,34 @@ mod tests {
         assert!(!stream_indicates_failure(
             r#"{"type":"assistant","message":{"role":"assistant","content":[]}}"#
         ));
+    }
+
+    #[test]
+    fn zcode_terminal_turn_failure_overrides_zero_exit() {
+        let stdout = concat!(
+            "{\"type\":\"turn.started\"}\n",
+            "{\"type\":\"model.streaming\",\"payload\":{\"done\":true}}\n",
+            "{\"type\":\"turn.failed\",\"payload\":{\"turnPhase\":\"model\"}}\n",
+        );
+        assert!(stream_indicates_failure(stdout));
+        assert_eq!(
+            classify_from_stream(0, stdout, &TraceFormat::ZcodeJsonl),
+            Outcome::Failure
+        );
+    }
+
+    #[test]
+    fn zcode_completed_turn_keeps_zero_exit_successful() {
+        let stdout = concat!(
+            "{\"type\":\"turn.started\"}\n",
+            "{\"type\":\"turn.completed\"}\n",
+            "{\"type\":\"result\",\"response\":\"done\"}\n",
+        );
+        assert!(!stream_indicates_failure(stdout));
+        assert_eq!(
+            classify_from_stream(0, stdout, &TraceFormat::ZcodeJsonl),
+            Outcome::Success
+        );
     }
 
     #[test]

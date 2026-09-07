@@ -1671,12 +1671,16 @@ impl Dispatcher {
 
                                 // Compute per-bead log file path.
                                 let log_path = agent_log_path(self.telemetry.worker_id(), bead_id);
+                                let log_sanitizer = self.sanitizer.clone();
 
                                 // Log writer task: reads transform stdout and
                                 // writes normalized JSONL to the log file.
                                 // Returns number of lines written.
-                                let log_task =
-                                    tokio::spawn(write_transform_log(transform_stdout, log_path));
+                                let log_task = tokio::spawn(write_transform_log(
+                                    transform_stdout,
+                                    log_path,
+                                    log_sanitizer,
+                                ));
 
                                 (
                                     Some(tx),
@@ -2275,6 +2279,7 @@ fn agent_log_path(worker_id: &str, bead_id: &BeadId) -> Option<PathBuf> {
 async fn write_transform_log(
     stdout_pipe: Option<tokio::process::ChildStdout>,
     log_path: Option<PathBuf>,
+    sanitizer: Option<Arc<Sanitizer>>,
 ) -> u64 {
     let Some(pipe) = stdout_pipe else {
         return 0;
@@ -2314,6 +2319,7 @@ async fn write_transform_log(
     let mut lines = reader.lines();
     let mut count = 0u64;
     while let Ok(Some(line)) = lines.next_line().await {
+        let line = sanitize_transform_line(&line, sanitizer.as_deref());
         if writer.write_all(line.as_bytes()).await.is_err() {
             break;
         }
@@ -2324,6 +2330,12 @@ async fn write_transform_log(
     }
     let _ = writer.flush().await;
     count
+}
+
+fn sanitize_transform_line(line: &str, sanitizer: Option<&Sanitizer>) -> String {
+    sanitizer
+        .map(|sanitizer| sanitizer.sanitize(line))
+        .unwrap_or_else(|| line.to_string())
 }
 
 /// Write prompt content to a temp file, returning the file path.
@@ -2956,6 +2968,21 @@ mod tests {
     fn test_dispatcher(adapters: HashMap<String, AgentAdapter>) -> Dispatcher {
         let telemetry = Telemetry::new("test-worker".to_string());
         Dispatcher::with_adapters(adapters, telemetry, 3600)
+    }
+
+    #[test]
+    fn live_transform_lines_are_sanitized_before_disk_write() {
+        let sanitizer = Sanitizer::new(&[]).unwrap();
+        let fake_key = format!(
+            "sk-ant-api03-{:0>93}AA",
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-ABCDEFGHIJKLMNOPQRSTU"
+        );
+        let line = format!(r#"{{"authorization":"Bearer {fake_key}"}}"#);
+
+        let sanitized = sanitize_transform_line(&line, Some(&sanitizer));
+
+        assert!(!sanitized.contains(&fake_key));
+        assert!(sanitized.contains("[REDACTED:"));
     }
 
     // ── Template rendering ──

@@ -33,5 +33,5 @@ fn shipped_zcode_adapter_matches_the_headless_contract() {
     assert!(!adapter.invoke_template.contains("| cat"));
     assert!(!adapter.invoke_template.contains("--max-turns"));
     assert!(!adapter.invoke_template.contains("--settings"));
-    assert!(adapter.output_transform.is_none());
+    assert_eq!(adapter.output_transform.as_deref(), Some("cat"));
 }

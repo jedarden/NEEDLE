@@ -6,6 +6,7 @@ BIN_DIR="${HOME}/.local/bin"
 ADAPTER_DIR="${HOME}/.config/needle/adapters"
 CONFIG_DIR="${HOME}/.config/needle"
 ZCODE_CLI=""
+SETTINGS_FILE="${HOME}/.zcode/cli/config.json"
 
 usage() {
     cat <<'EOF'
@@ -16,6 +17,7 @@ Options:
   --adapter-dir DIR   NEEDLE adapter directory.
   --config-dir DIR    NEEDLE configuration directory.
   --zcode-cli PATH    Persist the bundled ZCode CLI path without copying it.
+  --settings-file FILE  Pin this ZCode settings file and validate it per run.
   -h, --help          Show this help.
 EOF
 }
@@ -36,6 +38,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --zcode-cli)
             ZCODE_CLI="$2"
+            shift 2
+            ;;
+        --settings-file)
+            SETTINGS_FILE="$2"
             shift 2
             ;;
         --help|-h)
@@ -64,11 +70,22 @@ if [[ -n "$ZCODE_CLI" ]]; then
     chmod 0600 "$CONFIG_DIR/zcode-cli-path"
 fi
 
+[[ -r "$SETTINGS_FILE" ]] || {
+    printf 'ZCode settings file not readable: %s\n' "$SETTINGS_FILE" >&2
+    exit 2
+}
+settings_digest="$(sha256sum -- "$SETTINGS_FILE" | awk '{print $1}')"
+(
+    umask 077
+    printf '%s\n' "$settings_digest" > "$CONFIG_DIR/zcode-settings.sha256"
+)
+
 printf '%s\n' "Installed:"
 printf '  %s\n' "$BIN_DIR/needle-zcode-headless"
 printf '  %s\n' "$ADAPTER_DIR/zcode-headless.yaml"
 
-if NEEDLE_CONFIG_DIR="$CONFIG_DIR" PATH="$BIN_DIR:$PATH" \
+if NEEDLE_CONFIG_DIR="$CONFIG_DIR" NEEDLE_ZCODE_SETTINGS_FILE="$SETTINGS_FILE" \
+    PATH="$BIN_DIR:$PATH" \
     "$BIN_DIR/needle-zcode-headless" --preflight; then
     printf '%s\n' "Run: needle test-agent zcode-headless"
 else

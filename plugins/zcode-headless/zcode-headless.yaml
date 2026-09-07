@@ -6,6 +6,7 @@ input_method:
   method: file
   path_template: "{prompt_file}"
 invoke_template: "needle-zcode-headless --workspace '{workspace}' --prompt-file '{prompt_file}' --mode yolo"
+output_transform: cat
 environment: {}
 timeout_secs: 0
 idle_timeout_secs: 900

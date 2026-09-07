@@ -3,6 +3,9 @@
 set -euo pipefail
 
 PROGRAM="${0##*/}"
+EXPECTED_VERSION="${NEEDLE_ZCODE_EXPECTED_VERSION:-0.16.5}"
+EXPECTED_MODEL="${NEEDLE_ZCODE_EXPECTED_MODEL:-glm-5.3-flash}"
+MAX_PROMPT_BYTES="${NEEDLE_ZCODE_MAX_PROMPT_BYTES:-131072}"
 
 usage() {
     cat <<'EOF'
@@ -25,8 +28,8 @@ Runtime discovery order:
   3. a genuine `zcode` command on PATH
   4. common ZCode desktop installation paths
 
-The wrapper never accepts credentials. Configure the provider and selected
-model in ZCode's default config before dispatching NEEDLE workers.
+The wrapper never accepts credentials. The installer pins ZCode's settings
+file by digest; rerun it after an intentional provider or model change.
 EOF
 }
 
@@ -172,6 +175,57 @@ validate_capabilities() {
     fi
 }
 
+require_supported_runtime() {
+    local version="$1"
+    [[ "$version" == "zcode $EXPECTED_VERSION" ]] ||
+        die "unsupported ZCode CLI version '${version#zcode }'; expected $EXPECTED_VERSION"
+}
+
+settings_file() {
+    if [[ -n "${NEEDLE_ZCODE_SETTINGS_FILE:-}" ]]; then
+        printf '%s\n' "$NEEDLE_ZCODE_SETTINGS_FILE"
+    elif [[ -n "${HOME:-}" ]]; then
+        printf '%s/.zcode/cli/config.json\n' "$HOME"
+    fi
+}
+
+verify_settings() {
+    local root file pin expected_digest actual_digest
+
+    root="$(config_root)"
+    [[ -n "$root" ]] || die "cannot locate NEEDLE configuration directory"
+    file="$(settings_file)"
+    [[ -n "$file" && -r "$file" ]] || die "ZCode settings file is not readable"
+    pin="$root/zcode-settings.sha256"
+    [[ -r "$pin" ]] || die "ZCode settings are not pinned; rerun the adapter installer"
+    IFS= read -r expected_digest < "$pin" || true
+    [[ "$expected_digest" =~ ^[0-9a-fA-F]{64}$ ]] || die "invalid ZCode settings fingerprint"
+    actual_digest="$(sha256sum -- "$file" | awk '{print $1}')"
+    [[ "$actual_digest" == "$expected_digest" ]] ||
+        die "ZCode settings changed since installation; inspect the change and rerun the installer"
+
+    # CLI 0.16.5 cannot accept --model or --settings. Validate both configured
+    # model slots before claiming work so a desktop-side config edit cannot
+    # silently send a worker to a different model.
+    if ! node - "$file" "$EXPECTED_MODEL" <<'NODE'
+const fs = require("fs");
+const [file, expected] = process.argv.slice(2);
+let config;
+try {
+  config = JSON.parse(fs.readFileSync(file, "utf8"));
+} catch (_) {
+  process.exit(2);
+}
+const selected = [config?.model?.main, config?.model?.lite];
+const matches = (value) =>
+  typeof value === "string" && (value === expected || value.endsWith(`/${expected}`));
+process.exit(selected.length === 2 && selected.every(matches) ? 0 : 3);
+NODE
+    then
+        die "ZCode main/lite model selection does not match expected model $EXPECTED_MODEL"
+    fi
+}
+
 prompt_file=""
 workspace=""
 mode="${NEEDLE_ZCODE_MODE:-yolo}"
@@ -226,23 +280,33 @@ fi
 
 if [[ "$action" == "preflight" ]]; then
     version="$(identify_runtime)"
+    require_supported_runtime "$version"
     validate_capabilities
+    verify_settings
     printf 'ZCode CLI: %s\n' "$runtime"
     printf 'Version:   %s\n' "$version"
-    printf '%s\n' "Settings:  ZCode default"
+    printf '%s\n' "Settings:  pinned ZCode default"
+    printf 'Model:     %s\n' "$EXPECTED_MODEL"
     exit 0
 fi
 
 # Do not trust an arbitrary executable named `zcode` found on PATH. This also
 # catches desktop upgrades that remove or change the bundled runtime before a
 # bead is dispatched.
-identify_runtime >/dev/null
+version="$(identify_runtime)"
+require_supported_runtime "$version"
 validate_capabilities
+verify_settings
 
 [[ -n "$prompt_file" ]] || die "--prompt-file is required"
 [[ -r "$prompt_file" ]] || die "prompt file is not readable: $prompt_file"
 [[ -n "$workspace" ]] || die "--workspace is required"
 [[ -d "$workspace" ]] || die "workspace is not a directory: $workspace"
+[[ "$MAX_PROMPT_BYTES" =~ ^[0-9]+$ && "$MAX_PROMPT_BYTES" -gt 0 ]] ||
+    die "NEEDLE_ZCODE_MAX_PROMPT_BYTES must be a positive integer"
+prompt_bytes="$(wc -c < "$prompt_file")"
+[[ "$prompt_bytes" -le "$MAX_PROMPT_BYTES" ]] ||
+    die "prompt is $prompt_bytes bytes; maximum is $MAX_PROMPT_BYTES"
 case "$mode" in
     build|edit|plan|yolo) ;;
     *) die "invalid --mode '$mode'; expected build, edit, plan, or yolo" ;;
