@@ -1,0 +1,470 @@
+# needle-ci failure log — needle-ci-7tgdg
+#
+# WORKFLOW
+#   name:        needle-ci-7tgdg
+#   created:     2026-09-03T00:50:40Z   (triggered by push of commit c3ebf001)
+#   phase:       Failed
+#   message:     child 'needle-ci-7tgdg-1705412474' failed
+#   template:    needle-ci (verify lane) — clone of main @ c3ebf001 (shallow)
+#
+# FAILED STEP / POD
+#   step:        verify   -> pod needle-ci-7tgdg-verify-1705412474, container "main", exit code 1
+#   sibling pods: needle-ci-7tgdg-post-pending-github (Succeeded),
+#                 needle-ci-7tgdg-post-pending-forgejo (Succeeded) — conditional post steps, no artifacts
+#   run window:  00:52:44Z .. 01:04:28Z (~12 min)
+#
+# ROOT CAUSE (compile error, not a test failure)
+#   EventKind::BeadQuarantined is constructed/matched with a `threshold` field that
+#   the variant does not define.
+#     - src/outcome/mod.rs:1841  -> error[E0559]: variant `telemetry::EventKind::BeadQuarantined`
+#                                  has no field named `threshold` (note: available fields are
+#                                  `round`, `until`) — construction in the quarantine path
+#     - src/outcome/mod.rs:2307  -> error[E0026]: variant does not have a field named
+#                                  `threshold` (`threshold: 5` in a #[cfg(test)] pattern match)
+#   Variant definition at src/telemetry/mod.rs:400 is { bead_id, round, until, failure_count }.
+#
+# IMPACT
+#   verify lane ran 11 checks, 8 failed — all 8 are this single compile error
+#   (clippy, check, test --no-run, --lib, integration_tests, p2, p3, real_br).
+#   STILLS BROKEN ON MAIN: HEAD is still c3ebf001, so every needle-ci run fails at
+#   verify until src/outcome/mod.rs is reconciled with src/telemetry/mod.rs.
+#
+# CAPTURE
+#   captured: 2026-09-03T09:52:55Z via read-only kubectl from live pods
+#   (pods were still present ~8h post-completion; normally podGC reaps on completion)
+===== pod needle-ci-7tgdg-verify-1705412474 / container main =====
+time=2026-09-03T00:52:44.187Z level=INFO msg="waiting for signals" argo=true signalPath=/var/run/argo/ctr/main/signal
++ rm -rf /workspace/lost+found '/workspace/.[!.]*'
++ git clone --depth 1 --branch main https://git.ardenone.com/jedarden/NEEDLE.git /workspace
+Cloning into '/workspace'...
++ cd /workspace
++ rustc --version
+info: syncing channel updates for 1.95.0-x86_64-unknown-linux-gnu
+info: latest update on 2026-04-16 for version 1.95.0 (59807616e 2026-04-14)
+info: downloading 7 components
+rustc 1.95.0 (59807616e 2026-04-14)
++ '[' -n sccache ']'
++ '[' -n https://s3.ardenone.com ']'
++ command -v sccache
++ SCCACHE_VERSION=0.17.0
++ SCCACHE_ARCHIVE=sccache-v0.17.0-x86_64-unknown-linux-musl.tar.gz
++ SCCACHE_SHA256=67c4a96dd237c1f518f6b36083f270f9976d516f1e57fce891755ea782e50006
++ SCCACHE_TMP=/tmp/sccache-v0.17.0-x86_64-unknown-linux-musl.tar.gz
++ SCCACHE_ROOT=/tmp/sccache-0.17.0
++ mkdir -p /tmp/sccache-0.17.0
++ curl -fsSL --retry 3 https://github.com/mozilla/sccache/releases/download/v0.17.0/sccache-v0.17.0-x86_64-unknown-linux-musl.tar.gz -o /tmp/sccache-v0.17.0-x86_64-unknown-linux-musl.tar.gz
++ echo '67c4a96dd237c1f518f6b36083f270f9976d516f1e57fce891755ea782e50006  /tmp/sccache-v0.17.0-x86_64-unknown-linux-musl.tar.gz'
++ sha256sum -c -
+/tmp/sccache-v0.17.0-x86_64-unknown-linux-musl.tar.gz: OK
++ tar -xzf /tmp/sccache-v0.17.0-x86_64-unknown-linux-musl.tar.gz --strip-components=1 -C /tmp/sccache-0.17.0
++ chmod 0755 /tmp/sccache-0.17.0/sccache
++ export PATH=/tmp/sccache-0.17.0:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
++ PATH=/tmp/sccache-0.17.0:/root/.cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
++ export RUSTC_WRAPPER=sccache SCCACHE_S3_USE_SSL=true SCCACHE_REGION=garage
++ RUSTC_WRAPPER=sccache
++ SCCACHE_S3_USE_SSL=true
++ SCCACHE_REGION=garage
++ echo 'sccache enabled (bucket=sccache)'
++ sccache --start-server
+sccache enabled (bucket=sccache)
+sccache: Starting the server...
+sccache: Listening on address 127.0.0.1:4226
++ BEAD_RS_VERSION=v0.2.4
++ BEAD_RS_SHA256=cd49cabb1b124d708920f6472e17d7680150dc399b46b0475c9922282bec935b
++ bead --version
++ grep -q '^bead 0.2.4'
++ echo '=== Installing pinned bead-rs CLI (v0.2.4) ==='
++ curl -fsSL --retry 5 --retry-all-errors -o /tmp/bead-dl https://github.com/jedarden/bead-rs/releases/download/v0.2.4/bead-x86_64-unknown-linux-gnu
+=== Installing pinned bead-rs CLI (v0.2.4) ===
++ echo 'cd49cabb1b124d708920f6472e17d7680150dc399b46b0475c9922282bec935b  /tmp/bead-dl'
++ sha256sum -c -
++ install -m 0755 /tmp/bead-dl /usr/local/bin/bead
+/tmp/bead-dl: OK
++ rm -f /tmp/bead-dl
++ bead --version
+bead 0.2.4 (abff6f6 2026-08-30T04:18:20Z)
++ echo '=== Running Definition of Done (all lanes) ==='
++ ./scripts/definition-of-done.sh --all
+=== Running Definition of Done (all lanes) ===
+NEEDLE_VERIFICATION_GATE: definition-of-done
+=== Fast Lane Checks ===
+Running: cargo fmt --check...
+✓ cargo fmt --check passed
+Running: attribution tests...
+✓ attribution tests passed
+Running: cargo clippy...
+✗ cargo clippy failed (exit code: 101)
+Failure details for cargo clippy (last 100 lines):
+    Checking block-buffer v0.10.4
+    Checking matchers v0.2.0
+    Checking webpki-roots v1.0.9
+    Checking rand_core v0.6.4
+    Checking tracing-log v0.2.0
+    Checking serde_spanned v0.6.9
+    Checking tracing-serde v0.2.0
+    Checking toml_datetime v0.6.11
+    Checking thread_local v1.1.10
+    Checking linux-raw-sys v0.4.15
+    Checking nu-ansi-term v0.50.3
+    Checking winnow v0.7.15
+   Compiling thiserror v1.0.69
+    Checking toml_write v0.1.2
+    Checking subtle v2.6.1
+   Compiling crossbeam-epoch v0.9.20
+    Checking toml_edit v0.22.27
+    Checking tracing-subscriber v0.3.23
+    Checking clap v4.6.6
+    Checking rand_chacha v0.3.1
+    Checking webpki-roots v0.26.11
+    Checking digest v0.10.7
+    Checking opentelemetry-proto v0.31.0
+    Checking opentelemetry-http v0.31.0
+    Checking regex v1.13.1
+   Compiling thiserror-impl v1.0.69
+    Checking unsafe-libyaml v0.2.11
+   Compiling crossbeam-deque v0.8.7
+    Checking cpufeatures v0.2.17
+    Checking iana-time-zone v0.1.65
+   Compiling needle v0.6.0 (/workspace)
+    Checking home v0.5.12
+    Checking which v4.4.2
+    Checking chrono v0.4.45
+    Checking sha2 v0.10.9
+    Checking serde_yaml v0.9.34+deprecated
+    Checking opentelemetry-otlp v0.31.1
+    Checking ureq v2.12.1
+    Checking rand v0.8.7
+    Checking tracing-opentelemetry v0.32.1
+    Checking toml v0.8.23
+    Checking futures v0.3.33
+    Checking atty v0.2.14
+    Checking gethostname v0.4.3
+    Checking fs2 v0.4.3
+   Compiling rayon-core v1.13.0
+    Checking glob v0.3.4
+    Checking opentelemetry-semantic-conventions v0.31.0
+    Checking hex v0.4.3
+    Checking half v2.7.1
+    Checking ciborium-io v0.2.2
+    Checking plotters-backend v0.3.7
+    Checking ciborium-ll v0.2.2
+    Checking plotters-svg v0.3.7
+    Checking itertools v0.10.5
+    Checking wait-timeout v0.2.1
+    Checking quick-error v1.2.3
+    Checking bit-vec v0.8.0
+    Checking cast v0.3.0
+    Checking same-file v1.0.6
+    Checking walkdir v2.5.0
+    Checking criterion-plot v0.5.0
+    Checking bit-set v0.8.0
+    Checking rusty-fork v0.3.1
+    Checking rayon v1.12.0
+    Checking plotters v0.3.7
+    Checking ciborium v0.2.2
+    Checking tinytemplate v1.2.1
+    Checking rand_xorshift v0.4.0
+   Compiling serial_test_derive v3.5.0
+    Checking is-terminal v0.4.17
+    Checking oorandom v11.1.5
+    Checking anes v0.1.6
+    Checking unarray v0.1.4
+    Checking proptest v1.11.0
+    Checking criterion v0.5.1
+    Checking serial_test v3.5.0
+    Checking tokio-test v0.4.5
+    Checking filetime v0.2.29
+    Checking os_pipe v1.2.3
+error[E0559]: variant `telemetry::EventKind::BeadQuarantined` has no field named `threshold`
+    --> src/outcome/mod.rs:1841:13
+     |
+1841 |             threshold,
+     |             ^^^^^^^^^ `telemetry::EventKind::BeadQuarantined` does not have this field
+     |
+     = note: available fields are: `round`, `until`
+
+For more information about this error, try `rustc --explain E0559`.
+error: could not compile `needle` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error[E0026]: variant `telemetry::EventKind::BeadQuarantined` does not have a field named `threshold`
+    --> src/outcome/mod.rs:2307:21
+     |
+2307 |                     threshold: 5,
+     |                     ^^^^^^^^^ variant `telemetry::EventKind::BeadQuarantined` does not have this field
+
+Some errors have detailed explanations: E0026, E0559.
+For more information about an error, try `rustc --explain E0026`.
+error: could not compile `needle` (lib test) due to 2 previous errors
+Running: cargo check...
+✗ cargo check failed (exit code: 101)
+Failure details for cargo check (last 100 lines):
+   Compiling serde_core v1.0.229
+    Checking scopeguard v1.2.0
+    Checking lock_api v0.4.14
+    Checking parking_lot v0.12.5
+    Checking tokio v1.53.1
+   Compiling serde v1.0.229
+   Compiling zerocopy v0.8.56
+    Checking tokio-util v0.7.19
+    Checking h2 v0.4.15
+    Checking tower v0.5.3
+    Checking hyper v1.11.0
+    Checking ppv-lite86 v0.2.21
+    Checking hyper-util v0.1.20
+    Checking tokio-stream v0.1.19
+    Checking axum v0.8.9
+    Checking hyper-timeout v0.5.2
+    Checking rand_chacha v0.9.0
+   Compiling num-traits v0.2.19
+    Checking tonic v0.14.6
+    Checking rand v0.9.5
+    Checking serde_urlencoded v0.7.1
+    Checking tower-http v0.6.11
+    Checking tonic-prost v0.14.6
+    Checking serde_json v1.0.151
+    Checking reqwest v0.12.28
+    Checking opentelemetry_sdk v0.31.0
+    Checking serde_spanned v0.6.9
+    Checking tracing-serde v0.2.0
+    Checking toml_datetime v0.6.11
+    Checking tracing-subscriber v0.3.23
+    Checking toml_edit v0.22.27
+    Checking opentelemetry-proto v0.31.0
+    Checking rand_chacha v0.3.1
+    Checking opentelemetry-http v0.31.0
+   Compiling needle v0.6.0 (/workspace)
+    Checking either v1.17.0
+    Checking serde_yaml v0.9.34+deprecated
+    Checking which v4.4.2
+    Checking chrono v0.4.45
+    Checking opentelemetry-otlp v0.31.1
+    Checking rand v0.8.7
+    Checking tracing-opentelemetry v0.32.1
+    Checking toml v0.8.23
+error[E0559]: variant `EventKind::BeadQuarantined` has no field named `threshold`
+    --> src/outcome/mod.rs:1841:13
+     |
+1841 |             threshold,
+     |             ^^^^^^^^^ `EventKind::BeadQuarantined` does not have this field
+     |
+     = note: available fields are: `round`, `until`
+
+For more information about this error, try `rustc --explain E0559`.
+error: could not compile `needle` (lib) due to 1 previous error
+=== Slow Lane Checks ===
+Running: cargo test --no-run (build all test targets)...
+✗ cargo test --no-run (build all test targets) failed (exit code: 101)
+Failure details for cargo test --no-run (build all test targets) (last 100 lines):
+   Compiling tracing-serde v0.2.0
+   Compiling toml_datetime v0.6.11
+   Compiling thread_local v1.1.10
+   Compiling winnow v0.7.15
+   Compiling subtle v2.6.1
+   Compiling toml_write v0.1.2
+   Compiling nu-ansi-term v0.50.3
+   Compiling linux-raw-sys v0.4.15
+   Compiling tracing-subscriber v0.3.23
+   Compiling toml_edit v0.22.27
+   Compiling thiserror v1.0.69
+   Compiling crossbeam-epoch v0.9.20
+   Compiling rand_chacha v0.3.1
+   Compiling opentelemetry-proto v0.31.0
+   Compiling webpki-roots v0.26.11
+   Compiling digest v0.10.7
+   Compiling opentelemetry-http v0.31.0
+   Compiling clap v4.6.6
+   Compiling regex v1.13.1
+   Compiling cpufeatures v0.2.17
+   Compiling home v0.5.12
+   Compiling unsafe-libyaml v0.2.11
+   Compiling iana-time-zone v0.1.65
+   Compiling chrono v0.4.45
+   Compiling serde_yaml v0.9.34+deprecated
+   Compiling which v4.4.2
+   Compiling crossbeam-deque v0.8.7
+   Compiling sha2 v0.10.9
+   Compiling needle v0.6.0 (/workspace)
+   Compiling opentelemetry-otlp v0.31.1
+   Compiling ureq v2.12.1
+   Compiling rand v0.8.7
+   Compiling toml v0.8.23
+   Compiling tracing-opentelemetry v0.32.1
+   Compiling futures v0.3.33
+   Compiling gethostname v0.4.3
+   Compiling atty v0.2.14
+   Compiling fs2 v0.4.3
+   Compiling glob v0.3.4
+   Compiling hex v0.4.3
+   Compiling opentelemetry-semantic-conventions v0.31.0
+   Compiling rayon-core v1.13.0
+   Compiling half v2.7.1
+   Compiling plotters-backend v0.3.7
+   Compiling ciborium-io v0.2.2
+   Compiling plotters-svg v0.3.7
+   Compiling ciborium-ll v0.2.2
+   Compiling itertools v0.10.5
+   Compiling wait-timeout v0.2.1
+   Compiling quick-error v1.2.3
+   Compiling bit-vec v0.8.0
+   Compiling cast v0.3.0
+   Compiling same-file v1.0.6
+   Compiling walkdir v2.5.0
+   Compiling criterion-plot v0.5.0
+   Compiling bit-set v0.8.0
+   Compiling rusty-fork v0.3.1
+   Compiling rayon v1.12.0
+   Compiling ciborium v0.2.2
+   Compiling plotters v0.3.7
+   Compiling tinytemplate v1.2.1
+   Compiling rand_xorshift v0.4.0
+   Compiling is-terminal v0.4.17
+   Compiling oorandom v11.1.5
+   Compiling anes v0.1.6
+   Compiling unarray v0.1.4
+   Compiling proptest v1.11.0
+   Compiling criterion v0.5.1
+   Compiling serial_test v3.5.0
+   Compiling tokio-test v0.4.5
+   Compiling filetime v0.2.29
+   Compiling os_pipe v1.2.3
+error[E0559]: variant `EventKind::BeadQuarantined` has no field named `threshold`
+    --> src/outcome/mod.rs:1841:13
+     |
+1841 |             threshold,
+     |             ^^^^^^^^^ `EventKind::BeadQuarantined` does not have this field
+     |
+     = note: available fields are: `round`, `until`
+
+error[E0559]: variant `telemetry::EventKind::BeadQuarantined` has no field named `threshold`
+    --> src/outcome/mod.rs:1841:13
+     |
+1841 |             threshold,
+     |             ^^^^^^^^^ `telemetry::EventKind::BeadQuarantined` does not have this field
+     |
+     = note: available fields are: `round`, `until`
+
+For more information about this error, try `rustc --explain E0559`.
+error: could not compile `needle` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error[E0026]: variant `telemetry::EventKind::BeadQuarantined` does not have a field named `threshold`
+    --> src/outcome/mod.rs:2307:21
+     |
+2307 |                     threshold: 5,
+     |                     ^^^^^^^^^ variant `telemetry::EventKind::BeadQuarantined` does not have this field
+
+Some errors have detailed explanations: E0026, E0559.
+For more information about an error, try `rustc --explain E0026`.
+error: could not compile `needle` (lib test) due to 2 previous errors
+Running: cargo test --lib...
+✗ cargo test --lib failed (exit code: 101)
+Failure details for cargo test --lib (last 100 lines):
+   Compiling needle v0.6.0 (/workspace)
+error[E0559]: variant `telemetry::EventKind::BeadQuarantined` has no field named `threshold`
+    --> src/outcome/mod.rs:1841:13
+     |
+1841 |             threshold,
+     |             ^^^^^^^^^ `telemetry::EventKind::BeadQuarantined` does not have this field
+     |
+     = note: available fields are: `round`, `until`
+
+error[E0026]: variant `telemetry::EventKind::BeadQuarantined` does not have a field named `threshold`
+    --> src/outcome/mod.rs:2307:21
+     |
+2307 |                     threshold: 5,
+     |                     ^^^^^^^^^ variant `telemetry::EventKind::BeadQuarantined` does not have this field
+
+Some errors have detailed explanations: E0026, E0559.
+For more information about an error, try `rustc --explain E0026`.
+error: could not compile `needle` (lib test) due to 2 previous errors
+Running: cargo test --test integration_tests...
+✗ cargo test --test integration_tests failed (exit code: 101)
+Failure details for cargo test --test integration_tests (last 100 lines):
+   Compiling needle v0.6.0 (/workspace)
+error[E0559]: variant `EventKind::BeadQuarantined` has no field named `threshold`
+    --> src/outcome/mod.rs:1841:13
+     |
+1841 |             threshold,
+     |             ^^^^^^^^^ `EventKind::BeadQuarantined` does not have this field
+     |
+     = note: available fields are: `round`, `until`
+
+For more information about this error, try `rustc --explain E0559`.
+error: could not compile `needle` (lib) due to 1 previous error
+Running: cargo test --test p2_integration_tests...
+✗ cargo test --test p2_integration_tests failed (exit code: 101)
+Failure details for cargo test --test p2_integration_tests (last 100 lines):
+   Compiling needle v0.6.0 (/workspace)
+error[E0559]: variant `EventKind::BeadQuarantined` has no field named `threshold`
+    --> src/outcome/mod.rs:1841:13
+     |
+1841 |             threshold,
+     |             ^^^^^^^^^ `EventKind::BeadQuarantined` does not have this field
+     |
+     = note: available fields are: `round`, `until`
+
+For more information about this error, try `rustc --explain E0559`.
+error: could not compile `needle` (lib) due to 1 previous error
+Running: cargo test --test p3_integration_tests...
+✗ cargo test --test p3_integration_tests failed (exit code: 101)
+Failure details for cargo test --test p3_integration_tests (last 100 lines):
+   Compiling needle v0.6.0 (/workspace)
+error[E0559]: variant `EventKind::BeadQuarantined` has no field named `threshold`
+    --> src/outcome/mod.rs:1841:13
+     |
+1841 |             threshold,
+     |             ^^^^^^^^^ `EventKind::BeadQuarantined` does not have this field
+     |
+     = note: available fields are: `round`, `until`
+
+For more information about this error, try `rustc --explain E0559`.
+error: could not compile `needle` (lib) due to 1 previous error
+Running: cargo test --test real_br_integration_tests...
+✗ cargo test --test real_br_integration_tests failed (exit code: 101)
+Failure details for cargo test --test real_br_integration_tests (last 100 lines):
+   Compiling needle v0.6.0 (/workspace)
+error[E0559]: variant `EventKind::BeadQuarantined` has no field named `threshold`
+    --> src/outcome/mod.rs:1841:13
+     |
+1841 |             threshold,
+     |             ^^^^^^^^^ `EventKind::BeadQuarantined` does not have this field
+     |
+     = note: available fields are: `round`, `until`
+
+For more information about this error, try `rustc --explain E0559`.
+error: could not compile `needle` (lib) due to 1 previous error
+Running: installer tests...
+✓ installer tests passed
+
+=== Definition of Done Summary ===
+Lane: all
+Checks run: 11
+Failures: 8
+
+Failed checks:
+  - cargo clippy: exit code 101
+  - cargo check: exit code 101
+  - cargo test --no-run (build all test targets): exit code 101
+  - cargo test --lib: exit code 101
+  - cargo test --test integration_tests: exit code 101
+  - cargo test --test p2_integration_tests: exit code 101
+  - cargo test --test p3_integration_tests: exit code 101
+  - cargo test --test real_br_integration_tests: exit code 101
+
+❌ Definition of NOT done
+time=2026-09-03T01:04:28.693Z level=INFO msg="file signal handler exiting due to context cancellation" argo=true
+time=2026-09-03T01:04:28.693Z level=INFO msg="sub-process exited" error="exit status 1" argo=true
+Error: exit status 1
+
+===== pod needle-ci-7tgdg-verify-1705412474 / container wait (tail 50) =====
+time=2026-09-03T00:52:43.987Z level=INFO msg="Starting Workflow Executor" argo=true gitCommit=8cae17b6fb49f077eeb269fcf21ce021b37a97f1 gitTag=v4.0.3 gitTreeState=clean goVersion=go1.25.7 version=v4.0.3 buildDate=2026-03-19T08:45:16Z
+time=2026-09-03T00:52:43.996Z level=INFO msg="Using executor retry strategy" argo=true Factor=1.6 Jitter=0.5 Steps=5 Duration=1s
+time=2026-09-03T00:52:43.996Z level=INFO msg="Executor initialized" gitTag=v4.0.3 gitTreeState=clean version=v4.0.3 gitCommit=8cae17b6fb49f077eeb269fcf21ce021b37a97f1 argo=true goVersion=go1.25.7 podName=needle-ci-7tgdg-verify-1705412474 deadline=2026-09-03T13:45:41.000Z templateName=verify buildDate=2026-03-19T08:45:16Z namespace=argo-workflows includeScriptOutput=false
+time=2026-09-03T00:52:44.025Z level=INFO msg="Starting deadline monitor" containers=[main] argo=true
+time="2026-09-03T00:57:43.997Z" level=info msg="Alloc=6718 TotalAlloc=16407 Sys=22870 NumGC=7 Goroutines=9"
+time="2026-09-03T01:02:43.998Z" level=info msg="Alloc=6741 TotalAlloc=16747 Sys=22870 NumGC=9 Goroutines=9"
+time=2026-09-03T01:04:29.595Z level=INFO msg="Main container completed" argo=true error=<nil>
+time=2026-09-03T01:04:29.595Z level=INFO msg="No Script output reference in workflow. Capturing script output ignored" argo=true
+time=2026-09-03T01:04:29.595Z level=INFO msg="No output parameters" argo=true
+time=2026-09-03T01:04:29.595Z level=INFO msg="No output artifacts" argo=true
+time="2026-09-03T01:04:29.618Z" level=info msg="Alloc=6826 TotalAlloc=16947 Sys=22870 NumGC=10 Goroutines=9"
+time=2026-09-03T01:04:29.618Z level=INFO msg="no artifact sidecars to kill" argo=true
