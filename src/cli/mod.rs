@@ -1795,6 +1795,19 @@ trait ProcessInspector {
 /// Real process inspector using /proc filesystem.
 struct RealProcessInspector;
 
+/// Return whether an argv[0] basename is one of NEEDLE's executable names.
+///
+/// Workers normally start through `needle`, then may replace their process
+/// image with `needle-stable` at a safe cycle boundary. Release canaries use
+/// `needle-testing`. Keep this an exact allowlist so helpers such as
+/// `needle-transform-*` are never mistaken for workers.
+fn is_needle_binary_name(name: &str) -> bool {
+    matches!(
+        name,
+        "needle" | "needle-stable" | "needle-stable.prev" | "needle-testing"
+    )
+}
+
 impl ProcessInspector for RealProcessInspector {
     fn is_needle_run_process(&self, pid: u32) -> bool {
         is_needle_run_process(pid)
@@ -1860,8 +1873,9 @@ fn is_needle_run_process(pid: u32) -> bool {
         None => binary_path.clone(),
     };
 
-    // Strict match: basename must be exactly "needle" and next arg must be "run"
-    binary_name == "needle" && args[run_arg_idx] == "run"
+    // Strict match: basename must be an exact NEEDLE executable name and the
+    // next argument must be "run".
+    is_needle_binary_name(&binary_name) && args[run_arg_idx] == "run"
 }
 
 /// Find the actual needle run process in a process tree.
@@ -5999,8 +6013,9 @@ fn scan_needle_processes() -> Result<Vec<DiscoveredProcess>> {
                     None => binary_path.clone(),
                 };
 
-                // Strict match: basename must be exactly "needle" and next arg must be "run"
-                binary_name == "needle" && args[run_arg_idx] == "run"
+                // Strict match: basename must be an exact NEEDLE executable
+                // name and the next argument must be "run".
+                is_needle_binary_name(&binary_name) && args[run_arg_idx] == "run"
             }
         };
 
@@ -6833,6 +6848,30 @@ mod tests {
         // count > 26 exceeds NATO alphabet.
         let big: u32 = 27;
         assert!(big as usize > NATO_ALPHABET.len(), "exceeds NATO alphabet");
+    }
+
+    #[test]
+    fn worker_process_names_include_release_binaries() {
+        for name in [
+            "needle",
+            "needle-stable",
+            "needle-stable.prev",
+            "needle-testing",
+        ] {
+            assert!(is_needle_binary_name(name), "expected {name} to match");
+        }
+    }
+
+    #[test]
+    fn worker_process_names_reject_helpers_and_prefix_matches() {
+        for name in [
+            "needle-transform-claude",
+            "needle-stable.backup",
+            "needle-worker",
+            "some-needle",
+        ] {
+            assert!(!is_needle_binary_name(name), "expected {name} not to match");
+        }
     }
 
     #[cfg(unix)]
