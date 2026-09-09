@@ -2685,7 +2685,7 @@ fn checked_executable<'a>(token: &'a str, cmd_name: &'a str) -> &'a str {
     }
 }
 
-fn extract_executables_from_template(template: &str) -> Vec<String> {
+pub(crate) fn extract_executables_from_template(template: &str) -> Vec<String> {
     // Shell builtins to skip (not external binaries)
     const BUILTINS: &[&str] = &[
         "cd",

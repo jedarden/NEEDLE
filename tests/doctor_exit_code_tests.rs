@@ -193,29 +193,68 @@ fn doctor_mentions_exit_code_in_summary_on_failure() {
     );
 }
 
+/// Initialize a bead workspace bound to the bead-rs backend.
+///
+/// Returns false when the bead CLI is unavailable so the caller can skip.
+/// The `bead_cli.backend` binding is required for doctor to open the store —
+/// without it every checkpoint row is the "no bead backend binding" WARN and
+/// none of the checkpoint states below are reachable.
+fn init_bead_workspace(workspace: &Path) -> bool {
+    let output = Command::new("bead")
+        .arg("init")
+        .current_dir(workspace)
+        .output();
+
+    // If bead is not available, skip the caller's test
+    match output {
+        Ok(out) if out.status.success() => {}
+        _ => {
+            println!("WARNING: bead CLI not available, skipping test");
+            return false;
+        }
+    }
+
+    fs::write(
+        workspace.join(".needle.yaml"),
+        r#"
+bead_cli:
+  backend: bead-rs
+"#,
+    )
+    .unwrap();
+    true
+}
+
+/// Remove the published checkpoint, leaving "no checkpoint" behind.
+///
+/// bead-rs releases changed when the checkpoint is published: current builds
+/// write an (empty) `checkpoint/current.json` during `bead init` and on every
+/// mutation, older ones only on the first mutation. The states under test are
+/// defined by the data, not by the CLI's init side effects, so the fixtures
+/// remove the checkpoint explicitly instead of assuming either behavior.
+fn remove_checkpoint(workspace: &Path) {
+    let checkpoint_dir = workspace.join(".beads/checkpoint");
+    if checkpoint_dir.exists() {
+        fs::remove_dir_all(&checkpoint_dir).unwrap();
+    }
+}
+
 #[test]
 fn doctor_empty_store_no_checkpoint_is_warn_not_fail() {
     let temp_dir = tempfile::tempdir().unwrap();
     let workspace = temp_dir.path().join("empty-store-workspace");
     fs::create_dir_all(&workspace).unwrap();
 
-    // Initialize bead workspace (creates .beads/ with beads.db but zero beads, no checkpoint)
-    let output = Command::new("bead")
-        .arg("init")
-        .current_dir(&workspace)
-        .output();
-
-    // If bead is not available, skip this test
-    if output.is_err() || !output.as_ref().unwrap().status.success() {
-        println!("WARNING: bead CLI not available, skipping test");
+    if !init_bead_workspace(&workspace) {
         return;
     }
+    remove_checkpoint(&workspace);
 
-    // Verify no checkpoint exists (bead init doesn't create one)
+    // Verify no checkpoint exists (the fixture constructs this state)
     let checkpoint = workspace.join(".beads/checkpoint/current.json");
     assert!(
         !checkpoint.exists(),
-        "bead init should not create a checkpoint file"
+        "fixture should leave the workspace without a checkpoint file"
     );
 
     // Run needle doctor
@@ -277,14 +316,7 @@ fn doctor_store_with_beads_no_checkpoint_is_fail() {
     fs::create_dir_all(&workspace).unwrap();
 
     // Initialize bead workspace
-    let init_output = Command::new("bead")
-        .arg("init")
-        .current_dir(&workspace)
-        .output();
-
-    // If bead is not available, skip this test
-    if init_output.is_err() || !init_output.as_ref().unwrap().status.success() {
-        println!("WARNING: bead CLI not available, skipping test");
+    if !init_bead_workspace(&workspace) {
         return;
     }
 
@@ -332,10 +364,7 @@ fn doctor_store_with_beads_no_checkpoint_is_fail() {
     );
 
     // Remove the checkpoint if it was created (to simulate the missing checkpoint case)
-    let checkpoint_dir = workspace.join(".beads/checkpoint");
-    if checkpoint_dir.exists() {
-        fs::remove_dir_all(&checkpoint_dir).unwrap();
-    }
+    remove_checkpoint(&workspace);
 
     // Run needle doctor
     let doctor_output = Command::new(env!("CARGO_BIN_EXE_needle"))
@@ -347,10 +376,14 @@ fn doctor_store_with_beads_no_checkpoint_is_fail() {
 
     let stdout = String::from_utf8_lossy(&doctor_output.stdout);
 
-    // Should show FAIL for checkpoint (store has beads but no checkpoint)
+    // The Checkpoint row itself must be the FAIL — not an unrelated row while
+    // the checkpoint row shows something else.
+    let checkpoint_fail = stdout
+        .lines()
+        .find(|l| l.contains("Checkpoint") && l.contains("FAIL"));
     assert!(
-        stdout.contains("FAIL") && stdout.contains("Checkpoint"),
-        "store with beads but no checkpoint should show FAIL: {}",
+        checkpoint_fail.is_some(),
+        "store with beads but no checkpoint should show a FAIL Checkpoint row: {}",
         stdout
     );
 
@@ -375,17 +408,11 @@ fn doctor_checkpoint_warn_does_not_cause_exit_1() {
     let workspace = temp_dir.path().join("checkpoint-warn-workspace");
     fs::create_dir_all(&workspace).unwrap();
 
-    // Initialize bead workspace
-    let init_output = Command::new("bead")
-        .arg("init")
-        .current_dir(&workspace)
-        .output();
-
-    // If bead is not available, skip this test
-    if init_output.is_err() || !init_output.as_ref().unwrap().status.success() {
-        println!("WARNING: bead CLI not available, skipping test");
+    // Initialize bead workspace in the empty-store state
+    if !init_bead_workspace(&workspace) {
         return;
     }
+    remove_checkpoint(&workspace);
 
     // Run needle doctor
     let doctor_output = Command::new(env!("CARGO_BIN_EXE_needle"))
@@ -397,24 +424,334 @@ fn doctor_checkpoint_warn_does_not_cause_exit_1() {
 
     let stdout = String::from_utf8_lossy(&doctor_output.stdout);
 
-    // Check if we have the expected WARN for checkpoint
-    if stdout.contains("WARN") && stdout.contains("Checkpoint") {
-        // Count FAIL results (excluding checkpoint, which should be WARN)
-        let lines: Vec<&str> = stdout.lines().collect();
-        let fail_count = lines.iter().filter(|l| l.contains("FAIL")).count();
+    // The checkpoint row must be a WARN here — the fixture guarantees the
+    // empty-store state that produces it.
+    assert!(
+        stdout.contains("WARN") && stdout.contains("Checkpoint"),
+        "empty store should produce a checkpoint WARN: {}",
+        stdout
+    );
 
-        // If only WARN (no FAIL), exit code should be 0
-        if fail_count == 0 {
+    // Count FAIL results (excluding checkpoint, which should be WARN)
+    let lines: Vec<&str> = stdout.lines().collect();
+    let fail_count = lines.iter().filter(|l| l.contains("FAIL")).count();
+
+    // If only WARN (no FAIL), exit code should be 0
+    if fail_count == 0 {
+        assert!(
+            doctor_output.status.success(),
+            "needle doctor should exit 0 when checkpoint is WARN (no FAIL checks): {}",
+            stdout
+        );
+        assert!(
+            !stdout.contains("Exit code 1"),
+            "should not mention Exit code 1 when only WARN: {}",
+            stdout
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// `needle doctor --json` contract (needle-24bc5a35)
+//
+// stdout carries exactly one JSON document — rows, summary, exit_code — where
+// every row is {name, status, detail, fix} and `fix` is the command a machine
+// can run to repair the row. The human table prints the same fix text.
+// ─────────────────────────────────────────────────────────────────────────────
+
+use serde_json::Value;
+
+/// Run `needle doctor --json` against `workspace`.
+///
+/// Returns the raw process output plus the parsed document. HOME is pinned to
+/// the fixture's parent directory so the spawned binary neither reads nor
+/// repairs the real user environment (docs/testing-isolation-patterns.md).
+fn run_doctor_json(workspace: &Path) -> (std::process::Output, Value) {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_needle"));
+    cmd.arg("doctor")
+        .arg("--json")
+        .arg("--workspace")
+        .arg(workspace);
+    if let Some(home) = workspace.parent() {
+        cmd.env("HOME", home);
+    }
+    let output = cmd
+        .output()
+        .expect("failed to execute needle doctor --json");
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let doc: Value = serde_json::from_str(stdout.trim()).unwrap_or_else(|error| {
+        panic!("doctor --json stdout must be exactly one JSON document ({error}):\n{stdout}")
+    });
+    (output, doc)
+}
+
+/// Run `needle doctor` in human mode with the same isolation as
+/// `run_doctor_json`, returning its stdout.
+fn run_doctor_human(workspace: &Path) -> String {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_needle"));
+    cmd.arg("doctor").arg("--workspace").arg(workspace);
+    if let Some(home) = workspace.parent() {
+        cmd.env("HOME", home);
+    }
+    let output = cmd.output().expect("failed to execute needle doctor");
+    String::from_utf8_lossy(&output.stdout).to_string()
+}
+
+fn json_rows(doc: &Value) -> &[Value] {
+    doc["rows"]
+        .as_array()
+        .expect("document carries a rows array")
+}
+
+fn json_row<'a>(doc: &'a Value, name: &str) -> &'a Value {
+    json_rows(doc)
+        .iter()
+        .find(|row| row["name"] == *name)
+        .unwrap_or_else(|| panic!("no '{name}' row in doctor --json output"))
+}
+
+/// The --json contract: exit_code mirrors both the fail count and the actual
+/// process exit code, and every FAIL row a machine could act on carries a fix.
+fn assert_json_contract(output: &std::process::Output, doc: &Value) {
+    for row in json_rows(doc) {
+        // serde_json's Value object is a sorted map, so the emitted key order
+        // is alphabetical and carries no contract meaning — the contract is the
+        // exact key *set*.
+        let mut keys: Vec<&str> = row
+            .as_object()
+            .expect("row is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["detail", "fix", "name", "status"],
+            "rows must carry exactly the contract keys"
+        );
+        let status = row["status"].as_str().expect("status is a string");
+        assert!(
+            matches!(status, "pass" | "warn" | "fail"),
+            "unexpected status {status}"
+        );
+        assert!(row["detail"].is_string(), "detail is a string");
+        assert!(
+            row["fix"].is_null() || row["fix"].is_string(),
+            "fix is a command or null"
+        );
+        if status == "fail" {
             assert!(
-                doctor_output.status.success(),
-                "needle doctor should exit 0 when checkpoint is WARN (no FAIL checks): {}",
-                stdout
-            );
-            assert!(
-                !stdout.contains("Exit code 1"),
-                "should not mention Exit code 1 when only WARN: {}",
-                stdout
+                row["fix"].is_string(),
+                "FAIL row '{}' must carry a fix command",
+                row["name"]
             );
         }
+    }
+
+    let count = |status: &str| {
+        json_rows(doc)
+            .iter()
+            .filter(|row| row["status"] == status)
+            .count()
+    };
+    assert_eq!(doc["summary"]["pass"], count("pass"), "summary.pass");
+    assert_eq!(doc["summary"]["warn"], count("warn"), "summary.warn");
+    assert_eq!(doc["summary"]["fail"], count("fail"), "summary.fail");
+
+    let expected_exit = if count("fail") > 0 { 1 } else { 0 };
+    assert_eq!(doc["exit_code"], expected_exit, "exit_code field");
+    assert_eq!(
+        output.status.code(),
+        Some(expected_exit),
+        "process exit code must match the exit_code field"
+    );
+}
+
+/// Workspace bound to a bead CLI path that cannot exist: the backend row fails.
+fn create_json_backend_fixture(temp_dir: &Path) -> PathBuf {
+    create_test_workspace(temp_dir, "bead-rs")
+}
+
+/// Bound workspace whose agent binary cannot exist.
+fn create_json_agent_fixture(temp_dir: &Path) -> PathBuf {
+    let workspace = temp_dir.join("agent-fixture");
+    fs::create_dir_all(workspace.join(".beads")).unwrap();
+    fs::write(
+        workspace.join(".needle.yaml"),
+        "agent:\n  default: needle-fake-agent-json\nbead_cli:\n  backend: bead-rs\n",
+    )
+    .unwrap();
+    workspace
+}
+
+/// Bound workspace wired to a user-defined adapter whose transform binary and
+/// invoke_template executable cannot exist.
+///
+/// `agent.adapters_dir` is not a workspace-overridable key (`apply_workspace`
+/// merges only default/timeout/routing), so the fixture pins it through the
+/// global config inside the isolated HOME that `run_doctor_json` sets.
+fn create_json_transform_fixture(temp_dir: &Path) -> PathBuf {
+    let workspace = temp_dir.join("transform-fixture");
+    fs::create_dir_all(workspace.join(".beads")).unwrap();
+    let adapters_dir = temp_dir.join("adapters");
+    fs::create_dir_all(&adapters_dir).unwrap();
+    fs::write(
+        adapters_dir.join("fakegate.yaml"),
+        concat!(
+            "name: fakegate\n",
+            "agent_cli: needle-fake-gate-agent\n",
+            "invoke_template: \"needle-fake-gate-agent --verbose < {prompt_file}\"\n",
+            "output_transform: needle-fake-gate-transform\n",
+        ),
+    )
+    .unwrap();
+    let global_config_dir = temp_dir.join(".config").join("needle");
+    fs::create_dir_all(&global_config_dir).unwrap();
+    fs::write(
+        global_config_dir.join("config.yaml"),
+        format!("agent:\n  adapters_dir: {}\n", adapters_dir.display()),
+    )
+    .unwrap();
+    fs::write(
+        workspace.join(".needle.yaml"),
+        "bead_cli:\n  backend: bead-rs\n",
+    )
+    .unwrap();
+    workspace
+}
+
+#[test]
+fn doctor_json_document_matches_contract() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let workspace = create_json_backend_fixture(temp_dir.path());
+    let (output, doc) = run_doctor_json(&workspace);
+    assert_json_contract(&output, &doc);
+    assert!(
+        !json_rows(&doc).is_empty(),
+        "doctor always reports at least one row"
+    );
+}
+
+#[test]
+fn doctor_json_bead_cli_missing_row_has_fix() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let workspace = create_json_backend_fixture(temp_dir.path());
+    let (_, doc) = run_doctor_json(&workspace);
+    let row = json_row(&doc, "Bead backend");
+    assert_eq!(row["status"], "fail");
+    let fix = row["fix"].as_str().expect("missing bead CLI carries a fix");
+    assert!(
+        fix.contains("cargo install") && fix.contains("bead-rs"),
+        "fix should install bead-rs, got: {fix}"
+    );
+}
+
+#[test]
+fn doctor_json_missing_beads_dir_row_has_fix() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let workspace = temp_dir.path().join("no-beads-fixture");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::write(
+        workspace.join(".needle.yaml"),
+        "bead_cli:\n  backend: bead-rs\n",
+    )
+    .unwrap();
+
+    let (_, doc) = run_doctor_json(&workspace);
+    let row = json_row(&doc, "Workspace");
+    assert_eq!(row["status"], "fail");
+    let fix = row["fix"].as_str().expect("missing .beads/ carries a fix");
+    assert!(
+        fix.starts_with("mkdir -p"),
+        "fix should create the directory, got: {fix}"
+    );
+}
+
+#[test]
+fn doctor_json_missing_needle_yaml_row_has_fix() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let workspace = temp_dir.path().join("no-binding-fixture");
+    fs::create_dir_all(workspace.join(".beads")).unwrap();
+
+    let (output, doc) = run_doctor_json(&workspace);
+    let row = json_row(&doc, "Workspace");
+    assert_eq!(row["status"], "fail");
+    assert!(
+        row["detail"].as_str().unwrap().contains(".needle.yaml"),
+        "detail should name the missing file: {}",
+        row["detail"]
+    );
+    let fix = row["fix"].as_str().expect("missing binding carries a fix");
+    assert!(
+        fix.contains("needle init"),
+        "fix should run `needle init`, got: {fix}"
+    );
+    assert_eq!(output.status.code(), Some(1));
+}
+
+#[test]
+fn doctor_json_missing_agent_binary_row_has_fix() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let workspace = create_json_agent_fixture(temp_dir.path());
+    let (_, doc) = run_doctor_json(&workspace);
+    let row = json_row(&doc, "Agent binary");
+    assert_eq!(row["status"], "fail");
+    let fix = row["fix"]
+        .as_str()
+        .expect("missing agent binary carries a fix");
+    assert!(
+        fix.contains("agent.default"),
+        "fix should name the agent.default escape hatch, got: {fix}"
+    );
+}
+
+#[test]
+fn doctor_json_missing_transform_rows_have_fix() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let workspace = create_json_transform_fixture(temp_dir.path());
+    let (_, doc) = run_doctor_json(&workspace);
+
+    let transforms = json_row(&doc, "Adapter transforms");
+    assert_eq!(transforms["status"], "warn");
+    let transform_fix = transforms["fix"]
+        .as_str()
+        .expect("missing transform binary carries a fix");
+    assert!(
+        transform_fix.contains("needle-fake-gate-transform"),
+        "custom transform fix should name the binary to install, got: {transform_fix}"
+    );
+
+    let templates = json_row(&doc, "Adapter template executables");
+    assert_eq!(templates["status"], "fail");
+    let template_fix = templates["fix"]
+        .as_str()
+        .expect("missing template executable carries a fix");
+    assert!(
+        template_fix.contains("needle-fake-gate-agent"),
+        "fix should name the missing invoke_template executable, got: {template_fix}"
+    );
+}
+
+#[test]
+fn doctor_human_table_prints_the_json_fix_text() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let workspace = create_json_backend_fixture(temp_dir.path());
+
+    let (_, doc) = run_doctor_json(&workspace);
+    let fixes: Vec<&str> = json_rows(&doc)
+        .iter()
+        .filter_map(|row| row["fix"].as_str())
+        .collect();
+    assert!(
+        !fixes.is_empty(),
+        "the failing fixture must produce at least one fix"
+    );
+
+    let human = run_doctor_human(&workspace);
+    for fix in fixes {
+        assert!(
+            human.contains(fix),
+            "human table must print the same fix text the JSON row carries:\n  fix: {fix}\n  table:\n{human}"
+        );
     }
 }

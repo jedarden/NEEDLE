@@ -255,7 +255,14 @@ pub enum CliCommand {
         #[arg(short = 'w', long)]
         workspace: Option<PathBuf>,
 
-        /// Output machine-readable JSON instead of human-readable table.
+        /// Output machine-readable JSON instead of the human table.
+        ///
+        /// stdout carries exactly one JSON document:
+        /// `{"rows":[{"name":"...","status":"pass|warn|fail","detail":"...","fix":"..."|null}],
+        /// "summary":{"pass":n,"warn":n,"fail":n},"exit_code":0|1}` — `fix` is
+        /// the command that repairs the row (null when there is nothing to
+        /// run) and `exit_code` mirrors the process exit code, so
+        /// `needle doctor --json | jq -e '.summary.fail == 0'` works as a CI gate.
         #[arg(long)]
         json: bool,
     },
@@ -4108,7 +4115,7 @@ enum CheckStatus {
     Skip,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone)]
 struct CheckResult {
     name: String,
     status: CheckStatus,
@@ -4119,7 +4126,35 @@ struct CheckResult {
     fix: Option<String>,
 }
 
+impl serde::Serialize for CheckResult {
+    /// Contract for `needle doctor --json`: every row is exactly
+    /// `{name, status, detail, fix}` — `status` is `pass|warn|fail` and `fix`
+    /// is the command that repairs the row, or null when there is nothing to
+    /// run. The human-facing `message` plus the indented `detail` lines are
+    /// merged into the single `detail` string.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("CheckResult", 4)?;
+        state.serialize_field("name", &self.name)?;
+        state.serialize_field("status", &self.status)?;
+        state.serialize_field("detail", &self.json_detail())?;
+        state.serialize_field("fix", &self.fix)?;
+        state.end()
+    }
+}
+
 impl CheckResult {
+    /// Single-string detail for the `--json` contract: the main message, with
+    /// each extra detail line appended on its own line.
+    fn json_detail(&self) -> String {
+        let mut detail = self.message.clone();
+        for line in &self.detail {
+            detail.push('\n');
+            detail.push_str(line);
+        }
+        detail
+    }
+
     fn pass(name: impl Into<String>, msg: impl Into<String>) -> Self {
         CheckResult {
             name: name.into(),
@@ -4161,7 +4196,6 @@ impl CheckResult {
         self.detail = lines;
         self
     }
-    #[allow(dead_code)]
     fn with_fix(mut self, fix: impl Into<String>) -> Self {
         self.fix = Some(fix.into());
         self
@@ -4180,6 +4214,15 @@ impl CheckResult {
 // ──────────────────────────────────────────────────────────────────────────────
 // Doctor: individual check functions
 // ──────────────────────────────────────────────────────────────────────────────
+
+/// Fix carried on a `Checkpoint` FAIL row: republish the durable checkpoint
+/// from the live store. Idempotent, so it is safe to hand to an agent or CI.
+const FLUSH_CHECKPOINT_FIX: &str = "bead sync flush-only";
+
+/// Fix carried on every "the bead CLI is not there" row: the only install
+/// path bead-rs publishes today (GitHub #16).
+const BEAD_CLI_INSTALL_FIX: &str =
+    "cargo install --git https://github.com/jedarden/bead-rs --bin bead";
 
 fn doctor_check_config(workspace: &Path) -> CheckResult {
     match ConfigLoader::load_resolved(workspace, CliOverrides::default()) {
@@ -4204,6 +4247,23 @@ fn doctor_check_workspace(workspace: &Path) -> CheckResult {
     }
     if std::fs::read_dir(workspace).is_err() {
         return CheckResult::fail("Workspace", "not readable");
+    }
+    // The binding is what makes this directory a NEEDLE workspace: without
+    // .needle.yaml the bead backend is never bound, which is exactly the
+    // half-wired state the fresh-install flow used to end in (GitHub #16).
+    let needle_yaml = workspace.join(".needle.yaml");
+    if !needle_yaml.exists() {
+        return CheckResult::fail(
+            "Workspace",
+            format!(
+                ".needle.yaml missing in {} — no bead backend is bound to this workspace",
+                workspace.display()
+            ),
+        )
+        .with_fix(format!(
+            "cd {} && needle init --backend bead-rs",
+            workspace.display()
+        ));
     }
     let beads_dir = workspace.join(".beads");
     if !beads_dir.is_dir() {
@@ -4265,13 +4325,15 @@ fn doctor_check_checkpoint(
     ) {
         let pointer = beads_dir.join("checkpoint/current.json");
         if !pointer.exists() {
-            return CheckResult::fail("Checkpoint", "checkpoint/current.json not found");
+            return CheckResult::fail("Checkpoint", "checkpoint/current.json not found")
+                .with_fix(FLUSH_CHECKPOINT_FIX);
         }
         return match std::fs::read_to_string(&pointer) {
             Ok(content) if serde_json::from_str::<serde_json::Value>(&content).is_ok() => {
                 CheckResult::pass("Checkpoint", "native pointer is valid JSON")
             }
-            Ok(_) => CheckResult::fail("Checkpoint", "current.json is invalid JSON"),
+            Ok(_) => CheckResult::fail("Checkpoint", "current.json is invalid JSON")
+                .with_fix(FLUSH_CHECKPOINT_FIX),
             Err(error) => CheckResult::fail("Checkpoint", format!("unreadable: {error}")),
         };
     }
@@ -4307,7 +4369,8 @@ fn doctor_check_store_checkpoint(
                 }
                 Ok(_) => {
                     // Store has beads but no checkpoint - this is a FAIL
-                    return CheckResult::fail("Checkpoint", "checkpoint/current.json not found");
+                    return CheckResult::fail("Checkpoint", "checkpoint/current.json not found")
+                        .with_fix(FLUSH_CHECKPOINT_FIX);
                 }
                 Err(e) => {
                     // Can't determine store state - fail the check
@@ -4322,7 +4385,8 @@ fn doctor_check_store_checkpoint(
             Ok(content) if serde_json::from_str::<serde_json::Value>(&content).is_ok() => {
                 CheckResult::pass("Checkpoint", "native pointer is valid JSON")
             }
-            Ok(_) => CheckResult::fail("Checkpoint", "current.json is invalid JSON"),
+            Ok(_) => CheckResult::fail("Checkpoint", "current.json is invalid JSON")
+                .with_fix(FLUSH_CHECKPOINT_FIX),
             Err(error) => CheckResult::fail("Checkpoint", format!("unreadable: {error}")),
         };
     }
@@ -4549,7 +4613,8 @@ fn doctor_check_bead_store(
                 CheckResult::fail(
                     "Bead store",
                     format!("configured backend unavailable: {error:#}"),
-                ),
+                )
+                .with_fix(BEAD_CLI_INSTALL_FIX),
                 None,
             ))
         }
@@ -4570,9 +4635,9 @@ fn doctor_check_bead_backend(config: &Config) -> CheckResult {
             };
             // Add fix command for missing bead CLI
             let fix = if config.bead_cli.path.is_none() {
-                "cargo install --git https://github.com/jedarden/bead-rs --bin bead".to_string()
+                BEAD_CLI_INSTALL_FIX.to_string()
             } else {
-                "cargo install --git https://github.com/jedarden/bead-rs --bin bead # then update bead_cli.path in config".to_string()
+                format!("{BEAD_CLI_INSTALL_FIX} # then update bead_cli.path in config")
             };
             return CheckResult::fail("Bead backend", message).with_fix(fix);
         }
@@ -4585,7 +4650,7 @@ fn doctor_check_bead_backend(config: &Config) -> CheckResult {
         .find(|descriptor| descriptor.name == name)
     else {
         return CheckResult::fail("Bead backend", format!("descriptor {name} is missing"))
-            .with_fix("cargo install --git https://github.com/jedarden/bead-rs --bin bead");
+            .with_fix(BEAD_CLI_INSTALL_FIX);
     };
     let mut detail = vec![
         format!("CLI path: {}", path.display()),
@@ -4859,7 +4924,11 @@ fn doctor_check_agent_binary(config: &Config) -> CheckResult {
                     .unwrap_or_else(|_| "<empty>".to_string())
                     .replace(":", ", ")
             ),
-        ),
+        )
+        .with_fix(format!(
+            "install the '{agent}' agent CLI on PATH, or set agent.default in \
+             .needle.yaml to an installed agent"
+        )),
     }
 }
 
@@ -4878,11 +4947,27 @@ fn doctor_check_adapter_transforms(config: &Config) -> CheckResult {
             if missing.is_empty() {
                 CheckResult::pass("Adapter transforms", "ok")
             } else {
+                // The release installer ships the needle-transform-* helpers
+                // next to needle; anything else is a custom transform the
+                // user has to provide themselves.
+                let fix = if missing
+                    .iter()
+                    .all(|bin| bin.starts_with("needle-transform-"))
+                {
+                    "curl -fsSL https://github.com/jedarden/NEEDLE/releases/latest/download/install.sh | bash"
+                        .to_string()
+                } else {
+                    format!(
+                        "install the missing transform binaries on PATH: {}",
+                        missing.join(", ")
+                    )
+                };
                 CheckResult::warn(
                     "Adapter transforms",
                     format!("{} binary/binaries not on PATH", missing.len()),
                 )
                 .with_detail(missing)
+                .with_fix(fix)
             }
         }
     }
@@ -4915,17 +5000,25 @@ fn doctor_check_adapter_template_executables(config: &Config) -> CheckResult {
                     in_use.insert(rule.adapter.clone());
                 }
             }
-            let mut missing: Vec<String> = adapters
+            let mut missing: Vec<String> = Vec::new();
+            let mut missing_bins: Vec<String> = Vec::new();
+            for (name, a) in adapters
                 .iter()
                 .filter(|(name, _)| in_use.contains(*name) || !builtin_names.contains(*name))
-                .flat_map(|(name, a)| {
-                    dispatch::check_template_executables(&a.invoke_template)
-                        .into_iter()
-                        .map(move |bin| format!("{bin} (adapter {name})"))
-                })
-                .collect();
+            {
+                for line in dispatch::check_template_executables(&a.invoke_template) {
+                    missing.push(format!("{line} (adapter {name})"));
+                }
+                for bin in dispatch::extract_executables_from_template(&a.invoke_template) {
+                    if which::which(&bin).is_err() {
+                        missing_bins.push(bin);
+                    }
+                }
+            }
             missing.sort();
             missing.dedup();
+            missing_bins.sort();
+            missing_bins.dedup();
             if missing.is_empty() {
                 CheckResult::pass("Adapter template executables", "all commands available")
             } else {
@@ -4937,6 +5030,10 @@ fn doctor_check_adapter_template_executables(config: &Config) -> CheckResult {
                     ),
                 )
                 .with_detail(missing)
+                .with_fix(format!(
+                    "install {} on PATH, or edit the adapter's invoke_template",
+                    missing_bins.join(", ")
+                ))
             }
         }
     }
@@ -5228,6 +5325,9 @@ fn cmd_doctor(repair: bool, workspace: Option<PathBuf>, json: bool) -> Result<()
 
     // Output results.
     if json {
+        // The only stdout content in --json mode: one machine-readable
+        // document. The `exit_code` field mirrors the process exit code below
+        // so a consumer reading either one sees the same verdict.
         let json_output = serde_json::json!({
             "rows": results,
             "summary": {
@@ -5237,7 +5337,7 @@ fn cmd_doctor(repair: bool, workspace: Option<PathBuf>, json: bool) -> Result<()
             },
             "exit_code": if fails > 0 { 1 } else { 0 }
         });
-        println!("{}", json_output);
+        println!("{json_output}");
     } else {
         // Print human-readable results.
         let width = 60;
@@ -5248,6 +5348,10 @@ fn cmd_doctor(repair: bool, workspace: Option<PathBuf>, json: bool) -> Result<()
             println!("{}", r.display());
             for line in &r.detail {
                 println!("         └─ {line}");
+            }
+            // The same fix text the `--json` row carries in its `fix` field.
+            if let Some(fix) = &r.fix {
+                println!("         └─ fix: {fix}");
             }
         }
 
@@ -7739,18 +7843,149 @@ mod tests {
     #[test]
     fn doctor_check_workspace_no_beads_dir() {
         let tmp = tempfile::tempdir().unwrap();
-        // Dir exists but no .beads/ subdirectory.
+        // Dir exists with a binding but no .beads/ subdirectory.
+        std::fs::write(
+            tmp.path().join(".needle.yaml"),
+            "bead_cli:\n  backend: bead-rs\n",
+        )
+        .unwrap();
         let r = doctor_check_workspace(tmp.path());
         assert_eq!(r.status, CheckStatus::Fail);
         assert!(r.message.contains(".beads/"), "should mention .beads/");
+        assert!(
+            r.fix.as_deref().is_some_and(|f| f.contains("mkdir -p")),
+            "missing .beads/ should carry a mkdir fix, got {:?}",
+            r.fix
+        );
+    }
+
+    #[test]
+    fn doctor_check_workspace_missing_needle_yaml() {
+        let tmp = tempfile::tempdir().unwrap();
+        // .beads/ present but no .needle.yaml: the workspace is not bound.
+        std::fs::create_dir(tmp.path().join(".beads")).unwrap();
+        let r = doctor_check_workspace(tmp.path());
+        assert_eq!(r.status, CheckStatus::Fail);
+        assert!(
+            r.message.contains(".needle.yaml"),
+            "should mention .needle.yaml, got: {}",
+            r.message
+        );
+        let fix = r.fix.as_deref().expect("missing .needle.yaml needs a fix");
+        assert!(
+            fix.contains("needle init"),
+            "fix should name `needle init`, got: {fix}"
+        );
     }
 
     #[test]
     fn doctor_check_workspace_valid() {
         let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join(".needle.yaml"),
+            "bead_cli:\n  backend: bead-rs\n",
+        )
+        .unwrap();
         std::fs::create_dir(tmp.path().join(".beads")).unwrap();
         let r = doctor_check_workspace(tmp.path());
         assert_eq!(r.status, CheckStatus::Pass);
+        assert!(r.fix.is_none(), "a passing row carries no fix");
+    }
+
+    #[test]
+    fn check_result_json_row_has_contract_shape() {
+        let fail = CheckResult::fail("Workspace", ".beads/ missing")
+            .with_detail(vec!["extra line".to_string()])
+            .with_fix("mkdir -p /tmp/x/.beads");
+        let json = serde_json::to_value(&fail).unwrap();
+        let obj = json.as_object().expect("row serializes to an object");
+        // serde_json's Value object is a sorted map, so key order carries no
+        // contract meaning here — the contract is the exact key set.
+        let mut keys: Vec<String> = obj.keys().cloned().collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            ["detail", "fix", "name", "status"],
+            "--json rows must carry exactly the contract keys"
+        );
+        assert_eq!(json["status"], "fail");
+        // message + detail lines merge into one string, one line each.
+        assert_eq!(json["detail"], ".beads/ missing\nextra line");
+        assert_eq!(json["fix"], "mkdir -p /tmp/x/.beads");
+
+        let pass = serde_json::to_value(CheckResult::pass("Config", "valid")).unwrap();
+        assert_eq!(pass["status"], "pass");
+        assert_eq!(pass["detail"], "valid");
+        assert!(pass["fix"].is_null(), "a row with no fix serializes null");
+    }
+
+    #[test]
+    fn doctor_check_agent_binary_missing_carries_fix() {
+        let mut config = Config::default();
+        config.agent.default = "needle-definitely-not-a-real-agent".to_string();
+        let r = doctor_check_agent_binary(&config);
+        assert_eq!(r.status, CheckStatus::Fail);
+        assert!(
+            r.fix
+                .as_deref()
+                .is_some_and(|f| f.contains("agent.default")),
+            "missing agent binary should name the agent.default escape hatch, got {:?}",
+            r.fix
+        );
+    }
+
+    /// A user-defined adapter whose invoke_template and output_transform name
+    /// binaries that cannot exist, plus the config pointing at its directory.
+    fn fixture_unresolvable_adapter(tmp: &tempfile::TempDir) -> (Config, String, String) {
+        let adapters_dir = tmp.path().join("adapters");
+        std::fs::create_dir_all(&adapters_dir).unwrap();
+        std::fs::write(
+            adapters_dir.join("fakegate.yaml"),
+            concat!(
+                "name: fakegate\n",
+                "agent_cli: needle-fake-gate-agent\n",
+                "invoke_template: \"needle-fake-gate-agent --verbose < {prompt_file}\"\n",
+                "output_transform: needle-fake-gate-transform\n",
+            ),
+        )
+        .unwrap();
+        let mut config = Config::default();
+        config.agent.adapters_dir = adapters_dir;
+        let template_bin = "needle-fake-gate-agent".to_string();
+        let transform_bin = "needle-fake-gate-transform".to_string();
+        (config, template_bin, transform_bin)
+    }
+
+    #[test]
+    fn doctor_check_adapter_transforms_warn_carries_fix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (config, _, transform_bin) = fixture_unresolvable_adapter(&tmp);
+        let r = doctor_check_adapter_transforms(&config);
+        assert_eq!(r.status, CheckStatus::Warn);
+        let fix = r
+            .fix
+            .as_deref()
+            .expect("missing transform should carry a fix");
+        assert!(
+            fix.contains("install") && fix.contains(&transform_bin),
+            "custom transform fix should name the binary to install, got: {fix}"
+        );
+    }
+
+    #[test]
+    fn doctor_check_adapter_template_executables_fail_carries_fix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (config, template_bin, _) = fixture_unresolvable_adapter(&tmp);
+        let r = doctor_check_adapter_template_executables(&config);
+        assert_eq!(r.status, CheckStatus::Fail);
+        let fix = r
+            .fix
+            .as_deref()
+            .expect("missing template executable needs a fix");
+        assert!(
+            fix.contains(&template_bin),
+            "fix should name the missing executable, got: {fix}"
+        );
     }
 
     #[test]

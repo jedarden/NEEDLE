@@ -944,7 +944,7 @@ The `needle doctor` command performs comprehensive system health checks and opti
 #### Usage
 
 ```bash
-needle doctor [--workspace <path>] [--repair]
+needle doctor [--workspace <path>] [--repair] [--json]
 ```
 
 #### Checks Performed
@@ -982,6 +982,7 @@ NEEDLE Doctor
 [FAIL]  Bead backend                 binary not found: nonexistent-backend
          └─ bead_cli.backend points to 'nonexistent-backend'
          └─ but no such binary exists on PATH
+         └─ fix: cargo install --git https://github.com/jedarden/bead-rs --bin bead
 ────────────────────────────────────────────────────────────
 12 passed, 1 warning(s), 1 failure(s).
 Exit code 1: 1 failure(s).
@@ -992,6 +993,44 @@ When all checks pass:
 ```
 ────────────────────────────────────────────────────────────
 13 check(s) passed.
+```
+
+A row with a known repair prints the same `fix` command the `--json` row
+carries in its `fix` field.
+
+#### JSON Output
+
+`--json` replaces the human table with exactly one machine-readable document on
+stdout (nothing else is printed there):
+
+```json
+{
+  "rows": [
+    {
+      "name": "Bead backend",
+      "status": "fail",
+      "detail": "binary not found: nonexistent-backend",
+      "fix": "cargo install --git https://github.com/jedarden/bead-rs --bin bead"
+    }
+  ],
+  "summary": { "pass": 12, "warn": 0, "fail": 1 },
+  "exit_code": 1
+}
+```
+
+- `status` is `pass`, `warn` or `fail`; `detail` is the human message plus any
+  indented detail lines, joined with newlines.
+- `fix` is the command that repairs the row, or `null` when there is nothing to
+  run. Every `fail` row a machine could act on carries one — bead CLI missing,
+  `.beads/` missing, `.needle.yaml` missing, agent binary missing, transform
+  binary missing.
+- `exit_code` mirrors the process exit code, so a consumer reading either one
+  sees the same verdict.
+
+As a CI gate:
+
+```bash
+needle doctor --json | jq -e '.summary.fail == 0'
 ```
 
 #### Use Cases

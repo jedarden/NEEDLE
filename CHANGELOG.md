@@ -6,6 +6,14 @@ All notable changes to NEEDLE are documented in this file.
 
 ### Added
 
+- `needle doctor --json` prints one machine-readable document on stdout: a
+  `rows` array (`name`/`status`/`detail`/`fix` per row), a pass/warn/fail
+  `summary`, and an `exit_code` field mirroring the process exit code — so
+  `needle doctor --json | jq -e '.summary.fail == 0'` works as a CI gate. The
+  fresh-install failures carry a runnable `fix` command (bead CLI missing,
+  `.beads/` missing, `.needle.yaml` missing, agent binary missing, transform
+  binary missing), and the human table prints the same text under the row.
+  [#16](https://github.com/jedarden/NEEDLE/issues/16)
 - Bead-authoring guidance — **one deliverable, one acceptance command, per
   bead**, with the no-decompose instruction verified in
   [#22](https://github.com/jedarden/NEEDLE/issues/22) — in the `AGENTS.md`
