@@ -16,11 +16,10 @@ fast_lane:
     timeout: 60
     description: "Run clippy lints with deny warnings"
 
-  - name: "Cargo check"
-    command: "cargo"
-    args: ["check"]
-    timeout: 60
-    description: "Verify compilation without running tests"
+  # No `cargo check` here: clippy --all-targets type-checks a strict superset
+  # of its targets, and the workspace's own crates keep separate fingerprints
+  # between clippy and check, so a second pass re-ran lib+bins in full
+  # (~18s warm) without being able to find anything clippy missed.
 
 # Slow lane: Full test suite that may take several minutes
 # These mirror NEEDLE's named CI verification targets.

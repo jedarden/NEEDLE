@@ -23,7 +23,11 @@ The definition of done is split by **cost**, not by tool:
 **Fast lane** (seconds, runs locally under cgroup):
 - `cargo fmt --check`
 - `cargo clippy --all-targets -- -D warnings`
-- `cargo check`
+
+`cargo check` is deliberately absent: clippy type-checks a strict superset of
+its targets (lib, bins, tests and benches vs lib and bins), so a second pass
+could never surface an error clippy missed — and it re-ran in full every time,
+because clippy and check keep separate fingerprints.
 
 **Slow lane** (tests, submitted to iad-ci when tree is clean):
 - `cargo test --lib`

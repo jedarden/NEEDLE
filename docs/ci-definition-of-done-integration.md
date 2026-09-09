@@ -48,7 +48,8 @@ The unified definition-of-done pattern follows these core principles:
 ```
 
 **Verification Script**: `NEEDLE/scripts/definition-of-done.sh`
-- Fast lane: `cargo fmt --check`, `cargo clippy`, `cargo check`
+- Fast lane: `cargo fmt --check`, `cargo clippy --all-targets` (the lane's only
+  type-checking pass — see `scripts/definition-of-done.sh`)
 - Slow lane: Full test suite including unit tests and all strand integration targets
 - Both lanes invoked via `--all` flag
 

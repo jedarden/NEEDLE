@@ -8,7 +8,7 @@
 #   - NEEDLE validation gate (fast lane only)
 #
 # Lanes:
-#   - Fast: fmt, clippy, check (seconds, run locally under cgroup)
+#   - Fast: fmt, clippy (seconds, run locally under cgroup)
 #   - Slow: unit and core strand integration targets
 #
 # Behavior: Aggregates all failures rather than aborting on first.
@@ -382,16 +382,25 @@ if [[ "$LANE" == "fast" ]] || [[ "$LANE" == "all" ]]; then
 
   # cargo clippy --all-targets -- -D warnings
   #
+  # This is the fast lane's only type-checking pass, and that is deliberate --
+  # there is no `cargo check` after it. Clippy runs rustc's full type check
+  # over a strict superset of `cargo check`'s targets (--all-targets covers
+  # lib, bins, tests and benches; bare check covers lib and bins only), so a
+  # second pass could never surface an error clippy missed. Nor is it a cheap
+  # re-verification: the workspace's own crates keep separate fingerprints
+  # between clippy and check (only the dependency graph is shared), so check
+  # re-did the whole lib+bins pass even seconds after clippy had checked the
+  # identical tree -- measured 2026-09-09 (needle-18a7df70) at ~18s against a
+  # warm dependency cache on this box. Do not add it back.
+  #
   # `--message-format short` in --changed-only mode: the one-line-per-diagnostic
   # form is what needle_failure_is_ours parses to decide whether a failure sits
   # in a file this commit stages. The default (rendered) form still shows the
   # full diagnostic, so it stays the CI/manual default.
   if [[ "$CHANGED_ONLY" == true ]]; then
     run_check "cargo clippy" cargo clippy --all-targets --message-format short -- -D warnings
-    run_check "cargo check" cargo check --message-format short
   else
     run_check "cargo clippy" cargo clippy --all-targets -- -D warnings
-    run_check "cargo check" cargo check
   fi
 fi
 
@@ -491,8 +500,36 @@ if [[ "$RUN_SLOW" == true ]]; then
     LANE_TMPS+=("$d")
     printf '%s' "$d"
   }
-  cleanup_lane_tmps() { [ "${#LANE_TMPS[@]}" -gt 0 ] && rm -rf "${LANE_TMPS[@]}" 2>/dev/null || true; }
+  cleanup_lane_tmps() {
+    [ "${#LANE_TMPS[@]}" -gt 0 ] && rm -rf "${LANE_TMPS[@]}" 2>/dev/null || true
+    # Remove the poison below only if this run created it. Pre-existing
+    # litter stays: deleting host state we did not create is worse than
+    # leaving it, and the lanes are required to pass with it present anyway.
+    if [ "${POISON_WE_CREATED:-0}" = 1 ]; then
+      rm -rf "$POISON_DIR" 2>/dev/null || true
+    fi
+  }
   trap cleanup_lane_tmps EXIT
+
+  # Standing negative control for the 2026-08-30 incident. bead-rs workspace
+  # discovery stops at the first .beads it meets walking up from a temp dir,
+  # so a stray /tmp/.beads on the verify pod refused every fixture's
+  # `bead init` — 40 integration failures across four targets that day. The
+  # fixtures no longer name /tmp (the tree-wide lint enforces that), so every
+  # run now proves it: create the poison if absent and require the lanes to
+  # pass with it sitting there.
+  POISON_DIR="/tmp/.beads"
+  POISON_WE_CREATED=0
+  if [ ! -d "$POISON_DIR" ]; then
+    if mkdir -p "$POISON_DIR" 2>/dev/null; then
+      POISON_WE_CREATED=1
+      echo "note: created negative-control $POISON_DIR for this run"
+    else
+      echo "warning: could not create $POISON_DIR; lanes will run without the negative control" >&2
+    fi
+  else
+    echo "note: pre-existing $POISON_DIR found; keeping it as the negative control"
+  fi
 
   # Core integration coverage. Each target is run from the table above, so the
   # check name stays derived from the same place the build step got its
