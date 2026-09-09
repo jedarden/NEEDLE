@@ -46,10 +46,13 @@ The verification runner supports **fast lane**, **slow lane**, and **all lanes**
 
 The NEEDLE project organizes checks as follows:
 
-**Fast Lane (3 checks, ~2 minutes):**
+**Fast Lane (2 checks, ~2 minutes):**
 1. **Format check** (`cargo fmt --check`) - Verifies code formatting with rustfmt (30s timeout)
 2. **Clippy linting** (`cargo clippy --all-targets -- -D warnings`) - Runs clippy lints with deny warnings (60s timeout)
-3. **Cargo check** (`cargo check`) - Verifies compilation without running tests (60s timeout)
+
+There is no `cargo check` in the lane: clippy type-checks a strict superset of
+its targets, so a second pass could not find anything clippy missed and would
+only re-run lib+bins (~18s warm).
 
 **Slow Lane:**
 The committed NEEDLE configuration names the test-target build, unit tests,
