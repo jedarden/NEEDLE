@@ -90,6 +90,18 @@ Status: open
 - `bead: command not found` → Same as Step 3
 - `Invalid priority` → Use 0-4 (0=highest, 4=lowest)
 
+**Write a title the agent will execute, not decompose.** One deliverable, one
+acceptance command, per bead — a title naming several deliverables gets split
+into sub-beads instead of done ([#22](https://github.com/jedarden/NEEDLE/issues/22)):
+
+```bash
+bead create --title "Create scripts/money.py and scripts/__init__.py so that python3 -m pytest -q tests/test_money.py passes. Work on this issue directly." \
+  --description "Do not create sub-issues, do not split this work, and do not decompose it into smaller tasks."
+```
+
+See [Bead Authoring](bead-authoring.md) for the full rule and the experiment
+behind it.
+
 ---
 
 ### Step 5: Verify system health

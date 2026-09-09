@@ -199,6 +199,13 @@ If CI fails, record the failure on the bead, fix it, and do not close the bead a
 Each bead supplies its own deliverables and acceptance criteria. Complete and
 verify the requested repository work before closing it.
 
+When authoring beads, keep **one deliverable and one acceptance command per
+bead**. A title that names several deliverables makes the dispatched agent
+split it into sub-beads instead of doing the work; name the deliverable, name
+the command that proves it, and state that the work is not to be decomposed.
+See `docs/bead-authoring.md` for the verified wording and the experiment
+behind the rule.
+
 This repository is bead-rs-backed. Use:
 
 ```bash

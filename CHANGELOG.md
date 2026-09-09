@@ -4,6 +4,14 @@ All notable changes to NEEDLE are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Bead-authoring guidance — **one deliverable, one acceptance command, per
+  bead**, with the no-decompose instruction verified in
+  [#22](https://github.com/jedarden/NEEDLE/issues/22) — in the `AGENTS.md`
+  template shipped by `needle init`, the agent onboarding guide, and the new
+  `docs/bead-authoring.md`.
+
 ## [0.6.0] - 2026-08-30
 
 Closes the GitHub #16 onboarding gap: the README quickstart is now completable

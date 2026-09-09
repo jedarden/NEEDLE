@@ -291,12 +291,24 @@ fn agents_md_markers_are_correct() {
         template.contains("needle doctor"),
         "Template should mention needle doctor"
     );
+    assert!(
+        template.contains("One deliverable, one acceptance command, per bead"),
+        "Template should carry the single-deliverable authoring rule"
+    );
+    assert!(
+        template.contains("do not decompose it into smaller tasks"),
+        "Template should carry the verified no-decompose instruction"
+    );
+    assert!(
+        template.contains("pytest -q tests/test_money.py"),
+        "Template should carry the acceptance command from the verified example"
+    );
 
-    // Verify template is concise (≤ 60 lines)
+    // Verify template is concise (≤ 80 lines; the authoring section added 17)
     let line_count = template.lines().count();
     assert!(
-        line_count <= 60,
-        "Template should be ≤ 60 lines, got {}",
+        line_count <= 80,
+        "Template should be ≤ 80 lines, got {}",
         line_count
     );
 }

@@ -14,6 +14,23 @@ bead close <id> --reason "..." # Complete a bead (requires reason)
 bead release <id>             # Release bead back to ready frontier
 ```
 
+### Authoring beads
+
+**One deliverable, one acceptance command, per bead.** A title naming several
+deliverables gets split into sub-beads instead of done. Name the deliverable,
+name the command that proves it, and state that the work is not to be
+decomposed. Verified wording — zero sub-beads, closed in under a minute; the
+multi-deliverable title for the same work produced ~16 sub-beads and never
+closed:
+
+```bash
+bead create --title "Create scripts/money.py and scripts/__init__.py so that python3 -m pytest -q tests/test_money.py passes. Work on this issue directly." \
+  --description "Do not create sub-issues, do not split this work, and do not decompose it into smaller tasks."
+```
+
+Work spanning several deliverables becomes several beads ordered with
+`bead dep add` — not one bead with a list.
+
 ### Commit discipline
 
 **One commit per bead, always.** Every commit MUST include the bead ID in the trailer:

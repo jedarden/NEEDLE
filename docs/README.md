@@ -22,6 +22,7 @@ New to NEEDLE? Start with these guides to get up and running quickly.
 | **[Quickstart Example](examples/quickstart/README.md)** | End-to-end walkthrough from empty workspace to first closed bead |
 | **[Quickstart Expected Output](examples/quickstart/expected-output.md)** | Reference output for the quickstart example |
 | **[Configuration Guide](configuration.md)** | Complete configuration reference (config.yaml, environment variables, CLI args) |
+| **[Bead Authoring](bead-authoring.md)** | One deliverable, one acceptance command per bead — titles agents execute instead of decompose |
 | **[Agent Adapter Authoring](plan/plan.md#agent-adapters)** | How to write custom agent adapters (invoke_template schema) |
 | **[Plugin: Claude Interactive](templates/AGENTS-needle.md)** | NEEDLE workspace template for Claude Code sessions |
 
