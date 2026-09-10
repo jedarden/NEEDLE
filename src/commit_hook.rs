@@ -190,6 +190,37 @@ async fn get_staged_blob_hash(workspace: &str, path: &str) -> Result<String> {
 // Bead-Id trailer injection (existing functionality)
 // ---------------------------------------------------------------------------
 
+/// List the commit SHAs created in `workspace` since `since_sha` (inclusive of
+/// HEAD, exclusive of `since_sha`), oldest first.
+///
+/// Used to fill the `commits` field of the `attempt.resolved` ledger row: the
+/// worker captures HEAD just before dispatch and reads back what the agent
+/// added. Returns an empty list when `since_sha` is unknown, the workspace is
+/// not a git repo, or git fails — commits are ledger evidence, not a gate, so
+/// a failure here must never fail the dispatch.
+pub(crate) async fn commits_since(workspace: &str, since_sha: &str) -> Result<Vec<String>> {
+    let range = format!("{}..HEAD", since_sha);
+    let out = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        Command::new("git")
+            .args(["-C", workspace, "log", "--format=%H", "--reverse", &range])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| anyhow!("git log {} timed out after 10s in {}", range, workspace))??;
+
+    if !out.status.success() {
+        anyhow::bail!("git log {} failed in {}", range, workspace);
+    }
+    Ok(String::from_utf8(out.stdout)?
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
 /// Inject a `Bead-Id: <id>` trailer into the latest commit in `workspace`.
 ///
 /// Only acts when HEAD moved since `pre_dispatch_head` (i.e. the agent made

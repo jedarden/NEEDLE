@@ -27,6 +27,7 @@ fn init_backend_bead_rs_parses() {
         needle::cli::CliCommand::Init {
             backend,
             no_agents_md: _,
+            force: _,
         } => {
             assert_eq!(backend, "bead-rs", "Backend should be bead-rs");
         }
@@ -52,6 +53,7 @@ fn init_default_backend_is_bead_rs() {
         needle::cli::CliCommand::Init {
             backend,
             no_agents_md: _,
+            force: _,
         } => {
             assert_eq!(backend, "bead-rs", "Default backend should be bead-rs");
         }
@@ -98,6 +100,7 @@ fn init_creates_workspace_config_in_bead_workspace() {
         needle::cli::CliCommand::Init {
             backend,
             no_agents_md: _,
+            force: _,
         } => {
             assert_eq!(backend, "bead-rs");
         }
@@ -160,6 +163,7 @@ fn init_skips_workspace_config_outside_bead_workspace() {
         needle::cli::CliCommand::Init {
             backend,
             no_agents_md: _,
+            force: _,
         } => {
             assert_eq!(backend, "bead-rs");
         }
@@ -185,6 +189,7 @@ fn init_no_agents_md_flag_parses() {
         needle::cli::CliCommand::Init {
             backend,
             no_agents_md,
+            force: _,
         } => {
             assert_eq!(backend, "bead-rs");
             assert!(no_agents_md, "no_agents_md should be true");
@@ -219,6 +224,7 @@ fn init_creates_agents_md_when_missing() {
         needle::cli::CliCommand::Init {
             backend,
             no_agents_md,
+            force: _,
         } => {
             assert_eq!(backend, "bead-rs");
             assert!(!no_agents_md, "no_agents_md should be false by default");
@@ -253,6 +259,7 @@ fn init_skips_agents_md_with_flag() {
         needle::cli::CliCommand::Init {
             backend,
             no_agents_md,
+            force: _,
         } => {
             assert_eq!(backend, "bead-rs");
             assert!(no_agents_md, "no_agents_md should be true");
@@ -374,14 +381,17 @@ fn init_agents_md_injection_is_idempotent() {
             needle::cli::CliCommand::Init {
                 backend: b1,
                 no_agents_md: n1,
+                force: f1,
             },
             needle::cli::CliCommand::Init {
                 backend: b2,
                 no_agents_md: n2,
+                force: f2,
             },
         ) => {
             assert_eq!(b1, b2, "Backend should be the same");
             assert_eq!(n1, n2, "no_agents_md flag should be the same");
+            assert!(!f1 && !f2, "force should default to false");
         }
         _ => panic!("Both should be Init commands"),
     }
@@ -688,4 +698,165 @@ fn template_bead_commands_match_help_output() {
         bead_help.contains("claim"),
         "Template uses 'bead claim' but claim command not found in help output"
     );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// `needle init` vs an existing global config
+//
+// These spawn the compiled binary instead of calling `cmd_init` in process: the
+// command resolves its paths from $HOME, and a child's environment is the only
+// way to point it at a sandbox HOME without racing the rest of the test process
+// (docs/testing-isolation-patterns.md, subprocess isolation). Every invocation
+// also runs in a throwaway working directory so the workspace-binding half of
+// `needle init` can never touch this repo's own AGENTS.md.
+// ──────────────────────────────────────────────────────────────────────────────
+
+use std::path::{Path, PathBuf};
+
+/// A stand-in for a real fleet config: valid YAML with settings that differ
+/// from everything `needle init` would generate.
+const FLEET_CONFIG: &str = "# fleet config under test — must survive every init below\nagent:\n  default: codex\nworker:\n  max_workers: 7\n";
+
+/// Run `needle init` with `args` against a sandbox `home`, in `cwd`.
+fn init_in_sandbox(home: &Path, cwd: &Path, args: &[&str]) -> std::process::Output {
+    std::process::Command::new(env!("CARGO_BIN_EXE_needle"))
+        .arg("init")
+        .args(args)
+        .env("HOME", home)
+        .current_dir(cwd)
+        .output()
+        .expect("failed to execute needle init")
+}
+
+/// A sandbox HOME plus a throwaway working directory with a `.beads/` dir.
+fn sandbox() -> (tempfile::TempDir, PathBuf, PathBuf) {
+    let temp = TempDir::new().expect("Failed to create temp dir");
+    let home = temp.path().join("home");
+    let cwd = temp.path().join("project");
+    fs::create_dir_all(&home).expect("Failed to create sandbox HOME");
+    fs::create_dir_all(cwd.join(".beads")).expect("Failed to create workspace");
+    (temp, home, cwd)
+}
+
+fn global_config(home: &Path) -> PathBuf {
+    home.join(".config/needle/config.yaml")
+}
+
+/// `needle init` on a fresh HOME writes the global config (the quickstart's
+/// Step 2 depends on this).
+#[test]
+fn init_writes_global_config_on_fresh_home() {
+    let (_temp, home, cwd) = sandbox();
+
+    let output = init_in_sandbox(&home, &cwd, &["--backend", "bead-rs", "--no-agents-md"]);
+    assert!(
+        output.status.success(),
+        "init on a fresh HOME should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        global_config(&home).is_file(),
+        "global config should have been created"
+    );
+}
+
+/// An existing global config is left byte-for-byte intact without --force, and
+/// the workspace binding still happens: refusing to touch the fleet config is
+/// not a reason to skip the useful half of the command.
+#[test]
+fn init_refuses_to_overwrite_existing_global_config() {
+    let (_temp, home, cwd) = sandbox();
+
+    let config_path = global_config(&home);
+    fs::create_dir_all(config_path.parent().unwrap()).expect("Failed to create config dir");
+    fs::write(&config_path, FLEET_CONFIG).expect("Failed to write fleet config");
+
+    let output = init_in_sandbox(&home, &cwd, &["--backend", "bead-rs", "--no-agents-md"]);
+    assert!(
+        output.status.success(),
+        "init should report the refusal and still bind the workspace"
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Refusing to overwrite existing global config"),
+        "refusal should be announced, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains(config_path.to_string_lossy().as_ref()),
+        "refusal should name the path it did not write, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("--force"),
+        "refusal should name the override, got:\n{stdout}"
+    );
+    assert_eq!(
+        fs::read_to_string(&config_path).expect("config should still be readable"),
+        FLEET_CONFIG,
+        "the existing global config must survive `needle init` byte-for-byte"
+    );
+    assert_eq!(
+        fs::read_to_string(cwd.join(".needle.yaml")).expect("workspace binding should exist"),
+        "bead_cli:\n  backend: bead-rs\n",
+        "the workspace binding should still be written"
+    );
+}
+
+/// --force is the explicit override: it replaces the existing global config
+/// with a freshly generated one.
+#[test]
+fn init_force_overwrites_existing_global_config() {
+    let (_temp, home, cwd) = sandbox();
+
+    let config_path = global_config(&home);
+    fs::create_dir_all(config_path.parent().unwrap()).expect("Failed to create config dir");
+    fs::write(&config_path, FLEET_CONFIG).expect("Failed to write fleet config");
+
+    let output = init_in_sandbox(
+        &home,
+        &cwd,
+        &["--backend", "bead-rs", "--no-agents-md", "--force"],
+    );
+    assert!(
+        output.status.success(),
+        "init --force should succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Overwriting existing global config (--force)"),
+        "--force should say it is overwriting, got:\n{stdout}"
+    );
+
+    let rewritten = fs::read_to_string(&config_path).expect("config should be readable");
+    assert!(
+        !rewritten.contains("must survive every init below"),
+        "the previous config should be gone"
+    );
+    assert!(
+        rewritten.contains("# NEEDLE v2 Configuration"),
+        "a freshly generated config should be in place, got:\n{rewritten}"
+    );
+}
+
+/// `--force` parses and defaults to false everywhere else.
+#[test]
+fn init_force_flag_parses() {
+    let args = vec!["needle", "init", "--backend", "bead-rs", "--force"];
+    let result = Cli::try_parse_from(args);
+    assert!(result.is_ok(), "CLI parsing should succeed with --force");
+
+    let cli = result.unwrap();
+    match cli.command {
+        needle::cli::CliCommand::Init {
+            backend,
+            no_agents_md: _,
+            force,
+        } => {
+            assert_eq!(backend, "bead-rs");
+            assert!(force, "force should be true when passed");
+        }
+        _ => panic!("Expected Init command"),
+    }
 }

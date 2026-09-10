@@ -320,6 +320,13 @@ pub enum WorkerState {
     Logging,
     /// All strands returned empty — worker has nothing to do.
     Exhausted,
+    /// Launch admission is refused: the host is above CPU or memory policy.
+    ///
+    /// The worker stays resident in this state and retries with capped
+    /// jittered backoff (plan revision 24 §4.6, N-T33). It is not idle: no
+    /// strand ran, no bead is claimed, and the heartbeat must not read as an
+    /// idle worker.
+    AdmissionBlocked,
     /// Received graceful shutdown signal.
     Stopped,
     /// Unrecoverable error.
@@ -339,12 +346,44 @@ impl fmt::Display for WorkerState {
             WorkerState::Handling => "HANDLING",
             WorkerState::Logging => "LOGGING",
             WorkerState::Exhausted => "EXHAUSTED",
+            WorkerState::AdmissionBlocked => "ADMISSION_BLOCKED",
             WorkerState::Stopped => "STOPPED",
             WorkerState::Errored => "ERRORED",
         };
         f.write_str(s)
     }
 }
+
+/// The process could not start work because the host is above launch policy.
+///
+/// This is a *temporary unavailability*, not a work failure: no bead was
+/// claimed, so there is nothing to count against any worker's record. A
+/// one-shot caller that cannot stay resident (a script, a launcher) receives
+/// this error and exits with `EXIT_ADMISSION_UNAVAILABLE` so it is
+/// distinguishable from a real failure; a service-managed run never produces
+/// it — it holds resident instead (plan revision 24 §4.6, N-T33).
+#[derive(Debug, Clone, PartialEq)]
+pub struct AdmissionUnavailable {
+    /// What the admission check observed and what policy requires.
+    pub reason: String,
+}
+
+impl std::error::Error for AdmissionUnavailable {}
+
+impl fmt::Display for AdmissionUnavailable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "host above launch policy, no work started (temporary unavailable): {}",
+            self.reason
+        )
+    }
+}
+
+/// Exit code for a process that ended without work because launch admission
+/// was refused. `75` is `EX_TEMPFAIL` from BSD `sysexits.h` — the conventional
+/// "try again later" code, distinct from the generic failure exit `1`.
+pub const EXIT_ADMISSION_UNAVAILABLE: i32 = 75;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Outcome
@@ -1424,6 +1463,12 @@ mod tests {
         assert_eq!(json, r#""SELECTING""#);
         let json = serde_json::to_string(&WorkerState::Exhausted).unwrap();
         assert_eq!(json, r#""EXHAUSTED""#);
+        let json = serde_json::to_string(&WorkerState::AdmissionBlocked).unwrap();
+        assert_eq!(json, r#""ADMISSION_BLOCKED""#);
+        let round_tripped: WorkerState =
+            serde_json::from_str(&serde_json::to_string(&WorkerState::AdmissionBlocked).unwrap())
+                .unwrap();
+        assert_eq!(round_tripped, WorkerState::AdmissionBlocked);
     }
 
     #[test]
@@ -1645,6 +1690,10 @@ mod tests {
         assert_eq!(WorkerState::Handling.to_string(), "HANDLING");
         assert_eq!(WorkerState::Logging.to_string(), "LOGGING");
         assert_eq!(WorkerState::Exhausted.to_string(), "EXHAUSTED");
+        assert_eq!(
+            WorkerState::AdmissionBlocked.to_string(),
+            "ADMISSION_BLOCKED"
+        );
         assert_eq!(WorkerState::Stopped.to_string(), "STOPPED");
         assert_eq!(WorkerState::Errored.to_string(), "ERRORED");
     }

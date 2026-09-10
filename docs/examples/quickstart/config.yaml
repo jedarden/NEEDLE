@@ -13,3 +13,8 @@ worker:
   idle_timeout: 30         # Check for work every 30 seconds
   idle_action: exit        # Exit when no work remains
   identifier_scheme: sequential   # Use sequential identifiers (worker-1, worker-2, ...)
+  # enforce_shipped_work: true (the default) requires the workspace's branch to
+  # have an upstream: NEEDLE accepts a closure only when the dispatch produced a
+  # commit that was pushed to it. The quickstart README's Step 1 creates a local
+  # bare remote for exactly this. A repository that will never push must opt out:
+  # enforce_shipped_work: false

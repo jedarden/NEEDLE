@@ -1,16 +1,21 @@
-//! Provider/model concurrency limits and RPM rate limiting.
+//! Provider/model concurrency limits, RPM rate limiting, and host admission.
 //!
 //! Before dispatching an agent, the worker checks:
 //! 1. **Concurrency limits**: Are fewer than `max_concurrent` workers using
 //!    this provider/model? Checked via the worker registry.
 //! 2. **RPM limits**: Has the provider's requests-per-minute budget been
 //!    exceeded? Checked via a file-based token bucket.
+//! 3. **Host admission**: Are CPU load and available memory inside the launch
+//!    policy? A saturated host produces a typed [`AdmissionDecision::Blocked`]
+//!    rather than an opaque error, so the caller can enter a first-class
+//!    `ADMISSION_BLOCKED` state and hold there instead of exiting.
 //!
-//! If either check fails, the caller should back off and retry.
+//! If either limit check fails, the caller should back off and retry.
 //!
 //! Depends on: `config`, `registry`, `types`.
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -20,6 +25,452 @@ use serde::{Deserialize, Serialize};
 use crate::config::LimitsConfig;
 use crate::registry::Registry;
 use crate::telemetry::{EventKind, Telemetry};
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Host admission — typed launch deferral
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Where host resource readings come from.
+///
+/// Production reads `/proc`. Tests and the saturated-host regression fixture
+/// point `NEEDLE_LAUNCH_RESOURCE_PROBE` at a directory containing `loadavg`
+/// and `meminfo` files they can rewrite mid-run, which is how a fixture flips
+/// a live worker from blocked to admitted without killing it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceProbe {
+    loadavg_path: PathBuf,
+    meminfo_path: PathBuf,
+}
+
+impl ResourceProbe {
+    /// Probe the real host.
+    pub fn system() -> Self {
+        ResourceProbe {
+            loadavg_path: PathBuf::from("/proc/loadavg"),
+            meminfo_path: PathBuf::from("/proc/meminfo"),
+        }
+    }
+
+    /// Probe a directory of mock `loadavg`/`meminfo` files.
+    pub fn from_dir(dir: &Path) -> Self {
+        ResourceProbe {
+            loadavg_path: dir.join("loadavg"),
+            meminfo_path: dir.join("meminfo"),
+        }
+    }
+
+    /// Resolve the probe: the `NEEDLE_LAUNCH_RESOURCE_PROBE` directory when
+    /// set, the real host otherwise.
+    pub fn from_env() -> Self {
+        match std::env::var("NEEDLE_LAUNCH_RESOURCE_PROBE") {
+            Ok(dir) if !dir.is_empty() => ResourceProbe::from_dir(Path::new(&dir)),
+            _ => ResourceProbe::system(),
+        }
+    }
+
+    fn loadavg_path(&self) -> &Path {
+        &self.loadavg_path
+    }
+
+    fn meminfo_path(&self) -> &Path {
+        &self.meminfo_path
+    }
+}
+
+/// One reading of the host's CPU load and available memory.
+///
+/// A field is `None` when its source file is unreadable or unparsable — a
+/// missing reading must not look like a zero (which would read as "no memory
+/// available" and block forever) and must not fail admission either.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ResourceSnapshot {
+    /// 1-minute load average.
+    pub load_1min: Option<f64>,
+    /// Usable core count (`available_parallelism`).
+    pub cores: usize,
+    /// Available memory in MB.
+    pub available_mb: Option<u64>,
+}
+
+impl ResourceSnapshot {
+    /// Normalized CPU load (load / cores).
+    pub fn normalized_load(&self) -> Option<f64> {
+        self.load_1min.map(|load| load / self.cores.max(1) as f64)
+    }
+}
+
+/// Launch admission thresholds (mirrors `worker.cpu_load_warn` and
+/// `worker.memory_free_warn_mb`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AdmissionThresholds {
+    /// Normalized CPU load above which launch is deferred.
+    pub cpu_load_warn: f64,
+    /// Available memory (MB) below which launch is deferred.
+    pub memory_free_warn_mb: u64,
+}
+
+impl AdmissionThresholds {
+    pub fn new(cpu_load_warn: f64, memory_free_warn_mb: u64) -> Self {
+        AdmissionThresholds {
+            cpu_load_warn,
+            memory_free_warn_mb,
+        }
+    }
+}
+
+/// The resource whose policy blocked launch.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AdmissionResource {
+    /// Normalized CPU load over threshold.
+    Cpu {
+        /// 1-minute load average, raw.
+        load: f64,
+        /// Core count used for normalization.
+        cores: usize,
+    },
+    /// Available memory under threshold.
+    Memory {
+        /// Available memory in MB.
+        available_mb: u64,
+    },
+}
+
+impl std::fmt::Display for AdmissionResource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AdmissionResource::Cpu { .. } => write!(f, "cpu"),
+            AdmissionResource::Memory { .. } => write!(f, "memory"),
+        }
+    }
+}
+
+/// A typed launch block: what resource, what was observed, what the policy is.
+///
+/// `actual` and `threshold` are carried as formatted strings so telemetry and
+/// heartbeat consumers can render the pair without re-deriving normalization
+/// rules. The structured fields stay on [`AdmissionResource`] for callers that
+/// want numbers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AdmissionBlock {
+    /// The resource whose policy was violated.
+    pub resource: AdmissionResource,
+    /// Observed value (normalized load, or available MB).
+    pub actual: String,
+    /// The configured threshold the observed value crossed.
+    pub threshold: String,
+    /// One-line human-readable reason.
+    pub reason: String,
+}
+
+/// Result of a launch admission check.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AdmissionDecision {
+    /// Host is inside policy — launch may proceed.
+    Admitted,
+    /// Host is saturated — the caller must hold, not exit.
+    Blocked(AdmissionBlock),
+}
+
+impl AdmissionDecision {
+    /// Whether launch may proceed.
+    pub fn is_admitted(&self) -> bool {
+        matches!(self, AdmissionDecision::Admitted)
+    }
+
+    /// The block, when admission was denied.
+    pub fn block(&self) -> Option<&AdmissionBlock> {
+        match self {
+            AdmissionDecision::Admitted => None,
+            AdmissionDecision::Blocked(block) => Some(block),
+        }
+    }
+}
+
+/// Read the host's resource snapshot from `probe`.
+///
+/// Unreadable or unparsable probe files yield `None` readings rather than
+/// errors: admission is a policy gate over *known* values, and a probe that
+/// cannot be read (a mock file a fixture deleted mid-run, a transient `/proc`
+/// read failure) must not by itself block a worker forever.
+pub fn read_resource_snapshot(probe: &ResourceProbe) -> ResourceSnapshot {
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+
+    let load_1min = std::fs::read_to_string(probe.loadavg_path())
+        .ok()
+        .and_then(|loadavg| {
+            loadavg
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.parse().ok())
+        });
+
+    let available_mb = std::fs::read_to_string(probe.meminfo_path())
+        .ok()
+        .and_then(|meminfo| {
+            meminfo.lines().find_map(|line| {
+                line.starts_with("MemAvailable:")
+                    .then(|| line.split_whitespace().nth(1))
+                    .flatten()
+                    .and_then(|val| val.parse::<u64>().ok())
+                    .map(|kb| kb / 1024)
+            })
+        });
+
+    ResourceSnapshot {
+        load_1min,
+        cores,
+        available_mb,
+    }
+}
+
+/// Decide whether launch is admitted under the current host snapshot.
+///
+/// CPU is checked first (it is the threshold the 2026-09-03 lab incident
+/// tripped), then memory. Readings the probe could not produce admit rather
+/// than block — see [`read_resource_snapshot`].
+pub fn check_launch_admission(
+    thresholds: AdmissionThresholds,
+    snapshot: ResourceSnapshot,
+) -> AdmissionDecision {
+    // Explicit opt-out for callers that must launch regardless of host load.
+    //
+    // `cpu_load_warn` is a normalized ratio capped at 1.0 by config validation, so
+    // it cannot express "never defer": any box with load above its core count trips
+    // the gate. That is correct for a fleet worker and wrong for a test harness
+    // spawning one -- the test's own timeout expires inside the wait, reporting only
+    // a hang. It is also a reasonable deliberate operator override when launching
+    // onto a busy box.
+    if std::env::var("NEEDLE_SKIP_LAUNCH_RESOURCE_CHECK").as_deref() == Ok("1") {
+        tracing::debug!("NEEDLE_SKIP_LAUNCH_RESOURCE_CHECK=1: skipping pre-launch resource gate");
+        return AdmissionDecision::Admitted;
+    }
+
+    if let Some(normalized) = snapshot.normalized_load() {
+        if normalized > thresholds.cpu_load_warn {
+            let load = snapshot.load_1min.unwrap_or_default();
+            return AdmissionDecision::Blocked(AdmissionBlock {
+                resource: AdmissionResource::Cpu {
+                    load,
+                    cores: snapshot.cores,
+                },
+                actual: format!("{normalized:.2}"),
+                threshold: format!("{:.2}", thresholds.cpu_load_warn),
+                reason: format!(
+                    "CPU load saturated: {load:.2} (1-minute average) / {} cores = {normalized:.2} > threshold {:.2}",
+                    snapshot.cores, thresholds.cpu_load_warn
+                ),
+            });
+        }
+    }
+
+    if let Some(available_mb) = snapshot.available_mb {
+        if available_mb < thresholds.memory_free_warn_mb {
+            return AdmissionDecision::Blocked(AdmissionBlock {
+                resource: AdmissionResource::Memory { available_mb },
+                actual: format!("{available_mb} MB"),
+                threshold: format!("{} MB", thresholds.memory_free_warn_mb),
+                reason: format!(
+                    "Memory saturated: {available_mb} MB available < {} MB threshold",
+                    thresholds.memory_free_warn_mb
+                ),
+            });
+        }
+    }
+
+    AdmissionDecision::Admitted
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Admission hold — resident blocked state (plan revision 24 §4.6, N-T33)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Backoff and bounded-emission policy for an admission hold.
+///
+/// Defaults put a retry every 5–30 s and a `worker.admission_blocked` event at
+/// most every heartbeat interval, so a saturated host produces a handful of
+/// events per hour instead of the 2026-09-03 pattern of four deferral events
+/// per 30-second restart cycle.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AdmissionHoldConfig {
+    /// First retry delay. Doubles per attempt up to [`max_backoff`].
+    pub base_backoff: Duration,
+    /// Retry-delay ceiling. The cap is what keeps a blocked worker resident
+    /// instead of letting its retry cadence grow without bound.
+    pub max_backoff: Duration,
+    /// Minimum spacing between `worker.admission_blocked` emissions.
+    pub heartbeat_interval: Duration,
+}
+
+impl Default for AdmissionHoldConfig {
+    fn default() -> Self {
+        AdmissionHoldConfig {
+            base_backoff: Duration::from_secs(5),
+            max_backoff: Duration::from_secs(30),
+            heartbeat_interval: Duration::from_secs(30),
+        }
+    }
+}
+
+impl AdmissionHoldConfig {
+    /// Resolve the hold policy from the environment, falling back to the
+    /// defaults.
+    ///
+    /// `NEEDLE_ADMISSION_BACKOFF_BASE_MS` and
+    /// `NEEDLE_ADMISSION_BACKOFF_CAP_MS` size the retry backoff;
+    /// `NEEDLE_ADMISSION_HEARTBEAT_SECS` sizes the bounded blocked-event
+    /// spacing. These are operator/test seams (like
+    /// `NEEDLE_LAUNCH_RESOURCE_PROBE`): production should run on the defaults.
+    pub fn from_env() -> Self {
+        let mut config = AdmissionHoldConfig::default();
+
+        if let Ok(ms) = std::env::var("NEEDLE_ADMISSION_BACKOFF_BASE_MS") {
+            if let Ok(ms) = ms.parse::<u64>() {
+                config.base_backoff = Duration::from_millis(ms.max(1));
+            }
+        }
+        if let Ok(ms) = std::env::var("NEEDLE_ADMISSION_BACKOFF_CAP_MS") {
+            if let Ok(ms) = ms.parse::<u64>() {
+                config.max_backoff =
+                    Duration::from_millis(ms.max(config.base_backoff.as_millis() as u64));
+            }
+        }
+        if let Ok(secs) = std::env::var("NEEDLE_ADMISSION_HEARTBEAT_SECS") {
+            if let Ok(secs) = secs.parse::<u64>() {
+                config.heartbeat_interval = Duration::from_secs(secs.max(1));
+            }
+        }
+
+        config
+    }
+}
+
+/// Capped, jittered retry delay for the given attempt (1-based).
+///
+/// Exponential growth from `base` capped at `max`, with ±25% jitter so a fleet
+/// of blocked workers does not retry in lockstep and stampede the host the
+/// moment load dips.
+pub fn admission_backoff(attempt: u64, base: Duration, max: Duration) -> Duration {
+    let base_ms = base.as_millis() as u64;
+    let max_ms = max.as_millis() as u64;
+    let (lo, hi) = (base_ms.min(max_ms), base_ms.max(max_ms));
+    let exp = attempt.saturating_sub(1).min(30);
+    let shifted = lo.saturating_mul(1u64 << exp);
+    let capped = shifted.clamp(lo, hi);
+
+    // ±25% jitter from a cheap, non-cryptographic source: enough to break
+    // alignment between workers, deterministic enough to stay inside bounds.
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0) as u64;
+    let fraction = (nanos % 1000) as f64 / 1000.0; // 0.0..1.0
+    let jitter = 0.75 + 0.5 * fraction;
+    let jittered = (capped as f64 * jitter) as u64;
+
+    Duration::from_millis(jittered.clamp(lo, hi))
+}
+
+/// What a caller should do after observing a blocked admission check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockedObservation {
+    /// Emit a `worker.admission_blocked` event: this is the first blocked
+    /// check of a hold, or the heartbeat interval has elapsed since the last
+    /// emission.
+    Emit,
+    /// Stay quiet: a blocked event was emitted recently enough.
+    HoldQuiet,
+}
+
+/// State machine for one continuous admission hold.
+///
+/// Holds the "when do I emit" decisions so the three callers (worker run loop,
+/// boot gate, supervisor spawn gate) cannot drift: the first blocked check
+/// emits, subsequent checks emit only per [`AdmissionHoldConfig::
+/// heartbeat_interval`], and the transition back to admitted emits exactly one
+/// restore event — before selection resumes.
+///
+/// The hold carries no thresholds and no config: it cannot weaken policy. The
+/// thresholds live with the caller's next [`check_launch_admission`] call.
+#[derive(Debug)]
+pub struct AdmissionHold {
+    config: AdmissionHoldConfig,
+    attempt: u64,
+    blocked_since: Option<Instant>,
+    last_emit: Option<Instant>,
+}
+
+impl AdmissionHold {
+    pub fn new(config: AdmissionHoldConfig) -> Self {
+        AdmissionHold {
+            config,
+            attempt: 0,
+            blocked_since: None,
+            last_emit: None,
+        }
+    }
+
+    /// Whether a hold is currently in progress.
+    pub fn is_blocked(&self) -> bool {
+        self.blocked_since.is_some()
+    }
+
+    /// How long the current (or most recent) hold has lasted.
+    pub fn blocked_for(&self) -> Duration {
+        self.blocked_since
+            .map(|since| since.elapsed())
+            .unwrap_or_default()
+    }
+
+    /// How many admission checks have run during the hold.
+    pub fn attempts(&self) -> u64 {
+        self.attempt
+    }
+
+    /// Record a blocked check. Returns whether an event should be emitted.
+    pub fn observe_blocked(&mut self) -> BlockedObservation {
+        self.attempt = self.attempt.saturating_add(1);
+        if self.blocked_since.is_none() {
+            self.blocked_since = Some(Instant::now());
+            self.last_emit = Some(Instant::now());
+            return BlockedObservation::Emit;
+        }
+        let emit_due = self
+            .last_emit
+            .map(|last| last.elapsed() >= self.config.heartbeat_interval)
+            .unwrap_or(true);
+        if emit_due {
+            self.last_emit = Some(Instant::now());
+            BlockedObservation::Emit
+        } else {
+            BlockedObservation::HoldQuiet
+        }
+    }
+
+    /// Record an admitted check that ends a hold. Returns whether a
+    /// `worker.admission_restored` event should be emitted — true whenever a
+    /// hold was in progress, so restoration is never announced for a worker
+    /// that was never blocked.
+    pub fn observe_admitted(&mut self) -> bool {
+        if !self.is_blocked() {
+            self.attempt = 0;
+            return false;
+        }
+        self.blocked_since = None;
+        self.last_emit = None;
+        true
+    }
+
+    /// The retry delay to sleep before the next admission check.
+    pub fn backoff(&self) -> Duration {
+        admission_backoff(
+            self.attempt.max(1),
+            self.config.base_backoff,
+            self.config.max_backoff,
+        )
+    }
+}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // RateLimitDecision
@@ -697,6 +1148,7 @@ mod tests {
             started_at: Utc::now(),
             beads_processed: 0,
             config_reload_generation: 0,
+            state: None,
         }
     }
 
@@ -995,6 +1447,210 @@ mod tests {
         // Should be allowed because dead PIDs are filtered out.
         let decision = limiter.check(Some("anthropic"), None, &registry).unwrap();
         assert_eq!(decision, RateLimitDecision::Allowed);
+    }
+
+    // ── Launch admission (plan revision 24 §4.6 / N-T33) ──
+
+    /// Serializes tests that mutate process-global env vars.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn write_probe_files(dir: &Path, loadavg: &str, mem_available_kb: &str) {
+        std::fs::write(dir.join("loadavg"), format!("{loadavg}\n")).unwrap();
+        std::fs::write(
+            dir.join("meminfo"),
+            format!("MemTotal: 8388608 kB\nMemAvailable: {mem_available_kb} kB\n"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn admission_gate_blocks_cpu_over_threshold_with_typed_details() {
+        let dir = tempfile::tempdir().unwrap();
+        // 8.0 load on 4 cores = 2.0 normalized > 0.8.
+        write_probe_files(dir.path(), "8.00 7.00 6.00 1/123 45678", "4194304");
+
+        let snapshot = read_resource_snapshot(&ResourceProbe::from_dir(dir.path()));
+        assert_eq!(snapshot.load_1min, Some(8.0), "mock loadavg should parse");
+
+        let decision = check_launch_admission(
+            AdmissionThresholds::new(0.8, 512),
+            ResourceSnapshot {
+                load_1min: Some(8.0),
+                cores: 4,
+                available_mb: Some(4096),
+            },
+        );
+        let block = decision.block().expect("expected a typed block");
+        assert_eq!(
+            block.resource,
+            AdmissionResource::Cpu {
+                load: 8.0,
+                cores: 4
+            }
+        );
+        assert_eq!(block.actual, "2.00");
+        assert_eq!(block.threshold, "0.80");
+        assert!(
+            block.reason.contains("CPU load saturated"),
+            "{}",
+            block.reason
+        );
+        assert_eq!(block.resource.to_string(), "cpu");
+    }
+
+    #[test]
+    fn admission_gate_blocks_memory_under_threshold() {
+        let decision = check_launch_admission(
+            AdmissionThresholds::new(0.8, 512),
+            ResourceSnapshot {
+                load_1min: Some(0.5),
+                cores: 4,
+                available_mb: Some(128),
+            },
+        );
+        let block = decision.block().expect("expected a typed block");
+        assert_eq!(
+            block.resource,
+            AdmissionResource::Memory { available_mb: 128 }
+        );
+        assert_eq!(block.actual, "128 MB");
+        assert_eq!(block.threshold, "512 MB");
+        assert!(
+            block.reason.contains("Memory saturated"),
+            "{}",
+            block.reason
+        );
+        assert_eq!(block.resource.to_string(), "memory");
+    }
+
+    #[test]
+    fn admission_gate_admits_inside_policy() {
+        let decision = check_launch_admission(
+            AdmissionThresholds::new(0.8, 512),
+            ResourceSnapshot {
+                load_1min: Some(3.1),
+                cores: 4,
+                available_mb: Some(2048),
+            },
+        );
+        assert!(decision.is_admitted());
+    }
+
+    #[test]
+    fn admission_gate_admits_when_probe_readings_are_missing() {
+        // A probe that cannot produce a reading must not block forever, and a
+        // missing file must not read as a zero (which would look like "no
+        // memory available").
+        let dir = tempfile::tempdir().unwrap();
+        let snapshot = read_resource_snapshot(&ResourceProbe::from_dir(dir.path()));
+        assert_eq!(snapshot.load_1min, None);
+        assert_eq!(snapshot.available_mb, None);
+
+        let decision = check_launch_admission(AdmissionThresholds::new(0.8, 512), snapshot);
+        assert!(decision.is_admitted());
+    }
+
+    #[test]
+    fn probe_env_override_selects_mock_directory() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        write_probe_files(dir.path(), "1.00 1.00 1.00 1/123 45678", "2097152");
+
+        std::env::set_var("NEEDLE_LAUNCH_RESOURCE_PROBE", dir.path());
+        let probe = ResourceProbe::from_env();
+        std::env::remove_var("NEEDLE_LAUNCH_RESOURCE_PROBE");
+
+        let snapshot = read_resource_snapshot(&probe);
+        assert_eq!(snapshot.load_1min, Some(1.0));
+        assert_eq!(snapshot.available_mb, Some(2048));
+    }
+
+    #[test]
+    fn admission_backoff_grows_to_cap_and_stays_in_bounds() {
+        let base = Duration::from_secs(5);
+        let max = Duration::from_secs(30);
+        for attempt in 1..=20u64 {
+            let delay = admission_backoff(attempt, base, max);
+            assert!(
+                delay >= Duration::from_secs(1) && delay <= max,
+                "attempt {attempt} produced out-of-bounds delay {delay:?}"
+            );
+        }
+        // Late attempts must sit at (or under) the cap, never grow past it.
+        for _ in 0..50 {
+            let delay = admission_backoff(25, base, max);
+            assert!(delay <= max, "cap exceeded: {delay:?}");
+            assert!(
+                delay >= Duration::from_secs(15),
+                "jitter floor too low: {delay:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn admission_hold_emits_first_blocked_then_rate_bounds() {
+        let config = AdmissionHoldConfig {
+            base_backoff: Duration::from_millis(10),
+            max_backoff: Duration::from_millis(20),
+            heartbeat_interval: Duration::from_millis(50),
+        };
+        let mut hold = AdmissionHold::new(config);
+        assert!(!hold.is_blocked());
+
+        assert_eq!(hold.observe_blocked(), BlockedObservation::Emit);
+        assert_eq!(hold.attempts(), 1);
+
+        // Retries inside the heartbeat window stay quiet — that is the bound.
+        for expected_attempt in 2..=6 {
+            assert_eq!(
+                hold.observe_blocked(),
+                BlockedObservation::HoldQuiet,
+                "attempt {expected_attempt} should not have emitted"
+            );
+            assert_eq!(hold.attempts(), expected_attempt);
+        }
+
+        // After the heartbeat window, exactly one more emission.
+        std::thread::sleep(Duration::from_millis(60));
+        assert_eq!(hold.observe_blocked(), BlockedObservation::Emit);
+        assert_eq!(hold.observe_blocked(), BlockedObservation::HoldQuiet);
+    }
+
+    #[test]
+    fn admission_hold_announces_restore_only_after_a_hold() {
+        let mut hold = AdmissionHold::new(AdmissionHoldConfig::default());
+        assert!(!hold.observe_admitted(), "never blocked: no restore event");
+
+        let _ = hold.observe_blocked();
+        assert!(
+            hold.observe_admitted(),
+            "hold in progress: restore required"
+        );
+        assert!(!hold.is_blocked());
+        assert!(
+            !hold.observe_admitted(),
+            "hold ended: no second restore event"
+        );
+    }
+
+    #[test]
+    fn admission_hold_backoff_respects_configured_bounds() {
+        let config = AdmissionHoldConfig {
+            base_backoff: Duration::from_millis(40),
+            max_backoff: Duration::from_millis(90),
+            heartbeat_interval: Duration::from_secs(30),
+        };
+        let mut hold = AdmissionHold::new(config);
+        for attempt in 1..=10 {
+            let _ = hold.observe_blocked();
+            let delay = hold.backoff();
+            assert!(
+                delay >= Duration::from_millis(20) && delay <= Duration::from_millis(90),
+                "attempt {attempt} backoff {delay:?} outside [base/2, cap]"
+            );
+        }
+        assert_eq!(hold.attempts(), 10);
+        assert!(hold.blocked_for() < Duration::from_secs(5));
     }
 
     #[test]

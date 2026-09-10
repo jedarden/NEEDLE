@@ -31,9 +31,10 @@ use tracing::Instrument;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering as AtomicOrdering};
 
 use crate::bead_store::BeadStore;
+use crate::build_status::BuildStatusChecker;
 use crate::canary::CanaryRunner;
 use crate::ci::{self, RegistrationResult};
-use crate::claim::Claimer;
+use crate::claim::{CircuitGate, Claimer};
 use crate::commit_hook;
 use crate::config::{CliOverrides, Config, ConfigLoader, ConfigSource, SourceMap};
 use crate::cost::{self, BudgetCheck, EffortData};
@@ -42,7 +43,10 @@ use crate::health::HealthMonitor;
 use crate::mitosis::MitosisEvaluator;
 use crate::outcome::OutcomeHandler;
 use crate::prompt::{BuiltPrompt, PromptBuilder};
-use crate::rate_limit::RateLimiter;
+use crate::rate_limit::{
+    check_launch_admission, read_resource_snapshot, AdmissionDecision, AdmissionHold,
+    AdmissionHoldConfig, BlockedObservation, RateLimiter, ResourceProbe,
+};
 use crate::registry::{LiveConfigSnapshot, Registry, WorkerEntry};
 use crate::routing;
 use crate::span::ScopeGuard;
@@ -497,7 +501,7 @@ struct ConfigFileFingerprint {
 fn global_config_path() -> PathBuf {
     crate::config::get_home_env()
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .unwrap_or_else(std::env::temp_dir)
         .join(".config/needle/config.yaml")
 }
 
@@ -843,11 +847,23 @@ impl Worker {
         let claimer_start = Instant::now();
         let claimer = Claimer::new(
             store.clone(),
-            std::path::PathBuf::from("/tmp"),
+            std::env::temp_dir(),
             config.worker.max_claim_retries,
             100,
             telemetry.clone(),
         );
+        // A red build stops work: claims in the home workspace are refused
+        // while its newest CI run is failing, except for beads labeled as the
+        // way back to green (fix-build / ci-red).
+        let claimer = if config.strands.pluck.circuit_breaker.enabled {
+            claimer.with_circuit_gate(CircuitGate::new(
+                BuildStatusChecker::production(),
+                config.workspace.home.clone(),
+                config.strands.pluck.circuit_breaker.labels.clone(),
+            ))
+        } else {
+            claimer
+        };
         let _ = telemetry.emit(
             EventKind::InitStepCompleted {
                 step: "claimer_creation".to_string(),
@@ -993,7 +1009,7 @@ impl Worker {
         let mitosis_evaluator = MitosisEvaluator::new(
             config.strands.mitosis.clone(),
             telemetry.clone(),
-            std::path::PathBuf::from("/tmp"),
+            std::env::temp_dir(),
         );
         let _ = telemetry.emit(
             EventKind::InitStepCompleted {
@@ -1381,7 +1397,8 @@ impl Worker {
                     WorkerState::Selecting
                     | WorkerState::Claiming
                     | WorkerState::Retrying
-                    | WorkerState::Logging => {
+                    | WorkerState::Logging
+                    | WorkerState::AdmissionBlocked => {
                         // Release any claimed bead before stopping (should be none in these states).
                         self.release_current_bead(&reason).await;
                         return self.stop(&reason).await;
@@ -1442,6 +1459,10 @@ impl Worker {
 
             match self.state {
                 WorkerState::Selecting => self.do_select().await?,
+                // The hold lives inside do_select; re-entering it re-checks
+                // admission and, when the host recovers, emits
+                // worker.admission_restored before selection resumes.
+                WorkerState::AdmissionBlocked => self.do_select().await?,
                 WorkerState::Claiming => self.do_claim().await?,
                 WorkerState::Retrying => self.do_retry().await?,
                 WorkerState::Building => self.do_build().instrument(lifecycle_span.clone()).await?,
@@ -1458,10 +1479,13 @@ impl Worker {
                     self.apply_bead_action(action).await?;
                 }
                 WorkerState::Logging => {
-                    // Keep the entered guard inside a synchronous helper frame.
-                    // Letting it live in this async state-machine frame can retain
-                    // lifecycle entries across later polls and recursively parent
-                    // the next cycle's span until the worker overflows its stack.
+                    // LOGGING is the one synchronous handler, so it scopes the
+                    // lifecycle span with a `ScopeGuard` instead of
+                    // `.instrument()`. `do_log_scoped` bounds the entered guard
+                    // to the sync call itself: by the time this arm returns (and
+                    // the async boundary checks below run) the guard has
+                    // unwound, so no thread-local span entry survives into the
+                    // next `.await` (bf-3uj6i).
                     self.do_log_scoped(&lifecycle_span)?;
 
                     // After logging completes, check if the running binary is stale
@@ -1668,6 +1692,7 @@ impl Worker {
             started_at: chrono::Utc::now(),
             beads_processed: 0,
             config_reload_generation: self.config_reload_generation,
+            state: Some(WorkerState::Booting),
         };
         if let Err(e) = self.registry.register(entry.clone()) {
             // Log to both tracing and stderr for visibility
@@ -2122,6 +2147,22 @@ impl Worker {
 
     /// SELECTING: run strand waterfall to find a candidate bead.
     async fn do_select(&mut self) -> Result<()> {
+        // Launch admission gate (plan revision 24 §4.6, N-T33). Evaluated
+        // before candidate discovery and claim: an admission-blocked worker
+        // holds here — resident, retrying with capped jittered backoff, never
+        // reaching the strand waterfall — so it cannot claim a bead while the
+        // host is above CPU or memory policy, and it cannot escape the hold by
+        // relaxing the thresholds (they are re-read from config each check and
+        // never written).
+        self.hold_for_admission().await?;
+
+        // A shutdown signal that arrived mid-hold must not select: hand
+        // control back to the run loop, whose top-of-loop shutdown branch
+        // stops the worker cleanly.
+        if self.shutdown.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+
         // Claim ownership must be checked before clearing per-cycle state. A
         // leaked claim here would otherwise be forgotten and claim_auto could
         // assign this same worker a second bead.
@@ -2234,6 +2275,112 @@ impl Worker {
         Ok(())
     }
 
+    /// Hold while launch admission is refused (plan revision 24 §4.6, N-T33).
+    ///
+    /// A service-managed worker that cannot launch because CPU or memory is
+    /// above policy stays resident: it does not exit into `Restart=always`
+    /// churn, does not claim a bead, and does not weaken the thresholds. While
+    /// blocked it reports `ADMISSION_BLOCKED` in the heartbeat and the worker
+    /// registry, emits `worker.admission_blocked` rate-bounded (first check,
+    /// then at most one per heartbeat interval), and retries each check after
+    /// a capped jittered backoff. On recovery it emits
+    /// `worker.admission_restored` and returns to `SELECTING` before any
+    /// selection runs.
+    async fn hold_for_admission(&mut self) -> Result<()> {
+        // Operator/test override honored identically at every admission check:
+        // some callers must launch regardless of host load.
+        if std::env::var("NEEDLE_SKIP_LAUNCH_RESOURCE_CHECK").as_deref() == Ok("1") {
+            return Ok(());
+        }
+
+        let thresholds = crate::rate_limit::AdmissionThresholds::new(
+            self.config.worker.cpu_load_warn,
+            self.config.worker.memory_free_warn_mb,
+        );
+        let probe = ResourceProbe::from_env();
+        let mut hold = AdmissionHold::new(AdmissionHoldConfig::from_env());
+
+        loop {
+            let decision = check_launch_admission(thresholds, read_resource_snapshot(&probe));
+            match decision {
+                AdmissionDecision::Admitted => {
+                    // Capture hold stats before observe_admitted() ends the hold.
+                    let blocked_secs = hold.blocked_for().as_secs();
+                    let attempts = hold.attempts();
+                    if hold.observe_admitted() {
+                        tracing::info!(
+                            blocked_secs,
+                            attempts,
+                            "launch admission restored; resuming selection"
+                        );
+                        self.telemetry.emit(
+                            EventKind::WorkerAdmissionRestored {
+                                blocked_secs,
+                                attempts,
+                            },
+                            chrono::Utc::now(),
+                        )?;
+                        // Back to SELECTING *before* selection resumes, so no
+                        // observer ever sees a selecting worker that is still
+                        // over policy.
+                        self.set_state(WorkerState::Selecting)?;
+                        self.registry
+                            .update_state(&self.qualified_id(), Some(WorkerState::Selecting));
+                    }
+                    return Ok(());
+                }
+                AdmissionDecision::Blocked(block) => {
+                    if hold.observe_blocked() == BlockedObservation::Emit {
+                        if self.state != WorkerState::AdmissionBlocked {
+                            // First entry into the hold: publish the state to
+                            // the heartbeat and the registry. Later checks
+                            // must not re-emit the transition.
+                            self.set_state(WorkerState::AdmissionBlocked)?;
+                        }
+                        self.registry.update_state(
+                            &self.qualified_id(),
+                            Some(WorkerState::AdmissionBlocked),
+                        );
+                        tracing::warn!(
+                            resource = %block.resource,
+                            actual = %block.actual,
+                            threshold = %block.threshold,
+                            attempt = hold.attempts(),
+                            "launch admission blocked; holding resident"
+                        );
+                        self.telemetry.emit(
+                            EventKind::WorkerAdmissionBlocked {
+                                resource: block.resource.to_string(),
+                                actual: block.actual.clone(),
+                                threshold: block.threshold.clone(),
+                                reason: block.reason.clone(),
+                                attempt: hold.attempts(),
+                                disposition: "holding".to_string(),
+                            },
+                            chrono::Utc::now(),
+                        )?;
+                    }
+
+                    // Capped jittered backoff, polled in small ticks so a
+                    // shutdown signal interrupts the hold within ~100 ms.
+                    let mut remaining = hold.backoff();
+                    while remaining > Duration::ZERO {
+                        if self.shutdown.load(Ordering::SeqCst) {
+                            tracing::info!(
+                                blocked_secs = hold.blocked_for().as_secs(),
+                                "shutdown requested while admission-blocked"
+                            );
+                            return Ok(());
+                        }
+                        let tick = remaining.min(Duration::from_millis(100));
+                        tokio::time::sleep(tick).await;
+                        remaining = remaining.saturating_sub(tick);
+                    }
+                }
+            }
+        }
+    }
+
     /// Swap the active bead store to a remote workspace.
     ///
     /// Loads the target workspace's explicit backend binding, creates that
@@ -2277,7 +2424,7 @@ impl Worker {
         self.dispatcher.set_bead_store(remote_store.clone());
         self.claimer = Claimer::new(
             remote_store,
-            std::path::PathBuf::from("/tmp"),
+            std::env::temp_dir(),
             self.config.worker.max_claim_retries,
             100,
             self.telemetry.clone(),
@@ -2301,7 +2448,7 @@ impl Worker {
             self.dispatcher.set_bead_store(self.home_store.clone());
             self.claimer = Claimer::new(
                 self.home_store.clone(),
-                std::path::PathBuf::from("/tmp"),
+                std::env::temp_dir(),
                 self.config.worker.max_claim_retries,
                 100,
                 self.telemetry.clone(),
@@ -2792,10 +2939,10 @@ impl Worker {
         // configuration. These tasks have no legitimate resolution path from inside
         // a target repo and should not be split into child beads there.
         // Late invariant fallback. Explore already rejects these before ranking
-        // and claim; this catches a bead whose labels changed between selection
-        // and dispatch. Both paths call the same predicate on purpose — when
-        // they diverged, Explore claimed what the worker refused and the pair
-        // livelocked (needle-ee024ae4).
+        // and claim; this catches the case where a bead's labels changed between
+        // selection and dispatch. Both paths call the same predicate on purpose
+        // — when they diverged, Explore claimed what the worker refused and the
+        // pair livelocked (needle-ee024ae4).
         if template_name == "split"
             && crate::mitosis::would_release_as_split_out_of_scope(
                 &bead,
@@ -2958,6 +3105,20 @@ impl Worker {
             bail!("DISPATCHING state without current_bead — invariant violated");
         }
 
+        // Generate the provisional attempt ID for this dispatch (plan section
+        // 4.4 step 1). UUIDv7 embeds a unix-millisecond timestamp so ledger
+        // rows sort by dispatch start. It stays provisional — flagged
+        // `provisional: true` at emission — until N-T03 resolves attempts
+        // against beads. Enter it into the telemetry context so every event
+        // emitted between here and the end of the bead cycle carries it; the
+        // outcome handler reads it back through its own telemetry handle.
+        let attempt_id = uuid::Uuid::now_v7().to_string();
+        self.telemetry.set_attempt_id(attempt_id.clone());
+        tracing::debug!(
+            attempt_id = %attempt_id,
+            "dispatch start — provisional attempt ID assigned"
+        );
+
         // Check rate limits before dispatching.
         let adapter = self.resolve_adapter()?;
         let provider = adapter.provider.as_deref();
@@ -2972,12 +3133,13 @@ impl Worker {
             _bead_id.as_ref().map(|id| id.as_ref()),
             self.current_strand.as_deref(),
             "dispatch",
-            serde_json::json!({"adapter": adapter.name, "model": model}),
+            serde_json::json!({"adapter": adapter.name, "model": model, "attempt_id": attempt_id}),
         );
         let dispatch_span = tracing::info_span!(
             "agent.dispatch",
             gen_ai.system = %provider.unwrap_or("unknown"),
             gen_ai.request.model = %model.unwrap_or("unknown"),
+            needle.attempt.id = %attempt_id,
             needle.agent.pid = tracing::field::Empty, // Will be set when process starts
             needle.agent.exit_code = tracing::field::Empty, // Will be set after execution
         );
@@ -3070,9 +3232,10 @@ impl Worker {
                             );
 
                             self.telemetry.emit(
-                                EventKind::ClaimVerifyFailed {
+                                EventKind::ClaimRecheckFailed {
                                     bead_id: bead_id.clone(),
                                     expected_actor: worker_id.clone(),
+                                    stage: "dispatching".to_string(),
                                     actual_status: format!("{:?}", status.status),
                                     actual_assignee: status
                                         .assignee
@@ -3093,10 +3256,15 @@ impl Worker {
                             "claim verification passed — dispatching agent"
                         );
 
+                        // Stage re-check, not `ClaimVerifySuccess`: that name is
+                        // reserved for the canonical dispatch-time verification in
+                        // `Claimer::verify_claim_at_dispatch`, keeping
+                        // `verify_started`/`verify_success` 1:1 (issue #20).
                         self.telemetry.emit(
-                            EventKind::ClaimVerifySuccess {
+                            EventKind::ClaimRecheckSucceeded {
                                 bead_id: bead_id.clone(),
                                 expected_actor: worker_id.clone(),
+                                stage: "dispatching".to_string(),
                             },
                             chrono::Utc::now(),
                         )?;
@@ -3250,13 +3418,10 @@ impl Worker {
                         );
                     }
 
-                    // Emit telemetry for the failed verification
-                    let _ = self.telemetry.emit(EventKind::ClaimVerifyFailed {
-                        bead_id: bead.id.clone(),
-                        expected_actor: qualified_actor.clone(),
-                        actual_status: "unknown".to_string(),
-                        actual_assignee: "(not verified)".to_string(),
-                    }, chrono::Utc::now());
+                    // No failure telemetry here: `verify_claim_at_dispatch` already
+                    // emitted `bead.claim.verify_failed` with the live status and
+                    // assignee. A second emission with placeholder data would count
+                    // one failed verification twice.
 
                     bail!(
                         "dispatch-time claim verification failed for bead {}: bead is not assigned to worker {}",
@@ -3332,6 +3497,9 @@ impl Worker {
             dispatch::extract_tokens(&adapter.token_extraction, &output.stdout, &output.stderr);
         let model_name = adapter.model.as_deref().unwrap_or("");
         let estimated_cost = cost::estimate_cost(&tokens, model_name, &self.config.pricing);
+        // Read the figures out before `tokens` moves into the effort record —
+        // the attempt ledger row below needs the same numbers.
+        let (tokens_in, tokens_out) = (tokens.input_tokens, tokens.output_tokens);
 
         if let Some(ref mut effort) = self.last_effort {
             effort.agent_name = adapter.name.clone();
@@ -3340,6 +3508,50 @@ impl Worker {
             effort.tokens = tokens;
             effort.estimated_cost_usd = estimated_cost;
         }
+
+        // Hand the dispatch facts to the outcome handler so the terminal
+        // attempt.resolved ledger row can say what this attempt was (plan
+        // section 4.4 step 1, N-T16). Commit listing is best-effort evidence:
+        // a git failure leaves the field empty rather than failing the cycle.
+        let commits = match &self.pre_dispatch_head {
+            Some(pre_head) => tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                commit_hook::commits_since(dispatch_ws.to_str().unwrap_or("."), pre_head),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    "commit listing timed out — attempt ledger row will carry no commits"
+                );
+                Ok(Vec::new())
+            })
+            .unwrap_or_else(|e| {
+                tracing::debug!(
+                    bead_id = %bead.id,
+                    error = %e,
+                    "commit listing failed — attempt ledger row will carry no commits"
+                );
+                Vec::new()
+            }),
+            None => Vec::new(),
+        };
+        self.outcome_handler
+            .set_attempt_context(crate::outcome::AttemptContext {
+                adapter: adapter.name.clone(),
+                model: adapter.model.clone(),
+                provider: adapter.provider.clone(),
+                // The prompt has been taken out of built_prompt above; its
+                // template identity is all the ledger needs from it.
+                prompt_template: prompt.template_name.clone(),
+                template_version: prompt.template_version.clone(),
+                bead_revision_start: self.pre_dispatch_head.clone(),
+                commits,
+                tokens_in,
+                tokens_out,
+                estimated_cost_usd: estimated_cost,
+                started_at: self.last_effort.as_ref().map(|e| e.cycle_start),
+            });
 
         // Write trace files for stdout and stderr.
         // Errors are logged but don't fail the bead cycle — the output is
@@ -4643,11 +4855,17 @@ impl Worker {
         }
     }
 
-    /// Run the synchronous LOGGING handler inside the lifecycle span.
+    /// LOGGING: run the synchronous `do_log` inside the lifecycle span.
     ///
-    /// The guard is deliberately local to this non-async helper so it is dropped
-    /// before the worker loop reaches another `.await` or starts another claim
-    /// cycle. This keeps lifecycle spans LIFO-safe across repeated dispatches.
+    /// `do_log` is the only state handler that runs without an `.await`, so it
+    /// cannot carry the span via `.instrument()` the way the async handlers
+    /// do. Entering it with a `ScopeGuard` keeps the events it emits attributed
+    /// to `bead.lifecycle` while guaranteeing LIFO unwinding: the guard is a
+    /// local of this function, so it is dropped before any caller continues
+    /// into the async boundary checks that follow LOGGING. An entered guard
+    /// that outlives the sync section is exactly the leak that grew the span
+    /// stack unboundedly in bf-3uj6i, which is why the guard is deliberately
+    /// not returned or stored here.
     fn do_log_scoped(&mut self, lifecycle_span: &tracing::Span) -> Result<()> {
         let _lifecycle_guard = ScopeGuard::new(lifecycle_span.clone());
         self.do_log()
@@ -4696,6 +4914,10 @@ impl Worker {
         self.last_effort = None;
         self.beads_processed += 1;
         self.current_bead = None;
+        // The dispatch is over: stop attributing events to its attempt ID so
+        // idle and next-selection events are not joined to the previous
+        // attempt (plan section 4.4 step 1).
+        self.telemetry.clear_attempt_id();
 
         // Close the bead.lifecycle span by dropping the final handle.
         // Record the outcome before closing if we have the handler result available.
@@ -6223,6 +6445,7 @@ impl Worker {
             started_at: chrono::Utc::now(),
             beads_processed: self.beads_processed,
             config_reload_generation: self.config_reload_generation,
+            state: Some(self.state.clone()),
         };
         self.registry.register(entry)?;
         self.publish_live_config_snapshot()
@@ -8580,6 +8803,114 @@ mod tests {
         assert_eq!(*worker.state(), WorkerState::Exhausted);
     }
 
+    /// A probe directory whose CPU reading is far above any sane threshold.
+    fn write_saturated_probe(dir: &std::path::Path) {
+        std::fs::write(dir.join("loadavg"), "64.00 32.00 16.00 1/123 456\n").unwrap();
+        // Memory is plentiful: the block must be attributed to CPU alone.
+        std::fs::write(dir.join("meminfo"), "MemAvailable: 16777216 kB\n").unwrap();
+    }
+
+    fn admission_test_config(temp_dir: &tempfile::TempDir) -> Config {
+        let mut config = valid_test_config();
+        config.worker.cpu_load_warn = 1.0;
+        config.worker.memory_free_warn_mb = 64;
+        config.self_modification.hot_reload = false;
+        config.strands.explore.enabled = false;
+        // Pin workspace_root to prevent Explore strand from scanning real home
+        config.strands.explore.workspace_root = temp_dir.path().to_path_buf();
+        config.strands.explore.workspaces = Vec::new();
+        config
+    }
+
+    #[tokio::test]
+    async fn admission_blocked_hold_publishes_state_and_never_reaches_selection() {
+        let _env_lock = crate::util::test_env::isolate_env();
+        let probe_dir = tempfile::tempdir().unwrap();
+        write_saturated_probe(probe_dir.path());
+        std::env::set_var("NEEDLE_LAUNCH_RESOURCE_PROBE", probe_dir.path());
+        // Fast backoff so the first hold iteration reaches its shutdown check
+        // immediately; the hold must exit on the first tick, not spin.
+        std::env::set_var("NEEDLE_ADMISSION_BACKOFF_BASE_MS", "50");
+        std::env::set_var("NEEDLE_ADMISSION_BACKOFF_CAP_MS", "50");
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(MockStore::empty());
+        let config = admission_test_config(&temp_dir);
+        let mut worker = Worker::new(config, "adm-test".to_string(), store);
+        worker.boot().await.unwrap();
+
+        // Shutdown is set before the hold runs, so the hold emits one blocked
+        // event, publishes ADMISSION_BLOCKED, and returns on its first backoff
+        // tick — the run loop's shutdown branch then stops the worker.
+        worker
+            .shutdown
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        worker.do_select().await.unwrap();
+
+        assert_eq!(*worker.state(), WorkerState::AdmissionBlocked);
+        // The hold sits before candidate discovery and claim: nothing was
+        // claimed and no strand ran.
+        assert!(worker.current_bead.is_none());
+        assert_eq!(worker.beads_processed(), 0);
+    }
+
+    #[tokio::test]
+    async fn admission_hold_ends_admitted_and_selection_resumes_after_load_clears() {
+        let _env_lock = crate::util::test_env::isolate_env();
+        let probe_dir = tempfile::tempdir().unwrap();
+        write_saturated_probe(probe_dir.path());
+        std::env::set_var("NEEDLE_LAUNCH_RESOURCE_PROBE", probe_dir.path());
+        std::env::set_var("NEEDLE_ADMISSION_BACKOFF_BASE_MS", "150");
+        std::env::set_var("NEEDLE_ADMISSION_BACKOFF_CAP_MS", "150");
+
+        // Clear the load while the hold is sleeping between checks, well
+        // inside the first backoff window so the second check reads admitted.
+        // Spawned only after boot so the hold's first check reliably sees the
+        // saturated probe first.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(MockStore::empty());
+        let config = admission_test_config(&temp_dir);
+        let mut worker = Worker::new(config, "adm-test".to_string(), store);
+        worker.boot().await.unwrap();
+
+        let flip_probe = probe_dir.path().to_path_buf();
+        let flipper = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            std::fs::write(flip_probe.join("loadavg"), "0.10 0.10 0.10 1/123 456\n").unwrap();
+        });
+
+        worker.do_select().await.unwrap();
+        flipper.join().unwrap();
+
+        // The hold ended admitted — ADMISSION_BLOCKED was left behind for
+        // SELECTING before selection ran, and the selection pass then ran to
+        // its normal end on an empty store.
+        assert_eq!(*worker.state(), WorkerState::Exhausted);
+        assert!(worker.current_bead.is_none());
+    }
+
+    #[tokio::test]
+    async fn skip_launch_resource_check_bypasses_the_admission_hold() {
+        let _env_lock = crate::util::test_env::isolate_env();
+        let probe_dir = tempfile::tempdir().unwrap();
+        write_saturated_probe(probe_dir.path());
+        std::env::set_var("NEEDLE_LAUNCH_RESOURCE_PROBE", probe_dir.path());
+        std::env::set_var("NEEDLE_SKIP_LAUNCH_RESOURCE_CHECK", "1");
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(MockStore::empty());
+        let config = admission_test_config(&temp_dir);
+        let mut worker = Worker::new(config, "adm-test".to_string(), store);
+        worker.boot().await.unwrap();
+
+        // The override is honored identically at every admission check: the
+        // saturated probe is ignored and selection proceeds.
+        worker.do_select().await.unwrap();
+
+        assert_eq!(*worker.state(), WorkerState::Exhausted);
+        assert_ne!(*worker.state(), WorkerState::AdmissionBlocked);
+    }
+
     #[tokio::test]
     async fn shutdown_flag_causes_stop() {
         let store = Arc::new(MockStore::empty());
@@ -9200,9 +9531,10 @@ mod tests {
                         .bead_lifecycle_span
                         .clone()
                         .expect("successful claim should create lifecycle span");
-                    lifecycle_span.in_scope(|| {
+                    {
+                        let _probe_guard = ScopeGuard::new(lifecycle_span.clone());
                         tracing::info!(cycle, "claim-cycle-depth-probe");
-                    });
+                    }
 
                     worker.last_outcome = Some("success".to_string());
                     worker.do_log_scoped(&lifecycle_span).unwrap();
@@ -9256,6 +9588,7 @@ mod tests {
             .with_ansi(false)
             .without_time()
             .finish();
+
         let home = tempfile::tempdir().unwrap();
         let store = Arc::new(MockStore::empty());
         let mut config = valid_test_config();
@@ -9270,6 +9603,9 @@ mod tests {
 
         let bead = make_test_bead("needle-log-scoped");
         worker.current_bead = Some(bead.clone());
+        // `do_log` only emits its `tracing` effort event when an effort with a
+        // cost estimate is pending; seed one so there is an event inside the
+        // scoped call whose span attribution can be asserted on.
         worker.last_effort = Some(EffortData {
             cycle_start: Instant::now(),
             agent_name: "probe-agent".to_string(),
@@ -9290,11 +9626,14 @@ mod tests {
             );
             worker.bead_lifecycle_span = Some(lifecycle_span.clone());
             worker.do_log_scoped(&lifecycle_span).unwrap();
+            // Emitted where the async boundary checks would run, immediately
+            // after LOGGING: the lifecycle guard must already be unwound.
             tracing::info!("post-log-scope-probe");
         });
 
         let bytes = captured.0.lock().unwrap().clone();
         let logs = String::from_utf8_lossy(&bytes);
+
         let effort_line = logs
             .lines()
             .find(|line| line.contains("effort recorded"))
@@ -9701,6 +10040,37 @@ mod tests {
             .to_string()
             .contains("claim verification query failed"));
         assert_eq!(*worker.state(), WorkerState::Dispatching);
+    }
+
+    #[tokio::test]
+    async fn do_dispatch_assigns_provisional_attempt_id_readable_by_outcome_handler() {
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let mut worker = make_worker(store);
+        worker.boot().await.unwrap();
+
+        let mut bead = make_test_bead("needle-attempt-id");
+        bead.status = BeadStatus::InProgress;
+        bead.assignee = Some(worker.qualified_id());
+        worker.current_bead = Some(bead);
+        worker.state = WorkerState::Dispatching;
+
+        // The dispatch below fails closed on the unreadable live claim, but the
+        // provisional attempt ID must already exist by then: it is generated at
+        // dispatch start (plan section 4.4 step 1), and the outcome handler
+        // reads it back through the telemetry handle they share.
+        worker.do_dispatch().await.unwrap_err();
+
+        let attempt_id = worker
+            .outcome_handler
+            .attempt_id()
+            .expect("dispatch start must assign a provisional attempt ID");
+        let parsed =
+            uuid::Uuid::parse_str(&attempt_id).expect("provisional attempt ID must be a UUID");
+        assert_eq!(
+            parsed.get_version_num(),
+            7,
+            "attempt IDs are UUIDv7 so ledger rows sort by dispatch start"
+        );
     }
 
     #[tokio::test]

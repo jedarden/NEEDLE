@@ -36,6 +36,8 @@ Additional fields are event-specific and documented per type below.
 - `worker.found_but_excluded` — No claimable beads after exclusions
 - `worker.event_driven_wakeup` — Worker woke due to workspace mtime change
 - `worker.launch.deferred` — Worker launch delayed due to resource saturation
+- `worker.admission_blocked` — Launch admission refused: host above CPU/memory policy; worker holds resident
+- `worker.admission_restored` — Launch admission recovered; emitted before selection resumes
 - `worker.boot.timeout` — Worker initialization exceeded timeout
 
 ### State Transitions
@@ -58,6 +60,9 @@ Additional fields are event-specific and documented per type below.
 
 ### Bead Store Errors
 - `bead_store.error` — Bead store operation failed
+
+### Attempt Ledger
+- `attempt.resolved` — Terminal ledger row for one dispatch (one per dispatch, N-T16)
 
 ### Configuration
 - `config.warning` — Configuration validation warning
@@ -191,12 +196,177 @@ Emitted when worker launch is delayed due to resource saturation (CPU/memory lim
 | `total_wait_secs` | number | Total wait time across all deferrals.                  |
 | `reason`           | string | Why deferred (e.g., `"cpu_limit"`).                    |
 
+#### `worker.admission_blocked`
+Emitted when launch admission is refused because the host is above CPU or
+memory policy (plan revision 24 §4.6, N-T33). The worker enters the
+`ADMISSION_BLOCKED` state and holds resident: it claims no bead, never reads
+as idle, and retries with capped jittered backoff instead of exiting into a
+service restart.
+
+The event fires when the hold begins and then rate-bounded while it
+continues — one event per `heartbeat_interval` (default 30 s), not one per
+retry, so a hours-long saturation produces tens of events rather than
+thousands.
+
+| Field         | Type   | Description                                                        |
+|---------------|--------|--------------------------------------------------------------------|
+| `resource`    | string | Blocking resource: `"cpu"` or `"memory"`.                          |
+| `actual`      | string | Observed value, formatted (normalized load, or available MB).      |
+| `threshold`   | string | The configured threshold the observed value crossed.               |
+| `reason`      | string | One-line human-readable reason.                                    |
+| `attempt`     | number | How many admission checks have run since the hold began.           |
+| `disposition` | string | `"holding"` (resident retry) or `"one_shot_unavailable"` (a caller that cannot stay resident was told to come back later). |
+
+**Example:**
+```json
+{
+  "event_type": "worker.admission_blocked",
+  "timestamp": "2026-09-03T13:42:11Z",
+  "data": {
+    "resource": "cpu",
+    "actual": "7.86",
+    "threshold": "1.00",
+    "reason": "CPU load saturated: 55.02 (1-minute average) / 7 cores = 7.86 > threshold 1.00",
+    "attempt": 4,
+    "disposition": "holding"
+  }
+}
+```
+
+#### `worker.admission_restored`
+Emitted when launch admission recovers and normal selection is about to
+resume. Always emitted before the next selection pass, never after it, and
+only when a hold was actually in progress — a worker that was never blocked
+does not emit it.
+
+| Field          | Type   | Description                                            |
+|----------------|--------|--------------------------------------------------------|
+| `blocked_secs` | number | How long the hold lasted, in seconds.                  |
+| `attempts`     | number | How many admission checks ran during the hold.         |
+
 #### `worker.boot.timeout`
 Emitted when worker initialization exceeds the configured timeout.
 
 | Field         | Type   | Description                         |
 |---------------|--------|-------------------------------------|
 | `elapsed_ms`  | number | Time elapsed before timeout (ms).   |
+
+---
+
+### Attempt Ledger Events
+
+#### `attempt.resolved`
+The terminal ledger row for one dispatch (plan section 4.4 step 1, N-T16).
+Exactly **one** is emitted per dispatch, from `OutcomeHandler::handle`, after
+the match that routes to the eight terminal sub-handlers — so a sub-handler
+that re-routes into another still yields a single row, and no terminal path
+(success, gate_failure, gate_error, failure, timeout, crash, agent_not_found,
+interrupted) can forget it.
+
+The row separates *what the work did* from *what the lifecycle will do about
+it*: `outcome` is the semantic verdict, `requested_action` is the bead action
+the handler asked for, and `exit_code` is an observation of the agent process
+only — an exit code of 0 with a rejected gate is a `work_failure`, never a
+`verified_success`.
+
+Two dispatch end-states outside those sub-handlers are also resolved to a row
+by `OutcomeHandler::handle_with_cancellation`: a dispatch cancelled before
+handling starts (`outcome: "cancelled"`, reason `cancelled_before_handling`)
+and a handler torn down by its own timeout (`outcome: "indeterminate"`, reason
+`outcome_handler_timeout`). The fallback is guarded, so a dispatch that
+already has its row cannot gain a second.
+
+Until N-T03 resolves attempts against beads, every row carries
+`provisional: true` and a dispatch-local UUIDv7 `attempt_id` minted at
+dispatch start. The same ID is stamped on every event the dispatch emits (the
+envelope's `attempt_id` field, and the `attempt_id` OTLP log attribute), so a
+row joins to its dispatch's events. **No consumer may treat a provisional row
+as authoritative** — provisional rows are excluded from SLOs (plan Gate A).
+
+| Field                  | Type            | Present | Description                                                                 |
+|------------------------|-----------------|---------|-----------------------------------------------------------------------------|
+| `schema_version`       | integer         | always  | Row schema version; `1` for this contract.                                  |
+| `attempt_id`           | string          | always  | UUIDv7 minted at dispatch start.                                            |
+| `provisional`          | boolean         | always  | `true` until the real attempt identity exists (N-T03).                      |
+| `bead_id`              | string          | always  | Bead the attempt worked on.                                                 |
+| `workspace`            | string          | always  | Workspace directory the attempt ran in.                                     |
+| `worker`               | string          | always  | Worker identifier that ran the attempt.                                     |
+| `adapter`              | string          | always  | Agent adapter that executed the attempt (e.g. `"claude-code-glm-5.3-flash"`). |
+| `prompt_template`      | string          | always  | Prompt template that built the dispatch prompt (e.g. `"pluck"`).            |
+| `template_version`     | string          | always  | Version tag of that template (e.g. `"pluck-default"`).                      |
+| `gate_results`         | array           | always  | Per-gate entries `{name, status, duration_ms}`, ordered by gate name. `status` is `pass`, `fail`, or `execution_error`; empty when no gate ran. |
+| `outcome`              | string          | always  | `verified_success`, `work_failure`, `infrastructure_failure`, `cancelled`, `stale_ownership`, or `indeterminate`. |
+| `requested_action`     | string          | always  | Bead lifecycle action the handler requested (e.g. `"Completed"`, `"Released"`). |
+| `commits`              | array           | always  | Commit SHAs created in the workspace during the attempt.                    |
+| `duration_ms`          | integer         | always  | Wall-clock time from claim to resolution.                                   |
+| `exit_code`            | integer         | always  | Agent process exit code. Observation only.                                  |
+| `bead_revision_start`  | string          | optional| HEAD SHA captured before the agent ran.                                     |
+| `model`                | string          | optional| Model identifier from the adapter config.                                   |
+| `provider`             | string          | optional| Model provider (e.g. `"anthropic"`).                                        |
+| `context_manifest_hash`| string          | optional| ContextManifest hash — absent until N-T10 ships manifest hashing.           |
+| `confirmed_state`      | string          | optional| Authoritative post-action bead state; reserved for the resolver's re-read (plan section 3.2 step 5). |
+| `tokens_in`            | integer         | optional| Input tokens reported by the agent's token extractor.                       |
+| `tokens_out`           | integer         | optional| Output tokens reported by the agent's token extractor.                      |
+| `estimated_cost_usd`   | number          | optional| Estimated cost in USD; absent when no pricing is configured.                |
+| `terminal_reason`      | string          | optional| Short machine-readable reason for the terminal state (e.g. `"gate:fmt"`, `"exit_code:1"`, `"signal:9"`). Absent on a verified success. |
+
+**Outcome vocabulary:**
+- `verified_success` — the work passed every gate.
+- `work_failure` — a gate ran and rejected the work, or the agent reported failure; attributable to the attempt.
+- `infrastructure_failure` — nothing judged the work: the agent binary was missing or crashed, or a gate could not run or could never pass. Feeds workspace health, not the bead's failure count.
+- `cancelled` — the worker was interrupted before a verdict.
+- `stale_ownership` — reserved; assigned by the resolver once ownership is re-checked at resolution time (ADR-024), not by the outcome handler.
+- `indeterminate` — the attempt ended without a verdict: the time budget expired while the work was still running.
+
+**Versioned contract:** [`tests/fixtures/attempt-resolved-v1.schema.json`](../tests/fixtures/attempt-resolved-v1.schema.json)
+is the schema this row must satisfy; conformance is asserted in
+`src/telemetry/mod.rs`. Breaking changes version both the fixture and the
+row's `schema_version`.
+
+**Aggregation:** `needle stats --by adapter` and `needle stats --by outcome`
+aggregate these rows directly — one attempt per row, with PASS RATE reading
+as verified success over all attempts in the group.
+
+**Example (a rejected gate behind a zero exit code):**
+```json
+{
+  "event_type": "attempt.resolved",
+  "timestamp": "2026-09-10T12:34:56.312Z",
+  "worker_id": "needle-alpha",
+  "session_id": "9f2c11aa",
+  "sequence": 812,
+  "bead_id": "needle-96dec90b",
+  "workspace": "/home/coding/NEEDLE",
+  "attempt_id": "0198f6a1-7c2d-7cc3-98c4-dc0c0c07398f",
+  "data": {
+    "schema_version": 1,
+    "attempt_id": "0198f6a1-7c2d-7cc3-98c4-dc0c0c07398f",
+    "provisional": true,
+    "bead_id": "needle-96dec90b",
+    "workspace": "/home/coding/NEEDLE",
+    "bead_revision_start": "f902c854",
+    "worker": "needle-alpha",
+    "adapter": "claude-code-glm-5.3-flash",
+    "model": "glm-5.3-flash",
+    "provider": "anthropic",
+    "prompt_template": "pluck",
+    "template_version": "pluck-default",
+    "gate_results": [
+      { "name": "clippy", "status": "fail", "duration_ms": 0 },
+      { "name": "fmt", "status": "pass", "duration_ms": 0 }
+    ],
+    "outcome": "work_failure",
+    "requested_action": "Released",
+    "tokens_in": 120000,
+    "tokens_out": 4500,
+    "estimated_cost_usd": 0.0921,
+    "commits": ["deadbee"],
+    "duration_ms": 614000,
+    "terminal_reason": "gate:clippy",
+    "exit_code": 0
+  }
+}
+```
 
 ---
 

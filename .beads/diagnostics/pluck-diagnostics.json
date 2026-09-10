@@ -1,13 +1,13 @@
 {
-  "timestamp": "2026-09-10T19:38:03.768216387Z",
-  "total_open_beads": 420,
+  "timestamp": "2026-09-10T20:12:01.513814775Z",
+  "total_open_beads": 428,
   "exclusion_criteria": {
     "has_assignee": 2,
     "manually_blocked": 8,
-    "has_dependencies": 357,
+    "has_dependencies": 359,
     "resource_conflicts": 0
   },
-  "final_candidate_count": 82,
+  "final_candidate_count": 88,
   "excluded_beads": [
     {
       "bead_id": "needle-6b02eb9d",
@@ -897,17 +897,6 @@
       "manual_blocked": false,
       "has_blockers": false,
       "blocker_count": 0,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
-      "bead_id": "needle-d8e6cdff",
-      "title": "Genesis: Factory learning substrate (plan section 4.4)",
-      "priority": 1,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 15,
       "has_resource_conflicts": false,
       "conflict_count": 0
     }

@@ -1,0 +1,152 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://ardenone.com/schemas/needle/attempt-resolved-v1.schema.json",
+  "title": "attempt.resolved",
+  "description": "Terminal ledger row for one dispatch (plan section 4.4 step 1, transition N-T16). Exactly one is emitted per dispatch, from OutcomeHandler::handle, regardless of which of the eight terminal paths resolved it. The canonical Rust type is AttemptResolvedFields in src/telemetry/mod.rs; this fixture is the versioned contract its serialized `data` object must satisfy. schema_version 1.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "attempt_id",
+    "provisional",
+    "bead_id",
+    "workspace",
+    "worker",
+    "adapter",
+    "prompt_template",
+    "template_version",
+    "gate_results",
+    "outcome",
+    "requested_action",
+    "commits",
+    "duration_ms",
+    "exit_code"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Version of this row schema. Bump — and version the fixture — whenever a field changes meaning or availability."
+    },
+    "attempt_id": {
+      "type": "string",
+      "description": "UUIDv7 minted at dispatch start. Dispatch-local and flagged provisional until N-T03 resolves attempts against beads."
+    },
+    "provisional": {
+      "type": "boolean",
+      "description": "True on every row until the real attempt identity exists (N-T03). Consumers must not treat a provisional row as authoritative: provisional rows are excluded from SLOs (plan section 4.4 step 1, Gate A)."
+    },
+    "bead_id": {
+      "type": "string",
+      "description": "Bead the attempt worked on."
+    },
+    "workspace": {
+      "type": "string",
+      "description": "Workspace directory the attempt ran in."
+    },
+    "bead_revision_start": {
+      "type": "string",
+      "description": "HEAD SHA captured before the agent ran, so downstream commits can be attributed to the attempt. Absent when the SHA could not be captured."
+    },
+    "worker": {
+      "type": "string",
+      "description": "Worker identifier that ran the attempt."
+    },
+    "adapter": {
+      "type": "string",
+      "description": "Agent adapter that executed the attempt (e.g. \"claude-code-glm-4.7\")."
+    },
+    "model": {
+      "type": "string",
+      "description": "Model identifier from the adapter config. Absent when the adapter publishes none."
+    },
+    "provider": {
+      "type": "string",
+      "description": "Model provider (e.g. \"anthropic\"). Absent when unknown."
+    },
+    "prompt_template": {
+      "type": "string",
+      "description": "Prompt template that built the dispatch prompt (e.g. \"pluck\")."
+    },
+    "template_version": {
+      "type": "string",
+      "description": "Version tag of that template (e.g. \"pluck-default\")."
+    },
+    "context_manifest_hash": {
+      "type": "string",
+      "description": "Hash of the ContextManifest the attempt saw. Absent until N-T10 ships manifest hashing."
+    },
+    "gate_results": {
+      "type": "array",
+      "description": "Per-gate verdicts, ordered by gate name. Empty when no gate ran.",
+      "items": {
+        "type": "object",
+        "required": ["name", "status", "duration_ms"],
+        "properties": {
+          "name": { "type": "string" },
+          "status": {
+            "type": "string",
+            "enum": ["pass", "fail", "execution_error"]
+          },
+          "duration_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "0 until per-gate timing exists; the field is part of the schema so consumers can rely on its presence."
+          }
+        }
+      }
+    },
+    "outcome": {
+      "type": "string",
+      "description": "Semantic verdict: what the work did, separate from what the lifecycle will do about it.",
+      "enum": [
+        "verified_success",
+        "work_failure",
+        "infrastructure_failure",
+        "cancelled",
+        "stale_ownership",
+        "indeterminate"
+      ]
+    },
+    "requested_action": {
+      "type": "string",
+      "description": "Bead lifecycle action the handler requested (e.g. \"Completed\", \"Released\", \"Deferred\")."
+    },
+    "confirmed_state": {
+      "type": "string",
+      "description": "Authoritative post-action bead state. Reserved for the resolver's re-read (plan section 3.2 step 5); absent while only the request is known."
+    },
+    "tokens_in": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Input tokens reported by the agent's token extractor. Absent when unreported."
+    },
+    "tokens_out": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Output tokens reported by the agent's token extractor. Absent when unreported."
+    },
+    "estimated_cost_usd": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Estimated cost in USD. Absent when no pricing is configured."
+    },
+    "commits": {
+      "type": "array",
+      "description": "Commit SHAs created in the workspace during the attempt.",
+      "items": { "type": "string" }
+    },
+    "duration_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Wall-clock time from claim to resolution."
+    },
+    "terminal_reason": {
+      "type": "string",
+      "description": "Short machine-readable reason the attempt reached its terminal state (e.g. \"gate:fmt\", \"exit_code:1\", \"signal:9\"). Absent on a verified success."
+    },
+    "exit_code": {
+      "type": "integer",
+      "description": "Agent process exit code. Observation only: it says what the process did, never whether the work was accepted — `outcome` carries that."
+    }
+  }
+}

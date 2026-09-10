@@ -61,6 +61,11 @@ Complete the task described above. When finished:
   work, work that turned out to be already done, and work you found blocked are all
   legitimate outcomes with nothing to commit. Record the finding on the bead instead:
 
+  Never write outside the workspace and `$HOME/.needle` unless the bead says to —
+  not to `$HOME/.config`, not to another repository, not to a shared dotfile. The
+  workspace and `$HOME/.needle` are the only state this dispatch owns; everything
+  else on the host is shared with the fleet.
+
 `{bead_cli} update {bead_id} --notes \"what you checked and what you found\"`
 
   Never create `notes/{bead_id}.md`, a summary, a report, or a status file to satisfy a

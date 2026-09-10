@@ -827,6 +827,12 @@ pub enum StatsDimension {
     TaskType,
     /// Group by worker identifier (e.g., `"needle-alpha"`).
     Worker,
+    /// Group by the adapter that executed each attempt (e.g.
+    /// `"claude-code-glm-4.7"`), read from `attempt.resolved` ledger rows.
+    Adapter,
+    /// Group by the semantic ledger outcome of each attempt (e.g.
+    /// `"verified_success"`), read from `attempt.resolved` ledger rows.
+    Outcome,
 }
 
 /// Aggregated statistics row for one value of a grouping dimension.
@@ -884,11 +890,19 @@ impl StatsRow {
 /// Correlates `agent.dispatched`, `outcome.classified`, and `effort.recorded`
 /// events by `bead_id`, grouping each bead under the chosen `dimension`.
 ///
+/// The `Adapter` and `Outcome` dimensions do not correlate per-bead events at
+/// all: they aggregate the `attempt.resolved` ledger rows directly (plan
+/// section 4.4 step 1), one attempt per row.
+///
 /// Pass the result of [`telemetry::read_logs`] (already time-filtered) here.
 pub fn compute_stats(
     events: &[crate::telemetry::TelemetryEvent],
     dimension: StatsDimension,
 ) -> Vec<StatsRow> {
+    if matches!(dimension, StatsDimension::Adapter | StatsDimension::Outcome) {
+        return compute_attempt_stats(events, dimension);
+    }
+
     use std::collections::HashMap;
 
     // bead_id → dimension key (populated from agent.dispatched events)
@@ -916,6 +930,9 @@ pub fn compute_stats(
                         .unwrap_or("unknown")
                         .to_string(),
                     StatsDimension::Worker => event.worker_id.clone(),
+                    // Attempt dimensions never reach this loop — compute_stats
+                    // routes them to compute_attempt_stats before it.
+                    StatsDimension::Adapter | StatsDimension::Outcome => continue,
                 };
                 bead_key.insert(bead_id, key.clone());
                 let row = rows.entry(key.clone()).or_insert_with(|| StatsRow {
@@ -974,6 +991,79 @@ pub fn compute_stats(
 
             _ => {}
         }
+    }
+
+    rows.into_values().collect()
+}
+
+/// Aggregate the `attempt.resolved` ledger rows under the `Adapter` or
+/// `Outcome` dimension (plan section 4.4 step 1, N-T16).
+///
+/// Each ledger row is one attempt, so a row's count is attempts rather than
+/// dispatches correlated across event types. `pass`/`fail`/`timeout` count the
+/// semantic ledger outcomes they correspond to; the remaining outcomes
+/// (`infrastructure_failure`, `cancelled`, `stale_ownership`) are counted in
+/// `beads` but in none of the three, so `pass_rate()` stays "verified success
+/// over all attempts" — the number the routing and canary consumers in plan
+/// section 4.4 read.
+pub fn compute_attempt_stats(
+    events: &[crate::telemetry::TelemetryEvent],
+    dimension: StatsDimension,
+) -> Vec<StatsRow> {
+    let mut rows: BTreeMap<String, StatsRow> = BTreeMap::new();
+
+    for event in events {
+        if event.event_type != "attempt.resolved" {
+            continue;
+        }
+        let key_field = match dimension {
+            StatsDimension::Adapter => "adapter",
+            StatsDimension::Outcome => "outcome",
+            // Only called with the attempt dimensions; the dispatch
+            // dimensions take the bead-correlated path above.
+            StatsDimension::TemplateVersion | StatsDimension::TaskType | StatsDimension::Worker => {
+                continue
+            }
+        };
+        let key = event
+            .data
+            .get(key_field)
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+
+        let row = rows.entry(key.clone()).or_insert_with(|| StatsRow {
+            key,
+            ..Default::default()
+        });
+        row.beads += 1;
+
+        match event.data.get("outcome").and_then(|v| v.as_str()) {
+            Some("verified_success") => row.pass += 1,
+            Some("work_failure") => row.fail += 1,
+            Some("indeterminate") => row.timeout += 1,
+            _ => {}
+        }
+
+        let tokens_in = event
+            .data
+            .get("tokens_in")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let tokens_out = event
+            .data
+            .get("tokens_out")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        row.total_tokens += tokens_in + tokens_out;
+        if let Some(cost) = event
+            .data
+            .get("estimated_cost_usd")
+            .and_then(|v| v.as_f64())
+        {
+            row.total_cost_usd += cost;
+        }
+        row.effort_events += 1;
     }
 
     rows.into_values().collect()
@@ -1231,6 +1321,7 @@ mod tests {
             duration_ms: None,
             trace_id: None,
             span_id: None,
+            attempt_id: None,
         }
     }
 
@@ -1386,6 +1477,138 @@ mod tests {
         assert!(row.pass_rate().is_none());
         assert!(row.avg_tokens().is_none());
         assert!(row.avg_cost_usd().is_none());
+    }
+
+    // ── attempt ledger dimensions (N-T16) ────────────────────────────────────────
+
+    /// One `attempt.resolved` row per attempt: adapter, outcome, tokens, cost.
+    fn attempt_row(
+        adapter: &str,
+        outcome: &str,
+        tokens_in: Option<u64>,
+        tokens_out: Option<u64>,
+        cost: Option<f64>,
+    ) -> crate::telemetry::TelemetryEvent {
+        let mut data = serde_json::json!({
+            "attempt_id": uuid::Uuid::now_v7().to_string(),
+            "provisional": true,
+            "bead_id": "nd-1",
+            "workspace": "/ws",
+            "worker": "needle-alpha",
+            "adapter": adapter,
+            "prompt_template": "pluck",
+            "template_version": "pluck-default",
+            "gate_results": [],
+            "outcome": outcome,
+            "requested_action": "Released",
+            "commits": [],
+            "duration_ms": 1000,
+            "exit_code": 1,
+        });
+        if let Some(t) = tokens_in {
+            data["tokens_in"] = serde_json::json!(t);
+        }
+        if let Some(t) = tokens_out {
+            data["tokens_out"] = serde_json::json!(t);
+        }
+        if let Some(c) = cost {
+            data["estimated_cost_usd"] = serde_json::json!(c);
+        }
+        make_tel_event("attempt.resolved", "needle-alpha", Some("nd-1"), data)
+    }
+
+    #[test]
+    fn compute_stats_by_adapter_aggregates_attempts() {
+        let events = vec![
+            attempt_row(
+                "adapter-a",
+                "verified_success",
+                Some(100),
+                Some(50),
+                Some(0.01),
+            ),
+            attempt_row("adapter-a", "work_failure", Some(200), Some(10), Some(0.02)),
+            attempt_row("adapter-b", "verified_success", None, None, None),
+            // Dispatch-correlated events must not leak into attempt dimensions.
+            make_tel_event(
+                "agent.dispatched",
+                "needle-alpha",
+                Some("nd-1"),
+                serde_json::json!({"adapter": "adapter-a"}),
+            ),
+        ];
+
+        let rows = compute_stats(&events, StatsDimension::Adapter);
+
+        assert_eq!(rows.len(), 2, "only the ledger rows group");
+        let a = rows.iter().find(|r| r.key == "adapter-a").unwrap();
+        assert_eq!(a.beads, 2, "one attempt per ledger row");
+        assert_eq!(a.pass, 1);
+        assert_eq!(a.fail, 1);
+        assert_eq!(a.total_tokens, 360);
+        assert_eq!(a.effort_events, 2);
+        assert!((a.avg_cost_usd().unwrap() - 0.015).abs() < 1e-9);
+        assert!((a.pass_rate().unwrap() - 0.5).abs() < f64::EPSILON);
+
+        let b = rows.iter().find(|r| r.key == "adapter-b").unwrap();
+        assert_eq!(b.beads, 1);
+        assert_eq!(b.pass, 1);
+        assert_eq!(b.pass_rate().unwrap(), 1.0);
+    }
+
+    #[test]
+    fn compute_stats_by_outcome_counts_each_semantic_outcome() {
+        let events = vec![
+            attempt_row("adapter-a", "verified_success", Some(10), Some(5), None),
+            attempt_row("adapter-a", "work_failure", None, None, None),
+            attempt_row("adapter-b", "infrastructure_failure", None, None, None),
+            attempt_row("adapter-b", "indeterminate", None, None, None),
+            attempt_row("adapter-b", "cancelled", None, None, None),
+        ];
+
+        let rows = compute_stats(&events, StatsDimension::Outcome);
+
+        assert_eq!(rows.len(), 5);
+        let success = rows.iter().find(|r| r.key == "verified_success").unwrap();
+        assert_eq!(success.beads, 1);
+        assert_eq!(success.pass, 1);
+        assert_eq!(success.total_tokens, 15);
+
+        let work = rows.iter().find(|r| r.key == "work_failure").unwrap();
+        assert_eq!(work.beads, 1);
+        assert_eq!(work.fail, 1);
+
+        let infra = rows
+            .iter()
+            .find(|r| r.key == "infrastructure_failure")
+            .unwrap();
+        // Counted as an attempt, but in none of pass/fail/timeout — so it
+        // lowers every group's verified-success rate without reading as work.
+        assert_eq!(infra.beads, 1);
+        assert_eq!(infra.pass + infra.fail + infra.timeout, 0);
+
+        assert!(rows.iter().any(|r| r.key == "indeterminate"));
+        assert!(rows.iter().any(|r| r.key == "cancelled"));
+    }
+
+    #[test]
+    fn attempt_dimensions_tolerate_missing_key_and_empty_input() {
+        let mut unlabeled = attempt_row("adapter-a", "verified_success", None, None, None);
+        if let Some(obj) = unlabeled.data.as_object_mut() {
+            obj.remove("adapter");
+        }
+
+        let rows = compute_stats(
+            &[
+                unlabeled,
+                make_tel_event("worker.started", "w", None, serde_json::json!({})),
+            ],
+            StatsDimension::Adapter,
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].key, "unknown");
+
+        assert!(compute_stats(&[], StatsDimension::Outcome).is_empty());
     }
 
     // ── calculate_p95 tests ───────────────────────────────────────────────────────

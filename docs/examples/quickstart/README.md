@@ -11,27 +11,45 @@ You need:
 
 ## Step 0: Sandbox your HOME (mandatory)
 
-This walkthrough writes `~/.config/needle/config.yaml`. Never run it against a
-HOME that already runs NEEDLE — on 2026-08-30 a worker did exactly that and
-replaced a fleet's global config with the one-worker example below. Use a
-throwaway HOME for the whole example:
+This walkthrough writes `~/.config/needle/config.yaml` — the file NEEDLE's
+loader reads on every host. Never run it against a HOME that already runs
+NEEDLE: on 2026-08-30 a worker did exactly that and replaced a fleet's global
+config with the one-worker example below (one worker, `idle_action: exit`, and
+the Anthropic-billing agent default). Use a throwaway HOME for the entire
+example:
 
 ```bash
+# The binaries live in the real HOME. Remember where they are before HOME moves.
+QUICKSTART_BIN="$(dirname "$(command -v needle)")"
+
+# Move HOME to a throwaway directory. Everything below runs against it.
 export HOME="$(mktemp -d /tmp/needle-quickstart-home.XXXXXX)"
-export PATH="$HOME/.local/bin:$PATH"
+export PATH="$QUICKSTART_BIN:$PATH"
+
+# All three must still resolve; if one does not, add its directory to PATH too.
+command -v needle bead claude
 ```
+
+The sandbox lasts only for this shell — a new terminal returns you to your real
+HOME. Do not carry it into any other work, and never point an existing NEEDLE
+host at the example.
 
 ## Step 1: Create a Throwaway Workspace
 
-We'll use a disposable project so the agent has harmless work to do:
+We'll use a disposable project so the agent has harmless work to do. Besides a git
+repo it needs **a remote to push to** — see "The shipped-work gate" below for why.
+A local bare repository plays that role, so no hosting account is required:
 
 ```bash
 # Create and enter a temporary workspace
 mkdir -p /tmp/needle-quickstart-project
 cd /tmp/needle-quickstart-project
 
+# A local bare repository stands in for a hosted remote (GitHub, Forgejo, …)
+git init --bare -b main /tmp/needle-quickstart-remote.git
+
 # Initialize a minimal git repo (needed for bead operations)
-git init
+git init -b main
 git config user.email "quickstart@example.com"
 git config user.name "Quickstart User"
 
@@ -44,36 +62,61 @@ EOF
 
 git add README.md
 git commit -m "Initial commit"
+
+# Publish the branch and set its upstream in one step
+git remote add origin /tmp/needle-quickstart-remote.git
+git push -u origin main
+```
+
+### The shipped-work gate
+
+NEEDLE does not accept a bead closure on faith. With the default
+`worker.enforce_shipped_work: true`, a closure counts only if the dispatch
+produced a commit — on a path outside `notes/` and `.beads/` — that has been
+**pushed to the branch's upstream**. (The prompt NEEDLE builds instructs the
+agent to commit and push; an agent that legitimately ships no code instead
+records an explanatory note on the bead.) A branch with no upstream — a plain
+`git init`, or a remote added without `git push -u` — gives the gate nothing to
+compare against, so it cannot verify any closure there. That is why Step 1 ends
+with `git push -u origin main`.
+
+If your repository is genuinely local-only and will never push, say so
+explicitly instead of leaving the gate unable to run:
+
+```yaml
+# The sandbox HOME's ~/.config/needle/config.yaml (Step 0's sandbox — never a
+# real host's fleet config)
+worker:
+  enforce_shipped_work: false   # local-only repository: skip the pushed-work check
 ```
 
 ## Step 2: Configure the Workspace
 
 Bind the workspace to its bead backend. This writes `./.needle.yaml`, the global
-`~/.config/needle/config.yaml` (if absent), and a "Working with beads" section in
-`./AGENTS.md` for any coding agent that works in this repo:
+`~/.config/needle/config.yaml` (only because it does not exist yet inside the
+sandbox HOME — `needle init` refuses to touch an existing one without
+`--force`), and a "Working with beads" section in `./AGENTS.md` for any coding
+agent that works in this repo:
 
 ```bash
 needle init --backend bead-rs
 ```
 
-Then narrow the sandbox HOME's global config to a single worker that exits when
-the queue is empty (this overwrites the file `needle init` just created — which
-is fine only because HOME is the sandbox from Step 0):
+Then narrow the sandbox HOME's global config to the one-worker example by
+**copying the shipped file**:
 
 ```bash
-cat > ~/.config/needle/config.yaml << 'EOF'
-# Minimal worker config for quickstart
-agent:
-  default: claude
-  timeout: 300  # 5 minute timeout per bead
-
-worker:
-  max_workers: 1           # Only one worker for this example
-  idle_timeout: 30         # Check for work every 30 seconds
-  idle_action: exit        # Exit when no work remains
-  identifier_scheme: sequential   # Use sequential identifiers (worker-1, worker-2, ...)
-EOF
+NEEDLE_REPO=/path/to/NEEDLE   # adjust to your checkout
+cp "$NEEDLE_REPO/docs/examples/quickstart/config.yaml" "$HOME/.config/needle/config.yaml"
 ```
+
+Copying instead of retyping is deliberate. The file lands at
+`$HOME/.config/needle/config.yaml` only because HOME is the sandbox from
+Step 0 — on a real NEEDLE host that path *is* the fleet's config, `needle init`
+refuses to overwrite it without `--force`, and `needle doctor` warns when it is
+byte-identical to this example while other NEEDLE workspaces live on the host.
+The copy also keeps the content identical to what ships with this repo, which is
+exactly what doctor compares against.
 
 ## Step 3: Initialize the Bead Store
 
@@ -85,15 +128,17 @@ bead init --prefix quickstart
 needle doctor
 ```
 
-**Expected `needle doctor` output** (real output from needle 0.6.0 + bead 0.2.2 on a clean host; paths shortened):
+**Expected `needle doctor` output** (real output from needle 0.6.0 + bead 0.2.6 on a clean host, 2026-09-09; paths shortened, disk figure elided):
 
 ```
 NEEDLE Doctor
 ────────────────────────────────────────────────────────────
 [PASS]  Config                        valid
+[PASS]  Gate commands                 none configured
 [PASS]  Workspace                     /tmp/needle-quickstart-project
 [WARN]  SQLite integrity              sqlite3 not on PATH — skipped
 [PASS]  Lock files                    none
+[PASS]  DoD bypasses                  none recorded
 [PASS]  Bead CLI Backend              bead-rs
          └─ CLI path: ~/.local/bin/bead
          └─ source: config file
@@ -112,7 +157,7 @@ NEEDLE Doctor
 [PASS]  Disk space                    <n> MB available
 [PASS]  Telemetry logs                no log directory yet
 ────────────────────────────────────────────────────────────
-14 passed, 2 warning(s), 0 failure(s).
+16 passed, 2 warning(s), 0 failure(s).
 Run `needle doctor --repair` to attempt automatic fixes.
 ```
 
@@ -123,8 +168,8 @@ Every row is `PASS` or `WARN` and the exit code is 0. A `FAIL` row names the fix
 Run the provided seed script to create three test beads with one dependency:
 
 ```bash
-# From the NEEDLE repo (adjust path if needed)
-bash /path/to/NEEDLE/docs/examples/quickstart/seed-beads.sh
+# From the NEEDLE repo (same checkout NEEDLE_REPO pointed at in Step 2)
+bash "$NEEDLE_REPO/docs/examples/quickstart/seed-beads.sh"
 ```
 
 Or create them manually:
@@ -177,7 +222,7 @@ git log --oneline
 **Expected final state:**
 - Three beads with status `closed`
 - Three new files: `CONTRIBUTING.md`, `LICENSE`, `Makefile`
-- Three git commits, one per bead
+- Three git commits, one per bead, all pushed to the remote — `git log --oneline origin/main..HEAD` prints nothing
 
 ## What Just Happened?
 
@@ -198,6 +243,18 @@ git log --oneline
 **Worker exits immediately:**
 - Check if beads exist: `bead list --status open`
 - Verify the workspace has a git repo: `git status`
+- Verify the branch has an upstream: `git rev-parse --abbrev-ref --symbolic-full-name @{u}`
+
+**Worker logs `no upstream configured for branch '...'` (message captured from needle 0.6.0):**
+The shipped-work gate could not verify a push because the branch has no upstream — the
+workspace was created without step 1's `git remote add` + `git push -u`, or the remote was
+removed afterwards. Give the branch an upstream (`git push -u origin <branch>`), or, for a
+repository that will never have a remote, set `worker.enforce_shipped_work: false`. The
+gate prints the remedy itself:
+
+```
+no upstream configured for branch 'main': the shipped-work gate cannot verify that the commit was pushed, so this closure is not counted as a failure. Remedy: `git push -u <remote> main` — that publishes the branch and sets its upstream in one step. If no remote exists yet, add one first: `git remote add origin <url>` (adding a remote that already exists is an error, so check `git remote -v` first).
+```
 
 **Beads stuck in `in_progress`:**
 - Something went wrong during dispatch. Check the bead:
@@ -214,19 +271,21 @@ git log --oneline
 When you're done experimenting:
 
 ```bash
-# Exit the workspace
+# Leave the workspace and remove everything this example created
 cd /
-
-# Remove the temporary project
-rm -rf /tmp/needle-quickstart-project
+rm -rf /tmp/needle-quickstart-project /tmp/needle-quickstart-remote.git
+rm -rf /tmp/needle-quickstart-home.*
 ```
+
+Open a new terminal afterwards: your real HOME was never touched, and the
+sandbox only ever existed inside that shell.
 
 ## Next Steps
 
 - Try multiple workers: `needle run --agent claude --count 3`
 - Note the built-in `claude` adapter runs with `--dangerously-skip-permissions` — expected for unattended work, but read `needle config` first
 - Add more beads with dependencies: `bead dep add <dependent> <blocks>`
-- Configure different agents in `~/.config/needle/config.yaml`
+- Configure different agents in the sandbox HOME's `~/.config/needle/config.yaml` — on a real NEEDLE host that file is the fleet's config, so edit it deliberately rather than replacing it
 - See [main README](https://github.com/jedarden/NEEDLE) for full documentation
 
 ---

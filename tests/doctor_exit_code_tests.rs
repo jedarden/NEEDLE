@@ -755,3 +755,106 @@ fn doctor_human_table_prints_the_json_fix_text() {
         );
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Quickstart-config guard
+//
+// A global config byte-identical to the shipped quickstart example is exactly
+// what the walkthrough writes into its own sandbox HOME — and exactly what it
+// must never write over a real fleet config (2026-08-30, ex44). doctor passes
+// the first case and warns on the second, but only when this host also runs
+// NEEDLE somewhere else.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The shipped example, as the binary embeds it: same file, same compile.
+const QUICKSTART_EXAMPLE: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/docs/examples/quickstart/config.yaml"
+));
+
+/// Install `contents` as the isolated HOME's global config.
+fn write_global_config(home: &Path, contents: &str) {
+    let config_dir = home.join(".config").join("needle");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::write(config_dir.join("config.yaml"), contents).unwrap();
+}
+
+/// A second NEEDLE workspace in the same (isolated) HOME.
+fn add_other_workspace(home: &Path) -> PathBuf {
+    let other = home.join("other-fleet-repo");
+    fs::create_dir_all(other.join(".beads")).unwrap();
+    other
+}
+
+#[test]
+fn doctor_warns_when_global_config_is_the_quickstart_example() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    write_global_config(temp_dir.path(), QUICKSTART_EXAMPLE);
+    let other = add_other_workspace(temp_dir.path());
+    let workspace = create_test_workspace(temp_dir.path(), "bead-rs");
+
+    let human = run_doctor_human(&workspace);
+    assert!(
+        human.contains("[WARN]  Quickstart config"),
+        "expected a WARN row for the quickstart config, got:\n{human}"
+    );
+    assert!(
+        human.contains("byte-identical to the shipped quickstart example"),
+        "the row should say what matched, got:\n{human}"
+    );
+    assert!(
+        human.contains(other.to_string_lossy().as_ref()),
+        "the row should name the other workspaces that prove this is a fleet host, got:\n{human}"
+    );
+    assert!(
+        human.contains("needle init --force"),
+        "the row should name the remedy, got:\n{human}"
+    );
+
+    let (_, doc) = run_doctor_json(&workspace);
+    let row = json_row(&doc, "Quickstart config");
+    assert_eq!(row["status"], "warn");
+    assert_eq!(row["fix"], "needle init --force");
+}
+
+#[test]
+fn doctor_passes_quickstart_example_inside_its_own_sandbox_home() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    write_global_config(temp_dir.path(), QUICKSTART_EXAMPLE);
+    // No other workspace anywhere in this HOME — the example's own situation.
+    let workspace = create_test_workspace(temp_dir.path(), "bead-rs");
+
+    let human = run_doctor_human(&workspace);
+    assert!(
+        human.contains("[PASS]  Quickstart config"),
+        "a sandbox HOME is the one place the example belongs, got:\n{human}"
+    );
+    assert!(
+        human.contains("no other NEEDLE workspaces live here"),
+        "the pass row should say why it passed, got:\n{human}"
+    );
+    assert!(
+        !human.contains("byte-identical to the shipped quickstart example"),
+        "no warn text should appear, got:\n{human}"
+    );
+}
+
+#[test]
+fn doctor_passes_when_global_config_differs_from_the_example() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    write_global_config(
+        temp_dir.path(),
+        "# fleet config under test\nagent:\n  default: opus\nworker:\n  max_workers: 6\n",
+    );
+    add_other_workspace(temp_dir.path());
+    let workspace = create_test_workspace(temp_dir.path(), "bead-rs");
+
+    let human = run_doctor_human(&workspace);
+    assert!(
+        human.contains("[PASS]  Quickstart config"),
+        "a real fleet config is not the example, got:\n{human}"
+    );
+
+    let (_, doc) = run_doctor_json(&workspace);
+    assert_eq!(json_row(&doc, "Quickstart config")["status"], "pass");
+}

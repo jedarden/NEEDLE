@@ -29,6 +29,8 @@ use crate::types::IdleAction;
 use crate::upgrade;
 use crate::worker::Worker;
 
+pub mod audit;
+
 // ──────────────────────────────────────────────────────────────────────────────
 // NATO alphabet for worker identifiers
 // ──────────────────────────────────────────────────────────────────────────────
@@ -271,8 +273,10 @@ pub enum CliCommand {
     ///
     /// Creates ~/.config/needle/config.yaml. Detects existing v1 artifacts
     /// in ~/.needle/ and migrates compatible settings (agent name, workspace
-    /// path, worker count) to the v2 YAML schema. Safe to run on already-
-    /// initialized installs (idempotent).
+    /// path, worker count) to the v2 YAML schema. Refuses to touch an existing
+    /// global config unless --force is given: that file is the fleet's real
+    /// configuration, and replacing it with a fresh default silently drops
+    /// every override it carried.
     ///
     /// When run in a workspace (a directory containing .beads/), also creates
     /// .needle.yaml with an explicit bead backend binding.
@@ -284,6 +288,10 @@ pub enum CliCommand {
         /// Skip creating/updating AGENTS.md with bead workflow instructions.
         #[arg(long)]
         no_agents_md: bool,
+
+        /// Overwrite an existing ~/.config/needle/config.yaml.
+        #[arg(long)]
+        force: bool,
     },
 
     /// Show version information.
@@ -373,12 +381,17 @@ pub enum CliCommand {
     /// Show outcome statistics aggregated from telemetry logs.
     ///
     /// Reads JSONL telemetry files, correlates dispatch/outcome/effort events
-    /// by bead ID, and prints per-group statistics.
+    /// by bead ID, and prints per-group statistics. The `adapter` and
+    /// `outcome` dimensions aggregate the `attempt.resolved` ledger rows
+    /// directly: one row per attempt, so the count column is attempts and
+    /// PASS RATE is verified success over all attempts in the group.
     ///
     /// Examples:
     ///   needle stats --by template_version --since 7d
     ///   needle stats --by task_type --since 30d
     ///   needle stats --by worker --since 7d --format json
+    ///   needle stats --by adapter --since 7d
+    ///   needle stats --by outcome --since 30d
     Stats {
         /// Dimension to group results by.
         #[arg(long, value_enum)]
@@ -482,6 +495,14 @@ pub enum StatsBy {
     /// Group by worker identifier (e.g., `"needle-alpha"`).
     #[value(name = "worker")]
     Worker,
+    /// Group by the adapter that executed each attempt, over
+    /// `attempt.resolved` ledger rows.
+    #[value(name = "adapter")]
+    Adapter,
+    /// Group by the semantic ledger outcome of each attempt (e.g.
+    /// `"verified_success"`), over `attempt.resolved` ledger rows.
+    #[value(name = "outcome")]
+    Outcome,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -538,7 +559,8 @@ pub fn run() -> Result<()> {
         CliCommand::Init {
             backend,
             no_agents_md,
-        } => cmd_init(&backend, no_agents_md),
+            force,
+        } => cmd_init(&backend, no_agents_md, force),
         CliCommand::Version => {
             cmd_version();
             Ok(())
@@ -762,6 +784,37 @@ pub fn launch_workers(
 
     if count == 0 {
         bail!("--count must be at least 1");
+    }
+
+    // One-shot launcher admission check (plan revision 24 §4.6, N-T33). This
+    // launcher forks tmux sessions and returns: it cannot stay resident, so a
+    // saturated host produces an explicit temporary-unavailable outcome — the
+    // caller gets `AdmissionUnavailable` and exit code 75 (EX_TEMPFAIL), no
+    // sessions are forked, and no work-failure counter moves, because no bead
+    // was claimed. Service-managed (inner) workers take the resident hold in
+    // `run_worker` instead of exiting.
+    let launch_decision = crate::rate_limit::check_launch_admission(
+        crate::rate_limit::AdmissionThresholds::new(
+            config.worker.cpu_load_warn,
+            config.worker.memory_free_warn_mb,
+        ),
+        crate::rate_limit::read_resource_snapshot(&crate::rate_limit::ResourceProbe::from_env()),
+    );
+    if let crate::rate_limit::AdmissionDecision::Blocked(block) = launch_decision {
+        tracing::warn!(
+            resource = %block.resource,
+            actual = %block.actual,
+            threshold = %block.threshold,
+            "one-shot launch refused: host above launch policy"
+        );
+        eprintln!(
+            "needle: launch refused — {} (actual {}, threshold {})",
+            block.reason, block.actual, block.threshold
+        );
+        eprintln!("no work was started; retry when the host is below policy (temporary unavailable, exit 75)");
+        return Err(anyhow::Error::new(crate::types::AdmissionUnavailable {
+            reason: block.reason.clone(),
+        }));
     }
     if count as usize > NATO_ALPHABET.len() {
         bail!(
@@ -1294,73 +1347,113 @@ fn run_worker(config: Config, worker_name: String, config_sources: SourceMap) ->
         .context("failed to open configured bead store")
     })?;
 
-    // Phase 2: resource check before worker construction.
-    // Check system resources (CPU and memory) before entering the slow
-    // (~5s) worker_construction step. If saturated, retry with bounded
-    // backoff rather than proceeding into a step that may be killed by
-    // the OS due to resource pressure.
-    const MAX_RESOURCE_WAIT_SECS: u64 = 120; // Maximum total wait time
-    const RESOURCE_RETRY_DELAY_SECS: u64 = 5; // Initial retry delay
-    let mut resource_wait_total = 0u64;
-    let mut resource_retry_delay = RESOURCE_RETRY_DELAY_SECS;
+    // Phase 2: launch admission gate before worker construction (plan
+    // revision 24 section 4.6, N-T33).
+    //
+    // CPU and memory are checked against the launch policy before entering the
+    // slow (~5s) worker_construction step. This process is service-managed —
+    // run_worker is only reached from a tmux inner invocation or a --resume —
+    // so a saturated host holds here instead of exiting: the previous behavior
+    // (120s of retries, then bail) is exactly what produced the 2026-09-03
+    // churn of 68 launch failures in 15 minutes under systemd Restart=always.
+    // Blocked checks emit `worker.admission_blocked` rate-bounded, register the
+    // worker with an ADMISSION_BLOCKED registry state (no heartbeat file exists
+    // yet — the health monitor starts with the worker), and retry on a capped
+    // jittered backoff. `worker.admission_restored` is emitted before
+    // construction resumes. Thresholds come only from config on every check;
+    // nothing in the hold can weaken them.
+    let admission_probe = crate::rate_limit::ResourceProbe::from_env();
+    let admission_thresholds = crate::rate_limit::AdmissionThresholds::new(
+        config.worker.cpu_load_warn,
+        config.worker.memory_free_warn_mb,
+    );
+    let mut admission_hold =
+        crate::rate_limit::AdmissionHold::new(crate::rate_limit::AdmissionHoldConfig::from_env());
+    let qualified_worker_id = format!("{}-{}", config.agent.default, worker_name);
+    let registry = Registry::default_location(&config.workspace.home);
 
     loop {
-        match crate::rate_limit::RateLimiter::check_system_resources_for_launch(
-            config.worker.cpu_load_warn,
-            config.worker.memory_free_warn_mb,
-            &telemetry,
-        ) {
-            Ok(()) => {
-                // Resources are acceptable, proceed to worker_construction
-                break;
-            }
-            Err(e) => {
-                if resource_wait_total >= MAX_RESOURCE_WAIT_SECS {
-                    // Still saturated after max wait, fail the launch explicitly
-                    telemetry.emit(
-                        EventKind::WorkerLaunchDeferred {
-                            deferred_count: resource_wait_total / resource_retry_delay,
-                            total_wait_secs: resource_wait_total,
-                            reason: format!(
-                                "system still saturated after {}s wait: {}",
-                                MAX_RESOURCE_WAIT_SECS, e
-                            ),
-                        },
-                        chrono::Utc::now(),
-                    )?;
-                    bail!(
-                        "worker launch deferred {} times ({}s total wait), system still saturated: {}. Launch aborted — retry when load drops",
-                        resource_wait_total / resource_retry_delay,
-                        resource_wait_total,
-                        e
+        let decision = crate::rate_limit::check_launch_admission(
+            admission_thresholds,
+            crate::rate_limit::read_resource_snapshot(&admission_probe),
+        );
+        match decision {
+            crate::rate_limit::AdmissionDecision::Admitted => break,
+            crate::rate_limit::AdmissionDecision::Blocked(block) => {
+                if admission_hold.observe_blocked() == crate::rate_limit::BlockedObservation::Emit {
+                    // Best-effort registration so `needle status` shows this
+                    // worker holding rather than invisible. Worker::new
+                    // re-registers with the same id once construction runs.
+                    let entry = crate::registry::WorkerEntry {
+                        id: qualified_worker_id.clone(),
+                        pid: std::process::id(),
+                        workspace: config.workspace.default.clone(),
+                        agent: config.agent.default.clone(),
+                        model: None,
+                        provider: None,
+                        started_at: chrono::Utc::now(),
+                        beads_processed: 0,
+                        config_reload_generation: 0,
+                        state: Some(crate::types::WorkerState::AdmissionBlocked),
+                    };
+                    if let Err(e) = registry.register(entry) {
+                        tracing::warn!(
+                            error = %e,
+                            worker_id = %qualified_worker_id,
+                            "failed to register admission-blocked worker in registry"
+                        );
+                    }
+                    tracing::warn!(
+                        resource = %block.resource,
+                        actual = %block.actual,
+                        threshold = %block.threshold,
+                        attempt = admission_hold.attempts(),
+                        "launch admission blocked before worker construction; holding resident"
                     );
+                    telemetry
+                        .emit(
+                            EventKind::WorkerAdmissionBlocked {
+                                resource: block.resource.to_string(),
+                                actual: block.actual.clone(),
+                                threshold: block.threshold.clone(),
+                                reason: block.reason.clone(),
+                                attempt: admission_hold.attempts(),
+                                disposition: "holding".to_string(),
+                            },
+                            chrono::Utc::now(),
+                        )
+                        .unwrap_or_else(|e| {
+                            tracing::warn!(error = %e, "failed to emit worker.admission_blocked");
+                        });
                 }
 
-                // Resources are saturated, wait and retry
-                tracing::warn!(
-                    error = %e,
-                    wait_secs = resource_retry_delay,
-                    total_waited_secs = resource_wait_total,
-                    "system resources saturated, deferring worker construction"
-                );
-
-                telemetry.emit(
-                    EventKind::WorkerLaunchDeferred {
-                        deferred_count: resource_wait_total / resource_retry_delay + 1,
-                        total_wait_secs: resource_wait_total + resource_retry_delay,
-                        reason: format!("system saturated: {}", e),
-                    },
-                    chrono::Utc::now(),
-                )?;
-
-                std::thread::sleep(std::time::Duration::from_secs(resource_retry_delay));
-                resource_wait_total += resource_retry_delay;
-
-                // Exponential backoff with cap at 30 seconds
-                resource_retry_delay = std::cmp::min(resource_retry_delay * 2, 30);
+                std::thread::sleep(admission_hold.backoff());
             }
         }
     }
+
+    // Capture hold stats before observe_admitted() ends the hold.
+    let admission_blocked_secs = admission_hold.blocked_for().as_secs();
+    let admission_attempts = admission_hold.attempts();
+    if admission_hold.observe_admitted() {
+        let blocked_secs = admission_blocked_secs;
+        let attempts = admission_attempts;
+        tracing::info!(
+            blocked_secs,
+            attempts,
+            "launch admission restored before construction"
+        );
+        telemetry.emit(
+            EventKind::WorkerAdmissionRestored {
+                blocked_secs,
+                attempts,
+            },
+            chrono::Utc::now(),
+        )?;
+    }
+
+    // Total deliberate admission wait, excluded from the boot watchdog below.
+    let resource_wait_total = admission_blocked_secs;
 
     // Phase 3: worker construction (heavy — prompt loading, adapter discovery, etc.).
     let mut worker = init_step("worker_construction", &telemetry, || {
@@ -2435,28 +2528,50 @@ pub fn replace_needle_block(content: &str, template: &str) -> String {
     }
 }
 
-fn cmd_init(backend: &str, no_agents_md: bool) -> Result<()> {
+/// `needle init` — initialize v2 config with optional v1 migration.
+///
+/// Writes ~/.config/needle/config.yaml when it does not exist yet. An existing
+/// global config is left untouched unless `force` is set: the v2 loader reads
+/// exactly that path, so replacing it (with a fresh default, or with an
+/// example's one-worker config) silently drops the fleet's real settings.
+fn cmd_init(backend: &str, no_agents_md: bool, force: bool) -> Result<()> {
     /// Resolve a path relative to the user's home directory.
     fn dirs_or_home(relative: &str) -> PathBuf {
         if let Some(home) = std::env::var_os("HOME") {
             PathBuf::from(home).join(relative)
         } else {
-            PathBuf::from("/tmp").join(relative)
+            std::env::temp_dir().join(relative)
         }
     }
 
     let config_path = dirs_or_home(".config/needle/config.yaml");
     let v1_dir = dirs_or_home(".needle");
 
-    // Check if v2 config already exists.
+    // The global config is written only when it does not exist yet, or when
+    // --force names it explicitly. This file IS the fleet's configuration — the
+    // v2 loader reads exactly this path — so overwriting it from a walkthrough
+    // or a stray init replaces the real settings with defaults. That is how
+    // docs/examples/quickstart took an ex44 fleet down to one worker on
+    // 2026-08-30. Workspace binding below still runs: on an already-configured
+    // host, binding this directory is the useful half of the command.
+    let mut write_global_config = true;
     if config_path.exists() {
-        println!("Config already exists: {}", config_path.display());
-        let config = ConfigLoader::load_from_path(&config_path)?;
-        println!("  Agent default: {}", config.agent.default);
-        println!("  Workspace: {}", config.workspace.default.display());
-        println!("  Max workers: {}", config.worker.max_workers);
-        println!("\nTo reinitialize, delete the existing config file first.");
-        return Ok(());
+        if force {
+            println!(
+                "Overwriting existing global config (--force): {}",
+                config_path.display()
+            );
+        } else {
+            write_global_config = false;
+            println!(
+                "Refusing to overwrite existing global config: {} — pass --force to replace it",
+                config_path.display()
+            );
+            let config = ConfigLoader::load_from_path(&config_path)?;
+            println!("  Agent default: {}", config.agent.default);
+            println!("  Workspace: {}", config.workspace.default.display());
+            println!("  Max workers: {}", config.worker.max_workers);
+        }
     }
 
     // Detect v1 artifacts and migrate compatible settings.
@@ -2807,26 +2922,28 @@ fabric:
             .with_context(|| format!("failed to create config directory: {}", parent.display()))?;
     }
 
-    // Write the config file.
-    std::fs::write(&config_path, config_yaml)
-        .with_context(|| format!("failed to write config file: {}", config_path.display()))?;
+    if write_global_config {
+        // Write the config file.
+        std::fs::write(&config_path, config_yaml)
+            .with_context(|| format!("failed to write config file: {}", config_path.display()))?;
 
-    println!("Created config file: {}", config_path.display());
-    println!("\nConfiguration summary:");
-    println!("  Agent default: {}", agent_default);
-    println!("  Workspace: {}", workspace_default.display());
-    println!("  Max workers: 4 (default)");
+        println!("Created config file: {}", config_path.display());
+        println!("\nConfiguration summary:");
+        println!("  Agent default: {}", agent_default);
+        println!("  Workspace: {}", workspace_default.display());
+        println!("  Max workers: 4 (default)");
 
-    // Validate the created config by running it through ConfigLoader.
-    let validated = ConfigLoader::load_from_path(&config_path)?;
-    let errors = ConfigLoader::validate(&validated);
-    if !errors.is_empty() {
-        println!("\nWarning: Config validation produced errors:");
-        for error in &errors {
-            println!("  - {}", error);
+        // Validate the created config by running it through ConfigLoader.
+        let validated = ConfigLoader::load_from_path(&config_path)?;
+        let errors = ConfigLoader::validate(&validated);
+        if !errors.is_empty() {
+            println!("\nWarning: Config validation produced errors:");
+            for error in &errors {
+                println!("  - {}", error);
+            }
+        } else {
+            println!("\nConfig validated successfully.");
         }
-    } else {
-        println!("\nConfig validated successfully.");
     }
 
     // Validate backend parameter.
@@ -3204,10 +3321,12 @@ fn cmd_status(
 
             let is_alive = is_pid_alive(w.pid);
             let uptime = Utc::now().signed_duration_since(w.started_at);
+            let state =
+                resolved_worker_state(heartbeat.as_ref().map(|h| h.state.clone()), w.state.clone());
 
             WorkerStatus {
                 entry: w.clone(),
-                heartbeat_state: heartbeat.as_ref().map(|h| format!("{}", h.state)),
+                state,
                 current_bead: heartbeat.and_then(|h| h.current_bead.map(|b| b.to_string())),
                 pid_alive: is_alive,
                 uptime_secs: uptime.num_seconds().max(0) as u64,
@@ -3318,7 +3437,7 @@ fn cmd_status(
                         );
                         println!("{}", "-".repeat(80));
                         for ws in &heartbeat_statuses {
-                            let state = ws.heartbeat_state.as_deref().unwrap_or("unknown");
+                            let state = ws.state.as_str();
                             let bead = ws.current_bead.as_deref().unwrap_or("-");
                             let uptime = format_duration(ws.uptime_secs);
                             let alive = if ws.pid_alive { "yes" } else { "no" };
@@ -3330,7 +3449,7 @@ fn cmd_status(
                     } else {
                         println!("Registered Workers:");
                         for ws in &heartbeat_statuses {
-                            let state = ws.heartbeat_state.as_deref().unwrap_or("unknown");
+                            let state = ws.state.as_str();
                             let alive = if ws.pid_alive { "" } else { " (DEAD)" };
                             println!(
                                 "  {} — {} beads, state: {state}{alive}",
@@ -3391,7 +3510,7 @@ fn cmd_status(
                         "workspace": ws.entry.workspace,
                         "agent": ws.entry.agent,
                         "beads_processed": ws.entry.beads_processed,
-                        "state": ws.heartbeat_state,
+                        "state": ws.state,
                         "current_bead": ws.current_bead,
                         "pid_alive": ws.pid_alive,
                         "uptime_secs": ws.uptime_secs,
@@ -3629,16 +3748,21 @@ fn cmd_stats(
         StatsBy::TemplateVersion => StatsDimension::TemplateVersion,
         StatsBy::TaskType => StatsDimension::TaskType,
         StatsBy::Worker => StatsDimension::Worker,
+        StatsBy::Adapter => StatsDimension::Adapter,
+        StatsBy::Outcome => StatsDimension::Outcome,
     };
 
     let mut rows = compute_stats(&events, dimension);
     // Sort by beads descending so most active groups appear first.
     rows.sort_by(|a, b| b.beads.cmp(&a.beads).then(a.key.cmp(&b.key)));
 
-    let dim_label = match by {
-        StatsBy::TemplateVersion => "TEMPLATE VERSION",
-        StatsBy::TaskType => "TASK TYPE",
-        StatsBy::Worker => "WORKER",
+    // Attempt dimensions count attempts, not beads — say so in the header.
+    let (dim_label, count_label) = match by {
+        StatsBy::TemplateVersion => ("TEMPLATE VERSION", "BEADS"),
+        StatsBy::TaskType => ("TASK TYPE", "BEADS"),
+        StatsBy::Worker => ("WORKER", "BEADS"),
+        StatsBy::Adapter => ("ADAPTER", "ATTEMPTS"),
+        StatsBy::Outcome => ("OUTCOME", "ATTEMPTS"),
     };
 
     match format {
@@ -3649,9 +3773,9 @@ fn cmd_stats(
             }
             let key_width = rows.iter().map(|r| r.key.len()).max().unwrap_or(16).max(16);
             println!(
-                "{:<width$} {:>6} {:>6} {:>6} {:>8} {:>9} {:>10} {:>12}",
+                "{:<width$} {:>8} {:>6} {:>6} {:>8} {:>9} {:>10} {:>12}",
                 dim_label,
-                "BEADS",
+                count_label,
                 "PASS",
                 "FAIL",
                 "TIMEOUT",
@@ -3662,7 +3786,7 @@ fn cmd_stats(
             );
             println!(
                 "{}",
-                "-".repeat(key_width + 6 + 6 + 6 + 8 + 9 + 10 + 12 + 7)
+                "-".repeat(key_width + 8 + 6 + 6 + 8 + 9 + 10 + 12 + 7)
             );
             for row in &rows {
                 let pass_rate = row
@@ -3678,7 +3802,7 @@ fn cmd_stats(
                     .map(|c| format!("${:.5}", c))
                     .unwrap_or_else(|| "-".to_string());
                 println!(
-                    "{:<width$} {:>6} {:>6} {:>6} {:>8} {:>9} {:>10} {:>12}",
+                    "{:<width$} {:>8} {:>6} {:>6} {:>8} {:>9} {:>10} {:>12}",
                     row.key,
                     row.beads,
                     row.pass,
@@ -4229,6 +4353,108 @@ fn doctor_check_config(workspace: &Path) -> CheckResult {
         Ok(_) => CheckResult::pass("Config", "valid"),
         Err(e) => CheckResult::fail("Config", format!("{e:#}")),
     }
+}
+
+/// The shipped quickstart example, embedded at build time from the repo's docs.
+/// `needle doctor` compares the host's live global config against it to
+/// recognize a fleet config that was overwritten by a literal run of
+/// docs/examples/quickstart: the example caps NEEDLE at one worker that exits
+/// when the queue drains, on the Anthropic-billing agent default.
+const QUICKSTART_EXAMPLE_CONFIG: &str = include_str!("../../docs/examples/quickstart/config.yaml");
+
+/// True when `a` and `b` name the same directory. Canonical forms are compared
+/// when both resolve (symlinks, `..`, trailing slashes); the raw paths are the
+/// fallback when either side does not exist.
+fn same_directory(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(canonical_a), Ok(canonical_b)) => canonical_a == canonical_b,
+        _ => a == b,
+    }
+}
+
+/// Directories directly under `root` that look like NEEDLE workspaces — they
+/// contain a `.beads/` directory — excluding `except`. Same single-level
+/// heuristic `cmd_init` uses to find a v1 workspace under `$HOME`; hidden
+/// entries are skipped so `~/.cache` and friends are never candidates.
+fn needle_workspaces_under(root: &Path, except: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() || !path.join(".beads").is_dir() {
+            continue;
+        }
+        let is_hidden = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|name| name.starts_with('.'));
+        if is_hidden || same_directory(&path, except) {
+            continue;
+        }
+        found.push(path);
+    }
+    found
+}
+
+/// `needle doctor`: recognize a global config that is byte-identical to the
+/// shipped quickstart example. Inside the example's own throwaway HOME that
+/// file is exactly what the walkthrough produces, so the row passes. On a host
+/// that also runs NEEDLE elsewhere, an identical file means the example was
+/// written over the fleet's real config — which is how docs/examples/quickstart
+/// took an ex44 fleet down to one worker on 2026-08-30.
+fn doctor_check_quickstart_config(current_workspace: &Path) -> CheckResult {
+    let home = match std::env::var_os("HOME") {
+        Some(home) => PathBuf::from(home),
+        None => std::env::temp_dir(),
+    };
+    let config_path = home.join(".config/needle/config.yaml");
+    let contents = match std::fs::read(&config_path) {
+        Ok(contents) => contents,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return CheckResult::pass("Quickstart config", "no global config");
+        }
+        Err(e) => {
+            return CheckResult::fail(
+                "Quickstart config",
+                format!("unreadable {}: {e}", config_path.display()),
+            );
+        }
+    };
+    if contents != QUICKSTART_EXAMPLE_CONFIG.as_bytes() {
+        return CheckResult::pass("Quickstart config", "not the shipped quickstart example");
+    }
+
+    let others = needle_workspaces_under(&home, current_workspace);
+    if others.is_empty() {
+        return CheckResult::pass(
+            "Quickstart config",
+            "matches the quickstart example, and no other NEEDLE workspaces live here",
+        );
+    }
+
+    let mut detail = vec![
+        "This file is the fleet's real config; the quickstart example caps NEEDLE at one"
+            .to_string(),
+        "worker that exits when the queue drains, on the Anthropic-billing agent default."
+            .to_string(),
+        "Other NEEDLE workspaces on this host:".to_string(),
+    ];
+    detail.extend(
+        others
+            .iter()
+            .map(|workspace| format!("  {}", workspace.display())),
+    );
+    CheckResult::warn(
+        "Quickstart config",
+        format!(
+            "{} is byte-identical to the shipped quickstart example",
+            config_path.display()
+        ),
+    )
+    .with_detail(detail)
+    .with_fix("needle init --force")
 }
 
 fn doctor_check_workspace(workspace: &Path) -> CheckResult {
@@ -5266,20 +5492,16 @@ fn cmd_doctor(repair: bool, workspace: Option<PathBuf>, json: bool) -> Result<()
     let beads_dir = workspace_root.join(".beads");
     let heartbeat_dir = needle_home.join("state").join("heartbeats");
 
-    let mut results: Vec<CheckResult> = Vec::new();
-
-    // Config
-    results.push(doctor_check_config(&workspace_root));
-
-    // Gate command paths
-    results.push(doctor_check_gate_commands(
-        &config,
-        &workspace_root,
-        &sources,
-    ));
-
-    // Workspace accessibility + .beads/ presence
-    results.push(doctor_check_workspace(&workspace_root));
+    // The unconditional leading rows: the resolved config, whether its global
+    // file is the shipped quickstart example (a clobbered fleet config — see
+    // the 2026-08-30 ex44 incident), configured gate commands, and the
+    // workspace itself.
+    let mut results: Vec<CheckResult> = vec![
+        doctor_check_config(&workspace_root),
+        doctor_check_quickstart_config(&workspace_root),
+        doctor_check_gate_commands(&config, &workspace_root, &sources),
+        doctor_check_workspace(&workspace_root),
+    ];
 
     // JSONL consistency (basic file check only for non-bead-rs backends)
     // For bead-rs backends, we defer checkpoint checks until after the store is opened
@@ -5708,10 +5930,32 @@ fn print_query_stats_table(stats: &telemetry::AggregateStats) {
 /// Per-worker status information for the status command.
 struct WorkerStatus {
     entry: WorkerEntry,
-    heartbeat_state: Option<String>,
+    /// The state a dashboard should show: the heartbeat file's state when the
+    /// worker has one, otherwise the registry's state field, otherwise
+    /// "unknown". The registry fallback is what keeps a worker holding in
+    /// `ADMISSION_BLOCKED` during boot visible — it registers before the
+    /// health monitor starts, so it has no heartbeat file yet (plan revision
+    /// 24 §4.6 / N-T33).
+    state: String,
     current_bead: Option<String>,
     pid_alive: bool,
     uptime_secs: u64,
+}
+
+/// Resolve the state to display for a worker: the live heartbeat's state when
+/// one exists, falling back to the state the worker published to the registry,
+/// which survives dashboard polling between heartbeats and covers states
+/// reached before the heartbeat file was first written. Neither source means
+/// the state is genuinely unknown — an old registry entry from before the
+/// field existed, or a launcher that never reported.
+fn resolved_worker_state(
+    heartbeat_state: Option<crate::types::WorkerState>,
+    registry_state: Option<crate::types::WorkerState>,
+) -> String {
+    heartbeat_state
+        .or(registry_state)
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "unknown".to_string())
 }
 
 /// Check if a process with the given PID is alive.
@@ -6889,6 +7133,65 @@ mod tests {
         );
 
         assert_eq!(effective, Duration::ZERO);
+    }
+
+    #[test]
+    fn launcher_refused_by_admission_is_temporary_unavailable_not_work_failure() {
+        let _env_lock = crate::util::test_env::isolate_env();
+        let probe_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            probe_dir.path().join("loadavg"),
+            "64.00 32.00 16.00 1/123 456\n",
+        )
+        .unwrap();
+        std::fs::write(
+            probe_dir.path().join("meminfo"),
+            "MemAvailable: 16777216 kB\n",
+        )
+        .unwrap();
+        std::env::set_var("NEEDLE_LAUNCH_RESOURCE_PROBE", probe_dir.path());
+        // No sessions may be forked on the refusal path, so nothing else in
+        // the environment matters — but the registry must never see this
+        // process either, so pin the needle home to a private directory.
+        let home = crate::util::test_env::isolated_home();
+
+        let mut config = Config::default();
+        config.worker.cpu_load_warn = 1.0;
+        config.worker.memory_free_warn_mb = 64;
+        config.workspace.home = home;
+        config.workspace.default = probe_dir.path().to_path_buf();
+
+        let err = launch_workers(config, None, None, 1, None, None, None)
+            .expect_err("launch must be refused on a saturated host");
+        let unavailable = err
+            .downcast_ref::<crate::types::AdmissionUnavailable>()
+            .unwrap_or_else(|| panic!("expected AdmissionUnavailable, got: {err}"));
+        assert!(
+            unavailable.reason.contains("CPU load saturated"),
+            "reason should name the resource and the values, got: {}",
+            unavailable.reason
+        );
+        // 75 is EX_TEMPFAIL: a one-shot caller sees "try again later", which
+        // is not a work failure — no bead was claimed.
+        assert_eq!(crate::types::EXIT_ADMISSION_UNAVAILABLE, 75);
+    }
+
+    #[test]
+    fn resolved_worker_state_prefers_heartbeat_then_registry_then_unknown() {
+        use crate::types::WorkerState;
+
+        // A live heartbeat is the truth.
+        assert_eq!(
+            resolved_worker_state(Some(WorkerState::Handling), Some(WorkerState::Selecting)),
+            "HANDLING"
+        );
+        // The registry fallback keeps a boot-blocked worker visible: it
+        // registers ADMISSION_BLOCKED before any heartbeat file exists.
+        assert_eq!(
+            resolved_worker_state(None, Some(WorkerState::AdmissionBlocked)),
+            "ADMISSION_BLOCKED"
+        );
+        assert_eq!(resolved_worker_state(None, None), "unknown");
     }
 
     #[test]
@@ -8277,7 +8580,7 @@ mod tests {
             pid: 999_999,
             state: WorkerState::Selecting,
             current_bead: None,
-            workspace: PathBuf::from("/tmp"),
+            workspace: tmp.path().to_path_buf(),
             last_heartbeat: chrono::Utc::now() - chrono::Duration::seconds(600),
             started_at: chrono::Utc::now(),
             beads_processed: 0,
@@ -8310,7 +8613,7 @@ mod tests {
             pid: 999_999,
             state: WorkerState::Selecting,
             current_bead: None,
-            workspace: PathBuf::from("/tmp"),
+            workspace: tmp.path().to_path_buf(),
             last_heartbeat: chrono::Utc::now() - chrono::Duration::seconds(600),
             started_at: chrono::Utc::now(),
             beads_processed: 0,

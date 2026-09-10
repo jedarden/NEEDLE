@@ -89,6 +89,12 @@ pub struct TelemetryEvent {
     /// W3C span-id hex (16 lowercase hex chars). Present only when emitted inside an OTel span.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub span_id: Option<String>,
+    /// Provisional attempt ID (UUIDv7) of the dispatch this event belongs to.
+    /// Present only on events emitted inside a dispatch cycle, mirroring the
+    /// span-context fields above. Until N-T03 lands every attempt ID is
+    /// provisional (plan section 4.4 step 1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
 }
 
 // ─── Starvation Diagnostic Types ───────────────────────────────────────────────
@@ -279,6 +285,36 @@ pub enum EventKind {
         total_wait_secs: u64,
         reason: String,
     },
+    /// Launch admission is refusing this worker: the host is above CPU or
+    /// memory policy (plan revision 24 §4.6, N-T33).
+    ///
+    /// Emitted when the hold begins and then rate-bounded while it continues —
+    /// one event per `heartbeat_interval`, not one per retry, so a
+    /// hours-long saturation produces tens of events rather than thousands.
+    WorkerAdmissionBlocked {
+        /// `cpu` or `memory`.
+        resource: String,
+        /// Observed value, formatted (normalized load, or available MB).
+        actual: String,
+        /// The configured threshold that was crossed.
+        threshold: String,
+        /// One-line human-readable reason.
+        reason: String,
+        /// How many admission checks have run since the hold began.
+        attempt: u64,
+        /// `holding` (resident retry) or `one_shot_unavailable` (caller that
+        /// cannot stay resident was told to come back later).
+        disposition: String,
+    },
+    /// Admission recovered and normal selection is about to resume.
+    ///
+    /// Always emitted before the next selection pass, never after it.
+    WorkerAdmissionRestored {
+        /// How long the hold lasted.
+        blocked_secs: u64,
+        /// How many admission checks ran during the hold.
+        attempts: u64,
+    },
     /// Configuration validation warning.
     ConfigWarning {
         warning_type: String,
@@ -300,6 +336,44 @@ pub enum EventKind {
         decision: String,
         evidence: String,
         duration_ms: u64,
+    },
+    /// The low-water generation gate resolved a generator's permit for this
+    /// waterfall pass. Emitted once per generator per pass while the gate is
+    /// enabled, including the passes where the generator must not run.
+    GenerationGateEvaluated {
+        strand_name: String,
+        workspace: String,
+        /// Why the permit resolved the way it did: `low_water`, `contended`,
+        /// `backlog_healthy`, or `gate_disabled`.
+        reason: String,
+        eligible_ready: usize,
+        low_water_reserve: usize,
+    },
+    /// A generator produced real work rather than leaving the worker to
+    /// manufacture an alert. The waterfall restarts so the new bead can be
+    /// claimed in the same cycle.
+    GenerationWorkCreated {
+        strand_name: String,
+        workspace: String,
+        detail: String,
+    },
+    /// A generator failed recoverably. Recorded so creator failures are
+    /// distinguishable from idle, then the waterfall falls through to the
+    /// next generator.
+    GenerationCreatorFailed {
+        strand_name: String,
+        workspace: String,
+        error: String,
+    },
+    /// Terminal classification of one selection cycle. Exactly one is emitted
+    /// per cycle, so the five outcomes are directly comparable as a single
+    /// metric with a label rather than five unrelated counters.
+    CycleOutcome {
+        outcome: CycleOutcome,
+        /// Workspace the cycle ran against, when the emitter knows it.
+        workspace: Option<String>,
+        /// The strand that produced the candidate, when one did.
+        strand_name: Option<String>,
     },
     BeadStoreError {
         strand_name: String,
@@ -372,6 +446,18 @@ pub enum EventKind {
         bead_id: BeadId,
         reason: String,
     },
+    /// A claim was refused because the workspace's build circuit is open: the
+    /// newest run of the workspace's CI workflow failed, and the bead carries
+    /// none of the circuit-breaker bypass labels.
+    ClaimBlockedCircuitOpen {
+        bead_id: BeadId,
+        /// Workspace whose CI is red.
+        workspace: String,
+        /// CI workflow template whose newest run failed (for example `needle-ci`).
+        template: String,
+        /// Phase the failing run ended in (`Failed`, `Error`).
+        phase: String,
+    },
     ClaimRaceLostSkipped {
         consecutive_losses: u32,
         threshold: u32,
@@ -392,6 +478,30 @@ pub enum EventKind {
     ClaimVerifyFailed {
         bead_id: BeadId,
         expected_actor: String,
+        actual_status: String,
+        actual_assignee: String,
+    },
+    /// A stage-local claim re-check passed.
+    ///
+    /// The dispatch pipeline re-reads the live claim twice more around the
+    /// canonical `bead.claim.verify_*` verification: once when leaving the
+    /// DISPATCHING state (`stage: "dispatching"`) and once immediately before
+    /// the agent process is spawned (`stage: "pre_spawn"`). These re-checks
+    /// deliberately do not emit `bead.claim.verify_success` — that name is
+    /// reserved for the canonical verification so `verify_started` and
+    /// `verify_success` stay 1:1 and the stream can be aggregated (issue #20).
+    ClaimRecheckSucceeded {
+        bead_id: BeadId,
+        expected_actor: String,
+        /// Pipeline stage that ran the re-check (`dispatching`, `pre_spawn`).
+        stage: String,
+    },
+    /// A stage-local claim re-check failed; the dispatch aborted at that stage.
+    ClaimRecheckFailed {
+        bead_id: BeadId,
+        expected_actor: String,
+        /// Pipeline stage that ran the re-check (`dispatching`, `pre_spawn`).
+        stage: String,
         actual_status: String,
         actual_assignee: String,
     },
@@ -438,6 +548,19 @@ pub enum EventKind {
     },
     QuarantineExpired {
         bead_id: BeadId,
+    },
+    /// A bead moved down the escalation ladder to `rung` (Phase 19, ADR-022).
+    /// Rung 4 is the plan-grounded analysis dispatch; rung 5 is `human`.
+    BeadEscalated {
+        bead_id: BeadId,
+        rung: u32,
+    },
+    /// A bead reached the human rung (rung 5) carrying the rung-4 `analysis:`
+    /// note that justifies it (Phase 19, Principle 7). A `human` label without
+    /// that note is a defect, so the note travels with the event.
+    HumanRung {
+        bead_id: BeadId,
+        analysis: String,
     },
     /// False close detected: bead appeared closed but shipped-work verification failed.
     /// This indicates the agent closed the bead without actually shipping work (e.g.,
@@ -718,6 +841,18 @@ pub enum EventKind {
     MitosisSkipped {
         parent_id: BeadId,
         existing_children: u32,
+    },
+    /// A parent's cumulative child count crossed the configured warning
+    /// threshold. Fired at the split that pushes the parent from below the
+    /// threshold to at or above it — once per crossing, not once per split
+    /// beyond it — so runaway decomposition is observable while it is
+    /// happening rather than only at the `max_depth` x `max_children` cap.
+    MitosisChildCountWarning {
+        parent_id: BeadId,
+        /// Direct children now under the parent (existing + just created).
+        child_count: u32,
+        /// The configured threshold that was crossed.
+        threshold: u32,
     },
     MitosisOutOfScope {
         bead_id: BeadId,
@@ -1150,6 +1285,23 @@ pub enum EventKind {
         ready_beads_count: usize,
         workspaces_with_ready: Vec<String>,
     },
+    /// Workspace quarantined by Explore discovery after failing health
+    /// validation. The workspace is excluded from fleet counts and scanning
+    /// until it validates healthy again; this event is the operator's signal
+    /// to repair or remove it.
+    ExploreWorkspaceQuarantined {
+        /// Workspace path that failed validation.
+        workspace: String,
+        /// Machine-readable quarantine reason.
+        reason: String,
+        /// Human-readable explanation of what failed and why.
+        explanation: String,
+        /// For duplicate repositories: the canonical path that stays in
+        /// rotation, so the stale checkout can be identified and removed.
+        canonical_path: Option<String>,
+        /// How many consecutive validations have failed for this workspace.
+        consecutive_failures: u32,
+    },
 
     // ── Internal ──
     SinkError {
@@ -1178,6 +1330,40 @@ pub enum EventKind {
     },
 }
 
+/// The five terminal classifications of a selection cycle.
+///
+/// Emitted as `cycle.outcome` with this value as the label so that selected
+/// work, generated work, creator failure, idle, and genuine starvation are
+/// all slices of one comparable metric instead of five unrelated counters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CycleOutcome {
+    /// A strand selected an existing eligible bead; no generation happened.
+    Selected,
+    /// A generator created real work and the waterfall restarted to claim it.
+    Generated,
+    /// A generator failed recoverably and the cycle fell through.
+    CreatorFailed,
+    /// Every strand ran, nothing was selected or generated, and no store
+    /// defect was found — the worker is idle against a genuinely empty or
+    /// ineligible frontier.
+    TerminalIdle,
+    /// Open work exists but is invisible to every filter. This is the
+    /// starvation verdict, distinct from a genuinely empty frontier.
+    TerminalStarvation,
+}
+
+impl CycleOutcome {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CycleOutcome::Selected => "selected",
+            CycleOutcome::Generated => "generated",
+            CycleOutcome::CreatorFailed => "creator_failed",
+            CycleOutcome::TerminalIdle => "terminal_idle",
+            CycleOutcome::TerminalStarvation => "terminal_starvation",
+        }
+    }
+}
+
 impl EventKind {
     /// Return the dotted event type string.
     pub fn event_type(&self) -> &'static str {
@@ -1198,9 +1384,15 @@ impl EventKind {
             EventKind::WorkerBootTimeout { .. } => "worker.boot.timeout",
             EventKind::GatePathMissing { .. } => "gate.command_missing",
             EventKind::WorkerLaunchDeferred { .. } => "worker.launch.deferred",
+            EventKind::WorkerAdmissionBlocked { .. } => "worker.admission_blocked",
+            EventKind::WorkerAdmissionRestored { .. } => "worker.admission_restored",
             EventKind::ConfigWarning { .. } => "config.warning",
             EventKind::StrandEvaluated { .. } => "strand.evaluated",
             EventKind::StrandSkipped { .. } => "strand.skipped",
+            EventKind::GenerationGateEvaluated { .. } => "generation.gate_evaluated",
+            EventKind::GenerationWorkCreated { .. } => "generation.work_created",
+            EventKind::GenerationCreatorFailed { .. } => "generation.creator_failed",
+            EventKind::CycleOutcome { .. } => "cycle.outcome",
             EventKind::ResolveEvaluated { .. } => "strand.resolve.evaluated",
             EventKind::BeadStoreError { .. } => "bead_store.error",
             EventKind::QueueEmpty => "worker.queue_empty",
@@ -1218,10 +1410,13 @@ impl EventKind {
             EventKind::ClaimRaceLost { .. } => "bead.claim.race_lost",
             EventKind::ClaimRaceLostSkipped { .. } => "bead.claim.race_lost_skipped",
             EventKind::ClaimFailed { .. } => "bead.claim.failed",
+            EventKind::ClaimBlockedCircuitOpen { .. } => "bead.claim.circuit_open",
             EventKind::ClaimErrorThreshold { .. } => "bead.claim.error_threshold",
             EventKind::ClaimVerifyStarted { .. } => "bead.claim.verify_started",
             EventKind::ClaimVerifySuccess { .. } => "bead.claim.verify_success",
             EventKind::ClaimVerifyFailed { .. } => "bead.claim.verify_failed",
+            EventKind::ClaimRecheckSucceeded { .. } => "bead.claim.recheck_succeeded",
+            EventKind::ClaimRecheckFailed { .. } => "bead.claim.recheck_failed",
             EventKind::VersionVerifyStarted { .. } => "version.verify.started",
             EventKind::VersionVerifySuccess { .. } => "version.verify.success",
             EventKind::VersionVerifyFailed { .. } => "version.verify.failed",
@@ -1231,6 +1426,8 @@ impl EventKind {
             EventKind::BeadOrphaned { .. } => "bead.orphaned",
             EventKind::BeadQuarantined { .. } => "bead.quarantined",
             EventKind::QuarantineExpired { .. } => "bead.quarantine_expired",
+            EventKind::BeadEscalated { .. } => "bead.escalated",
+            EventKind::HumanRung { .. } => "bead.human_rung",
             EventKind::FalseCloseDetected { .. } => "bead.false_close_detected",
             EventKind::DispatchStarted { .. } => "agent.dispatched",
             EventKind::DispatchCompleted { .. } => "agent.completed",
@@ -1280,6 +1477,7 @@ impl EventKind {
             EventKind::MitosisEvaluated { .. } => "bead.mitosis.evaluated",
             EventKind::MitosisSplit { .. } => "bead.mitosis.split",
             EventKind::MitosisSkipped { .. } => "bead.mitosis.skipped",
+            EventKind::MitosisChildCountWarning { .. } => "bead.mitosis.child_count_warning",
             EventKind::MitosisOutOfScope { .. } => "bead.mitosis.out_of_scope",
             EventKind::SplitSkipped { .. } => "bead.split.skipped",
             EventKind::VerificationFailed { .. } => "verification.failed",
@@ -1356,6 +1554,7 @@ impl EventKind {
             EventKind::SupervisorStarvationDetected { .. } => "supervisor.starvation_detected",
             EventKind::ExploreScanSummary { .. } => "explore.scan_summary",
             EventKind::ExploreStarvationAlarm { .. } => "explore.starvation_alarm",
+            EventKind::ExploreWorkspaceQuarantined { .. } => "explore.workspace_quarantined",
             EventKind::SinkError { .. } => "telemetry.sink_error",
             EventKind::OtlpDropped { .. } => "telemetry.otlp.dropped",
             EventKind::OtlpShutdownTimeout { .. } => "telemetry.otlp.shutdown_timeout",
@@ -1367,6 +1566,7 @@ impl EventKind {
     pub fn bead_id(&self) -> Option<BeadId> {
         match self {
             EventKind::ClaimAttempt { bead_id, .. }
+            | EventKind::ClaimBlockedCircuitOpen { bead_id, .. }
             | EventKind::ClaimSuccess { bead_id, .. }
             | EventKind::ClaimRaceLost { bead_id }
             | EventKind::ClaimFailed { bead_id, .. }
@@ -1374,11 +1574,15 @@ impl EventKind {
             | EventKind::ClaimVerifyStarted { bead_id, .. }
             | EventKind::ClaimVerifySuccess { bead_id, .. }
             | EventKind::ClaimVerifyFailed { bead_id, .. }
+            | EventKind::ClaimRecheckSucceeded { bead_id, .. }
+            | EventKind::ClaimRecheckFailed { bead_id, .. }
             | EventKind::BeadReleased { bead_id, .. }
             | EventKind::BeadReleaseFailed { bead_id, .. }
             | EventKind::BeadCompleted { bead_id, .. }
             | EventKind::BeadOrphaned { bead_id }
             | EventKind::BeadQuarantined { bead_id, .. }
+            | EventKind::BeadEscalated { bead_id, .. }
+            | EventKind::HumanRung { bead_id, .. }
             | EventKind::FalseCloseDetected { bead_id, .. }
             | EventKind::DispatchStarted { bead_id, .. }
             | EventKind::DispatchCompleted { bead_id, .. }
@@ -1417,7 +1621,8 @@ impl EventKind {
             | EventKind::AuditBeadClosedAsVerification { bead_id, .. }
             | EventKind::AuditBeadDeferredOverBudget { bead_id, .. } => Some(bead_id.clone()),
             EventKind::MitosisSplit { parent_id, .. }
-            | EventKind::MitosisSkipped { parent_id, .. } => Some(parent_id.clone()),
+            | EventKind::MitosisSkipped { parent_id, .. }
+            | EventKind::MitosisChildCountWarning { parent_id, .. } => Some(parent_id.clone()),
             EventKind::MitosisOutOfScope { bead_id } => Some(bead_id.clone()),
             EventKind::HeartbeatEmitted { bead_id, .. } => bead_id.clone(),
             EventKind::BeadStoreError { .. }
@@ -1436,9 +1641,15 @@ impl EventKind {
             | EventKind::InitStepCompleted { .. }
             | EventKind::WorkerBootTimeout { .. }
             | EventKind::WorkerLaunchDeferred { .. }
+            | EventKind::WorkerAdmissionBlocked { .. }
+            | EventKind::WorkerAdmissionRestored { .. }
             | EventKind::ConfigWarning { .. }
             | EventKind::StrandEvaluated { .. }
             | EventKind::StrandSkipped { .. }
+            | EventKind::GenerationGateEvaluated { .. }
+            | EventKind::GenerationWorkCreated { .. }
+            | EventKind::GenerationCreatorFailed { .. }
+            | EventKind::CycleOutcome { .. }
             | EventKind::QueueEmpty
             | EventKind::PluckStarvationDetected { .. }
             | EventKind::PluckNoCandidate { .. }
@@ -1529,6 +1740,7 @@ impl EventKind {
             | EventKind::SupervisorStarvationDetected { .. } => None,
             EventKind::ExploreScanSummary { .. } => None,
             EventKind::ExploreStarvationAlarm { .. } => None,
+            EventKind::ExploreWorkspaceQuarantined { .. } => None,
             EventKind::SpawnPathModifiedInPlace { .. } => None,
             EventKind::VersionVerifyStarted { .. } => None,
             EventKind::VersionVerifySuccess { .. } => None,
@@ -1540,7 +1752,7 @@ impl EventKind {
             EventKind::UpgradeCheckFailed { .. } => None,
             EventKind::PluckOrderingDegraded { .. } => None,
             EventKind::MendCycleBroken { .. } => None,
-            EventKind::QuarantineExpired { .. } => None,
+            EventKind::QuarantineExpired { bead_id } => Some(bead_id.clone()),
             EventKind::AttemptResolved(f) => Some(f.bead_id.clone()),
         }
     }
@@ -1645,6 +1857,32 @@ impl EventKind {
                     "reason": reason
                 })
             }
+            EventKind::WorkerAdmissionBlocked {
+                resource,
+                actual,
+                threshold,
+                reason,
+                attempt,
+                disposition,
+            } => {
+                serde_json::json!({
+                    "resource": resource,
+                    "actual": actual,
+                    "threshold": threshold,
+                    "reason": reason,
+                    "attempt": attempt,
+                    "disposition": disposition
+                })
+            }
+            EventKind::WorkerAdmissionRestored {
+                blocked_secs,
+                attempts,
+            } => {
+                serde_json::json!({
+                    "blocked_secs": blocked_secs,
+                    "attempts": attempts
+                })
+            }
             EventKind::ConfigWarning {
                 warning_type,
                 message,
@@ -1671,6 +1909,46 @@ impl EventKind {
             } => {
                 serde_json::json!({ "strand_name": strand_name, "reason": reason })
             }
+            EventKind::GenerationGateEvaluated {
+                strand_name,
+                workspace,
+                reason,
+                eligible_ready,
+                low_water_reserve,
+            } => serde_json::json!({
+                "strand_name": strand_name,
+                "workspace": workspace,
+                "reason": reason,
+                "eligible_ready": eligible_ready,
+                "low_water_reserve": low_water_reserve,
+            }),
+            EventKind::GenerationWorkCreated {
+                strand_name,
+                workspace,
+                detail,
+            } => serde_json::json!({
+                "strand_name": strand_name,
+                "workspace": workspace,
+                "detail": detail,
+            }),
+            EventKind::GenerationCreatorFailed {
+                strand_name,
+                workspace,
+                error,
+            } => serde_json::json!({
+                "strand_name": strand_name,
+                "workspace": workspace,
+                "error": error,
+            }),
+            EventKind::CycleOutcome {
+                outcome,
+                workspace,
+                strand_name,
+            } => serde_json::json!({
+                "outcome": outcome.as_str(),
+                "workspace": workspace,
+                "strand_name": strand_name,
+            }),
             EventKind::ResolveEvaluated {
                 bead_id,
                 decision,
@@ -1786,6 +2064,19 @@ impl EventKind {
             }
             EventKind::ClaimFailed { bead_id, reason } => {
                 serde_json::json!({ "bead_id": bead_id.as_ref(), "reason": reason })
+            }
+            EventKind::ClaimBlockedCircuitOpen {
+                bead_id,
+                workspace,
+                template,
+                phase,
+            } => {
+                serde_json::json!({
+                    "bead_id": bead_id.as_ref(),
+                    "workspace": workspace,
+                    "template": template,
+                    "phase": phase,
+                })
             }
             EventKind::BeadReleased { bead_id, reason } => {
                 serde_json::json!({ "bead_id": bead_id.as_ref(), "reason": reason })
@@ -2111,6 +2402,17 @@ impl EventKind {
                 serde_json::json!({
                     "parent_id": parent_id.as_ref(),
                     "existing_children": existing_children,
+                })
+            }
+            EventKind::MitosisChildCountWarning {
+                parent_id,
+                child_count,
+                threshold,
+            } => {
+                serde_json::json!({
+                    "parent_id": parent_id.as_ref(),
+                    "child_count": child_count,
+                    "threshold": threshold,
                 })
             }
             EventKind::MitosisOutOfScope { bead_id } => {
@@ -2790,6 +3092,19 @@ impl EventKind {
                 "ready_beads_count": ready_beads_count,
                 "workspaces_with_ready": workspaces_with_ready,
             }),
+            EventKind::ExploreWorkspaceQuarantined {
+                workspace,
+                reason,
+                explanation,
+                canonical_path,
+                consecutive_failures,
+            } => serde_json::json!({
+                "workspace": workspace,
+                "reason": reason,
+                "explanation": explanation,
+                "canonical_path": canonical_path,
+                "consecutive_failures": consecutive_failures,
+            }),
             EventKind::WorkerFoundButExcluded {
                 total_candidates,
                 excluded_count,
@@ -2839,6 +3154,28 @@ impl EventKind {
             } => serde_json::json!({
                 "bead_id": bead_id,
                 "expected_actor": expected_actor,
+            }),
+            EventKind::ClaimRecheckSucceeded {
+                bead_id,
+                expected_actor,
+                stage,
+            } => serde_json::json!({
+                "bead_id": bead_id,
+                "expected_actor": expected_actor,
+                "stage": stage,
+            }),
+            EventKind::ClaimRecheckFailed {
+                bead_id,
+                expected_actor,
+                stage,
+                actual_status,
+                actual_assignee,
+            } => serde_json::json!({
+                "bead_id": bead_id,
+                "expected_actor": expected_actor,
+                "stage": stage,
+                "actual_status": actual_status,
+                "actual_assignee": actual_assignee,
             }),
             EventKind::MendStaleAssigneeCleared { bead_id, assignee } => serde_json::json!({
                 "bead_id": bead_id,
@@ -3004,6 +3341,14 @@ impl EventKind {
             EventKind::QuarantineExpired { bead_id } => serde_json::json!({
                 "bead_id": bead_id,
             }),
+            EventKind::BeadEscalated { bead_id, rung } => serde_json::json!({
+                "bead_id": bead_id,
+                "rung": rung,
+            }),
+            EventKind::HumanRung { bead_id, analysis } => serde_json::json!({
+                "bead_id": bead_id,
+                "analysis": analysis,
+            }),
             EventKind::AttemptResolved(fields) => {
                 let AttemptResolvedFields {
                     attempt_id,
@@ -3031,6 +3376,10 @@ impl EventKind {
                     exit_code,
                 } = &**fields;
                 let mut data = serde_json::json!({
+                    // Ledger rows are read by consumers that outlive this
+                    // binary; the version lets them detect field drift
+                    // instead of guessing from a missing key.
+                    "schema_version": 1,
                     "attempt_id": attempt_id,
                     "provisional": provisional,
                     "bead_id": bead_id,
@@ -3107,6 +3456,10 @@ impl EventKind {
             | EventKind::InitStepStarted { .. }
             | EventKind::WorkerBootTimeout { .. }
             | EventKind::StrandSkipped { .. }
+            | EventKind::GenerationGateEvaluated { .. }
+            | EventKind::GenerationWorkCreated { .. }
+            | EventKind::GenerationCreatorFailed { .. }
+            | EventKind::CycleOutcome { .. }
             | EventKind::QueueEmpty
             | EventKind::PluckStarvationDetected { .. }
             | EventKind::PluckNoCandidate { .. }
@@ -3118,6 +3471,7 @@ impl EventKind {
             | EventKind::ClaimRaceLost { .. }
             | EventKind::ClaimRaceLostSkipped { .. }
             | EventKind::ClaimFailed { .. }
+            | EventKind::ClaimBlockedCircuitOpen { .. }
             | EventKind::BeadReleased { .. }
             | EventKind::BeadReleaseFailed { .. }
             | EventKind::BeadOrphaned { .. }
@@ -3155,6 +3509,7 @@ impl EventKind {
             | EventKind::MitosisEvaluated { .. }
             | EventKind::MitosisSplit { .. }
             | EventKind::MitosisSkipped { .. }
+            | EventKind::MitosisChildCountWarning { .. }
             | EventKind::MitosisOutOfScope { .. }
             | EventKind::SplitSkipped { .. }
             | EventKind::VerificationFailed { .. }
@@ -3243,6 +3598,8 @@ impl EventKind {
             | EventKind::ClaimVerifyStarted { .. }
             | EventKind::ClaimVerifySuccess { .. }
             | EventKind::ClaimVerifyFailed { .. }
+            | EventKind::ClaimRecheckSucceeded { .. }
+            | EventKind::ClaimRecheckFailed { .. }
             | EventKind::VersionVerifyStarted { .. }
             | EventKind::VersionVerifySuccess { .. }
             | EventKind::VersionVerifyFailed { .. }
@@ -3252,6 +3609,8 @@ impl EventKind {
             | EventKind::MendTriageStaleDeferred { .. }
             | EventKind::MendTriageStaleReport { .. }
             | EventKind::WorkerLaunchDeferred { .. }
+            | EventKind::WorkerAdmissionBlocked { .. }
+            | EventKind::WorkerAdmissionRestored { .. }
             | EventKind::ConfigWarning { .. }
             | EventKind::BeadQuarantined { .. }
             | EventKind::FalseCloseDetected { .. }
@@ -3262,7 +3621,10 @@ impl EventKind {
             | EventKind::MendCycleBroken { .. }
             | EventKind::AuditBeadClosedAsVerification { .. }
             | EventKind::AuditBeadDeferredOverBudget { .. }
-            | EventKind::QuarantineExpired { .. } => None,
+            | EventKind::QuarantineExpired { .. }
+            | EventKind::BeadEscalated { .. }
+            | EventKind::HumanRung { .. } => None,
+            EventKind::ExploreWorkspaceQuarantined { .. } => None,
         }
     }
 }
@@ -3425,12 +3787,17 @@ impl StdoutSink {
             "bead.mitosis.evaluated" => "MITOSIS_EVAL",
             "bead.mitosis.split" => "MITOSIS",
             "bead.mitosis.skipped" => "MITOSIS_SKIP",
+            "bead.mitosis.child_count_warning" => "MITOSIS_WARN",
             "mend.orphaned_lock_removed" => "MEND_LOCK",
             "mend.dependency_cleaned" => "MEND_DEP",
             "mend.db_repaired" => "MEND_REPAIR",
             "mend.db_rebuilt" => "MEND_REBUILD",
             "mend.cycle_summary" => "MEND_DONE",
             "telemetry.sink_error" => "SINK_ERR",
+            "generation.gate_evaluated" => "GEN_GATE",
+            "generation.work_created" => "GEN_CREATED",
+            "generation.creator_failed" => "GEN_FAIL",
+            "cycle.outcome" => "CYCLE",
             other => other,
         }
     }
@@ -3477,6 +3844,11 @@ impl StdoutSink {
             "bead.mitosis.split" => {
                 let created = d["children_created"].as_u64().unwrap_or(0);
                 format!("{created} children")
+            }
+            "bead.mitosis.child_count_warning" => {
+                let count = d["child_count"].as_u64().unwrap_or(0);
+                let threshold = d["threshold"].as_u64().unwrap_or(0);
+                format!("{count} children under one parent (threshold {threshold})")
             }
             "budget.warning" | "budget.stop" => {
                 let cost = d["daily_cost"].as_f64().unwrap_or(0.0);
@@ -3693,6 +4065,7 @@ impl HookSink {
                             duration_ms: None,
                             trace_id: None,
                             span_id: None,
+                            attempt_id: None,
                         });
                     }
                 }
@@ -3728,6 +4101,7 @@ impl HookSink {
                             duration_ms: None,
                             trace_id: None,
                             span_id: None,
+                            attempt_id: None,
                         });
                     }
                 }
@@ -3825,6 +4199,11 @@ pub struct Telemetry {
     sequence: Arc<AtomicU64>,
     /// Workspace of the most recently claimed bead, shared by all telemetry handles.
     current_workspace: Arc<std::sync::RwLock<Option<PathBuf>>>,
+    /// Provisional attempt ID (UUIDv7) of the in-flight dispatch, shared by all
+    /// telemetry handles. Set at dispatch start and cleared at the end of the
+    /// bead cycle, so every event emitted in between carries the same
+    /// `attempt_id` (plan section 4.4 step 1).
+    current_attempt_id: Arc<std::sync::RwLock<Option<String>>>,
     /// Basename of the current workspace, shared by all telemetry handles.
     /// This is cached separately for efficient access in OTLP and other contexts
     /// where only the workspace name (not the full path) is needed.
@@ -3916,6 +4295,10 @@ impl Telemetry {
         Arc::new(std::sync::RwLock::new(None))
     }
 
+    fn new_attempt_cell() -> Arc<std::sync::RwLock<Option<String>>> {
+        Arc::new(std::sync::RwLock::new(None))
+    }
+
     fn new_basename_cell() -> Arc<std::sync::Mutex<Option<String>>> {
         Arc::new(std::sync::Mutex::new(None))
     }
@@ -3967,6 +4350,7 @@ impl Telemetry {
             session_id,
             sequence,
             current_workspace: Self::new_workspace_cell(),
+            current_attempt_id: Self::new_attempt_cell(),
             current_workspace_basename: Self::new_basename_cell(),
             sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
@@ -4024,6 +4408,7 @@ impl Telemetry {
             session_id,
             sequence,
             current_workspace: Self::new_workspace_cell(),
+            current_attempt_id: Self::new_attempt_cell(),
             current_workspace_basename: Self::new_basename_cell(),
             sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
@@ -4088,6 +4473,7 @@ impl Telemetry {
             session_id,
             sequence,
             current_workspace: Self::new_workspace_cell(),
+            current_attempt_id: Self::new_attempt_cell(),
             current_workspace_basename: Self::new_basename_cell(),
             sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
@@ -4216,6 +4602,7 @@ impl Telemetry {
             session_id,
             sequence,
             current_workspace: Self::new_workspace_cell(),
+            current_attempt_id: Self::new_attempt_cell(),
             current_workspace_basename: Self::new_basename_cell(),
             sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
@@ -4252,6 +4639,7 @@ impl Telemetry {
                 session_id,
                 sequence,
                 current_workspace: Self::new_workspace_cell(),
+                current_attempt_id: Self::new_attempt_cell(),
                 current_workspace_basename: Self::new_basename_cell(),
                 sender: Arc::new(std::sync::Mutex::new(Some(sender))),
                 pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
@@ -4274,6 +4662,7 @@ impl Telemetry {
             session_id,
             sequence,
             current_workspace: Self::new_workspace_cell(),
+            current_attempt_id: Self::new_attempt_cell(),
             current_workspace_basename: Self::new_basename_cell(),
             sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
@@ -4325,6 +4714,7 @@ impl Telemetry {
             session_id,
             sequence,
             current_workspace: Self::new_workspace_cell(),
+            current_attempt_id: Self::new_attempt_cell(),
             current_workspace_basename: Self::new_basename_cell(),
             sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(None)),
@@ -4390,6 +4780,57 @@ impl Telemetry {
         }
     }
 
+    /// Enter a dispatch cycle: record the provisional attempt ID that every
+    /// event emitted until [`clear_attempt_id`](Self::clear_attempt_id) will
+    /// carry.
+    ///
+    /// The ID is a UUIDv7 generated at dispatch start by the caller. It stays
+    /// provisional until N-T03 (bead-scoped attempt resolution) lands — plan
+    /// section 4.4 step 1.
+    pub fn set_attempt_id(&self, attempt_id: impl Into<String>) {
+        let attempt_id = attempt_id.into();
+        match self.current_attempt_id.write() {
+            Ok(mut current) => *current = Some(attempt_id),
+            Err(poisoned) => {
+                tracing::warn!("telemetry attempt lock poisoned; recovering current attempt ID");
+                *poisoned.into_inner() = Some(attempt_id);
+            }
+        }
+    }
+
+    /// Leave the dispatch cycle: stop stamping `attempt_id` onto events.
+    ///
+    /// Called when the bead cycle ends so post-cycle events (idle, next
+    /// selection) are not attributed to the previous attempt.
+    pub fn clear_attempt_id(&self) {
+        match self.current_attempt_id.write() {
+            Ok(mut current) => *current = None,
+            Err(poisoned) => {
+                tracing::warn!("telemetry attempt lock poisoned; clearing current attempt ID");
+                *poisoned.into_inner() = None;
+            }
+        }
+    }
+
+    /// The provisional attempt ID of the in-flight dispatch, if any.
+    ///
+    /// This is how the outcome handler — which holds its own clone of the
+    /// telemetry handle sharing the same cell — reads back the ID generated at
+    /// dispatch start, ready for the eventual `attempt.resolved` emission.
+    pub fn attempt_id(&self) -> Option<String> {
+        self.attempt_snapshot()
+    }
+
+    fn attempt_snapshot(&self) -> Option<String> {
+        match self.current_attempt_id.read() {
+            Ok(current) => current.clone(),
+            Err(poisoned) => {
+                tracing::warn!("telemetry attempt lock poisoned; recovering attempt snapshot");
+                poisoned.into_inner().clone()
+            }
+        }
+    }
+
     /// Update the cached workspace basename.
     ///
     /// Keeps the basename in sync with the full workspace path. Call this
@@ -4426,6 +4867,7 @@ impl Telemetry {
             data: kind.to_data(),
             trace_id,
             span_id,
+            attempt_id: self.attempt_snapshot(),
         }
     }
 
@@ -4621,6 +5063,7 @@ impl Telemetry {
             session_id,
             sequence,
             current_workspace: Self::new_workspace_cell(),
+            current_attempt_id: Self::new_attempt_cell(),
             current_workspace_basename: Self::new_basename_cell(),
             sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
@@ -5632,6 +6075,73 @@ mod tests {
     }
 
     #[test]
+    fn claim_recheck_event_types_are_distinct_from_canonical_verify() {
+        // needle-e0054281 (GitHub #20): the dispatch pipeline's two stage
+        // re-checks used to reuse the canonical `bead.claim.verify_*` names,
+        // so the one `verify_started` per dispatch counted three
+        // `verify_success`. The re-check names must stay distinct from the
+        // canonical ones or the stream overstates the ratio again.
+        let canonical_verify = [
+            (
+                EventKind::ClaimVerifyStarted {
+                    bead_id: BeadId::from("nd-x"),
+                    expected_actor: "worker-1".to_string(),
+                },
+                "bead.claim.verify_started",
+            ),
+            (
+                EventKind::ClaimVerifySuccess {
+                    bead_id: BeadId::from("nd-x"),
+                    expected_actor: "worker-1".to_string(),
+                },
+                "bead.claim.verify_success",
+            ),
+            (
+                EventKind::ClaimVerifyFailed {
+                    bead_id: BeadId::from("nd-x"),
+                    expected_actor: "worker-1".to_string(),
+                    actual_status: "in_progress".to_string(),
+                    actual_assignee: "worker-1".to_string(),
+                },
+                "bead.claim.verify_failed",
+            ),
+        ];
+        let stage_rechecks = [
+            (
+                EventKind::ClaimRecheckSucceeded {
+                    bead_id: BeadId::from("nd-x"),
+                    expected_actor: "worker-1".to_string(),
+                    stage: "pre_spawn".to_string(),
+                },
+                "bead.claim.recheck_succeeded",
+            ),
+            (
+                EventKind::ClaimRecheckFailed {
+                    bead_id: BeadId::from("nd-x"),
+                    expected_actor: "worker-1".to_string(),
+                    stage: "dispatching".to_string(),
+                    actual_status: "open".to_string(),
+                    actual_assignee: "other-worker".to_string(),
+                },
+                "bead.claim.recheck_failed",
+            ),
+        ];
+
+        for (kind, name) in canonical_verify.iter().chain(stage_rechecks.iter()) {
+            assert_eq!(kind.event_type(), *name);
+        }
+        for (recheck, recheck_name) in stage_rechecks.iter() {
+            for (_, canonical_name) in canonical_verify.iter() {
+                assert_ne!(
+                    recheck.event_type(),
+                    *canonical_name,
+                    "re-check event {recheck_name} must not be countable as {canonical_name}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn config_reload_event_types_and_payloads_are_stable_and_value_free() {
         let detected = EventKind::ConfigReloadDetected;
         assert_eq!(detected.event_type(), "config.reload.detected");
@@ -5755,6 +6265,7 @@ mod tests {
             duration_ms: Some(42),
             trace_id: None,
             span_id: None,
+            attempt_id: None,
         };
         let json = serde_json::to_string(&event).expect("serialize");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("parse back");
@@ -5777,6 +6288,7 @@ mod tests {
             duration_ms: None,
             trace_id: None,
             span_id: None,
+            attempt_id: None,
         };
         let json = serde_json::to_string(&event).expect("serialize");
         let parsed: TelemetryEvent = serde_json::from_str(&json).expect("deserialize");
@@ -5786,6 +6298,339 @@ mod tests {
         assert_eq!(parsed.sequence, event.sequence);
         assert_eq!(parsed.bead_id, event.bead_id);
         assert_eq!(parsed.data["retry_number"], 2);
+    }
+
+    #[test]
+    fn attempt_id_stamps_events_between_set_and_clear() {
+        let telemetry = Telemetry::new("needle-test".to_string());
+        assert_eq!(telemetry.attempt_id(), None, "no attempt before dispatch");
+
+        let attempt_id = "017f22e2-79b0-7cc3-98c4-dc0c0c07398f";
+        telemetry.set_attempt_id(attempt_id);
+
+        let in_cycle = telemetry.make_event(&EventKind::QueueEmpty, Utc::now());
+        assert_eq!(
+            in_cycle.attempt_id.as_deref(),
+            Some(attempt_id),
+            "events emitted during the dispatch cycle carry the provisional attempt ID"
+        );
+
+        telemetry.clear_attempt_id();
+        assert_eq!(telemetry.attempt_id(), None);
+        let after_cycle = telemetry.make_event(&EventKind::QueueEmpty, Utc::now());
+        assert_eq!(
+            after_cycle.attempt_id, None,
+            "post-cycle events must not be attributed to the previous attempt"
+        );
+    }
+
+    #[test]
+    fn attempt_id_is_visible_through_a_cloned_handle() {
+        // The outcome handler holds its own clone of the worker's telemetry
+        // handle (`OutcomeHandler::new(config, telemetry.clone())`), so the ID
+        // assigned at dispatch start must resolve through that clone too.
+        let telemetry = Telemetry::new("needle-test".to_string());
+        let handler_handle = telemetry.clone();
+        assert_eq!(handler_handle.attempt_id(), None);
+
+        telemetry.set_attempt_id("017f22e2-79b0-7cc3-98c4-dc0c0c07398f");
+        assert_eq!(
+            handler_handle.attempt_id().as_deref(),
+            Some("017f22e2-79b0-7cc3-98c4-dc0c0c07398f"),
+            "the dispatch-assigned attempt ID must be readable from the outcome handler's handle"
+        );
+    }
+
+    // ── attempt.resolved schema fixture (N-T16) ──────────────────────────────
+
+    /// The versioned contract every serialized `attempt.resolved` row must
+    /// satisfy. Compiled into the test binary so a moved or renamed fixture
+    /// is a build error rather than a silently skipped check.
+    fn attempt_resolved_fixture() -> serde_json::Value {
+        serde_json::from_str(include_str!(
+            "../../tests/fixtures/attempt-resolved-v1.schema.json"
+        ))
+        .expect("schema fixture must parse")
+    }
+
+    /// Check one value against one property spec from the fixture. Only the
+    /// JSON Schema subset the fixture actually uses is implemented — that
+    /// subset is closed, so an unsupported keyword here is a fixture bug to
+    /// fix, not a validation to skip.
+    fn check_value_matches_spec(
+        key: &str,
+        value: &serde_json::Value,
+        spec: &serde_json::Value,
+    ) -> Result<(), String> {
+        if let Some(expected) = spec.get("const") {
+            if value != expected {
+                return Err(format!(
+                    "{key} must equal the fixture const {expected}, got {value}"
+                ));
+            }
+        }
+        let spec_type = spec
+            .get("type")
+            .and_then(|t| t.as_str())
+            .unwrap_or_else(|| panic!("fixture spec for {key} must declare a type"));
+        match spec_type {
+            "string" => {
+                if !value.is_string() {
+                    return Err(format!("{key} must be a string, got {value}"));
+                }
+            }
+            "boolean" => {
+                if !value.is_boolean() {
+                    return Err(format!("{key} must be a boolean, got {value}"));
+                }
+            }
+            "integer" => {
+                let n = value
+                    .as_i64()
+                    .ok_or_else(|| format!("{key} must be an integer, got {value}"))?;
+                if let Some(min) = spec.get("minimum").and_then(|m| m.as_i64()) {
+                    if n < min {
+                        return Err(format!("{key}={n} is below the minimum {min}"));
+                    }
+                }
+            }
+            "number" => {
+                if !value.is_number() {
+                    return Err(format!("{key} must be a number, got {value}"));
+                }
+            }
+            "array" => {
+                let entries = value
+                    .as_array()
+                    .ok_or_else(|| format!("{key} must be an array, got {value}"))?;
+                if let Some(items) = spec.get("items") {
+                    for (i, entry) in entries.iter().enumerate() {
+                        check_value_matches_spec(&format!("{key}[{i}]"), entry, items)?;
+                    }
+                }
+            }
+            "object" => check_object_matches(key, value, spec)?,
+            other => panic!("fixture spec for {key} uses unsupported type {other}"),
+        }
+        if let Some(allowed) = spec.get("enum").and_then(|e| e.as_array()) {
+            if !allowed.contains(value) {
+                return Err(format!(
+                    "{key}={value} is not one of the fixture's enum values {allowed:?}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Check an object value against an object spec: required keys present,
+    /// and every key that appears covered by the fixture (strict — a field
+    /// missing from the fixture is a schema change that must be versioned).
+    fn check_object_matches(
+        key: &str,
+        value: &serde_json::Value,
+        spec: &serde_json::Value,
+    ) -> Result<(), String> {
+        let obj = value
+            .as_object()
+            .ok_or_else(|| format!("{key} must be an object, got {value}"))?;
+        if let Some(required) = spec.get("required").and_then(|r| r.as_array()) {
+            for field in required {
+                let field = field.as_str().expect("required entries are strings");
+                if !obj.contains_key(field) {
+                    return Err(format!("{key} is missing required field {field}"));
+                }
+            }
+        }
+        let props = spec
+            .get("properties")
+            .and_then(|p| p.as_object())
+            .expect("object spec must declare properties");
+        for field in obj.keys() {
+            if !props.contains_key(field) {
+                return Err(format!("{key}.{field} is not part of the fixture contract"));
+            }
+        }
+        for (field, field_value) in obj {
+            check_value_matches_spec(&format!("{key}.{field}"), field_value, &props[field])?;
+        }
+        Ok(())
+    }
+
+    /// A fully-populated ledger row, mirroring what the outcome handler emits
+    /// at the end of a real dispatch cycle.
+    fn attempt_resolved_fields() -> AttemptResolvedFields {
+        AttemptResolvedFields {
+            attempt_id: uuid::Uuid::now_v7().to_string(),
+            provisional: true,
+            bead_id: BeadId::from("needle-96dec90b"),
+            workspace: "/home/coding/NEEDLE".to_string(),
+            bead_revision_start: Some("f902c854".to_string()),
+            worker: "needle-test".to_string(),
+            adapter: "claude-code-glm-5.3-flash".to_string(),
+            model: Some("glm-5.3-flash".to_string()),
+            provider: Some("anthropic".to_string()),
+            prompt_template: "pluck".to_string(),
+            template_version: "pluck-default".to_string(),
+            context_manifest_hash: None, // absent until N-T10
+            gate_results: vec![
+                GateResultEntry {
+                    name: "fmt".to_string(),
+                    status: "pass".to_string(),
+                    duration_ms: 0,
+                },
+                GateResultEntry {
+                    name: "clippy".to_string(),
+                    status: "fail".to_string(),
+                    duration_ms: 0,
+                },
+            ],
+            outcome: "work_failure".to_string(),
+            requested_action: "Released".to_string(),
+            confirmed_state: None,
+            tokens_in: Some(120_000),
+            tokens_out: Some(4_500),
+            estimated_cost_usd: Some(0.0921),
+            commits: vec!["deadbee".to_string()],
+            duration_ms: 614_000,
+            terminal_reason: Some("gate:clippy".to_string()),
+            exit_code: 0,
+        }
+    }
+
+    fn fixture_spec() -> serde_json::Value {
+        serde_json::json!({
+            "required": attempt_resolved_fixture()["required"],
+            "properties": attempt_resolved_fixture()["properties"],
+        })
+    }
+
+    #[test]
+    fn attempt_resolved_fixture_describes_this_event() {
+        let fixture = attempt_resolved_fixture();
+        assert_eq!(fixture["title"], "attempt.resolved");
+        assert_eq!(
+            fixture["$id"],
+            "https://ardenone.com/schemas/needle/attempt-resolved-v1.schema.json"
+        );
+        // Every field AttemptResolvedFields can emit is covered by the fixture.
+        for field in [
+            "schema_version",
+            "attempt_id",
+            "provisional",
+            "bead_id",
+            "workspace",
+            "bead_revision_start",
+            "worker",
+            "adapter",
+            "model",
+            "provider",
+            "prompt_template",
+            "template_version",
+            "context_manifest_hash",
+            "gate_results",
+            "outcome",
+            "requested_action",
+            "confirmed_state",
+            "tokens_in",
+            "tokens_out",
+            "estimated_cost_usd",
+            "commits",
+            "duration_ms",
+            "terminal_reason",
+            "exit_code",
+        ] {
+            assert!(
+                fixture["properties"].get(field).is_some(),
+                "fixture does not describe field {field}"
+            );
+        }
+    }
+
+    #[test]
+    fn attempt_resolved_row_conforms_to_the_schema_fixture() {
+        let data = EventKind::AttemptResolved(Box::new(attempt_resolved_fields())).to_data();
+        check_object_matches("attempt.resolved", &data, &fixture_spec())
+            .unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    #[test]
+    fn attempt_resolved_row_with_only_required_fields_conforms() {
+        let mut fields = attempt_resolved_fields();
+        fields.bead_revision_start = None;
+        fields.model = None;
+        fields.provider = None;
+        fields.context_manifest_hash = None;
+        fields.confirmed_state = None;
+        fields.tokens_in = None;
+        fields.tokens_out = None;
+        fields.estimated_cost_usd = None;
+        fields.terminal_reason = None;
+        fields.gate_results = Vec::new();
+        fields.commits = Vec::new();
+
+        let data = EventKind::AttemptResolved(Box::new(fields)).to_data();
+        check_object_matches("attempt.resolved", &data, &fixture_spec())
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert!(
+            data.get("model").is_none(),
+            "absent optional fields must be omitted, not null"
+        );
+    }
+
+    #[test]
+    fn attempt_resolved_validator_rejects_an_unknown_field() {
+        // Proves the conformance check is not vacuous: a field outside the
+        // fixture contract must fail, since v1 rows are what consumers join on.
+        let mut data = EventKind::AttemptResolved(Box::new(attempt_resolved_fields())).to_data();
+        data["attempts"] = serde_json::json!(1);
+        let result = check_object_matches("attempt.resolved", &data, &fixture_spec());
+        assert!(result.is_err(), "an unknown field must fail validation");
+    }
+
+    #[test]
+    fn attempt_resolved_validator_rejects_an_off_enum_outcome() {
+        let mut fields = attempt_resolved_fields();
+        fields.outcome = "success-ish".to_string();
+        let data = EventKind::AttemptResolved(Box::new(fields)).to_data();
+        let result = check_object_matches("attempt.resolved", &data, &fixture_spec());
+        assert!(
+            result.is_err(),
+            "an outcome outside the enum must fail validation"
+        );
+    }
+
+    #[test]
+    fn telemetry_event_serializes_attempt_id_only_when_present() {
+        let attempt_id = "017f22e2-79b0-7cc3-98c4-dc0c0c07398f";
+        let with_attempt = TelemetryEvent {
+            timestamp: Utc::now(),
+            event_type: "state.transition".to_string(),
+            worker_id: "needle-test".to_string(),
+            session_id: "abcd1234".to_string(),
+            sequence: 0,
+            bead_id: None,
+            workspace: None,
+            data: serde_json::json!({}),
+            duration_ms: None,
+            trace_id: None,
+            span_id: None,
+            attempt_id: Some(attempt_id.to_string()),
+        };
+        let json = serde_json::to_string(&with_attempt).expect("serialize");
+        assert!(
+            json.contains(&format!("\"attempt_id\":\"{attempt_id}\"")),
+            "JSONL records must carry attempt_id during a dispatch: {json}"
+        );
+
+        let without_attempt = TelemetryEvent {
+            attempt_id: None,
+            ..with_attempt
+        };
+        let json = serde_json::to_string(&without_attempt).expect("serialize");
+        assert!(
+            !json.contains("attempt_id"),
+            "attempt_id should be omitted outside a dispatch cycle: {json}"
+        );
     }
 
     #[test]
@@ -5802,6 +6647,7 @@ mod tests {
             duration_ms: None,
             trace_id: None,
             span_id: None,
+            attempt_id: None,
         };
         let json = serde_json::to_string(&event).expect("serialize");
         assert!(
@@ -6105,6 +6951,7 @@ mod tests {
             duration_ms: None,
             trace_id: None,
             span_id: None,
+            attempt_id: None,
         };
 
         sink.accept(&event).expect("accept should succeed");
@@ -6158,6 +7005,7 @@ mod tests {
             duration_ms: None,
             trace_id: None,
             span_id: None,
+            attempt_id: None,
         };
         sink.accept(&event).unwrap();
 
@@ -6230,6 +7078,28 @@ mod tests {
             EventKind::StrandSkipped {
                 strand_name: "mend".to_string(),
                 reason: "disabled".to_string(),
+            },
+            EventKind::GenerationGateEvaluated {
+                strand_name: "weave".to_string(),
+                workspace: "/ws".to_string(),
+                reason: "low_water".to_string(),
+                eligible_ready: 0,
+                low_water_reserve: 2,
+            },
+            EventKind::GenerationWorkCreated {
+                strand_name: "weave".to_string(),
+                workspace: "/ws".to_string(),
+                detail: "2 beads".to_string(),
+            },
+            EventKind::GenerationCreatorFailed {
+                strand_name: "weave".to_string(),
+                workspace: "/ws".to_string(),
+                error: "agent exited 1".to_string(),
+            },
+            EventKind::CycleOutcome {
+                outcome: crate::telemetry::CycleOutcome::Generated,
+                workspace: Some("/ws".to_string()),
+                strand_name: Some("weave".to_string()),
             },
             EventKind::QueueEmpty,
             EventKind::ClaimAttempt {
@@ -6397,6 +7267,7 @@ mod tests {
             duration_ms: None,
             trace_id: None,
             span_id: None,
+            attempt_id: None,
         };
         let line = sink.format_event(&event);
         assert!(line.contains("15:30:00"));
@@ -6422,6 +7293,7 @@ mod tests {
             duration_ms: None,
             trace_id: None,
             span_id: None,
+            attempt_id: None,
         };
         let line = sink.format_event(&event);
         assert!(line.contains("CLAIMED"), "should use short type: {}", line);
@@ -6446,6 +7318,7 @@ mod tests {
             duration_ms: Some(3000),
             trace_id: None,
             span_id: None,
+            attempt_id: None,
         };
         let line = sink.format_event(&event);
         assert!(
@@ -6475,6 +7348,7 @@ mod tests {
             duration_ms: None,
             trace_id: None,
             span_id: None,
+            attempt_id: None,
         };
         let line = sink.format_event(&event);
         assert!(line.contains("\x1b[31m"), "errors should be red: {}", line);
@@ -6572,6 +7446,7 @@ mod tests {
             duration_ms: None,
             trace_id: None,
             span_id: None,
+            attempt_id: None,
         };
         let event2 = TelemetryEvent {
             timestamp: Utc::now(),
@@ -6585,6 +7460,7 @@ mod tests {
             duration_ms: None,
             trace_id: None,
             span_id: None,
+            attempt_id: None,
         };
 
         let log_file = dir.join("test-aabb0011.jsonl");
@@ -6621,6 +7497,7 @@ mod tests {
             duration_ms: None,
             trace_id: None,
             span_id: None,
+            attempt_id: None,
         };
         let event2 = TelemetryEvent {
             timestamp: Utc::now(),
@@ -6634,6 +7511,7 @@ mod tests {
             duration_ms: None,
             trace_id: None,
             span_id: None,
+            attempt_id: None,
         };
 
         let log_file = dir.join("test.jsonl");
@@ -6670,6 +7548,7 @@ mod tests {
             duration_ms: Some(2000),
             trace_id: None,
             span_id: None,
+            attempt_id: None,
         };
         let event2 = TelemetryEvent {
             timestamp: Utc::now(),
@@ -6683,6 +7562,7 @@ mod tests {
             duration_ms: Some(500),
             trace_id: None,
             span_id: None,
+            attempt_id: None,
         };
 
         let log_file = dir.join("test.jsonl");
@@ -6722,6 +7602,7 @@ mod tests {
             duration_ms: None,
             trace_id: None,
             span_id: None,
+            attempt_id: None,
         };
         let event2 = TelemetryEvent {
             timestamp: recent,
@@ -6735,6 +7616,7 @@ mod tests {
             duration_ms: None,
             trace_id: None,
             span_id: None,
+            attempt_id: None,
         };
 
         let log_file = dir.join("test.jsonl");
@@ -6769,6 +7651,7 @@ mod tests {
             duration_ms: None,
             trace_id: None,
             span_id: None,
+            attempt_id: None,
         };
         assert!(filter.matches(&event));
 
@@ -6796,6 +7679,7 @@ mod tests {
             duration_ms: None,
             trace_id: None,
             span_id: None,
+            attempt_id: None,
         };
         assert!(filter.matches(&matching));
 
@@ -6834,6 +7718,7 @@ mod tests {
                 duration_ms: Some(10000),
                 trace_id: None,
                 span_id: None,
+                attempt_id: None,
             },
             TelemetryEvent {
                 timestamp: Utc::now(),
@@ -6854,6 +7739,7 @@ mod tests {
                 duration_ms: Some(20000),
                 trace_id: None,
                 span_id: None,
+                attempt_id: None,
             },
             TelemetryEvent {
                 timestamp: Utc::now(),
@@ -6867,6 +7753,7 @@ mod tests {
                 duration_ms: None,
                 trace_id: None,
                 span_id: None,
+                attempt_id: None,
             },
         ];
 
@@ -6921,6 +7808,7 @@ mod tests {
             duration_ms: None,
             trace_id: None,
             span_id: None,
+            attempt_id: None,
         }
     }
 

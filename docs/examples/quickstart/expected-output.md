@@ -4,18 +4,20 @@ This file shows what a healthy NEEDLE quickstart run looks like, including the `
 
 ## `needle doctor` Output (All Checks Pass)
 
-Real output from needle 0.6.0 with bead 0.2.4, immediately after Step 4 (paths
-shortened, disk figure elided). The two `WARN` rows are normal on a fresh host:
-`sqlite3` is optional, and the heartbeat directory appears when the first worker
-starts.
+Real output from needle 0.6.0 with bead 0.2.6, immediately after Step 4
+(captured 2026-09-09; paths shortened, disk figure elided). The two `WARN` rows
+are normal on a fresh host: `sqlite3` is optional, and the heartbeat directory
+appears when the first worker starts.
 
 ```
 NEEDLE Doctor
 ────────────────────────────────────────────────────────────
 [PASS]  Config                        valid
+[PASS]  Gate commands                 none configured
 [PASS]  Workspace                     /tmp/needle-quickstart-project
 [WARN]  SQLite integrity              sqlite3 not on PATH — skipped
 [PASS]  Lock files                    none
+[PASS]  DoD bypasses                  none recorded
 [PASS]  Bead CLI Backend              bead-rs
          └─ CLI path: ~/.local/bin/bead
          └─ source: config file
@@ -34,7 +36,7 @@ NEEDLE Doctor
 [PASS]  Disk space                    <n> MB available
 [PASS]  Telemetry logs                no log directory yet
 ────────────────────────────────────────────────────────────
-14 passed, 2 warning(s), 0 failure(s).
+16 passed, 2 warning(s), 0 failure(s).
 Run `needle doctor --repair` to attempt automatic fixes.
 ```
 
@@ -65,10 +67,10 @@ $ needle run --agent claude -i alpha
 [2026-08-29 12:34:57] 🔍 SELECT: querying bead store...
 [2026-08-29 12:34:57]    Found 3 open beads
 [2026-08-29 12:34:57]    Ready frontier: 2 beads (1 blocked by dependency)
-[2026-08-29 12:34:57]    Selected: qs-abc123 (priority 2, created 2026-08-29T12:30:00Z)
+[2026-08-29 12:34:57]    Selected: quickstart-22da302f (priority 2, created 2026-08-29T12:30:00Z)
 
 [2026-08-29 12:34:57] 🔒 CLAIM: attempting atomic claim...
-[2026-08-29 12:34:57]    Claim successful: qs-abc123 → in_progress
+[2026-08-29 12:34:57]    Claim successful: quickstart-22da302f → in_progress
 [2026-08-29 12:34:57]    Assignee: needle-claude-alpha
 
 [2026-08-29 12:34:57] 📋 BUILD: constructing prompt...
@@ -90,7 +92,7 @@ $ needle run --agent claude -i alpha
 [2026-08-29 12:35:45]    Validating output...
 [2026-08-29 12:35:45]    ✓ Changes detected: CONTRIBUTING.md (new file)
 [2026-08-29 12:35:45]    ✓ Git commit created
-[2026-08-29 12:35:45]    Closing bead: qs-abc123
+[2026-08-29 12:35:45]    Closing bead: quickstart-22da302f
 [2026-08-29 12:35:45]    ✓ Closed successfully
 
 [2026-08-29 12:35:45] ─── Cycle complete in 48.1s ───
@@ -102,10 +104,10 @@ $ needle run --agent claude -i alpha
 [2026-08-29 12:35:46] 🔍 SELECT: querying bead store...
 [2026-08-29 12:35:46]    Found 2 open beads
 [2026-08-29 12:35:46]    Ready frontier: 1 bead (1 blocked by dependency)
-[2026-08-29 12:35:46]    Selected: qs-def456 (priority 2, created 2026-08-29T12:30:15Z)
+[2026-08-29 12:35:46]    Selected: quickstart-4cbf7f92 (priority 2, created 2026-08-29T12:30:15Z)
 
 [2026-08-29 12:35:46] 🔒 CLAIM: attempting atomic claim...
-[2026-08-29 12:35:46]    Claim successful: qs-def456 → in_progress
+[2026-08-29 12:35:46]    Claim successful: quickstart-4cbf7f92 → in_progress
 
 [2026-08-29 12:35:46] 📋 BUILD: constructing prompt...
 [2026-08-29 12:35:46]    Bead: Add LICENSE file
@@ -121,7 +123,7 @@ $ needle run --agent claude -i alpha
 [2026-08-29 12:36:30]    Validating output...
 [2026-08-29 12:36:30]    ✓ Changes detected: LICENSE (new file)
 [2026-08-29 12:36:30]    ✓ Git commit created
-[2026-08-29 12:36:30]    Closing bead: qs-def456
+[2026-08-29 12:36:30]    Closing bead: quickstart-4cbf7f92
 [2026-08-29 12:36:30]    ✓ Closed successfully
 
 [2026-08-29 12:36:30] ─── Cycle complete in 44.4s ───
@@ -132,11 +134,11 @@ $ needle run --agent claude -i alpha
 ```
 [2026-08-29 12:36:31] 🔍 SELECT: querying bead store...
 [2026-08-29 12:36:31]    Found 1 open beads
-[2026-08-29 12:36:31]    Ready frontier: 1 bead (dependency qs-def456 now closed)
-[2026-08-29 12:36:31]    Selected: qs-ghi789 (priority 1, created 2026-08-29T12:30:30Z)
+[2026-08-29 12:36:31]    Ready frontier: 1 bead (dependency quickstart-4cbf7f92 now closed)
+[2026-08-29 12:36:31]    Selected: quickstart-30fe61fb (priority 1, created 2026-08-29T12:30:30Z)
 
 [2026-08-29 12:36:31] 🔒 CLAIM: attempting atomic claim...
-[2026-08-29 12:36:31]    Claim successful: qs-ghi789 → in_progress
+[2026-08-29 12:36:31]    Claim successful: quickstart-30fe61fb → in_progress
 
 [2026-08-29 12:36:31] 📋 BUILD: constructing prompt...
 [2026-08-29 12:36:31]    Bead: Add simple Makefile
@@ -152,7 +154,7 @@ $ needle run --agent claude -i alpha
 [2026-08-29 12:37:15]    Validating output...
 [2026-08-29 12:37:15]    ✓ Changes detected: Makefile (new file)
 [2026-08-29 12:37:15]    ✓ Git commit created
-[2026-08-29 12:37:15]    Closing bead: qs-ghi789
+[2026-08-29 12:37:15]    Closing bead: quickstart-30fe61fb
 [2026-08-29 12:37:15]    ✓ Closed successfully
 
 [2026-08-29 12:37:15] ─── Cycle complete in 44.1s ───
@@ -187,20 +189,43 @@ $ needle run --agent claude -i alpha
 
 ## Verifying Results
 
+Real output from the verification run behind this document, with hashes shortened.
+Bead IDs differ every time (`bead init --prefix quickstart` mints fresh ones) and the
+commit subjects above are the fixture agent's wording — a Claude Code dispatch words
+its own; the shape is what matters:
+
 ```bash
 $ bead list --status closed
 
-ID           TITLE                    STATUS    CLOSED_AT
-qs-abc123    Add CONTRIBUTING.md     closed    2026-08-29T12:35:45Z
-qs-def456    Add LICENSE file         closed    2026-08-29T12:36:30Z
-qs-ghi789    Add simple Makefile      closed    2026-08-29T12:37:15Z
+ID: quickstart-22da302f
+  Title: Add CONTRIBUTING.md
+  Status: Closed
+  Priority: P2
+  Revision: 3
+  Assignee: quickstart-fixture-verify1
+
+ID: quickstart-4cbf7f92
+  Title: Add LICENSE file
+  Status: Closed
+  Priority: P2
+  Revision: 3
+  Assignee: quickstart-fixture-verify1
+
+ID: quickstart-30fe61fb
+  Title: Add simple Makefile
+  Status: Closed
+  Priority: P1
+  Revision: 3
+  Assignee: quickstart-fixture-verify1
 
 $ git log --oneline
 
-a1b2c3d fix(qs-ghi789): add simple Makefile
-d4e5f6g fix(qs-def456): add LICENSE file
-h8i9j0k fix(qs-abc123): add CONTRIBUTING.md
-l1m2n3o Initial commit
+ad68398 fix(quickstart-22da302f): add fixture deliverable
+4d781a7 fix(quickstart-30fe61fb): add fixture deliverable
+f1fd4e8 fix(quickstart-4cbf7f92): add fixture deliverable
+cf366b7 Initial commit
+
+$ git log --oneline origin/main..HEAD        # must print nothing: all commits pushed
 
 $ ls -la
 
@@ -212,6 +237,12 @@ drwxr-xr-x  .beads/
 -rw-r--r--  .needle.yaml
 ```
 
+The shipped-work gate is what makes those commits a requirement rather than a
+courtesy: with `worker.enforce_shipped_work: true` (the default), a closure only
+stands when its commit has been pushed to the branch's upstream. A workspace
+without one cannot be checked at all — see "The shipped-work gate" in the
+quickstart README.
+
 ## What to Look For
 
 ✅ **Healthy indicators:**
@@ -221,6 +252,7 @@ drwxr-xr-x  .beads/
 - Worker exits cleanly when queue is empty
 - Git commits are created with bead IDs in trailers
 - All three files are created in the workspace
+- `git log --oneline origin/main..HEAD` prints nothing — every commit reached the remote
 
 ❌ **Warning signs:**
 - Beads stuck in `in_progress` (agent crashed or hung)
@@ -228,3 +260,6 @@ drwxr-xr-x  .beads/
 - `needle doctor` shows `✗` marks (missing dependencies)
 - No git commits created (validation failed)
 - Files missing (agent didn't produce expected output)
+- `no upstream configured for branch '...'` in the worker log — the shipped-work
+  gate has nothing to verify pushes against; set the upstream or set
+  `worker.enforce_shipped_work: false`
