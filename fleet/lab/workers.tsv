@@ -1,0 +1,27 @@
+# lab fleet membership — the source-controlled answer to "which workers should
+# exist on lab, on which workspace, started at what offset".
+#
+# Columns (tab-separated):
+#   identifier      systemd instance (needle-worker@<identifier>) and worker --identifier
+#   workspace       absolute path; pinned via NEEDLE_WS (no roaming)
+#   agent           NEEDLE_AGENT (claude-code dispatcher identifier)
+#   start_delay     NEEDLE_START_DELAY seconds; spreads launches after reboot/mass restart
+#   explore         NEEDLE_STRANDS__EXPLORE__ENABLED (false pins the scan root away from $HOME)
+#
+# Seven workers on a 7-core fleet slice = ~1 core per worker. This is the
+# 2026-09-09 right-size of the 15-unit fleet that starved during the
+# 2026-09-03 CPU saturation (needle-3d5c65d8). Do not grow the fleet past
+# the slice quota in needle.slice without raising CPUQuota deliberately.
+#
+# Secret-bearing configuration deliberately stays OFF this host-copy list:
+# worker-common.env (NEEDLE_OTLP_AUTHORIZATION) is host-only, mode 600, and
+# referenced by the unit template but never rendered from this manifest.
+#
+#identifier	workspace	agent	start_delay	explore
+lab-beadrs	/home/coding/bead-rs	claude-code-glm-5.3-flash	15	false
+lab-needle	/home/coding/NEEDLE	claude-code-glm-5.3-flash	30	false
+lab-drawrace-public	/home/coding/drawrace	claude-code-glm-5.3-flash	60	false
+lab-gantry	/home/coding/gantry-rs	claude-code-glm-5.3-flash	75	false
+lab-miroir	/home/coding/miroir	claude-code-glm-5.3-flash	90	false
+lab-pdftract-php	/home/coding/pdftract-php	claude-code-glm-5.3-flash	120	false
+lab-pdftract-swift	/home/coding/pdftract-swift	claude-code-glm-5.3-flash	150	false

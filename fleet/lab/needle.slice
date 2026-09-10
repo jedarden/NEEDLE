@@ -1,0 +1,41 @@
+# NEEDLE fleet slice for lab (bare-metal NixOS, 12 logical cores).
+#
+# Source-controlled copy of the unit deployed at
+# ~/.config/systemd/user/needle.slice plus the drop-ins that historically
+# lived only on the host (~/.config/systemd/user/needle.slice.d/{cpu,limits}.conf).
+# The drop-ins set the same values and are left in place by apply-lab-fleet.sh;
+# this fragment is the authoritative copy. Apply with apply-lab-fleet.sh.
+#
+# See README.md "CPU budget accounting" for how this quota interacts with
+# launch admission (src/rate_limit/mod.rs).
+[Unit]
+Description=NEEDLE fleet workers (IO-capped)
+Before=slices.target
+
+[Slice]
+# 2026-08-16: 4 concurrent vitest runs in one repo sustained ~1.06 GB/s of
+# reads, drove io pressure to 94% and starved sshd's session setup — the box
+# looked wedged (ping fine, :22 open, SSH hanging). CPU/memory caps did not
+# help because they do not constrain IO.
+#
+# IOWeight deprioritises the fleet against system.slice (default 100), so
+# sshd keeps making progress under contention.
+IOWeight=50
+# Hard ceiling well under the ~1 GB/s storm, but above normal build reads.
+IOReadBandwidthMax=/dev/nvme0n1 500M
+IOWriteBandwidthMax=/dev/nvme0n1 300M
+
+# 2026-09-10 (needle-3d5c65d8): folded in from host-only drop-ins so the
+# whole budget is tracked. 700% = 7 of the host's 12 cores; this is ALSO the
+# core count launch admission sees, because available_parallelism() reads the
+# cgroup quota — see README.md before changing it.
+CPUWeight=100
+CPUQuota=700%
+
+# 2026-08-04, after a runaway test swarm (3 screenferry workers x ~12-way
+# vitest pools = ~36 node procs) saturated NVMe and made the box unable to
+# fork, requiring a power cycle. The slice had MemoryMax=infinity/TasksMax=infinity.
+# These caps bound ANY dispatch in ANY repo, not just vitest.
+MemoryMax=32G
+MemoryHigh=24G
+TasksMax=1500

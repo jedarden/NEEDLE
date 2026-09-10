@@ -1,0 +1,72 @@
+[Unit]
+Description=needle worker %i
+After=default.target
+# Backstop against tight crash loops. 2026-09-10 (needle-3d5c65d8): was
+# 300s/5 while RestartSec was 30s. The 2026-09-03 storm showed the old pair
+# never trips when the failure cycle is slower than the restart delay —
+# admission-deferred exits took ~155-185s per cycle, so units bounced at
+# 30s cadence for hours and racked up 130-355 restarts each. 120s restart
+# delay + 3 failures in 900s means a worker that keeps exiting now fails
+# VISIBLE after three cycles instead of bouncing silently all day.
+StartLimitIntervalSec=900
+StartLimitBurst=3
+
+[Service]
+Type=simple
+Slice=needle.slice
+WorkingDirectory=/home/coding
+
+# Per-instance agent, so one template serves every repo lab owns.
+# Missing file => unit fails loudly rather than silently working the wrong repo.
+EnvironmentFile=%h/.config/needle/workers/%i.env
+# Shared fleet credentials are kept out of the per-worker files so rotations
+# need one mode-600 update instead of fifteen plaintext copies.
+# This file is host-only and deliberately NOT tracked (it carries
+# NEEDLE_OTLP_AUTHORIZATION); apply-lab-fleet.sh requires it to already exist.
+EnvironmentFile=-%h/.config/needle/worker-common.env
+
+# NEEDLE_INNER=1 runs the worker loop in the foreground instead of
+# detaching into tmux, so systemd supervises the real process.
+Environment=NEEDLE_INNER=1
+Environment=PATH=/home/coding/.local/bin:/home/coding/.cargo/bin:/home/coding/bin:/run/wrappers/bin:/home/coding/.nix-profile/bin:/nix/profile/bin:/home/coding/.local/state/nix/profile/bin:/etc/profiles/per-user/coding/bin:/nix/var/nix/profiles/default/bin:/run/current-system/sw/bin
+
+# No DISPLAY/XAUTHORITY here, unlike bench: lab has no attached panel or
+# cameras, so browser-driving beads must stay on bench.
+
+# Pinned via NEEDLE_WS per instance rather than roaming: the claude-governor
+# queue currently holds unsplittable NEEDLE-internal beads (bf-4c4ip, bf-28oar)
+# that trap a roaming worker in a claim/retry loop without ever dispatching.
+# Drop --workspace to restore roaming once that family is triaged.
+
+# Staggered via NEEDLE_START_DELAY (seconds) per instance (workers.tsv) --
+# on a reboot (lingering is enabled) or a mass Restart=always retry,
+# every enabled instance reaches default.target at once; sleeping first
+# spreads the actual needle/claude process launches out instead of
+# thundering-herding CPU/API load, same pattern as ex44.
+ExecStartPre=/bin/sh -c 'sleep "${NEEDLE_START_DELAY:-0}"'
+
+ExecStart=/home/coding/.local/bin/needle run \
+  --workspace ${NEEDLE_WS} \
+  --agent ${NEEDLE_AGENT} \
+  --count 1 \
+  --identifier %i
+
+# Launch admission (N-T33, src/rate_limit/mod.rs) defers the launch while
+# load/cores > worker.cpu_load_warn (0.80) or free memory is under
+# worker.memory_free_warn_mb. Current builds HOLD RESIDENT while blocked and
+# resume selection when the host recovers, so saturation no longer produces
+# an exit here. Restart=always is for genuine crashes only — keep the retry
+# patient (120s, 2026-09-10/needle-3d5c65d8, was 30s) so a pathological
+# exit loop spreads itself out and trips the start limit above instead of
+# herding 15 units through systemd every half minute.
+#
+# The CPU/RAM safety threshold itself is NOT configurable from here and must
+# stay enabled: do not add NEEDLE_SKIP_LAUNCH_RESOURCE_CHECK to this file.
+Restart=always
+RestartSec=120
+TimeoutStartSec=300
+TimeoutStopSec=120
+KillSignal=SIGINT
+
+[Install]
+WantedBy=default.target

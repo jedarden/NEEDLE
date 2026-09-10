@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# Cargo wrapper: offloads heavy commands to iad-ci, limits local runs via cgroup.
+#
+# Tracked copy of the wrapper deployed at ~/.local/bin/cargo on lab and
+# codinghome (upstream lives in operator dotfiles; no repo claimed it as of
+# 2026-09-10). Only delta vs upstream: `-p RuntimeMaxSec=14400` below —
+# needle-3d5c65d8. The 2026-09-03 lab CPU saturation was five hung SIGIL
+# cargo-test binaries living in unbounded scopes for 14-24 days (one spun at
+# ~7 effective cores). RuntimeMaxSec makes systemd reap any orphaned scope
+# after 4h instead of never; a legitimate build under CPUQuota=200% has
+# hours of headroom, and CI-offloaded `cargo test` never reaches this path.
+#
+# Install with: fleet/lab/apply-lab-fleet.sh --install-cargo-wrapper
+REAL_CARGO="$HOME/.cargo/bin/cargo"
+SUBCOMMAND="${1:-}"
+
+local_limited() {
+    if systemd-run --scope --user --description="cargo $SUBCOMMAND" \
+            -p CPUQuota=200% -p MemoryMax=6G -p MemorySwapMax=0 \
+            -p RuntimeMaxSec=14400 -q -- \
+            "$REAL_CARGO" "$@" 2>/dev/null; then
+        return $?
+    fi
+    # systemd-run unavailable (container/non-session env) — run directly
+    exec "$REAL_CARGO" "$@"
+}
+
+# Enable rust-verify for cargo test on git repos with remotes
+if [[ "$SUBCOMMAND" == "test" ]]; then
+    if git rev-parse --git-dir &>/dev/null 2>&1 && \
+       git remote get-url origin &>/dev/null 2>&1; then
+        exec ~/.local/bin/cargo-remote "$@"
+    fi
+fi
+
+local_limited "$@"
