@@ -1,13 +1,13 @@
 {
-  "timestamp": "2026-09-07T22:42:29.690066142Z",
-  "total_open_beads": 411,
+  "timestamp": "2026-09-09T23:42:35.509611246Z",
+  "total_open_beads": 424,
   "exclusion_criteria": {
-    "has_assignee": 1,
+    "has_assignee": 2,
     "manually_blocked": 8,
-    "has_dependencies": 358,
+    "has_dependencies": 366,
     "resource_conflicts": 0
   },
-  "final_candidate_count": 77,
+  "final_candidate_count": 80,
   "excluded_beads": [
     {
       "bead_id": "needle-6b02eb9d",
@@ -104,7 +104,7 @@
       "assignee": null,
       "manual_blocked": false,
       "has_blockers": true,
-      "blocker_count": 4,
+      "blocker_count": 3,
       "has_resource_conflicts": false,
       "conflict_count": 0
     },
@@ -160,17 +160,6 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 4,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
-      "bead_id": "needle-ee024ae4",
-      "title": "Prevent Explore from reselecting split-out-of-scope internal artifacts",
-      "priority": 0,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 2,
       "has_resource_conflicts": false,
       "conflict_count": 0
     },
@@ -1006,7 +995,7 @@
       "assignee": null,
       "manual_blocked": false,
       "has_blockers": true,
-      "blocker_count": 3,
+      "blocker_count": 2,
       "has_resource_conflicts": false,
       "conflict_count": 0
     },
@@ -1491,6 +1480,61 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 2,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-6aa1ccf1",
+      "title": "Capability → harness translation tables for claude-print and codex, plus the adapter-definition lint (no LOOM strand on an adapter invoking claude -p/--print)",
+      "priority": 1,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-04e4eaa7",
+      "title": "Weft adapter mapping: run the mapped adapter from workspace_root with the translated envelope, the brief's timeout/max_turns and prompt_markdown verbatim; download attachments to scratch_dir and delete after",
+      "priority": 1,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 3,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-0ea049d0",
+      "title": "WeftStrand skeleton: LOOM client over ureq (list/claim/brief/heartbeat/complete/fail) and the StrandResult variant for work performed without a bead (with ADR)",
+      "priority": 1,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-8e24cef6",
+      "title": "Land the in-flight pluck StarvationSnapshot emitter rewrite: commit, verify, ship",
+      "priority": 1,
+      "assignee": "claude-code-glm-5.3-flash-glm-mta",
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 2,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-ec3bfb2f",
+      "title": "handle_crash never increments the failure count or cooldown, so a crash-looping bead can never quarantine",
+      "priority": 1,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
       "has_resource_conflicts": false,
       "conflict_count": 0
     },
@@ -3629,6 +3673,61 @@
       "conflict_count": 0
     },
     {
+      "bead_id": "needle-52adccb4",
+      "title": "Waterfall insertion by loom.position and telemetry events weft.claimed / weft.completed / weft.failed / weft.lease_lost / weft.unreachable",
+      "priority": 2,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-17298ce0",
+      "title": "courier handling: backend detection (bead-rs vs bf), bead/bf create in target_repo, completion with {bead_id, backend}",
+      "priority": 2,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-980afbb6",
+      "title": "Weft conformance test: replay LOOM's docs/api/conformance/*.json against a mock server, once per configured adapter mapping; CI gate",
+      "priority": 2,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 3,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-0d7f9a37",
+      "title": "Weft: list a missing scope path as (missing on <host>) in the worker's framing and proceed (EC-16)",
+      "priority": 2,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-216baf70",
+      "title": "Output parse ladder implemented from EC-05 with local fixtures (fenced JSON → bare text with parse_fallback → empty → fail empty_reply)",
+      "priority": 2,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
       "bead_id": "needle-bc4ac726",
       "title": "16.14 Per-descriptor subprocess timeouts — DEFAULT_BR_TIMEOUT_SECS is hardcoded 30s for every backend",
       "priority": 3,
@@ -3675,6 +3774,17 @@
     {
       "bead_id": "needle-881ce3da",
       "title": "Test: claim, release, re-claim reports one completion against two claims",
+      "priority": 3,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-31eb8331",
+      "title": "Fleet rollout note in NEEDLE docs: codinghome runs the before_pluck worker first; every other host after_pluck; onboarding pointer",
       "priority": 3,
       "assignee": null,
       "manual_blocked": false,
