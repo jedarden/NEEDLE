@@ -1,10 +1,10 @@
 {
-  "timestamp": "2026-09-10T11:40:37.441519698Z",
-  "total_open_beads": 420,
+  "timestamp": "2026-09-10T12:30:51.440408246Z",
+  "total_open_beads": 419,
   "exclusion_criteria": {
     "has_assignee": 2,
     "manually_blocked": 8,
-    "has_dependencies": 362,
+    "has_dependencies": 361,
     "resource_conflicts": 0
   },
   "final_candidate_count": 79,
@@ -1574,17 +1574,6 @@
     {
       "bead_id": "needle-7005057c",
       "title": "Add error handling to heartbeat cleanup",
-      "priority": 2,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
-      "bead_id": "needle-651c35f3",
-      "title": "Verify long-run claim logging and lint compliance",
       "priority": 2,
       "assignee": null,
       "manual_blocked": false,
