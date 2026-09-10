@@ -12,6 +12,27 @@
 //! This writer bounds total bytes instead: `max_bytes × (max_files + 1)`, which is
 //! the number an operator actually cares about — "NEEDLE cannot exceed N".
 //!
+//! # Line bound
+//!
+//! Byte rotation alone does not bound a single event: one leaked span stack
+//! can format a multi-hundred-KiB line in a single call, which is why
+//! [`DEFAULT_MAX_LINE_BYTES`] exists alongside the roll threshold. Every line
+//! passing through [`LineCappedMakeWriter`] is at most `max_line_bytes` bytes
+//! *including* its terminating newline — the formatter's payload gets
+//! `max_line_bytes - 1`, and the newline always fits. Bytes past the limit on
+//! a line are discarded and reported as written so the formatter never
+//! retries them; full output resumes at the next newline. Truncation is
+//! deterministic (input line N maps to output line N) and cannot fail — an
+//! oversized event degrades to a short line, never to an error or an
+//! unbounded write.
+//!
+//! In production the cap is applied at the writer boundary, so it holds
+//! wherever a line is headed: `worker_log_writer` (in `cli`) wraps both the
+//! rolling [`SizeCappedWriter`] file *and* the stderr fallback in
+//! [`LineCappedMakeWriter`]. The structured JSONL that `telemetry::FileSink`
+//! writes is a separate path and is intentionally not capped — the bound is
+//! for the human-readable stream, not for structured telemetry.
+//!
 //! # What it deliberately does not do
 //!
 //! It does not fix whatever is producing the volume. A cap turns a disk-filling
@@ -462,5 +483,117 @@ mod tests {
             .inner
             .split_inclusive(|byte| *byte == b'\n')
             .all(|line| line.len() <= 8));
+    }
+
+    // ── line-cap boundary cases ─────────────────────────────────────────────
+    //
+    // The runaway and split-write tests above exercise lines well past the
+    // cap; these pin the exact edge. The bound is on the emitted line *with*
+    // its newline, so the payload limit is always `cap - 1`.
+
+    /// A payload landing exactly on the limit must pass through untouched:
+    /// `cap - 1` payload bytes plus the newline is precisely `cap`.
+    #[test]
+    fn line_exactly_at_the_cap_passes_through_untruncated() {
+        const CAP: usize = 16;
+        let mut writer = LineCappedWriter::new(Vec::new(), CAP);
+        let payload = vec![b'a'; CAP - 1];
+        writer.write_all(&payload).unwrap();
+        writer.write_all(b"\n").unwrap();
+
+        let mut expected = payload;
+        expected.push(b'\n');
+        assert_eq!(writer.inner, expected);
+        assert_eq!(writer.inner.len(), CAP, "a cap-sized line is kept whole");
+    }
+
+    /// One byte over the cap loses exactly that byte: the emitted line is
+    /// still `cap` bytes, and the discarded tail never leaks into the next
+    /// line.
+    #[test]
+    fn line_one_byte_over_the_cap_truncates_by_exactly_one_byte() {
+        const CAP: usize = 16;
+        let mut writer = LineCappedWriter::new(Vec::new(), CAP);
+        // 16 payload bytes: one past the `cap - 1` payload limit.
+        writer.write_all(b"abcdefghijklmnop\n").unwrap();
+
+        assert_eq!(writer.inner, b"abcdefghijklmno\n");
+        assert_eq!(writer.inner.len(), CAP);
+    }
+
+    /// The limit is on the accumulated line, not on any single write: bytes
+    /// may pile up to the payload limit across calls, and only the first byte
+    /// past it is dropped.
+    #[test]
+    fn line_cap_boundary_is_on_the_accumulated_line_not_the_write() {
+        const CAP: usize = 16;
+        let mut writer = LineCappedWriter::new(Vec::new(), CAP);
+
+        writer.write_all(b"0123456789").unwrap(); // 10 bytes
+        writer.write_all(b"01234").unwrap(); // 15 — exactly the payload limit
+        writer.write_all(b"5\n").unwrap(); // '5' is past it; '\n' terminates
+
+        assert_eq!(writer.inner, b"012345678901234\n");
+        assert_eq!(writer.inner.len(), CAP);
+    }
+
+    /// The degenerate cap of one still makes progress: every payload byte is
+    /// dropped, the newline survives, and the writer never wedges.
+    #[test]
+    fn minimum_cap_of_one_emits_only_newlines() {
+        let mut writer = LineCappedWriter::new(Vec::new(), 1);
+        writer.write_all(b"suppressed\n").unwrap();
+        assert_eq!(writer.inner, b"\n");
+    }
+
+    /// The production composition: the line cap wraps the rolling file
+    /// writer at the `MakeWriter` boundary, so no path from a formatted
+    /// tracing event to the file can exceed the cap — and a within-cap event
+    /// still reaches it verbatim.
+    #[test]
+    fn make_writer_boundary_caps_lines_before_the_rolling_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("capped.log");
+        const CAP: usize = 128;
+
+        let make_writer =
+            LineCappedMakeWriter::new(SizeCappedWriter::new(&path, 64 * 1024, 2).unwrap(), CAP);
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(make_writer)
+            .with_ansi(false)
+            .without_time()
+            .finish();
+
+        let oversized = "y".repeat(CAP * 3);
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(message = "oversized-boundary-probe", payload = %oversized);
+            tracing::info!("compact-boundary-probe");
+        });
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = content.lines().collect();
+        assert_eq!(lines.len(), 2, "one emitted line per event: {content:?}");
+        // `line.len() < CAP` is the cap including the newline: the content on
+        // disk never carries more than `CAP - 1` payload bytes.
+        assert!(
+            lines.iter().all(|line| line.len() < CAP),
+            "every emitted line including its newline must be within the cap: {:?}",
+            lines.iter().map(|l| l.len()).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            lines[0].len(),
+            CAP - 1,
+            "an oversized event degrades to exactly the payload limit"
+        );
+        assert!(
+            lines[0].contains("oversized-boundary-probe"),
+            "truncation keeps the leading part of the event: {:?}",
+            lines[0]
+        );
+        assert!(
+            lines[1].contains("compact-boundary-probe"),
+            "a within-cap event passes through intact: {:?}",
+            lines[1]
+        );
     }
 }
