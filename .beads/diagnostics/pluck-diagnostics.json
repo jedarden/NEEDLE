@@ -1,13 +1,13 @@
 {
-  "timestamp": "2026-09-10T03:28:23.286664181Z",
-  "total_open_beads": 425,
+  "timestamp": "2026-09-10T03:51:09.547276716Z",
+  "total_open_beads": 423,
   "exclusion_criteria": {
     "has_assignee": 2,
     "manually_blocked": 8,
-    "has_dependencies": 366,
+    "has_dependencies": 365,
     "resource_conflicts": 0
   },
-  "final_candidate_count": 80,
+  "final_candidate_count": 79,
   "excluded_beads": [
     {
       "bead_id": "needle-6b02eb9d",
@@ -248,17 +248,6 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 2,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
-      "bead_id": "needle-6cf4d9fc",
-      "title": "Recover timeout-created permanent deferrals in TradeGraph workspaces",
-      "priority": 0,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 1,
       "has_resource_conflicts": false,
       "conflict_count": 0
     },
@@ -940,7 +929,7 @@
       "assignee": null,
       "manual_blocked": false,
       "has_blockers": true,
-      "blocker_count": 16,
+      "blocker_count": 15,
       "has_resource_conflicts": false,
       "conflict_count": 0
     },
