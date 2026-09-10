@@ -3439,3 +3439,7 @@
 {"last_strand":null,"state":"idle","ts":"2026-09-10T05:26:25.587984332+00:00","worker":"glm-needle"}
 {"last_strand":null,"state":"idle","ts":"2026-09-10T05:32:40.039228839+00:00","worker":"glm-needle"}
 {"last_strand":null,"state":"idle","ts":"2026-09-10T06:03:32.368135147+00:00","worker":"glm-needle"}
+{"last_strand":null,"state":"idle","ts":"2026-09-10T06:29:07.150761206+00:00","worker":"test-worker"}
+{"last_strand":null,"state":"idle","ts":"2026-09-10T06:29:07.159051200+00:00","worker":"test-worker"}
+{"last_strand":null,"state":"idle","ts":"2026-09-10T06:29:07.346357155+00:00","worker":"test-zero-budget"}
+{"last_strand":null,"state":"idle","ts":"2026-09-10T06:37:07.183309385+00:00","worker":"glm-needle"}
