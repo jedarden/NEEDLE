@@ -3444,3 +3444,4 @@
 {"last_strand":null,"state":"idle","ts":"2026-09-10T06:29:07.346357155+00:00","worker":"test-zero-budget"}
 {"last_strand":null,"state":"idle","ts":"2026-09-10T06:37:07.183309385+00:00","worker":"glm-needle"}
 {"last_strand":null,"state":"idle","ts":"2026-09-10T07:23:46.284379690+00:00","worker":"glm-needle"}
+{"last_strand":null,"state":"idle","ts":"2026-09-10T08:24:20.394636401+00:00","worker":"glm-needle"}
