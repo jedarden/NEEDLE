@@ -45,6 +45,7 @@ use crate::prompt::{BuiltPrompt, PromptBuilder};
 use crate::rate_limit::RateLimiter;
 use crate::registry::{LiveConfigSnapshot, Registry, WorkerEntry};
 use crate::routing;
+use crate::span::ScopeGuard;
 use crate::strand::StrandRunner;
 use crate::telemetry::{EventKind, Telemetry};
 use crate::types::{
@@ -1457,7 +1458,11 @@ impl Worker {
                     self.apply_bead_action(action).await?;
                 }
                 WorkerState::Logging => {
-                    lifecycle_span.in_scope(|| self.do_log())?;
+                    // Keep the entered guard inside a synchronous helper frame.
+                    // Letting it live in this async state-machine frame can retain
+                    // lifecycle entries across later polls and recursively parent
+                    // the next cycle's span until the worker overflows its stack.
+                    self.do_log_scoped(&lifecycle_span)?;
 
                     // After logging completes, check if the running binary is stale
                     // compared to the latest needle-stable on disk. If a new binary
@@ -4636,6 +4641,16 @@ impl Worker {
                 );
             }
         }
+    }
+
+    /// Run the synchronous LOGGING handler inside the lifecycle span.
+    ///
+    /// The guard is deliberately local to this non-async helper so it is dropped
+    /// before the worker loop reaches another `.await` or starts another claim
+    /// cycle. This keeps lifecycle spans LIFO-safe across repeated dispatches.
+    fn do_log_scoped(&mut self, lifecycle_span: &tracing::Span) -> Result<()> {
+        let _lifecycle_guard = ScopeGuard::new(lifecycle_span.clone());
+        self.do_log()
     }
 
     /// LOGGING: record effort telemetry, check budget, update registry, and
@@ -9190,7 +9205,7 @@ mod tests {
                     });
 
                     worker.last_outcome = Some("success".to_string());
-                    lifecycle_span.in_scope(|| worker.do_log()).unwrap();
+                    worker.do_log_scoped(&lifecycle_span).unwrap();
                     assert!(worker.bead_lifecycle_span.is_none());
                 }
 
@@ -9227,6 +9242,76 @@ mod tests {
         assert!(probe_lines
             .iter()
             .all(|line| line.matches("bead.lifecycle{").count() == 1));
+    }
+
+    #[tokio::test]
+    async fn do_log_scoped_enters_lifecycle_span_only_for_the_sync_call() {
+        let captured = CapturedLogs::default();
+        let writer = crate::log_writer::LineCappedMakeWriter::new(
+            captured.clone(),
+            crate::log_writer::DEFAULT_MAX_LINE_BYTES,
+        );
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(writer)
+            .with_ansi(false)
+            .without_time()
+            .finish();
+        let home = tempfile::tempdir().unwrap();
+        let store = Arc::new(MockStore::empty());
+        let mut config = valid_test_config();
+        config.self_modification.hot_reload = false;
+        config.workspace.home = home.path().to_path_buf();
+        config.workspace.default = home.path().to_path_buf();
+        config.strands.explore.enabled = false;
+        config.strands.explore.workspace_root = home.path().to_path_buf();
+        config.strands.explore.workspaces = Vec::new();
+        let mut worker = Worker::new(config, "log-scoped".to_string(), store);
+        worker.boot().await.unwrap();
+
+        let bead = make_test_bead("needle-log-scoped");
+        worker.current_bead = Some(bead.clone());
+        worker.last_effort = Some(EffortData {
+            cycle_start: Instant::now(),
+            agent_name: "probe-agent".to_string(),
+            model: None,
+            provider: None,
+            tokens: dispatch::TokenUsage::default(),
+            estimated_cost_usd: Some(0.01),
+        });
+        worker.last_outcome = Some("success".to_string());
+
+        // Construct the span under the subscriber that captures the assertions;
+        // spans are bound to the active dispatcher when they are created.
+        tracing::subscriber::with_default(subscriber, || {
+            let lifecycle_span = tracing::info_span!(
+                "bead.lifecycle",
+                needle.bead.id = %bead.id.as_ref(),
+                needle.bead.outcome = tracing::field::Empty,
+            );
+            worker.bead_lifecycle_span = Some(lifecycle_span.clone());
+            worker.do_log_scoped(&lifecycle_span).unwrap();
+            tracing::info!("post-log-scope-probe");
+        });
+
+        let bytes = captured.0.lock().unwrap().clone();
+        let logs = String::from_utf8_lossy(&bytes);
+        let effort_line = logs
+            .lines()
+            .find(|line| line.contains("effort recorded"))
+            .expect("do_log should emit the effort-recorded event");
+        assert!(
+            effort_line.contains("bead.lifecycle{"),
+            "effort-recorded event lost its bead.lifecycle attribution: {effort_line}"
+        );
+
+        let probe_line = logs
+            .lines()
+            .find(|line| line.contains("post-log-scope-probe"))
+            .expect("post-log probe event should be captured");
+        assert!(
+            !probe_line.contains("bead.lifecycle{"),
+            "lifecycle guard leaked past do_log_scoped: {probe_line}"
+        );
     }
 
     #[tokio::test]
