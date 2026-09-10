@@ -1428,7 +1428,14 @@ impl OutcomeHandler {
         Ok((action, events))
     }
 
-    /// Timeout: release bead and add `deferred` label.
+    /// Timeout: release the bead and let it cool down behind an expiring
+    /// deferral.
+    ///
+    /// The handler only increments the failure count — the round the deferral
+    /// ladder reads. The `deferred:<rfc3339>` hold itself is written by the
+    /// worker's `apply_bead_action`, the single choke point for
+    /// [`BeadAction::Deferred`], so no path can pair the action with the
+    /// permanent bare `deferred` label again (N-T26).
     ///
     /// If br calls timeout or fail, logs the error and continues — does not
     /// block the worker in HANDLING state indefinitely.
@@ -1439,9 +1446,8 @@ impl OutcomeHandler {
     ) -> Result<(BeadAction, Vec<EventKind>)> {
         tracing::warn!(bead_id = %bead.id, "agent timed out — releasing bead as deferred");
 
-        let mut events = self.prepare_release_events(store, bead).await?;
+        let events = self.prepare_release_events(store, bead).await?;
 
-        // If release succeeded, increment failure count and add deferred label.
         // The release itself now happens later in the worker's apply_bead_action(),
         // so no BeadReleased event exists here. Testing for one made this always
         // false, silently disabling the failure-count/quarantine follow-up. Treat
@@ -1450,32 +1456,14 @@ impl OutcomeHandler {
             .iter()
             .any(|e| matches!(e, EventKind::WorkerHandlingTimeout { .. }));
         if release_succeeded {
-            // Increment failure count for auto-split tracking.
+            // Increment failure count for auto-split tracking; the count is
+            // also the deferral ladder round the applied hold will use.
             if let Err(e) = self.increment_failure_count(store, bead).await {
                 tracing::warn!(
                     bead_id = %bead.id,
                     error = %e,
                     "failed to increment failure count after timeout"
                 );
-            }
-
-            if let Err(e) = tokio::time::timeout(
-                std::time::Duration::from_secs(30),
-                store.add_label(&bead.id, "deferred"),
-            )
-            .await
-            {
-                tracing::warn!(
-                    bead_id = %bead.id,
-                    error = %e,
-                    "add_label deferred timed out or failed after timeout release"
-                );
-                events.push(EventKind::WorkerHandlingTimeout {
-                    bead_id: bead.id.clone(),
-                    outcome: "timeout".to_string(),
-                    operation: "add_label".to_string(),
-                    error: e.to_string(),
-                });
             }
         }
 
@@ -1853,13 +1841,16 @@ impl OutcomeHandler {
 
         // Remove every retry/quarantine label. A successful dispatch after an
         // expired quarantine starts a fresh failure series; leaving an old
-        // future timestamp behind would hide otherwise healthy work.
+        // future timestamp behind would hide otherwise healthy work. Stale
+        // `deferred:<rfc3339>` windows (N-T26) are cleared here too — only the
+        // expiring form, never the operator-owned bare `deferred`.
         let mut removed_count = 0;
         for label in &labels {
             if label.starts_with("failure-count:")
                 || label.starts_with("quarantine-until:")
                 || label.starts_with("quarantine-round:")
                 || label.starts_with("quarantine:")
+                || label.starts_with("deferred:")
                 || label == "quarantined"
                 || label == "cycling"
             {
@@ -2875,7 +2866,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_timeout_releases_and_adds_deferred() {
+    async fn handle_timeout_returns_deferred_without_a_permanent_label() {
         let handler = test_handler();
         let store = test_store(BeadStatus::InProgress);
         let bead = test_bead(BeadStatus::InProgress);
@@ -2893,10 +2884,10 @@ mod tests {
         // the worker via apply_bead_action(). The release intent is asserted above as
         // result.bead_action; a StoreAction::Release here would now never appear.
         assert!(
-            actions
+            !actions
                 .iter()
                 .any(|a| matches!(a, StoreAction::AddLabel(_, label) if label == "deferred")),
-            "timeout must add deferred label"
+            "the outcome handler must never add the permanent bare deferred label"
         );
     }
 

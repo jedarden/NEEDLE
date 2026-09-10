@@ -8,6 +8,7 @@
 //! Given the same queue state, every worker computes the same candidate list.
 
 use crate::bead_store::{active_quarantine_until, BeadStore, Filters};
+use crate::deferral::{holds as deferral_holds, until as deferred_until};
 use crate::mitosis::detects_needle_internal_config;
 use crate::telemetry::Telemetry;
 use crate::types::{Bead, BeadId, BrDependency, Comment, StrandError, StrandResult};
@@ -189,7 +190,10 @@ impl FilteringStats {
             }
 
             if matches!(bead.status, crate::types::BeadStatus::Deferred)
-                || bead.labels.iter().any(|label| is_deferred_label(label))
+                || bead
+                    .labels
+                    .iter()
+                    .any(|label| deferral_holds(label, inventory_now))
                 || bead.assignee.is_some()
             {
                 stats.exclusion_counts.deferred_assignee += 1;
@@ -276,7 +280,7 @@ fn passes_never_relaxed_constraints(
         && !bead
             .labels
             .iter()
-            .any(|label| is_never_relaxed_label(label))
+            .any(|label| is_never_relaxed_label(label, now))
         && active_quarantine_until(bead, now).is_none()
 }
 
@@ -292,7 +296,7 @@ fn passes_never_relaxed_ready_constraints(bead: &Bead, now: chrono::DateTime<Utc
         && !bead
             .labels
             .iter()
-            .any(|label| is_never_relaxed_label(label))
+            .any(|label| is_never_relaxed_label(label, now))
         && active_quarantine_until(bead, now).is_none()
 }
 
@@ -304,6 +308,7 @@ fn exclusion_reasons_for_bead(
     beads: &[Bead],
     exclude_labels: &[String],
     exclude_ids: &HashSet<BeadId>,
+    now: chrono::DateTime<Utc>,
 ) -> Vec<String> {
     let finished_by_id: HashMap<BeadId, bool> = beads
         .iter()
@@ -318,7 +323,7 @@ fn exclusion_reasons_for_bead(
     }
 
     for label in &bead.labels {
-        if exclude_labels.contains(label) {
+        if exclude_labels.contains(label) || deferral_holds(label, now) {
             reasons.push(format!("label:{label}"));
         }
     }
@@ -348,9 +353,10 @@ fn open_bead_diagnostic(
     beads: &[Bead],
     exclude_labels: &[String],
     exclude_ids: &HashSet<BeadId>,
+    now: chrono::DateTime<Utc>,
 ) -> OpenBeadDiagnostic {
     let inferred_exclusion_reasons =
-        exclusion_reasons_for_bead(bead, beads, exclude_labels, exclude_ids);
+        exclusion_reasons_for_bead(bead, beads, exclude_labels, exclude_ids, now);
     let is_ready = inferred_exclusion_reasons.is_empty();
     let exclusion_reasons = if is_ready {
         // The backend can omit a bead from ready() without exposing a
@@ -392,7 +398,7 @@ fn starvation_diagnostic_snapshot(
     let open_beads: Vec<OpenBeadDiagnostic> = beads
         .iter()
         .filter(|bead| is_open_work_bead(bead))
-        .map(|bead| open_bead_diagnostic(bead, beads, exclude_labels, exclude_ids))
+        .map(|bead| open_bead_diagnostic(bead, beads, exclude_labels, exclude_ids, timestamp))
         .collect();
 
     let mut exclusion_reason_counts = BTreeMap::new();
@@ -489,8 +495,8 @@ fn is_human_like_label(label: &str, exclude_labels: &[String]) -> bool {
         })
 }
 
-fn is_never_relaxed_label(label: &str) -> bool {
-    is_manual_block_label(label) || is_deferred_label(label) || is_human_like_label(label, &[])
+fn is_never_relaxed_label(label: &str, now: chrono::DateTime<Utc>) -> bool {
+    is_manual_block_label(label) || deferral_holds(label, now) || is_human_like_label(label, &[])
 }
 
 fn workspace_from_inventory(beads: &[Bead]) -> String {
@@ -702,8 +708,13 @@ fn write_pluck_diagnostic(
             .iter()
             .filter(|bead| is_open_work_bead(bead))
             .map(|bead| {
-                let reasons =
-                    exclusion_reasons_for_bead(bead, all_beads, exclude_labels, exclude_ids);
+                let reasons = exclusion_reasons_for_bead(
+                    bead,
+                    all_beads,
+                    exclude_labels,
+                    exclude_ids,
+                    Utc::now(),
+                );
                 PerBeadExclusion {
                     bead_id: bead.id.to_string(),
                     bead_title: bead.title.clone(),
@@ -1636,6 +1647,48 @@ impl super::Strand for PluckStrand {
         //    candidates regardless of backend behaviour, preventing the
         //    SELECTING→CLAIMING→RETRYING spin loop observed when br ready --json
         //    omits label fields for some beads.
+        // Expired automatic deferrals no longer hold work. Remove their stale
+        // labels opportunistically and emit the same lifecycle signal used by
+        // ADR-022 quarantine expiry. Selection never depends on this cleanup:
+        // a failed label removal still leaves an expired bead eligible.
+        let deferral_now = Utc::now();
+        for candidate in &candidates {
+            let expired: Vec<&str> = candidate
+                .labels
+                .iter()
+                .filter_map(|label| {
+                    deferred_until(label)
+                        .filter(|until| *until <= deferral_now)
+                        .map(|_| label.as_str())
+                })
+                .collect();
+            if expired.is_empty() {
+                continue;
+            }
+            for label in expired {
+                if let Err(error) = store.remove_label(&candidate.id, label).await {
+                    tracing::warn!(
+                        bead_id = %candidate.id,
+                        label,
+                        error = %error,
+                        "failed to remove expired deferral label"
+                    );
+                }
+            }
+            if let Err(error) = self.telemetry.emit(
+                crate::telemetry::EventKind::QuarantineExpired {
+                    bead_id: candidate.id.clone(),
+                },
+                deferral_now,
+            ) {
+                tracing::warn!(
+                    bead_id = %candidate.id,
+                    error = %error,
+                    "failed to emit expired deferral telemetry"
+                );
+            }
+        }
+
         let before_label_filter = candidates.len();
         let worker_label_exclusions = if relaxation_tier.ignores_labels() {
             &[]
@@ -1643,7 +1696,7 @@ impl super::Strand for PluckStrand {
             self.exclude_labels.as_slice()
         };
         let label_is_excluded = |label: &str| {
-            is_never_relaxed_label(label)
+            is_never_relaxed_label(label, deferral_now)
                 || worker_label_exclusions
                     .iter()
                     .any(|excluded| excluded == label)
@@ -1976,9 +2029,13 @@ impl super::Strand for PluckStrand {
                 // report would name one cause and omit the others. Explain
                 // every open bead from the inventory instead.
                 for bead in beads.iter().filter(|b| is_open_work_bead(b)) {
-                    for reason in
-                        exclusion_reasons_for_bead(bead, beads, &self.exclude_labels, exclusions)
-                    {
+                    for reason in exclusion_reasons_for_bead(
+                        bead,
+                        beads,
+                        &self.exclude_labels,
+                        exclusions,
+                        Utc::now(),
+                    ) {
                         if !stats.exclusion_reasons.contains(&reason) {
                             stats.exclusion_reasons.push(reason);
                         }
@@ -3143,6 +3200,37 @@ mod tests {
             }
             other => panic!("expected BeadFound, got: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn expired_timeout_deferral_is_selected_and_emits_expiry() {
+        use crate::telemetry::test_utils::TestHelper;
+
+        let now = Utc::now();
+        let future = (now + chrono::Duration::hours(1)).to_rfc3339();
+        let past = (now - chrono::Duration::hours(1)).to_rfc3339();
+        let store = MemoryStore {
+            beads: vec![
+                make_bead_with_labels("future-deferral", 1, vec![&format!("deferred:{future}")]),
+                make_bead_with_labels("expired-deferral", 1, vec![&format!("deferred:{past}")]),
+            ],
+        };
+        let helper = TestHelper::new("test-worker");
+        let strand = PluckStrand::new(vec![], helper.telemetry().clone());
+
+        let result = strand.evaluate(&store, &HashSet::new()).await;
+
+        match result {
+            StrandResult::BeadFound(beads) => {
+                let ids: Vec<&str> = beads.iter().map(|bead| bead.id.as_ref()).collect();
+                assert_eq!(ids, vec!["expired-deferral"]);
+            }
+            other => panic!("expected the expired deferral to be claimable, got: {other:?}"),
+        }
+        helper.sync().await;
+        let expiry_events = helper.events_by_type("bead.quarantine_expired");
+        assert_eq!(expiry_events.len(), 1);
+        assert_eq!(expiry_events[0].data["bead_id"], "expired-deferral");
     }
 
     #[tokio::test]

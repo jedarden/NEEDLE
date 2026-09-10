@@ -4623,6 +4623,54 @@ fn doctor_check_bead_store(
     Ok((result, Some(store)))
 }
 
+/// Report operator-owned, non-expiring `deferred` labels.
+///
+/// Automatic timeout handling must never create this form. Doctor remains
+/// read-only even under `--repair`: deciding whether a permanent deferral was
+/// intentional belongs to the operator, so this row names the affected beads
+/// and supplies the scoped command to run after review.
+fn doctor_check_permanent_deferred_labels(store: &std::sync::Arc<dyn BeadStore>) -> CheckResult {
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(error) => {
+            return CheckResult::warn(
+                "Permanent deferrals",
+                format!("unable to create runtime for label inspection: {error}"),
+            )
+        }
+    };
+    match rt.block_on(store.list_all()) {
+        Ok(beads) => doctor_result_for_permanent_deferred_labels(&beads),
+        Err(error) => CheckResult::warn(
+            "Permanent deferrals",
+            format!("unable to inspect bead labels: {error}"),
+        ),
+    }
+}
+
+fn doctor_result_for_permanent_deferred_labels(beads: &[crate::types::Bead]) -> CheckResult {
+    let mut ids: Vec<String> = beads
+        .iter()
+        .filter(|bead| crate::deferral::is_permanent(bead))
+        .map(|bead| bead.id.to_string())
+        .collect();
+    ids.sort();
+
+    if ids.is_empty() {
+        return CheckResult::pass("Permanent deferrals", "none");
+    }
+
+    CheckResult::warn(
+        "Permanent deferrals",
+        format!(
+            "{} bead(s) carry the non-expiring bare `deferred` label",
+            ids.len()
+        ),
+    )
+    .with_detail(ids)
+    .with_fix("bead label remove <ID> --label deferred")
+}
+
 fn doctor_check_bead_backend(config: &Config) -> CheckResult {
     let (backend, path, source) = match crate::config::resolve_bead_cli(&config.bead_cli) {
         Ok(resolved) => resolved,
@@ -5273,6 +5321,7 @@ fn cmd_doctor(repair: bool, workspace: Option<PathBuf>, json: bool) -> Result<()
             &beads_dir,
             &config.bead_cli,
         ));
+        results.push(doctor_check_permanent_deferred_labels(&store));
     }
 
     // Worker registry
@@ -6783,6 +6832,41 @@ mod tests {
     #[test]
     fn last_nato_is_zulu() {
         assert_eq!(NATO_ALPHABET[25], "zulu");
+    }
+
+    #[test]
+    fn doctor_lists_only_bare_permanent_deferrals() {
+        let make_bead = |id: &str, labels: Vec<&str>| -> crate::types::Bead {
+            serde_json::from_value(serde_json::json!({
+                "id": id,
+                "title": id,
+                "description": null,
+                "priority": 2,
+                "status": "open",
+                "assignee": null,
+                "labels": labels,
+                "source_repo": "/tmp/doctor-test",
+                "dependencies": [],
+                "dependents": [],
+                "comments": [],
+                "created_at": "2026-09-01T00:00:00Z",
+                "updated_at": "2026-09-01T00:00:00Z"
+            }))
+            .unwrap()
+        };
+        let beads = vec![
+            make_bead("permanent", vec!["deferred"]),
+            make_bead("expiring", vec!["deferred:2099-01-01T00:00:00Z"]),
+            make_bead("ordinary", vec![]),
+        ];
+
+        let result = doctor_result_for_permanent_deferred_labels(&beads);
+        assert_eq!(result.status, CheckStatus::Warn);
+        assert_eq!(result.detail, vec!["permanent"]);
+        assert_eq!(
+            result.fix.as_deref(),
+            Some("bead label remove <ID> --label deferred")
+        );
     }
 
     #[test]

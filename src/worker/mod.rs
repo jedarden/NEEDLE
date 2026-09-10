@@ -4437,14 +4437,14 @@ impl Worker {
                 )?;
             }
             BeadAction::Deferred => {
-                // Release and add deferred label.
+                // Release and hold behind an expiring deferral window. The
+                // hold is written here — the choke point for the action — in
+                // the ADR-022 expiring form (N-T26); the permanent bare
+                // `deferred` label is operator territory and nothing automatic
+                // may add it.
                 tokio::time::timeout(Duration::from_secs(30), self.store.release(&bead.id))
                     .await??;
-                let _ = tokio::time::timeout(
-                    Duration::from_secs(30),
-                    self.store.add_label(&bead.id, "deferred"),
-                )
-                .await;
+                self.apply_deferral_hold(&bead).await;
                 self.telemetry.emit(
                     EventKind::BeadReleased {
                         bead_id: bead.id.clone(),
@@ -4531,6 +4531,111 @@ impl Worker {
         }
 
         Ok(())
+    }
+
+    /// Hold a just-released bead behind an expiring `deferred:<rfc3339>`
+    /// label (N-T26, ADR-022).
+    ///
+    /// The window comes from the deferral ladder at the bead's current failure
+    /// round — 2h, 4h, 8h — so a bead that keeps timing out cools down longer
+    /// each time but never permanently: once the instant passes, Pluck and the
+    /// ready query treat it as claimable again with no human action. Windows
+    /// from earlier rounds are removed first so a bead carries at most one
+    /// live hold; only the expiring form is touched, never the operator-owned
+    /// bare `deferred`.
+    ///
+    /// Every call is timeout-wrapped and non-fatal: a hold that fails to
+    /// transfer leaves the bead claimable, which is the safe direction — the
+    /// permanent form is the one that starved a P1 (beadrs-e167fde8).
+    async fn apply_deferral_hold(&self, bead: &Bead) {
+        let labels = match tokio::time::timeout(
+            Duration::from_secs(30),
+            self.store.labels(&bead.id),
+        )
+        .await
+        {
+            Ok(Ok(labels)) => labels,
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    error = %e,
+                    "could not read labels for the deferral hold; bead left claimable"
+                );
+                return;
+            }
+            Err(_) => {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    "labels() timed out after 30s; skipping the deferral hold"
+                );
+                return;
+            }
+        };
+
+        // The ladder round is the failure count the outcome handler just
+        // wrote; unreadable counts fall back to the shortest window.
+        let round = labels
+            .iter()
+            .filter_map(|label| label.strip_prefix("failure-count:"))
+            .filter_map(|count| count.parse::<u32>().ok())
+            .max()
+            .unwrap_or(1);
+        let hold_label = crate::deferral::label_for_round(round, chrono::Utc::now());
+
+        for label in labels.iter().filter(|label| label.starts_with("deferred:")) {
+            match tokio::time::timeout(
+                Duration::from_secs(30),
+                self.store.remove_label(&bead.id, label),
+            )
+            .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        label,
+                        error = %e,
+                        "failed to remove a stale deferral window"
+                    );
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        label,
+                        "remove_label timed out after 30s clearing a stale deferral window"
+                    );
+                }
+            }
+        }
+
+        match tokio::time::timeout(
+            Duration::from_secs(30),
+            self.store.add_label(&bead.id, &hold_label),
+        )
+        .await
+        {
+            Ok(Ok(())) => {
+                tracing::info!(
+                    bead_id = %bead.id,
+                    round,
+                    until = %hold_label,
+                    "bead deferred behind an expiring window"
+                );
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    error = %e,
+                    "failed to add the deferral hold; bead left claimable"
+                );
+            }
+            Err(_) => {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    "add_label timed out after 30s; deferral hold not applied"
+                );
+            }
+        }
     }
 
     /// LOGGING: record effort telemetry, check budget, update registry, and
@@ -8019,13 +8124,27 @@ mod tests {
             bead.assignee = None;
             Ok(())
         }
-        async fn labels(&self, _id: &BeadId) -> Result<Vec<String>> {
-            Ok(vec![])
+        async fn labels(&self, id: &BeadId) -> Result<Vec<String>> {
+            Ok(self.show(id).await?.labels)
         }
-        async fn add_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
+        async fn add_label(&self, id: &BeadId, label: &str) -> Result<()> {
+            let mut beads = self.beads.lock().unwrap();
+            let bead = beads
+                .iter_mut()
+                .find(|bead| bead.id == *id)
+                .ok_or_else(|| anyhow::anyhow!("bead not found: {id}"))?;
+            if !bead.labels.iter().any(|existing| existing == label) {
+                bead.labels.push(label.to_string());
+            }
             Ok(())
         }
-        async fn remove_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
+        async fn remove_label(&self, id: &BeadId, label: &str) -> Result<()> {
+            let mut beads = self.beads.lock().unwrap();
+            let bead = beads
+                .iter_mut()
+                .find(|bead| bead.id == *id)
+                .ok_or_else(|| anyhow::anyhow!("bead not found: {id}"))?;
+            bead.labels.retain(|existing| existing != label);
             Ok(())
         }
         async fn create_bead(&self, _title: &str, _body: &str, _labels: &[&str]) -> Result<BeadId> {
@@ -8514,6 +8633,32 @@ mod tests {
             store.show(&eligible.id).await.unwrap().status,
             BeadStatus::InProgress
         );
+    }
+
+    #[tokio::test]
+    async fn timeout_hold_replaces_old_windows_without_adding_bare_deferred() {
+        let mut bead = make_test_bead("needle-timeout-window");
+        bead.labels = vec![
+            "failure-count:2".to_string(),
+            "deferred:2026-09-01T00:00:00Z".to_string(),
+        ];
+        let store = Arc::new(MockStore::new(vec![bead.clone()]));
+        let worker = make_worker(store.clone());
+        let before = chrono::Utc::now();
+
+        worker.apply_deferral_hold(&bead).await;
+
+        let labels = store.labels(&bead.id).await.unwrap();
+        assert!(!labels.iter().any(|label| label == "deferred"));
+        assert!(!labels
+            .iter()
+            .any(|label| label == "deferred:2026-09-01T00:00:00Z"));
+        let until = labels
+            .iter()
+            .find_map(|label| crate::deferral::until(label))
+            .expect("an expiring deferred label should be installed");
+        assert!(until >= before + chrono::Duration::hours(4));
+        assert!(until <= chrono::Utc::now() + chrono::Duration::hours(4));
     }
 
     #[tokio::test]

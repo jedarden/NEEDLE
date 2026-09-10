@@ -16,6 +16,7 @@ pub mod commit_hook;
 pub mod config;
 pub mod cost;
 pub mod decision;
+mod deferral;
 pub mod dispatch;
 pub mod drift;
 pub mod fingerprint;

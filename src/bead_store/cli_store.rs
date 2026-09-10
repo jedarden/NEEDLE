@@ -503,7 +503,13 @@ impl BeadStore for CliBeadStore {
                     .any(|label| filters.exclude_labels.contains(label))
         });
         let now = chrono::Utc::now();
-        beads.retain(|bead| super::active_quarantine_until(bead, now).is_none());
+        // An ADR-022 quarantine and an expiring deferral (N-T26) are both
+        // time-bounded holds: drop them here so every consumer of `ready()` —
+        // Pluck's tiers included — honours the expiry, not just the label form.
+        beads.retain(|bead| {
+            super::active_quarantine_until(bead, now).is_none()
+                && crate::deferral::active_until(bead, now).is_none()
+        });
         Ok(beads)
     }
 
