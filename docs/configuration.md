@@ -103,7 +103,8 @@ This guide covers the most commonly used configuration options.
 - `limits.models` — Model-level rate limits
 
 **Validation gates:**
-- `gates` — Gate configuration
+- `gates` — Gate configuration. Gates resolve from the **bead's** workspace config at outcome time, never from the worker's startup config — a worker homed in a gate-declaring workspace does not carry those gates onto foreign beads, and a workspace that declares no gates runs none (needle-da77b68a)
+- `verification` — Legacy gate commands; resolved the same per-workspace way
 - `validation.outcome_timeout_seconds` — Gate execution timeout
 - `validation.stderr_cap_bytes` — Stderr capture limit
 
@@ -566,10 +567,22 @@ bead_cli:
 # backend: bead-rs          # Native bead-rs workspace after rehydration
 # explicit_path: /opt/bin/bead  # Optional host-specific operator override
 
+gates:                       # Validation gates owned by THIS workspace
+  - type: command
+    commands:
+      - scripts/definition-of-done.sh --fast
+
 # These fields are ignored if set in .needle.yaml:
 # - workspace.default (resolved globally)
 # - workspace.home (resolved globally)
 ```
+
+`gates` (and its legacy `verification` spelling) declared here apply to beads
+that **belong to this workspace**: they are resolved from the bead's workspace
+config when the dispatch outcome is judged, the same way `bead_cli.backend` is.
+A worker homed in a gate-declaring workspace does not carry those gates onto
+beads elsewhere — a workspace that declares no gates runs none. Declare a gate
+in every workspace whose work it should judge.
 
 `bead-forge` resolves the `bf` executable and requires its identity to begin
 with `bf `. `bead-rs` resolves `bead` and requires `bead `. Identity is checked
