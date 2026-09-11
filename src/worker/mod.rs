@@ -12436,11 +12436,24 @@ mod tests {
 
     #[test]
     fn is_supervisor_present_with_defaults() {
-        // Test the convenience wrapper with default paths
-        // This should return false in a test environment with no supervisor
+        // Take the process-wide env lock: this test reads HOME through
+        // is_supervisor_present()'s default paths, and unlocked it raced every
+        // test that swaps HOME — is_supervisor_present_with_custom_home
+        // publishes a fresh supervisor heartbeat under its temp HOME, so an
+        // interleaved read resolved the "defaults" against that directory and
+        // flipped this assertion to true (intermittent test-lib reds in CI).
+        let _env_guard = crate::util::test_env::isolate_env();
+
+        // Hermetic HOME: no supervisor artifacts, so the defaults cannot pick
+        // up a heartbeat or socket left by another test or by a live
+        // supervisor on the host running the suite.
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("HOME", home.path());
+
+        // Test the convenience wrapper with default paths. With no supervisor
+        // artifacts under HOME, this should return false.
         let result = is_supervisor_present();
 
-        // In test environment, no supervisor should be running
         assert!(
             !result,
             "should return false in test environment with no supervisor"
