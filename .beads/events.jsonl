@@ -10204,3 +10204,6 @@
 {"bead":"needle-96dec90b","event":"claim","strand":"pluck","ts":"2026-09-11T01:15:36.482926415+00:00","worker":"glm-needle"}
 {"adapter":"claude-code-glm-5.3-flash","bead":"needle-96dec90b","event":"dispatch","model":"glm-5.3-flash","strand":"pluck","ts":"2026-09-11T01:15:37.058781162+00:00","worker":"glm-needle"}
 {"adapter":"claude-sonnet","attempt_id":"01a08e19-9f72-70c0-bc11-5422e2032048","bead":"needle-attempt-id","event":"dispatch","model":"claude-sonnet-4-6","ts":"2026-09-11T01:33:59.026164348+00:00","worker":"test-worker"}
+{"bead":"needle-96dec90b","duration_ms":3602200,"event":"timeout","exit_code":124,"outcome":"timeout","strand":"pluck","ts":"2026-09-11T02:15:39.451417030+00:00","worker":"glm-needle"}
+{"bead":"needle-e4fbe47c","event":"claim","strand":"pluck","ts":"2026-09-11T02:15:43.880107582+00:00","worker":"glm-needle"}
+{"adapter":"claude-code-glm-5.3-flash","bead":"needle-e4fbe47c","event":"dispatch","model":"glm-5.3-flash","strand":"pluck","ts":"2026-09-11T02:15:44.381159052+00:00","worker":"glm-needle"}
