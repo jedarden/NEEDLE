@@ -185,6 +185,9 @@ pub struct AttemptResolvedFields {
     pub template_version: String,
     pub context_manifest_hash: Option<String>,
     pub gate_results: Vec<GateResultEntry>,
+    /// Wire string of one [`AttemptOutcome`] variant — the schema fixture's
+    /// `outcome` enum. Stored as `String` so emitters can pass their mapped
+    /// `&'static str` directly; [`AttemptOutcome::try_from`] parses it back.
     pub outcome: String,
     pub requested_action: String,
     pub confirmed_state: Option<String>,
@@ -195,6 +198,91 @@ pub struct AttemptResolvedFields {
     pub duration_ms: u64,
     pub terminal_reason: Option<String>,
     pub exit_code: i32,
+}
+
+/// The semantic outcome vocabulary of an `attempt.resolved` ledger row
+/// (plan section 3.2): what the work did, independent of what the lifecycle
+/// will do about it.
+///
+/// The wire form is snake_case and matches the `outcome` enum of
+/// `tests/fixtures/attempt-resolved-v1.schema.json`, which is the versioned
+/// contract consumers validate against — a variant added here without a
+/// fixture version bump (or vice versa) is caught by
+/// `attempt_outcome_wire_vocabulary_matches_the_schema_fixture`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttemptOutcome {
+    /// The work passed every gate.
+    VerifiedSuccess,
+    /// A gate ran and rejected the work, or the agent reported failure;
+    /// attributable to the attempt.
+    WorkFailure,
+    /// Nothing judged the work: the agent binary was missing or crashed, or a
+    /// gate could not run / could never pass. Feeds workspace health, not the
+    /// bead's failure count.
+    InfrastructureFailure,
+    /// The worker was interrupted before a verdict.
+    Cancelled,
+    /// Ownership was re-checked at resolution time and lost (ADR-024).
+    StaleOwnership,
+    /// The attempt ended without a verdict: the time budget expired while the
+    /// work was still running.
+    Indeterminate,
+}
+
+impl AttemptOutcome {
+    /// Every variant, for exhaustive iteration.
+    pub const ALL: [AttemptOutcome; 6] = [
+        AttemptOutcome::VerifiedSuccess,
+        AttemptOutcome::WorkFailure,
+        AttemptOutcome::InfrastructureFailure,
+        AttemptOutcome::Cancelled,
+        AttemptOutcome::StaleOwnership,
+        AttemptOutcome::Indeterminate,
+    ];
+
+    /// The wire string stored in ledger rows.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AttemptOutcome::VerifiedSuccess => "verified_success",
+            AttemptOutcome::WorkFailure => "work_failure",
+            AttemptOutcome::InfrastructureFailure => "infrastructure_failure",
+            AttemptOutcome::Cancelled => "cancelled",
+            AttemptOutcome::StaleOwnership => "stale_ownership",
+            AttemptOutcome::Indeterminate => "indeterminate",
+        }
+    }
+}
+
+impl std::fmt::Display for AttemptOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl TryFrom<&str> for AttemptOutcome {
+    type Error = String;
+
+    fn try_from(value: &str) -> std::result::Result<Self, Self::Error> {
+        Self::ALL
+            .iter()
+            .find(|outcome| outcome.as_str() == value)
+            .copied()
+            .ok_or_else(|| {
+                format!(
+                    "unknown attempt outcome {value:?}; expected one of {:?}",
+                    Self::ALL.map(|outcome| outcome.as_str())
+                )
+            })
+    }
+}
+
+impl TryFrom<String> for AttemptOutcome {
+    type Error = String;
+
+    fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
+        AttemptOutcome::try_from(value.as_str())
+    }
 }
 
 /// Typed event variants emitted by all NEEDLE components.
@@ -6596,6 +6684,126 @@ mod tests {
         assert!(
             result.is_err(),
             "an outcome outside the enum must fail validation"
+        );
+    }
+
+    #[test]
+    fn attempt_resolved_event_type_is_attempt_resolved() {
+        let kind = EventKind::AttemptResolved(Box::new(attempt_resolved_fields()));
+        assert_eq!(kind.event_type(), "attempt.resolved");
+    }
+
+    #[test]
+    fn attempt_outcome_round_trips_all_six_variants() {
+        for outcome in AttemptOutcome::ALL {
+            let wire = outcome.as_str();
+            let json = serde_json::to_string(&outcome).expect("serialize");
+            assert_eq!(
+                json,
+                format!("\"{wire}\""),
+                "serde wire form must equal as_str for {wire}"
+            );
+            let parsed: AttemptOutcome = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(parsed, outcome, "serde round-trip must preserve {wire}");
+            assert_eq!(
+                AttemptOutcome::try_from(wire).expect("parse"),
+                outcome,
+                "try_from must round-trip {wire}"
+            );
+            assert_eq!(
+                outcome.to_string(),
+                wire,
+                "Display must equal as_str for {wire}"
+            );
+        }
+    }
+
+    #[test]
+    fn attempt_outcome_wire_vocabulary_matches_the_schema_fixture() {
+        let mut fixture_enum: Vec<String> = attempt_resolved_fixture()["properties"]["outcome"]
+            ["enum"]
+            .as_array()
+            .expect("fixture outcome must declare an enum")
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .expect("enum entries are strings")
+                    .to_string()
+            })
+            .collect();
+        fixture_enum.sort();
+        let mut wire: Vec<String> = AttemptOutcome::ALL
+            .iter()
+            .map(|outcome| outcome.as_str().to_string())
+            .collect();
+        wire.sort();
+        assert_eq!(
+            wire, fixture_enum,
+            "AttemptOutcome and the versioned fixture's outcome enum must not drift apart"
+        );
+    }
+
+    #[test]
+    fn attempt_outcome_rejects_strings_outside_the_vocabulary() {
+        assert!(AttemptOutcome::try_from("success-ish").is_err());
+        // The vocabulary is case-exact: ledger consumers join on these strings.
+        assert!(AttemptOutcome::try_from("Verified_Success").is_err());
+        assert!(AttemptOutcome::try_from("").is_err());
+    }
+
+    #[test]
+    fn attempt_resolved_row_round_trips_through_the_jsonl_record() {
+        let mut fields = attempt_resolved_fields();
+        fields.context_manifest_hash = Some("9f2b1c4d5e6a7b8c".to_string());
+        let kind = EventKind::AttemptResolved(Box::new(fields.clone()));
+        let event = TelemetryEvent {
+            timestamp: Utc::now(),
+            event_type: kind.event_type().to_string(),
+            worker_id: fields.worker.clone(),
+            session_id: "abcd1234".to_string(),
+            sequence: 7,
+            bead_id: Some(fields.bead_id.clone()),
+            workspace: Some(PathBuf::from(&fields.workspace)),
+            data: kind.to_data(),
+            duration_ms: Some(fields.duration_ms),
+            trace_id: None,
+            span_id: None,
+            attempt_id: Some(fields.attempt_id.clone()),
+        };
+
+        let json = serde_json::to_string(&event).expect("serialize");
+        let parsed: TelemetryEvent = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.event_type, "attempt.resolved");
+        assert_eq!(
+            parsed.attempt_id.as_deref(),
+            Some(fields.attempt_id.as_str()),
+            "the provisional attempt ID must survive the JSONL round-trip"
+        );
+        assert_eq!(
+            parsed.data, event.data,
+            "the ledger payload must survive the JSONL round-trip byte-identically"
+        );
+        assert_eq!(parsed.data["schema_version"], 1);
+        assert_eq!(parsed.data["outcome"], "work_failure");
+        assert_eq!(
+            parsed.data["context_manifest_hash"], "9f2b1c4d5e6a7b8c",
+            "a present hash must survive the round-trip"
+        );
+        assert_eq!(parsed.duration_ms, Some(fields.duration_ms));
+    }
+
+    #[test]
+    fn attempt_resolved_row_omits_context_manifest_hash_when_none() {
+        // v1 contract: the hash is absent until N-T10 ships manifest hashing,
+        // never null — the versioned fixture types the field as a plain
+        // string, so a null would fail every downstream validator.
+        let mut fields = attempt_resolved_fields();
+        fields.context_manifest_hash = None;
+        let data = EventKind::AttemptResolved(Box::new(fields)).to_data();
+        assert!(
+            data.get("context_manifest_hash").is_none(),
+            "an absent hash must be omitted, not serialized as null: {data}"
         );
     }
 
