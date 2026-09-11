@@ -10448,3 +10448,14 @@
 {"adapter":"echo-test","attempt_id":"01a09139-18f1-7e60-9007-b65d37ce2af2","bead":"needle-echo","event":"dispatch","model":null,"strand":"pluck","ts":"2026-09-11T16:07:13.393684541+00:00","worker":"test-worker"}
 {"bead":"needle-echo","event":"claim","strand":"pluck","ts":"2026-09-11T16:08:03.422266479+00:00","worker":"test-worker"}
 {"adapter":"echo-test","attempt_id":"01a09139-dc60-7be1-93d9-c46af62b2301","bead":"needle-echo","event":"dispatch","model":null,"strand":"pluck","ts":"2026-09-11T16:08:03.424266296+00:00","worker":"test-worker"}
+{"bead":"needle-echo","event":"claim","strand":"pluck","ts":"2026-09-11T16:08:53.451545974+00:00","worker":"test-worker"}
+{"adapter":"echo-test","attempt_id":"01a0913a-9fcd-73a0-b209-358be79404f4","bead":"needle-echo","event":"dispatch","model":null,"strand":"pluck","ts":"2026-09-11T16:08:53.453566616+00:00","worker":"test-worker"}
+{"bead":"needle-echo","event":"claim","strand":"pluck","ts":"2026-09-11T16:09:43.687115494+00:00","worker":"test-worker"}
+{"adapter":"echo-test","attempt_id":"01a0913b-6408-7253-8b6c-9d08c8c44164","bead":"needle-echo","event":"dispatch","model":null,"strand":"pluck","ts":"2026-09-11T16:09:43.688925867+00:00","worker":"test-worker"}
+{"bead":"needle-echo","event":"claim","strand":"pluck","ts":"2026-09-11T16:10:33.722159182+00:00","worker":"test-worker"}
+{"adapter":"echo-test","attempt_id":"01a0913c-277c-7ea0-ab2f-7bfc613c30e1","bead":"needle-echo","event":"dispatch","model":null,"strand":"pluck","ts":"2026-09-11T16:10:33.724182694+00:00","worker":"test-worker"}
+{"bead":"needle-echo","event":"claim","strand":"pluck","ts":"2026-09-11T16:11:23.753020802+00:00","worker":"test-worker"}
+{"adapter":"echo-test","attempt_id":"01a0913c-eaeb-7612-b527-010fe3e95b13","bead":"needle-echo","event":"dispatch","model":null,"strand":"pluck","ts":"2026-09-11T16:11:23.755040765+00:00","worker":"test-worker"}
+{"bead":"needle-echo","event":"claim","strand":"pluck","ts":"2026-09-11T16:12:13.791131169+00:00","worker":"test-worker"}
+{"bead":"needle-96dec90b","event":"claim","strand":"pluck","ts":"2026-09-11T16:34:09.490948386+00:00","worker":"glm-needle"}
+{"adapter":"claude-code-glm-5.3-flash","bead":"needle-96dec90b","event":"dispatch","model":"glm-5.3-flash","strand":"pluck","ts":"2026-09-11T16:34:10.242646694+00:00","worker":"glm-needle"}

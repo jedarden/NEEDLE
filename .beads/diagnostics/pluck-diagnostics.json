@@ -1,13 +1,13 @@
 {
-  "timestamp": "2026-09-11T15:58:59.921163015Z",
-  "total_open_beads": 463,
+  "timestamp": "2026-09-11T16:34:09.308036182Z",
+  "total_open_beads": 464,
   "exclusion_criteria": {
     "has_assignee": 2,
     "manually_blocked": 8,
-    "has_dependencies": 362,
+    "has_dependencies": 361,
     "resource_conflicts": 0
   },
-  "final_candidate_count": 122,
+  "final_candidate_count": 124,
   "excluded_beads": [
     {
       "bead_id": "needle-6b02eb9d",
@@ -875,17 +875,6 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 2,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
-      "bead_id": "needle-96dec90b",
-      "title": "Emit one attempt.resolved ledger event per dispatch with a provisional attempt id (N-T16)",
-      "priority": 1,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 1,
       "has_resource_conflicts": false,
       "conflict_count": 0
     },
