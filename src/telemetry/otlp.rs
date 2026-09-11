@@ -50,19 +50,53 @@ fn resolve_headers(headers: &[String]) -> Result<Vec<(String, String)>> {
             }
 
             let value = if let Some(variable) = raw_value.strip_prefix("env:") {
+                let variable = variable.trim();
                 if variable.is_empty() {
                     anyhow::bail!("invalid OTLP header environment reference");
                 }
-                // Do not include the variable name or resolved value in the
-                // error. The caller may forward this diagnostic to a log or a
-                // reload event, and header material must never appear there.
+                // Name the variable but never the resolved value. The name is
+                // not secret — it already appears verbatim in the config file
+                // the operator wrote — and an unresolvable reference that cannot
+                // say which reference it was is undiagnosable. The value must
+                // still never reach a log, a reload event, or an error string.
                 std::env::var(variable).map_err(|_| {
-                    anyhow::anyhow!("OTLP header references an unavailable environment variable")
+                    anyhow::anyhow!(
+                        "OTLP header '{key}' references unset environment variable '{variable}'"
+                    )
                 })?
             } else {
                 raw_value.to_string()
             };
             Ok((key.to_string(), value))
+        })
+        .collect()
+}
+
+/// Environment variables named by `env:` references in `config.headers` that
+/// are not present in the process environment.
+///
+/// This is the probe behind telemetry degradation at worker boot: an absent
+/// variable means the sink cannot authenticate, so the caller must not build
+/// it at all rather than export unauthenticated telemetry. Header values are
+/// never returned — only names, which are not secret.
+pub fn missing_header_env(config: &OtlpSinkConfig) -> Vec<String> {
+    config
+        .headers
+        .iter()
+        .filter_map(|header| {
+            let raw_value = header.split_once(':')?.1.trim();
+            let variable = raw_value.strip_prefix("env:")?.trim();
+            if variable.is_empty() {
+                return None;
+            }
+            // A variable set to the empty string is still set: the reference
+            // resolves and the exporter is built with an empty header value,
+            // exactly as `resolve_headers` would resolve it.
+            if std::env::var_os(variable).is_some() {
+                None
+            } else {
+                Some(variable.to_string())
+            }
         })
         .collect()
 }
@@ -738,6 +772,7 @@ impl OtlpSink {
                     data: serde_json::Value::Object(data),
                     trace_id: None,
                     span_id: None,
+                    attempt_id: None,
                 };
 
                 // Emit to file sink - ignore errors to avoid recursion
@@ -1469,12 +1504,20 @@ impl OtlpSink {
         }
 
         // Build and add attributes - explicit type to avoid inference errors
-        let mut attrs: Vec<(&str, AnyValue)> = Vec::with_capacity(9);
+        let mut attrs: Vec<(&str, AnyValue)> = Vec::with_capacity(10);
         attrs.push(("service.version", AnyValue::from(env!("CARGO_PKG_VERSION"))));
         attrs.push(("event_type", event.event_type.clone().into()));
         attrs.push(("worker_id", event.worker_id.clone().into()));
         attrs.push(("session_id", event.session_id.clone().into()));
         attrs.push(("sequence", AnyValue::from(event.sequence as i64)));
+
+        // Provisional dispatch attempt ID (plan section 4.4 step 1). Joins the
+        // ledger's attempt rows to the events emitted during the dispatch; the
+        // JSONL file sink stamps the same ID on the event envelope, so a span
+        // and the rows it produced join on one field.
+        if let Some(ref attempt_id) = event.attempt_id {
+            attrs.push(("attempt_id", attempt_id.clone().into()));
+        }
 
         if let Some(ref bead_id) = event.bead_id {
             attrs.push(("bead_id", bead_id.as_ref().to_string().into()));
@@ -1527,6 +1570,11 @@ impl OtlpSink {
         fields.push(("worker_id", Cow::Borrowed(event.worker_id.as_str())));
         fields.push(("session_id", Cow::Borrowed(event.session_id.as_str())));
 
+        // Provisional dispatch attempt ID (plan section 4.4 step 1).
+        if let Some(ref attempt_id) = event.attempt_id {
+            fields.push(("attempt_id", Cow::Borrowed(attempt_id.as_str())));
+        }
+
         if let Some(ref bead_id) = event.bead_id {
             fields.push(("bead_id", Cow::Borrowed(&**bead_id)));
         }
@@ -1576,6 +1624,8 @@ impl OtlpSink {
             | "peer.crashed" // StuckReleased
             | "fleet.cpu_saturated" // System CPU load exceeds threshold
             | "fleet.memory_low" // System memory below threshold
+            | "worker.admission_blocked" // launch refused: host above CPU/memory policy
+            | "bead.mitosis.child_count_warning" // runaway decomposition tripwire
             => (Severity::Warn, "WARN"),
 
             // INFO events (default)
@@ -1731,6 +1781,7 @@ impl OtlpSink {
                     data: serde_json::Value::Object(data),
                     trace_id: None,
                     span_id: None,
+                    attempt_id: None,
                 };
 
                 let _ = catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1916,6 +1967,7 @@ impl OtlpSink {
                 data: serde_json::Value::Object(data),
                 trace_id: None,
                 span_id: None,
+                attempt_id: None,
             };
 
             // Emit to file sink - ignore errors to avoid recursion
@@ -1995,6 +2047,7 @@ mod tests {
             metrics_interval_secs: 10,
             service_namespace: "needle-fleet".to_string(),
             max_queue_size: 2048,
+            required: false,
         }
     }
 
@@ -2495,6 +2548,7 @@ mod tests {
             duration_ms: None,
             trace_id: None,
             span_id: None,
+            attempt_id: None,
             data,
         }
     }
@@ -3271,6 +3325,7 @@ mod tests {
             data: serde_json::Value::Object(data),
             trace_id: None,
             span_id: None,
+            attempt_id: None,
         };
 
         // Emit the event to the file sink
@@ -3337,6 +3392,7 @@ mod tests {
             data: serde_json::Value::Object(data),
             trace_id: None,
             span_id: None,
+            attempt_id: None,
         };
 
         // Emit the event to the file sink

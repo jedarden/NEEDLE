@@ -374,6 +374,9 @@ impl FileSink {
             data: serde_json::json!({ "worker_name": worker_id, "version": version }),
             trace_id: None,
             span_id: None,
+            // Boot happens before any dispatch cycle, so there is no attempt
+            // ID to carry — the envelope here is genuinely attempt-less.
+            attempt_id: None,
         };
         let line = serde_json::to_string(&event)?;
         let path_for_error = path.display().to_string();
@@ -498,6 +501,8 @@ mod tests {
             data: serde_json::json!({ "test": "data" }),
             trace_id: None,
             span_id: None,
+            // Fixtures model events outside a dispatch cycle — no attempt ID.
+            attempt_id: None,
         }
     }
 

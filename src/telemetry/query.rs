@@ -349,6 +349,8 @@ mod tests {
             duration_ms: None,
             trace_id: None,
             span_id: None,
+            // Fixtures model events outside a dispatch cycle — no attempt ID.
+            attempt_id: None,
         }
     }
 
