@@ -752,11 +752,26 @@ async fn knot_emits_starvation_telemetry_for_open_beads() {
                 .collect::<Vec<_>>()
         })
         .collect();
+    // Name the expected verdict explicitly: `strand.knot.starvation_detected`
+    // is the sole, terminal starvation verdict (Knot-owned since 865484e4),
+    // emitted on the threshold cycle itself because the config above disables
+    // the backoff. A rename, a move back to Pluck, or a re-introduced emission
+    // delay must fail loudly here rather than silently pass.
     let starvation = events
         .iter()
         .find(|event| event["event_type"] == "strand.knot.starvation_detected")
-        .expect("knot should emit starvation telemetry for an invisible open bead");
+        .expect(
+            "expected the terminal starvation verdict strand.knot.starvation_detected \
+             on the threshold cycle — Knot has owned the sole verdict since 865484e4",
+        );
     assert_eq!(starvation["data"]["open_count"], 1);
+    assert!(
+        events
+            .iter()
+            .all(|event| event["event_type"] != "strand.pluck.starvation_detected"),
+        "strand.pluck.starvation_detected is retired — a second starvation verdict \
+         means the strand waterfall grew a duplicate alert path"
+    );
     assert_eq!(store.list_all().await.unwrap().len(), 1);
 }
 
@@ -882,6 +897,7 @@ fn hook_sink_dispatches_matching_events() {
         duration_ms: None,
         trace_id: None,
         span_id: None,
+        attempt_id: None,
     };
 
     let failures = sink.dispatch(&event);
@@ -923,6 +939,7 @@ fn hook_sink_skips_non_matching_events() {
         duration_ms: None,
         trace_id: None,
         span_id: None,
+        attempt_id: None,
     };
 
     let failures = sink.dispatch(&event);
@@ -955,6 +972,7 @@ fn hook_sink_prevents_recursion_on_sink_errors() {
         duration_ms: None,
         trace_id: None,
         span_id: None,
+        attempt_id: None,
     };
 
     let failures = sink.dispatch(&error_event);
