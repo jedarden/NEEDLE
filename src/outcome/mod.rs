@@ -5071,7 +5071,39 @@ mod tests {
             .await
             .unwrap();
         helper.sync().await;
-        helper.events_by_type("attempt.resolved")
+        let rows = helper.events_by_type("attempt.resolved");
+        for row in &rows {
+            assert_row_satisfies_v1_contract(
+                &format!("terminal path (exit {exit_code}, interrupted {interrupted})"),
+                row,
+            );
+        }
+        rows
+    }
+
+    /// Every emitted row satisfies the versioned v1 fixture, and carries the
+    /// two pins this audit stands guard on: `provisional: true` until N-T03
+    /// resolves attempt identity, and no `context_manifest_hash` until N-T10
+    /// ships manifest hashing. The hash pin is *absence*, not null — the
+    /// fixture types the field as a plain string, so a null would fail the
+    /// conformance check above (and every downstream validator with it).
+    fn assert_row_satisfies_v1_contract(label: &str, row: &crate::telemetry::TelemetryEvent) {
+        crate::telemetry::test_utils::check_object_matches(
+            label,
+            &row.data,
+            &crate::telemetry::test_utils::fixture_spec(),
+        )
+        .unwrap_or_else(|e| panic!("{label}: {e}"));
+        assert_eq!(row.data["schema_version"], 1, "{label}: schema_version");
+        assert_eq!(
+            row.data["provisional"], true,
+            "{label}: every row is provisional until N-T03"
+        );
+        assert!(
+            row.data.get("context_manifest_hash").is_none(),
+            "{label}: context_manifest_hash must stay absent until N-T10, got {}",
+            row.data["context_manifest_hash"]
+        );
     }
 
     /// The terminal handlers `handle` routes to must each produce one —
@@ -5163,6 +5195,7 @@ mod tests {
         // The envelope carries it too, so every event of the cycle — not just
         // the ledger row — joins on the attempt.
         assert_eq!(rows[0].attempt_id.as_deref(), Some(attempt_id.as_str()));
+        assert_row_satisfies_v1_contract("dispatch-cycle row", &rows[0]);
 
         // A handler used without a dispatch cycle still emits an identified
         // row rather than one that cannot be joined to anything.
@@ -5180,6 +5213,7 @@ mod tests {
         let minted = solo[1].data["attempt_id"].as_str().expect("attempt_id");
         assert_ne!(minted, attempt_id, "no cycle: the row mints its own id");
         assert_eq!(solo[1].attempt_id.as_deref(), Some(minted));
+        assert_row_satisfies_v1_contract("solo-handler row", &solo[1]);
     }
 
     /// A dispatch cancelled before `handle` runs is still terminal, so it
@@ -5215,6 +5249,7 @@ mod tests {
         );
         assert_eq!(rows[0].data["attempt_id"], attempt_id);
         assert_eq!(rows[0].data["gate_results"], serde_json::json!([]));
+        assert_row_satisfies_v1_contract("cancelled dispatch", &rows[0]);
     }
 
     /// A handler that is torn down by its own timeout must not leave the
@@ -5254,5 +5289,59 @@ mod tests {
         );
         assert_eq!(rows[0].data["terminal_reason"], "outcome_handler_timeout");
         assert_eq!(rows[0].data["attempt_id"], attempt_id);
+        assert_row_satisfies_v1_contract("handler timeout", &rows[0]);
+    }
+
+    /// A sub-handler that errors — the post-completion checkpoint flush
+    /// failing inside `handle_success` (completion is unverified, so the
+    /// handler refuses to report success) — must still resolve the dispatch
+    /// to exactly one ledger row: `handle` died before its own emission, so
+    /// the `Ok(Err(_))` arm of `handle_with_cancellation` emits it. This is
+    /// the third fallback, next to cancelled-before-handling and handler
+    /// timeout.
+    #[tokio::test]
+    async fn attempt_resolved_row_exists_when_the_handler_errors() {
+        let (_guard, _home) = isolated_home();
+        let mut config = Config::default();
+        config.worker.enforce_shipped_work = false;
+        let helper = crate::telemetry::test_utils::TestHelper::new("ledger-row-test");
+        let attempt_id = uuid::Uuid::now_v7().to_string();
+        helper.telemetry().set_attempt_id(attempt_id.clone());
+
+        let handler = OutcomeHandler::new(config, helper.telemetry().clone());
+        // The worker records the dispatch context before entering HANDLING.
+        handler.set_attempt_context(AttemptContext::default());
+
+        // Done, so the success flow reaches its final flush — which fails.
+        let mut store = test_store(BeadStatus::Done);
+        store.fail_flush = true;
+        let bead = test_bead(BeadStatus::InProgress);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let result = handler
+            .handle_with_cancellation(&store, &bead, &test_output(0), false, cancelled)
+            .await;
+        assert!(
+            result.is_err(),
+            "the failing flush must surface as a handler error"
+        );
+        helper.sync().await;
+
+        let rows = helper.events_by_type("attempt.resolved");
+        assert_eq!(
+            rows.len(),
+            1,
+            "an errored dispatch still gets exactly one row"
+        );
+        assert_eq!(
+            rows[0].data["outcome"], "infrastructure_failure",
+            "nothing judged the work: the attempt died inside the handler"
+        );
+        assert_eq!(rows[0].data["terminal_reason"], "outcome_handler_error");
+        assert_eq!(
+            rows[0].data["requested_action"], "Errored",
+            "the fallback requests the release-recovery action"
+        );
+        assert_eq!(rows[0].data["attempt_id"], attempt_id);
+        assert_row_satisfies_v1_contract("handler error", &rows[0]);
     }
 }
