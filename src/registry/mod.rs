@@ -133,6 +133,16 @@ pub struct WorkerEntry {
     /// Used by `needle config --dump --live` to show the live config generation.
     #[serde(default)]
     pub config_reload_generation: u64,
+    /// Last state the worker reported, when it reported one.
+    ///
+    /// `None` for entries written before this field existed, and for launchers
+    /// that only spawn workers. Heartbeat files carry the live state; this
+    /// registry copy preserves it for dashboard polling between heartbeats and
+    /// for states reached before the health monitor exists (a worker holding
+    /// in `AdmissionBlocked` during boot has no heartbeat file yet — see plan
+    /// revision 24 §4.6 / N-T33).
+    #[serde(default)]
+    pub state: Option<crate::types::WorkerState>,
 }
 
 /// The user-facing configuration dump published by a running worker.
@@ -267,6 +277,35 @@ impl Registry {
                 entry.workspace = workspace.to_path_buf();
             }
         })
+    }
+
+    /// Update a worker's reported state.
+    ///
+    /// Writing `None` clears a previously recorded state. An unknown worker
+    /// ID is a no-op, not an error — the entry may have deregistered between
+    /// the caller's read and this write.
+    ///
+    /// Best-effort by callers: a registry write failure must never take a
+    /// worker down, so errors are logged and swallowed here like
+    /// [`Registry::deregister`].
+    pub fn update_state(&self, worker_id: &str, state: Option<crate::types::WorkerState>) {
+        let result = self.modify(|reg| {
+            if let Some(entry) = reg.workers.iter_mut().find(|w| w.id == worker_id) {
+                entry.state = state.clone();
+            }
+        });
+        if let Err(e) = result {
+            tracing::warn!(
+                error = %e,
+                worker_id,
+                "failed to update worker state in registry; status will show the stale state"
+            );
+        }
+    }
+
+    /// Read a single worker's entry, if it is registered and alive.
+    pub fn get(&self, worker_id: &str) -> Result<Option<WorkerEntry>> {
+        Ok(self.list()?.into_iter().find(|w| w.id == worker_id))
     }
 
     /// Read all registered workers, filtering out entries for dead PIDs.
@@ -505,6 +544,7 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::WorkerState;
 
     fn make_entry(id: &str) -> WorkerEntry {
         WorkerEntry {
@@ -517,7 +557,80 @@ mod tests {
             started_at: Utc::now(),
             beads_processed: 0,
             config_reload_generation: 0,
+            state: None,
         }
+    }
+
+    #[test]
+    fn update_state_round_trips_and_clears() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = Registry::new(dir.path());
+        reg.register(make_entry("alpha")).unwrap();
+
+        reg.update_state("alpha", Some(WorkerState::AdmissionBlocked));
+        let entry = reg.get("alpha").unwrap().expect("entry present");
+        assert_eq!(entry.state, Some(WorkerState::AdmissionBlocked));
+
+        reg.update_state("alpha", Some(WorkerState::Selecting));
+        let entry = reg.get("alpha").unwrap().expect("entry present");
+        assert_eq!(entry.state, Some(WorkerState::Selecting));
+
+        // Back to "no state reported" once normal heartbeat-driven states resume.
+        reg.update_state("alpha", None);
+        let entry = reg.get("alpha").unwrap().expect("entry present");
+        assert_eq!(entry.state, None);
+
+        // Unknown worker is a no-op, not an error.
+        reg.update_state("ghost", Some(WorkerState::AdmissionBlocked));
+    }
+
+    #[test]
+    fn entry_without_state_field_reads_as_none() {
+        // A file written by a binary that predates the `state` field must
+        // still parse: a hard failure here would make `list()` error, and the
+        // write path's `unwrap_or_default()` would then wipe the registry.
+        let dir = tempfile::tempdir().unwrap();
+        let reg = Registry::new(dir.path());
+        let legacy = r#"{
+  "workers": [
+    {
+      "id": "legacy-worker",
+      "pid": 4242,
+      "workspace": "/tmp/ws",
+      "agent": "claude",
+      "model": "sonnet",
+      "provider": "anthropic",
+      "started_at": "2026-09-03T14:00:00Z",
+      "beads_processed": 1,
+      "config_reload_generation": 0
+    }
+  ],
+  "updated_at": "2026-09-03T14:00:00Z"
+}"#;
+        std::fs::write(reg.path(), legacy).unwrap();
+
+        let workers = reg.list().unwrap();
+        assert_eq!(workers.len(), 1);
+        assert_eq!(workers[0].state, None);
+    }
+
+    #[test]
+    fn admission_blocked_state_survives_file_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = Registry::new(dir.path());
+        let mut entry = make_entry("blocked-worker");
+        entry.pid = std::process::id(); // must be alive or list() filters it
+        entry.state = Some(WorkerState::AdmissionBlocked);
+        reg.register(entry).unwrap();
+
+        // Re-read from disk through a fresh handle, the way a polling
+        // dashboard's `needle status` invocation would.
+        let reread = Registry::new(dir.path());
+        let entry = reread
+            .get("blocked-worker")
+            .unwrap()
+            .expect("entry present");
+        assert_eq!(entry.state, Some(WorkerState::AdmissionBlocked));
     }
 
     /// A PID that is definitely not in use on any real system.

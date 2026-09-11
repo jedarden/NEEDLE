@@ -5,6 +5,8 @@
 pub mod agent_event;
 pub mod bead_store;
 pub mod build_metadata;
+/// CI build-status probe behind the claim-time circuit breaker.
+pub mod build_status;
 pub mod canary;
 pub mod cargo_test;
 pub mod checkpoint_utils;
@@ -79,6 +81,8 @@ pub mod types;
 pub mod upgrade;
 pub mod util;
 pub mod validation;
+/// Verification-failure fingerprinting and the cross-bead gate-degradation trip.
+pub mod verification_fingerprint;
 pub mod version_probe;
 pub mod worker;
 pub mod workspace_equality;

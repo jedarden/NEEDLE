@@ -18,6 +18,7 @@ use anyhow::{anyhow, Result};
 use fs2::FileExt;
 
 use crate::bead_store::BeadStore;
+use crate::build_status::{BuildStatusChecker, CiWorkflowRun};
 use crate::telemetry::{EventKind, Telemetry};
 use crate::types::{Bead, BeadId, BeadStatus, ClaimOutcome, ClaimResult};
 
@@ -38,6 +39,168 @@ const CLAIM_ERROR_THRESHOLD: u32 = 3;
 /// each mutation whenever it exposes event history.
 const MAX_CLAIM_EVENTS_PER_BEAD: u32 = 100;
 
+/// Claim-time circuit breaker for a workspace whose build is failing.
+///
+/// A gate that is permanently red carries no signal, so workers learn to
+/// route around it: 575 recorded DoD bypasses and 35 consecutive red
+/// `needle-ci` runs happened while work kept landing on a broken main. This
+/// gate is the stop. When the newest run of the workspace's CI workflow has
+/// failed, a claim is refused unless the bead carries a bypass label — a
+/// build-fix bead must stay claimable, because the fix is the way back to
+/// green.
+///
+/// The gate fails open. A pending run, a template that has never run, and a
+/// CI endpoint that cannot be reached are all "no verdict", and no verdict
+/// never blocks a claim: the alternative turns every CI outage into a fleet-
+/// wide work stoppage, which is the opposite failure to the one this exists
+/// to prevent.
+pub struct CircuitGate {
+    checker: BuildStatusChecker,
+    /// Workspace whose build state the gate guards.
+    workspace: PathBuf,
+    /// Labels that keep a bead claimable while the circuit is open.
+    bypass_labels: Vec<String>,
+    /// CI template to consult. Derived from the workspace's git remote when
+    /// left unset; pinning it spares the subprocess and keeps tests hermetic.
+    template: Option<String>,
+}
+
+/// What the gate decided about one claim attempt.
+#[derive(Debug, Clone)]
+enum CircuitVerdict {
+    /// The claim may proceed: no verdict, an open-and-shut pass, or a bead
+    /// that carries a bypass label.
+    Admit,
+    /// The claim is refused: the circuit is open and the bead does not fix it.
+    Refuse(CircuitRefusal),
+}
+
+/// The evidence behind a refusal, for the reason string and telemetry.
+#[derive(Debug, Clone)]
+struct CircuitRefusal {
+    workspace: PathBuf,
+    template: String,
+    run: CiWorkflowRun,
+    bypass_labels: Vec<String>,
+}
+
+impl CircuitRefusal {
+    /// Human-readable refusal reason, recorded on the claim attempt.
+    fn reason(&self) -> String {
+        format!(
+            "circuit open: {} ({}) ended {} in {}; only beads labeled {:?} are claimable until CI is green",
+            self.run.name,
+            self.template,
+            self.run.phase,
+            self.workspace.display(),
+            self.bypass_labels,
+        )
+    }
+}
+
+impl CircuitGate {
+    /// Gate the claims of `workspace` on its CI workflow, keeping beads
+    /// labeled with any of `bypass_labels` claimable while the circuit is
+    /// open.
+    pub fn new(
+        checker: BuildStatusChecker,
+        workspace: PathBuf,
+        bypass_labels: Vec<String>,
+    ) -> Self {
+        Self {
+            checker,
+            workspace,
+            bypass_labels,
+            template: None,
+        }
+    }
+
+    /// Pin the CI workflow template instead of deriving it from the
+    /// workspace's git remote on every verdict.
+    pub fn with_template(mut self, template: impl Into<String>) -> Self {
+        self.template = Some(template.into());
+        self
+    }
+
+    /// Decide whether `bead` may be claimed right now.
+    ///
+    /// The gate only covers beads belonging to its own workspace. A bead from
+    /// another repository is that repository's circuit to trip, never this
+    /// one's — circuit state is per-workspace and never couples workspaces
+    /// together.
+    async fn verdict(&self, bead: &Bead) -> CircuitVerdict {
+        if !self.covers(bead) {
+            return CircuitVerdict::Admit;
+        }
+        // Without a nameable CI template there is no verdict to fail on.
+        let template = match &self.template {
+            Some(template) => template.clone(),
+            None => match crate::build_status::template_for_workspace(&self.workspace).await {
+                Ok(template) => template,
+                Err(error) => {
+                    tracing::debug!(
+                        workspace = %self.workspace.display(),
+                        error = %error,
+                        "No CI workflow template for workspace; circuit gate admits the claim"
+                    );
+                    return CircuitVerdict::Admit;
+                }
+            },
+        };
+
+        let Some(run) = self.checker.newest_run_for_template(&template).await else {
+            return CircuitVerdict::Admit;
+        };
+        if run.status().is_passing() || run.status().is_unknown() {
+            tracing::debug!(
+                workspace = %self.workspace.display(),
+                workflow = %run.name,
+                phase = %run.phase,
+                "CI circuit closed; claim proceeds"
+            );
+            return CircuitVerdict::Admit;
+        }
+        if self.bypasses(bead) {
+            tracing::info!(
+                workspace = %self.workspace.display(),
+                bead_id = %bead.id,
+                labels = ?bead.labels,
+                workflow = %run.name,
+                phase = %run.phase,
+                "CI circuit is open but the bead carries a bypass label; claim proceeds"
+            );
+            return CircuitVerdict::Admit;
+        }
+
+        CircuitVerdict::Refuse(CircuitRefusal {
+            workspace: self.workspace.clone(),
+            template,
+            run,
+            bypass_labels: self.bypass_labels.clone(),
+        })
+    }
+
+    /// Whether this gate has jurisdiction over `bead`.
+    ///
+    /// Beads from the home store come back with an unset source path; an
+    /// explicit path counts only when it *is* the gated workspace.
+    fn covers(&self, bead: &Bead) -> bool {
+        workspace_is_unset(&bead.workspace) || bead.workspace == self.workspace
+    }
+
+    /// Whether `bead` is a way back to green (carries a bypass label).
+    fn bypasses(&self, bead: &Bead) -> bool {
+        bead.labels
+            .iter()
+            .any(|label| self.bypass_labels.contains(label))
+    }
+}
+
+/// Whether a bead's recorded workspace is unset (empty or cwd-relative ".").
+fn workspace_is_unset(path: &Path) -> bool {
+    path.as_os_str().is_empty() || path == std::path::Path::new(".")
+}
+
 /// Atomic bead claimer with workspace-level flock serialization.
 pub struct Claimer {
     store: Arc<dyn BeadStore>,
@@ -45,6 +208,8 @@ pub struct Claimer {
     max_retries: u32,
     retry_backoff_ms: u64,
     telemetry: Telemetry,
+    /// Optional build-status circuit breaker (see [`CircuitGate`]).
+    circuit: Option<CircuitGate>,
     /// Track consecutive claim errors per bead ID.
     claim_errors: Arc<std::sync::Mutex<HashMap<BeadId, u32>>>,
     /// Track total claim events emitted per bead ID for circuit-breaking.
@@ -55,7 +220,7 @@ impl Claimer {
     /// Create a new Claimer.
     ///
     /// - `store`: bead store for verify + claim operations
-    /// - `lock_dir`: directory for flock files (default: `/tmp`)
+    /// - `lock_dir`: directory for flock files (default: the process temp dir)
     /// - `max_retries`: maximum claim attempts before giving up (default: 5)
     /// - `retry_backoff_ms`: base backoff between retries in ms (default: 100)
     /// - `telemetry`: telemetry emitter
@@ -72,9 +237,22 @@ impl Claimer {
             max_retries,
             retry_backoff_ms,
             telemetry,
+            circuit: None,
             claim_errors: Arc::new(std::sync::Mutex::new(HashMap::new())),
             claim_events: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Attach a claim-time build-status circuit breaker.
+    ///
+    /// Without a gate the claimer claims whatever selection hands it; with
+    /// one, claims in the gated workspace are refused while that workspace's
+    /// newest CI run is failing (see [`CircuitGate`]). The gate fails open —
+    /// a pending run, a missing verdict, or an unreachable CI endpoint never
+    /// refuses a claim, so a CI outage cannot stop the fleet.
+    pub fn with_circuit_gate(mut self, gate: CircuitGate) -> Self {
+        self.circuit = Some(gate);
+        self
     }
 
     /// Record a claim error for a bead and check if the threshold is reached.
@@ -497,6 +675,32 @@ impl Claimer {
             return Ok(ClaimResult::NotClaimable {
                 reason: "bead is excluded".to_string(),
             });
+        }
+
+        // Build-status circuit breaker. Selection may still surface a bead in
+        // a workspace whose build is red — the point of this gate is that the
+        // claim does not land. The refusal is a normal NotClaimable, so the
+        // worker excludes the bead and moves on rather than erroring.
+        if let Some(gate) = &self.circuit {
+            if let CircuitVerdict::Refuse(refusal) = gate.verdict(&bead).await {
+                let reason = refusal.reason();
+                let _ = self.telemetry.emit(
+                    EventKind::ClaimBlockedCircuitOpen {
+                        bead_id: bead_id.clone(),
+                        workspace: refusal.workspace.display().to_string(),
+                        template: refusal.template.clone(),
+                        phase: refusal.run.phase.clone(),
+                    },
+                    Utc::now(),
+                );
+                tracing::warn!(
+                    bead_id = %bead_id,
+                    workflow = %refusal.run.name,
+                    phase = %refusal.run.phase,
+                    "Claim refused: build circuit is open"
+                );
+                return Ok(ClaimResult::NotClaimable { reason });
+            }
         }
 
         match self
@@ -1195,7 +1399,7 @@ mod tests {
 
     #[test]
     fn workspace_lock_path_is_deterministic() {
-        let dir = PathBuf::from("/tmp");
+        let dir = std::env::temp_dir();
         let ws = Path::new("/home/coding/NEEDLE");
         let path1 = workspace_lock_path(&dir, ws);
         let path2 = workspace_lock_path(&dir, ws);
@@ -1208,7 +1412,7 @@ mod tests {
 
     #[test]
     fn workspace_lock_path_differs_for_different_workspaces() {
-        let dir = PathBuf::from("/tmp");
+        let dir = std::env::temp_dir();
         let path1 = workspace_lock_path(&dir, Path::new("/workspace/a"));
         let path2 = workspace_lock_path(&dir, Path::new("/workspace/b"));
         assert_ne!(path1, path2);
@@ -1876,6 +2080,62 @@ mod tests {
         assert_eq!(verify_success.data["expected_actor"], "worker-1");
     }
 
+    #[tokio::test]
+    async fn verify_success_stays_one_to_one_with_verify_started() {
+        // needle-e0054281 (GitHub #20, secondary observation): the reporter
+        // counted three `bead.claim.verify_success` per `verify_started`
+        // because the two stage re-checks around the canonical dispatch-time
+        // verification reused the same event names. The re-checks now emit
+        // `bead.claim.recheck_*`, so the canonical pair must stay exactly 1:1.
+        // This pins the ratio across repeated verifications and asserts the
+        // canonical path never emits a re-check event of its own.
+        let bead = make_bead("needle-tel-ratio", "/tmp/ws");
+        let mut bead_claimed = bead.clone();
+        bead_claimed.status = BeadStatus::InProgress;
+        bead_claimed.assignee = Some("worker-1".to_string());
+
+        let store = Arc::new(MockBeadStore::new(vec![bead_claimed]));
+        let (sink, events) = crate::telemetry::test_utils::MemorySink::new();
+        let telemetry = Telemetry::with_sink("test-worker".to_string(), sink);
+        let claimer = Claimer::new(store, std::env::temp_dir(), 5, 10, telemetry);
+
+        const ROUNDS: usize = 3;
+        for _ in 0..ROUNDS {
+            let verified = claimer
+                .verify_claim_at_dispatch(&bead.id, "worker-1")
+                .await
+                .unwrap();
+            assert!(verified, "expected each verification to pass");
+        }
+
+        drop(claimer);
+        // Give telemetry writer time to flush
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let captured = events.lock().unwrap();
+        let count = |event_type: &str| {
+            captured
+                .iter()
+                .filter(|event| event.event_type == event_type)
+                .count()
+        };
+        assert_eq!(
+            count("bead.claim.verify_started"),
+            ROUNDS,
+            "each canonical verification emits exactly one verify_started"
+        );
+        assert_eq!(
+            count("bead.claim.verify_success"),
+            ROUNDS,
+            "verify_success must stay 1:1 with verify_started (GitHub #20 counted 3:1)"
+        );
+        assert_eq!(
+            count("bead.claim.recheck_succeeded"),
+            0,
+            "the canonical verification must not emit stage re-check events"
+        );
+    }
+
     // ─── Telemetry-contract tests (needle-d91ca5e9) ────────────────────────────
     //
     // The bf-3uj6i span refactor replaced the `Entered` guard held across the
@@ -2214,6 +2474,214 @@ mod tests {
                 .iter()
                 .any(|kv| kv.contains("br update exited with code 1")),
             "error reason must land on needle.claim.result; got {recorded:?}"
+        );
+    }
+
+    // ── Circuit gate: a red build stops claims ─────────────────────────────
+    //
+    // The gate is the enforcement half of "a red gate must stop work". Each
+    // test pins the CI template so no git subprocess runs, and injects the
+    // newest run through the source trait.
+
+    /// Source with a canned newest run (or none), standing in for the cluster.
+    struct StaticCircuitSource {
+        run: Option<CiWorkflowRun>,
+        error: Option<String>,
+    }
+
+    #[async_trait]
+    impl crate::build_status::CiStatusSource for StaticCircuitSource {
+        async fn newest_run(&self, _template: &str) -> anyhow::Result<Option<CiWorkflowRun>> {
+            if let Some(error) = &self.error {
+                return Err(anyhow!("{}", error));
+            }
+            Ok(self.run.clone())
+        }
+    }
+
+    fn ci_run(phase: &str) -> CiWorkflowRun {
+        CiWorkflowRun {
+            name: format!("needle-ci-{phase}"),
+            phase: phase.to_string(),
+            created_at: Some(chrono::Utc::now()),
+        }
+    }
+
+    fn circuit_gate(run: Option<CiWorkflowRun>) -> CircuitGate {
+        CircuitGate::new(
+            BuildStatusChecker::with_source(
+                600,
+                Arc::new(StaticCircuitSource { run, error: None }),
+            ),
+            PathBuf::from("/tmp/claim-circuit-home"),
+            vec!["fix-build".to_string(), "ci-red".to_string()],
+        )
+        .with_template("needle-ci")
+    }
+
+    fn claimer_with_gate(beads: Vec<Bead>, gate: CircuitGate) -> Claimer {
+        Claimer::new(
+            Arc::new(MockBeadStore::new(beads)),
+            std::env::temp_dir(),
+            5,
+            10,
+            Telemetry::new("test-worker".to_string()),
+        )
+        .with_circuit_gate(gate)
+    }
+
+    #[tokio::test]
+    async fn circuit_gate_refuses_a_claim_while_ci_is_red() {
+        let bead = make_bead("needle-open-1", "");
+        let claimer = claimer_with_gate(vec![bead.clone()], circuit_gate(Some(ci_run("Failed"))));
+
+        let result = claimer
+            .claim_one(&bead.id, "worker-a", &HashSet::new(), Some("pluck"))
+            .await
+            .expect("a refused claim is not an error");
+
+        match result {
+            ClaimResult::NotClaimable { reason } => {
+                assert!(
+                    reason.contains("circuit open") && reason.contains("Failed"),
+                    "refusal must name the open circuit, got: {reason}"
+                );
+            }
+            other => panic!("expected NotClaimable from the open circuit, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn circuit_gate_records_the_refusal_as_telemetry() {
+        let (sink, events) = MemorySink::new();
+        let bead = make_bead("needle-open-2", "");
+        let claimer = Claimer::new(
+            Arc::new(MockBeadStore::new(vec![bead.clone()])),
+            std::env::temp_dir(),
+            5,
+            10,
+            Telemetry::with_sink("test-worker".to_string(), sink),
+        )
+        .with_circuit_gate(circuit_gate(Some(ci_run("Error"))));
+
+        let result = claimer
+            .claim_one(&bead.id, "worker-a", &HashSet::new(), Some("pluck"))
+            .await
+            .expect("a refused claim is not an error");
+        assert!(matches!(result, ClaimResult::NotClaimable { .. }));
+
+        // The telemetry writer is a spawned task; drive the runtime briefly so
+        // the event drains into the sink before asserting.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let captured = events.lock().unwrap().clone();
+        let refusal = captured
+            .iter()
+            .find(|event| event.event_type == "bead.claim.circuit_open")
+            .expect("the refusal must be recorded as bead.claim.circuit_open");
+        assert_eq!(refusal.bead_id, Some(bead.id.clone()));
+        assert_eq!(refusal.data["phase"], serde_json::json!("Error"));
+    }
+
+    #[tokio::test]
+    async fn circuit_gate_admits_the_bead_that_fixes_the_build() {
+        let mut bead = make_bead("needle-fix-1", "");
+        bead.labels = vec!["fix-build".to_string()];
+        let claimer = claimer_with_gate(vec![bead.clone()], circuit_gate(Some(ci_run("Failed"))));
+
+        let result = claimer
+            .claim_one(&bead.id, "worker-a", &HashSet::new(), Some("pluck"))
+            .await
+            .expect("claim succeeds");
+        assert!(
+            matches!(result, ClaimResult::Claimed(_)),
+            "a fix-build bead must stay claimable while CI is red, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn circuit_gate_never_blocks_on_green_pending_or_absent_ci() {
+        for phase in ["Succeeded", "Running", "Pending"] {
+            let bead = make_bead("needle-green", "");
+            let claimer = claimer_with_gate(vec![bead.clone()], circuit_gate(Some(ci_run(phase))));
+            let result = claimer
+                .claim_one(&bead.id, "worker-a", &HashSet::new(), Some("pluck"))
+                .await
+                .expect("claim succeeds");
+            assert!(
+                matches!(result, ClaimResult::Claimed(_)),
+                "phase {phase} must not block a claim, got {result:?}"
+            );
+        }
+
+        // A workspace with no CI history at all has no verdict either.
+        let bead = make_bead("needle-no-ci", "");
+        let claimer = claimer_with_gate(vec![bead.clone()], circuit_gate(None));
+        let result = claimer
+            .claim_one(&bead.id, "worker-a", &HashSet::new(), Some("pluck"))
+            .await
+            .expect("claim succeeds");
+        assert!(matches!(result, ClaimResult::Claimed(_)));
+    }
+
+    #[tokio::test]
+    async fn circuit_gate_fails_open_when_ci_cannot_be_reached() {
+        let bead = make_bead("needle-outage", "");
+        let gate = CircuitGate::new(
+            BuildStatusChecker::with_source(
+                600,
+                Arc::new(StaticCircuitSource {
+                    run: None,
+                    error: Some("connection refused".to_string()),
+                }),
+            ),
+            PathBuf::from("/tmp/claim-circuit-home"),
+            vec!["fix-build".to_string()],
+        )
+        .with_template("needle-ci");
+        let claimer = claimer_with_gate(vec![bead.clone()], gate);
+
+        let result = claimer
+            .claim_one(&bead.id, "worker-a", &HashSet::new(), Some("pluck"))
+            .await
+            .expect("claim succeeds");
+        assert!(
+            matches!(result, ClaimResult::Claimed(_)),
+            "an unreachable CI source is no verdict, so it must not block: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn circuit_gate_leaves_other_workspaces_alone() {
+        // Circuit state is per-workspace: NEEDLE being red says nothing about
+        // a bead that lives in another repository.
+        let mut remote = make_bead("remote-bead-1", "/home/coding/other-repo");
+        remote.workspace = PathBuf::from("/home/coding/other-repo");
+        let claimer = claimer_with_gate(vec![remote.clone()], circuit_gate(Some(ci_run("Failed"))));
+
+        let result = claimer
+            .claim_one(&remote.id, "worker-a", &HashSet::new(), Some("explore"))
+            .await
+            .expect("claim succeeds");
+        assert!(
+            matches!(result, ClaimResult::Claimed(_)),
+            "a red home workspace must not block another repo's bead, got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn circuit_gate_matches_its_own_workspace_path() {
+        let home = PathBuf::from("/tmp/claim-circuit-home");
+        let mut bead = make_bead("needle-ws-1", "/tmp/claim-circuit-home");
+        bead.workspace = home.clone();
+        let claimer = claimer_with_gate(vec![bead.clone()], circuit_gate(Some(ci_run("Failed"))));
+
+        let result = claimer
+            .claim_one(&bead.id, "worker-a", &HashSet::new(), Some("pluck"))
+            .await
+            .expect("a refused claim is not an error");
+        assert!(
+            matches!(result, ClaimResult::NotClaimable { .. }),
+            "a bead whose workspace is the gated workspace is gated, got {result:?}"
         );
     }
 }

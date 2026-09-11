@@ -85,9 +85,11 @@ fn assert_all_config_fields_have_tiers(config: &Config) {
         ref fabric,
         ref supervisor,
         ref outcome,
+        ref workspace_health,
         ref post_push_ci,
         ref stop,
         ref attempt_archive,
+        ref transitions,
     } = config;
 
     // Verify tier A assignments
@@ -115,10 +117,15 @@ fn assert_all_config_fields_have_tiers(config: &Config) {
     let _ = self_modification.reload_tier();
     let _ = supervisor.reload_tier();
     let _ = outcome.reload_tier();
+    let _ = workspace_health.reload_tier();
 
     // Legacy fields - tracked but use newer equivalents
     let _ = verification;
     let _ = fabric;
+
+    // Tracked but not yet tier-assigned: TransitionsConfig has no reload_tier
+    // yet, so a change to it is treated like a restart-required section.
+    let _ = transitions;
 }
 
 /// Reload tier for a configuration field.
@@ -165,6 +172,35 @@ pub fn get_tier_for_key(key: &str) -> Option<ReloadTier> {
         .iter()
         .find(|(k, _)| *k == key)
         .map(|(_, tier)| *tier)
+}
+
+/// Accepted-but-deprecated key spellings, mapped to the canonical spelling
+/// they deserialize into.
+///
+/// A key lands here when a config field is renamed. The old spelling stays in
+/// the tier table so an existing `.needle.yaml` still resolves to a tier, and
+/// it stays live through the field's serde alias. This table is what the
+/// loader consults to tell the operator the spelling is legacy, and what the
+/// tier-table test consults to know which entries are aliases rather than
+/// field paths.
+pub static DEPRECATED_KEY_SPELLINGS: &[(&str, &str)] = &[
+    (
+        "strands.mend.stuck_threshold_secs",
+        "strands.mend.stale_claim_ttl",
+    ),
+    (
+        "strands.explore.stuck_threshold_secs",
+        "strands.explore.stale_claim_ttl",
+    ),
+    ("strands.mend.lock_ttl", "strands.mend.lock_ttl_secs"),
+];
+
+/// Canonical spelling for a deprecated key path, if the path is one.
+pub fn canonical_key_spelling(key: &str) -> Option<&'static str> {
+    DEPRECATED_KEY_SPELLINGS
+        .iter()
+        .find(|(deprecated, _)| *deprecated == key)
+        .map(|(_, canonical)| *canonical)
 }
 
 /// Master tier table: maps every config key path to its reload tier.
@@ -221,13 +257,29 @@ static TIER_TABLE: &[(&str, ReloadTier)] = &[
     ("pricing", ReloadTier::Live),
     // Strand thresholds (live)
     ("strands.pluck.exclude_labels", ReloadTier::Live),
+    // Mend's and Explore's claim TTLs are stored under the field names
+    // `stale_claim_ttl` (the spellings `apply_tier_a_config` reports). The
+    // legacy `stuck_threshold_secs` spellings — the field names these TTLs
+    // used to live under — and Mend's `lock_ttl` alias remain accepted so a
+    // key copied out of an existing `.needle.yaml` still resolves to its
+    // tier. Every spelling here must reach a real config field; the
+    // `test_every_tier_key_resolves_in_serialized_config` test fails a tier
+    // entry whose key no field produces.
     ("strands.mend.stale_claim_ttl", ReloadTier::Live),
+    ("strands.mend.stuck_threshold_secs", ReloadTier::Live),
+    ("strands.mend.lock_ttl_secs", ReloadTier::Live),
     ("strands.mend.lock_ttl", ReloadTier::Live),
     ("strands.explore.workspaces", ReloadTier::Live),
+    ("strands.explore.stale_claim_ttl", ReloadTier::Live),
+    ("strands.explore.stuck_threshold_secs", ReloadTier::Live),
     ("strands.weave.max_beads_per_run", ReloadTier::Live),
     ("strands.weave.cooldown_hours", ReloadTier::Live),
-    ("strands.unravel.max_per_run", ReloadTier::Live),
-    ("strands.unravel.cooldown_days", ReloadTier::Live),
+    // Unravel's fields are `max_beads_per_run` / `cooldown_hours`; the
+    // `max_per_run` / `cooldown_days` spellings in the original plan were
+    // never fields, and `cooldown_days` cannot be an alias of a
+    // different-unit key.
+    ("strands.unravel.max_beads_per_run", ReloadTier::Live),
+    ("strands.unravel.cooldown_hours", ReloadTier::Live),
     ("strands.pulse.max_beads_per_run", ReloadTier::Live),
     ("strands.pulse.cooldown_hours", ReloadTier::Live),
     ("strands.pulse.severity_threshold", ReloadTier::Live),
@@ -246,7 +298,6 @@ static TIER_TABLE: &[(&str, ReloadTier)] = &[
     ("strands.knot.alert_cooldown_minutes", ReloadTier::Live),
     ("strands.knot.exhaustion_threshold", ReloadTier::Live),
     ("strands.knot.starvation_backoff_minutes", ReloadTier::Live),
-    ("strands.knot.retry_backoff_secs", ReloadTier::Live),
     (
         "strands.learning.trace_retention_failed_days",
         ReloadTier::Rebuild,
@@ -260,6 +311,24 @@ static TIER_TABLE: &[(&str, ReloadTier)] = &[
     ("strands.mitosis.first_failure_only", ReloadTier::Live),
     // Outcome (live)
     ("outcome.quarantine_after_failures", ReloadTier::Live),
+    // Workspace-health fingerprint thresholds (live; read per verification failure)
+    (
+        "workspace_health.fingerprint_window_seconds",
+        ReloadTier::Live,
+    ),
+    (
+        "workspace_health.fingerprint_window_max_failures",
+        ReloadTier::Live,
+    ),
+    (
+        "workspace_health.fingerprint_min_window_failures",
+        ReloadTier::Live,
+    ),
+    ("workspace_health.fingerprint_trip_ratio", ReloadTier::Live),
+    (
+        "workspace_health.fingerprint_min_distinct_beads",
+        ReloadTier::Live,
+    ),
     // ═══════════════════════════════════════════════════════════════════════════════
     // TIER B: COMPONENT REBUILD
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -405,6 +474,92 @@ mod tests {
     fn test_get_tier_for_unknown_keys_returns_none() {
         assert_eq!(get_tier_for_key("unknown.field"), None);
         assert_eq!(get_tier_for_key("agent.nonexistent"), None);
+    }
+
+    #[test]
+    fn test_mend_keys_resolve_in_every_documented_spelling() {
+        // Both the stored field names (what `apply_tier_a_config` reports)
+        // and the accepted deprecated spellings (what an older `.needle.yaml`
+        // may spell) must resolve to a tier, so a key copied out of a config
+        // file is never reported as unrecognized.
+        for key in [
+            "strands.mend.stale_claim_ttl",
+            "strands.mend.stuck_threshold_secs",
+            "strands.mend.lock_ttl_secs",
+            "strands.mend.lock_ttl",
+            "strands.explore.stale_claim_ttl",
+            "strands.explore.stuck_threshold_secs",
+        ] {
+            assert_eq!(get_tier_for_key(key), Some(ReloadTier::Live), "{key}");
+        }
+    }
+
+    #[test]
+    fn test_every_tier_key_resolves_in_serialized_config() {
+        // A tier entry whose key no config field produces is a lie: it tells
+        // the operator a key is reloadable when nothing reads it. That is
+        // exactly how `strands.mend.stale_claim_ttl` went dead before
+        // needle-c8510ace — declared Live, read nowhere. Every entry must
+        // either name a path that exists in the serialized config or be a
+        // registered deprecated spelling of one that does.
+        let value = serde_json::to_value(Config::default()).expect("default config serializes");
+        for (key, _) in TIER_TABLE {
+            let resolves = resolve_key(&value, key)
+                || canonical_key_spelling(key)
+                    .is_some_and(|canonical| resolve_key(&value, canonical));
+            assert!(
+                resolves,
+                "tier key '{key}' matches no config field: either the spelling is \
+                 wrong or the field it named was removed without dropping its tier entry"
+            );
+        }
+    }
+
+    #[test]
+    fn test_deprecated_spellings_map_to_live_canonical_keys() {
+        // A deprecated spelling is only honest if its canonical twin both
+        // exists as a field and carries the same tier: the alias must not
+        // outlive the key it points at.
+        for (deprecated, canonical) in DEPRECATED_KEY_SPELLINGS {
+            assert!(
+                get_tier_for_key(canonical).is_some(),
+                "canonical key '{canonical}' has no tier entry"
+            );
+            assert_eq!(
+                get_tier_for_key(deprecated),
+                get_tier_for_key(canonical),
+                "deprecated '{deprecated}' and canonical '{canonical}' must share a tier"
+            );
+            assert_ne!(
+                get_tier_for_key(deprecated),
+                None,
+                "deprecated spelling '{deprecated}' must stay resolvable"
+            );
+        }
+    }
+
+    /// Walk a dot-notation key through a serialized config value.
+    ///
+    /// Returns `true` only when every segment names an existing key (or array
+    /// index) on the way down, so a key that no field produces fails.
+    fn resolve_key(value: &serde_json::Value, key: &str) -> bool {
+        let mut current = value;
+        for segment in key.split('.') {
+            match current {
+                serde_json::Value::Object(map) => match map.get(segment) {
+                    Some(next) => current = next,
+                    None => return false,
+                },
+                serde_json::Value::Array(items) => {
+                    match segment.parse::<usize>().ok().and_then(|i| items.get(i)) {
+                        Some(next) => current = next,
+                        None => return false,
+                    }
+                }
+                _ => return false,
+            }
+        }
+        true
     }
 
     #[test]

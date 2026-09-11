@@ -3714,12 +3714,34 @@ impl PluckConfig {
 /// Mend strand configuration (stuck/failed bead recovery).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MendConfig {
-    /// Beads stuck in_progress longer than this (seconds) are candidates.
-    #[serde(default = "MendConfig::default_stuck_threshold_secs")]
-    pub stuck_threshold_secs: u64,
+    /// Claim TTL: how long a claimed in_progress bead may sit unreaped before
+    /// it becomes a release candidate (seconds).
+    ///
+    /// This is the TTL Mend passes to its orphaned in-progress cleanup. Age is
+    /// the *abandonment* backstop, not the primary guard — a claim whose
+    /// worker holds a fresh heartbeat naming that exact bead is never released
+    /// on age alone (needle-a7372f9b). Because a legitimate dispatch may run
+    /// for up to `agent.timeout`, the default deliberately exceeds it so an
+    /// ordinary long run can never be reaped mid-flight; the TTL only fires on
+    /// claims whose worker has moved on or vanished.
+    ///
+    /// `stuck_threshold_secs` is an accepted alias — it was the field name
+    /// this TTL originally lived under, and existing `.needle.yaml` files
+    /// that spell it that way must keep working rather than being silently
+    /// ignored. The spelling is deprecated: it read as a stuck-detection knob,
+    /// which this never was.
+    #[serde(
+        default = "MendConfig::default_stale_claim_ttl",
+        alias = "stuck_threshold_secs"
+    )]
+    pub stale_claim_ttl: u64,
 
     /// Lock files older than this (seconds) are considered orphaned.
-    #[serde(default = "MendConfig::default_lock_ttl_secs")]
+    ///
+    /// `lock_ttl` is an accepted alias for the same reason as
+    /// `stuck_threshold_secs` above: the reload-tier table and the
+    /// configuration guide document that spelling.
+    #[serde(default = "MendConfig::default_lock_ttl_secs", alias = "lock_ttl")]
     pub lock_ttl_secs: u64,
 
     /// Run `br doctor` after every N beads processed (0 = disabled).
@@ -3734,7 +3756,7 @@ pub struct MendConfig {
 impl Default for MendConfig {
     fn default() -> Self {
         MendConfig {
-            stuck_threshold_secs: Self::default_stuck_threshold_secs(),
+            stale_claim_ttl: Self::default_stale_claim_ttl(),
             lock_ttl_secs: Self::default_lock_ttl_secs(),
             db_check_interval: Self::default_db_check_interval(),
             idle_timeout: Self::default_idle_timeout(),
@@ -3743,8 +3765,12 @@ impl Default for MendConfig {
 }
 
 impl MendConfig {
-    fn default_stuck_threshold_secs() -> u64 {
-        300
+    /// Claim-TTL default: twice the default agent timeout. A dispatch may
+    /// legitimately run for up to `agent.timeout`, so the abandonment backstop
+    /// must sit above it (needle-c8510ace) — otherwise every long run looked
+    /// like an abandoned claim and Mend released live work.
+    fn default_stale_claim_ttl() -> u64 {
+        2 * AgentConfig::default_timeout()
     }
     fn default_lock_ttl_secs() -> u64 {
         600
@@ -3914,10 +3940,16 @@ pub struct ExploreConfig {
     #[serde(default = "ExploreConfig::default_max_scan_interval_cycles")]
     pub max_scan_interval_cycles: u32,
 
-    /// Cross-workspace cleanup: release beads stuck in_progress for longer
-    /// than this (seconds). Default matches MendConfig (300s = 5 minutes).
-    #[serde(default = "ExploreConfig::default_stuck_threshold_secs")]
-    pub stuck_threshold_secs: u64,
+    /// Cross-workspace cleanup claim TTL: release in_progress beads claimed
+    /// longer ago than this (seconds) when Explore's roaming scan finds them.
+    /// Same semantics as `strands.mend.stale_claim_ttl`, which see for the
+    /// default and the heartbeat guard. `stuck_threshold_secs` is an accepted
+    /// alias spelling of this key.
+    #[serde(
+        default = "ExploreConfig::default_stale_claim_ttl",
+        alias = "stuck_threshold_secs"
+    )]
+    pub stale_claim_ttl: u64,
 }
 
 impl Default for ExploreConfig {
@@ -3930,7 +3962,7 @@ impl Default for ExploreConfig {
             starvation_threshold_minutes: Self::default_starvation_threshold_minutes(),
             scan_interval_cycles: Self::default_scan_interval_cycles(),
             max_scan_interval_cycles: Self::default_max_scan_interval_cycles(),
-            stuck_threshold_secs: Self::default_stuck_threshold_secs(),
+            stale_claim_ttl: Self::default_stale_claim_ttl(),
         }
     }
 }
@@ -3960,8 +3992,9 @@ impl ExploreConfig {
         8
     }
 
-    fn default_stuck_threshold_secs() -> u64 {
-        300
+    /// Same default as MendConfig so both cleanup paths agree out of the box.
+    fn default_stale_claim_ttl() -> u64 {
+        MendConfig::default_stale_claim_ttl()
     }
 }
 
@@ -4186,6 +4219,21 @@ pub struct MitosisConfig {
     #[serde(default = "MitosisConfig::default_max_children")]
     pub max_children: u32,
 
+    /// Emit `bead.mitosis.child_count_warning` when a parent's cumulative
+    /// child count crosses this threshold (0 = disabled, default: 24).
+    ///
+    /// The shipped caps authorize a worst case of 73 beads from one
+    /// unsplittable parent (1 root + 8 children + 64 grandchildren, i.e.
+    /// `1 + max_children + max_children^max_depth` at the defaults). This
+    /// threshold is the in-flight tripwire: 24 is three full split
+    /// generations under one parent and a third of that ceiling, so a
+    /// runaway is visible in the event stream while there is still ~49
+    /// beads of headroom to react. Unlike the caps it counts *cumulative*
+    /// children under one parent, so re-splits via `repeat_interval` that
+    /// never breach `max_children` still trip it.
+    #[serde(default = "MitosisConfig::default_child_count_warning_threshold")]
+    pub child_count_warning_threshold: u32,
+
     /// Timeout-triggered mitosis policy (opt-in, default: disabled).
     #[serde(default)]
     pub timeout_triggered: TimeoutTriggeredPolicy,
@@ -4200,6 +4248,7 @@ impl Default for MitosisConfig {
             repeat_interval: 0,
             max_depth: Self::default_max_depth(),
             max_children: Self::default_max_children(),
+            child_count_warning_threshold: Self::default_child_count_warning_threshold(),
             timeout_triggered: TimeoutTriggeredPolicy::default(),
         }
     }
@@ -4217,6 +4266,67 @@ impl MitosisConfig {
     }
     fn default_max_children() -> u32 {
         8
+    }
+    fn default_child_count_warning_threshold() -> u32 {
+        24
+    }
+}
+
+/// Analyze strand configuration (the escalation ladder's rung-4 dispatch).
+///
+/// When a bead's `quarantine-round:3` expires, the Analyze strand runs one
+/// plan-grounded analysis dispatch (Phase 19 §19.2, ADR-022 decision 3) that
+/// must conclude with either a re-scoped child bead or a `human` label carrying
+/// an `analysis:` note.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnalyzeConfig {
+    /// Whether the Analyze strand is enabled (default: true).
+    ///
+    /// Unlike the generating strands this is a mandatory ladder rung, not
+    /// speculative work: it runs at most once per bead (plus the single
+    /// re-queue a failed analysis gets), and only for beads that have already
+    /// failed `quarantine_after_failures` times and survived three quarantine
+    /// rounds.
+    #[serde(default = "AnalyzeConfig::default_enabled")]
+    pub enabled: bool,
+
+    /// Maximum rung-4 beads to analyze per cycle (default: 1).
+    #[serde(default = "AnalyzeConfig::default_max_beads_per_run")]
+    pub max_beads_per_run: u32,
+
+    /// The plan document the dispatch re-reads, relative to the workspace
+    /// (default: `docs/plan/plan.md`).
+    #[serde(default = "AnalyzeConfig::default_plan_path")]
+    pub plan_path: std::path::PathBuf,
+
+    /// Custom prompt template for the analysis dispatch.
+    ///
+    /// Template variables: `{id}`, `{title}`, `{body}`, `{labels}`,
+    /// `{failure_trail}`, `{plan}`. When `None`, the built-in template is used.
+    #[serde(default)]
+    pub prompt_template: Option<String>,
+}
+
+impl Default for AnalyzeConfig {
+    fn default() -> Self {
+        AnalyzeConfig {
+            enabled: Self::default_enabled(),
+            max_beads_per_run: Self::default_max_beads_per_run(),
+            plan_path: Self::default_plan_path(),
+            prompt_template: None,
+        }
+    }
+}
+
+impl AnalyzeConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+    fn default_max_beads_per_run() -> u32 {
+        1
+    }
+    fn default_plan_path() -> std::path::PathBuf {
+        std::path::PathBuf::from("docs/plan/plan.md")
     }
 }
 
@@ -4654,6 +4764,8 @@ pub struct StrandsConfig {
     pub mitosis: MitosisConfig,
     #[serde(default)]
     pub weave: WeaveConfig,
+    #[serde(default)]
+    pub analyze: AnalyzeConfig,
     #[serde(default)]
     pub unravel: UnravelConfig,
     #[serde(default)]
@@ -5166,6 +5278,7 @@ struct OtlpSinkConfigIntermediate {
     metrics_interval_secs: Option<u64>,
     service_namespace: Option<String>,
     max_queue_size: Option<usize>,
+    required: Option<bool>,
 }
 
 impl From<OtlpSinkConfigIntermediate> for OtlpSinkConfig {
@@ -5196,6 +5309,7 @@ impl From<OtlpSinkConfigIntermediate> for OtlpSinkConfig {
                 .service_namespace
                 .unwrap_or_else(|| "needle-fleet".to_string()),
             max_queue_size: intermediate.max_queue_size.unwrap_or(2048),
+            required: intermediate.required.unwrap_or(false),
         }
     }
 }
@@ -5256,6 +5370,15 @@ pub struct OtlpSinkConfig {
     /// Maximum queue size for batch processors (default: 2048).
     /// When the queue fills, the OTel SDK drops the oldest items.
     pub max_queue_size: usize,
+
+    /// Treat an unusable OTLP sink as fatal at worker boot (default: false).
+    ///
+    /// By default a sink that cannot be built — most often a header `env:`
+    /// reference naming a variable that is not set — degrades telemetry instead
+    /// of blocking work: the worker logs a warning naming the variable and runs
+    /// without OTLP export. Set this to restore fail-fast behaviour in
+    /// environments where an untelemetered worker is unacceptable.
+    pub required: bool,
 }
 
 impl Default for OtlpSinkConfig {
@@ -5273,6 +5396,7 @@ impl Default for OtlpSinkConfig {
             metrics_interval_secs: Self::default_metrics_interval_secs(),
             service_namespace: Self::default_service_namespace(),
             max_queue_size: Self::default_max_queue_size(),
+            required: Self::default_required(),
         }
     }
 }
@@ -5308,6 +5432,10 @@ impl OtlpSinkConfig {
 
     fn default_max_queue_size() -> usize {
         2048
+    }
+
+    fn default_required() -> bool {
+        false
     }
 }
 
@@ -5846,6 +5974,92 @@ impl ConfigTier for OutcomeConfig {
     }
 }
 
+/// Workspace-health controller configuration (ADR-025).
+///
+/// The only knobs today are the verification-fingerprint thresholds (N-T22):
+/// when a single failure fingerprint — gate name plus normalized output —
+/// covers enough of a workspace's recent verification failures across enough
+/// distinct beads, the workspace is gate-degraded exactly as three
+/// consecutive `GateError`s degrade it (needle-0abc120d), except the signal
+/// is statistical rather than consecutive. Defaults reproduce the 2026-09-01
+/// incident, where one `fatal: not a git repository` failure penalised 40
+/// beads across two workspaces before a human noticed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceHealthConfig {
+    /// How far back the failure window reaches, in seconds (default 2h).
+    #[serde(default = "WorkspaceHealthConfig::default_fingerprint_window_seconds")]
+    pub fingerprint_window_seconds: u64,
+
+    /// Hard cap on failures retained in the window (default 20).
+    #[serde(default = "WorkspaceHealthConfig::default_fingerprint_window_max_failures")]
+    pub fingerprint_window_max_failures: usize,
+
+    /// Failures that must be in the window before a trip is evaluated
+    /// (default 5). A ratio over fewer observations is noise.
+    #[serde(default = "WorkspaceHealthConfig::default_fingerprint_min_window_failures")]
+    pub fingerprint_min_window_failures: usize,
+
+    /// Share of the window one fingerprint must cover to degrade the
+    /// workspace, as a fraction (default 0.80).
+    #[serde(default = "WorkspaceHealthConfig::default_fingerprint_trip_ratio")]
+    pub fingerprint_trip_ratio: f64,
+
+    /// Distinct beads the dominating fingerprint must span (default 3).
+    /// One bead failing repeatedly is a bead problem; several beads failing
+    /// identically is infrastructure.
+    #[serde(default = "WorkspaceHealthConfig::default_fingerprint_min_distinct_beads")]
+    pub fingerprint_min_distinct_beads: usize,
+}
+
+impl Default for WorkspaceHealthConfig {
+    fn default() -> Self {
+        WorkspaceHealthConfig {
+            fingerprint_window_seconds: Self::default_fingerprint_window_seconds(),
+            fingerprint_window_max_failures: Self::default_fingerprint_window_max_failures(),
+            fingerprint_min_window_failures: Self::default_fingerprint_min_window_failures(),
+            fingerprint_trip_ratio: Self::default_fingerprint_trip_ratio(),
+            fingerprint_min_distinct_beads: Self::default_fingerprint_min_distinct_beads(),
+        }
+    }
+}
+
+impl WorkspaceHealthConfig {
+    fn default_fingerprint_window_seconds() -> u64 {
+        2 * 60 * 60
+    }
+    fn default_fingerprint_window_max_failures() -> usize {
+        20
+    }
+    fn default_fingerprint_min_window_failures() -> usize {
+        5
+    }
+    fn default_fingerprint_trip_ratio() -> f64 {
+        0.80
+    }
+    fn default_fingerprint_min_distinct_beads() -> usize {
+        3
+    }
+
+    /// The detector thresholds this configuration describes.
+    pub fn detector_config(&self) -> crate::verification_fingerprint::DetectorConfig {
+        crate::verification_fingerprint::DetectorConfig {
+            window: std::time::Duration::from_secs(self.fingerprint_window_seconds),
+            window_max_failures: self.fingerprint_window_max_failures,
+            min_window_failures: self.fingerprint_min_window_failures,
+            trip_ratio: self.fingerprint_trip_ratio,
+            min_distinct_beads: self.fingerprint_min_distinct_beads,
+        }
+    }
+}
+
+impl ConfigTier for WorkspaceHealthConfig {
+    fn reload_tier(&self) -> ReloadTier {
+        // Tier A: the detector thresholds are read at each verification
+        // failure, live from the outcome handler's config.
+        ReloadTier::Live
+    }
+}
+
 /// Validation gate execution configuration.
 ///
 /// Both fields preserve NEEDLE's previous hardcoded behavior as their default,
@@ -6039,6 +6253,112 @@ impl ConfigTier for AttemptArchiveConfig {
     }
 }
 
+/// One plan-transition switch (plan.md transition N-T11).
+///
+/// Every transition here changes who holds authority over bead state — what
+/// NEEDLE may assert about an attempt, a resolution, a lesson, or a claim —
+/// so each one defaults to **off** and may only be turned on once that
+/// transition's conformance gate has passed. Enabling one is not merely
+/// additive: it makes the bead backend's advertised capability a hard
+/// requirement, and a backend that does not advertise it is refused (see
+/// `crate::bead_store::capabilities`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransitionToggle {
+    /// `false` (default) keeps the pre-transition behavior: the legacy path
+    /// runs and no capability is demanded from the backend.
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+/// Plan-transition feature switches and their config schema version.
+///
+/// **Backward compatible by construction:** a config that predates this
+/// section — or omits any field — deserializes to every switch off, which is
+/// exactly the behavior NEEDLE had before transitions existed. Unknown keys
+/// are rejected rather than ignored: a file written for a newer schema must
+/// not be half-loaded and mistaken for a decision an operator never made.
+///
+/// `version` pins that contract. This binary understands version 1; a
+/// document claiming a later version is refused by
+/// [`TransitionsConfig::validate`] instead of being read with v1 semantics.
+///
+/// Global only — not overridable per workspace (see `NON_OVERRIDABLE_KEYS`):
+/// these switches authorize authority-changing behavior, and a workspace's
+/// `.needle.yaml` is not an operator.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransitionsConfig {
+    /// Config schema version. Absent means 1; only 1 is understood.
+    #[serde(default = "TransitionsConfig::default_version")]
+    pub version: u32,
+    /// Attempt identity and receipts.
+    #[serde(default)]
+    pub attempt: TransitionToggle,
+    /// Guarded, atomic resolution application.
+    #[serde(default)]
+    pub resolution: TransitionToggle,
+    /// Mature reflection and learning records.
+    #[serde(default)]
+    pub learning: TransitionToggle,
+    /// Renewable fenced claim handles.
+    #[serde(default)]
+    pub fenced_claim: TransitionToggle,
+}
+
+impl Default for TransitionsConfig {
+    fn default() -> Self {
+        TransitionsConfig {
+            version: Self::default_version(),
+            attempt: TransitionToggle::default(),
+            resolution: TransitionToggle::default(),
+            learning: TransitionToggle::default(),
+            fenced_claim: TransitionToggle::default(),
+        }
+    }
+}
+
+impl TransitionsConfig {
+    fn default_version() -> u32 {
+        1
+    }
+
+    /// The schema version this binary understands.
+    pub const SUPPORTED_VERSION: u32 = 1;
+
+    /// Whether any authority-changing transition is enabled.
+    pub fn any_enabled(&self) -> bool {
+        self.attempt.enabled
+            || self.resolution.enabled
+            || self.learning.enabled
+            || self.fenced_claim.enabled
+    }
+
+    /// Fail closed when the document asks for semantics this binary does not
+    /// implement.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.version != Self::SUPPORTED_VERSION {
+            return Err(format!(
+                "transitions.version {} is not supported by this binary (understands version {}); \
+                 refusing to interpret the switches under the wrong semantics",
+                self.version,
+                Self::SUPPORTED_VERSION
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl ConfigTier for TransitionsConfig {
+    fn reload_tier(&self) -> ReloadTier {
+        // Tier C: capability negotiation happens when a bead store is opened,
+        // and a store binds one negotiated snapshot for its lifetime. Flipping
+        // a switch mid-process cannot re-negotiate what the backend supports,
+        // so a change requires a restart to take effect.
+        ReloadTier::RestartRequired
+    }
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Config Source Tracking
 // ──────────────────────────────────────────────────────────────────────────────
@@ -6214,6 +6534,10 @@ pub struct Config {
     /// Outcome handling configuration (failure circuit-breaker).
     #[serde(default)]
     pub outcome: OutcomeConfig,
+    /// Workspace-health controller thresholds (verification-fingerprint
+    /// degradation, N-T22).
+    #[serde(default)]
+    pub workspace_health: WorkspaceHealthConfig,
     /// Tsnet identity provisioning configuration.
     #[serde(default)]
     pub tsnet: crate::tsnet::TsnetConfig,
@@ -6228,6 +6552,12 @@ pub struct Config {
     /// local spool for an external drain. Default off (no behavior change).
     #[serde(default)]
     pub attempt_archive: AttemptArchiveConfig,
+    /// Plan-transition switches (N-T11) and their config schema version.
+    /// Every switch defaults to off; enabling one makes the bead backend's
+    /// advertised capability a hard requirement. Default off (no behavior
+    /// change).
+    #[serde(default)]
+    pub transitions: TransitionsConfig,
 }
 
 impl Config {
@@ -6411,6 +6741,7 @@ impl Config {
             "attempt_archive".to_string(),
             hash_section(&self.attempt_archive),
         );
+        hashes.insert("transitions".to_string(), hash_section(&self.transitions));
 
         hashes
     }
@@ -7295,6 +7626,7 @@ impl ConfigLoader {
         }
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read config file: {}", path.display()))?;
+        Self::warn_deprecated_key_spellings(&text, path);
         let mut config: Config = serde_yaml::from_str(&text)
             .with_context(|| format!("invalid YAML in config file: {}", path.display()))?;
         config.expand_tildes();
@@ -7348,6 +7680,68 @@ impl ConfigLoader {
             );
         }
         Ok(())
+    }
+
+    /// Warn about deprecated key spellings in a config file.
+    ///
+    /// Renamed keys keep deserializing through their serde alias, so the old
+    /// spelling still works — but an operator editing the file deserves to
+    /// know it is legacy: docs and the reload reporting use the canonical
+    /// name, and a spelling that silently stopped being read is exactly how
+    /// `strands.mend.stale_claim_ttl` went dead (needle-c8510ace). Parse
+    /// failures are ignored here; the real deserialization reports them.
+    fn warn_deprecated_key_spellings(yaml_text: &str, path: &Path) {
+        let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(yaml_text) else {
+            return;
+        };
+        let mut deprecated = Vec::new();
+        Self::collect_deprecated_key_spellings(&value, String::new(), &mut deprecated);
+        for (spelling, canonical) in deprecated {
+            tracing::warn!(
+                key = %spelling,
+                canonical = %canonical,
+                path = %path.display(),
+                "config uses deprecated key spelling '{}' — renamed to '{}' (the old spelling still works)",
+                spelling,
+                canonical,
+            );
+        }
+    }
+
+    /// Walk a YAML tree collecting every deprecated key spelling present.
+    fn collect_deprecated_key_spellings(
+        value: &serde_yaml::Value,
+        prefix: String,
+        found: &mut Vec<(String, &'static str)>,
+    ) {
+        match value {
+            serde_yaml::Value::Mapping(map) => {
+                for (key, child) in map {
+                    let Some(key) = key.as_str() else {
+                        continue;
+                    };
+                    let path = if prefix.is_empty() {
+                        key.to_string()
+                    } else {
+                        format!("{prefix}.{key}")
+                    };
+                    if let Some(canonical) = tiers::canonical_key_spelling(&path) {
+                        found.push((path.clone(), canonical));
+                    }
+                    Self::collect_deprecated_key_spellings(child, path, found);
+                }
+            }
+            serde_yaml::Value::Sequence(items) => {
+                for (index, child) in items.iter().enumerate() {
+                    Self::collect_deprecated_key_spellings(
+                        child,
+                        format!("{prefix}[{index}]"),
+                        found,
+                    );
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Parse non-overridable top-level keys from workspace YAML.
@@ -8167,7 +8561,7 @@ fn dirs_or_home(relative: &str) -> PathBuf {
     if let Some(home) = std::env::var_os("HOME") {
         PathBuf::from(home).join(relative)
     } else {
-        PathBuf::from("/tmp").join(relative)
+        std::env::temp_dir().join(relative)
     }
 }
 
@@ -9574,9 +9968,39 @@ strands:
     #[test]
     fn default_mend_config_values() {
         let config = MendConfig::default();
-        assert_eq!(config.stuck_threshold_secs, 300);
+        // The claim TTL must exceed the longest legitimate dispatch: a claim
+        // younger than agent.timeout is not evidence of abandonment.
+        assert!(config.stale_claim_ttl > AgentConfig::default_timeout());
         assert_eq!(config.lock_ttl_secs, 600);
         assert_eq!(config.db_check_interval, 50);
+    }
+
+    #[test]
+    fn mend_config_reads_documented_key_spellings() {
+        // `stale_claim_ttl` is the canonical spelling and the field name the
+        // reload-tier table reports; `stuck_threshold_secs` is the deprecated
+        // alias it used to live under. Both must deserialize into the claim
+        // TTL rather than being dropped as unknown keys — a silently ignored
+        // key is indistinguishable from a working default.
+        let config: MendConfig = serde_yaml::from_str("stale_claim_ttl: 900").unwrap();
+        assert_eq!(config.stale_claim_ttl, 900);
+
+        let config: MendConfig = serde_yaml::from_str("stuck_threshold_secs: 900").unwrap();
+        assert_eq!(config.stale_claim_ttl, 900);
+
+        let config: MendConfig = serde_yaml::from_str("lock_ttl: 1200").unwrap();
+        assert_eq!(config.lock_ttl_secs, 1200);
+
+        let config: MendConfig = serde_yaml::from_str("lock_ttl_secs: 1200").unwrap();
+        assert_eq!(config.lock_ttl_secs, 1200);
+
+        // Unset keeps the built-in defaults.
+        let config: MendConfig = serde_yaml::from_str("db_check_interval: 50").unwrap();
+        assert_eq!(
+            config.stale_claim_ttl,
+            MendConfig::default().stale_claim_ttl
+        );
+        assert_eq!(config.lock_ttl_secs, 600);
     }
 
     #[test]
@@ -9586,6 +10010,71 @@ strands:
         assert!(config.workspaces.is_empty());
         assert_eq!(config.scan_interval_cycles, 1);
         assert_eq!(config.max_scan_interval_cycles, 8);
+        // Cross-workspace cleanup shares Mend's claim-TTL default: the same
+        // long-dispatch argument applies to a roaming scan.
+        assert_eq!(
+            config.stale_claim_ttl,
+            MendConfig::default().stale_claim_ttl
+        );
+    }
+
+    #[test]
+    fn explore_config_reads_legacy_claim_ttl_spelling() {
+        let config: ExploreConfig = serde_yaml::from_str("stale_claim_ttl: 900").unwrap();
+        assert_eq!(config.stale_claim_ttl, 900);
+
+        let config: ExploreConfig = serde_yaml::from_str("stuck_threshold_secs: 900").unwrap();
+        assert_eq!(config.stale_claim_ttl, 900);
+    }
+
+    #[test]
+    fn deprecated_key_spellings_are_collected_from_yaml() {
+        // The loader warns on the deprecated spellings wherever they appear.
+        // Only real paths are reported: the canonical spelling and an
+        // unrelated key must produce nothing.
+        let value: serde_yaml::Value = serde_yaml::from_str(
+            "strands:\n  mend:\n    stuck_threshold_secs: 300\n    lock_ttl: 60\n  explore:\n    stale_claim_ttl: 45\n",
+        )
+        .unwrap();
+        let mut found = Vec::new();
+        ConfigLoader::collect_deprecated_key_spellings(&value, String::new(), &mut found);
+        let mut spellings: Vec<&str> = found.iter().map(|(k, _)| k.as_str()).collect();
+        spellings.sort();
+        assert_eq!(
+            spellings,
+            vec!["strands.mend.lock_ttl", "strands.mend.stuck_threshold_secs"]
+        );
+        assert!(found.iter().all(|(_, canonical)| !canonical.is_empty()));
+
+        let clean: serde_yaml::Value = serde_yaml::from_str(
+            "strands:\n  mend:\n    stale_claim_ttl: 300\n    lock_ttl_secs: 60\n",
+        )
+        .unwrap();
+        let mut found = Vec::new();
+        ConfigLoader::collect_deprecated_key_spellings(&clean, String::new(), &mut found);
+        assert!(
+            found.is_empty(),
+            "canonical spellings must not warn: {found:?}"
+        );
+    }
+
+    #[test]
+    fn canonical_key_spelling_maps_every_documented_alias() {
+        use crate::config::tiers::canonical_key_spelling;
+        assert_eq!(
+            canonical_key_spelling("strands.mend.stuck_threshold_secs"),
+            Some("strands.mend.stale_claim_ttl")
+        );
+        assert_eq!(
+            canonical_key_spelling("strands.explore.stuck_threshold_secs"),
+            Some("strands.explore.stale_claim_ttl")
+        );
+        assert_eq!(
+            canonical_key_spelling("strands.mend.lock_ttl"),
+            Some("strands.mend.lock_ttl_secs")
+        );
+        assert_eq!(canonical_key_spelling("strands.mend.stale_claim_ttl"), None);
+        assert_eq!(canonical_key_spelling("strands.mend.not_a_key"), None);
     }
 
     #[test]
