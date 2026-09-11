@@ -1636,10 +1636,12 @@ mod tests {
 
     #[test]
     fn resolve_config_validation_fails_on_directory_path() {
+        // Any existing directory is rejected as a custom template: it is not a file.
+        let dir = tempfile::tempdir().unwrap();
         let config = crate::config::ResolveConfig {
             enabled: true,
             timeout_secs: 60,
-            custom_template_path: Some(PathBuf::from("/tmp")), // /tmp is a directory
+            custom_template_path: Some(dir.path().to_path_buf()),
             use_default_template: false,
         };
 

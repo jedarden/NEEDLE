@@ -337,6 +337,7 @@ fn make_worker_entry(id: &str, provider: Option<&str>, model: Option<&str>) -> W
         started_at: Utc::now(),
         beads_processed: 0,
         config_reload_generation: 0,
+        state: None,
     }
 }
 
@@ -580,14 +581,14 @@ async fn mend_strand_cleans_crashed_peer_returns_work_created() {
         "mend-worker".to_string(),
         registry,
         telemetry,
-        std::path::PathBuf::from("/tmp/needle-test-logs"),
+        hb_dir.path().join("logs"),
         0,
-        std::path::PathBuf::from("/tmp/needle-test-traces"),
+        hb_dir.path().join("traces"),
         30,
         7,
-        std::path::PathBuf::from("/tmp"),
+        hb_dir.path().to_path_buf(),
         100,
-        std::path::PathBuf::from("/tmp/needle-test-state"),
+        hb_dir.path().join("state"),
         LimitsConfig::default(),
     );
 
@@ -631,14 +632,14 @@ async fn mend_strand_no_stale_peers_returns_no_work() {
         "mend-worker".to_string(),
         registry,
         telemetry,
-        std::path::PathBuf::from("/tmp/needle-test-logs"),
+        hb_dir.path().join("logs"),
         0,
-        std::path::PathBuf::from("/tmp/needle-test-traces"),
+        hb_dir.path().join("traces"),
         30,
         7,
-        std::path::PathBuf::from("/tmp"),
+        hb_dir.path().to_path_buf(),
         100,
-        std::path::PathBuf::from("/tmp/needle-test-state"),
+        hb_dir.path().join("state"),
         LimitsConfig::default(),
     );
 
@@ -679,14 +680,14 @@ async fn mend_strand_removes_orphaned_lock_files() {
         "mend-worker".to_string(),
         registry,
         telemetry,
-        std::path::PathBuf::from("/tmp/needle-test-logs"),
+        hb_dir.path().join("logs"),
         0,
-        std::path::PathBuf::from("/tmp/needle-test-traces"),
+        hb_dir.path().join("traces"),
         30,
         7,
-        std::path::PathBuf::from("/tmp"),
+        hb_dir.path().to_path_buf(),
         100,
-        std::path::PathBuf::from("/tmp/needle-test-state"),
+        hb_dir.path().join("state"),
         LimitsConfig::default(),
     );
 
@@ -726,6 +727,7 @@ async fn mend_strand_cleans_dead_zero_activity_worker_logs_immediately() {
             started_at: Utc::now(),
             beads_processed: 0,
             config_reload_generation: 0,
+            state: None,
         })
         .unwrap();
 
@@ -751,12 +753,12 @@ async fn mend_strand_cleans_dead_zero_activity_worker_logs_immediately() {
         telemetry,
         log_dir.path().to_path_buf(),
         7, // 7-day retention, but zero-activity logs are deleted immediately
-        std::path::PathBuf::from("/tmp/needle-test-traces"),
+        hb_dir.path().join("traces"),
         30,
         7,
-        std::path::PathBuf::from("/tmp"),
+        hb_dir.path().to_path_buf(),
         100,
-        std::path::PathBuf::from("/tmp/needle-test-state"),
+        hb_dir.path().join("state"),
         needle::config::LimitsConfig::default(),
     );
 
@@ -793,6 +795,7 @@ async fn mend_strand_preserves_active_worker_logs() {
             started_at: Utc::now(),
             beads_processed: 10,
             config_reload_generation: 0,
+            state: None,
         })
         .unwrap();
 
@@ -814,12 +817,12 @@ async fn mend_strand_preserves_active_worker_logs() {
         telemetry,
         log_dir.path().to_path_buf(),
         7, // 7-day retention
-        std::path::PathBuf::from("/tmp/needle-test-traces"),
+        hb_dir.path().join("traces"),
         30,
         7,
-        std::path::PathBuf::from("/tmp"),
+        hb_dir.path().to_path_buf(),
         100,
-        std::path::PathBuf::from("/tmp/needle-test-state"),
+        hb_dir.path().join("state"),
         needle::config::LimitsConfig::default(),
     );
 
@@ -1242,6 +1245,7 @@ async fn registry_concurrent_registration_no_corruption() {
                     started_at: Utc::now(),
                     beads_processed: 0,
                     config_reload_generation: 0,
+                    state: None,
                 })
                 .unwrap();
         });
@@ -1283,6 +1287,7 @@ async fn registry_deregister_during_concurrent_registrations() {
                 started_at: Utc::now(),
                 beads_processed: 0,
                 config_reload_generation: 0,
+                state: None,
             })
             .unwrap();
     }
@@ -1302,6 +1307,7 @@ async fn registry_deregister_during_concurrent_registrations() {
                 started_at: Utc::now(),
                 beads_processed: 0,
                 config_reload_generation: 0,
+                state: None,
             })
             .unwrap();
         }));
@@ -1397,7 +1403,7 @@ fn stale_detection_works_correctly() {
         pid: 1,
         state: WorkerState::Selecting,
         current_bead: None,
-        workspace: PathBuf::from("/tmp"),
+        workspace: std::env::temp_dir(),
         last_heartbeat: Utc::now(),
         started_at: Utc::now(),
         beads_processed: 0,
@@ -1414,7 +1420,7 @@ fn stale_detection_works_correctly() {
         pid: 2,
         state: WorkerState::Executing,
         current_bead: Some(BeadId::from("nd-x")),
-        workspace: PathBuf::from("/tmp"),
+        workspace: std::env::temp_dir(),
         last_heartbeat: Utc::now() - chrono::Duration::seconds(600),
         started_at: Utc::now(),
         beads_processed: 0,
@@ -1551,7 +1557,7 @@ async fn explore_discovers_work_in_other_workspace() {
         starvation_threshold_minutes: 15,
         scan_interval_cycles: 1,
         max_scan_interval_cycles: 8,
-        stuck_threshold_secs: 300,
+        stale_claim_ttl: 300,
     };
     let strand = ExploreStrand::new(
         config,

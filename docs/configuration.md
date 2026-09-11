@@ -38,6 +38,7 @@ This guide covers the most commonly used configuration options.
 - `worker.idle_timeout` — Seconds to wait between queue polls when idle
 - `worker.idle_action` — What to do when queue is empty (`wait` or `exit`)
 - `worker.allow_exit_without_supervisor` — Opt-in to exit without supervisor
+- `worker.enforce_shipped_work` — Require pushed work (or an explanatory bead note) before accepting a closure
 - `worker.max_claim_retries` — Maximum claim retry attempts
 - `worker.cpu_load_warn` — CPU load warning threshold
 - `worker.memory_free_warn_mb` — Memory warning threshold
@@ -51,8 +52,8 @@ This guide covers the most commonly used configuration options.
 
 **Strand thresholds:**
 - `strands.pluck.exclude_labels` — Labels to exclude from plucking
-- `strands.mend.stale_claim_ttl` — Time before a claim is considered stale
-- `strands.mend.lock_ttl` — Lock file TTL
+- `strands.mend.stuck_threshold_secs` — Time before a claimed in-progress bead is considered stale and becomes a release candidate. `strands.mend.stale_claim_ttl` is an accepted alias of the same key (the name used in the original plan); both spellings are live-reloadable
+- `strands.mend.lock_ttl_secs` — Lock file TTL. `strands.mend.lock_ttl` is an accepted alias of the same key
 - `strands.explore.workspaces` — Pinned workspace list
 - `strands.weave.*` — Weave bead creation limits
 - `strands.unravel.*` — Unravel alternative limits
@@ -62,6 +63,7 @@ This guide covers the most commonly used configuration options.
 - `strands.knot.*` — Exhaustion recovery settings
 - `strands.mitosis.enabled` — Enable/disable mitosis
 - `strands.mitosis.first_failure_only` — Split only on first failure
+- `strands.mitosis.max_depth` / `strands.mitosis.max_children` — Split-tree caps; together they bound the worst case at `1 + C + C² + … + C^max_depth` beads per parent (73 at the shipped 8 × 2)
 
 **Outcome handling:**
 - `outcome.quarantine_after_failures` — Quarantine bead after N failures
@@ -295,6 +297,36 @@ worker:
 This setting is Tier C (restart-required) because it gates the reload mechanism
 itself. In particular, a worker started with the default `0` cannot discover a
 file change that enables polling; restart the worker after changing this value.
+
+### Launch Admission Under Resource Pressure
+
+Before a worker selects work — and before the supervisor spawns one, or the
+one-shot launcher forks sessions — CPU and memory are checked against
+`worker.cpu_load_warn` (normalized load: 1-minute load average divided by core
+count) and `worker.memory_free_warn_mb` (available memory). Above policy, the
+worker does **not** exit: a service-managed run enters the
+`ADMISSION_BLOCKED` state and holds resident, emitting rate-bounded
+`worker.admission_blocked` heartbeats and retrying on a capped jittered
+backoff until the host is back inside policy, when it emits
+`worker.admission_restored` and resumes selection (plan revision 24 §4.6,
+N-T33). It claims no bead while blocked and never relaxes the thresholds to
+escape the hold.
+
+A one-shot caller (`needle run` outside a service or tmux inner session)
+cannot stay resident, so it receives an explicit temporary-unavailable
+outcome — `AdmissionUnavailable`, exit code `75` (`EX_TEMPFAIL`) — with no
+sessions forked and no work-failure counted, because no bead was claimed.
+
+Backoff and heartbeat pacing have environment overrides (mainly for tests and
+fixtures; defaults are fine in production):
+
+| Environment variable | Default | Meaning |
+|----------------------|---------|---------|
+| `NEEDLE_ADMISSION_BACKOFF_BASE_MS` | `5000` | First retry delay; doubles with ±25% jitter on each attempt. |
+| `NEEDLE_ADMISSION_BACKOFF_CAP_MS` | `30000` | Maximum retry delay. |
+| `NEEDLE_ADMISSION_HEARTBEAT_SECS` | `30` | Minimum spacing between `worker.admission_blocked` emissions. |
+| `NEEDLE_LAUNCH_RESOURCE_PROBE` | — | Read load/memory from a directory of mock `loadavg`/`meminfo` files instead of `/proc` (test fixtures). |
+| `NEEDLE_SKIP_LAUNCH_RESOURCE_CHECK` | — | `1` disables the gate entirely. For test harnesses that must launch onto a busy box; do not set on fleet workers. |
 
 ### Worker Binary Path Override
 
@@ -601,10 +633,12 @@ strands:
 strands:
   mitosis:
     enabled: true                # Enable mitosis (default: true)
-    first_failure_only: true     # Only split on first failure (default: true)
-    force_failure_threshold: 0  # Force split after N failures (0 = disabled)
-    repeat_interval: 0           # Re-split every N failures (0 = disabled)
-    max_depth: 0                # Maximum generation depth (0 = unlimited)
+    first_failure_only: true     # Evaluate only on the first failure (default: true)
+    force_failure_threshold: 0   # Evaluate from the Nth failure on (0 = use the policy above)
+    repeat_interval: 0           # Re-evaluate every N failures after the first (0 = disabled)
+    max_depth: 2                 # Maximum generation depth (0 = UNLIMITED — not the default)
+    max_children: 8              # Maximum children created per split
+    child_count_warning_threshold: 24  # Warn when one parent's cumulative children cross this (0 = off)
 
     # Timeout-triggered mitosis (opt-in, default: disabled)
     timeout_triggered:
@@ -613,6 +647,98 @@ strands:
       handler_timeout: false
       min_elapsed_fraction: 0.9  # Trigger only if 90% of timeout elapsed
 ```
+
+#### Worst-case blast radius
+
+The two caps bound the size of one split tree, and they bound it as a
+**product**, so reason about them together, not as two independent knobs.
+Every split mints at most `max_children` children, one generation deeper
+than its parent, and beads that reach `max_depth` are labelled `human`
+instead of being split again. One bead whose dispatches keep failing with
+the fault attributed to the work can therefore grow into:
+
+```
+1 + max_children + max_children² + … + max_children^max_depth
+```
+
+At the shipped defaults (`max_children: 8`, `max_depth: 2`) that is
+**1 + 8 + 64 = 73 beads** from a single parent. Other shapes, for scale:
+
+| `max_children` | `max_depth` | Worst case |
+|---|---|---|
+| 8 (default) | 2 (default) | 73 |
+| 4 | 2 | 21 |
+| 3 | 1 | 4 |
+| 8 | 0 (unlimited) | unbounded |
+
+How fast the ceiling is reached: a split mints up to `max_children` beads
+in a single cycle — GitHub #18 went from one bead to seven in about 70
+seconds — but each *further* generation costs every splitting child at
+least one failed dispatch plus one mitosis analysis dispatch, so the full
+73 needs at least `1 + max_children` failed dispatches under the default
+trigger policy.
+
+Two things lift the arithmetic above:
+
+- **`repeat_interval` (default 0, off)** re-evaluates the *same* depth-0
+  parent at later failure counts. Dedup only skips proposed children that
+  already exist, so novel children accumulate past `max_children` across
+  re-splits, and each of those can mint its own subtree — the per-parent
+  ceiling above no longer holds.
+- **`max_depth: 0` disables the depth cap entirely.** That is not the
+  shipped default; setting it removes the only bound on generations.
+
+To shrink the blast radius, tighten the product — `max_children: 3` with
+`max_depth: 1` caps a parent at 4 beads — or disable the strand outright
+(`strands.mitosis.enabled: false`).
+
+#### What bounds a runaway today
+
+Stated plainly, as of 2026-09-09 (see `docs/plan/plan.md` revision 32 and
+beads `needle-3f82395d`, `needle-0be52050`):
+
+- **Depth and children caps: enforced.** The evaluator refuses a bead at
+  or past `max_depth` (labelling it `human` for the escalation ladder) and
+  truncates a proposal past `max_children`.
+- **Failure attribution: not yet.** The split call site still evaluates on
+  any `Outcome::Failure`, and `Outcome::GateUnsatisfiable` exists in the
+  taxonomy without a classification path producing it yet
+  (`needle-6519f163`, `needle-857df79d`). Until that lands, a gate or
+  configuration fault that fails on every dispatch *will* split on its
+  first failure, because the trigger cannot tell "the work was too big"
+  from "the gate can never pass". A workspace whose gates can be
+  unsatisfiable should tighten the cap product or disable the strand until
+  attribution gating ships.
+- **Child-count warning: declared, not emitted.**
+  `child_count_warning_threshold` (default 24 — one third of the shipped
+  73 ceiling) and the `bead.mitosis.child_count_warning` event exist, but
+  no code emits the event yet (`needle-3f82395d`). Counting is cumulative
+  per parent, so it is the tripwire that catches `repeat_interval` growth
+  that never breaches `max_children` in a single split.
+- **`needle status`** shows the configured mitosis values; it does not yet
+  surface live per-parent child counts (`needle-3f82395d`).
+
+#### Trigger policy
+
+The knobs interact — `force_failure_threshold` **replaces** the
+first-failure policy rather than adding to it (`src/mitosis/mod.rs`):
+
+- `first_failure_only: true` (default): evaluate exactly at failure count
+  1. Retries never re-evaluate, except at `repeat_interval` ticks, and a
+  bead carrying a `mitosis-depth:` label is never re-split.
+- `first_failure_only: false`: evaluate on *every* failure — strictly more
+  eager, never safer.
+- `force_failure_threshold: N` (N > 0): evaluate from failure N onward,
+  and `first_failure_only` / `repeat_interval` are ignored for as long as
+  it is set.
+
+Raising the threshold makes legitimate splits later (a genuinely oversized
+bead burns N−1 extra dispatches first) but does **not** bound the
+mis-attributed class: a failure that is not the work's fault repeats on
+every dispatch by construction and clears any N. That class is bounded by
+attribution gating, not by a higher trigger count — which is why
+`first_failure_only` stays the shipped default. `timeout_triggered`, when
+enabled, fires on a single qualifying timeout regardless of failure count.
 
 ### Weave, Unravel, Pulse (Opt-in Strands)
 
@@ -989,14 +1115,14 @@ Exit code 1: 1 failure(s).
 Run `needle doctor --repair` to attempt automatic fixes.
 ```
 
+A row with a known repair prints the same `fix` command the `--json` row
+carries in its `fix` field.
+
 When all checks pass:
 ```
 ────────────────────────────────────────────────────────────
 13 check(s) passed.
 ```
-
-A row with a known repair prints the same `fix` command the `--json` row
-carries in its `fix` field.
 
 #### JSON Output
 

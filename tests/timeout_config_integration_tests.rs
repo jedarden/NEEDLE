@@ -51,9 +51,8 @@ worker:
   building_timeout: 1800
 strands:
   mend:
-    stuck_threshold_secs: 600
+    stale_claim_ttl: 600
     idle_timeout: 300
-strands:
   mitosis:
     timeout_triggered:
       enabled: true
@@ -77,6 +76,7 @@ worker:
   building_timeout: 0
 strands:
   mend:
+    # Deprecated spelling of stale_claim_ttl: must still reach the same field.
     stuck_threshold_secs: 300
     idle_timeout: 0
 validation:
@@ -198,6 +198,10 @@ fn explicit_timeouts_parse_correctly() {
         "strands.mend.idle_timeout should be 300s"
     );
     assert_eq!(
+        config.strands.mend.stale_claim_ttl, 600,
+        "strands.mend.stale_claim_ttl should be 600s"
+    );
+    assert_eq!(
         config.validation.outcome_timeout_seconds, 100,
         "validation.outcome_timeout_seconds should be 100s"
     );
@@ -223,6 +227,10 @@ fn zero_timeouts_represent_unlimited_behavior() {
     assert_eq!(
         config.strands.mend.idle_timeout, 0,
         "strands.mend.idle_timeout=0 means unlimited"
+    );
+    assert_eq!(
+        config.strands.mend.stale_claim_ttl, 300,
+        "the deprecated stuck_threshold_secs spelling must reach stale_claim_ttl"
     );
     assert_eq!(
         config.validation.outcome_timeout_seconds, 0,
@@ -416,28 +424,32 @@ strands:
 }
 
 #[test]
-fn min_elapsed_fraction_negative_rejected_gracefully() {
-    let invalid_yaml = r#"
+fn min_elapsed_fraction_negative_always_qualifies_real_timeouts() {
+    let yaml = r#"
 agent:
   default: claude
 strands:
   mitosis:
     timeout_triggered:
       enabled: true
+      agent_wallclock_timeout: true
       min_elapsed_fraction: -0.5
 "#;
 
-    let config: Config = serde_yaml::from_str(invalid_yaml).unwrap();
+    let config: Config = serde_yaml::from_str(yaml).unwrap();
     let policy = &config.strands.mitosis.timeout_triggered;
 
-    // Negative fraction means every timeout satisfies it (threshold is never met)
+    // A negative min_elapsed_fraction is accepted at parse time (no validation
+    // rejects it), and `qualifies` applies the plain
+    // `elapsed_fraction < min_elapsed_fraction` comparison — so no real
+    // (non-negative) elapsed fraction can ever fall below the threshold.
     assert!(
         policy.qualifies("timeout", 0.0),
-        "negative min_elapsed_fraction should always qualify"
+        "a zero elapsed fraction qualifies when the minimum is negative"
     );
     assert!(
-        policy.qualifies("timeout", -1.0),
-        "negative elapsed_fraction should still qualify"
+        policy.qualifies("timeout", 0.5),
+        "a mid-range elapsed fraction qualifies when the minimum is negative"
     );
 }
 

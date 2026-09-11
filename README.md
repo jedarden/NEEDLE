@@ -28,29 +28,47 @@ curl -fsSL https://github.com/jedarden/NEEDLE/releases/latest/download/install.s
 # 2. Initialize your repo with the bead-rs backend
 cd <your-repo> && needle init --backend bead-rs
 
-# 3. Create the bead store
+# 3. Make sure your branch has an upstream — the shipped-work gate (on by
+#    default) verifies that each closed bead's commit was pushed
+git push -u origin "$(git branch --show-current)"
+
+# 4. Create the bead store
 bead init --prefix <name>
 
-# 4. Create your first bead
+# 5. Create your first bead
 bead create --title "Add a CONTRIBUTING.md" --priority 2
 
-# 5. Verify system health
+# 6. Verify system health
 needle doctor
 
-# 6. Run a worker
+# 7. Run a worker
 needle run --agent claude --identifier alpha
 
-# 7. Check status and attach to the session
+# 8. Check status and attach to the session
 needle status
 tmux attach -t needle-claude-alpha
 
-# 8. Verify completion
+# 9. Verify completion
 bead list --status closed
 ```
 
 **Heads-up:** the built-in `claude` adapter invokes `claude -p … --dangerously-skip-permissions`.
 Unattended operation means no permission prompts; read `needle config` before pointing a
 worker at a repository you care about.
+
+**Shipped-work gate (step 3):** `worker.enforce_shipped_work` is `true` by default. Before
+NEEDLE accepts a closure it checks that the dispatch produced a commit — on a path outside
+`notes/` and `.beads/` — that has been **pushed to the branch's upstream** (agents are
+instructed to commit and push; a bead note explaining why no code was needed also passes).
+A workspace whose branch has no upstream — a plain `git init`, or `git remote add` without
+`git push -u` — cannot be checked at all, so the quickstart's `git push -u` in step 3 is not
+optional. For a repository that is genuinely local-only, disable the gate instead:
+
+```yaml
+# ~/.config/needle/config.yaml
+worker:
+  enforce_shipped_work: false
+```
 
 **Build from source** (Rust 1.85+; NEEDLE pins its toolchain in `rust-toolchain.toml`):
 

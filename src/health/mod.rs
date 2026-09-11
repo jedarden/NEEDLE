@@ -1046,7 +1046,13 @@ impl HealthMonitor {
         // Use the current bead's workspace if set, otherwise fall back to home workspace.
         let effective_workspace = current_workspace.unwrap_or_else(|| self.workspace.clone());
 
-        let is_idle = state == WorkerState::Exhausted || current_bead.is_none();
+        // Admission-blocked is not idle (plan revision 24 §4.6): no strand ran
+        // and no bead is held, but the worker is refusing work on purpose
+        // because the host is above launch policy. Reporting it as idle would
+        // be exactly the 2026-09-03 dashboard failure where 15 blocked workers
+        // all looked free.
+        let is_idle = state == WorkerState::Exhausted
+            || (current_bead.is_none() && state != WorkerState::AdmissionBlocked);
         let current_task = current_bead.as_ref().map(|b| b.to_string());
 
         // HOOP Hook 3 (heartbeat): append a JSONL line in HOOP's three-state
@@ -1069,6 +1075,16 @@ impl HealthMonitor {
                     "pid": std::process::id(),
                     "adapter": adapter,
                 }),
+            );
+        } else if state == WorkerState::AdmissionBlocked {
+            // HOOP's wire format has no admission state, so the three-state
+            // value stays "idle" and the precise state rides in the extras for
+            // consumers that want it.
+            crate::hoop_hooks::emit_needle_heartbeat(
+                &effective_workspace,
+                &self.worker_id,
+                "idle",
+                serde_json::json!({"last_strand": last_strand, "needle_state": state.to_string()}),
             );
         } else {
             crate::hoop_hooks::emit_needle_heartbeat(
@@ -1447,7 +1463,9 @@ fn emitter_loop(
         // Use the current bead's workspace if set, otherwise fall back to home workspace.
         let effective_workspace = current_workspace.unwrap_or_else(|| workspace.clone());
 
-        let is_idle = state == WorkerState::Exhausted || current_bead.is_none();
+        // Admission-blocked is not idle — see the same rule in write_heartbeat.
+        let is_idle = state == WorkerState::Exhausted
+            || (current_bead.is_none() && state != WorkerState::AdmissionBlocked);
         let current_task = current_bead.as_ref().map(|b| b.to_string());
 
         let data = HeartbeatData {
@@ -1723,7 +1741,7 @@ mod tests {
             pid: 1000,
             state: WorkerState::Selecting,
             current_bead: None,
-            workspace: PathBuf::from("/tmp"),
+            workspace: dir.path().to_path_buf(),
             last_heartbeat: Utc::now(),
             started_at: Utc::now(),
             beads_processed: 0,
@@ -1739,7 +1757,7 @@ mod tests {
             pid: 2000,
             state: WorkerState::Executing,
             current_bead: Some(BeadId::from("nd-x")),
-            workspace: PathBuf::from("/tmp"),
+            workspace: dir.path().to_path_buf(),
             last_heartbeat: Utc::now(),
             started_at: Utc::now(),
             beads_processed: 3,
@@ -1790,7 +1808,7 @@ mod tests {
             pid: std::process::id(),
             state: WorkerState::Executing,
             current_bead: Some(BeadId::from("nd-live")),
-            workspace: PathBuf::from("/tmp"),
+            workspace: dir.path().to_path_buf(),
             last_heartbeat: Utc::now(),
             started_at: Utc::now(),
             beads_processed: 1,
@@ -1917,7 +1935,7 @@ mod tests {
             pid: 1,
             state: WorkerState::Selecting,
             current_bead: None,
-            workspace: PathBuf::from("/tmp"),
+            workspace: std::env::temp_dir(),
             last_heartbeat: Utc::now(),
             started_at: Utc::now(),
             beads_processed: 0,
@@ -2033,7 +2051,7 @@ mod tests {
             pid: std::process::id(),
             state: WorkerState::Selecting,
             current_bead: None,
-            workspace: PathBuf::from("/tmp"),
+            workspace: dir.path().to_path_buf(),
             last_heartbeat: Utc::now() - chrono::Duration::seconds(600),
             started_at: Utc::now(),
             beads_processed: 0,
@@ -2101,7 +2119,7 @@ mod tests {
                 hb_dir_clone,
                 "cb-test".to_string(),
                 "claude-cb-test".to_string(),
-                PathBuf::from("/tmp"),
+                dir.path().to_path_buf(),
                 Utc::now(),
                 Duration::from_millis(1),
                 3, // trip after 3 consecutive failures
@@ -2656,7 +2674,7 @@ mod tests {
                 pid: 1000 + i as u32,
                 state: WorkerState::Selecting,
                 current_bead: None,
-                workspace: PathBuf::from("/tmp"),
+                workspace: dir.path().to_path_buf(),
                 last_heartbeat: now,
                 started_at: now - chrono::Duration::seconds(60),
                 beads_processed: 0,
@@ -2702,7 +2720,7 @@ mod tests {
             pid: 2000,
             state: WorkerState::Selecting,
             current_bead: None,
-            workspace: PathBuf::from("/tmp"),
+            workspace: dir.path().to_path_buf(),
             last_heartbeat: old_time,
             started_at: old_time,
             beads_processed: 0,
@@ -2748,7 +2766,7 @@ mod tests {
             pid: 2000,
             state: WorkerState::Selecting,
             current_bead: None,
-            workspace: PathBuf::from("/tmp"),
+            workspace: dir.path().to_path_buf(),
             last_heartbeat: now,
             started_at: recent_time,
             beads_processed: 0,
@@ -2932,7 +2950,7 @@ mod tests {
             pid: std::process::id(),
             state: WorkerState::Selecting,
             current_bead: None,
-            workspace: PathBuf::from("/tmp"),
+            workspace: dir.path().to_path_buf(),
             last_heartbeat: Utc::now(),
             started_at: Utc::now(),
             beads_processed: 0,
@@ -4201,7 +4219,7 @@ mod tests {
             pid: 1,
             state: WorkerState::Selecting,
             current_bead: None,
-            workspace: PathBuf::from("/tmp"),
+            workspace: std::env::temp_dir(),
             last_heartbeat: Utc::now() - chrono::Duration::seconds(60), // 1 minute ago
             started_at: Utc::now(),
             beads_processed: 0,
@@ -4232,7 +4250,7 @@ mod tests {
             pid: 1,
             state: WorkerState::Selecting,
             current_bead: None,
-            workspace: PathBuf::from("/tmp"),
+            workspace: std::env::temp_dir(),
             last_heartbeat: Utc::now() - chrono::Duration::seconds(600), // 10 minutes ago
             started_at: Utc::now(),
             beads_processed: 0,
@@ -4263,7 +4281,7 @@ mod tests {
             pid: 1,
             state: WorkerState::Selecting,
             current_bead: None,
-            workspace: PathBuf::from("/tmp"),
+            workspace: std::env::temp_dir(),
             last_heartbeat: Utc::now() - chrono::Duration::seconds(300), // exactly 5 minutes ago
             started_at: Utc::now(),
             beads_processed: 0,
@@ -4312,7 +4330,7 @@ mod tests {
             pid: 2000,
             state: WorkerState::Executing,
             current_bead: Some(BeadId::from("nd-abc")),
-            workspace: PathBuf::from("/tmp"),
+            workspace: dir.path().to_path_buf(),
             last_heartbeat: Utc::now() - chrono::Duration::seconds(2), // 2 seconds ago (fresh, within 5s TTL)
             started_at: Utc::now(),
             beads_processed: 5,
@@ -4364,7 +4382,7 @@ mod tests {
             pid: 3000,
             state: WorkerState::Executing,
             current_bead: Some(BeadId::from("nd-def")),
-            workspace: PathBuf::from("/tmp"),
+            workspace: dir.path().to_path_buf(),
             last_heartbeat: Utc::now() - chrono::Duration::seconds(600), // 10 minutes ago (stale)
             started_at: Utc::now(),
             beads_processed: 10,
@@ -5059,7 +5077,7 @@ mod tests {
             pid: 1234,
             state: WorkerState::Executing,
             current_bead: Some(BeadId::from("needle-abc")),
-            workspace: PathBuf::from("/tmp"),
+            workspace: dir.path().to_path_buf(),
             last_heartbeat: Utc::now(),
             started_at: Utc::now(),
             beads_processed: 5,
@@ -5104,7 +5122,7 @@ mod tests {
             pid: 1234,
             state: WorkerState::Executing,
             current_bead: Some(BeadId::from("needle-abc")),
-            workspace: PathBuf::from("/tmp"),
+            workspace: dir.path().to_path_buf(),
             last_heartbeat: Utc::now() - chrono::Duration::seconds(600), // 10 minutes old
             started_at: Utc::now(),
             beads_processed: 5,
@@ -5203,7 +5221,7 @@ mod tests {
             pid: 1234,
             state: WorkerState::Executing,
             current_bead: None,
-            workspace: PathBuf::from("/tmp"),
+            workspace: dir.path().to_path_buf(),
             last_heartbeat: Utc::now() - chrono::Duration::seconds(300), // Exactly at TTL
             started_at: Utc::now(),
             beads_processed: 0,
@@ -5249,7 +5267,7 @@ mod tests {
             pid: 5678,
             state: WorkerState::Selecting,
             current_bead: None,
-            workspace: PathBuf::from("/tmp"),
+            workspace: dir.path().to_path_buf(),
             last_heartbeat: Utc::now(),
             started_at: Utc::now(),
             beads_processed: 0,

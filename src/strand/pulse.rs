@@ -126,6 +126,9 @@ pub struct PulseStrand {
     workspace: PathBuf,
     state_dir: PathBuf,
     telemetry: Telemetry,
+    /// Low-water backlog policy. `None` keeps the strand's ordinary cooldown
+    /// behaviour.
+    generation: Option<super::generation::GeneratorGate>,
 }
 
 impl PulseStrand {
@@ -144,7 +147,28 @@ impl PulseStrand {
             workspace,
             state_dir,
             telemetry,
+            generation: None,
         }
+    }
+
+    /// Enable low-water backlog generation for this strand.
+    ///
+    /// Pulse's scan cooldown is long by design, so when the fleet's
+    /// eligible-ready count has fallen below the reserve an acquired lease
+    /// lets the scan run anyway and turn findings into real work.
+    pub fn with_generation(
+        mut self,
+        config: crate::config::GenerationConfig,
+        exclude_labels: Vec<String>,
+    ) -> Self {
+        self.generation = Some(super::generation::GeneratorGate::new(
+            config,
+            self.workspace.clone(),
+            self.state_dir.clone(),
+            exclude_labels,
+            self.telemetry.clone(),
+        ));
+        self
     }
 
     /// Compute the state file path for a workspace.
@@ -258,6 +282,36 @@ impl PulseStrand {
             output
         )
     }
+
+    /// Record that this run replenished the backlog with real work, so a
+    /// generated bead is attributable to the strand that created it.
+    fn emit_work_created(&self, created: u32) {
+        self.telemetry
+            .emit(
+                EventKind::GenerationWorkCreated {
+                    strand_name: "pulse".to_string(),
+                    workspace: self.workspace.display().to_string(),
+                    detail: format!("{created} bead(s) created from codebase health findings"),
+                },
+                chrono::Utc::now(),
+            )
+            .ok();
+    }
+
+    /// Record a recoverable creator failure. The waterfall still falls through
+    /// to the next generator, so this must not fail the cycle.
+    fn emit_creator_failed(&self, error: &str) {
+        self.telemetry
+            .emit(
+                EventKind::GenerationCreatorFailed {
+                    strand_name: "pulse".to_string(),
+                    workspace: self.workspace.display().to_string(),
+                    error: error.to_string(),
+                },
+                chrono::Utc::now(),
+            )
+            .ok();
+    }
 }
 
 #[async_trait::async_trait]
@@ -266,7 +320,11 @@ impl super::Strand for PulseStrand {
         "pulse"
     }
 
-    async fn evaluate(&self, store: &dyn BeadStore, _exclusions: &HashSet<BeadId>) -> StrandResult {
+    fn is_generator(&self) -> bool {
+        true
+    }
+
+    async fn evaluate(&self, store: &dyn BeadStore, exclusions: &HashSet<BeadId>) -> StrandResult {
         // Guard: disabled.
         if !self.config.enabled {
             tracing::debug!("pulse strand disabled");
@@ -289,8 +347,27 @@ impl super::Strand for PulseStrand {
             }
         };
 
-        // Guard: cooldown.
-        if state.is_in_cooldown(self.config.cooldown_hours as i64) {
+        // Guard: cooldown. The low-water generation gate can override it when
+        // the fleet's eligible-ready count has fallen below the reserve; a
+        // contended lease means another worker is already replenishing, so
+        // this pass must not duplicate the same plan gap.
+        let generation_permit = match &self.generation {
+            Some(gate) => Some(gate.prepare("pulse", store, exclusions).await),
+            None => None,
+        };
+        if matches!(
+            generation_permit,
+            Some(super::generation::GeneratorPermit::Contended)
+        ) {
+            return StrandResult::Skipped {
+                reason: "generation_lease_contended".to_string(),
+            };
+        }
+        let bypass_cooldown = generation_permit
+            .as_ref()
+            .is_some_and(|permit| permit.bypasses_cooldown());
+
+        if !bypass_cooldown && state.is_in_cooldown(self.config.cooldown_hours as i64) {
             tracing::debug!(
                 cooldown_hours = self.config.cooldown_hours,
                 "pulse strand: in cooldown, skipping"
@@ -308,6 +385,7 @@ impl super::Strand for PulseStrand {
 
         // Run scanners and collect findings.
         let mut all_findings: Vec<(String, ScannerFinding)> = Vec::new();
+        let mut failed_scanners = 0usize;
 
         for scanner in &self.config.scanners {
             tracing::info!(
@@ -342,6 +420,7 @@ impl super::Strand for PulseStrand {
                             chrono::Utc::now(),
                         )
                         .ok();
+                    failed_scanners += 1;
                     continue;
                 }
             };
@@ -374,6 +453,14 @@ impl super::Strand for PulseStrand {
 
         // Update state timestamp
         state.touch();
+
+        // Every scanner failing is a recoverable creator failure: the run
+        // produced no work for a reason that need not hold next time. Record
+        // it as such — it is not idle — and let the waterfall fall through to
+        // the next generator.
+        if failed_scanners == self.config.scanners.len() {
+            self.emit_creator_failed(&format!("all {failed_scanners} scanner(s) failed"));
+        }
 
         if all_findings.is_empty() {
             tracing::info!("pulse strand: no new significant findings");
@@ -523,6 +610,7 @@ impl super::Strand for PulseStrand {
                 created,
                 "pulse strand: created beads for codebase health findings"
             );
+            self.emit_work_created(created);
             StrandResult::WorkCreated
         } else {
             tracing::info!("pulse strand: no new beads created (all findings deduplicated)");
@@ -755,10 +843,12 @@ mod tests {
     #[tokio::test]
     async fn strand_name_is_pulse() {
         let telemetry = Telemetry::new("test".to_string());
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let state_dir = tempfile::tempdir().unwrap();
         let strand = PulseStrand::new(
             PulseConfig::default(),
-            PathBuf::from("/tmp"),
-            PathBuf::from("/tmp/state"),
+            workspace_dir.path().to_path_buf(),
+            state_dir.path().to_path_buf(),
             telemetry,
         );
         assert_eq!(strand.name(), "pulse");
@@ -767,10 +857,12 @@ mod tests {
     #[tokio::test]
     async fn disabled_returns_no_work() {
         let telemetry = Telemetry::new("test".to_string());
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let state_dir = tempfile::tempdir().unwrap();
         let strand = PulseStrand::new(
             PulseConfig::default(), // disabled by default
-            PathBuf::from("/tmp"),
-            PathBuf::from("/tmp/state"),
+            workspace_dir.path().to_path_buf(),
+            state_dir.path().to_path_buf(),
             telemetry,
         );
         let store = MockStore::new();
@@ -781,6 +873,8 @@ mod tests {
     #[tokio::test]
     async fn no_scanners_returns_no_work() {
         let telemetry = Telemetry::new("test".to_string());
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let state_dir = tempfile::tempdir().unwrap();
         let config = PulseConfig {
             enabled: true,
             scanners: vec![],
@@ -788,8 +882,8 @@ mod tests {
         };
         let strand = PulseStrand::new(
             config,
-            PathBuf::from("/tmp"),
-            PathBuf::from("/tmp/state"),
+            workspace_dir.path().to_path_buf(),
+            state_dir.path().to_path_buf(),
             telemetry,
         );
         let store = MockStore::new();
@@ -831,6 +925,177 @@ mod tests {
 
         assert!(matches!(result, StrandResult::NoWork));
         assert!(store.created_beads().is_empty());
+    }
+
+    #[tokio::test]
+    async fn low_water_reserve_overrides_pulse_cooldown() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let telemetry = Telemetry::new("test".to_string());
+
+        // Pulse ran recently, so its ordinary cooldown is active.
+        let mut state = PulseState::default();
+        state.touch();
+        let hash = workspace_hash(workspace_dir.path());
+        let state_path = state_dir.path().join(format!("{hash}.json"));
+        state.save(&state_path).unwrap();
+
+        // The fleet's eligible-ready frontier is empty, so it sits below the
+        // reserve and the low-water gate lets this generator run anyway.
+        let strand = PulseStrand::new(
+            PulseConfig {
+                enabled: true,
+                scanners: vec![crate::config::ScannerConfig {
+                    name: "echo-scanner".to_string(),
+                    command: "echo 'src/foo.rs:10:1: error: unused import'".to_string(),
+                    severity_threshold: None,
+                }],
+                cooldown_hours: 48,
+                severity_threshold: 5,
+                max_beads_per_run: 10,
+                ..PulseConfig::default()
+            },
+            workspace_dir.path().to_path_buf(),
+            state_dir.path().to_path_buf(),
+            telemetry,
+        )
+        .with_generation(
+            crate::config::GenerationConfig {
+                enabled: true,
+                low_water_reserve: 1,
+                lease_ttl_secs: 300,
+            },
+            Vec::new(),
+        );
+
+        let store = MockStore::new();
+        let result = strand.evaluate(&store, &HashSet::new()).await;
+
+        assert!(
+            matches!(result, StrandResult::WorkCreated),
+            "the low-water reserve should override the pulse cooldown; got {result:?}"
+        );
+        assert_eq!(store.created_beads().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn contended_pulse_lease_skips_generation() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let scanner = || crate::config::ScannerConfig {
+            name: "echo-scanner".to_string(),
+            command: "echo 'src/foo.rs:10:1: error: unused import'".to_string(),
+            severity_threshold: None,
+        };
+        let generation = crate::config::GenerationConfig {
+            enabled: true,
+            low_water_reserve: 1,
+            lease_ttl_secs: 300,
+        };
+
+        // The first empty worker wins the workspace-plus-strand lease and
+        // replenishes the backlog...
+        let first = PulseStrand::new(
+            PulseConfig {
+                enabled: true,
+                scanners: vec![scanner()],
+                cooldown_hours: 0,
+                severity_threshold: 5,
+                max_beads_per_run: 10,
+                ..PulseConfig::default()
+            },
+            workspace_dir.path().to_path_buf(),
+            state_dir.path().to_path_buf(),
+            Telemetry::new("worker-a".to_string()),
+        )
+        .with_generation(generation.clone(), Vec::new());
+        let first_store = MockStore::new();
+        assert!(matches!(
+            first.evaluate(&first_store, &HashSet::new()).await,
+            StrandResult::WorkCreated
+        ));
+
+        // ...so a second empty worker seeing the same empty frontier must not
+        // generate the same gap while that lease is still live.
+        let second = PulseStrand::new(
+            PulseConfig {
+                enabled: true,
+                scanners: vec![scanner()],
+                cooldown_hours: 0,
+                severity_threshold: 5,
+                max_beads_per_run: 10,
+                ..PulseConfig::default()
+            },
+            workspace_dir.path().to_path_buf(),
+            state_dir.path().to_path_buf(),
+            Telemetry::new("worker-b".to_string()),
+        )
+        .with_generation(generation, Vec::new());
+        let second_store = MockStore::new();
+        let result = second.evaluate(&second_store, &HashSet::new()).await;
+
+        assert_eq!(
+            second_store.created_beads().len(),
+            0,
+            "a contended lease must not generate a duplicate plan gap"
+        );
+        match result {
+            StrandResult::Skipped { reason } => {
+                assert_eq!(reason, "generation_lease_contended");
+            }
+            other => panic!("expected the waterfall to continue, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn every_scanner_failing_is_recorded_as_a_creator_failure() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let (sink, events) = crate::telemetry::test_utils::MemorySink::new();
+        let telemetry = Telemetry::with_sink("test".to_string(), sink);
+
+        let strand = PulseStrand::new(
+            PulseConfig {
+                enabled: true,
+                scanners: vec![
+                    crate::config::ScannerConfig {
+                        name: "failing-scanner".to_string(),
+                        command: "exit 1".to_string(),
+                        severity_threshold: None,
+                    },
+                    crate::config::ScannerConfig {
+                        name: "also-failing".to_string(),
+                        command: "exit 2".to_string(),
+                        severity_threshold: None,
+                    },
+                ],
+                cooldown_hours: 0,
+                ..PulseConfig::default()
+            },
+            workspace_dir.path().to_path_buf(),
+            state_dir.path().to_path_buf(),
+            telemetry,
+        );
+
+        let store = MockStore::new();
+        // A creator failure is recoverable: the cycle falls through rather
+        // than failing, so the strand still reports that it has no work.
+        let result = strand.evaluate(&store, &HashSet::new()).await;
+        assert!(matches!(result, StrandResult::NoWork));
+        assert!(store.created_beads().is_empty());
+
+        drop(strand);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let locked = events.lock().unwrap();
+        let failures: Vec<_> = locked
+            .iter()
+            .filter(|event| event.event_type == "generation.creator_failed")
+            .collect();
+        assert_eq!(
+            failures.len(),
+            1,
+            "a run whose scanners all failed is a creator failure, not idle"
+        );
     }
 
     // ── Helper tests ─────────────────────────────────────────────────────
@@ -889,13 +1154,15 @@ mod tests {
     #[tokio::test]
     async fn parse_output_extracts_warnings() {
         let telemetry = Telemetry::new("test".to_string());
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let state_dir = tempfile::tempdir().unwrap();
         let strand = PulseStrand::new(
             PulseConfig {
                 severity_threshold: 5, // Accept all severities
                 ..PulseConfig::default()
             },
-            PathBuf::from("/tmp"),
-            PathBuf::from("/tmp/state"),
+            workspace_dir.path().to_path_buf(),
+            state_dir.path().to_path_buf(),
             telemetry,
         );
 
@@ -913,13 +1180,15 @@ mod tests {
     #[tokio::test]
     async fn parse_output_respects_severity() {
         let telemetry = Telemetry::new("test".to_string());
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let state_dir = tempfile::tempdir().unwrap();
         let strand = PulseStrand::new(
             PulseConfig {
                 severity_threshold: 2, // Only errors (severity 1-2)
                 ..PulseConfig::default()
             },
-            PathBuf::from("/tmp"),
-            PathBuf::from("/tmp/state"),
+            workspace_dir.path().to_path_buf(),
+            state_dir.path().to_path_buf(),
             telemetry,
         );
 

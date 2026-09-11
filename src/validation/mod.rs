@@ -24,7 +24,7 @@ pub mod dod_bypass;
 pub mod predispatch;
 mod shipped_work;
 pub mod worker_config;
-pub use shipped_work::verify_shipped_work;
+pub use shipped_work::{upstream_status, verify_shipped_work, UpstreamStatus};
 
 mod gate_path_validation;
 pub use gate_path_validation::{
@@ -898,7 +898,7 @@ mod tests {
             status: BeadStatus::InProgress,
             assignee: Some("worker-01".to_string()),
             labels: vec![],
-            workspace: PathBuf::from("/tmp"),
+            workspace: std::env::temp_dir(),
             dependencies: vec![],
             dependents: vec![],
             comments: vec![],
@@ -1210,26 +1210,30 @@ mod tests {
 
     #[test]
     fn validation_gate_new_returns_none_for_empty_configs() {
-        let gate = ValidationGate::new(vec![], PathBuf::from("/tmp"));
+        let ws = tempfile::tempdir().unwrap();
+        let gate = ValidationGate::new(vec![], ws.path().to_path_buf());
         assert!(gate.is_none());
     }
 
     #[test]
     fn validation_gate_from_commands_returns_none_for_empty() {
-        let gate = ValidationGate::from_commands(vec![], PathBuf::from("/tmp"));
+        let ws = tempfile::tempdir().unwrap();
+        let gate = ValidationGate::from_commands(vec![], ws.path().to_path_buf());
         assert!(gate.is_none());
     }
 
     #[test]
     fn validation_gate_from_commands_returns_some_for_nonempty() {
-        let gate = ValidationGate::from_commands(vec!["true".to_string()], PathBuf::from("/tmp"));
+        let ws = tempfile::tempdir().unwrap();
+        let gate = ValidationGate::from_commands(vec!["true".to_string()], ws.path().to_path_buf());
         assert!(gate.is_some());
     }
 
     #[tokio::test]
     async fn validation_gate_run_passes() {
-        let gate =
-            ValidationGate::from_commands(vec!["true".to_string()], PathBuf::from("/tmp")).unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let gate = ValidationGate::from_commands(vec!["true".to_string()], ws.path().to_path_buf())
+            .unwrap();
         let bead = test_bead();
         let report = gate.run(&bead).await.unwrap();
         assert!(report.all_passed);
@@ -1237,8 +1241,10 @@ mod tests {
 
     #[tokio::test]
     async fn validation_gate_run_fails() {
-        let gate = ValidationGate::from_commands(vec!["false".to_string()], PathBuf::from("/tmp"))
-            .unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let gate =
+            ValidationGate::from_commands(vec!["false".to_string()], ws.path().to_path_buf())
+                .unwrap();
         let bead = test_bead();
         let report = gate.run(&bead).await.unwrap();
         assert!(!report.all_passed);

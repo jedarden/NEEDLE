@@ -1399,16 +1399,16 @@ pub fn split_threshold_reached(failure_count: u32, threshold: u32) -> bool {
 /// immediate `split_out_of_scope` release?
 ///
 /// True when the bead has reached the auto-split threshold *and* references
-/// NEEDLE-internal configuration — splitting such a bead has no legitimate
-/// resolution path inside a target repo, so the worker skips it and releases it
-/// unchanged.
+/// NEEDLE-internal configuration — a split of such a bead has no legitimate
+/// resolution path inside a target repo, so the worker skips it and releases
+/// it unchanged.
 ///
 /// Explore calls this **before ranking and claiming** so a poison candidate is
-/// never claimed at all; the worker calls it after claiming as a late invariant
-/// fallback. Both call the same function deliberately: when the two disagreed,
-/// Explore claimed a bead the worker then refused, released it unchanged, and
-/// reselected it on the very next scan — a livelock that produced 1382
-/// claim/release cycles across 3 beads and 15 workers in a single day
+/// never claimed at all; the worker calls it after claiming as a late
+/// invariant fallback. Both call the same function deliberately: when the two
+/// disagreed, Explore claimed a bead the worker then refused, released it
+/// unchanged, and reselected it on the very next scan — a livelock that
+/// produced 1382 claim/release cycles across 3 beads and 15 workers in one day
 /// (needle-ee024ae4), with zero dispatches from the workers caught in it.
 ///
 /// Note for anyone adding an exclusion cache on top of this: do **not** key it
@@ -2295,6 +2295,7 @@ End of response."#;
     #[tokio::test]
     async fn evaluate_skips_when_disabled() {
         let config = MitosisConfig {
+            child_count_warning_threshold: 24,
             enabled: false,
             first_failure_only: true,
             force_failure_threshold: 0,
@@ -2304,7 +2305,8 @@ End of response."#;
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
-        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+        let ws_tmp = tempfile::tempdir().unwrap();
+        let evaluator = MitosisEvaluator::new(config, telemetry, ws_tmp.path().to_path_buf());
         let store = MockStore::new();
         let bead = test_bead();
 
@@ -2331,6 +2333,7 @@ End of response."#;
     #[tokio::test]
     async fn evaluate_skips_when_not_first_failure() {
         let config = MitosisConfig {
+            child_count_warning_threshold: 24,
             enabled: true,
             first_failure_only: true,
             force_failure_threshold: 0,
@@ -2340,7 +2343,8 @@ End of response."#;
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
-        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+        let ws_tmp = tempfile::tempdir().unwrap();
+        let evaluator = MitosisEvaluator::new(config, telemetry, ws_tmp.path().to_path_buf());
         let store = MockStore::new().with_labels(vec!["failure-count:2".to_string()]);
         let bead = test_bead();
 
@@ -2390,6 +2394,7 @@ End of response."#;
     #[tokio::test]
     async fn create_children_with_dedup() {
         let config = MitosisConfig {
+            child_count_warning_threshold: 24,
             enabled: true,
             first_failure_only: true,
             force_failure_threshold: 0,
@@ -2399,7 +2404,8 @@ End of response."#;
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
-        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+        let ws_tmp = tempfile::tempdir().unwrap();
+        let evaluator = MitosisEvaluator::new(config, telemetry, ws_tmp.path().to_path_buf());
 
         // Parent already has a child titled "Add endpoint" (found via label).
         let store = MockStore::new()
@@ -2439,6 +2445,7 @@ End of response."#;
     #[tokio::test]
     async fn create_children_all_deduped() {
         let config = MitosisConfig {
+            child_count_warning_threshold: 24,
             enabled: true,
             first_failure_only: true,
             force_failure_threshold: 0,
@@ -2448,7 +2455,8 @@ End of response."#;
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
-        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+        let ws_tmp = tempfile::tempdir().unwrap();
+        let evaluator = MitosisEvaluator::new(config, telemetry, ws_tmp.path().to_path_buf());
 
         // Both proposed children already exist (found via parent label).
         let store = MockStore::new().with_existing_children(vec![
@@ -2488,6 +2496,7 @@ End of response."#;
     async fn dedup_ignores_children_of_other_parents() {
         // Children exist but belong to a different parent — should not dedup.
         let config = MitosisConfig {
+            child_count_warning_threshold: 24,
             enabled: true,
             first_failure_only: true,
             force_failure_threshold: 0,
@@ -2497,7 +2506,8 @@ End of response."#;
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
-        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+        let ws_tmp = tempfile::tempdir().unwrap();
+        let evaluator = MitosisEvaluator::new(config, telemetry, ws_tmp.path().to_path_buf());
 
         let store = MockStore::new()
             .with_existing_children(vec![existing_child("Add endpoint", "different-parent")]);
@@ -2538,6 +2548,7 @@ End of response."#;
     async fn repeat_interval_triggers_at_correct_counts() {
         // repeat_interval = 50 should fire at 1, 51, 101, 151, ...
         let config = MitosisConfig {
+            child_count_warning_threshold: 24,
             enabled: true,
             first_failure_only: true,
             force_failure_threshold: 0,
@@ -2547,7 +2558,8 @@ End of response."#;
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
-        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+        let ws_tmp = tempfile::tempdir().unwrap();
+        let evaluator = MitosisEvaluator::new(config, telemetry, ws_tmp.path().to_path_buf());
 
         // Test failure_count = 1 (should fire)
         let store = MockStore::new().with_labels(vec!["failure-count:1".to_string()]);
@@ -2631,6 +2643,7 @@ End of response."#;
     async fn repeat_interval_skips_mitosis_depth_beads() {
         // Beads with mitosis-depth:1 label should be skipped even at repeat ticks
         let config = MitosisConfig {
+            child_count_warning_threshold: 24,
             enabled: true,
             first_failure_only: true,
             force_failure_threshold: 0,
@@ -2640,7 +2653,8 @@ End of response."#;
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
-        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+        let ws_tmp = tempfile::tempdir().unwrap();
+        let evaluator = MitosisEvaluator::new(config, telemetry, ws_tmp.path().to_path_buf());
 
         // Bead with mitosis-depth:1 label at failure_count = 51 (repeat tick)
         let store = MockStore::new().with_labels(vec![
@@ -2675,6 +2689,7 @@ End of response."#;
     async fn repeat_interval_zero_preserves_first_failure_only() {
         // repeat_interval = 0 should behave like first_failure_only
         let config = MitosisConfig {
+            child_count_warning_threshold: 24,
             enabled: true,
             first_failure_only: true,
             force_failure_threshold: 0,
@@ -2684,7 +2699,8 @@ End of response."#;
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
-        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+        let ws_tmp = tempfile::tempdir().unwrap();
+        let evaluator = MitosisEvaluator::new(config, telemetry, ws_tmp.path().to_path_buf());
 
         // Test failure_count = 1 (should fire)
         let store = MockStore::new().with_labels(vec!["failure-count:1".to_string()]);
@@ -2730,6 +2746,7 @@ End of response."#;
         // Test that beads with mitosis-depth:1 label are skipped during repeat tick.
         // Verify depth-limited beads don't trigger repeat mitosis.
         let config = MitosisConfig {
+            child_count_warning_threshold: 24,
             enabled: true,
             first_failure_only: true,
             force_failure_threshold: 0,
@@ -2739,7 +2756,8 @@ End of response."#;
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
-        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+        let ws_tmp = tempfile::tempdir().unwrap();
+        let evaluator = MitosisEvaluator::new(config, telemetry, ws_tmp.path().to_path_buf());
 
         // Bead with mitosis-depth:1 label at failure_count = 51 (repeat tick)
         // This should be skipped because it's a mitosis child bead (depth-limited).
@@ -2785,6 +2803,7 @@ End of response."#;
         // evaluator must return OutOfScope and NOT create any child beads.
 
         let config = MitosisConfig {
+            child_count_warning_threshold: 24,
             enabled: true,
             first_failure_only: true,
             force_failure_threshold: 0,
@@ -2794,7 +2813,8 @@ End of response."#;
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
-        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+        let ws_tmp = tempfile::tempdir().unwrap();
+        let evaluator = MitosisEvaluator::new(config, telemetry, ws_tmp.path().to_path_buf());
 
         // Bead matching bf-3b64: "Starvation alert: beads invisible to worker"
         // with body referencing NEEDLE-internal configuration
@@ -2853,6 +2873,7 @@ End of response."#;
     async fn evaluate_returns_out_of_scope_for_pluck_config_beads() {
         // Additional regression test for "Pluck configuration" references
         let config = MitosisConfig {
+            child_count_warning_threshold: 24,
             enabled: true,
             first_failure_only: true,
             force_failure_threshold: 0,
@@ -2862,7 +2883,8 @@ End of response."#;
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
-        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+        let ws_tmp = tempfile::tempdir().unwrap();
+        let evaluator = MitosisEvaluator::new(config, telemetry, ws_tmp.path().to_path_buf());
 
         let mut bead = test_bead();
         bead.title = "Fix bead discovery configuration".to_string();
@@ -2905,6 +2927,7 @@ End of response."#;
     async fn evaluate_returns_out_of_scope_for_strand_config_beads() {
         // Test for "strand configuration" and "worker configuration" references
         let config = MitosisConfig {
+            child_count_warning_threshold: 24,
             enabled: true,
             first_failure_only: true,
             force_failure_threshold: 0,
@@ -2914,7 +2937,8 @@ End of response."#;
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
-        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+        let ws_tmp = tempfile::tempdir().unwrap();
+        let evaluator = MitosisEvaluator::new(config, telemetry, ws_tmp.path().to_path_buf());
 
         let mut bead = test_bead();
         bead.title = "Configure strand filters".to_string();
@@ -2957,6 +2981,7 @@ End of response."#;
     async fn max_depth_prevents_splitting_beyond_limit() {
         // Test that beads exceeding max_depth are not split further.
         let config = MitosisConfig {
+            child_count_warning_threshold: 24,
             enabled: true,
             first_failure_only: true,
             force_failure_threshold: 0,
@@ -2966,7 +2991,8 @@ End of response."#;
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
-        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+        let ws_tmp = tempfile::tempdir().unwrap();
+        let evaluator = MitosisEvaluator::new(config, telemetry, ws_tmp.path().to_path_buf());
 
         // A bead already at depth 3 should not be split further.
         let mut bead = test_bead();
@@ -3018,6 +3044,7 @@ End of response."#;
     async fn max_depth_zero_allows_unlimited_splitting() {
         // Test that max_depth = 0 allows unlimited splitting (no limit).
         let config = MitosisConfig {
+            child_count_warning_threshold: 24,
             enabled: true,
             first_failure_only: true,
             force_failure_threshold: 0,
@@ -3027,7 +3054,8 @@ End of response."#;
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
-        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+        let ws_tmp = tempfile::tempdir().unwrap();
+        let evaluator = MitosisEvaluator::new(config, telemetry, ws_tmp.path().to_path_buf());
 
         // A bead at depth 100 should still be allowed to split when max_depth = 0.
         let mut bead = test_bead();
@@ -3064,6 +3092,7 @@ End of response."#;
     async fn children_get_incremented_depth() {
         // Test that children get depth = parent_depth + 1.
         let config = MitosisConfig {
+            child_count_warning_threshold: 24,
             enabled: true,
             first_failure_only: true,
             force_failure_threshold: 0,
@@ -3073,7 +3102,8 @@ End of response."#;
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
-        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+        let ws_tmp = tempfile::tempdir().unwrap();
+        let evaluator = MitosisEvaluator::new(config, telemetry, ws_tmp.path().to_path_buf());
 
         // Parent bead at depth 2 should create children at depth 3.
         let mut bead = test_bead();
@@ -3111,6 +3141,7 @@ End of response."#;
     async fn root_bead_creates_depth_1_children() {
         // Test that a root bead (no mitosis-depth label) creates children at depth 1.
         let config = MitosisConfig {
+            child_count_warning_threshold: 24,
             enabled: true,
             first_failure_only: true,
             force_failure_threshold: 0,
@@ -3120,7 +3151,8 @@ End of response."#;
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
-        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+        let ws_tmp = tempfile::tempdir().unwrap();
+        let evaluator = MitosisEvaluator::new(config, telemetry, ws_tmp.path().to_path_buf());
 
         // Root bead with no mitosis-depth label (depth 0).
         let bead = test_bead();
@@ -3187,6 +3219,7 @@ End of response."#;
     async fn multi_generation_depth_tracking() {
         // Test that depth tracking works across multiple generations.
         let config = MitosisConfig {
+            child_count_warning_threshold: 24,
             enabled: true,
             first_failure_only: true,
             force_failure_threshold: 0,
@@ -3196,7 +3229,8 @@ End of response."#;
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
-        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+        let ws_tmp = tempfile::tempdir().unwrap();
+        let evaluator = MitosisEvaluator::new(config, telemetry, ws_tmp.path().to_path_buf());
 
         // Generation 0: Root bead (no mitosis-depth label).
         let mut root = test_bead();
@@ -3264,6 +3298,7 @@ End of response."#;
         // Regression test for bf-3mfgf: dedup should find duplicates created by
         // earlier generations, not just direct children of the current parent.
         let config = MitosisConfig {
+            child_count_warning_threshold: 24,
             enabled: true,
             first_failure_only: true,
             force_failure_threshold: 0,
@@ -3273,7 +3308,8 @@ End of response."#;
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
-        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+        let ws_tmp = tempfile::tempdir().unwrap();
+        let evaluator = MitosisEvaluator::new(config, telemetry, ws_tmp.path().to_path_buf());
 
         // Simulate a multi-generation cascade:
         // - Root bead "parent-001" creates "Add endpoint" at generation 1
@@ -3354,6 +3390,7 @@ End of response."#;
         // into unrelated lineages. A bead with the same title from a different
         // root should NOT be deduped.
         let config = MitosisConfig {
+            child_count_warning_threshold: 24,
             enabled: true,
             first_failure_only: true,
             force_failure_threshold: 0,
@@ -3363,7 +3400,8 @@ End of response."#;
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
-        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+        let ws_tmp = tempfile::tempdir().unwrap();
+        let evaluator = MitosisEvaluator::new(config, telemetry, ws_tmp.path().to_path_buf());
 
         // Bead from a DIFFERENT lineage (root-parent-999)
         let other_lineage_bead = existing_child_with_depth("Add endpoint", "parent-999", 2);
@@ -3416,6 +3454,7 @@ End of response."#;
         // If parent has root-*, children get the same root-*.
         // If parent has no root-*, children get root-<parent_id>.
         let config = MitosisConfig {
+            child_count_warning_threshold: 24,
             enabled: true,
             first_failure_only: true,
             force_failure_threshold: 0,
@@ -3425,7 +3464,8 @@ End of response."#;
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
-        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+        let ws_tmp = tempfile::tempdir().unwrap();
+        let evaluator = MitosisEvaluator::new(config, telemetry, ws_tmp.path().to_path_buf());
 
         // Store that captures created beads with their labels
         let store = MockStore::new();
@@ -3460,6 +3500,7 @@ End of response."#;
         // Test that a root bead (no mitosis-depth, no root-*) creates children
         // with root-<parent_id> label.
         let config = MitosisConfig {
+            child_count_warning_threshold: 24,
             enabled: true,
             first_failure_only: true,
             force_failure_threshold: 0,
@@ -3469,7 +3510,8 @@ End of response."#;
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
-        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+        let ws_tmp = tempfile::tempdir().unwrap();
+        let evaluator = MitosisEvaluator::new(config, telemetry, ws_tmp.path().to_path_buf());
 
         let store = MockStore::new();
 
@@ -3497,6 +3539,7 @@ End of response."#;
     async fn timeout_mitosis_skips_when_not_eligible() {
         // Test that timeout mitosis is skipped when timeout eligibility fails
         let config = MitosisConfig {
+            child_count_warning_threshold: 24,
             enabled: true,
             first_failure_only: true,
             force_failure_threshold: 0,
@@ -3511,7 +3554,8 @@ End of response."#;
             },
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
-        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+        let ws_tmp = tempfile::tempdir().unwrap();
+        let evaluator = MitosisEvaluator::new(config, telemetry, ws_tmp.path().to_path_buf());
 
         let store = MockStore::new();
         let bead = test_bead();
@@ -3555,6 +3599,7 @@ End of response."#;
     async fn timeout_mitosis_skips_on_infrastructure_timeout() {
         // Test that infrastructure-type timeouts are rejected
         let config = MitosisConfig {
+            child_count_warning_threshold: 24,
             enabled: true,
             first_failure_only: true,
             force_failure_threshold: 0,
@@ -3569,7 +3614,8 @@ End of response."#;
             },
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
-        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+        let ws_tmp = tempfile::tempdir().unwrap();
+        let evaluator = MitosisEvaluator::new(config, telemetry, ws_tmp.path().to_path_buf());
 
         let store = MockStore::new();
         let bead = test_bead();
@@ -3616,6 +3662,7 @@ End of response."#;
     async fn timeout_mitosis_returns_out_of_scope_for_internal_config() {
         // Test that timeout mitosis returns OutOfScope for NEEDLE-internal config beads
         let config = MitosisConfig {
+            child_count_warning_threshold: 24,
             enabled: true,
             first_failure_only: true,
             force_failure_threshold: 0,
@@ -3630,7 +3677,8 @@ End of response."#;
             },
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
-        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+        let ws_tmp = tempfile::tempdir().unwrap();
+        let evaluator = MitosisEvaluator::new(config, telemetry, ws_tmp.path().to_path_buf());
 
         let store = MockStore::new();
 
@@ -3675,6 +3723,7 @@ End of response."#;
     async fn timeout_mitosis_respects_max_depth() {
         // Test that beads at max_depth are not split further
         let config = MitosisConfig {
+            child_count_warning_threshold: 24,
             enabled: true,
             first_failure_only: true,
             force_failure_threshold: 0,
@@ -3689,7 +3738,8 @@ End of response."#;
             },
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
-        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+        let ws_tmp = tempfile::tempdir().unwrap();
+        let evaluator = MitosisEvaluator::new(config, telemetry, ws_tmp.path().to_path_buf());
 
         let store = MockStore::new();
 
@@ -3735,6 +3785,7 @@ End of response."#;
     async fn timeout_mitosis_uses_separate_prompt_template() {
         // Test that timeout mitosis uses the mitosis-timeout template, not regular mitosis
         let config = MitosisConfig {
+            child_count_warning_threshold: 24,
             enabled: true,
             first_failure_only: true,
             force_failure_threshold: 0,
@@ -3749,7 +3800,8 @@ End of response."#;
             },
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
-        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+        let ws_tmp = tempfile::tempdir().unwrap();
+        let evaluator = MitosisEvaluator::new(config, telemetry, ws_tmp.path().to_path_buf());
 
         let store = MockStore::new();
         let bead = test_bead();
@@ -3792,6 +3844,7 @@ End of response."#;
     async fn timeout_mitosis_distinguishes_completed_from_remaining_work() {
         // Test that the timeout prompt instructs the agent to distinguish completed vs remaining work
         let config = MitosisConfig {
+            child_count_warning_threshold: 24,
             enabled: true,
             first_failure_only: true,
             force_failure_threshold: 0,
@@ -3806,7 +3859,8 @@ End of response."#;
             },
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
-        let _evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+        let ws_tmp = tempfile::tempdir().unwrap();
+        let _evaluator = MitosisEvaluator::new(config, telemetry, ws_tmp.path().to_path_buf());
 
         let _store = MockStore::new();
         let bead = test_bead();
@@ -3919,6 +3973,7 @@ End of response."#;
         // 5. Refuses decomposition for hangs/infrastructure failures
 
         let config = MitosisConfig {
+            child_count_warning_threshold: 24,
             enabled: true,
             first_failure_only: true,
             force_failure_threshold: 0,
@@ -3933,7 +3988,8 @@ End of response."#;
             },
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
-        let _evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+        let ws_tmp = tempfile::tempdir().unwrap();
+        let _evaluator = MitosisEvaluator::new(config, telemetry, ws_tmp.path().to_path_buf());
 
         let _store = MockStore::new();
         let bead = test_bead();
@@ -4075,6 +4131,7 @@ End of response."#;
         // This is part of the acceptance criteria: "ordinary failure Mitosis semantics remain unchanged"
 
         let config = MitosisConfig {
+            child_count_warning_threshold: 24,
             enabled: true,
             first_failure_only: true,
             force_failure_threshold: 0,
@@ -4084,7 +4141,8 @@ End of response."#;
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
-        let _evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+        let ws_tmp = tempfile::tempdir().unwrap();
+        let _evaluator = MitosisEvaluator::new(config, telemetry, ws_tmp.path().to_path_buf());
 
         let _store = MockStore::new();
         let bead = test_bead();
@@ -4118,6 +4176,7 @@ End of response."#;
         let __duration = std::time::Duration::from_secs(3540);
 
         let timeout_config = MitosisConfig {
+            child_count_warning_threshold: 24,
             enabled: true,
             first_failure_only: true,
             force_failure_threshold: 0,
@@ -4131,10 +4190,11 @@ End of response."#;
                 min_elapsed_fraction: 0.9,
             },
         };
+        let ws_tmp = tempfile::tempdir().unwrap();
         let __timeout_evaluator = MitosisEvaluator::new(
             timeout_config,
             crate::telemetry::Telemetry::new("test".to_string()),
-            PathBuf::from("/tmp"),
+            ws_tmp.path().to_path_buf(),
         );
 
         let timeout_result = __timeout_evaluator
@@ -4178,6 +4238,7 @@ End of response."#;
     async fn max_children_truncates_proposal() {
         // Test that proposals exceeding max_children are truncated
         let config = MitosisConfig {
+            child_count_warning_threshold: 24,
             enabled: true,
             first_failure_only: true,
             force_failure_threshold: 0,
@@ -4187,7 +4248,8 @@ End of response."#;
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
-        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+        let ws_tmp = tempfile::tempdir().unwrap();
+        let evaluator = MitosisEvaluator::new(config, telemetry, ws_tmp.path().to_path_buf());
 
         let store = MockStore::new();
         let parent = test_bead();
@@ -4221,6 +4283,7 @@ End of response."#;
     async fn max_children_with_dedup() {
         // Test that max_children is applied AFTER deduplication
         let config = MitosisConfig {
+            child_count_warning_threshold: 24,
             enabled: true,
             first_failure_only: true,
             force_failure_threshold: 0,
@@ -4230,7 +4293,8 @@ End of response."#;
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
-        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+        let ws_tmp = tempfile::tempdir().unwrap();
+        let evaluator = MitosisEvaluator::new(config, telemetry, ws_tmp.path().to_path_buf());
 
         // Simulate existing children that will be deduplicated.
         //
@@ -4273,6 +4337,7 @@ End of response."#;
     async fn max_depth_blocks_grandchild_split() {
         // Test that a grandchild split at max_depth returns NotSplittable
         let config = MitosisConfig {
+            child_count_warning_threshold: 24,
             enabled: true,
             first_failure_only: true,
             force_failure_threshold: 0,
@@ -4282,7 +4347,8 @@ End of response."#;
             timeout_triggered: crate::config::TimeoutTriggeredPolicy::default(),
         };
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
-        let evaluator = MitosisEvaluator::new(config, telemetry, PathBuf::from("/tmp"));
+        let ws_tmp = tempfile::tempdir().unwrap();
+        let evaluator = MitosisEvaluator::new(config, telemetry, ws_tmp.path().to_path_buf());
 
         let store = MockStore::new();
 

@@ -325,7 +325,11 @@ row's `schema_version`.
 
 **Aggregation:** `needle stats --by adapter` and `needle stats --by outcome`
 aggregate these rows directly — one attempt per row, with PASS RATE reading
-as verified success over all attempts in the group.
+as verified success over all attempts in the group. Both surface a
+PROVISIONAL count per group: the rows flagged `provisional: true`. Until
+N-T03 lands every row is provisional, and such rows are excluded from
+authoritative SLOs (Gate A), so consumers must not treat a provisional
+attempt ID as authoritative.
 
 **Example (a rejected gate behind a zero exit code):**
 ```json

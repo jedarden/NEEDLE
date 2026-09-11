@@ -366,7 +366,7 @@ async fn real_bead_rs_explore_discovers_remote_workspace() {
         starvation_threshold_minutes: 15,
         scan_interval_cycles: 1,
         max_scan_interval_cycles: 8,
-        stuck_threshold_secs: 300,
+        stale_claim_ttl: 300,
     };
 
     let explore = ExploreStrand::new(
@@ -410,7 +410,7 @@ async fn real_bead_rs_explore_skips_home_workspace() {
         starvation_threshold_minutes: 15,
         scan_interval_cycles: 1,
         max_scan_interval_cycles: 8,
-        stuck_threshold_secs: 300,
+        stale_claim_ttl: 300,
     };
 
     let reg_dir = tempfile::tempdir().unwrap();
@@ -447,7 +447,7 @@ async fn real_bead_rs_explore_disabled_returns_no_work() {
         enabled: false,
         workspaces: vec![remote_workspace.path().to_path_buf()],
         workspace_root: scan_root.path().to_path_buf(),
-        stuck_threshold_secs: 300,
+        stale_claim_ttl: 300,
         rediscovery_cycles: 60,
         starvation_threshold_minutes: 15,
         scan_interval_cycles: 1,
@@ -2164,4 +2164,305 @@ async fn real_bead_rs_reopen_unclaimed_bead_stays_unclaimed() {
         ready_beads.iter().any(|b| b.id == bead_id),
         "reopened unclaimed bead should appear in ready frontier"
     );
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Saturated-host admission fixture (plan revision 24 §4.6, transition N-T33)
+// ═════════════════════════════════════════════════════════════════════════════
+
+/// Parse every JSONL telemetry record written under `log_dir`.
+fn read_telemetry_events(log_dir: &Path) -> Vec<serde_json::Value> {
+    let mut events = Vec::new();
+    let entries =
+        std::fs::read_dir(log_dir).unwrap_or_else(|e| panic!("telemetry log dir readable: {e}"));
+    for entry in entries.flatten() {
+        let content = std::fs::read_to_string(entry.path()).unwrap_or_default();
+        for line in content.lines().filter(|l| !l.trim().is_empty()) {
+            match serde_json::from_str::<serde_json::Value>(line) {
+                Ok(event) => events.push(event),
+                Err(e) => panic!("telemetry line {} is not JSON: {e}", entry.path().display()),
+            }
+        }
+    }
+    events
+}
+
+fn event_ts(event: &serde_json::Value) -> chrono::DateTime<chrono::FixedOffset> {
+    let raw = event["timestamp"].as_str().unwrap_or_default();
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .unwrap_or_else(|_| chrono::DateTime::parse_from_rfc3339("1970-01-01T00:00:00Z").unwrap())
+}
+
+/// A saturated host must hold one resident worker process — no exit, no
+/// restart churn, no claims — and resume selection once load clears.
+#[test]
+fn saturated_host_worker_stays_resident_until_load_clears() -> Result<()> {
+    let bead_bin = bead_path();
+
+    let root = tempfile::Builder::new()
+        .prefix("needle-satfix-")
+        .tempdir()
+        .context("failed to create temp dir")?;
+    let workspace = root.path().join("workspace");
+    let home = root.path().join("home");
+    let bin_dir = root.path().join("bin");
+    let logs = home.join("logs");
+    let probe = root.path().join("probe");
+    for dir in [&workspace, &home, &bin_dir, &logs, &probe] {
+        std::fs::create_dir_all(dir)?;
+    }
+
+    // Pin the same real bead binary this suite validates onto the child PATH,
+    // so the worker claims and closes against bead-rs and nothing else.
+    let pinned_bead = bin_dir.join("bead");
+    std::fs::copy(&bead_bin, &pinned_bead)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&pinned_bead)?.permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&pinned_bead, permissions)?;
+    }
+
+    // Workspace with exactly one claimable canary bead.
+    let init = bead_command(&workspace)
+        .args(["init", "--prefix", "sat"])
+        .output()?;
+    if !init.status.success() {
+        anyhow::bail!(
+            "bead init failed: {}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+    }
+    std::fs::write(
+        workspace.join(".needle.yaml"),
+        "bead_cli:\n  backend: bead-rs\n",
+    )?;
+    let canary = create_bead(&workspace, "Saturated host canary", 1)?;
+
+    // Deterministic adapter: closes the canary and exits.
+    let adapters = home.join(".config/needle/adapters");
+    std::fs::create_dir_all(&adapters)?;
+    std::fs::write(
+        adapters.join("sat-agent.yaml"),
+        format!(
+            "name: sat-agent\ndescription: deterministic closer for the saturated-host fixture\nagent_cli: /bin/true\ninvoke_template: \"cd {{workspace}} && {} close {{bead_id}} --reason 'closed by saturated-host fixture'\"\ntimeout_secs: 30\nprovider: local\nmodel: e2e\n",
+            pinned_bead.display()
+        ),
+    )?;
+
+    // Launch policy blocks on CPU only: normalized load 64.0 against a 1.0
+    // threshold, memory comfortably inside policy.
+    std::fs::write(probe.join("loadavg"), "64.00 32.00 16.00 1/123 456\n")?;
+    std::fs::write(probe.join("meminfo"), "MemAvailable: 16777216 kB\n")?;
+
+    std::fs::write(
+        home.join(".config/needle/config.yaml"),
+        format!(
+            "agent:\n  default: sat-agent\n  timeout: 30\n  adapters_dir: {}\n  routing: null\nworker:\n  idle_action: exit\n  enforce_shipped_work: false\n  cpu_load_warn: 1.0\n  memory_free_warn_mb: 64\nworkspace:\n  home: {}\nstrands:\n  explore:\n    enabled: false\n    workspace_root: {}\n    workspaces: []\n  splice:\n    enabled: false\n  reflect:\n    enabled: false\ntelemetry:\n  file_sink:\n    enabled: true\n    log_dir: {}\n",
+            adapters.display(),
+            home.join(".needle").display(),
+            root.path().display(),
+            logs.display(),
+        ),
+    )?;
+
+    // Log to files, not pipes: a full pipe would deadlock the liveness polling
+    // below long before the fixture's own deadlines.
+    let stdout_log = root.path().join("worker-stdout.log");
+    let stderr_log = root.path().join("worker-stderr.log");
+
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_needle"))
+        .args([
+            "run",
+            "--workspace",
+            workspace.to_str().unwrap(),
+            "--identifier",
+            "satfix",
+            "--hot-reload",
+            "false",
+        ])
+        .env("HOME", &home)
+        .env("NEEDLE_INNER", "1")
+        .env("NEEDLE_LAUNCH_RESOURCE_PROBE", &probe)
+        .env("NEEDLE_ADMISSION_BACKOFF_BASE_MS", "100")
+        .env("NEEDLE_ADMISSION_BACKOFF_CAP_MS", "400")
+        .env("NEEDLE_ADMISSION_HEARTBEAT_SECS", "1")
+        .env(
+            "PATH",
+            std::env::join_paths([bin_dir.as_path(), Path::new("/usr/bin"), Path::new("/bin")])?,
+        )
+        .stdout(std::fs::File::create(&stdout_log)?)
+        .stderr(std::fs::File::create(&stderr_log)?)
+        .spawn()
+        .context("failed to spawn needle run")?;
+
+    // While saturated: the worker must register itself as admission-blocked
+    // and stay resident — never exit, never restart.
+    let registry_path = home.join(".needle/state/workers.json");
+    let blocked_deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let mut blocked_seen = false;
+    while std::time::Instant::now() < blocked_deadline {
+        assert!(
+            child.try_wait()?.is_none(),
+            "worker exited while the host was still saturated"
+        );
+        if std::fs::read_to_string(&registry_path)
+            .unwrap_or_default()
+            .contains("ADMISSION_BLOCKED")
+        {
+            blocked_seen = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        blocked_seen,
+        "registry never recorded ADMISSION_BLOCKED; workers.json: {:?}",
+        std::fs::read_to_string(&registry_path)
+    );
+
+    // Hold the saturation a while longer: the process must still be the same
+    // live one, and nothing may be claimed.
+    let blocked_since = std::time::Instant::now();
+    while blocked_since.elapsed() < Duration::from_secs(2) {
+        assert!(
+            child.try_wait()?.is_none(),
+            "worker exited (or restarted) while still saturated"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    // Clear the load: the worker must restore, claim the canary, close it, and
+    // exit cleanly on its own.
+    std::fs::write(probe.join("loadavg"), "0.10 0.20 0.30 1/123 456\n")?;
+    let exit_deadline = std::time::Instant::now() + Duration::from_secs(45);
+    let mut status = None;
+    while std::time::Instant::now() < exit_deadline {
+        if let Some(s) = child.try_wait()? {
+            status = Some(s);
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    let status = status.expect("worker did not exit after load cleared");
+    assert!(status.success(), "worker exited non-success: {status}");
+
+    let stderr = std::fs::read_to_string(&stderr_log)?;
+    assert!(
+        !stderr.contains("stopped unexpectedly"),
+        "worker must not crash under admission pressure; stderr: {stderr}"
+    );
+
+    // Telemetry: one stable session, bounded blocked heartbeats, exactly one
+    // restoration, and the single claim strictly after it.
+    let events = read_telemetry_events(&logs);
+    assert!(
+        !events.is_empty(),
+        "no telemetry events were written to {}",
+        logs.display()
+    );
+
+    let sessions: HashSet<String> = events
+        .iter()
+        .filter_map(|e| e["session_id"].as_str().map(str::to_string))
+        .collect();
+    assert_eq!(
+        sessions.len(),
+        1,
+        "one stable worker process must own every event; sessions: {sessions:?}"
+    );
+
+    let blocked: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|e| e["event_type"] == "worker.admission_blocked")
+        .collect();
+    assert!(
+        !blocked.is_empty(),
+        "expected bounded worker.admission_blocked heartbeats; got: {:?}",
+        events
+            .iter()
+            .map(|e| e["event_type"].clone())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        blocked.len() <= 8,
+        "blocked heartbeats must be rate-bounded, got {}",
+        blocked.len()
+    );
+    for event in &blocked {
+        assert!(
+            !event["data"]["reason"]
+                .as_str()
+                .unwrap_or_default()
+                .is_empty(),
+            "blocked heartbeat missing reason: {event}"
+        );
+        assert!(
+            event["data"]["actual"].as_f64().is_some(),
+            "blocked heartbeat missing actual reading: {event}"
+        );
+        assert!(
+            event["data"]["threshold"].as_f64().is_some(),
+            "blocked heartbeat missing threshold: {event}"
+        );
+        assert_eq!(
+            event["data"]["disposition"], "holding",
+            "blocked heartbeat must declare a resident hold: {event}"
+        );
+    }
+
+    let restored: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|e| e["event_type"] == "worker.admission_restored")
+        .collect();
+    assert_eq!(
+        restored.len(),
+        1,
+        "exactly one worker.admission_restored expected; got {restored:?}"
+    );
+    let restored_ts = event_ts(restored[0]);
+    assert!(
+        event_ts(blocked[blocked.len() - 1]) < restored_ts,
+        "restoration must follow the last blocked heartbeat"
+    );
+    let blocked_secs = restored[0]["data"]["blocked_secs"].as_u64().unwrap_or(0);
+    assert!(
+        blocked_secs >= 1,
+        "restore event must record a sustained hold; got: {restored:?}"
+    );
+    let attempts = restored[0]["data"]["attempts"].as_u64().unwrap_or(0);
+    assert!(
+        attempts > blocked.len() as u64,
+        "capped retries must keep running between rate-bounded heartbeats: attempts={attempts} heartbeats={:?}",
+        blocked.len()
+    );
+
+    let claims: Vec<&serde_json::Value> = events
+        .iter()
+        .filter(|e| e["event_type"] == "bead.claim.succeeded")
+        .collect();
+    assert_eq!(
+        claims.len(),
+        1,
+        "exactly one claim expected, and only after restoration"
+    );
+    assert!(
+        event_ts(claims[0]) > restored_ts,
+        "worker claimed while admission-blocked (claim at {}, restore at {})",
+        event_ts(claims[0]).to_rfc3339(),
+        restored_ts.to_rfc3339()
+    );
+
+    // Selection resumed for real: the canary was claimed AND completed.
+    let shown = bead_command(&workspace)
+        .args(["show", canary.as_ref(), "--json"])
+        .output()?;
+    let shown = String::from_utf8_lossy(&shown.stdout);
+    assert!(
+        shown.contains("\"status\":\"closed\""),
+        "canary bead should be closed after restoration: {shown}"
+    );
+
+    Ok(())
 }

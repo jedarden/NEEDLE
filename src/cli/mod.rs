@@ -384,7 +384,9 @@ pub enum CliCommand {
     /// by bead ID, and prints per-group statistics. The `adapter` and
     /// `outcome` dimensions aggregate the `attempt.resolved` ledger rows
     /// directly: one row per attempt, so the count column is attempts and
-    /// PASS RATE is verified success over all attempts in the group.
+    /// PASS RATE is verified success over all attempts in the group. Both
+    /// also surface a PROVISIONAL count of rows whose attempt ID is still
+    /// provisional — treat such rows as non-authoritative.
     ///
     /// Examples:
     ///   needle stats --by template_version --since 7d
@@ -2726,7 +2728,9 @@ strands:
 
   # Stuck/failed bead recovery strand.
   mend:
-    stuck_threshold_secs: 300
+    # Claim TTL: an in_progress claim older than this is a release candidate
+    # (must exceed agent.timeout so a long dispatch is never reaped).
+    stale_claim_ttl: 7200
     lock_ttl_secs: 600
     db_check_interval: 50
     idle_timeout: 120
@@ -3764,6 +3768,9 @@ fn cmd_stats(
         StatsBy::Adapter => ("ADAPTER", "ATTEMPTS"),
         StatsBy::Outcome => ("OUTCOME", "ATTEMPTS"),
     };
+    // Only the attempt dimensions read `attempt.resolved` rows, so only they
+    // carry a provisional-attempt-ID count to surface.
+    let show_provisional = matches!(by, StatsBy::Adapter | StatsBy::Outcome);
 
     match format {
         ListFormat::Table => {
@@ -3772,22 +3779,42 @@ fn cmd_stats(
                 return Ok(());
             }
             let key_width = rows.iter().map(|r| r.key.len()).max().unwrap_or(16).max(16);
-            println!(
-                "{:<width$} {:>8} {:>6} {:>6} {:>8} {:>9} {:>10} {:>12}",
-                dim_label,
-                count_label,
-                "PASS",
-                "FAIL",
-                "TIMEOUT",
-                "PASS RATE",
-                "AVG TOK",
-                "AVG COST",
-                width = key_width,
-            );
-            println!(
-                "{}",
-                "-".repeat(key_width + 8 + 6 + 6 + 8 + 9 + 10 + 12 + 7)
-            );
+            if show_provisional {
+                println!(
+                    "{:<width$} {:>8} {:>11} {:>6} {:>6} {:>8} {:>9} {:>10} {:>12}",
+                    dim_label,
+                    count_label,
+                    "PROVISIONAL",
+                    "PASS",
+                    "FAIL",
+                    "TIMEOUT",
+                    "PASS RATE",
+                    "AVG TOK",
+                    "AVG COST",
+                    width = key_width,
+                );
+                println!(
+                    "{}",
+                    "-".repeat(key_width + 8 + 11 + 6 + 6 + 8 + 9 + 10 + 12 + 8)
+                );
+            } else {
+                println!(
+                    "{:<width$} {:>8} {:>6} {:>6} {:>8} {:>9} {:>10} {:>12}",
+                    dim_label,
+                    count_label,
+                    "PASS",
+                    "FAIL",
+                    "TIMEOUT",
+                    "PASS RATE",
+                    "AVG TOK",
+                    "AVG COST",
+                    width = key_width,
+                );
+                println!(
+                    "{}",
+                    "-".repeat(key_width + 8 + 6 + 6 + 8 + 9 + 10 + 12 + 7)
+                );
+            }
             for row in &rows {
                 let pass_rate = row
                     .pass_rate()
@@ -3801,18 +3828,44 @@ fn cmd_stats(
                     .avg_cost_usd()
                     .map(|c| format!("${:.5}", c))
                     .unwrap_or_else(|| "-".to_string());
-                println!(
-                    "{:<width$} {:>8} {:>6} {:>6} {:>8} {:>9} {:>10} {:>12}",
-                    row.key,
-                    row.beads,
-                    row.pass,
-                    row.fail,
-                    row.timeout,
-                    pass_rate,
-                    avg_tok,
-                    avg_cost,
-                    width = key_width,
-                );
+                if show_provisional {
+                    println!(
+                        "{:<width$} {:>8} {:>11} {:>6} {:>6} {:>8} {:>9} {:>10} {:>12}",
+                        row.key,
+                        row.beads,
+                        row.provisional,
+                        row.pass,
+                        row.fail,
+                        row.timeout,
+                        pass_rate,
+                        avg_tok,
+                        avg_cost,
+                        width = key_width,
+                    );
+                } else {
+                    println!(
+                        "{:<width$} {:>8} {:>6} {:>6} {:>8} {:>9} {:>10} {:>12}",
+                        row.key,
+                        row.beads,
+                        row.pass,
+                        row.fail,
+                        row.timeout,
+                        pass_rate,
+                        avg_tok,
+                        avg_cost,
+                        width = key_width,
+                    );
+                }
+            }
+            if show_provisional {
+                let attempts: u64 = rows.iter().map(|r| r.beads).sum();
+                let provisional: u64 = rows.iter().map(|r| r.provisional).sum();
+                if provisional > 0 {
+                    println!(
+                        "\nnote: {provisional} of {attempts} attempt rows carry a provisional \
+                         attempt ID — treat those rows as non-authoritative"
+                    );
+                }
             }
         }
         ListFormat::Json => {
@@ -3822,6 +3875,7 @@ fn cmd_stats(
                     serde_json::json!({
                         "key": row.key,
                         "beads": row.beads,
+                        "provisional": row.provisional,
                         "pass": row.pass,
                         "fail": row.fail,
                         "timeout": row.timeout,

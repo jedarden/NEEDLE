@@ -13,6 +13,7 @@
 #   - missing/unusable checksum data exits nonzero before moving the binary
 #   - valid checksum installs; a mismatch aborts (never skippable)
 #   - explicit opt-out installs with a conspicuous warning
+#   - needle-transform-* helpers go through the same verification (GitHub #15)
 #   - version discovery on a >pipe-buffer API payload, no broken-pipe noise
 #   - --help documents the security tradeoff
 
@@ -44,6 +45,17 @@ detect_asset_name() {
 }
 ASSET_NAME="$(detect_asset_name)"
 BEAD_ASSET_NAME="bead-${ASSET_NAME#needle-}"
+PLATFORM_SUFFIX="${ASSET_NAME#needle-}"
+TRANSFORMS=("needle-transform-claude" "needle-transform-codex")
+TRANSFORM_ASSETS=()
+for _t in "${TRANSFORMS[@]}"; do TRANSFORM_ASSETS+=("${_t}-${PLATFORM_SUFFIX}"); done
+
+# Every run_installer passes `env -i` an explicit PATH, and hardcoding
+# `/usr/bin:/bin` after the mock dir breaks on hosts that keep bash and the
+# coreutils somewhere else (NixOS: /run/current-system/sw/bin) — every test
+# then died with 127 from env before install.sh even started. Resolve the
+# running bash's directory once and put it on the child's PATH everywhere.
+BASH_BIN_DIR="$(cd "$(dirname "$(command -v bash)")" && pwd)"
 
 setup() {
     # Fresh, unique fixture root + fake curl + isolated home per test.
@@ -97,8 +109,16 @@ MOCKEOF
     printf '#!/bin/sh\necho "needle 0.1.0-mock"\n' > "$MOCK_ROOT/files/$ASSET_NAME"
     chmod +x "$MOCK_ROOT/files/$ASSET_NAME"
 
-    printf '{"tag_name": "v0.1.0", "assets": [{"name": "%s"}, {"name": "checksums.txt"}]}\n' \
-        "$ASSET_NAME" > "$MOCK_ROOT/api.json"
+    # Mock transform binaries: downloaded, checksum-verified and moved into
+    # place, but never executed by install.sh. Present unless a test removes
+    # them (test_transform_absent_from_release_is_nonfatal).
+    local transform
+    for transform in "${TRANSFORM_ASSETS[@]}"; do
+        printf '#!/bin/sh\necho "%s 0.1.0-mock"\n' "$transform" > "$MOCK_ROOT/files/$transform"
+        chmod +x "$MOCK_ROOT/files/$transform"
+    done
+
+    write_api_json yes
 
     # bead-rs release fixtures: a mock `bead` binary, its release document and
     # a correct checksums.txt. install.sh bundles bead next to needle.
@@ -121,27 +141,63 @@ teardown() {
     BASE_DIR=""
 }
 
+# write_api_json <with-transforms: yes|no>
+# The release document the mock curl serves for /releases/latest. A release
+# that never built the transforms lists only the needle asset and its manifest.
+write_api_json() {
+    local with_transforms="${1:-yes}"
+    {
+        printf '{"tag_name": "v0.1.0", "assets": [{"name": "%s"}, {"name": "checksums.txt"}' \
+            "$ASSET_NAME"
+        if [[ "$with_transforms" == "yes" ]]; then
+            local transform
+            for transform in "${TRANSFORM_ASSETS[@]}"; do
+                printf ', {"name": "%s"}' "$transform"
+            done
+        fi
+        printf ']}\n'
+    } > "$MOCK_ROOT/api.json"
+}
+
 write_checksums() {
     # write_checksums <hash-or-special>
-    #   special "correct"  -> hash of the actual mock binary
-    #   special "absent"   -> checksums.txt listing only other assets
-    #   special "missing"  -> no checksums.txt at all (404)
+    #   special "correct"            -> hashes of the actual mock binaries
+    #   special "absent"             -> checksums.txt listing only other assets
+    #   special "missing"            -> no checksums.txt at all (404)
+    #   special "transform-mismatch" -> needle entry correct, transforms zeroed
+    #   special "transform-absent"   -> needle entry correct, no transform rows
+    # A raw hash argument replaces the needle entry only.
     local what="$1"
     if [[ "$what" == "missing" ]]; then
         rm -f "$MOCK_ROOT/files/checksums.txt"
         return
     fi
-    local hash
-    if [[ "$what" == "correct" ]]; then
-        hash=$(sha256sum "$MOCK_ROOT/files/$ASSET_NAME" | awk '{print $1}')
-    else
-        hash="$what"
-    fi
     if [[ "$what" == "absent" ]]; then
         printf 'somehash  other-asset\nanotherhash  another-asset-2\n' > "$MOCK_ROOT/files/checksums.txt"
-    else
-        printf '%s  %s\notherhash  some-other-asset\n' "$hash" "$ASSET_NAME" > "$MOCK_ROOT/files/checksums.txt"
+        return
     fi
+
+    local needle_hash transform_hash
+    needle_hash=$(sha256sum "$MOCK_ROOT/files/$ASSET_NAME" | awk '{print $1}')
+    if [[ "$what" == "correct" || "$what" == "transform-mismatch" || "$what" == "transform-absent" ]]; then
+        printf '%s  %s\n' "$needle_hash" "$ASSET_NAME" > "$MOCK_ROOT/files/checksums.txt"
+    else
+        printf '%s  %s\n' "$what" "$ASSET_NAME" > "$MOCK_ROOT/files/checksums.txt"
+    fi
+
+    if [[ "$what" != "transform-absent" ]]; then
+        local transform_asset
+        for transform_asset in "${TRANSFORM_ASSETS[@]}"; do
+            if [[ "$what" == "transform-mismatch" ]]; then
+                transform_hash="0000000000000000000000000000000000000000000000000000000000000000"
+            else
+                transform_hash=$(sha256sum "$MOCK_ROOT/files/$transform_asset" | awk '{print $1}')
+            fi
+            printf '%s  %s\n' "$transform_hash" "$transform_asset" >> "$MOCK_ROOT/files/checksums.txt"
+        done
+    fi
+
+    printf 'otherhash  some-other-asset\n' >> "$MOCK_ROOT/files/checksums.txt"
 }
 
 # write_bead_checksums <correct|hash>
@@ -171,7 +227,7 @@ run_installer() {
     local install_path="$MOCK_HOME/bin/needle"
     local rc=0
     env -i \
-        PATH="$BASE_DIR/bin:/usr/bin:/bin" \
+        PATH="$BASE_DIR/bin:$BASH_BIN_DIR:/usr/bin:/bin" \
         HOME="$MOCK_HOME" \
         NEEDLE_INSTALL_PATH="$install_path" \
         MOCK_ROOT="$MOCK_ROOT" \
@@ -353,6 +409,10 @@ test_no_hash_tool_aborts() {
     mkdir -p "$restricted"
     local tool
     for tool in bash awk grep sed cat cp basename uname mktemp chmod mv mkdir dirname rm; do
+        # bash is in the list: on hosts where it is not under /usr/bin:/bin
+        # (NixOS) the child's PATH is this directory alone, so without its own
+        # symlink the installer never starts and the rc=0 assertion passes
+        # vacuously on the 127.
         local path
         path=$(type -P "$tool" 2>/dev/null) || true
         [[ -n "$path" ]] && ln -s "$path" "$restricted/$tool"
@@ -480,7 +540,7 @@ EOF
     # Restricted PATH with our mock uname first
     local rc=0
     env -i \
-        PATH="$BASE_DIR/bin:/usr/bin:/bin" \
+        PATH="$BASE_DIR/bin:$BASH_BIN_DIR:/usr/bin:/bin" \
         HOME="$MOCK_HOME" \
         NEEDLE_INSTALL_PATH="$MOCK_HOME/bin/needle" \
         MOCK_ROOT="$MOCK_ROOT" \
@@ -497,8 +557,109 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# bead backend bundling (GitHub #16)
+# transform binaries (GitHub #15)
 # ---------------------------------------------------------------------------
+
+transform_installed() { [[ -f "$MOCK_HOME/bin/$1" ]]; }
+
+assert_transform_installed() {
+    local transform="$1" want="$2" # want: "yes" | "no"
+    if [[ "$want" == "yes" ]]; then
+        record "$( transform_installed "$transform"; echo $? )" "$transform installed next to needle"
+    else
+        record "$( ! transform_installed "$transform"; echo $? )" "$transform NOT installed"
+    fi
+}
+
+test_transforms_install_alongside_needle() {
+    echo "TEST: verified transforms install next to needle"
+    setup
+    write_checksums correct
+    run_installer
+    assert_rc_zero
+    assert_installed
+    local transform
+    for transform in "${TRANSFORMS[@]}"; do
+        assert_transform_installed "$transform" yes
+    done
+    assert_output_contains "transform install reported" "needle-transform-claude installed to"
+    teardown
+}
+
+test_transform_checksum_mismatch_aborts() {
+    echo "TEST: tampered transform aborts before anything is installed"
+    setup
+    write_checksums transform-mismatch
+    run_installer
+    assert_rc_nonzero
+    assert_not_installed
+    local transform
+    for transform in "${TRANSFORMS[@]}"; do
+        assert_transform_installed "$transform" no
+    done
+    assert_output_contains "mismatch reported" \
+        "Checksum mismatch for needle-transform-claude-$PLATFORM_SUFFIX"
+    teardown
+}
+
+test_transform_mismatch_never_skippable() {
+    echo "TEST: transform mismatch is never skippable, even with --skip-checksum"
+    setup
+    write_checksums transform-mismatch
+    run_installer --skip-checksum
+    assert_rc_nonzero
+    assert_not_installed
+    assert_output_contains "mismatch reported" "Checksum mismatch for"
+    teardown
+}
+
+test_transform_missing_manifest_entry_aborts() {
+    echo "TEST: transform missing from checksums.txt aborts (fail closed)"
+    setup
+    write_checksums transform-absent
+    run_installer
+    assert_rc_nonzero
+    assert_not_installed
+    assert_output_contains "legible abort reason" "Could not find checksum for"
+    teardown
+}
+
+test_transform_missing_entry_skippable() {
+    echo "TEST: transform missing from checksums.txt + --skip-checksum installs with warning"
+    setup
+    write_checksums transform-absent
+    run_installer --skip-checksum
+    assert_rc_zero
+    assert_installed
+    assert_output_contains "conspicuous security warning" "SECURITY WARNING"
+    assert_output_contains "skip acknowledged" "Skipping checksum verification (checksum for"
+    teardown
+}
+
+test_transform_absent_from_release_is_nonfatal() {
+    echo "TEST: transform absent from the release warns but needle still installs"
+    setup
+    # Model a release that never built the transforms: no asset file, no
+    # manifest row, no entry in the release document. The pipeline only
+    # checksums artifacts it built, so all three go together.
+    write_checksums transform-absent
+    local transform
+    for transform in "${TRANSFORM_ASSETS[@]}"; do
+        rm -f "$MOCK_ROOT/files/$transform"
+    done
+    write_api_json no
+    run_installer
+    assert_rc_zero
+    assert_installed
+    for transform in "${TRANSFORMS[@]}"; do
+        assert_transform_installed "$transform" no
+    done
+    assert_output_contains "nonfatal skip reported" "not found in release assets"
+    teardown
+}
+
+
+
 
 test_bead_installed_alongside_needle() {
     echo "TEST: bead backend is installed next to needle with a verified checksum"
@@ -625,6 +786,12 @@ main() {
     test_help_documents_security_tradeoff
     test_unknown_option_rejected
     test_unsupported_architecture_fails_early
+    test_transforms_install_alongside_needle
+    test_transform_checksum_mismatch_aborts
+    test_transform_mismatch_never_skippable
+    test_transform_missing_manifest_entry_aborts
+    test_transform_missing_entry_skippable
+    test_transform_absent_from_release_is_nonfatal
     test_bead_installed_alongside_needle
     test_bead_checksum_tamper_aborts
     test_skip_bead_flag_leaves_bead_absent

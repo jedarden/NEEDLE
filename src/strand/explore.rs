@@ -48,6 +48,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Duration;
 
+use super::workspace_health;
 use crate::bead_store::{discover_default, BeadStore, Filters};
 use crate::config::ExploreConfig;
 use crate::registry::Registry;
@@ -160,7 +161,8 @@ pub struct ExploreStrand {
     cycles_since_rediscovery: std::sync::atomic::AtomicU32,
     /// Auto-split threshold (`strands.pluck.split_after_failures`), used to
     /// reject candidates that would be claimed and immediately released as
-    /// `split_out_of_scope`. Zero disables splitting and this rejection too.
+    /// `split_out_of_scope`. Zero disables splitting and therefore disables
+    /// this rejection too.
     split_after_failures: u32,
     /// Re-discovery interval, still parsed from config for backward
     /// compatibility with existing `.needle.yaml` files, but no longer read:
@@ -192,11 +194,18 @@ pub struct ExploreStrand {
     /// Adaptive cadence for roaming scans. This is intentionally in-memory and
     /// scoped to one worker instance.
     scan_backoff: std::sync::Mutex<ExploreScanBackoff>,
-    /// Cross-workspace cleanup threshold (seconds). Beads stuck in_progress
-    /// longer than this are candidates for release during remote workspace scans.
-    stuck_threshold_secs: u64,
+    /// Cross-workspace cleanup claim TTL (seconds), from
+    /// `strands.explore.stale_claim_ttl`. An in_progress claim older than this
+    /// is a release candidate during remote workspace scans — subject to the
+    /// same heartbeat guard Mend applies, so an in-flight dispatch is never
+    /// reaped for age alone.
+    stale_claim_ttl: u64,
     /// Freshness bound for heartbeat evidence used by cross-workspace Mend.
     heartbeat_ttl: Duration,
+    /// Health state for workspaces that failed validation this process.
+    /// In-memory on purpose — see `workspace_health` for why it is not
+    /// persisted into the stores it is judging.
+    quarantine_registry: std::sync::Mutex<workspace_health::QuarantineRegistry>,
 }
 
 impl ExploreStrand {
@@ -254,7 +263,7 @@ impl ExploreStrand {
             );
         }
 
-        ExploreStrand {
+        let strand = ExploreStrand {
             enabled: config.enabled,
             workspaces: std::sync::Mutex::new(workspaces),
             home_workspace,
@@ -275,9 +284,32 @@ impl ExploreStrand {
                 config.scan_interval_cycles,
                 config.max_scan_interval_cycles,
             )),
-            stuck_threshold_secs: config.stuck_threshold_secs,
+            stale_claim_ttl: config.stale_claim_ttl,
             heartbeat_ttl: Duration::from_secs(300),
+            quarantine_registry: std::sync::Mutex::new(
+                workspace_health::QuarantineRegistry::default(),
+            ),
+        };
+
+        // The construction-time list is held to the same bar as every later
+        // re-discovery: a workspace only enters fleet counts having passed
+        // validation, so the first cycle does not scan whatever discovery
+        // happened to sweep up.
+        let discovered_count = {
+            let workspaces = strand.workspaces.lock().unwrap();
+            workspaces.len()
+        };
+        let scannable = strand.apply_workspace_health();
+        if scannable < discovered_count {
+            tracing::debug!(
+                worker = %strand.qualified_id,
+                discovered = discovered_count,
+                scannable,
+                "construction-time discovery: workspaces excluded by health validation"
+            );
         }
+
+        strand
     }
 
     /// Create a new ExploreStrand for testing with explicit workspace list.
@@ -311,8 +343,11 @@ impl ExploreStrand {
             ready_beads_detected: AtomicU64::new(0),
             last_scan_per_workspace: std::sync::Mutex::new(std::collections::HashMap::new()),
             scan_backoff: std::sync::Mutex::new(ExploreScanBackoff::new(1, 8)),
-            stuck_threshold_secs: 300,
+            stale_claim_ttl: 300,
             heartbeat_ttl: Duration::from_secs(300),
+            quarantine_registry: std::sync::Mutex::new(
+                workspace_health::QuarantineRegistry::default(),
+            ),
         }
     }
 
@@ -329,7 +364,7 @@ impl ExploreStrand {
         telemetry: Telemetry,
         qualified_id: String,
         store_factory: Arc<dyn StoreFactory>,
-        stuck_threshold_secs: u64,
+        stale_claim_ttl: u64,
     ) -> Self {
         ExploreStrand {
             enabled: true,
@@ -349,15 +384,18 @@ impl ExploreStrand {
             ready_beads_detected: AtomicU64::new(0),
             last_scan_per_workspace: std::sync::Mutex::new(std::collections::HashMap::new()),
             scan_backoff: std::sync::Mutex::new(ExploreScanBackoff::new(1, 8)),
-            stuck_threshold_secs,
+            stale_claim_ttl,
             heartbeat_ttl: Duration::from_secs(300),
+            quarantine_registry: std::sync::Mutex::new(
+                workspace_health::QuarantineRegistry::default(),
+            ),
         }
     }
 
     /// Use the configured worker heartbeat TTL for cross-workspace claim
     /// recovery. Kept as a builder so the public constructor remains stable.
-    /// Set the auto-split threshold used to reject ineligible candidates before
-    /// ranking and claim (`strands.pluck.split_after_failures`).
+    /// Set the auto-split threshold used to reject ineligible candidates
+    /// before ranking and claim (`strands.pluck.split_after_failures`).
     ///
     /// Left at 0 by the constructors, which disables the rejection — callers
     /// that dispatch real work must set it, or Explore will claim beads the
@@ -440,6 +478,292 @@ impl ExploreStrand {
         workspace.join(".beads").is_dir()
     }
 
+    /// Reduce a discovered workspace list to the workspaces worth scanning.
+    ///
+    /// Structural validation runs first — cheap, and no subprocess — so hidden
+    /// fixtures, absent stores, and directories that are not repositories are
+    /// settled before any backend is touched. Duplicate repository identities
+    /// then collapse to one canonical path, so a stale alternate checkout
+    /// cannot count a repository twice in fleet discovery.
+    ///
+    /// Two kinds of exclusion are deliberately silent: a hidden test fixture
+    /// and a directory with no bead store are not *unhealthy workspaces*, they
+    /// are not workspaces. Reporting them would turn every fleet into a
+    /// permanent alarm about its own test suite. Everything else — a
+    /// diagnostic dump under a `.beads/` folder, a store the backend cannot
+    /// read — is recorded as a quarantine and reported when it crosses its
+    /// threshold.
+    ///
+    /// Already-quarantined workspaces are re-validated rather than skipped, so
+    /// a store that was merely busy last cycle rejoins rotation instead of
+    /// being exiled for the life of the process.
+    fn filter_healthy_workspaces(&self, candidates: &[PathBuf]) -> Vec<PathBuf> {
+        let mut validated = Vec::with_capacity(candidates.len());
+
+        for workspace in candidates {
+            // The home workspace is never an Explore target; Pluck owns it.
+            if workspace == &self.home_workspace {
+                continue;
+            }
+
+            match workspace_health::validate_workspace(workspace).quarantine_reason() {
+                None => {
+                    self.record_workspace_success(workspace);
+                    validated.push(workspace.clone());
+                }
+                Some(reason) => {
+                    if reason.is_excluded_shape() {
+                        tracing::debug!(
+                            worker = %self.qualified_id,
+                            workspace = %workspace.display(),
+                            reason = reason.slug(),
+                            "excluding non-workspace from discovery (not counted as a workspace)"
+                        );
+                        // Not a health problem, so clear any earlier one.
+                        self.record_workspace_success(workspace);
+                        continue;
+                    }
+
+                    self.record_workspace_failure(workspace, reason.clone());
+                }
+            }
+        }
+
+        let (scannable, duplicates) = workspace_health::resolve_duplicates(&validated);
+        for (path, reason) in duplicates {
+            self.record_workspace_failure(&path, reason);
+        }
+
+        scannable
+    }
+
+    /// Validate the current workspace list in place, keeping only what is worth
+    /// scanning.
+    ///
+    /// This is the single point where the discovered list meets workspace
+    /// health: construction and every re-discovery both come through here, so a
+    /// workspace can only enter fleet counts by passing validation.
+    ///
+    /// Returns the number of workspaces that remain scannable.
+    ///
+    /// In pinned mode the configured list is validated and reported but never
+    /// truncated. The operator named those paths explicitly, so silently
+    /// dropping one would turn a recoverable condition (a `.beads/` directory
+    /// absent mid-checkout) into a restart requirement. Auto-discovery has no
+    /// such contract — its list is rebuilt from scratch every cycle anyway.
+    fn apply_workspace_health(&self) -> usize {
+        let candidates: Vec<PathBuf> = {
+            let workspaces = self.workspaces.lock().unwrap();
+            workspaces.clone()
+        };
+
+        if !self.auto_discovery_mode {
+            for workspace in &candidates {
+                match workspace_health::validate_workspace(workspace).quarantine_reason() {
+                    None => {
+                        self.record_workspace_success(workspace);
+                    }
+                    // Not a workspace at all — same treatment as in discovery:
+                    // not an incident, just not something to scan.
+                    Some(reason) if reason.is_excluded_shape() => {
+                        self.record_workspace_success(workspace);
+                    }
+                    Some(reason) => {
+                        self.record_workspace_failure(workspace, reason.clone());
+                    }
+                }
+            }
+            return candidates.len();
+        }
+
+        let scannable = self.filter_healthy_workspaces(&candidates);
+        let count = scannable.len();
+
+        {
+            let mut workspaces = self.workspaces.lock().unwrap();
+            *workspaces = scannable;
+        }
+
+        count
+    }
+
+    /// Classify a failed store open or inventory read and record it as a
+    /// workspace health failure.
+    ///
+    /// The structural checks in `filter_healthy_workspaces` are cheap and
+    /// subprocess-free, so they run ahead of any backend — but they cannot see a
+    /// store the backend itself cannot read. That half of validation surfaces
+    /// here, at the point the store is opened or queried, and is classified by
+    /// signature so the resulting event names the repair rather than just the
+    /// symptom. The error is never acted on: no repair, reinitialization, or
+    /// write of any kind is attempted against a store we could not read.
+    fn record_store_failure(&self, workspace: &Path, error: &anyhow::Error) {
+        self.record_workspace_failure(workspace, workspace_health::classify_store_error(error));
+    }
+
+    /// Apply the candidate guards every remote-scan query path shares: lift
+    /// the expired quarantine marking (needle-28efee3b) via `store`, then
+    /// drop assigned and label-excluded beads.
+    ///
+    /// Defensive belt-and-suspenders on top of `store.ready(&filters)`: a
+    /// backend that filters imperfectly must not hand an excluded bead to the
+    /// dispatcher. The label half of the guard is the store's own
+    /// [`crate::bead_store::excluded_by_labels`] decision rather than a local
+    /// reimplementation, so a bead the store admitted cannot be re-excluded
+    /// here by a drifted copy of the same rule.
+    async fn admit_candidates(
+        &self,
+        store: &dyn crate::bead_store::BeadStore,
+        candidates: Vec<crate::types::Bead>,
+        filters: &Filters,
+    ) -> Vec<crate::types::Bead> {
+        let candidates = self
+            .lift_expired_quarantine_markings(store, candidates)
+            .await;
+        let now = Utc::now();
+        candidates
+            .into_iter()
+            .filter(|bead| {
+                bead.assignee.is_none()
+                    && !crate::bead_store::excluded_by_labels(bead, filters, now)
+            })
+            .collect()
+    }
+
+    /// Strip the expired quarantine marking from ready candidates of a
+    /// remote store.
+    ///
+    /// A bead the old quarantine path parked carries a bare `deferred` label
+    /// beside its `quarantine-until` window. The window lapses and the store
+    /// admits the bead, but the label outlives it — and unlike the home
+    /// workspace, no Pluck pass ever re-evaluates a remote frontier, so the
+    /// marking is lifted here: the bare `deferred` and every lapsed window
+    /// go, the `failure-count` history stays. Best-effort by design — a
+    /// failed lift logs and keeps the bead, because an expired quarantine is
+    /// not a hold and one failed write must not starve the bead for another
+    /// cycle. The locally returned snapshots are updated to the lifted label
+    /// set so the filters below see post-lift state.
+    async fn lift_expired_quarantine_markings(
+        &self,
+        store: &dyn crate::bead_store::BeadStore,
+        mut candidates: Vec<crate::types::Bead>,
+    ) -> Vec<crate::types::Bead> {
+        for bead in &mut candidates {
+            if !crate::bead_store::expired_quarantine_marking(&bead.labels, Utc::now()) {
+                continue;
+            }
+            match crate::quarantine_expiry::lift_expired_marking(store, bead).await {
+                Ok(removed) if removed.is_empty() => {}
+                Ok(removed) => {
+                    tracing::info!(
+                        worker = %self.qualified_id,
+                        bead_id = %bead.id,
+                        removed = ?removed,
+                        "lifted an expired quarantine marking from a remote-workspace bead"
+                    );
+                    bead.labels.retain(|label| !removed.contains(label));
+                    let _ = self.telemetry.emit(
+                        crate::telemetry::EventKind::QuarantineExpired {
+                            bead_id: bead.id.clone(),
+                        },
+                        Utc::now(),
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        worker = %self.qualified_id,
+                        bead_id = %bead.id,
+                        error = %error,
+                        "failed to lift an expired quarantine marking; the bead stays a candidate"
+                    );
+                }
+            }
+        }
+        candidates
+    }
+
+    /// Record a workspace health failure and report it once it is a pattern.
+    ///
+    /// A permanent failure is reported the first time it is seen; a transient
+    /// one only after three consecutive cycles, so a single lock contention
+    /// does not page an operator. A quarantine that never clears re-reports
+    /// every tenth cycle rather than vanishing after its first mention.
+    fn record_workspace_failure(
+        &self,
+        workspace: &Path,
+        reason: workspace_health::QuarantineReason,
+    ) {
+        let (transition, failures) = {
+            let mut registry = self.quarantine_registry.lock().unwrap();
+            let transition = registry.record_failure(workspace, reason.clone());
+            let failures = registry.consecutive_failures(workspace);
+            (transition, failures)
+        };
+
+        tracing::warn!(
+            worker = %self.qualified_id,
+            workspace = %workspace.display(),
+            reason = reason.slug(),
+            consecutive_failures = failures,
+            transient = reason.is_transient(),
+            "workspace failed Explore health validation"
+        );
+
+        if transition == workspace_health::QuarantineTransition::Silent {
+            return;
+        }
+
+        let explanation = match &reason {
+            workspace_health::QuarantineReason::BackendConfigInvalid { details }
+            | workspace_health::QuarantineReason::CapabilitiesFailed { details }
+            | workspace_health::QuarantineReason::StoreReadError { details }
+            | workspace_health::QuarantineReason::SchemaIncompatible { details } => details.clone(),
+            workspace_health::QuarantineReason::DuplicateRepository { canonical_path } => {
+                format!(
+                    "duplicate checkout of a repository already discovered at {}",
+                    canonical_path.display()
+                )
+            }
+            workspace_health::QuarantineReason::NotAGitRepository => {
+                "directory holds a .beads/ folder but is not a git repository".to_string()
+            }
+            workspace_health::QuarantineReason::NoBeadStore => "no .beads/ directory".to_string(),
+            workspace_health::QuarantineReason::HiddenTestFixture => {
+                "hidden test fixture".to_string()
+            }
+        };
+
+        let _ = self.telemetry.emit(
+            crate::telemetry::EventKind::ExploreWorkspaceQuarantined {
+                workspace: workspace.display().to_string(),
+                reason: reason.slug().to_string(),
+                explanation,
+                canonical_path: reason.canonical_path().map(|p| p.display().to_string()),
+                consecutive_failures: failures,
+            },
+            chrono::Utc::now(),
+        );
+    }
+
+    /// Clear a workspace's health state after a successful validation.
+    ///
+    /// Returns `true` when the workspace had been failing, so the caller can
+    /// surface the recovery.
+    fn record_workspace_success(&self, workspace: &Path) -> bool {
+        let recovered = {
+            let mut registry = self.quarantine_registry.lock().unwrap();
+            registry.record_success(workspace)
+        };
+        if recovered {
+            tracing::info!(
+                worker = %self.qualified_id,
+                workspace = %workspace.display(),
+                "workspace recovered — released from Explore quarantine"
+            );
+        }
+        recovered
+    }
+
     /// Re-discover workspaces (refresh the workspace list).
     ///
     /// This is called periodically when `rediscovery_cycles` > 0 and we're in
@@ -468,13 +792,24 @@ impl ExploreStrand {
         };
 
         let new_workspaces = Self::discover_workspaces(&self.workspace_root);
-        let new_count = new_workspaces.len();
+        let discovered_count = new_workspaces.len();
 
-        // Update the workspace list.
+        // Update the workspace list with the raw discovery result, then validate
+        // it in place. Health is always recomputed from the raw list rather than
+        // applied cumulatively, so a workspace that was quarantined last cycle is
+        // re-validated this one and can rejoin rotation without a restart.
         {
             let mut workspaces = self.workspaces.lock().unwrap();
             *workspaces = new_workspaces;
         }
+        let new_count = self.apply_workspace_health();
+
+        tracing::debug!(
+            worker = %self.qualified_id,
+            discovered_count,
+            healthy_count = new_count,
+            "workspace re-discovery: validated discovered workspaces"
+        );
 
         let added_count = new_count.saturating_sub(previous_count);
 
@@ -722,7 +1057,10 @@ impl super::Strand for ExploreStrand {
             // Create store and query for ready beads
             let remote_store = match self.store_factory.create_store(workspace).await {
                 Ok(s) => s,
-                Err(_) => continue,
+                Err(e) => {
+                    self.record_store_failure(workspace, &e);
+                    continue;
+                }
             };
 
             match remote_store.ready(&filters).await {
@@ -744,7 +1082,10 @@ impl super::Strand for ExploreStrand {
                         oldest_bead_age_secs,
                     });
                 }
-                Err(_) => continue,
+                Err(e) => {
+                    self.record_store_failure(workspace, &e);
+                    continue;
+                }
             }
         }
 
@@ -853,23 +1194,17 @@ impl super::Strand for ExploreStrand {
                         "failed to create bead store for workspace, skipping"
                     );
                     exclusion_reasons.insert(format!("store_error: {}", e));
+                    self.record_store_failure(workspace, &e);
                     continue;
                 }
             };
 
             match remote_store.ready(&filters).await {
-                Ok(mut candidates) => {
-                    // Defensive belt-and-suspenders filtering.
-                    // The store.ready() method receives exclude_labels in its Filters,
-                    // but some backend implementations may not filter correctly.
-                    // This ensures excluded/assigned beads are never returned as candidates.
+                Ok(candidates) => {
                     let before_count = candidates.len();
-                    candidates.retain(|b| {
-                        let assignee_ok = b.assignee.is_none();
-                        let labels_ok =
-                            !b.labels.iter().any(|l| filters.exclude_labels.contains(l));
-                        assignee_ok && labels_ok
-                    });
+                    let mut candidates = self
+                        .admit_candidates(remote_store.as_ref(), candidates, &filters)
+                        .await;
                     let filtered_count = before_count - candidates.len();
 
                     if filtered_count > 0 {
@@ -954,7 +1289,7 @@ impl super::Strand for ExploreStrand {
                             &self.registry,
                             &self.telemetry,
                             &self.qualified_id,
-                            Some(Duration::from_secs(self.stuck_threshold_secs)),
+                            Some(Duration::from_secs(self.stale_claim_ttl)),
                             self.heartbeat_ttl,
                         )
                         .await
@@ -968,17 +1303,17 @@ impl super::Strand for ExploreStrand {
 
                                 // Re-query ready after cleanup.
                                 match remote_store.ready(&filters).await {
-                                    Ok(mut retry_candidates) => {
-                                        // Apply the same defensive filtering.
+                                    Ok(retry_candidates) => {
+                                        // Apply the same candidate guards as the
+                                        // first query of this workspace.
                                         let retry_before = retry_candidates.len();
-                                        retry_candidates.retain(|b| {
-                                            let assignee_ok = b.assignee.is_none();
-                                            let labels_ok = !b
-                                                .labels
-                                                .iter()
-                                                .any(|l| filters.exclude_labels.contains(l));
-                                            assignee_ok && labels_ok
-                                        });
+                                        let mut retry_candidates = self
+                                            .admit_candidates(
+                                                remote_store.as_ref(),
+                                                retry_candidates,
+                                                &filters,
+                                            )
+                                            .await;
                                         let retry_filtered = retry_before - retry_candidates.len();
 
                                         if retry_filtered > 0 {
@@ -1084,6 +1419,7 @@ impl super::Strand for ExploreStrand {
                         "failed to query workspace, skipping"
                     );
                     exclusion_reasons.insert(format!("query_error: {}", e));
+                    self.record_store_failure(workspace, &e);
                     continue;
                 }
             }
@@ -1176,7 +1512,7 @@ mod tests {
             starvation_threshold_minutes: 0,
             scan_interval_cycles: 1,
             max_scan_interval_cycles: 8,
-            stuck_threshold_secs: 300,
+            stale_claim_ttl: 300,
         }
     }
 
@@ -1193,7 +1529,7 @@ mod tests {
             starvation_threshold_minutes: 0,
             scan_interval_cycles: 1,
             max_scan_interval_cycles: 8,
-            stuck_threshold_secs: 300,
+            stale_claim_ttl: 300,
         }
     }
 
@@ -2855,6 +3191,220 @@ mod tests {
         }
     }
 
+    /// Mock store whose only ready bead carries the pre-ADR-022 quarantine
+    /// marking: a bare `deferred` beside a lapsed `quarantine-until` window.
+    /// Removes are recorded so a test can assert exactly which labels the
+    /// strand lifted.
+    struct QuarantineMarkedStore {
+        #[allow(dead_code)]
+        workspace: PathBuf,
+        bead: std::sync::Mutex<Bead>,
+        removed: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl QuarantineMarkedStore {
+        fn new(workspace: PathBuf, id: &str, labels: Vec<&str>) -> Self {
+            QuarantineMarkedStore {
+                bead: std::sync::Mutex::new(Bead {
+                    id: BeadId::from(id.to_string()),
+                    title: "Quarantine-marked bead".to_string(),
+                    body: None,
+                    priority: 0,
+                    status: BeadStatus::Open,
+                    assignee: None,
+                    labels: labels.into_iter().map(|s| s.to_string()).collect(),
+                    workspace: workspace.clone(),
+                    dependencies: vec![],
+                    dependents: vec![],
+                    comments: vec![],
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                }),
+                workspace,
+                removed: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn removals(&self) -> Vec<String> {
+            self.removed.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BeadStore for QuarantineMarkedStore {
+        fn has_valid_store(&self) -> bool {
+            true
+        }
+        async fn ready(&self, _filters: &Filters) -> Result<Vec<Bead>> {
+            // The real store admits this bead via the marking-aware label
+            // decision; the strand's own guard must admit it too.
+            Ok(vec![self.bead.lock().unwrap().clone()])
+        }
+
+        async fn list_all(&self) -> Result<Vec<Bead>> {
+            Ok(vec![self.bead.lock().unwrap().clone()])
+        }
+        async fn show(&self, _id: &BeadId) -> Result<Bead> {
+            anyhow::bail!("not implemented")
+        }
+        async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<ClaimResult> {
+            anyhow::bail!("not implemented")
+        }
+        async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {
+            anyhow::bail!("not implemented")
+        }
+        async fn release(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+        async fn block(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+        async fn flush(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn reopen(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+        async fn labels(&self, _id: &BeadId) -> Result<Vec<String>> {
+            Ok(self.bead.lock().unwrap().labels.clone())
+        }
+        async fn add_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn remove_label(&self, _id: &BeadId, label: &str) -> Result<()> {
+            self.removed.lock().unwrap().push(label.to_string());
+            self.bead.lock().unwrap().labels.retain(|l| l != label);
+            Ok(())
+        }
+        async fn create_bead(&self, _title: &str, _body: &str, _labels: &[&str]) -> Result<BeadId> {
+            Ok(BeadId::from("new-bead".to_string()))
+        }
+        async fn doctor_repair(&self) -> Result<RepairReport> {
+            Ok(RepairReport::default())
+        }
+        async fn doctor_check(&self) -> Result<RepairReport> {
+            Ok(RepairReport::default())
+        }
+        async fn full_rebuild(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn add_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+        async fn remove_dependency(
+            &self,
+            _blocked_id: &BeadId,
+            _blocker_id: &BeadId,
+        ) -> Result<()> {
+            Ok(())
+        }
+        async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Factory handing every workspace the same quarantine-marked store.
+    struct QuarantineMarkedFactory {
+        workspace: PathBuf,
+        store: Arc<QuarantineMarkedStore>,
+    }
+
+    #[async_trait::async_trait]
+    impl StoreFactory for QuarantineMarkedFactory {
+        async fn create_store(&self, workspace: &Path) -> Result<Arc<dyn BeadStore>> {
+            if workspace == self.workspace {
+                Ok(self.store.clone())
+            } else {
+                Err(anyhow::anyhow!(
+                    "unexpected workspace: {}",
+                    workspace.display()
+                ))
+            }
+        }
+    }
+
+    /// Regression for needle-28efee3b: a remote store whose only ready bead
+    /// carries the legacy quarantine marking — bare `deferred` beside a
+    /// `quarantine-until` window that lapsed a day ago — must surface that
+    /// bead as a candidate. The marking is lifted through the store, and the
+    /// `failure-count` history survives the lift.
+    #[test]
+    fn expired_quarantine_marking_is_a_candidate_and_is_lifted() {
+        let runtime = create_test_runtime();
+        runtime.block_on(async {
+            let temp_root = tempfile::tempdir().unwrap();
+            let workspace = temp_root.path().join("remote-workspace");
+            let home = PathBuf::from("/home/test");
+
+            fs::create_dir_all(workspace.join(".beads")).unwrap();
+
+            let past = (Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
+            let store = Arc::new(QuarantineMarkedStore::new(
+                workspace.clone(),
+                "loom-expired-marked",
+                vec!["deferred", "failure-count:1", &format!("quarantine-until:{past}")],
+            ));
+            let factory = Arc::new(QuarantineMarkedFactory {
+                workspace: workspace.clone(),
+                store: store.clone(),
+            });
+
+            let temp_dir = tempfile::tempdir().unwrap();
+            let registry = crate::registry::Registry::new(temp_dir.path());
+            let telemetry = Telemetry::new("test-worker".to_string());
+
+            let strand = ExploreStrand::new_with_store_factory(
+                vec![workspace.clone()],
+                home,
+                registry,
+                telemetry,
+                "test-worker".to_string(),
+                factory,
+                300,
+            );
+
+            let store_bead_store = DummyStore;
+            let result = strand.evaluate(&store_bead_store, &HashSet::new()).await;
+
+            match result {
+                StrandResult::BeadFound(candidates) => {
+                    assert_eq!(candidates.len(), 1, "the expired marking must be a candidate");
+                    let candidate = &candidates[0];
+                    assert_eq!(candidate.id, BeadId::from("loom-expired-marked".to_string()));
+                    assert_eq!(candidate.workspace, workspace);
+                    assert!(
+                        !candidate
+                            .labels
+                            .iter()
+                            .any(|l| l == "deferred" || l.starts_with("quarantine-until:")),
+                        "the returned snapshot must not carry the lifted marking: {:?}",
+                        candidate.labels
+                    );
+                }
+                StrandResult::NoWork => panic!(
+                    "needle-28efee3b reproduced: an expired quarantine marking starved the only ready bead"
+                ),
+                other => panic!("unexpected strand result: {other:?}"),
+            }
+
+            let removals = store.removals();
+            assert!(
+                removals.contains(&"deferred".to_string()),
+                "the bare deferred marker must be lifted: {removals:?}"
+            );
+            assert!(
+                removals
+                    .iter()
+                    .any(|label| label.starts_with("quarantine-until:")),
+                "the lapsed window must be lifted: {removals:?}"
+            );
+            assert!(
+                !removals.contains(&"failure-count:1".to_string()),
+                "the failure-count history must not be dropped when lifting: {removals:?}"
+            );
+        });
+    }
+
     /// Mock store that returns only assigned beads.
     struct AssignedBeadsStore {
         workspace: PathBuf,
@@ -3372,7 +3922,7 @@ mod tests {
             starvation_threshold_minutes: 0,
             scan_interval_cycles: 1,
             max_scan_interval_cycles: 8,
-            stuck_threshold_secs: 300,
+            stale_claim_ttl: 300,
         };
 
         let home = PathBuf::from("/home/test");
@@ -3454,7 +4004,7 @@ mod tests {
             starvation_threshold_minutes: 0,
             scan_interval_cycles: 1,
             max_scan_interval_cycles: 8,
-            stuck_threshold_secs: 300,
+            stale_claim_ttl: 300,
         };
 
         let home = PathBuf::from("/home/test");
@@ -3559,7 +4109,7 @@ mod tests {
             starvation_threshold_minutes: 0,
             scan_interval_cycles: 1,
             max_scan_interval_cycles: 8,
-            stuck_threshold_secs: 300,
+            stale_claim_ttl: 300,
         };
 
         let home = PathBuf::from("/home/test");
@@ -3623,7 +4173,7 @@ mod tests {
             starvation_threshold_minutes: 0,
             scan_interval_cycles: 1,
             max_scan_interval_cycles: 8,
-            stuck_threshold_secs: 300,
+            stale_claim_ttl: 300,
         };
 
         let home = PathBuf::from("/home/test");
@@ -3681,7 +4231,7 @@ mod tests {
             starvation_threshold_minutes: 0,
             scan_interval_cycles: 1,
             max_scan_interval_cycles: 8,
-            stuck_threshold_secs: 300,
+            stale_claim_ttl: 300,
         };
 
         let home = PathBuf::from("/home/test");
@@ -3742,7 +4292,7 @@ mod tests {
             starvation_threshold_minutes: 15,
             scan_interval_cycles: 1,
             max_scan_interval_cycles: 8,
-            stuck_threshold_secs: 300,
+            stale_claim_ttl: 300,
         };
 
         let home = PathBuf::from("/home/test");
@@ -3781,7 +4331,7 @@ mod tests {
             starvation_threshold_minutes: 0,
             scan_interval_cycles: 1,
             max_scan_interval_cycles: 8,
-            stuck_threshold_secs: 300,
+            stale_claim_ttl: 300,
         };
 
         let home = PathBuf::from("/home/test");
@@ -3832,7 +4382,7 @@ mod tests {
             starvation_threshold_minutes: 0,
             scan_interval_cycles: 1,
             max_scan_interval_cycles: 8,
-            stuck_threshold_secs: 300,
+            stale_claim_ttl: 300,
         };
 
         let home = PathBuf::from("/home/test");
@@ -3909,7 +4459,7 @@ mod tests {
             starvation_threshold_minutes: 0,
             scan_interval_cycles: 1,
             max_scan_interval_cycles: 8,
-            stuck_threshold_secs: 300,
+            stale_claim_ttl: 300,
         };
 
         let home = PathBuf::from("/home/test");
@@ -3980,7 +4530,7 @@ mod tests {
             starvation_threshold_minutes: 15,
             scan_interval_cycles: 1,
             max_scan_interval_cycles: 1,
-            stuck_threshold_secs: 300,
+            stale_claim_ttl: 300,
         };
 
         let home = PathBuf::from("/some/other/home");
@@ -4070,7 +4620,7 @@ mod tests {
             starvation_threshold_minutes: 15,
             scan_interval_cycles: 1,
             max_scan_interval_cycles: 1,
-            stuck_threshold_secs: 300,
+            stale_claim_ttl: 300,
         };
 
         let home = PathBuf::from("/some/other/home");
@@ -4145,7 +4695,7 @@ mod tests {
             starvation_threshold_minutes: 15,
             scan_interval_cycles: 1,
             max_scan_interval_cycles: 1,
-            stuck_threshold_secs: 300,
+            stale_claim_ttl: 300,
         };
 
         let home = PathBuf::from("/some/other/home");
@@ -4192,21 +4742,21 @@ mod tests {
         );
     }
 
-    /// Test that cross-workspace mend applies stuck_threshold_secs for age-based reclaim.
+    /// Test that cross-workspace mend applies stale_claim_ttl for age-based reclaim.
     ///
     /// This test verifies that the Explore strand properly threads the Mend config's
-    /// stuck_threshold_secs through to cleanup_orphaned_in_progress, enabling age-based
+    /// stale_claim_ttl through to cleanup_orphaned_in_progress, enabling age-based
     /// reclaim even in remote stores where the assignee PID is still alive (--count 1 case).
     ///
     /// Scenario:
     /// - Remote workspace has an in_progress bead with assignee PID alive
-    /// - The bead's updated_at is older than stuck_threshold_secs (simulating a stuck claim)
+    /// - The bead's updated_at is older than stale_claim_ttl (simulating a stuck claim)
     /// - Explore's cross-workspace cleanup should release the bead based on age
     ///
     /// This test uses a custom store factory to inject a fixture store with controlled state.
     #[tokio::test]
     #[ignore]
-    async fn cross_workspace_mend_applies_stuck_threshold_secs() {
+    async fn cross_workspace_mend_applies_stale_claim_ttl() {
         use std::time::SystemTime;
 
         let temp_root = tempfile::tempdir().unwrap();
@@ -4232,13 +4782,14 @@ mod tests {
             started_at: SystemTime::now().into(),
             beads_processed: 0,
             config_reload_generation: 0,
+            state: None,
         };
 
         // Create a registry entry that will appear as "live" (PID check passes)
         registry.register(live_worker).unwrap();
 
         // Test threshold: 60 seconds
-        let stuck_threshold_secs = 60u64;
+        let stale_claim_ttl = 60u64;
 
         // Create a bead that's older than the threshold
         let old_bead = crate::types::Bead {
@@ -4254,7 +4805,7 @@ mod tests {
             dependents: vec![],
             comments: vec![],
             created_at: Utc::now() - chrono::Duration::seconds(600), // Created 10 min ago
-            updated_at: Utc::now() - chrono::Duration::seconds(stuck_threshold_secs as i64 + 10), // Updated 70s ago (older than threshold)
+            updated_at: Utc::now() - chrono::Duration::seconds(stale_claim_ttl as i64 + 10), // Updated 70s ago (older than threshold)
         };
 
         // Create a custom store factory that returns a fixture store with our old bead
@@ -4395,7 +4946,7 @@ mod tests {
             should_release: should_release.clone(),
         });
 
-        // Create Explore strand with explicit stuck_threshold_secs
+        // Create Explore strand with explicit stale_claim_ttl
         let _config = ExploreConfig {
             enabled: true,
             workspaces: vec![remote_workspace.clone()],
@@ -4404,7 +4955,7 @@ mod tests {
             starvation_threshold_minutes: 15,
             scan_interval_cycles: 1,
             max_scan_interval_cycles: 1,
-            stuck_threshold_secs, // Explicit threshold for this test
+            stale_claim_ttl, // Explicit threshold for this test
         };
 
         let telemetry = Telemetry::new("test-worker".to_string());
@@ -4416,7 +4967,7 @@ mod tests {
             telemetry,
             "test-worker".to_string(),
             factory,
-            stuck_threshold_secs,
+            stale_claim_ttl,
         );
 
         // Run Explore evaluation

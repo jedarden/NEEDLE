@@ -356,6 +356,7 @@ async fn test_no_heartbeat_but_in_registry() {
         started_at: chrono::Utc::now(),
         beads_processed: 0,
         config_reload_generation: 0,
+        state: None,
     };
     registry.register(worker_entry).unwrap();
 

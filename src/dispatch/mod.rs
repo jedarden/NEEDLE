@@ -126,7 +126,10 @@ use crate::process_guard::{ProcessGroupKillGuard, ProcessGuard};
 use crate::prompt::BuiltPrompt;
 use crate::sanitize::{CustomPattern, Sanitizer};
 use crate::telemetry::{EventKind, Telemetry};
-use crate::trace::{classify_from_stream, detect_trace_format, TraceCapture, TraceMetadata};
+use crate::trace::{
+    classify_from_stream, detect_trace_format, parse_result_envelope, ClaudeResultEnvelope,
+    TraceCapture, TraceMetadata,
+};
 use crate::tsnet::{inject_identity_env, IdentityRegistry, TsnetConfig};
 use crate::types::{BeadId, InputMethod};
 
@@ -1431,9 +1434,10 @@ impl Dispatcher {
                         );
 
                         let _ = self.telemetry.emit(
-                            crate::telemetry::EventKind::ClaimVerifyFailed {
+                            crate::telemetry::EventKind::ClaimRecheckFailed {
                                 bead_id: bead_id.clone(),
                                 expected_actor: verify_worker_id.clone(),
+                                stage: "pre_spawn".to_string(),
                                 actual_status: format!("{:?}", status.status),
                                 actual_assignee: status
                                     .assignee
@@ -1454,10 +1458,15 @@ impl Dispatcher {
                         "atomic claim verification passed — proceeding with process spawn"
                     );
 
+                    // Stage re-check, not `ClaimVerifySuccess`: that name is
+                    // reserved for the canonical dispatch-time verification in
+                    // `Claimer::verify_claim_at_dispatch`, keeping
+                    // `verify_started`/`verify_success` 1:1 (issue #20).
                     let _ = self.telemetry.emit(
-                        crate::telemetry::EventKind::ClaimVerifySuccess {
+                        crate::telemetry::EventKind::ClaimRecheckSucceeded {
                             bead_id: bead_id.clone(),
                             expected_actor: verify_worker_id.clone(),
+                            stage: "pre_spawn".to_string(),
                         },
                         chrono::Utc::now(),
                     );
@@ -2172,6 +2181,16 @@ impl Dispatcher {
             // as the verdict for every other format.
             let trace_format = detect_trace_format(&adapter.name);
             let outcome = classify_from_stream(exit_code, &stdout, &trace_format);
+            // Record the envelope's terminal fields next to the outcome: during
+            // the 2026-09-02 zai-proxy outage the only way to tell outage
+            // casualties from genuinely hard tasks was grepping raw stdout for
+            // the 503. `parse_result_envelope` returns None for formats without
+            // a claude_json result envelope, leaving both fields absent there.
+            let ClaudeResultEnvelope {
+                terminal_reason,
+                api_error_status,
+                ..
+            } = parse_result_envelope(&stdout).unwrap_or_default();
             let metadata = TraceMetadata {
                 bead_id: bead_id.clone(),
                 agent: adapter.name.clone(),
@@ -2188,6 +2207,8 @@ impl Dispatcher {
                 pruned: false,
                 template_version: None,
                 timeout_reason: timeout_reason.clone(),
+                terminal_reason,
+                api_error_status,
             };
             let _ = capture.write_metadata(&metadata);
 

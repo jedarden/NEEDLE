@@ -6,7 +6,9 @@
 //!
 //! Depends on: `types`, `config`, `bead_store`.
 
+pub mod analyze;
 mod explore;
+mod generation;
 mod knot;
 pub mod mend;
 mod pluck;
@@ -15,6 +17,7 @@ pub mod reflect;
 pub mod splice;
 pub mod unravel;
 pub mod weave;
+mod workspace_health;
 
 use std::collections::HashSet;
 use std::time::Instant;
@@ -25,6 +28,7 @@ use tracing::Instrument;
 use crate::bead_store::BeadStore;
 use crate::config::Config;
 use crate::span::{attrs, strand_results};
+use crate::telemetry::CycleOutcome;
 use crate::types::{Bead, BeadId, StrandResult};
 
 /// A single strand evaluation result.
@@ -58,6 +62,7 @@ pub struct SelectOutcome {
     pub split_failure_count: Option<u32>,
 }
 
+pub use analyze::{AnalysisAgent, AnalyzeStrand};
 pub use explore::ExploreStrand;
 pub use knot::KnotStrand;
 pub use mend::{cleanup_orphaned_in_progress, MendStrand};
@@ -97,12 +102,27 @@ pub trait Strand: Send + Sync {
     ) -> anyhow::Result<()> {
         Ok(())
     }
+
+    /// Whether this strand manufactures new work rather than selecting work
+    /// that already exists.
+    ///
+    /// The runner uses this to tell a recoverable generator failure apart from
+    /// an ordinary selection error: a failed generator falls through to the
+    /// next generator, and that fall-through is recorded as `creator_failed`
+    /// rather than as idle.
+    fn is_generator(&self) -> bool {
+        false
+    }
 }
 
 /// Runs strands in order, returning the first candidate found.
 pub struct StrandRunner {
     strands: Vec<Box<dyn Strand>>,
     telemetry: crate::telemetry::Telemetry,
+    /// Shared with Knot so that a cycle records at most one outcome: Knot is
+    /// the terminal classifier, but a cycle that already selected or generated
+    /// work must not also be counted as idle or starvation.
+    cycle_outcome_recorded: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl StrandRunner {
@@ -110,6 +130,7 @@ impl StrandRunner {
         StrandRunner {
             strands,
             telemetry: crate::telemetry::Telemetry::new("strand-runner".to_string()),
+            cycle_outcome_recorded: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -129,11 +150,12 @@ impl StrandRunner {
             telemetry.clone(),
             config.workspace.home.clone(),
             config.strands.pluck.persistent_starvation_records,
-        );
+        )
+        .with_quarantine_threshold(config.outcome.quarantine_after_failures);
 
         let heartbeat_dir = config.workspace.home.join("state").join("heartbeats");
         let heartbeat_ttl = std::time::Duration::from_secs(config.health.heartbeat_ttl_secs);
-        let lock_dir = std::path::PathBuf::from("/tmp");
+        let lock_dir = std::env::temp_dir();
         let log_dir = config
             .telemetry
             .file_sink
@@ -185,12 +207,26 @@ impl StrandRunner {
         // are (needle-ee024ae4).
         .with_split_after_failures(config.strands.pluck.split_after_failures);
 
+        // Constructed to validate its configuration and state directory; the
+        // waterfall wires it in when the analyze strand's dispatch path lands.
+        let _analyze = AnalyzeStrand::new(
+            config.strands.analyze.clone(),
+            config.workspace.default.clone(),
+            state_base.join("analyze"),
+            Box::new(analyze::CliAnalysisAgent::new(config.agent.default.clone())),
+            telemetry.clone(),
+        );
+
         let weave = WeaveStrand::new(
             config.strands.weave.clone(),
             config.workspace.default.clone(),
             state_base.join("weave"),
             Box::new(CliWeaveAgent::new(config.agent.default.clone())),
             telemetry.clone(),
+        )
+        .with_generation(
+            config.strands.generation.clone(),
+            config.strands.pluck.exclude_labels.clone(),
         );
 
         let unravel = UnravelStrand::new(
@@ -206,6 +242,10 @@ impl StrandRunner {
             config.workspace.default.clone(),
             state_base.join("pulse"),
             telemetry.clone(),
+        )
+        .with_generation(
+            config.strands.generation.clone(),
+            config.strands.pluck.exclude_labels.clone(),
         );
 
         // Create the extraction agent if configured.
@@ -268,6 +308,7 @@ impl StrandRunner {
             runner_telemetry.clone(),
             config.workspace.default.clone(),
         );
+        let cycle_outcome_recorded = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         StrandRunner {
             strands: vec![
                 Box::new(pluck),
@@ -278,9 +319,10 @@ impl StrandRunner {
                 Box::new(pulse),
                 Box::new(reflect),
                 Box::new(splice),
-                Box::new(knot),
+                Box::new(knot.with_cycle_outcome_guard(cycle_outcome_recorded.clone())),
             ],
             telemetry: runner_telemetry,
+            cycle_outcome_recorded,
         }
     }
 
@@ -301,6 +343,8 @@ impl StrandRunner {
         exclusions: &HashSet<BeadId>,
     ) -> Result<SelectOutcome> {
         const MAX_RESTARTS: u32 = 3;
+        self.cycle_outcome_recorded
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         let mut restarts = 0u32;
         let mut restart_triggers: Vec<String> = Vec::new();
         let mut strand_evaluations: Vec<StrandEvaluation> = Vec::new();
@@ -412,6 +456,11 @@ impl StrandRunner {
                             "strand found candidates"
                         );
                         if let Some(bead) = filtered.into_iter().next() {
+                            self.emit_cycle_outcome(
+                                CycleOutcome::Selected,
+                                Some(strand_name.clone()),
+                                None,
+                            );
                             return Ok(SelectOutcome {
                                 bead: Some((bead, strand_name.clone())),
                                 waterfall_restarts: restarts,
@@ -467,6 +516,14 @@ impl StrandRunner {
                                 "failed to emit strand evaluated telemetry"
                             );
                         }
+                        // Real work was manufactured rather than selected, so
+                        // this is a generation cycle even if the restart below
+                        // never manages to claim the new bead.
+                        self.emit_cycle_outcome(
+                            CycleOutcome::Generated,
+                            Some(strand_name.clone()),
+                            None,
+                        );
                         restarts += 1;
                         restart_triggers.push(strand_name.clone());
                         if restarts > MAX_RESTARTS {
@@ -576,6 +633,17 @@ impl StrandRunner {
                             elapsed_ms,
                             "strand error, continuing to next strand"
                         );
+                        // A generator that fails recoverably is a distinct
+                        // outcome from idle: the cycle did try to manufacture
+                        // work and will fall through to the next generator.
+                        // The generator itself records `creator_failed` detail.
+                        if strand.is_generator() {
+                            self.emit_cycle_outcome(
+                                CycleOutcome::CreatorFailed,
+                                Some(strand_name.clone()),
+                                None,
+                            );
+                        }
                         continue;
                     }
                 }
@@ -594,6 +662,41 @@ impl StrandRunner {
     /// Return the names of all configured strands (for telemetry/debugging).
     pub fn strand_names(&self) -> Vec<&str> {
         self.strands.iter().map(|s| s.name()).collect()
+    }
+
+    /// Record how a selection cycle resolved.
+    ///
+    /// Exactly one outcome is recorded per cycle: the first of a selection, a
+    /// generation restart, or a generator failure wins. Terminal idle and
+    /// terminal starvation are recorded by Knot, which is the last strand in
+    /// an exhausted cycle and the only place that can tell the two apart.
+    fn emit_cycle_outcome(
+        &self,
+        outcome: CycleOutcome,
+        strand_name: Option<String>,
+        detail: Option<String>,
+    ) {
+        if self
+            .cycle_outcome_recorded
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            tracing::debug!(
+                outcome = outcome.as_str(),
+                "cycle outcome already recorded; not overwriting it"
+            );
+            return;
+        }
+        if let Some(detail) = detail {
+            tracing::info!(outcome = outcome.as_str(), detail = %detail, "cycle outcome");
+        }
+        let _ = self.telemetry.emit(
+            crate::telemetry::EventKind::CycleOutcome {
+                outcome,
+                workspace: None,
+                strand_name,
+            },
+            chrono::Utc::now(),
+        );
     }
 }
 

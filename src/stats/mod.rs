@@ -838,10 +838,21 @@ pub enum StatsDimension {
 /// Aggregated statistics row for one value of a grouping dimension.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct StatsRow {
-    /// The dimension value (version, task type, or worker id).
+    /// The dimension value (version, task type, worker id, adapter, or
+    /// ledger outcome).
     pub key: String,
     /// Total number of beads dispatched in this group.
+    ///
+    /// For the `Adapter` and `Outcome` dimensions this counts attempts (one
+    /// `attempt.resolved` row per attempt), not dispatches.
     pub beads: u64,
+    /// Number of rows in this group whose attempt ID is provisional
+    /// (`"provisional": true` on the `attempt.resolved` row). Populated only
+    /// by the `Adapter` and `Outcome` dimensions — every row is provisional
+    /// until bead-scoped attempt resolution lands (N-T03), and such rows are
+    /// excluded from authoritative SLOs (plan section 4.4 step 1), so
+    /// consumers must not treat a provisional attempt ID as authoritative.
+    pub provisional: u64,
     /// Number of beads that completed with `"Success"` outcome.
     pub pass: u64,
     /// Number of beads that completed with `"Failure"` outcome.
@@ -1037,6 +1048,9 @@ pub fn compute_attempt_stats(
             ..Default::default()
         });
         row.beads += 1;
+        if event.data.get("provisional").and_then(|v| v.as_bool()) == Some(true) {
+            row.provisional += 1;
+        }
 
         match event.data.get("outcome").and_then(|v| v.as_str()) {
             Some("verified_success") => row.pass += 1,
@@ -1462,6 +1476,10 @@ mod tests {
         let alpha = rows.iter().find(|r| r.key == "needle-alpha").unwrap();
         assert_eq!(alpha.beads, 1);
         assert_eq!(alpha.pass, 1);
+        assert_eq!(
+            alpha.provisional, 0,
+            "dispatch-correlated dimensions have no attempt rows to be provisional"
+        );
         assert!((alpha.pass_rate().unwrap() - 1.0).abs() < f64::EPSILON);
 
         let bravo = rows.iter().find(|r| r.key == "needle-bravo").unwrap();
@@ -1543,6 +1561,7 @@ mod tests {
         assert_eq!(rows.len(), 2, "only the ledger rows group");
         let a = rows.iter().find(|r| r.key == "adapter-a").unwrap();
         assert_eq!(a.beads, 2, "one attempt per ledger row");
+        assert_eq!(a.provisional, 2, "every fixture row is provisional");
         assert_eq!(a.pass, 1);
         assert_eq!(a.fail, 1);
         assert_eq!(a.total_tokens, 360);
@@ -1552,6 +1571,7 @@ mod tests {
 
         let b = rows.iter().find(|r| r.key == "adapter-b").unwrap();
         assert_eq!(b.beads, 1);
+        assert_eq!(b.provisional, 1);
         assert_eq!(b.pass, 1);
         assert_eq!(b.pass_rate().unwrap(), 1.0);
     }
@@ -1589,6 +1609,46 @@ mod tests {
 
         assert!(rows.iter().any(|r| r.key == "indeterminate"));
         assert!(rows.iter().any(|r| r.key == "cancelled"));
+    }
+
+    #[test]
+    fn attempt_dimensions_count_provisional_rows_per_group() {
+        // A confirmed row — the flag present but false.
+        let mut confirmed = attempt_row("adapter-a", "work_failure", Some(1), Some(2), None);
+        if let Some(obj) = confirmed.data.as_object_mut() {
+            obj.insert("provisional".to_string(), serde_json::json!(false));
+        }
+        // A row with the flag absent entirely — counted, but not provisional.
+        let mut unflagged = attempt_row("adapter-b", "verified_success", None, None, None);
+        if let Some(obj) = unflagged.data.as_object_mut() {
+            obj.remove("provisional");
+        }
+
+        let events = vec![
+            attempt_row("adapter-a", "verified_success", None, None, None), // provisional
+            confirmed,
+            unflagged,
+            attempt_row("adapter-b", "cancelled", None, None, None), // provisional
+        ];
+
+        let rows = compute_stats(&events, StatsDimension::Adapter);
+        let a = rows.iter().find(|r| r.key == "adapter-a").unwrap();
+        assert_eq!(a.beads, 2);
+        assert_eq!(
+            a.provisional, 1,
+            "only the flagged row counts as provisional"
+        );
+
+        let b = rows.iter().find(|r| r.key == "adapter-b").unwrap();
+        assert_eq!(b.beads, 2);
+        assert_eq!(b.provisional, 1, "a missing flag is not a provisional row");
+
+        // Same rows under the Outcome dimension: the count follows the row,
+        // so both provisional rows land in their outcome groups.
+        let rows = compute_stats(&events, StatsDimension::Outcome);
+        assert_eq!(rows.iter().map(|r| r.beads).sum::<u64>(), 4);
+        let total_provisional: u64 = rows.iter().map(|r| r.provisional).sum();
+        assert_eq!(total_provisional, 2);
     }
 
     #[test]

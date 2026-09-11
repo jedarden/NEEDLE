@@ -73,6 +73,11 @@ pub struct KnotStrand {
     first_starvation_detected_at: Mutex<Option<DateTime<Utc>>>,
     /// Telemetry emitter for starvation events.
     telemetry: Telemetry,
+    /// Set by whoever owns the selection cycle once it has recorded an outcome.
+    /// Knot is the last strand in a cycle, so it consults this before calling a
+    /// cycle terminal: a cycle that already selected or generated work must not
+    /// also be counted as idle or starvation. `None` means Knot owns the cycle.
+    cycle_outcome_recorded: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl KnotStrand {
@@ -90,7 +95,17 @@ impl KnotStrand {
             last_alert_at: Mutex::new(None),
             first_starvation_detected_at: Mutex::new(None),
             telemetry,
+            cycle_outcome_recorded: None,
         }
+    }
+
+    /// Share the selection cycle's outcome flag with this strand.
+    pub fn with_cycle_outcome_guard(
+        mut self,
+        guard: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Self {
+        self.cycle_outcome_recorded = Some(guard);
+        self
     }
 
     fn workspace_from_inventory(&self, beads: &[crate::types::Bead]) -> String {
@@ -363,6 +378,43 @@ impl KnotStrand {
 
         (beads_marked, success, details)
     }
+
+    /// Record how the cycle terminated.
+    fn emit_cycle_outcome(
+        &self,
+        outcome: crate::telemetry::CycleOutcome,
+        workspace: Option<String>,
+    ) {
+        // A cycle that already selected or generated work is not terminal, no
+        // matter what the exhausted frontier looks like afterwards.
+        if let Some(flag) = &self.cycle_outcome_recorded {
+            if flag.load(std::sync::atomic::Ordering::SeqCst) {
+                tracing::debug!(
+                    attempted = outcome.as_str(),
+                    "cycle outcome already recorded; terminal classification not applicable"
+                );
+                return;
+            }
+        }
+        let _ = self.telemetry.emit(
+            crate::telemetry::EventKind::CycleOutcome {
+                outcome,
+                workspace,
+                strand_name: Some("knot".to_string()),
+            },
+            Utc::now(),
+        );
+    }
+}
+
+/// Best-effort workspace label for the terminal cycle outcome.
+fn diagnosis_workspace(diagnosis: &ExhaustionDiagnosis) -> Option<String> {
+    match diagnosis {
+        ExhaustionDiagnosis::Invisible { workspace, .. } => Some(workspace.clone()),
+        ExhaustionDiagnosis::NoBeadsExist
+        | ExhaustionDiagnosis::AllClaimed { .. }
+        | ExhaustionDiagnosis::BlockedOnly { .. } => None,
+    }
 }
 
 #[async_trait::async_trait]
@@ -438,6 +490,19 @@ impl super::Strand for KnotStrand {
                 diagnosis = diagnosis.as_str(),
                 cycle,
                 "knot strand evaluated"
+            );
+
+            // Knot is the last strand in an exhausted cycle, so it owns the
+            // terminal classification. Open work that no filter can reach is
+            // genuine starvation; an empty, fully claimed, or fully blocked
+            // frontier is ordinary idle. Emitted once per cycle either way.
+            self.emit_cycle_outcome(
+                if matches!(diagnosis, ExhaustionDiagnosis::Invisible { .. }) {
+                    crate::telemetry::CycleOutcome::TerminalStarvation
+                } else {
+                    crate::telemetry::CycleOutcome::TerminalIdle
+                },
+                diagnosis_workspace(&diagnosis),
             );
 
             // Only emit telemetry for INVISIBLE diagnosis and only after threshold AND backoff window.
@@ -809,6 +874,18 @@ mod tests {
         (knot, events)
     }
 
+    /// The starvation alerts in a captured event list.
+    ///
+    /// Every evaluation now also emits a `cycle.outcome` event recording how
+    /// the cycle terminated, so an assertion on the alert count has to select
+    /// the alert it means rather than counting the whole stream.
+    fn starvation_alerts(events: &[TelemetryEvent]) -> Vec<&TelemetryEvent> {
+        events
+            .iter()
+            .filter(|event| event.event_type == "strand.knot.starvation_detected")
+            .collect()
+    }
+
     /// Create a KnotStrand with test defaults for telemetry (legacy, no event capture).
     fn make_test_knot(config: KnotConfig) -> KnotStrand {
         let telemetry = crate::telemetry::Telemetry::new("test-worker".to_string());
@@ -877,9 +954,8 @@ mod tests {
             let result = knot.evaluate(&store, &HashSet::new()).await;
             assert!(matches!(result, StrandResult::NoWork));
         }
-        assert_eq!(
-            events.lock().unwrap().len(),
-            0,
+        assert!(
+            starvation_alerts(&events.lock().unwrap()).is_empty(),
             "no telemetry below threshold"
         );
         assert_eq!(store.created_count(), 0, "no beads created below threshold");
@@ -900,13 +976,14 @@ mod tests {
         drop(knot);
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        let events_guard = events.lock().unwrap();
+        let locked = events.lock().unwrap();
+        let events_guard = starvation_alerts(&locked);
         assert_eq!(
             events_guard.len(),
             1,
             "telemetry emitted after backoff elapsed"
         );
-        let event = &events_guard[0];
+        let event = events_guard[0];
         assert_eq!(event.event_type, "strand.knot.starvation_detected");
         assert_eq!(event.data["workspace"], "/tmp/test");
         assert_eq!(event.data["open_count"], 1);
@@ -938,7 +1015,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         assert_eq!(
-            events.lock().unwrap().len(),
+            starvation_alerts(&events.lock().unwrap()).len(),
             1,
             "telemetry emitted after backoff elapsed"
         );
@@ -947,7 +1024,7 @@ mod tests {
         knot.evaluate(&store, &HashSet::new()).await;
         assert_eq!(store.created_count(), 0, "no beads created on third cycle");
         assert_eq!(
-            events.lock().unwrap().len(),
+            starvation_alerts(&events.lock().unwrap()).len(),
             1,
             "rate limited — no second telemetry event"
         );
@@ -989,9 +1066,10 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         // Verify telemetry event contains diagnostic details
-        let events_guard = events.lock().unwrap();
+        let locked = events.lock().unwrap();
+        let events_guard = starvation_alerts(&locked);
         assert_eq!(events_guard.len(), 1, "telemetry event emitted");
-        let event = &events_guard[0];
+        let event = events_guard[0];
 
         assert_eq!(event.event_type, "strand.knot.starvation_detected");
         assert_eq!(event.data["open_count"], 2);
@@ -1139,7 +1217,7 @@ mod tests {
             knot.diagnose(&store).await.unwrap(),
             ExhaustionDiagnosis::BlockedOnly { open_count: 1 }
         ));
-        assert!(events.lock().unwrap().is_empty());
+        assert!(starvation_alerts(&events.lock().unwrap()).is_empty());
         assert_eq!(store.created_count(), 0);
     }
 
@@ -1157,11 +1235,11 @@ mod tests {
         knot.evaluate(&invisible, &HashSet::new()).await;
         knot.evaluate(&empty, &HashSet::new()).await;
         knot.evaluate(&invisible, &HashSet::new()).await;
-        assert!(events.lock().unwrap().is_empty());
+        assert!(starvation_alerts(&events.lock().unwrap()).is_empty());
 
         // Fourth evaluation: hits threshold, enters backoff
         knot.evaluate(&invisible, &HashSet::new()).await;
-        assert!(events.lock().unwrap().is_empty());
+        assert!(starvation_alerts(&events.lock().unwrap()).is_empty());
 
         // Simulate backoff elapse
         *knot.first_starvation_detected_at.lock().unwrap() = None;
@@ -1170,7 +1248,7 @@ mod tests {
         knot.evaluate(&invisible, &HashSet::new()).await;
         drop(knot);
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert_eq!(events.lock().unwrap().len(), 1);
+        assert_eq!(starvation_alerts(&events.lock().unwrap()).len(), 1);
     }
 
     // ──────────────────────────────────────────────────────────────────────────
@@ -1335,9 +1413,8 @@ mod tests {
         // First cycle: hits threshold, enters backoff window, no telemetry yet
         let result = knot.evaluate(&store, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::NoWork));
-        assert_eq!(
-            events.lock().unwrap().len(),
-            0,
+        assert!(
+            starvation_alerts(&events.lock().unwrap()).is_empty(),
             "no telemetry during backoff window"
         );
         assert_eq!(store.created_count(), 0, "no beads created during backoff");
@@ -1345,17 +1422,15 @@ mod tests {
         // Still within backoff window — no telemetry
         let result = knot.evaluate(&store, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::NoWork));
-        assert_eq!(
-            events.lock().unwrap().len(),
-            0,
+        assert!(
+            starvation_alerts(&events.lock().unwrap()).is_empty(),
             "still no telemetry during backoff"
         );
 
         drop(knot);
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert_eq!(
-            events.lock().unwrap().len(),
-            0,
+        assert!(
+            starvation_alerts(&events.lock().unwrap()).is_empty(),
             "no telemetry emitted while in backoff"
         );
     }
@@ -1374,18 +1449,16 @@ mod tests {
 
         // First evaluation: starvation detected, enters backoff
         knot.evaluate(&invisible_store, &HashSet::new()).await;
-        assert_eq!(
-            events.lock().unwrap().len(),
-            0,
+        assert!(
+            starvation_alerts(&events.lock().unwrap()).is_empty(),
             "no telemetry on first detection"
         );
 
         // Second evaluation: condition resolved (empty queue)
         let result = knot.evaluate(&resolved_store, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::NoWork));
-        assert_eq!(
-            events.lock().unwrap().len(),
-            0,
+        assert!(
+            starvation_alerts(&events.lock().unwrap()).is_empty(),
             "no telemetry when condition resolves"
         );
 
@@ -1394,9 +1467,8 @@ mod tests {
 
         drop(knot);
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert_eq!(
-            events.lock().unwrap().len(),
-            0,
+        assert!(
+            starvation_alerts(&events.lock().unwrap()).is_empty(),
             "no starvation telemetry for resolved condition"
         );
     }
@@ -1432,7 +1504,7 @@ mod tests {
 
         // Should have emitted telemetry after backoff "elapsed"
         assert_eq!(
-            events.lock().unwrap().len(),
+            starvation_alerts(&events.lock().unwrap()).len(),
             1,
             "telemetry emitted after backoff elapsed"
         );

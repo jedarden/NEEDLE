@@ -14,11 +14,14 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 
 use crate::bead_store::BeadStore;
-use crate::config::Config;
+use crate::config::{Config, ConfigLoader};
 use crate::fingerprint::{
     append_alert_note, build_alert_labels, check_alert_deduplication, AlertDeduplication, AlertKind,
 };
 use crate::gate_health;
+use crate::quarantine_expiry::{
+    capped_exponential_backoff, content_hash_label, QUARANTINE_BASE_SECS, QUARANTINE_MAX_SECS,
+};
 use crate::telemetry::{EventKind, Telemetry};
 use crate::types::{AgentOutcome, Bead, BeadAction, BeadId, BeadStatus, HandlerResult, Outcome};
 use crate::validation::{
@@ -31,16 +34,6 @@ use crate::validation::{
 /// worker immediately reclaiming the same deterministic frontier entry.
 const RETRY_COOLDOWN_BASE_SECS: u64 = 5 * 60;
 const RETRY_COOLDOWN_MAX_SECS: u64 = 30 * 60;
-
-/// ADR-022 quarantine windows.  A full quarantine begins at two hours and
-/// doubles by round, capped at two days.
-const QUARANTINE_BASE_SECS: u64 = 2 * 60 * 60;
-const QUARANTINE_MAX_SECS: u64 = 48 * 60 * 60;
-
-fn capped_exponential_backoff(base_secs: u64, exponent: u32, cap_secs: u64) -> u64 {
-    let multiplier = 1u64.checked_shl(exponent.min(20)).unwrap_or(u64::MAX);
-    base_secs.saturating_mul(multiplier).min(cap_secs)
-}
 
 /// The first line of a normalized failure summary, capped for a bead title.
 ///
@@ -273,6 +266,13 @@ pub struct AttemptContext {
     /// Commit SHAs created in the workspace between `bead_revision_start` and
     /// the end of execution.
     pub commits: Vec<String>,
+    /// Identity of the predispatch snapshot this dispatch wrote, as returned
+    /// by `predispatch::record`. The shipped-work cleanup removes the
+    /// snapshot file only when it still carries this identity: the file is
+    /// single-slot per (workspace, bead), so a completing twin dispatch would
+    /// otherwise destroy the survivor's baseline and wedge every later
+    /// closure on "no pre-dispatch snapshot recorded" (bead needle-e4fbe47c).
+    pub predispatch_token: Option<String>,
     /// Input tokens reported by the agent's token extractor.
     pub tokens_in: Option<u64>,
     /// Output tokens reported by the agent's token extractor.
@@ -332,6 +332,45 @@ impl OutcomeHandler {
             .unwrap_or_else(|e| e.into_inner())
             .take()
             .unwrap_or_default()
+    }
+
+    /// Non-consuming read of the in-flight attempt context.
+    ///
+    /// The shipped-work check needs the dispatch's own facts — the in-memory
+    /// pre-dispatch HEAD and the snapshot token — while the attempt is still
+    /// being resolved, but [`Self::take_attempt_context`] consumes the context
+    /// for the terminal ledger row later in [`Self::handle`]. Clone, don't
+    /// take.
+    fn peek_attempt_context(&self) -> AttemptContext {
+        self.attempt_context
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .unwrap_or_default()
+    }
+
+    /// The dispatch's in-memory shipped-work baseline, substituted when the
+    /// on-disk predispatch snapshot is gone.
+    ///
+    /// The snapshot file is single-slot per (workspace, bead), so a twin
+    /// dispatch finishing first clears it out from under this one and every
+    /// later closure bounced with "no pre-dispatch snapshot recorded" no
+    /// matter what was shipped (bead needle-e4fbe47c: five closes bounced
+    /// until an operator intervened). `bead_revision_start` was captured by
+    /// this very dispatch right before the agent ran — the same evidence
+    /// quality the file would have carried. Notes have no in-memory baseline,
+    /// so the gate falls back to its unreadable-at-dispatch semantics for
+    /// them.
+    fn fallback_predispatch(context: &AttemptContext) -> Option<predispatch::PreDispatch> {
+        context
+            .bead_revision_start
+            .as_ref()
+            .map(|head| predispatch::PreDispatch {
+                head_sha: Some(head.clone()),
+                notes_hash: None,
+                dirty_files: Vec::new(),
+                captured_at: None,
+            })
     }
 
     /// The provisional attempt ID of the in-flight dispatch, if one is assigned.
@@ -448,16 +487,63 @@ impl OutcomeHandler {
     ///
     /// This is extracted as a helper so it can be called BEFORE outcome classification.
     /// Verification must determine Success, not just exit code 0.
+    ///
+    /// Gates resolve from the workspace the BEAD belongs to — that
+    /// workspace's own `.needle.yaml` — never from the worker's startup
+    /// config, which carries the worker's HOME workspace's gates. A worker
+    /// homed in a gate-declaring workspace that roams onto a foreign bead
+    /// must judge that bead by the foreign workspace's own rules: workers
+    /// homed in commitgraph ran commitgraph's
+    /// `scripts/definition-of-done.sh --fast` against every foreign bead they
+    /// touched and failed them all with exit 127 on a script that workspace
+    /// never had (needle-da77b68a, live incident 2026-09-09). This is the
+    /// same per-workspace resolution `bead_cli.backend` already gets, and a
+    /// workspace that declares no gates runs none — not another workspace's.
     async fn run_verification_gates(&self, bead: &Bead) -> Result<(bool, Option<GateReport>)> {
-        // Try pluggable gates first, fall back to legacy verification commands.
-        let gate_opt = if !self.config.gates.is_empty() {
-            // New pluggable gate system. Fill in each command gate's stderr
-            // cap from `validation.stderr_cap_bytes` unless the gate already
-            // set its own override — see GitHub issue jedarden/NEEDLE#9.
+        let (workspace_gates, workspace_verification) =
+            ConfigLoader::load_workspace(&bead.workspace)
+                .with_context(|| {
+                    format!(
+                        "failed to load validation gates from the bead's workspace config {}",
+                        bead.workspace.join(".needle.yaml").display()
+                    )
+                })?
+                .map(|overrides| {
+                    (
+                        overrides.gates.unwrap_or_default(),
+                        overrides.verification.unwrap_or_default(),
+                    )
+                })
+                .unwrap_or_default();
+
+        if workspace_gates.is_empty() && workspace_verification.is_empty() {
+            // The bead's workspace declares no gates — the dispatch is judged
+            // on its own merits, even when the worker's home workspace gates
+            // everything homed there.
+            tracing::debug!(
+                bead_id = %bead.id,
+                workspace = %bead.workspace.display(),
+                "bead's workspace declares no validation gates — running none"
+            );
+            return Ok((true, None));
+        }
+        tracing::debug!(
+            bead_id = %bead.id,
+            workspace = %bead.workspace.display(),
+            command_gates = workspace_gates.len(),
+            legacy_verification = workspace_verification.len(),
+            "resolved validation gates from the bead's workspace config"
+        );
+
+        // Pluggable gates first, fall back to legacy verification commands.
+        // Fill in each command gate's stderr cap from
+        // `validation.stderr_cap_bytes` unless the gate already set its own
+        // override — see GitHub issue jedarden/NEEDLE#9. The cap is a
+        // host-level setting (`validation` is not workspace-overridable), so
+        // the worker's resolved value applies to foreign workspaces too.
+        let gate_opt = if !workspace_gates.is_empty() {
             let default_stderr_cap = self.config.validation.stderr_cap_bytes;
-            let gate_configs: Vec<(String, GateConfig)> = self
-                .config
-                .gates
+            let gate_configs: Vec<(String, GateConfig)> = workspace_gates
                 .iter()
                 .enumerate()
                 .map(|(i, config)| {
@@ -472,16 +558,13 @@ impl OutcomeHandler {
                 })
                 .collect();
             ValidationGate::new(gate_configs, bead.workspace.clone())
-        } else if !self.config.verification.is_empty() {
+        } else {
             // Legacy verification command format.
             ValidationGate::from_commands_with_stderr_cap(
-                self.config.verification.clone(),
+                workspace_verification,
                 bead.workspace.clone(),
                 self.config.validation.stderr_cap_bytes,
             )
-        } else {
-            // No gates configured — treat as verified (backward compatible).
-            return Ok((true, None));
         };
 
         // Run the gate and return the result.
@@ -986,8 +1069,16 @@ impl OutcomeHandler {
         // Use timeout for show() to prevent indefinite hang in HANDLING state.
         match self.timeout_op(|| store.show(&bead.id), "show").await {
             Ok(Some(current)) if current.status.is_done() => {
+                // This dispatch's own facts: the in-memory pre-dispatch HEAD
+                // substitutes for a vanished snapshot file, and the snapshot
+                // token scopes the cleanup below to this dispatch's baseline.
+                let attempt = self.peek_attempt_context();
+                let fallback = Self::fallback_predispatch(&attempt);
+
                 if self.config.worker.enforce_shipped_work {
-                    match verify_shipped_work(&current, &bead.workspace, store).await {
+                    match verify_shipped_work(&current, &bead.workspace, store, fallback.as_ref())
+                        .await
+                    {
                         Ok(crate::validation::GateResult::Fail(reason)) => {
                             tracing::warn!(
                                 bead_id = %bead.id,
@@ -1006,7 +1097,9 @@ impl OutcomeHandler {
                             // message naming the bead; it routes through the
                             // same failure path and counts toward quarantine
                             // like any other gate failure.
-                            let snapshot = predispatch::load(&bead.workspace, &bead.id).await;
+                            let snapshot = predispatch::load(&bead.workspace, &bead.id)
+                                .await
+                                .or(fallback);
                             match dod_bypass::check_dod_bypass(&bead.workspace, snapshot.as_ref())
                                 .await
                             {
@@ -1085,8 +1178,17 @@ impl OutcomeHandler {
                 }
 
                 // Dispatch is fully accounted for — drop its snapshot so the
-                // next claim of this bead starts from a fresh baseline.
-                crate::validation::predispatch::clear(&bead.workspace, &bead.id).await;
+                // next claim of this bead starts from a fresh baseline. Only
+                // this dispatch's own snapshot: a twin dispatch on the same
+                // bead may have overwritten the single-slot file, and the
+                // survivor's baseline is the one still in flight
+                // (needle-e4fbe47c).
+                crate::validation::predispatch::clear_if_own(
+                    &bead.workspace,
+                    &bead.id,
+                    attempt.predispatch_token.as_deref(),
+                )
+                .await;
 
                 tracing::info!(bead_id = %bead.id, "bead confirmed closed by agent");
                 events.push(EventKind::BeadCompleted {
@@ -1120,14 +1222,25 @@ impl OutcomeHandler {
                 // If the agent shipped work, mark as completed. Otherwise, release
                 // and increment failure count so repeat offenders quarantine.
                 if self.config.worker.enforce_shipped_work {
-                    match verify_shipped_work(&current, &bead.workspace, store).await {
+                    let attempt = self.peek_attempt_context();
+                    let fallback = Self::fallback_predispatch(&attempt);
+                    match verify_shipped_work(&current, &bead.workspace, store, fallback.as_ref())
+                        .await
+                    {
                         Ok(crate::validation::GateResult::Pass) => {
                             tracing::info!(
                                 bead_id = %bead.id,
                                 "shipped work detected — marking orphaned bead as completed"
                             );
-                            // Clear the predispatch snapshot since work is complete.
-                            crate::validation::predispatch::clear(&bead.workspace, &bead.id).await;
+                            // Clear the predispatch snapshot since work is complete —
+                            // only this dispatch's own baseline (see the twin-dispatch
+                            // note on the closed-bead path).
+                            crate::validation::predispatch::clear_if_own(
+                                &bead.workspace,
+                                &bead.id,
+                                attempt.predispatch_token.as_deref(),
+                            )
+                            .await;
                             // Shipped work detected — reset failure count.
                             let _ = self.reset_failure_count(store, bead).await;
                             // Mark as completed - the agent shipped work but forgot to close.
@@ -2805,6 +2918,10 @@ impl OutcomeHandler {
         let round_label = format!("quarantine-round:{round}");
         let until_label = format!("quarantine-until:{}", until.to_rfc3339());
         let reason_label = format!("quarantine:failure-count:{failure_count}");
+        // Stamp the content this quarantine was taken against, so the
+        // expiry-time re-evaluation (quarantine_expiry) can tell "still
+        // broken" apart from "someone edited the bead since".
+        let hash_label = content_hash_label(bead);
 
         tracing::warn!(
             bead_id = %bead.id,
@@ -2824,6 +2941,7 @@ impl OutcomeHandler {
             round_label.clone(),
             until_label.clone(),
             reason_label,
+            hash_label.clone(),
         ] {
             self.timeout_op(|| store.add_label(&bead.id, &label), "quarantine add_label")
                 .await?
@@ -2833,6 +2951,8 @@ impl OutcomeHandler {
         for label in labels.iter().filter(|label| {
             (label.starts_with("quarantine-round:") && label.as_str() != round_label)
                 || (label.starts_with("quarantine-until:") && label.as_str() != until_label)
+                || (label.starts_with(crate::quarantine_expiry::CONTENT_HASH_LABEL_PREFIX)
+                    && label.as_str() != hash_label)
         }) {
             self.timeout_op(
                 || store.remove_label(&bead.id, label),
@@ -3317,9 +3437,9 @@ mod tests {
         // The old test expected Success plus BeadOrphaned and thereby locked in
         // the leaked in_progress claim.
         let (_guard, _home) = isolated_home();
-        let handler = test_handler_with_verification(vec!["false".to_string()]);
+        let handler = test_handler();
         let store = test_store(BeadStatus::InProgress);
-        let bead = test_bead(BeadStatus::InProgress);
+        let (_ws, bead) = bead_in_workspace_with_verification(&["false".to_string()]);
 
         let result = handler
             .handle(&store, &bead, &test_output(0), false)
@@ -3940,13 +4060,26 @@ mod tests {
 
     // ── verification gate tests ──
 
-    fn test_handler_with_verification(commands: Vec<String>) -> OutcomeHandler {
-        let config = Config {
-            verification: commands,
-            ..Config::default()
+    /// A test bead whose workspace is a real directory declaring the given
+    /// legacy `verification:` commands in its own `.needle.yaml`.
+    ///
+    /// Gates resolve from the bead's workspace config (needle-da77b68a), so a
+    /// gate that must RUN is declared where resolution reads it — the bead's
+    /// own `.needle.yaml`. The handler's `Config` models the worker's home
+    /// workspace, which a foreign bead is deliberately not judged by. The
+    /// directory is real because it is the gate command's cwd; drop the
+    /// returned guard to remove it.
+    fn bead_in_workspace_with_verification(commands: &[String]) -> (tempfile::TempDir, Bead) {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let yaml = serde_yaml::to_string(&serde_json::json!({ "verification": commands }))
+            .expect("fixture yaml serializes");
+        std::fs::write(workspace.path().join(".needle.yaml"), yaml)
+            .expect("fixture .needle.yaml writes");
+        let bead = Bead {
+            workspace: workspace.path().to_path_buf(),
+            ..test_bead(BeadStatus::InProgress)
         };
-        let telemetry = Telemetry::with_sink("test-worker".to_string(), NopSink);
-        OutcomeHandler::new(config, telemetry)
+        (workspace, bead)
     }
 
     #[tokio::test]
@@ -4011,9 +4144,9 @@ mod tests {
     async fn handle_success_verification_fails_releases_bead() {
         // Verification fails → bead released.
         let (_guard, _home) = isolated_home();
-        let handler = test_handler_with_verification(vec!["false".to_string()]);
+        let handler = test_handler();
         let store = test_store(BeadStatus::InProgress);
-        let bead = test_bead(BeadStatus::InProgress);
+        let (_ws, bead) = bead_in_workspace_with_verification(&["false".to_string()]);
 
         let result = handler
             .handle(&store, &bead, &test_output(0), false)
@@ -4039,9 +4172,9 @@ mod tests {
     async fn handle_success_verification_fails_reopens_closed_bead() {
         // Agent closed the bead, but verification fails → reopen then release.
         let (_guard, _home) = isolated_home();
-        let handler = test_handler_with_verification(vec!["false".to_string()]);
+        let handler = test_handler();
         let store = test_store(BeadStatus::Done);
-        let bead = test_bead(BeadStatus::InProgress);
+        let (_ws, bead) = bead_in_workspace_with_verification(&["false".to_string()]);
 
         let result = handler
             .handle(&store, &bead, &test_output(0), false)
@@ -4065,9 +4198,9 @@ mod tests {
     #[tokio::test]
     async fn handle_success_verification_fails_increments_failure_count() {
         let (_guard, _home) = isolated_home();
-        let handler = test_handler_with_verification(vec!["false".to_string()]);
+        let handler = test_handler();
         let store = test_store(BeadStatus::InProgress);
-        let bead = test_bead(BeadStatus::InProgress);
+        let (_ws, bead) = bead_in_workspace_with_verification(&["false".to_string()]);
 
         let _result = handler
             .handle(&store, &bead, &test_output(0), false)
@@ -4087,13 +4220,13 @@ mod tests {
     async fn handle_success_multiple_gates_first_fails() {
         // First gate passes, second fails → should stop and release.
         let (_guard, _home) = isolated_home();
-        let handler = test_handler_with_verification(vec![
+        let handler = test_handler();
+        let store = test_store(BeadStatus::InProgress);
+        let (_ws, bead) = bead_in_workspace_with_verification(&[
             "true".to_string(),
             "false".to_string(),
             "echo should-not-run".to_string(),
         ]);
-        let store = test_store(BeadStatus::InProgress);
-        let bead = test_bead(BeadStatus::InProgress);
 
         let result = handler
             .handle(&store, &bead, &test_output(0), false)
@@ -4101,6 +4234,110 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.bead_action, BeadAction::Released);
+    }
+
+    // ── per-workspace gate resolution (needle-da77b68a) ──
+
+    #[tokio::test]
+    async fn worker_home_gates_never_judge_a_bead_whose_workspace_declares_none() {
+        // Direction 1 of needle-da77b68a (live incident aa-48a6e726): a
+        // worker homed in commitgraph carried commitgraph's gate in its
+        // startup config and ran `scripts/definition-of-done.sh --fast`
+        // against every foreign bead it touched — agent-archivist, whose
+        // `.needle.yaml` declares only `bead_cli.backend` and which has no
+        // `scripts/` directory — failing five dispatches with exit 127.
+        // The handler's Config here IS that home config; the bead's
+        // workspace is the foreign one. The dispatch must run ZERO command
+        // gates and be judged on its own merits.
+        let (_guard, _home) = isolated_home();
+        let config = Config {
+            gates: vec![GateConfig::Command {
+                commands: vec!["scripts/definition-of-done.sh --fast".to_string()],
+                stderr_cap_bytes: None,
+                run_in: Default::default(),
+            }],
+            worker: crate::config::WorkerConfig {
+                enforce_shipped_work: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let handler = test_handler_with_config(config);
+
+        let workspace = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            workspace.path().join(".needle.yaml"),
+            "bead_cli:\n  backend: bead-rs\n",
+        )
+        .unwrap();
+        let bead = Bead {
+            workspace: workspace.path().to_path_buf(),
+            ..test_bead(BeadStatus::InProgress)
+        };
+        let store = test_store(BeadStatus::Done);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+
+        // Had the home gate run, the missing script would exit 127 and this
+        // dispatch would be a Failure/Released.
+        assert_eq!(result.outcome, Outcome::Success);
+        assert_eq!(result.bead_action, BeadAction::Closed);
+    }
+
+    #[tokio::test]
+    async fn bead_workspace_declared_gates_run_from_that_workspaces_config() {
+        // Direction 2 of needle-da77b68a: a worker homed in a workspace that
+        // declares no gates (default Config) dispatched onto a bead whose
+        // workspace declares its OWN pluggable gates must run exactly those
+        // gates, in that workspace. The first command drops a marker in its
+        // cwd — the bead workspace — and the second fails, so the test
+        // observes both that the gate ran and where.
+        let (_guard, _home) = isolated_home();
+        let handler = test_handler();
+
+        let workspace = tempfile::TempDir::new().unwrap();
+        // `run_in: workspace` because the fixture is a bare directory, not a
+        // git repo — the default clean mode would fail at `git archive`
+        // extraction before running any command, which would make this test
+        // pass for the wrong reason (and the marker assert would still
+        // catch it, but the failure would say nothing about resolution).
+        std::fs::write(
+            workspace.path().join(".needle.yaml"),
+            "gates:\n\
+             \x20 - type: command\n\
+             \x20   run_in: workspace\n\
+             \x20   commands:\n\
+             \x20     - touch gate-ran-in-this-workspace\n\
+             \x20     - exit 42\n",
+        )
+        .unwrap();
+        let bead = Bead {
+            workspace: workspace.path().to_path_buf(),
+            ..test_bead(BeadStatus::InProgress)
+        };
+        let store = test_store(BeadStatus::InProgress);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+
+        assert_eq!(result.outcome, Outcome::Failure);
+        assert_eq!(result.bead_action, BeadAction::Released);
+        let actions = store.actions();
+        assert!(
+            actions.iter().any(
+                |a| matches!(a, StoreAction::AddLabel(_, label) if label == "verification-failed")
+            ),
+            "the workspace's own gate must judge this dispatch, got {actions:?}"
+        );
+        assert!(
+            workspace.path().join("gate-ran-in-this-workspace").exists(),
+            "the gate must execute with the bead's workspace as its cwd"
+        );
     }
 
     // ── timeout and resilience tests ──
@@ -4504,8 +4741,14 @@ mod tests {
         let marker_path = marker.path().to_path_buf();
         std::fs::remove_file(&marker_path).ok();
 
+        // The 3s gate is declared by the bead's own workspace, where gate
+        // resolution reads it (needle-da77b68a); the handler config only
+        // carries the outcome timeout.
+        let (_ws, bead) = bead_in_workspace_with_verification(&[format!(
+            "sleep 3 && touch {}",
+            marker_path.display()
+        )]);
         let config = Config {
-            verification: vec![format!("sleep 3 && touch {}", marker_path.display())],
             validation: ValidationConfig {
                 outcome_timeout_seconds: 1,
                 ..Default::default()
@@ -4514,7 +4757,6 @@ mod tests {
         };
         let handler = test_handler_with_config(config);
         let store = test_store(BeadStatus::InProgress);
-        let bead = test_bead(BeadStatus::InProgress);
         let cancelled = Arc::new(AtomicBool::new(false));
 
         let start = std::time::Instant::now();
@@ -4817,11 +5059,12 @@ mod tests {
         let (_guard, _home) = isolated_home();
         let mut config = Config::default();
         config.worker.enforce_shipped_work = false;
-        config.verification = verification;
         let helper = crate::telemetry::test_utils::TestHelper::new("ledger-row-test");
         let handler = OutcomeHandler::new(config, helper.telemetry().clone());
         let store = test_store(BeadStatus::InProgress);
-        let bead = test_bead(BeadStatus::InProgress);
+        // Any gate under test is declared by the bead's own workspace, where
+        // gate resolution reads it (needle-da77b68a).
+        let (_ws, bead) = bead_in_workspace_with_verification(&verification);
 
         let _ = handler
             .handle(&store, &bead, &test_output(exit_code), interrupted)
@@ -4831,23 +5074,26 @@ mod tests {
         helper.events_by_type("attempt.resolved")
     }
 
-    /// The eight terminal handlers `handle` routes to must each produce one —
+    /// The terminal handlers `handle` routes to must each produce one —
     /// and only one — `attempt.resolved` ledger row.
     #[tokio::test]
     async fn attempt_resolved_emitted_exactly_once_on_every_terminal_path() {
         // (label, exit code, interrupted, verification commands). The exit
-        // codes and the two gate configurations each select a different
-        // sub-handler: success, gate_failure (gate ran and rejected), and
-        // gate_error (gate could not run) all arrive via exit 0.
+        // codes and the gate configuration each select a different
+        // sub-handler: success and gate_failure (gate ran and rejected)
+        // arrive via exit 0. The gate_error sub-handler (gate could not run)
+        // has no entry here because it is currently unreachable through
+        // handle(): CommandGate::validate flattens its GateReport through
+        // to_gate_result, so an ExecutionError (a child that cannot even
+        // start) reaches the routing match as a plain Fail and lands in
+        // handle_gate_failure. Preserving the error kind through that
+        // flattening — and the question of whether sh exit 127 should count
+        // as an execution error at all (the aa-48a6e726 incident's shape) —
+        // is needle-3771863e's scope; when it lands, add the gate_error row
+        // here.
         let paths: Vec<(&str, i32, bool, Vec<String>)> = vec![
             ("success", 0, false, vec![]),
             ("gate_failure", 0, false, vec!["false".to_string()]),
-            (
-                "gate_error",
-                0,
-                false,
-                vec!["needle-n-t16-no-such-binary".to_string()],
-            ),
             ("failure", 1, false, vec![]),
             ("timeout", 124, false, vec![]),
             ("agent_not_found", 127, false, vec![]),

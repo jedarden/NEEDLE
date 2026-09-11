@@ -592,13 +592,14 @@ mod tests {
             .register(crate::registry::WorkerEntry {
                 id: "claude-dead-idle".to_string(),
                 pid: 99_999_999,
-                workspace: PathBuf::from("/tmp"),
+                workspace: reg_dir.path().to_path_buf(),
                 agent: "test".to_string(),
                 model: None,
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 0,
                 config_reload_generation: 0,
+                state: None,
             })
             .unwrap();
 

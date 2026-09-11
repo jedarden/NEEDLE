@@ -625,7 +625,7 @@ impl MendStrand {
             &self.registry,
             &self.telemetry,
             &self.qualified_id,
-            Some(Duration::from_secs(self.config.stuck_threshold_secs)),
+            Some(Duration::from_secs(self.config.stale_claim_ttl)),
             Some(&self.heartbeat_dir),
             self.heartbeat_ttl,
         )
@@ -3020,6 +3020,7 @@ mod tests {
                 started_at: Utc::now(),
                 beads_processed: 0,
                 config_reload_generation: 0,
+                state: None,
             })
             .unwrap();
 
@@ -3073,6 +3074,7 @@ mod tests {
                 started_at: Utc::now(),
                 beads_processed: 1,
                 config_reload_generation: 0,
+                state: None,
             })
             .unwrap();
 
@@ -3085,7 +3087,7 @@ mod tests {
         let (store, release_count, _) = MockBeadStore::new(vec![bead]);
         let mend = MendStrand::new(
             MendConfig {
-                stuck_threshold_secs: 60,
+                stale_claim_ttl: 60,
                 ..MendConfig::default()
             },
             hb_dir.path().to_path_buf(),
@@ -3149,6 +3151,7 @@ mod tests {
                     started_at: Utc::now(),
                     beads_processed: 1,
                     config_reload_generation: 0,
+                    state: None,
                 })
                 .unwrap();
 
@@ -3178,7 +3181,7 @@ mod tests {
             let (store, release_count, _) = MockBeadStore::new(vec![bead]);
             let mend = MendStrand::new(
                 MendConfig {
-                    stuck_threshold_secs: 60,
+                    stale_claim_ttl: 60,
                     ..MendConfig::default()
                 },
                 hb_dir.path().to_path_buf(),
@@ -3209,6 +3212,160 @@ mod tests {
                 "{case:?} must release exactly one stale claim"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn stale_claim_ttl_spelling_drives_claim_release() {
+        // `stale_claim_ttl` is the canonical key and `stuck_threshold_secs`
+        // its deprecated alias. Both spellings must reach the cleanup as the
+        // claim TTL: the same 90s-old claim from a live, registered worker is
+        // released under a 60s TTL and held under a 600s one. A silently
+        // ignored spelling would release in both.
+        for (yaml, expect_release) in [
+            ("stale_claim_ttl: 60", true),
+            ("stale_claim_ttl: 600", false),
+            ("stuck_threshold_secs: 60", true),
+            ("stuck_threshold_secs: 600", false),
+        ] {
+            let hb_dir = tempfile::tempdir().unwrap();
+            let lock_dir = tempfile::tempdir().unwrap();
+            let reg_dir = tempfile::tempdir().unwrap();
+            let assignee = "claude-alive-worker";
+
+            let mut bead = make_in_progress_bead("nd-alias-ttl", assignee);
+            bead.updated_at = Utc::now() - chrono::Duration::seconds(90);
+
+            let registry = Registry::new(reg_dir.path());
+            registry
+                .register(crate::registry::WorkerEntry {
+                    id: assignee.to_string(),
+                    pid: std::process::id(),
+                    workspace: PathBuf::from("/tmp/test"),
+                    agent: "test".to_string(),
+                    model: None,
+                    provider: None,
+                    started_at: Utc::now(),
+                    beads_processed: 1,
+                    config_reload_generation: 0,
+                    state: None,
+                })
+                .unwrap();
+
+            // No heartbeat file: nothing protects the claim except the TTL.
+            let (store, release_count, _) = MockBeadStore::new(vec![bead]);
+            let config: MendConfig = serde_yaml::from_str(yaml).unwrap();
+            let mend = MendStrand::new(
+                config,
+                hb_dir.path().to_path_buf(),
+                Duration::from_secs(300),
+                lock_dir.path().to_path_buf(),
+                "test-worker".to_string(),
+                registry,
+                Telemetry::new("test-worker".to_string()),
+                PathBuf::from("/tmp/needle-test-logs"),
+                0,
+                PathBuf::from("/tmp/test-traces"),
+                30,
+                7,
+                PathBuf::from("/tmp/test-workspace"),
+                80,
+                tempfile::tempdir().unwrap().path().to_path_buf(),
+                LimitsConfig::default(),
+            );
+
+            let result = mend.evaluate(&store, &HashSet::new()).await;
+            if expect_release {
+                assert!(
+                    matches!(result, StrandResult::WorkCreated),
+                    "{yaml} must release the stale claim: {result:?}"
+                );
+                assert_eq!(
+                    release_count.load(Ordering::Relaxed),
+                    1,
+                    "{yaml} must release exactly one stale claim"
+                );
+            } else {
+                assert!(
+                    matches!(result, StrandResult::NoWork),
+                    "{yaml} must hold a claim younger than the TTL: {result:?}"
+                );
+                assert_eq!(
+                    release_count.load(Ordering::Relaxed),
+                    0,
+                    "{yaml} must not release a claim younger than the TTL"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn config_yaml_stale_claim_ttl_reaches_the_reaper() {
+        // The spelling an operator writes in config.yaml — under the
+        // `strands.mend` section, not the bare `MendConfig` fragment — must
+        // be the value the cleanup enforces. A silently dropped key would
+        // hold an abandoned claim forever at the default.
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+        let assignee = "claude-alive-worker";
+
+        let full_config: crate::config::Config = serde_yaml::from_str(
+            "strands:\n  mend:\n    stale_claim_ttl: 60\n  explore:\n    stale_claim_ttl: 60\n",
+        )
+        .unwrap();
+        assert_eq!(full_config.strands.mend.stale_claim_ttl, 60);
+        assert_eq!(full_config.strands.explore.stale_claim_ttl, 60);
+
+        let mut bead = make_in_progress_bead("nd-yaml-ttl", assignee);
+        bead.updated_at = Utc::now() - chrono::Duration::seconds(90);
+
+        let registry = Registry::new(reg_dir.path());
+        registry
+            .register(crate::registry::WorkerEntry {
+                id: assignee.to_string(),
+                pid: std::process::id(),
+                workspace: PathBuf::from("/tmp/test"),
+                agent: "test".to_string(),
+                model: None,
+                provider: None,
+                started_at: Utc::now(),
+                beads_processed: 1,
+                config_reload_generation: 0,
+                state: None,
+            })
+            .unwrap();
+
+        // No heartbeat file: nothing protects the claim except the TTL.
+        let (store, release_count, _) = MockBeadStore::new(vec![bead]);
+        let mend = MendStrand::new(
+            full_config.strands.mend.clone(),
+            hb_dir.path().to_path_buf(),
+            Duration::from_secs(300),
+            lock_dir.path().to_path_buf(),
+            "test-worker".to_string(),
+            registry,
+            Telemetry::new("test-worker".to_string()),
+            PathBuf::from("/tmp/needle-test-logs"),
+            0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            LimitsConfig::default(),
+        );
+
+        let result = mend.evaluate(&store, &HashSet::new()).await;
+        assert!(
+            matches!(result, StrandResult::WorkCreated),
+            "the config.yaml TTL must release the abandoned claim: {result:?}"
+        );
+        assert_eq!(
+            release_count.load(Ordering::Relaxed),
+            1,
+            "exactly one abandoned claim must be released"
+        );
     }
 
     #[tokio::test]
@@ -3253,6 +3410,7 @@ mod tests {
                 started_at: Utc::now(),
                 beads_processed: 0,
                 config_reload_generation: 0,
+                state: None,
             })
             .unwrap();
 
@@ -3320,6 +3478,7 @@ mod tests {
                 started_at: Utc::now() - chrono::Duration::seconds(7200),
                 beads_processed: 10,
                 config_reload_generation: 0,
+                state: None,
             })
             .unwrap();
 
@@ -3387,6 +3546,7 @@ mod tests {
                 started_at: Utc::now(),
                 beads_processed: 1,
                 config_reload_generation: 0,
+                state: None,
             })
             .unwrap();
 
@@ -3399,7 +3559,7 @@ mod tests {
         let (store, release_count, _) = MockBeadStore::new(vec![active, leaked]);
         let mend = MendStrand::new(
             MendConfig {
-                stuck_threshold_secs: 60,
+                stale_claim_ttl: 60,
                 ..MendConfig::default()
             },
             hb_dir.path().to_path_buf(),
@@ -3464,6 +3624,7 @@ mod tests {
                 started_at: Utc::now(),
                 beads_processed: 1,
                 config_reload_generation: 0,
+                state: None,
             })
             .unwrap();
 
@@ -3545,6 +3706,7 @@ mod tests {
                 started_at: Utc::now(),
                 beads_processed: 5,
                 config_reload_generation: 0,
+                state: None,
             })
             .unwrap();
 
@@ -3630,6 +3792,7 @@ mod tests {
                 started_at: Utc::now(),
                 beads_processed: 10,
                 config_reload_generation: 0,
+                state: None,
             })
             .unwrap();
 
@@ -3729,6 +3892,7 @@ mod tests {
                 started_at: Utc::now(),
                 beads_processed: 0,
                 config_reload_generation: 0,
+                state: None,
             })
             .unwrap();
         registry
@@ -3742,6 +3906,7 @@ mod tests {
                 started_at: Utc::now(),
                 beads_processed: 100,
                 config_reload_generation: 0,
+                state: None,
             })
             .unwrap();
 
@@ -3806,6 +3971,7 @@ mod tests {
                 started_at: Utc::now(),
                 beads_processed: 342,
                 config_reload_generation: 0,
+                state: None,
             })
             .unwrap();
         registry
@@ -3819,6 +3985,7 @@ mod tests {
                 started_at: Utc::now(),
                 beads_processed: 0,
                 config_reload_generation: 0,
+                state: None,
             })
             .unwrap();
 
@@ -4334,6 +4501,7 @@ mod tests {
                 started_at: Utc::now(),
                 beads_processed: 5,
                 config_reload_generation: 0,
+                state: None,
             })
             .unwrap();
 
@@ -4479,6 +4647,7 @@ mod tests {
                 started_at: Utc::now(),
                 beads_processed: 0,
                 config_reload_generation: 0,
+                state: None,
             })
             .unwrap();
 
@@ -4528,6 +4697,7 @@ mod tests {
                 started_at: Utc::now(),
                 beads_processed: 0,
                 config_reload_generation: 0,
+                state: None,
             })
             .unwrap();
 
@@ -4573,6 +4743,7 @@ mod tests {
                 started_at: Utc::now(),
                 beads_processed: 10,
                 config_reload_generation: 0,
+                state: None,
             })
             .unwrap();
 
@@ -4687,6 +4858,7 @@ mod tests {
                 started_at: Utc::now(),
                 beads_processed: 0,
                 config_reload_generation: 0,
+                state: None,
             })
             .unwrap();
 
@@ -4890,6 +5062,7 @@ mod tests {
                 started_at: Utc::now(),
                 beads_processed: 5,
                 config_reload_generation: 0,
+                state: None,
             })
             .unwrap();
 
@@ -4948,6 +5121,7 @@ mod tests {
                 started_at: Utc::now(),
                 beads_processed: 10,
                 config_reload_generation: 0,
+                state: None,
             })
             .unwrap();
 
@@ -5000,6 +5174,7 @@ mod tests {
                 started_at: Utc::now(),
                 beads_processed: 0,
                 config_reload_generation: 0,
+                state: None,
             })
             .unwrap();
 
@@ -5053,6 +5228,7 @@ mod tests {
                     started_at: Utc::now(),
                     beads_processed: i as u64,
                     config_reload_generation: 0,
+                    state: None,
                 })
                 .unwrap();
         }
@@ -5069,6 +5245,7 @@ mod tests {
                 started_at: Utc::now(),
                 beads_processed: 100,
                 config_reload_generation: 0,
+                state: None,
             })
             .unwrap();
 
@@ -5371,6 +5548,7 @@ mod tests {
             started_at: Utc::now() - chrono::Duration::seconds(300), // 5 minutes ago
             beads_processed: 0,
             config_reload_generation: 0,
+            state: None,
         };
         registry.register(idle_entry).unwrap();
 
@@ -5421,6 +5599,7 @@ mod tests {
             started_at: Utc::now() - chrono::Duration::seconds(300),
             beads_processed: 10,
             config_reload_generation: 0,
+            state: None,
         };
         registry.register(active_entry).unwrap();
 
@@ -5471,6 +5650,7 @@ mod tests {
             started_at: Utc::now() - chrono::Duration::seconds(30), // 30 seconds ago
             beads_processed: 0,
             config_reload_generation: 0,
+            state: None,
         };
         registry.register(recent_entry).unwrap();
 
@@ -5522,6 +5702,7 @@ mod tests {
                 started_at: Utc::now() - chrono::Duration::seconds(300),
                 beads_processed: 0,
                 config_reload_generation: 0,
+                state: None,
             };
             registry.register(entry).unwrap();
         }
@@ -5573,6 +5754,7 @@ mod tests {
             started_at: Utc::now() - chrono::Duration::seconds(300),
             beads_processed: 10,
             config_reload_generation: 0,
+            state: None,
         };
         registry.register(active_entry).unwrap();
 
@@ -5587,6 +5769,7 @@ mod tests {
             started_at: Utc::now() - chrono::Duration::seconds(30),
             beads_processed: 0,
             config_reload_generation: 0,
+            state: None,
         };
         registry.register(recent_entry).unwrap();
 
@@ -5601,6 +5784,7 @@ mod tests {
             started_at: Utc::now() - chrono::Duration::seconds(300),
             beads_processed: 0,
             config_reload_generation: 0,
+            state: None,
         };
         registry.register(idle_entry).unwrap();
 
@@ -5688,6 +5872,7 @@ mod tests {
             started_at: Utc::now() + chrono::Duration::seconds(300), // 5 minutes in the future
             beads_processed: 0,
             config_reload_generation: 0,
+            state: None,
         };
         registry.register(future_entry).unwrap();
 
@@ -5741,6 +5926,7 @@ mod tests {
             started_at: Utc::now() - chrono::Duration::seconds(300), // 5 minutes ago
             beads_processed: 0,
             config_reload_generation: 0,
+            state: None,
         };
         registry.register(idle_entry).unwrap();
 
@@ -6658,6 +6844,7 @@ mod tests {
                 started_at: Utc::now() - chrono::Duration::seconds(600),
                 beads_processed: 5,
                 config_reload_generation: 0,
+                state: None,
             })
             .unwrap();
 
@@ -6705,6 +6892,7 @@ mod tests {
                 started_at: Utc::now() - chrono::Duration::seconds(60),
                 beads_processed: 0,
                 config_reload_generation: 0,
+                state: None,
             })
             .unwrap();
 
@@ -6752,6 +6940,7 @@ mod tests {
                 started_at: Utc::now() - chrono::Duration::seconds(600),
                 beads_processed: 0,
                 config_reload_generation: 0,
+                state: None,
             })
             .unwrap();
 
@@ -6799,6 +6988,7 @@ mod tests {
                 started_at: Utc::now() + chrono::Duration::seconds(60),
                 beads_processed: 0,
                 config_reload_generation: 0,
+                state: None,
             })
             .unwrap();
 
@@ -6846,6 +7036,7 @@ mod tests {
                 started_at: Utc::now() - chrono::Duration::seconds(600),
                 beads_processed: 0,
                 config_reload_generation: 0,
+                state: None,
             })
             .unwrap();
 
@@ -6904,6 +7095,7 @@ mod tests {
             started_at: Utc::now() - chrono::Duration::seconds(60), // Exactly at timeout
             beads_processed: 0,
             config_reload_generation: 0,
+            state: None,
         };
         registry.register(entry).unwrap();
 
@@ -6996,6 +7188,7 @@ mod tests {
                 started_at: Utc::now() - chrono::Duration::seconds(300),
                 beads_processed: 0,
                 config_reload_generation: 0,
+                state: None,
             };
             registry.register(entry).unwrap();
         }
@@ -7100,6 +7293,11 @@ mod tests {
             pruned: false,
             template_version: None,
             timeout_reason: None,
+            // An outage casualty carries the envelope fields even when
+            // classified as failed; retention must keep classifying on
+            // exit_code alone and ignore them.
+            terminal_reason: Some("api_error".to_string()),
+            api_error_status: Some(503),
         };
         let metadata_path = trace_dir.join("metadata.json");
         std::fs::write(
@@ -7173,6 +7371,8 @@ mod tests {
             pruned: false,
             template_version: None,
             timeout_reason: None,
+            terminal_reason: None,
+            api_error_status: None,
         };
         let metadata_path = trace_dir.join("metadata.json");
         std::fs::write(
@@ -7250,6 +7450,8 @@ mod tests {
             pruned: false,
             template_version: None,
             timeout_reason: None,
+            terminal_reason: None,
+            api_error_status: None,
         };
         let metadata_path = trace_dir.join("metadata.json");
         std::fs::write(
@@ -7317,6 +7519,8 @@ mod tests {
             pruned: false,
             template_version: None,
             timeout_reason: None,
+            terminal_reason: None,
+            api_error_status: None,
         };
         std::fs::write(
             failed_trace_dir.join("metadata.json"),
@@ -7345,6 +7549,8 @@ mod tests {
             pruned: false,
             template_version: None,
             timeout_reason: None,
+            terminal_reason: None,
+            api_error_status: None,
         };
         std::fs::write(
             success_trace_dir.join("metadata.json"),
@@ -7707,6 +7913,7 @@ mod tests {
             started_at,
             beads_processed,
             config_reload_generation: 0,
+            state: None,
         }
     }
 
@@ -7808,6 +8015,7 @@ mod tests {
                 started_at: Utc::now(),
                 beads_processed: 1,
                 config_reload_generation: 0,
+                state: None,
             })
             .unwrap();
 
@@ -7884,6 +8092,7 @@ mod tests {
                 started_at: Utc::now(),
                 beads_processed: 1,
                 config_reload_generation: 0,
+                state: None,
             })
             .unwrap();
 
@@ -7944,6 +8153,7 @@ mod tests {
                 started_at: Utc::now(),
                 beads_processed: 0,
                 config_reload_generation: 0,
+                state: None,
             })
             .unwrap();
 
@@ -8003,6 +8213,7 @@ mod tests {
                 started_at: Utc::now(),
                 beads_processed: 1,
                 config_reload_generation: 0,
+                state: None,
             })
             .unwrap();
 

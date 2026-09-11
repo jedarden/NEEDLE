@@ -24,9 +24,14 @@ use tempfile::TempDir;
 // ═════════════════════════════════════════════════════════════════════════════
 
 /// Create a temporary config file with the given YAML content.
+///
+/// The file is named `.needle.yaml` because `ConfigLoader::load_workspace`
+/// discovers workspace overrides by exactly that name; tests that exercise the
+/// workspace tier (see `workspace_override_agent_timeout`) pass this file's
+/// parent directory to the loader.
 fn create_temp_config(yaml_content: &str) -> (TempDir, PathBuf) {
     let temp_dir = TempDir::new().expect("failed to create temp dir");
-    let config_path = temp_dir.path().join("config.yaml");
+    let config_path = temp_dir.path().join(".needle.yaml");
 
     let mut file = fs::File::create(&config_path).expect("failed to create config file");
     file.write_all(yaml_content.as_bytes())

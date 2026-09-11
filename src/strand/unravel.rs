@@ -28,7 +28,7 @@ use crate::fingerprint::{
     append_alert_note, build_alert_labels, check_alert_deduplication, AlertDeduplication, AlertKind,
 };
 use crate::telemetry::{EventKind, Telemetry};
-use crate::types::{Bead, BeadId, StrandResult};
+use crate::types::{Bead, BeadId, BeadStatus, StrandResult};
 
 // ─── UnravelAgent trait ─────────────────────────────────────────────────────
 
@@ -141,11 +141,17 @@ impl UnravelStrand {
         self.state_dir.join(format!("{hash}.json"))
     }
 
-    /// Find beads with the "human" label from all beads in the store.
+    /// Find beads with the "human" label that are still open.
+    ///
+    /// The label alone only says a human decision was once needed, not that it
+    /// still is: Closed/Done means the blocker is resolved, InProgress means a
+    /// worker already holds the bead (a parallel proposer would duplicate that
+    /// work), and Blocked/Deferred are deliberately parked.
     fn filter_human_beads(beads: &[Bead]) -> Vec<&Bead> {
         beads
             .iter()
             .filter(|b| b.labels.iter().any(|l| l == "human"))
+            .filter(|b| matches!(b.status, BeadStatus::Open))
             .collect()
     }
 
@@ -285,6 +291,30 @@ impl super::Strand for UnravelStrand {
             }
         };
 
+        // Non-open human beads must not be re-dispatched (see
+        // `filter_human_beads`). Emit one skip event per bead so the run is
+        // observable even when nothing qualifies.
+        for bead in all_beads
+            .iter()
+            .filter(|b| b.labels.iter().any(|l| l == "human"))
+            .filter(|b| !matches!(b.status, BeadStatus::Open))
+        {
+            tracing::debug!(
+                bead_id = %bead.id,
+                status = %bead.status,
+                "unravel strand: bead is not open, skipping"
+            );
+            self.telemetry
+                .emit(
+                    EventKind::UnravelSkipped {
+                        bead_id: bead.id.clone(),
+                        reason: "bead_not_open".to_string(),
+                    },
+                    chrono::Utc::now(),
+                )
+                .ok();
+        }
+
         let human_beads = Self::filter_human_beads(&all_beads);
         if human_beads.is_empty() {
             tracing::debug!("unravel strand: no human-labeled beads found");
@@ -339,6 +369,40 @@ impl super::Strand for UnravelStrand {
                     "unravel strand: bead already has max alternatives, skipping"
                 );
                 state.mark_analyzed(&bead.id);
+                continue;
+            }
+
+            // Re-check status immediately before dispatching: the bead may
+            // have closed or been claimed since `list_all` was taken, and the
+            // dispatch itself can run for minutes. A store error falls back to
+            // the (already status-filtered) snapshot — this strand is
+            // best-effort, not gate-keeping.
+            let status = match store.show(&bead.id).await {
+                Ok(fresh) => fresh.status,
+                Err(e) => {
+                    tracing::debug!(
+                        bead_id = %bead.id,
+                        error = %e,
+                        "unravel strand: could not re-read bead status, using snapshot"
+                    );
+                    bead.status.clone()
+                }
+            };
+            if !matches!(status, BeadStatus::Open) {
+                tracing::debug!(
+                    bead_id = %bead.id,
+                    status = %status,
+                    "unravel strand: bead no longer open, skipping"
+                );
+                self.telemetry
+                    .emit(
+                        EventKind::UnravelSkipped {
+                            bead_id: bead.id.clone(),
+                            reason: "bead_not_open".to_string(),
+                        },
+                        chrono::Utc::now(),
+                    )
+                    .ok();
                 continue;
             }
 
@@ -710,10 +774,40 @@ mod tests {
         }
     }
 
+    /// Agent that counts invocations, so tests can assert a bead never
+    /// reached `propose_alternatives`.
+    struct CountingAgent {
+        calls: std::sync::Arc<Mutex<usize>>,
+    }
+
+    impl CountingAgent {
+        fn new() -> (Self, std::sync::Arc<Mutex<usize>>) {
+            let calls = std::sync::Arc::new(Mutex::new(0));
+            (
+                CountingAgent {
+                    calls: calls.clone(),
+                },
+                calls,
+            )
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl UnravelAgent for CountingAgent {
+        async fn propose_alternatives(&self, _prompt: &str, _workspace: &Path) -> Result<String> {
+            *self.calls.lock().unwrap() += 1;
+            Ok("NO_ALTERNATIVES".to_string())
+        }
+    }
+
     // ── Mock BeadStore ──────────────────────────────────────────────────
 
     struct MockStore {
         beads: Vec<Bead>,
+        /// Statuses served by `show` in place of the listed snapshot, keyed by
+        /// bead id — models a bead changing state between `list_all` and the
+        /// pre-dispatch re-check.
+        show_overrides: Mutex<HashMap<String, BeadStatus>>,
         created: Mutex<Vec<(String, String, Vec<String>)>>,
         deps_added: Mutex<Vec<(String, String)>>,
     }
@@ -722,6 +816,7 @@ mod tests {
         fn new(beads: Vec<Bead>) -> Self {
             MockStore {
                 beads,
+                show_overrides: Mutex::new(HashMap::new()),
                 created: Mutex::new(Vec::new()),
                 deps_added: Mutex::new(Vec::new()),
             }
@@ -729,6 +824,14 @@ mod tests {
 
         fn empty() -> Self {
             Self::new(vec![])
+        }
+
+        /// Make `show` report `status` for `id`, regardless of the snapshot.
+        fn set_show_status(&self, id: &str, status: BeadStatus) {
+            self.show_overrides
+                .lock()
+                .unwrap()
+                .insert(id.to_string(), status);
         }
 
         fn created_beads(&self) -> Vec<(String, String, Vec<String>)> {
@@ -748,8 +851,17 @@ mod tests {
         async fn ready(&self, _filters: &Filters) -> Result<Vec<Bead>> {
             Ok(self.beads.clone())
         }
-        async fn show(&self, _id: &BeadId) -> Result<Bead> {
-            anyhow::bail!("not implemented")
+        async fn show(&self, id: &BeadId) -> Result<Bead> {
+            let mut bead = self
+                .beads
+                .iter()
+                .find(|b| &b.id == id)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("bead not found: {id}"))?;
+            if let Some(status) = self.show_overrides.lock().unwrap().get(id.as_ref()) {
+                bead.status = status.clone();
+            }
+            Ok(bead)
         }
         async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<ClaimResult> {
             Ok(ClaimResult::NotClaimable {
@@ -864,7 +976,7 @@ mod tests {
         let telemetry = Telemetry::new("test".to_string());
         let strand = UnravelStrand::new(
             UnravelConfig::default(),
-            PathBuf::from("/tmp"),
+            dir.path().to_path_buf(),
             dir.path().to_path_buf(),
             Box::new(MockAgent::new("NO_ALTERNATIVES")),
             telemetry,
@@ -878,7 +990,7 @@ mod tests {
         let telemetry = Telemetry::new("test".to_string());
         let strand = UnravelStrand::new(
             UnravelConfig::default(), // disabled by default
-            PathBuf::from("/tmp"),
+            dir.path().to_path_buf(),
             dir.path().to_path_buf(),
             Box::new(MockAgent::new("NO_ALTERNATIVES")),
             telemetry,
@@ -894,7 +1006,7 @@ mod tests {
         let telemetry = Telemetry::new("test".to_string());
         let strand = UnravelStrand::new(
             make_enabled_config(),
-            PathBuf::from("/tmp"),
+            dir.path().to_path_buf(),
             dir.path().to_path_buf(),
             Box::new(MockAgent::new("NO_ALTERNATIVES")),
             telemetry,
@@ -917,7 +1029,7 @@ mod tests {
 
         let strand = UnravelStrand::new(
             make_enabled_config(),
-            PathBuf::from("/tmp"),
+            state_dir.path().to_path_buf(),
             state_dir.path().to_path_buf(),
             Box::new(MockAgent::new(response)),
             telemetry,
@@ -960,7 +1072,7 @@ mod tests {
         let response = r#"[{"title": "Alt A", "body": "Do A"}]"#;
         let strand = UnravelStrand::new(
             config,
-            PathBuf::from("/tmp"),
+            state_dir.path().to_path_buf(),
             state_dir.path().to_path_buf(),
             Box::new(MockAgent::new(response)),
             telemetry,
@@ -992,7 +1104,7 @@ mod tests {
         ]"#;
         let strand = UnravelStrand::new(
             config,
-            PathBuf::from("/tmp"),
+            state_dir.path().to_path_buf(),
             state_dir.path().to_path_buf(),
             Box::new(MockAgent::new(response)),
             telemetry,
@@ -1090,7 +1202,7 @@ mod tests {
 
         let strand = UnravelStrand::new(
             make_enabled_config(),
-            PathBuf::from("/tmp"),
+            state_dir.path().to_path_buf(),
             state_dir.path().to_path_buf(),
             Box::new(MockAgent::new("NO_ALTERNATIVES")),
             telemetry,
@@ -1111,7 +1223,7 @@ mod tests {
 
         let strand = UnravelStrand::new(
             make_enabled_config(),
-            PathBuf::from("/tmp"),
+            state_dir.path().to_path_buf(),
             state_dir.path().to_path_buf(),
             Box::new(FailingAgent),
             telemetry,
@@ -1133,7 +1245,7 @@ mod tests {
         let response = r#"[{"title": "Alt", "body": "body"}]"#;
         let strand = UnravelStrand::new(
             make_enabled_config(),
-            PathBuf::from("/tmp"),
+            state_dir.path().to_path_buf(),
             state_dir.path().to_path_buf(),
             Box::new(MockAgent::new(response)),
             telemetry,
@@ -1267,16 +1379,138 @@ mod tests {
 
     #[test]
     fn filter_human_beads() {
+        let mut closed = make_bead("nd-closed", "Resolved human task", &["human"]);
+        closed.status = BeadStatus::Closed;
+        let mut done = make_bead("nd-done", "Completed human task", &["human"]);
+        done.status = BeadStatus::Done;
+        let mut in_progress = make_bead("nd-wip", "Claimed human task", &["human"]);
+        in_progress.status = BeadStatus::InProgress;
+        let mut blocked = make_bead("nd-blocked", "Parked human task", &["human"]);
+        blocked.status = BeadStatus::Blocked;
+        let mut deferred = make_bead("nd-deferred", "Deferred human task", &["human"]);
+        deferred.status = BeadStatus::Deferred;
+
         let beads = vec![
             make_bead("nd-1", "Normal", &[]),
             make_bead("nd-2", "Human task", &["human"]),
             make_bead("nd-3", "Deferred", &["deferred"]),
             make_bead("nd-4", "Human + other", &["human", "priority"]),
+            closed,
+            done,
+            in_progress,
+            blocked,
+            deferred,
         ];
         let filtered = UnravelStrand::filter_human_beads(&beads);
-        assert_eq!(filtered.len(), 2);
+        assert_eq!(filtered.len(), 2, "only the open human beads qualify");
         assert_eq!(filtered[0].id, BeadId::from("nd-2"));
         assert_eq!(filtered[1].id, BeadId::from("nd-4"));
+    }
+
+    // ── Non-open bead skip tests ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn closed_human_bead_never_reaches_the_agent() {
+        let state_dir = tempfile::tempdir().unwrap();
+        let (sink, events) = crate::telemetry::test_utils::MemorySink::new();
+        let telemetry = Telemetry::with_sink("test".to_string(), sink);
+
+        let (agent, calls) = CountingAgent::new();
+        let strand = UnravelStrand::new(
+            make_enabled_config(),
+            PathBuf::from("/tmp/test"),
+            state_dir.path().to_path_buf(),
+            Box::new(agent),
+            telemetry,
+        );
+
+        let mut resolved = make_bead("nd-resolved", "Resolved starvation alert", &["human"]);
+        resolved.status = BeadStatus::Closed;
+        let store = MockStore::new(vec![resolved]);
+
+        let result = strand.evaluate(&store, &HashSet::new()).await;
+
+        assert!(matches!(result, StrandResult::NoWork), "got {result:?}");
+        assert_eq!(
+            *calls.lock().unwrap(),
+            0,
+            "a closed bead must never be dispatched"
+        );
+        assert!(store.created_beads().is_empty());
+
+        // The skip must be observable.
+        drop(strand);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let captured = events.lock().unwrap();
+        let skipped: Vec<_> = captured
+            .iter()
+            .filter(|e| e.event_type == "bead.unravel.skipped")
+            .collect();
+        assert_eq!(skipped.len(), 1, "expected one skip event: {skipped:?}");
+        assert_eq!(
+            skipped[0].bead_id.as_ref(),
+            Some(&BeadId::from("nd-resolved"))
+        );
+        assert_eq!(skipped[0].data["reason"], "bead_not_open");
+    }
+
+    #[tokio::test]
+    async fn bead_closing_between_listing_and_dispatch_is_skipped() {
+        let state_dir = tempfile::tempdir().unwrap();
+
+        let (agent, calls) = CountingAgent::new();
+        let strand = UnravelStrand::new(
+            make_enabled_config(),
+            PathBuf::from("/tmp/test"),
+            state_dir.path().to_path_buf(),
+            Box::new(agent),
+            Telemetry::new("test".to_string()),
+        );
+
+        // Both beads looked open when listed; one has since closed and the
+        // other was claimed by a worker.
+        let mut closed = make_bead("nd-race-closed", "Closed mid-run", &["human"]);
+        closed.status = BeadStatus::Open;
+        let mut claimed = make_bead("nd-race-claimed", "Claimed mid-run", &["human"]);
+        claimed.status = BeadStatus::Open;
+        let store = MockStore::new(vec![closed, claimed]);
+        store.set_show_status("nd-race-closed", BeadStatus::Closed);
+        store.set_show_status("nd-race-claimed", BeadStatus::InProgress);
+
+        let result = strand.evaluate(&store, &HashSet::new()).await;
+
+        assert!(matches!(result, StrandResult::NoWork), "got {result:?}");
+        assert_eq!(
+            *calls.lock().unwrap(),
+            0,
+            "neither bead may reach propose_alternatives"
+        );
+        assert!(store.created_beads().is_empty());
+    }
+
+    #[tokio::test]
+    async fn still_open_beads_dispatch_normally() {
+        let state_dir = tempfile::tempdir().unwrap();
+
+        let (agent, calls) = CountingAgent::new();
+        let strand = UnravelStrand::new(
+            make_enabled_config(),
+            PathBuf::from("/tmp/test"),
+            state_dir.path().to_path_buf(),
+            Box::new(agent),
+            Telemetry::new("test".to_string()),
+        );
+
+        let open_bead = make_bead("nd-open", "Still needs a human", &["human"]);
+        let store = MockStore::new(vec![open_bead]);
+
+        let result = strand.evaluate(&store, &HashSet::new()).await;
+
+        assert_eq!(
+            *calls.lock().unwrap(),
+            1,
+            "an open bead must still be dispatched; got {result:?}"
+        );
     }
 
     // ── Default config tests ────────────────────────────────────────────
@@ -1309,10 +1543,12 @@ mod tests {
             prompt_template: Some("ID={id} TITLE={title} BODY={body} LABELS={labels}".to_string()),
             ..UnravelConfig::default()
         };
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let state_dir = tempfile::tempdir().unwrap();
         let strand = UnravelStrand::new(
             config,
-            PathBuf::from("/tmp"),
-            PathBuf::from("/tmp/state"),
+            workspace_dir.path().to_path_buf(),
+            state_dir.path().to_path_buf(),
             Box::new(MockAgent::new("NO_ALTERNATIVES")),
             Telemetry::new("test".to_string()),
         );
@@ -1326,10 +1562,12 @@ mod tests {
 
     #[tokio::test]
     async fn default_prompt_template_contains_key_sections() {
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let state_dir = tempfile::tempdir().unwrap();
         let strand = UnravelStrand::new(
             make_enabled_config(),
-            PathBuf::from("/tmp"),
-            PathBuf::from("/tmp/state"),
+            workspace_dir.path().to_path_buf(),
+            state_dir.path().to_path_buf(),
             Box::new(MockAgent::new("NO_ALTERNATIVES")),
             Telemetry::new("test".to_string()),
         );

@@ -1596,10 +1596,12 @@ mod tests {
     fn reflect_strand_name() {
         let config = ReflectConfig::default();
         let tel = Telemetry::new("test".to_string());
+        let workspace_dir = tempfile::tempdir().unwrap();
+        let state_dir = tempfile::tempdir().unwrap();
         let strand = ReflectStrand::new(
             config,
-            PathBuf::from("/tmp"),
-            PathBuf::from("/tmp/state"),
+            workspace_dir.path().to_path_buf(),
+            state_dir.path().to_path_buf(),
             tel,
             None,
         );

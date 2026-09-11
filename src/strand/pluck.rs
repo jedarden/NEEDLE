@@ -22,6 +22,12 @@ use std::sync::{atomic::AtomicUsize, atomic::Ordering, Mutex};
 /// Default labels excluded from Pluck selection when not configured.
 const DEFAULT_EXCLUDE_LABELS: &[&str] = &["deferred", "human", "blocked"];
 
+/// Failure count at which an ADR-022 quarantine triggers, used when a caller
+/// does not wire the configured threshold explicitly. Production wiring passes
+/// `outcome.quarantine_after_failures`; this default only exists so a
+/// hand-constructed strand in a test still re-evaluates expiries sensibly.
+const DEFAULT_QUARANTINE_THRESHOLD: u32 = 5;
+
 /// Constraint relaxation level used when the normal ready query is empty.
 ///
 /// The current bead-store abstraction does not expose a separate priority
@@ -128,6 +134,8 @@ struct FilteringStats {
     exclusion_counts: ExclusionCounts,
     /// Bead IDs with stale assignees (safe to auto-repair).
     stale_assignee_beads: Vec<BeadId>,
+    /// Every open bead sorted into exactly one frontier category.
+    classification: FrontierClassification,
 }
 
 impl FilteringStats {
@@ -138,13 +146,20 @@ impl FilteringStats {
     /// This inventory pass is the equivalent of joining those predicates back to
     /// the full issue set. Dependency edges from bead-rs are lean and only carry
     /// the blocker ID/kind, so blocker status is resolved from the inventory map.
-    fn from_inventory(beads: &[Bead], exclude_labels: &[String]) -> Self {
+    fn from_inventory(
+        beads: &[Bead],
+        exclude_labels: &[String],
+        exclude_ids: &HashSet<BeadId>,
+    ) -> Self {
         let inventory_now = Utc::now();
         let finished_by_id: HashMap<BeadId, bool> = beads
             .iter()
             .map(|bead| (bead.id.clone(), bead.status.is_done()))
             .collect();
-        let mut stats = Self::default();
+        let mut stats = Self {
+            classification: classify_frontier(beads, exclude_labels, exclude_ids, inventory_now),
+            ..Default::default()
+        };
 
         for bead in beads {
             // In-progress beads are already being worked and must not turn an
@@ -257,6 +272,98 @@ fn dependency_is_blocking(
     }
 }
 
+/// Why each open bead is missing from an empty ready frontier, one bucket per
+/// bead, first match wins.
+///
+/// The classification is decided at no-candidate time so the frontier can be
+/// judged before anything reaches a human:
+///
+/// 1. `manual_block` — a person or policy set the bead aside: manual-block,
+///    deferred, or human labels, or blocked/deferred status
+/// 2. `dependency_blocked` — at least one blocker still unfinished after
+///    resolving every edge against the live inventory (a closed blocker marks
+///    the edge stale and stops blocking)
+/// 3. `assigned_open` — an assignee holds the claim (ADR-018)
+/// 4. `resource_conflict` — the bead is temporarily fenced out of this
+///    worker's reach: this worker excluded it after a failed claim (a claim
+///    race), or an active ADR-022 quarantine holds it fleet-wide
+/// 5. `invisible` — open, unassigned, unblocked, unfenced, yet absent from
+///    the ready frontier; the backend should have returned it and did not
+///
+/// An empty frontier whose open beads all fall in buckets 1–4 is correct
+/// behaviour, not starvation. Only bucket 5 warrants escalation, and it is a
+/// store-health problem for the automated recovery, not a human decision.
+#[derive(Debug, Default, Clone)]
+struct FrontierClassification {
+    manual_block: Vec<BeadId>,
+    dependency_blocked: Vec<BeadId>,
+    assigned_open: Vec<BeadId>,
+    resource_conflict: Vec<BeadId>,
+    invisible: Vec<BeadId>,
+}
+
+impl FrontierClassification {
+    /// Open beads that are legitimately ineligible — every bucket except
+    /// `invisible`.
+    fn legitimately_ineligible(&self) -> usize {
+        self.manual_block.len()
+            + self.dependency_blocked.len()
+            + self.assigned_open.len()
+            + self.resource_conflict.len()
+    }
+}
+
+/// Sort every open bead into exactly one frontier category.
+///
+/// The precedence order matches the order a reader would explain the frontier
+/// in: a bead both set aside and assigned is reported as set aside, because
+/// the label is the reason that survives the assignee being cleared, and a
+/// fenced bead is reported as fenced only when nothing more durable explains
+/// it — a quarantine expires, so it must never be the last word over a
+/// permanent reason.
+fn classify_frontier(
+    beads: &[Bead],
+    exclude_labels: &[String],
+    exclude_ids: &HashSet<BeadId>,
+    now: chrono::DateTime<Utc>,
+) -> FrontierClassification {
+    let finished_by_id: HashMap<BeadId, bool> = beads
+        .iter()
+        .map(|bead| (bead.id.clone(), bead.status.is_done()))
+        .collect();
+    let mut classification = FrontierClassification::default();
+
+    for bead in beads.iter().filter(|bead| is_open_work_bead(bead)) {
+        let operator_set_aside = matches!(
+            bead.status,
+            crate::types::BeadStatus::Blocked | crate::types::BeadStatus::Deferred
+        ) || bead.labels.iter().any(|label| {
+            is_manual_block_label(label)
+                || deferral_holds(label, now)
+                || is_human_like_label(label, exclude_labels)
+        });
+
+        let bucket = if operator_set_aside {
+            &mut classification.manual_block
+        } else if bead
+            .dependencies
+            .iter()
+            .any(|dependency| dependency_is_blocking(dependency, &finished_by_id))
+        {
+            &mut classification.dependency_blocked
+        } else if bead.assignee.is_some() {
+            &mut classification.assigned_open
+        } else if exclude_ids.contains(&bead.id) || active_quarantine_until(bead, now).is_some() {
+            &mut classification.resource_conflict
+        } else {
+            &mut classification.invisible
+        };
+        bucket.push(bead.id.clone());
+    }
+
+    classification
+}
+
 /// Constraints that no relaxation tier may drop.
 ///
 /// These are properties of the work, not of this worker's preferences.
@@ -345,6 +452,10 @@ fn exclusion_reasons_for_bead(
         reasons.push("worker_exclusion".to_string());
     }
 
+    if active_quarantine_until(bead, now).is_some() {
+        reasons.push("quarantined".to_string());
+    }
+
     reasons
 }
 
@@ -394,6 +505,11 @@ fn starvation_diagnostic_snapshot(
     relaxation_tier: RelaxationTier,
     split_after_failures: u32,
 ) -> StarvationDiagnosticSnapshot {
+    /// How many unexplained bead IDs the one-line alert message spells out
+    /// before collapsing the rest into a count. The structured
+    /// `invisible_beads` list below stays complete.
+    const INVISIBLE_IDS_IN_MESSAGE: usize = 5;
+
     let timestamp = Utc::now();
     let open_beads: Vec<OpenBeadDiagnostic> = beads
         .iter()
@@ -408,6 +524,76 @@ fn starvation_diagnostic_snapshot(
         }
     }
 
+    let classification = FrontierClassificationSummary {
+        manual_block: stats.classification.manual_block.len(),
+        dependency_blocked: stats.classification.dependency_blocked.len(),
+        assigned_open: stats.classification.assigned_open.len(),
+        resource_conflict: stats.classification.resource_conflict.len(),
+        invisible: stats.classification.invisible.len(),
+    };
+    let invisible_beads: Vec<NamedBeadDiagnostic> = stats
+        .classification
+        .invisible
+        .iter()
+        .filter_map(|id| {
+            beads
+                .iter()
+                .find(|bead| &bead.id == id)
+                .map(|bead| NamedBeadDiagnostic {
+                    id: bead.id.to_string(),
+                    title: bead.title.clone(),
+                })
+        })
+        .collect();
+    let workspace = extract_workspace_path(beads);
+    // Per-bead reasons render into the message so a reader of the alert text
+    // alone — no JSONL tooling — still sees which bead is held by what. The
+    // BTreeMap iteration order keeps the rendering stable for dedup and diffing.
+    let reason_breakdown = exclusion_reason_counts
+        .iter()
+        .map(|(reason, count)| format!("{reason}={count}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let named_invisible: Vec<String> = invisible_beads
+        .iter()
+        .map(|bead| format!("{} (\"{}\")", bead.id, bead.title))
+        .collect();
+    let message = if open_beads.is_empty() {
+        format!(
+            "Pluck returned zero candidates in {workspace}: no open work remains — \
+             quiescent frontier, not starvation"
+        )
+    } else if classification.invisible == 0 {
+        format!(
+            "Pluck returned zero candidates in {workspace}: {} open bead(s), all \
+             legitimately ineligible ({reason_breakdown}) — not starvation",
+            open_beads.len(),
+        )
+    } else {
+        let listed = named_invisible
+            .iter()
+            .take(INVISIBLE_IDS_IN_MESSAGE)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("; ");
+        let overflow = named_invisible
+            .len()
+            .saturating_sub(INVISIBLE_IDS_IN_MESSAGE);
+        let more = if overflow > 0 {
+            format!(" (+{overflow} more)")
+        } else {
+            String::new()
+        };
+        format!(
+            "Pluck returned zero candidates in {workspace}: {} open bead(s), {} \
+             legitimately ineligible ({reason_breakdown}), {} invisible with no \
+             explanation: {listed}{more}",
+            open_beads.len(),
+            stats.classification.legitimately_ineligible(),
+            classification.invisible,
+        )
+    };
+
     let mut excluded_ids: Vec<String> = exclude_ids.iter().map(ToString::to_string).collect();
     excluded_ids.sort();
     let dropped_constraints: Vec<String> = relaxation_tier
@@ -417,19 +603,18 @@ fn starvation_diagnostic_snapshot(
         .collect();
 
     StarvationDiagnosticSnapshot {
-        schema_version: 1,
+        schema_version: 2,
         event: "pluck.no_candidate",
         timestamp,
-        target_workspace: workspace_from_inventory(beads),
+        target_workspace: workspace,
         summary: StarvationSummary {
-            message: format!(
-                "Pluck returned zero candidates while {} open beads remained",
-                open_beads.len()
-            ),
+            message,
             detected_at: timestamp,
-            open_bead_count: open_beads.len(),
+            open_beads_total: open_beads.len(),
             candidate_count: 0,
-            excluded_bead_count: stats.excluded_count,
+            excluded_bead_count: stats.classification.legitimately_ineligible(),
+            classification,
+            invisible_beads,
             exclusion_reason_counts,
         },
         open_beads,
@@ -558,7 +743,7 @@ fn needle_diagnostics_dir(workspace: &str) -> PathBuf {
         .collect();
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp"));
+        .unwrap_or_else(std::env::temp_dir);
     home.join(".needle")
         .join("diagnostics")
         .join(slug.trim_matches('-'))
@@ -654,6 +839,9 @@ struct FilteringBreakdown {
     assignee_held: usize,
     /// Beads excluded by configured label filters.
     label_filtered: usize,
+    /// Open, unassigned, unblocked beads the ready frontier omitted — the
+    /// only bucket that is a store-health problem rather than a reason.
+    invisible: usize,
     /// Total excluded count (sum of all above).
     total_excluded: usize,
 }
@@ -740,6 +928,7 @@ fn write_pluck_diagnostic(
             .iter()
             .filter(|b| b.labels.iter().any(|l| exclude_labels.contains(l)) && is_open_work_bead(b))
             .count(),
+        invisible: stats.classification.invisible.len(),
         total_excluded: stats.excluded_count,
     };
 
@@ -823,21 +1012,57 @@ struct StarvationDiagnosticSnapshot {
     pluck_parameters: PluckParameters,
 }
 
-/// Aggregate counts and a stable human-readable explanation of starvation.
+/// Aggregate counts and a stable human-readable explanation of the empty
+/// frontier.
+///
+/// `open_beads_total` is reported separately from the eligible and excluded
+/// counts so the summary can never contradict itself the way the legacy alert
+/// body did — prose claiming open beads exist directly above an
+/// "**Open beads:** 0" field, which is what forced hand investigation of the
+/// false alerts filed on 2026-08-29.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StarvationSummary {
-    /// Short explanation suitable for log viewers.
+    /// Short explanation naming the workspace and the frontier counts.
     message: String,
     /// Explicit timestamp for consumers that index the summary independently.
     detected_at: chrono::DateTime<chrono::Utc>,
-    /// Number of open work beads in the inventory.
-    open_bead_count: usize,
+    /// Total open work beads in the target workspace.
+    open_beads_total: usize,
     /// Number of candidates returned after the final filtering pass.
     candidate_count: usize,
-    /// Number of open work beads omitted from the candidate result.
+    /// Open beads legitimately ineligible for the frontier — every
+    /// classification bucket except `invisible`.
     excluded_bead_count: usize,
+    /// The per-category breakdown of those open beads.
+    classification: FrontierClassificationSummary,
+    /// The genuinely invisible beads, by id and title. Empty here means the
+    /// empty frontier is fully explained and nothing should be escalated.
+    invisible_beads: Vec<NamedBeadDiagnostic>,
     /// Count of each per-bead exclusion reason.
     exclusion_reason_counts: BTreeMap<String, usize>,
+}
+
+/// Counts per frontier category (see [`FrontierClassification`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FrontierClassificationSummary {
+    /// Set aside by a person or policy.
+    manual_block: usize,
+    /// Waiting on an unfinished blocker.
+    dependency_blocked: usize,
+    /// An assignee holds the claim.
+    assigned_open: usize,
+    /// Temporarily fenced out of this worker's reach: claim-race exclusion or
+    /// an active ADR-022 quarantine.
+    resource_conflict: usize,
+    /// Open, unassigned, unblocked — yet absent from the ready frontier.
+    invisible: usize,
+}
+
+/// A bead named so a reader never has to resolve an id by hand.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct NamedBeadDiagnostic {
+    id: String,
+    title: String,
 }
 
 /// Complete point-in-time state for one open work bead.
@@ -898,6 +1123,10 @@ pub struct PluckStrand {
     exclude_labels: Vec<String>,
     /// Auto-split beads after this many consecutive failures (0 = disabled).
     split_after_failures: u32,
+    /// Failure count at which an ADR-022 quarantine triggers. Pluck
+    /// re-evaluates an expired quarantine window against it before the bead
+    /// re-enters the pool (see `quarantine_expiry`; 0 = quarantine disabled).
+    quarantine_threshold: u32,
     /// Telemetry emitter for starvation events.
     telemetry: Telemetry,
     /// NEEDLE workspace path for persistent starvation records.
@@ -913,6 +1142,16 @@ pub struct PluckStrand {
     /// Aggregated exclusion reasons from the most recent evaluation.
     /// Uses Mutex for thread-safe interior mutability.
     last_exclusion_reasons: Mutex<Vec<String>>,
+    /// Frontier signature of the last snapshot written, per target workspace.
+    ///
+    /// Pluck re-evaluates an idle workspace on every cycle and the diagnostic
+    /// stream is append-only, so an unchanged frontier must not append another
+    /// record — without this, a workspace whose open beads are all blocked
+    /// grows `state/starvation_events.jsonl` by one full snapshot per cycle
+    /// (222 MB observed). Signatures cover only the frontier facts; timestamps
+    /// and worker identity are excluded so a *change* is what produces a new
+    /// record.
+    last_snapshot_signatures: Mutex<HashMap<String, String>>,
 }
 
 impl PluckStrand {
@@ -932,12 +1171,14 @@ impl PluckStrand {
         PluckStrand {
             exclude_labels: labels,
             split_after_failures: 3, // default threshold
+            quarantine_threshold: DEFAULT_QUARANTINE_THRESHOLD,
             telemetry,
             needle_workspace: None,
             persistent_starvation_records: false,
             last_open_count: AtomicUsize::new(0),
             last_excluded_count: AtomicUsize::new(0),
             last_exclusion_reasons: Mutex::new(Vec::new()),
+            last_snapshot_signatures: Mutex::new(HashMap::new()),
         }
     }
 
@@ -961,12 +1202,14 @@ impl PluckStrand {
         PluckStrand {
             exclude_labels: labels,
             split_after_failures,
+            quarantine_threshold: DEFAULT_QUARANTINE_THRESHOLD,
             telemetry,
             needle_workspace: None,
             persistent_starvation_records: false,
             last_open_count: AtomicUsize::new(0),
             last_excluded_count: AtomicUsize::new(0),
             last_exclusion_reasons: Mutex::new(Vec::new()),
+            last_snapshot_signatures: Mutex::new(HashMap::new()),
         }
     }
 
@@ -995,13 +1238,25 @@ impl PluckStrand {
         PluckStrand {
             exclude_labels: labels,
             split_after_failures,
+            quarantine_threshold: DEFAULT_QUARANTINE_THRESHOLD,
             telemetry,
             needle_workspace: Some(needle_workspace),
             persistent_starvation_records,
             last_open_count: AtomicUsize::new(0),
             last_excluded_count: AtomicUsize::new(0),
             last_exclusion_reasons: Mutex::new(Vec::new()),
+            last_snapshot_signatures: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Set the failure count at which an ADR-022 quarantine triggers.
+    ///
+    /// Pluck re-evaluates an expired quarantine window against it before the
+    /// bead re-enters the pool: a bead whose conditions still hold is
+    /// re-quarantined rather than re-dispatched (see `quarantine_expiry`).
+    pub fn with_quarantine_threshold(mut self, quarantine_threshold: u32) -> Self {
+        self.quarantine_threshold = quarantine_threshold;
+        self
     }
 
     /// Query for work, progressively relaxing constraints when the ready
@@ -1437,6 +1692,40 @@ impl PluckStrand {
         )
     }
 
+    /// Whether this frontier state has not been recorded for the workspace
+    /// yet.
+    ///
+    /// Records the signature as a side effect, so the check-and-record is
+    /// atomic under the signature lock and two evaluations of the same
+    /// frontier cannot both decide to write.
+    fn should_write_snapshot(&self, snapshot: &StarvationDiagnosticSnapshot) -> bool {
+        let signature = format!(
+            "open={}|manual={}|dep={}|assigned={}|conflict={}|invisible={}|{}",
+            snapshot.summary.open_beads_total,
+            snapshot.summary.classification.manual_block,
+            snapshot.summary.classification.dependency_blocked,
+            snapshot.summary.classification.assigned_open,
+            snapshot.summary.classification.resource_conflict,
+            snapshot.summary.classification.invisible,
+            snapshot
+                .summary
+                .invisible_beads
+                .iter()
+                .map(|bead| bead.id.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+        let mut signatures = self
+            .last_snapshot_signatures
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if signatures.get(&snapshot.target_workspace) == Some(&signature) {
+            return false;
+        }
+        signatures.insert(snapshot.target_workspace.clone(), signature);
+        true
+    }
+
     /// Append a complete starvation snapshot to NEEDLE's durable diagnostic
     /// stream.  The lock covers serialization and the newline write so two
     /// workers cannot interleave JSON objects in the same JSONL file.
@@ -1652,7 +1941,7 @@ impl super::Strand for PluckStrand {
         // ADR-022 quarantine expiry. Selection never depends on this cleanup:
         // a failed label removal still leaves an expired bead eligible.
         let deferral_now = Utc::now();
-        for candidate in &candidates {
+        for candidate in &mut candidates {
             let expired: Vec<&str> = candidate
                 .labels
                 .iter()
@@ -1662,9 +1951,7 @@ impl super::Strand for PluckStrand {
                         .map(|_| label.as_str())
                 })
                 .collect();
-            if expired.is_empty() {
-                continue;
-            }
+            let had_expired = !expired.is_empty();
             for label in expired {
                 if let Err(error) = store.remove_label(&candidate.id, label).await {
                     tracing::warn!(
@@ -1675,17 +1962,57 @@ impl super::Strand for PluckStrand {
                     );
                 }
             }
-            if let Err(error) = self.telemetry.emit(
-                crate::telemetry::EventKind::QuarantineExpired {
-                    bead_id: candidate.id.clone(),
-                },
-                deferral_now,
-            ) {
-                tracing::warn!(
-                    bead_id = %candidate.id,
-                    error = %error,
-                    "failed to emit expired deferral telemetry"
-                );
+            if had_expired {
+                candidate.labels.retain(|label| {
+                    deferred_until(label)
+                        .map(|until| until > deferral_now)
+                        .unwrap_or(true)
+                });
+                if let Err(error) = self.telemetry.emit(
+                    crate::telemetry::EventKind::QuarantineExpired {
+                        bead_id: candidate.id.clone(),
+                    },
+                    deferral_now,
+                ) {
+                    tracing::warn!(
+                        bead_id = %candidate.id,
+                        error = %error,
+                        "failed to emit expired deferral telemetry"
+                    );
+                }
+            }
+
+            // The legacy quarantine marking — the bare `deferred` the
+            // pre-ADR-022 path wrote beside a now-lapsed `quarantine-until`
+            // window — lifts the same way, keeping the `failure-count`
+            // history (needle-28efee3b). A bare `deferred` without the rest
+            // of the trio is an operator hold and is never touched.
+            if crate::bead_store::expired_quarantine_marking(&candidate.labels, deferral_now) {
+                match crate::quarantine_expiry::lift_expired_marking(store, candidate).await {
+                    Ok(removed) if !removed.is_empty() => {
+                        candidate.labels.retain(|label| !removed.contains(label));
+                        if let Err(error) = self.telemetry.emit(
+                            crate::telemetry::EventKind::QuarantineExpired {
+                                bead_id: candidate.id.clone(),
+                            },
+                            deferral_now,
+                        ) {
+                            tracing::warn!(
+                                bead_id = %candidate.id,
+                                error = %error,
+                                "failed to emit expired-quarantine telemetry"
+                            );
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            bead_id = %candidate.id,
+                            error = %error,
+                            "failed to lift an expired quarantine marking; the bead stays excluded this cycle"
+                        );
+                    }
+                }
             }
         }
 
@@ -1786,6 +2113,19 @@ impl super::Strand for PluckStrand {
         //     makes the bead eligible again with no label edit — that is the
         //     point of the expiring form — so only the *latest* future
         //     `quarantine-until` excludes.
+        //     An expired window is a question, not a verdict, though: before
+        //     the bead re-enters the pool its quarantine is re-evaluated
+        //     (needle-73d94360). Conditions still holding — the failure counter
+        //     at or above the threshold, content unchanged since quarantine —
+        //     re-quarantine the bead behind the next round's window instead of
+        //     spending a dispatch on a known-failing bead, and a bead past the
+        //     ladder's last round is parked behind an automatic deferral that
+        //     renews only while the conditions keep holding. Only open,
+        //     unassigned beads are re-evaluated: anything else is not a
+        //     selection candidate regardless of its quarantine and is left to
+        //     the readiness guards below. Selection never depends on the label
+        //     writes succeeding — a failed re-quarantine excludes the bead from
+        //     this cycle only, and it is re-evaluated on the next one.
         let quarantine_now = Utc::now();
         let before_quarantine_filter = candidates.len();
         let quarantined: Vec<(String, chrono::DateTime<Utc>)> = candidates
@@ -1795,7 +2135,27 @@ impl super::Strand for PluckStrand {
                     .map(|until| (b.id.as_ref().to_string(), until))
             })
             .collect();
-        candidates.retain(|b| active_quarantine_until(b, quarantine_now).is_none());
+        let mut expired_still_holding: Vec<(Bead, u32, u32)> = Vec::new();
+        candidates.retain(|b| {
+            if active_quarantine_until(b, quarantine_now).is_some() {
+                return false;
+            }
+            if b.status != crate::types::BeadStatus::Open || b.assignee.is_some() {
+                return true;
+            }
+            match crate::quarantine_expiry::evaluate(b, quarantine_now, self.quarantine_threshold) {
+                crate::quarantine_expiry::QuarantineExpiry::NoWindow
+                | crate::quarantine_expiry::QuarantineExpiry::Active
+                | crate::quarantine_expiry::QuarantineExpiry::Expired => true,
+                crate::quarantine_expiry::QuarantineExpiry::StillHolding {
+                    round,
+                    failure_count,
+                } => {
+                    expired_still_holding.push((b.clone(), round, failure_count));
+                    false
+                }
+            }
+        });
         let after_quarantine_filter = candidates.len();
         let quarantine_excluded_count = before_quarantine_filter - after_quarantine_filter;
         if quarantine_excluded_count > 0 {
@@ -1826,6 +2186,71 @@ impl super::Strand for PluckStrand {
                 .map(|(id, until)| format!("{}:quarantine-until:{}", id, until.to_rfc3339()))
                 .collect(),
         });
+
+        // 2c. Act on the expired windows whose conditions still hold. The
+        //     beads are already out of `candidates`; the writes make the hold
+        //     fleet-visible so the *next* worker skips them too.
+        for (bead, round, failure_count) in &expired_still_holding {
+            if *round >= crate::quarantine_expiry::LADDER_LAST_ROUND {
+                match crate::quarantine_expiry::park_expired_ladder(store, bead).await {
+                    Ok(until) => tracing::warn!(
+                        bead_id = %bead.id,
+                        round,
+                        failure_count,
+                        deferred_until = %until.to_rfc3339(),
+                        "quarantine expired with conditions still holding at the ladder's last round — parked behind an automatic deferral"
+                    ),
+                    Err(error) => tracing::warn!(
+                        bead_id = %bead.id,
+                        round,
+                        failure_count,
+                        error = %error,
+                        "failed to park a ladder-exhausted bead past its expired quarantine"
+                    ),
+                }
+                stats
+                    .exclusion_reasons
+                    .push(format!("quarantine-expiry-parked:{}", bead.id));
+                continue;
+            }
+            match crate::quarantine_expiry::requarantine(store, bead, *round, *failure_count).await
+            {
+                Ok((new_round, until)) => {
+                    tracing::info!(
+                        bead_id = %bead.id,
+                        round = new_round,
+                        failure_count,
+                        quarantine_until = %until.to_rfc3339(),
+                        "quarantine expired with conditions still holding — re-quarantined without a dispatch"
+                    );
+                    if let Err(error) = self.telemetry.emit(
+                        crate::telemetry::EventKind::BeadQuarantined {
+                            bead_id: bead.id.clone(),
+                            round: new_round,
+                            until: until.to_rfc3339(),
+                            failure_count: *failure_count,
+                        },
+                        quarantine_now,
+                    ) {
+                        tracing::warn!(
+                            bead_id = %bead.id,
+                            error = %error,
+                            "failed to emit re-quarantine telemetry"
+                        );
+                    }
+                }
+                Err(error) => tracing::warn!(
+                    bead_id = %bead.id,
+                    round,
+                    failure_count,
+                    error = %error,
+                    "failed to re-quarantine an expired bead whose conditions still hold"
+                ),
+            }
+            stats
+                .exclusion_reasons
+                .push(format!("quarantine-expiry-requarantined:{}", bead.id));
+        }
 
         // 3. Apply the normal readiness guards unless the final fallback was
         // selected. The status-only tier intentionally keeps `status=open` as
@@ -2017,11 +2442,19 @@ impl super::Strand for PluckStrand {
                 .unwrap_or_else(|| "unknown".to_string());
 
             if let Some(beads) = all_beads.as_deref() {
-                let inventory_stats = FilteringStats::from_inventory(beads, &self.exclude_labels);
+                let inventory_stats =
+                    FilteringStats::from_inventory(beads, &self.exclude_labels, exclusions);
                 stats.open_count = inventory_stats.open_count;
                 stats.excluded_count = inventory_stats.excluded_count;
                 stats.exclusion_counts = inventory_stats.exclusion_counts;
                 stats.stale_assignee_beads = inventory_stats.stale_assignee_beads;
+                // The frontier classification decides whether the empty result
+                // is ordinary idle or a store-health problem, and drives the
+                // invisible-bead recovery below — it must come from the same
+                // inventory pass as the counts, never from the ready-query
+                // stage (whose stats still carry the default, all-zero
+                // classification here).
+                stats.classification = inventory_stats.classification;
 
                 // The candidate-stage filters only explain beads the backend
                 // returned. Beads the backend itself withheld (excluded label,
@@ -2171,6 +2604,94 @@ impl super::Strand for PluckStrand {
                 }
             }
 
+            // Genuinely invisible beads: open, unassigned, unblocked work the
+            // backend failed to return from the ready frontier. That is a
+            // store-health problem, not a human decision — route it to the
+            // automated, non-destructive store recovery and re-query, the same
+            // way stale assignees are auto-repaired above. Nothing is filed
+            // from here either way: the classification travels in the
+            // snapshot, and a frontier that stays invisible reaches a human
+            // only through Knot's terminal verdict after the full waterfall.
+            if !stats.classification.invisible.is_empty() {
+                let invisible_ids: Vec<String> = stats
+                    .classification
+                    .invisible
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect();
+                tracing::warn!(
+                    count = invisible_ids.len(),
+                    invisible = ?invisible_ids,
+                    workspace = %workspace_path,
+                    "Open unblocked beads are absent from the ready frontier — running automated store recovery"
+                );
+
+                match store.doctor_repair().await {
+                    Ok(report) => {
+                        tracing::info!(
+                            fixed = ?report.fixed,
+                            warnings = ?report.warnings,
+                            "Automated store recovery completed, re-querying the frontier"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "Automated store recovery failed, continuing the waterfall"
+                        );
+                    }
+                }
+
+                // The re-queried set must pass the same guards as the first
+                // query — a repair that did not actually restore visibility
+                // must not turn into a claim on a bead another worker holds.
+                match self.query_with_relaxation(store).await {
+                    Ok((mut recovered_candidates, recovered_tier)) => {
+                        let recovered_now = Utc::now();
+                        let recovered_worker_label_exclusions = if recovered_tier.ignores_labels() {
+                            &[]
+                        } else {
+                            self.exclude_labels.as_slice()
+                        };
+                        recovered_candidates.retain(|b| {
+                            passes_never_relaxed_ready_constraints(b, recovered_now)
+                                && !b.labels.iter().any(|label| {
+                                    recovered_worker_label_exclusions
+                                        .iter()
+                                        .any(|excluded| excluded == label)
+                                })
+                        });
+                        if !recovered_candidates.is_empty() {
+                            tracing::info!(
+                                candidate_count = recovered_candidates.len(),
+                                "Automated store recovery restored frontier visibility"
+                            );
+
+                            if let Some(all_beads) = all_beads.as_deref() {
+                                self.sort_candidates(
+                                    &mut recovered_candidates,
+                                    all_beads,
+                                    &self.telemetry,
+                                );
+                            }
+
+                            self.last_open_count
+                                .store(stats.open_count, Ordering::Relaxed);
+                            self.last_excluded_count.store(0, Ordering::Relaxed);
+                            *self.last_exclusion_reasons.lock().unwrap() = Vec::new();
+
+                            return StrandResult::BeadFound(recovered_candidates);
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "Re-query after store recovery failed, continuing the waterfall"
+                        );
+                    }
+                }
+            }
+
             // This is a local selection diagnostic, not a starvation verdict.
             // Explore and every work-generating strand still run after Pluck.
             let _ = self.telemetry.emit(
@@ -2183,10 +2704,13 @@ impl super::Strand for PluckStrand {
                 Utc::now(),
             );
 
-            // Persist a point-in-time snapshot whenever open work remains. A
-            // dependency-only inventory is still valuable diagnostic evidence,
-            // even though it is ordinary idle rather than starvation.
-            if self.persistent_starvation_records && stats.open_count > 0 {
+            // Persist a point-in-time snapshot of the frontier, whatever its
+            // shape: a quiescent workspace (no open work at all) is recorded
+            // exactly like a blocked one, because "nothing open and nothing
+            // filed" is a claim worth evidence too. Deduplicated on the
+            // frontier signature so an idle workspace appends one record per
+            // state change instead of one per cycle.
+            if self.persistent_starvation_records {
                 if let Some(beads) = all_beads.as_deref() {
                     let snapshot = starvation_diagnostic_snapshot(
                         beads,
@@ -2197,11 +2721,18 @@ impl super::Strand for PluckStrand {
                         relaxation_tier,
                         self.split_after_failures,
                     );
-                    if let Err(error) = self.write_starvation_diagnostic(&snapshot) {
-                        tracing::warn!(
-                            error = %error,
+                    if self.should_write_snapshot(&snapshot) {
+                        if let Err(error) = self.write_starvation_diagnostic(&snapshot) {
+                            tracing::warn!(
+                                error = %error,
+                                target_workspace = %snapshot.target_workspace,
+                                "Failed to write starvation diagnostic snapshot"
+                            );
+                        }
+                    } else {
+                        tracing::debug!(
                             target_workspace = %snapshot.target_workspace,
-                            "Failed to write starvation diagnostic snapshot"
+                            "Frontier unchanged since the last snapshot — skipping duplicate record"
                         );
                     }
                 }
@@ -2735,6 +3266,173 @@ mod tests {
         }
     }
 
+    /// A backend that omits named beads from the ready frontier — the
+    /// "genuinely invisible" condition — while `list_all()` still returns
+    /// them. Records `create_bead` calls so tests can assert that no alert
+    /// bead was filed, and can simulate a recovery that restores visibility.
+    #[allow(dead_code)]
+    struct RecoverableFrontierStore {
+        beads: Vec<Bead>,
+        /// Bead ids the ready query drops until a doctor repair restores them.
+        hidden: Mutex<HashSet<String>>,
+        /// Whether `doctor_repair` clears `hidden` (models a repair that works).
+        repair_restores: bool,
+        doctor_calls: Mutex<usize>,
+        created_beads: Mutex<Vec<(String, String, Vec<String>)>>,
+    }
+
+    #[allow(dead_code)]
+    impl RecoverableFrontierStore {
+        fn hiding(beads: Vec<Bead>, hidden: &[&str]) -> Self {
+            Self {
+                beads,
+                hidden: Mutex::new(hidden.iter().map(|id| id.to_string()).collect()),
+                repair_restores: false,
+                doctor_calls: Mutex::new(0),
+                created_beads: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn with_working_repair(mut self) -> Self {
+            self.repair_restores = true;
+            self
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BeadStore for RecoverableFrontierStore {
+        async fn list_all(&self) -> Result<Vec<Bead>> {
+            Ok(self.beads.clone())
+        }
+
+        async fn ready(&self, _filters: &Filters) -> Result<Vec<Bead>> {
+            let hidden = self
+                .hidden
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            Ok(self
+                .beads
+                .iter()
+                .filter(|bead| !hidden.contains(bead.id.as_ref()))
+                .cloned()
+                .collect())
+        }
+
+        async fn show(&self, id: &BeadId) -> Result<Bead> {
+            self.beads
+                .iter()
+                .find(|bead| &bead.id == id)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("bead not found: {id}"))
+        }
+
+        async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<ClaimResult> {
+            anyhow::bail!("not used by these tests")
+        }
+
+        async fn release(&self, _id: &BeadId) -> Result<()> {
+            anyhow::bail!("not used by these tests")
+        }
+
+        async fn block(&self, _id: &BeadId) -> Result<()> {
+            anyhow::bail!("not used by these tests")
+        }
+
+        async fn flush(&self) -> Result<()> {
+            Ok(())
+        }
+
+        async fn reopen(&self, _id: &BeadId) -> Result<()> {
+            anyhow::bail!("not used by these tests")
+        }
+
+        async fn labels(&self, _id: &BeadId) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+
+        async fn add_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
+            anyhow::bail!("not used by these tests")
+        }
+
+        async fn remove_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
+            anyhow::bail!("not used by these tests")
+        }
+
+        async fn create_bead(&self, title: &str, body: &str, labels: &[&str]) -> Result<BeadId> {
+            self.created_beads
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push((
+                    title.to_string(),
+                    body.to_string(),
+                    labels.iter().map(|s| s.to_string()).collect(),
+                ));
+            Ok(BeadId::from("created-by-test"))
+        }
+
+        async fn doctor_repair(&self) -> Result<RepairReport> {
+            *self
+                .doctor_calls
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) += 1;
+            if self.repair_restores {
+                self.hidden
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clear();
+            }
+            Ok(RepairReport {
+                fixed: vec!["test-repair".to_string()],
+                warnings: vec![],
+            })
+        }
+
+        async fn doctor_check(&self) -> Result<RepairReport> {
+            Ok(RepairReport::default())
+        }
+
+        async fn full_rebuild(&self) -> Result<()> {
+            anyhow::bail!("not used by these tests")
+        }
+
+        async fn add_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> Result<()> {
+            anyhow::bail!("not used by these tests")
+        }
+
+        async fn remove_dependency(
+            &self,
+            _blocker_id: &BeadId,
+            _blocked_id: &BeadId,
+        ) -> Result<()> {
+            anyhow::bail!("not used by these tests")
+        }
+
+        async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
+            anyhow::bail!("not used by these tests")
+        }
+
+        async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {
+            anyhow::bail!("not used by these tests")
+        }
+
+        fn has_valid_store(&self) -> bool {
+            true
+        }
+    }
+
+    /// Read every snapshot record written for `needle_workspace`.
+    #[allow(dead_code)]
+    fn read_snapshot_records(needle_workspace: &std::path::Path) -> Vec<serde_json::Value> {
+        let record_path = needle_workspace
+            .join("state")
+            .join("starvation_events.jsonl");
+        let content = std::fs::read_to_string(record_path).expect("snapshot stream should exist");
+        content
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("one JSON object per line"))
+            .collect()
+    }
+
     fn make_bead(id: &str, priority: u8, created_at: &str) -> Bead {
         let dt = chrono::NaiveDateTime::parse_from_str(created_at, "%Y-%m-%d %H:%M:%S")
             .expect("bad test date");
@@ -3233,6 +3931,80 @@ mod tests {
         assert_eq!(expiry_events[0].data["bead_id"], "expired-deferral");
     }
 
+    /// A bead marked by the pre-ADR-022 quarantine path — bare `deferred`
+    /// beside a lapsed `quarantine-until` window — must re-enter the pool
+    /// with the marking lifted and the `failure-count` history kept, while a
+    /// bare `deferred` without the trio stays an operator hold (needle-28efee3b).
+    #[tokio::test]
+    async fn expired_quarantine_marking_is_lifted_and_failure_count_kept() {
+        let now = Utc::now();
+        let past = (now - chrono::Duration::hours(1)).to_rfc3339();
+        let future = (now + chrono::Duration::hours(1)).to_rfc3339();
+        let store = MutatingStore::new(vec![
+            make_bead_with_labels(
+                "legacy-quarantined",
+                1,
+                vec![
+                    "deferred",
+                    "failure-count:2",
+                    &format!("quarantine-until:{past}"),
+                ],
+            ),
+            make_bead_with_labels(
+                "still-quarantined",
+                1,
+                vec![
+                    "deferred",
+                    "failure-count:2",
+                    &format!("quarantine-until:{future}"),
+                ],
+            ),
+            make_bead_with_labels("operator-deferred", 1, vec!["deferred"]),
+        ]);
+        let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()));
+
+        let result = strand.evaluate(&store, &HashSet::new()).await;
+
+        match result {
+            StrandResult::BeadFound(beads) => {
+                let ids: Vec<&str> = beads.iter().map(|b| b.id.as_ref()).collect();
+                assert_eq!(
+                    ids,
+                    vec!["legacy-quarantined"],
+                    "only the expired marking is a candidate; a live window and an operator hold are not: {ids:?}"
+                );
+            }
+            other => panic!("expected BeadFound, got: {other:?}"),
+        }
+
+        let lifted = store.bead("legacy-quarantined");
+        assert!(
+            !lifted.labels.contains(&"deferred".to_string()),
+            "the expired quarantine's bare deferred marker must be lifted: {:?}",
+            lifted.labels
+        );
+        assert!(
+            !lifted
+                .labels
+                .iter()
+                .any(|label| label.starts_with("quarantine-until:")),
+            "the lapsed window must be lifted: {:?}",
+            lifted.labels
+        );
+        assert!(
+            lifted.labels.contains(&"failure-count:2".to_string()),
+            "the failure-count history must survive the lift: {:?}",
+            lifted.labels
+        );
+        assert!(
+            store
+                .bead("operator-deferred")
+                .labels
+                .contains(&"deferred".to_string()),
+            "an operator hold must never be lifted"
+        );
+    }
+
     #[tokio::test]
     async fn custom_exclude_labels_do_not_override_safety_defaults() {
         let store = MemoryStore {
@@ -3532,6 +4304,7 @@ mod tests {
                 .iter()
                 .map(|label| (*label).to_string())
                 .collect::<Vec<_>>(),
+            &HashSet::new(),
         );
 
         assert_eq!(stats.open_count, 5);
@@ -3549,7 +4322,7 @@ mod tests {
     #[test]
     fn starvation_inventory_counts_assigned_beads_as_deferred_assignees() {
         let assigned = make_bead_with_assignee("assigned", "old-worker");
-        let stats = FilteringStats::from_inventory(&[assigned], &[]);
+        let stats = FilteringStats::from_inventory(&[assigned], &[], &HashSet::new());
 
         assert_eq!(stats.exclusion_counts.deferred_assignee, 1);
         assert_eq!(stats.exclusion_counts.summary(), "deferred_assignee=1");
@@ -4384,17 +5157,26 @@ mod tests {
         let record: serde_json::Value = serde_json::from_str(content.lines().last().unwrap())
             .expect("diagnostic record should be one valid JSON object per line");
 
-        assert_eq!(record["schema_version"], 1);
+        assert_eq!(record["schema_version"], 2);
         assert_eq!(record["event"], "pluck.no_candidate");
         assert_eq!(record["target_workspace"], "/tmp/test");
         assert!(record["timestamp"].as_str().is_some());
         assert_eq!(record["summary"]["candidate_count"], 0);
-        assert_eq!(record["summary"]["open_bead_count"], 2);
+        assert_eq!(record["summary"]["open_beads_total"], 2);
+        // Both beads are set aside by a person or policy (deferred and blocked
+        // labels), so both are legitimately ineligible and none is invisible.
         assert_eq!(record["summary"]["excluded_bead_count"], 2);
+        assert_eq!(record["summary"]["classification"]["manual_block"], 2);
+        assert_eq!(record["summary"]["classification"]["invisible"], 0);
+        assert_eq!(record["summary"]["invisible_beads"], serde_json::json!([]));
         assert!(record["summary"]["message"]
             .as_str()
             .unwrap()
-            .contains("2 open beads remained"));
+            .contains("/tmp/test"));
+        assert!(record["summary"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("legitimately ineligible"));
 
         let open_beads = record["open_beads"].as_array().unwrap();
         assert_eq!(open_beads.len(), 2);
@@ -4452,6 +5234,74 @@ mod tests {
         assert_eq!(
             record["summary"]["exclusion_reason_counts"]["dependency:missing-blocker"],
             1
+        );
+    }
+
+    /// Regression test for the 2026-08-28 alert shape: an empty frontier whose
+    /// alert read "beads invisible in " with no workspace, zero counts that
+    /// contradicted the prose, and no exclusion reasons. The emitted message
+    /// must carry the workspace, the per-bead reason for the dependency-blocked
+    /// bead, and the ID of the one bead nothing explains — the data a reader
+    /// needs to act without opening the JSONL record.
+    #[test]
+    fn starvation_message_names_workspace_reasons_and_invisible_ids() {
+        let mut dependency_blocked =
+            make_bead_with_workspace_and_labels("blocked-bead", 1, "/srv/fleet-workspace", vec![]);
+        dependency_blocked
+            .dependencies
+            .push(make_blocks_dependency("missing-blocker"));
+
+        // Open, unassigned, unblocked, unlabeled: the ready listing should
+        // have returned this bead, and nothing in the inventory explains why
+        // it did not.
+        let unexplained =
+            make_bead_with_workspace_and_labels("phantom-bead", 2, "/srv/fleet-workspace", vec![]);
+
+        let beads = vec![dependency_blocked, unexplained];
+        let exclude_labels = DEFAULT_EXCLUDE_LABELS
+            .iter()
+            .map(|label| (*label).to_string())
+            .collect::<Vec<_>>();
+        let stats = FilteringStats::from_inventory(&beads, &exclude_labels, &HashSet::new());
+
+        assert_eq!(stats.classification.dependency_blocked.len(), 1);
+        assert_eq!(stats.classification.invisible.len(), 1);
+
+        let snapshot = starvation_diagnostic_snapshot(
+            &beads,
+            &stats,
+            &exclude_labels,
+            &HashSet::new(),
+            "regression-worker",
+            RelaxationTier::OldestOpen,
+            3,
+        );
+
+        assert_eq!(snapshot.target_workspace, "/srv/fleet-workspace");
+        let message = &snapshot.summary.message;
+        assert!(
+            message.contains("/srv/fleet-workspace"),
+            "message must carry the workspace: {message}"
+        );
+        assert!(
+            message.contains("dependency:missing-blocker=1"),
+            "message must carry the per-bead dependency reason: {message}"
+        );
+        assert!(
+            message.contains("phantom-bead"),
+            "message must name the unexplained bead: {message}"
+        );
+        // The structured summary agrees with the prose.
+        assert_eq!(snapshot.summary.classification.dependency_blocked, 1);
+        assert_eq!(snapshot.summary.classification.invisible, 1);
+        assert_eq!(snapshot.summary.invisible_beads.len(), 1);
+        assert_eq!(snapshot.summary.invisible_beads[0].id, "phantom-bead");
+        assert_eq!(
+            snapshot
+                .summary
+                .exclusion_reason_counts
+                .get("dependency:missing-blocker"),
+            Some(&1)
         );
     }
 
@@ -4883,6 +5733,7 @@ mod tests {
                 quarantined: 0,
             },
             stale_assignee_beads: vec![],
+            classification: FrontierClassification::default(),
         };
 
         assert!(
@@ -4909,6 +5760,7 @@ mod tests {
                 quarantined: 0,
             },
             stale_assignee_beads: vec![],
+            classification: FrontierClassification::default(),
         };
 
         assert!(
@@ -4931,6 +5783,7 @@ mod tests {
                 quarantined: 0,
             },
             stale_assignee_beads: vec![],
+            classification: FrontierClassification::default(),
         };
 
         assert!(
@@ -4957,6 +5810,7 @@ mod tests {
                 quarantined: 0,
             },
             stale_assignee_beads: vec![],
+            classification: FrontierClassification::default(),
         };
 
         assert!(
@@ -5050,5 +5904,297 @@ mod tests {
         let reason_strings: Vec<&str> = reasons.iter().filter_map(|r| r.as_str()).collect();
         assert!(reason_strings.iter().any(|r| r.contains("assignee")));
         assert!(reason_strings.iter().any(|r| r.contains("label")));
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Quarantine-expiry re-evaluation (needle-73d94360)
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// A store whose label writes land, so a re-quarantine or park is
+    /// observable from the test.
+    struct MutatingStore {
+        beads: std::sync::Mutex<Vec<Bead>>,
+    }
+
+    impl MutatingStore {
+        fn new(beads: Vec<Bead>) -> Self {
+            Self {
+                beads: std::sync::Mutex::new(beads),
+            }
+        }
+
+        fn bead(&self, id: &str) -> Bead {
+            self.beads
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|b| b.id.as_ref() == id)
+                .cloned()
+                .unwrap_or_else(|| panic!("bead {id} missing from store"))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl BeadStore for MutatingStore {
+        async fn list_all(&self) -> Result<Vec<Bead>> {
+            Ok(self.beads.lock().unwrap().clone())
+        }
+        async fn ready(&self, _filters: &Filters) -> Result<Vec<Bead>> {
+            Ok(self.beads.lock().unwrap().clone())
+        }
+        async fn show(&self, id: &BeadId) -> Result<Bead> {
+            Ok(self.bead(id.as_ref()))
+        }
+        async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<ClaimResult> {
+            anyhow::bail!("not implemented")
+        }
+        async fn release(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+        async fn block(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+        async fn flush(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn reopen(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+        async fn labels(&self, id: &BeadId) -> Result<Vec<String>> {
+            Ok(self.bead(id.as_ref()).labels)
+        }
+        async fn add_label(&self, id: &BeadId, label: &str) -> Result<()> {
+            let mut beads = self.beads.lock().unwrap();
+            let bead = beads
+                .iter_mut()
+                .find(|b| b.id == *id)
+                .ok_or_else(|| anyhow::anyhow!("bead not found: {id}"))?;
+            // Labels are a set on real backends: re-adding `quarantined` (as
+            // the quarantine writers do every round) must not duplicate it.
+            if !bead.labels.iter().any(|existing| existing == label) {
+                bead.labels.push(label.to_string());
+            }
+            Ok(())
+        }
+        async fn remove_label(&self, id: &BeadId, label: &str) -> Result<()> {
+            let mut beads = self.beads.lock().unwrap();
+            let bead = beads
+                .iter_mut()
+                .find(|b| b.id == *id)
+                .ok_or_else(|| anyhow::anyhow!("bead not found: {id}"))?;
+            bead.labels.retain(|existing| existing != label);
+            Ok(())
+        }
+        async fn create_bead(&self, _title: &str, _body: &str, _labels: &[&str]) -> Result<BeadId> {
+            Ok(BeadId::from("new-bead".to_string()))
+        }
+        async fn doctor_repair(&self) -> Result<RepairReport> {
+            Ok(RepairReport::default())
+        }
+        async fn doctor_check(&self) -> Result<RepairReport> {
+            Ok(RepairReport::default())
+        }
+        async fn full_rebuild(&self) -> Result<()> {
+            Ok(())
+        }
+        async fn add_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+        async fn remove_dependency(
+            &self,
+            _blocked_id: &BeadId,
+            _blocker_id: &BeadId,
+        ) -> Result<()> {
+            Ok(())
+        }
+        async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
+            Ok(())
+        }
+        async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {
+            Ok(ClaimResult::NotClaimable {
+                reason: "claim_auto not supported in mock".to_string(),
+            })
+        }
+        fn has_valid_store(&self) -> bool {
+            true
+        }
+    }
+
+    /// An open, unassigned bead quarantined `hours_ago` hours into a window
+    /// that has already lapsed, carrying `failure_count` and a content hash
+    /// matching `body`.
+    fn expired_quarantined_bead(id: &str, body: &str, round: u32, failure_count: u32) -> Bead {
+        let mut bead = make_bead(id, 1, "2026-01-01 00:00:00");
+        bead.body = Some(body.to_string());
+        let hash = crate::quarantine_expiry::bead_content_hash(&bead);
+        let until = (Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        bead.labels = vec![
+            "quarantined".to_string(),
+            format!("quarantine-round:{round}"),
+            format!("quarantine-until:{until}"),
+            format!("quarantine:failure-count:{failure_count}"),
+            format!("failure-count:{failure_count}"),
+            "verification-failed".to_string(),
+            format!(
+                "{}{hash}",
+                crate::quarantine_expiry::CONTENT_HASH_LABEL_PREFIX
+            ),
+        ];
+        bead
+    }
+
+    fn labels_of(bead: &Bead, prefix: &str) -> Vec<String> {
+        bead.labels
+            .iter()
+            .filter(|l| l.starts_with(prefix))
+            .cloned()
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn expired_quarantine_with_conditions_still_holding_is_requarantined_not_selected() {
+        let bead = expired_quarantined_bead("q-hold", "still broken work", 1, 3);
+        let store = MutatingStore::new(vec![bead]);
+
+        let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()))
+            .with_quarantine_threshold(3);
+        let result = strand.evaluate(&store, &HashSet::new()).await;
+
+        // The bead must not re-enter the pool.
+        match result {
+            StrandResult::NoWork => {}
+            other => panic!("expected NoWork, got: {:?}", other),
+        }
+
+        // It was re-quarantined at the next round, behind a longer future
+        // window, and the stale round-1 window was pruned.
+        let after = store.bead("q-hold");
+        assert_eq!(
+            labels_of(&after, "quarantine-round:"),
+            vec!["quarantine-round:2".to_string()],
+            "round must advance exactly one rung: {:?}",
+            after.labels
+        );
+        let windows = labels_of(&after, "quarantine-until:");
+        assert_eq!(windows.len(), 1, "one current window: {:?}", after.labels);
+        let new_until = chrono::DateTime::parse_from_rfc3339(
+            windows[0].strip_prefix("quarantine-until:").unwrap(),
+        )
+        .unwrap()
+        .with_timezone(&Utc);
+        assert!(
+            new_until > Utc::now(),
+            "re-quarantine must write a future window"
+        );
+        let remaining = new_until - Utc::now();
+        assert!(
+            remaining > chrono::Duration::hours(3) && remaining <= chrono::Duration::hours(5),
+            "round 2 must carry the 4h rung of the ADR-022 ladder, got {remaining}"
+        );
+        // The content hash survived unchanged: the content did.
+        assert_eq!(
+            labels_of(&after, crate::quarantine_expiry::CONTENT_HASH_LABEL_PREFIX).len(),
+            1,
+            "exactly one content-hash label: {:?}",
+            after.labels
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_quarantine_after_conditions_cleared_returns_to_pool() {
+        // The hash was recorded against the original body; the bead was
+        // rewritten after quarantine — someone fixed the work, so the fix
+        // deserves its attempt. Splitting is disabled so the assertion stays
+        // on the quarantine decision alone.
+        let mut bead = expired_quarantined_bead("q-clear", "original body", 1, 3);
+        bead.body = Some("rewritten after the scope was narrowed".to_string());
+        let store = MutatingStore::new(vec![bead]);
+
+        let strand =
+            PluckStrand::with_split_threshold(vec![], 0, Telemetry::new("test-worker".to_string()))
+                .with_quarantine_threshold(3);
+        let result = strand.evaluate(&store, &HashSet::new()).await;
+
+        match result {
+            StrandResult::BeadFound(beads) => assert!(
+                beads.iter().any(|b| b.id.as_ref() == "q-clear"),
+                "cleared bead must be selected: {beads:?}"
+            ),
+            other => panic!("expected BeadFound, got: {:?}", other),
+        }
+
+        // Selection must not have re-quarantined it.
+        let after = store.bead("q-clear");
+        assert!(
+            labels_of(&after, "quarantine-round:2").is_empty(),
+            "no round bump on a cleared quarantine: {:?}",
+            after.labels
+        );
+    }
+
+    #[tokio::test]
+    async fn ladder_exhausted_bead_is_parked_instead_of_cycling() {
+        let bead = expired_quarantined_bead("q-stuck", "still broken work", 3, 3);
+        let store = MutatingStore::new(vec![bead]);
+
+        let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()))
+            .with_quarantine_threshold(3);
+        let result = strand.evaluate(&store, &HashSet::new()).await;
+
+        match result {
+            StrandResult::NoWork => {}
+            other => panic!("expected NoWork, got: {:?}", other),
+        }
+
+        // Parked behind an automatic deferral, not rolled into a round 4.
+        let after = store.bead("q-stuck");
+        assert!(
+            labels_of(&after, "quarantine-round:4").is_empty(),
+            "the ladder stops at round 3: {:?}",
+            after.labels
+        );
+        let deferrals = labels_of(&after, "deferred:");
+        assert_eq!(deferrals.len(), 1, "one park window: {:?}", after.labels);
+        let until =
+            chrono::DateTime::parse_from_rfc3339(deferrals[0].strip_prefix("deferred:").unwrap())
+                .unwrap()
+                .with_timezone(&Utc);
+        assert!(until > Utc::now(), "the park must hold into the future");
+    }
+
+    #[tokio::test]
+    async fn active_quarantine_window_still_excludes_without_label_writes() {
+        let mut bead = expired_quarantined_bead("q-active", "still broken work", 1, 3);
+        // Re-point the window into the future.
+        bead.labels = bead
+            .labels
+            .into_iter()
+            .map(|l| {
+                if l.starts_with("quarantine-until:") {
+                    format!(
+                        "quarantine-until:{}",
+                        (Utc::now() + chrono::Duration::hours(1)).to_rfc3339()
+                    )
+                } else {
+                    l
+                }
+            })
+            .collect();
+        let before = bead.labels.clone();
+        let store = MutatingStore::new(vec![bead]);
+
+        let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()))
+            .with_quarantine_threshold(3);
+        let result = strand.evaluate(&store, &HashSet::new()).await;
+
+        match result {
+            StrandResult::NoWork => {}
+            other => panic!("expected NoWork, got: {:?}", other),
+        }
+        assert_eq!(
+            store.bead("q-active").labels,
+            before,
+            "an active window is a hold, not a decision — nothing is written"
+        );
     }
 }

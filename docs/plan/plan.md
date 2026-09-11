@@ -2,9 +2,9 @@
 
 > **N**avigates **E**very **E**nqueued **D**eliverable, **L**ogs **E**ffort
 
-Plan revision: 31
+Plan revision: 32
 
-As of: 2026-09-05
+As of: 2026-09-09
 
 Status owner: NEEDLE maintainers
 
@@ -31,6 +31,12 @@ Revision 31 decomposes N-T39–43 into single-task implementation leaves and
 extracts the N-T44 pilot profile from its integration task. Section 4.8.8 is
 the dispatch ownership map; the five original broad beads remain manually
 blocked tracking records, with executable dependents routed to the leaves.
+Revision 32 answers the mitosis trigger question left open by GitHub #18/#22:
+`strands.mitosis.first_failure_only` stays `true` as the shipped default,
+conditioned on failure-attribution gating landing, and states the split-tree
+ceiling arithmetic explicitly so the blast radius is a documented number
+rather than a latent one (Phase 19.4; operator-facing form in
+`docs/configuration.md`).
 
 ## 0. How to read this plan
 
@@ -6044,6 +6050,9 @@ Gate *execution* errors (19.1) are not failures and do not advance a bead down t
 
 ### 19.4 Generation budget and anti-noise
 - Mitosis caps: `mitosis.max_children` (default 8) and `mitosis.max_depth` (default 2 — a child of a child is `NotSplittable` and proceeds to rung 3). Both are per-workspace overridable.
+- **Worst-case blast radius (revision 32).** The caps bound a split tree as a *product*, not as two independent knobs: one bead whose dispatches keep failing with the fault attributed to the work grows to `1 + max_children + max_children² + … + max_children^max_depth` beads — **73** at the shipped 8 × 2. One split mints up to `max_children` beads in a single cycle (GitHub #18: one bead to seven in ~70 seconds); each further generation costs every splitting child at least one failed dispatch plus one analysis dispatch, so the full ceiling needs at least `1 + max_children` failed dispatches. `repeat_interval` (off by default) lifts the ceiling: it re-splits the same depth-0 parent, dedup skips only *duplicate* children, so novel ones accumulate past `max_children` and each can mint its own subtree. The operator-facing arithmetic, the per-shape table, and the tightening guidance are in `docs/configuration.md` § Mitosis.
+- **Decision (revision 32): `first_failure_only` stays `true` as the shipped default.** Three reasons. (1) The alternative does not bound the hazard it is being asked to bound: `force_failure_threshold` raises the trigger to N failures, but a failure that is not attributable to the work — an unsatisfiable gate, an agent that never ran — repeats on every dispatch *by construction* and clears any N, so a higher threshold delays legitimate splits by N−1 wasted dispatches without preventing the explosions that motivated the question. That class is bounded by failure attribution, not by trigger count. (2) Mitosis evaluates only on failure outcomes, so a bead that fails once and passes on retry never reaches the evaluator — "first failure" already means "first observed failure", and the flake case is filtered upstream of it. (3) A wrong split is bounded: depth and children caps, child dedup against the parent's existing children, and `human` labelling at `max_depth` hand the residue to the escalation ladder. **Condition on this decision:** it holds once attribution gating ships. As of revision 32 the split call site still evaluates on bare `Outcome::Failure`, `Outcome::GateUnsatisfiable` exists in the taxonomy with no classification path producing it, and the two gate defects behind GitHub #18 remain open (`needle-6519f163`, `needle-857df79d`, `needle-4fcd150c`, `needle-dbee40b5`) — so the shipped trigger is today as eager as it can be, set against a gate that can fail forever. If attribution gating is descoped rather than landed, this default is revisited; in the interim a workspace whose gates can be unsatisfiable should tighten the cap product or set `strands.mitosis.enabled: false`.
+- **Still open under `needle-3f82395d`, not decided here:** whether the shipped 8 × 2 pair remains the shipped pair, the emitter for `bead.mitosis.child_count_warning` (declared, default threshold 24 — one third of the 73 ceiling — but nothing emits it yet), and surfacing live per-parent decomposition in `needle status`.
 - **Post-dispatch audit** (new step in HANDLING, after the gate): beads created during the dispatch window by the dispatching worker's actor are inspected. (a) A bead whose title matches the verification-shaped pattern (`^(verify|test|confirm|validate|check|re-?run)\b`, case-insensitive) and that names the parent's own work is closed with reason `verification is the gate's job (Phase 19.4)` and its body folded into the parent's notes. (b) If the agent created more than `generation.max_per_dispatch` (default 3) beads, the excess (newest first) are set `deferred` with label `over-budget` — visible, reversible, never deleted. *Because* 743 verify-shaped beads and 2,075 split-children were consuming the throughput meant for human-authored work.
 - Alert beads (Knot exhaustion, starvation, gate-broken, Unravel proposals) carry `fingerprint:<sha256[:12]>` of `(workspace, kind, cause)`. Creation first looks for an open bead with the same fingerprint and appends to its notes instead; a closed one suppresses re-creation for 24h.
 - Fleet metric `generation_ratio` (beads created ÷ beads closed, per day, per workspace and fleet-wide) is emitted by the supervisor; a ratio above 1.0 for three consecutive days raises a fingerprinted alert bead in the NEEDLE workspace itself.

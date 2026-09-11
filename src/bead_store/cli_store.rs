@@ -495,14 +495,14 @@ impl BeadStore for CliBeadStore {
         if let Some(assignee) = &filters.assignee {
             beads.retain(|bead| bead.assignee.as_ref() == Some(assignee));
         }
+        let now = chrono::Utc::now();
+        // Label exclusions go through the shared decision, so the expired
+        // quarantine marking (needle-28efee3b) is admitted here exactly where
+        // the strands' own filters admit it — an expired window is not a hold.
         beads.retain(|bead| {
             !filters.exclude_ids.contains(&bead.id)
-                && !bead
-                    .labels
-                    .iter()
-                    .any(|label| filters.exclude_labels.contains(label))
+                && !super::excluded_by_labels(bead, filters, now)
         });
-        let now = chrono::Utc::now();
         // An ADR-022 quarantine and an expiring deferral (N-T26) are both
         // time-bounded holds: drop them here so every consumer of `ready()` —
         // Pluck's tiers included — honours the expiry, not just the label form.
@@ -1566,6 +1566,64 @@ mod tests {
         let ready = store.ready(&Filters::default()).await.unwrap();
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].id.as_ref(), "expired");
+    }
+
+    /// The pre-ADR-022 quarantine marking — bare `deferred` beside a lapsed
+    /// `quarantine-until` window — must not exclude at the store boundary,
+    /// or a workspace no worker calls home starves behind one failed attempt
+    /// forever (needle-28efee3b). A live window and an operator `deferred`
+    /// still exclude.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ready_admits_beads_whose_expired_quarantine_marking_carries_a_deferred_label() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = tempfile::tempdir().unwrap();
+        let binary = workspace.path().join("fake-bead");
+        std::fs::write(
+            &binary,
+            concat!(
+                "#!/bin/sh\n",
+                "printf '%s\\n' '",
+                r#"{"id":"legacy-marked","title":"expired marking","priority":1,"status":"open","labels":["deferred","failure-count:1","phase-0","quarantine-until:2000-01-01T00:00:00Z"],"created_at":"2026-08-13T00:00:00Z"}"#,
+                "' '",
+                r#"{"id":"still-quarantined","title":"live window","priority":1,"status":"open","labels":["deferred","failure-count:1","quarantine-until:2099-01-01T00:00:00Z"],"created_at":"2026-08-13T00:00:00Z"}"#,
+                "' '",
+                r#"{"id":"operator-deferred","title":"operator hold","priority":1,"status":"open","labels":["deferred"],"created_at":"2026-08-13T00:00:00Z"}"#,
+                "'\n"
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&binary).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&binary, permissions).unwrap();
+
+        let backend = builtin_bead_backends()
+            .into_iter()
+            .find(|backend| backend.name == "bead-rs")
+            .unwrap();
+        let store = CliBeadStore::new(
+            backend,
+            binary,
+            workspace.path().to_path_buf(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+        let filters = Filters {
+            assignee: None,
+            exclude_labels: vec![
+                "deferred".to_string(),
+                "human".to_string(),
+                "blocked".to_string(),
+            ],
+            exclude_ids: std::collections::HashSet::new(),
+        };
+        let ready = store.ready(&filters).await.unwrap();
+        let ids: Vec<&str> = ready.iter().map(|bead| bead.id.as_ref()).collect();
+        assert_eq!(ids, vec!["legacy-marked"], "{ids:?}");
     }
 
     #[cfg(unix)]

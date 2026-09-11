@@ -3317,6 +3317,12 @@ impl Worker {
 
         // Race the dispatch against the shutdown signal.
         let was_interrupted;
+        // Identity of the predispatch snapshot written for this dispatch, set
+        // inside the execution block below and handed to the outcome handler
+        // so its cleanup removes only this dispatch's baseline (twin
+        // dispatches on one bead share the single-slot snapshot file —
+        // needle-e4fbe47c).
+        let mut predispatch_token: Option<String> = None;
         let exec_result = if self.shutdown.load(Ordering::SeqCst) {
             // Already shutting down — don't start the agent.
             was_interrupted = true;
@@ -3361,24 +3367,32 @@ impl Worker {
             // access like self.worker_name is a disjoint capture and does not, but
             // worker_name is the WRONG actor -- the claim is made with qualified_id().
             let qualified_actor = self.qualified_id();
-            let (result, exec_tokens) = async {
+            let (result, exec_tokens, token) = async {
                 // Snapshot workspace HEAD + the bead's notes before the agent
                 // runs, so the shipped-work gate has a baseline to judge the
                 // closure against. Best-effort: a missing snapshot degrades the
-                // gate to its conservative path, it never blocks dispatch.
-                if let Err(e) = crate::validation::predispatch::record(
+                // gate to its conservative path, it never blocks dispatch. The
+                // returned identity lets the outcome cleanup remove only this
+                // dispatch's snapshot — twin dispatches on one bead share the
+                // single-slot file (needle-e4fbe47c).
+                let predispatch_token = match crate::validation::predispatch::record(
                     dispatch_ws,
                     &bead.id,
                     self.store.as_ref(),
                 )
                 .await
                 {
-                    tracing::warn!(
-                        bead_id = %bead.id,
-                        error = %e,
-                        "failed to record pre-dispatch snapshot — shipped-work gate will fall back"
-                    );
-                }
+                    Ok(token) => token,
+                    Err(e) => {
+                        tracing::warn!(
+                            bead_id = %bead.id,
+                            error = %e,
+                            "failed to record pre-dispatch snapshot — shipped-work gate will \
+                             fall back to its in-memory baseline"
+                        );
+                        None
+                    }
+                };
 
                 // ── Atomic claim verification at dispatch time ──
                 // Verify that the bead is still assigned to this worker immediately
@@ -3423,6 +3437,17 @@ impl Worker {
                     // assignee. A second emission with placeholder data would count
                     // one failed verification twice.
 
+                    // This dispatch never ran — drop the snapshot it just
+                    // recorded so it cannot sit there as a stale baseline.
+                    // Scoped to our own token: if a twin dispatch owns the
+                    // file now, its baseline is the one in flight.
+                    crate::validation::predispatch::clear_if_own(
+                        dispatch_ws,
+                        &bead.id,
+                        predispatch_token.as_deref(),
+                    )
+                    .await;
+
                     bail!(
                         "dispatch-time claim verification failed for bead {}: bead is not assigned to worker {}",
                         bead.id,
@@ -3451,10 +3476,11 @@ impl Worker {
                     &result.stdout,
                     &result.stderr,
                 );
-                Ok::<_, anyhow::Error>((result, exec_tokens))
+                Ok::<_, anyhow::Error>((result, exec_tokens, predispatch_token))
             }
             .instrument(execution_span)
             .await?;
+            predispatch_token = token;
 
             // Now we're back in the agent.dispatch span. Record the execution results.
             tracing::Span::current().record("needle.agent.pid", result.pid);
@@ -3547,6 +3573,7 @@ impl Worker {
                 template_version: prompt.template_version.clone(),
                 bead_revision_start: self.pre_dispatch_head.clone(),
                 commits,
+                predispatch_token,
                 tokens_in,
                 tokens_out,
                 estimated_cost_usd: estimated_cost,
@@ -5631,9 +5658,9 @@ impl Worker {
             candidate.strands.pluck.exclude_labels
         );
         replace!(
-            "strands.mend.stuck_threshold_secs",
-            next.strands.mend.stuck_threshold_secs,
-            candidate.strands.mend.stuck_threshold_secs
+            "strands.mend.stale_claim_ttl",
+            next.strands.mend.stale_claim_ttl,
+            candidate.strands.mend.stale_claim_ttl
         );
         replace!(
             "strands.mend.lock_ttl_secs",
@@ -5644,6 +5671,11 @@ impl Worker {
             "strands.explore.workspaces",
             next.strands.explore.workspaces,
             candidate.strands.explore.workspaces
+        );
+        replace!(
+            "strands.explore.stale_claim_ttl",
+            next.strands.explore.stale_claim_ttl,
+            candidate.strands.explore.stale_claim_ttl
         );
         replace!(
             "strands.weave.max_beads_per_run",
@@ -9101,9 +9133,17 @@ mod tests {
         );
         incident.workspace = workspace.path().to_path_buf();
 
+        // The failing definition-of-done gate is declared by the bead's own
+        // workspace config: gates resolve from the workspace the bead belongs
+        // to, never from the worker's startup config (needle-da77b68a).
+        std::fs::write(
+            workspace.path().join(".needle.yaml"),
+            "verification:\n  - \"false\"\n",
+        )
+        .unwrap();
+
         let store = Arc::new(MockStore::new(vec![incident.clone()]));
         let mut config = valid_test_config();
-        config.verification = vec!["false".to_string()];
         config.self_modification.hot_reload = false;
         config.strands.explore.enabled = false;
         config.strands.explore.workspace_root = workspace.path().to_path_buf();

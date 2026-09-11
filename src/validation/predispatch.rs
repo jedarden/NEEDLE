@@ -67,11 +67,26 @@ pub fn hash_notes(notes: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+impl PreDispatch {
+    /// Identity of the dispatch that wrote this snapshot.
+    ///
+    /// The snapshot file is single-slot per (workspace, bead): two dispatches
+    /// racing on one bead overwrite each other's baseline (needle-e4fbe47c).
+    /// A dispatch that wants to clean up after itself must therefore first
+    /// check the file still holds what it wrote — this identity is what it
+    /// compares against. `record` always stamps `Utc::now`, so the capture
+    /// timestamp distinguishes two writes short of an exact-nanosecond tie.
+    pub fn identity(&self) -> Option<String> {
+        self.captured_at
+            .map(|t| t.timestamp_nanos_opt().unwrap_or_default().to_string())
+    }
+}
+
 fn state_root() -> PathBuf {
     if let Some(home) = std::env::var_os("HOME") {
         PathBuf::from(home).join(".needle/state/predispatch")
     } else {
-        PathBuf::from("/tmp").join(".needle/state/predispatch")
+        std::env::temp_dir().join(".needle/state/predispatch")
     }
 }
 
@@ -99,8 +114,14 @@ pub fn snapshot_path(workspace: &Path, bead_id: &BeadId) -> PathBuf {
 /// Capture the workspace HEAD and the bead's current notes before dispatch.
 ///
 /// Never fails the dispatch: a snapshot that cannot be written just means the
-/// gate falls back to its conservative path later.
-pub async fn record(workspace: &Path, bead_id: &BeadId, store: &dyn BeadStore) -> Result<()> {
+/// gate falls back to its conservative path later. On success returns the
+/// written snapshot's [`PreDispatch::identity`] — the token a completing
+/// dispatch passes to [`clear_if_own`] so it removes only its own baseline.
+pub async fn record(
+    workspace: &Path,
+    bead_id: &BeadId,
+    store: &dyn BeadStore,
+) -> Result<Option<String>> {
     let snapshot = PreDispatch {
         // Captured first: this timestamp bounds which bypass-log entries can be
         // attributed to this dispatch, so it must predate the agent's run.
@@ -109,6 +130,7 @@ pub async fn record(workspace: &Path, bead_id: &BeadId, store: &dyn BeadStore) -
         notes_hash: read_notes(store, bead_id).await.map(|n| hash_notes(&n)),
         dirty_files: capture_dirty_files(workspace).await.unwrap_or_default(),
     };
+    let identity = snapshot.identity();
 
     let path = snapshot_path(workspace, bead_id);
     if let Some(parent) = path.parent() {
@@ -120,7 +142,7 @@ pub async fn record(workspace: &Path, bead_id: &BeadId, store: &dyn BeadStore) -
     tokio::fs::write(&path, encoded)
         .await
         .with_context(|| format!("writing predispatch snapshot {}", path.display()))?;
-    Ok(())
+    Ok(identity)
 }
 
 /// Load the snapshot for a (workspace, bead) pair, if one was recorded.
@@ -132,7 +154,65 @@ pub async fn load(workspace: &Path, bead_id: &BeadId) -> Option<PreDispatch> {
 
 /// Remove a snapshot once its dispatch has been fully accounted for.
 pub async fn clear(workspace: &Path, bead_id: &BeadId) {
-    let _ = tokio::fs::remove_file(snapshot_path(workspace, bead_id)).await;
+    clear_in(&state_root(), workspace, bead_id).await;
+}
+
+/// [`clear`] against an explicit state root, for tests.
+pub async fn clear_in(root: &Path, workspace: &Path, bead_id: &BeadId) {
+    let _ = tokio::fs::remove_file(snapshot_path_in(root, workspace, bead_id)).await;
+}
+
+/// Remove the snapshot for this dispatch — but only while it is still ours.
+///
+/// `token` is the identity [`record`] returned when this dispatch wrote its
+/// baseline. A `None` token (callers from before the token existed, and tests
+/// that write fixture snapshots by hand) falls back to the unconditional
+/// [`clear`]. With a token, the file is removed only when it still carries
+/// that identity: duplicate dispatches racing on one bead share the
+/// single-slot file, and the first to finish must not destroy the survivor's
+/// baseline — that left every later closure bouncing with "no pre-dispatch
+/// snapshot recorded" no matter what evidence the dispatch had
+/// (bead needle-e4fbe47c: five closes bounced until an operator intervened).
+/// A mismatch is left in place for its owner to clear, and logged as the
+/// twin-dispatch signal it is.
+pub async fn clear_if_own(workspace: &Path, bead_id: &BeadId, token: Option<&str>) {
+    clear_if_own_in(&state_root(), workspace, bead_id, token).await;
+}
+
+/// [`clear_if_own`] against an explicit state root, so tests never touch the
+/// process `HOME` the default root derives from.
+pub async fn clear_if_own_in(root: &Path, workspace: &Path, bead_id: &BeadId, token: Option<&str>) {
+    let Some(token) = token else {
+        return clear_in(root, workspace, bead_id).await;
+    };
+    let path = snapshot_path_in(root, workspace, bead_id);
+    let raw = match tokio::fs::read(&path).await {
+        Ok(raw) => raw,
+        Err(_) => return, // Nothing to clean — already cleared or never written.
+    };
+    match serde_json::from_slice::<PreDispatch>(&raw)
+        .ok()
+        .and_then(|s| s.identity())
+    {
+        Some(ours) if ours == token => {
+            let _ = tokio::fs::remove_file(&path).await;
+        }
+        Some(_) => {
+            tracing::warn!(
+                bead_id = %bead_id,
+                "predispatch snapshot was recorded by another dispatch — possible \
+                 duplicate dispatch on this bead; leaving the baseline for its owner"
+            );
+        }
+        None => {
+            // Pre-identity snapshot: ownership cannot be proven, so err toward
+            // keeping the file — it is overwritten by the next record anyway.
+            tracing::debug!(
+                bead_id = %bead_id,
+                "predispatch snapshot carries no dispatch identity — leaving it"
+            );
+        }
+    }
 }
 
 /// Capture all dirty files in the workspace with their blob hashes.
@@ -416,6 +496,116 @@ mod tests {
         tokio::fs::remove_file(&path)
             .await
             .expect("failed to remove snapshot file during clear test");
+        assert!(load_at(root.path(), ws.path(), &bead).await.is_none());
+    }
+
+    /// Distinct writes produce distinct identities — that is the whole basis
+    /// on which `clear_if_own` can tell "our snapshot" from "a twin's".
+    #[test]
+    fn identity_distinguishes_two_recordings() {
+        let first = PreDispatch {
+            head_sha: None,
+            notes_hash: None,
+            dirty_files: vec![],
+            captured_at: Some(Utc::now()),
+        };
+        let second = PreDispatch {
+            captured_at: Some(first.captured_at.unwrap() + chrono::Duration::microseconds(1)),
+            ..first.clone()
+        };
+        assert_ne!(first.identity(), second.identity());
+        assert_eq!(first.identity(), first.clone().identity());
+    }
+
+    /// A dispatch clears the file when it still holds the baseline it wrote.
+    #[tokio::test]
+    async fn clear_if_own_removes_its_own_snapshot() {
+        let root = TempDir::new().unwrap();
+        let ws = TempDir::new().unwrap();
+        let bead: BeadId = "bf-own".into();
+
+        let snapshot = PreDispatch {
+            head_sha: Some("abc".to_string()),
+            notes_hash: None,
+            dirty_files: vec![],
+            captured_at: Some(Utc::now()),
+        };
+        write_at(root.path(), ws.path(), &bead, &snapshot).await;
+
+        clear_if_own_in(
+            root.path(),
+            ws.path(),
+            &bead,
+            snapshot.identity().as_deref(),
+        )
+        .await;
+        assert!(load_at(root.path(), ws.path(), &bead).await.is_none());
+    }
+
+    /// The twin-dispatch case: another dispatch overwrote the file after this
+    /// one recorded. This dispatch's cleanup must leave the survivor's
+    /// baseline in place — destroying it is what permanently wedged closures
+    /// on beads beadrs-5d781dc7 and beadrs-374f9df6.
+    #[tokio::test]
+    async fn clear_if_own_leaves_a_twins_snapshot_alone() {
+        let root = TempDir::new().unwrap();
+        let ws = TempDir::new().unwrap();
+        let bead: BeadId = "bf-twin".into();
+
+        let ours = PreDispatch {
+            head_sha: Some("abc".to_string()),
+            notes_hash: None,
+            dirty_files: vec![],
+            captured_at: Some(Utc::now()),
+        };
+        let twin = PreDispatch {
+            captured_at: Some(ours.captured_at.unwrap() + chrono::Duration::seconds(1)),
+            ..ours.clone()
+        };
+        // The twin recorded after us: the file now holds its baseline.
+        write_at(root.path(), ws.path(), &bead, &twin).await;
+
+        clear_if_own_in(root.path(), ws.path(), &bead, ours.identity().as_deref()).await;
+        assert_eq!(
+            load_at(root.path(), ws.path(), &bead).await.as_ref(),
+            Some(&twin),
+            "the surviving dispatch's baseline must not be destroyed"
+        );
+    }
+
+    /// A tokenless caller (pre-token writer, or a hand-built fixture) keeps
+    /// the unconditional cleanup semantics.
+    #[tokio::test]
+    async fn clear_if_own_without_a_token_clears_unconditionally() {
+        let root = TempDir::new().unwrap();
+        let ws = TempDir::new().unwrap();
+        let bead: BeadId = "bf-notoken".into();
+
+        write_at(
+            root.path(),
+            ws.path(),
+            &bead,
+            &PreDispatch {
+                head_sha: None,
+                notes_hash: None,
+                dirty_files: vec![],
+                captured_at: Some(Utc::now()),
+            },
+        )
+        .await;
+
+        clear_if_own_in(root.path(), ws.path(), &bead, None).await;
+        assert!(load_at(root.path(), ws.path(), &bead).await.is_none());
+    }
+
+    /// Nothing to clean is not an error and not a twin warning — the common
+    /// no-twin path simply finds the file already gone.
+    #[tokio::test]
+    async fn clear_if_own_tolerates_a_missing_snapshot() {
+        let root = TempDir::new().unwrap();
+        let ws = TempDir::new().unwrap();
+        let bead: BeadId = "bf-gone".into();
+        clear_if_own_in(root.path(), ws.path(), &bead, Some("1234")).await;
         assert!(load_at(root.path(), ws.path(), &bead).await.is_none());
     }
 

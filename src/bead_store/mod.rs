@@ -30,7 +30,7 @@ use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 
 use crate::process_guard::ProcessGuardSync;
-use crate::types::{Bead, BeadId, ClaimResult};
+use crate::types::{Bead, BeadId, BeadStatus, ClaimResult};
 use tracing::{debug, warn};
 
 // Re-export the implementations so consumers don't need to change their imports
@@ -70,9 +70,128 @@ pub(crate) fn active_quarantine_until(
         .filter(|until| *until > now)
 }
 
+/// Whether `labels` carry the bare `deferred` label as the marker of an
+/// expired quarantine rather than of an operator hold.
+///
+/// The pre-ADR-022 quarantine path parked a failing bead by adding the bare
+/// `deferred` label beside its `quarantine-until` window. The window expires;
+/// the bare label never lifts on its own, and the pass that re-evaluates an
+/// expired quarantine filters the bead out before it ever reaches that pass —
+/// so in a workspace no worker calls home, a single failed attempt hid the
+/// bead from the whole fleet (needle-28efee3b). That marking is recognized by
+/// its shape: a bare `deferred` beside a `failure-count` and a
+/// `quarantine-until` window, none of them still active. A bare `deferred`
+/// without the rest of the trio still reads as an operator hold.
+pub(crate) fn expired_quarantine_marking(
+    labels: &[String],
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let bare_deferred = labels
+        .iter()
+        .any(|label| label.trim().eq_ignore_ascii_case("deferred"));
+    bare_deferred
+        && labels
+            .iter()
+            .any(|label| label.trim().starts_with("failure-count:"))
+        && labels.iter().any(|label| quarantine_until(label).is_some())
+        && !labels
+            .iter()
+            .filter_map(|label| quarantine_until(label))
+            .any(|until| until > now)
+}
+
+/// Whether `bead` is excluded by `filters`' label list at `now`.
+///
+/// Shared by every ready-queue consumer — [`crate::bead_store::cli_store`]'s
+/// `ready`, Pluck's and Explore's in-strand guards — so a label's
+/// exclusivity cannot drift between the store layer and the strands. The one
+/// exception is [`expired_quarantine_marking`]: its bare `deferred` is the
+/// remnant of a lapsed hold, not a live one, so it does not exclude.
+pub(crate) fn excluded_by_labels(
+    bead: &Bead,
+    filters: &Filters,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    let expired_marking = expired_quarantine_marking(&bead.labels, now);
+    bead.labels.iter().any(|label| {
+        filters.exclude_labels.contains(label) && !(expired_marking && label == "deferred")
+    })
+}
+
+/// The highest `quarantine-round:N` on the bead, if any.
+///
+/// Round 3 is the last quarantine round (ADR-022): its expiry is the trigger
+/// for the rung-4 analysis dispatch, so reading the round off the labels is
+/// shared logic rather than a Pluck detail.
+pub(crate) fn quarantine_round(bead: &Bead) -> Option<u32> {
+    const PREFIX: &str = "quarantine-round:";
+    bead.labels
+        .iter()
+        .filter_map(|label| {
+            let trimmed = label.trim();
+            trimmed
+                .strip_prefix(PREFIX)
+                .and_then(|round| round.parse::<u32>().ok())
+        })
+        .max()
+}
+
+/// Whether the bead has exhausted quarantine and is waiting on its rung-4
+/// analysis dispatch (Phase 19 rung 4, ADR-022 decision 3).
+///
+/// True exactly when the bead is open, carries `quarantine-round:3` — the
+/// ladder's last round — and no future `quarantine-until` remains. A bead in
+/// an earlier round whose window expired is a normal candidate again; a round-3
+/// bead whose window is still running is still quarantined. A round-3 bead
+/// with no window at all reads as expired rather than stuck forever, matching
+/// the malformed-label rule of [`quarantine_until`].
+pub(crate) fn awaiting_analysis_dispatch(bead: &Bead, now: chrono::DateTime<chrono::Utc>) -> bool {
+    bead.status == BeadStatus::Open
+        && quarantine_round(bead)
+            .map(|round| round >= 3)
+            .unwrap_or(false)
+        && active_quarantine_until(bead, now).is_none()
+}
+
+/// Label prefix attributing a bead to the actor that created it.
+///
+/// The bead backend records no creator — bead-rs `created` events always name
+/// actor `system`, whatever ran the CLI — so attribution has to be written
+/// onto the bead at creation time. Consumers (the Phase 19.4 post-dispatch
+/// audit in particular) close, fold and defer beads out of a dispatch window,
+/// so a bead with no creator label reads as *foreign*: it was created by an
+/// operator, another agent, or a backend that predates attribution, and it is
+/// never a candidate for automated mutation.
+pub const CREATOR_LABEL_PREFIX: &str = "creator:";
+
+/// The label attributing a bead to `actor`.
+pub fn creator_label(actor: &str) -> String {
+    format!("{CREATOR_LABEL_PREFIX}{actor}")
+}
+
+/// The actor that created this bead, if the bead carries attribution.
+///
+/// `None` means "not created by me" for every caller: an unattributable bead
+/// is out of scope for any automated close, fold or defer, no matter when it
+/// was created.
+pub fn creator_of(bead: &Bead) -> Option<&str> {
+    let actor = bead.labels.iter().find_map(|label| {
+        label
+            .strip_prefix(CREATOR_LABEL_PREFIX)
+            .filter(|rest| !rest.is_empty())
+    });
+    actor
+}
+
 /// Open the bead store explicitly bound by the target workspace's resolved
 /// configuration. This is the production entry point: executable discovery
 /// alone is never treated as evidence of store ownership.
+///
+/// `actor` is the identity beads created through this store are attributed to.
+/// Dispatching workers pass their qualified id so the post-dispatch audit can
+/// recognize their own creations; utility paths that never audit what they
+/// create pass `None`, which leaves the beads unattributed — and therefore
+/// foreign to every other worker's audit.
 pub fn open_configured(
     config: &crate::config::BeadCliConfig,
     workspace: PathBuf,
@@ -1456,6 +1575,117 @@ mod tests {
         assert!(error
             .to_string()
             .contains("no authoritative bead backend binding"));
+    }
+
+    fn labeled(labels: &[&str]) -> Vec<String> {
+        labels.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// The legacy quarantine trio (needle-28efee3b) is recognized exactly by
+    /// its shape; anything short of it stays an operator hold.
+    #[test]
+    fn expired_quarantine_marking_matches_only_the_full_trio() {
+        let now = chrono::Utc::now();
+        let past = (now - chrono::Duration::hours(1)).to_rfc3339();
+        let future = (now + chrono::Duration::hours(1)).to_rfc3339();
+
+        assert!(expired_quarantine_marking(
+            &labeled(&[
+                "deferred",
+                "failure-count:1",
+                &format!("quarantine-until:{past}")
+            ]),
+            now
+        ));
+        // Extra unrelated labels do not break the recognition.
+        assert!(expired_quarantine_marking(
+            &labeled(&[
+                "phase-0",
+                "deferred",
+                "failure-count:3",
+                &format!("quarantine-until:{past}"),
+            ]),
+            now
+        ));
+        // An active window means the quarantine still runs, not that it lapsed.
+        assert!(!expired_quarantine_marking(
+            &labeled(&[
+                "deferred",
+                "failure-count:1",
+                &format!("quarantine-until:{future}")
+            ]),
+            now
+        ));
+        // A bare `deferred` with no failure-count is an operator hold.
+        assert!(!expired_quarantine_marking(&labeled(&["deferred"]), now));
+        assert!(!expired_quarantine_marking(
+            &labeled(&["deferred", &format!("quarantine-until:{past}")]),
+            now
+        ));
+        // A failure-count alone never marks.
+        assert!(!expired_quarantine_marking(
+            &labeled(&["failure-count:4", &format!("quarantine-until:{past}")]),
+            now
+        ));
+    }
+
+    /// The marking's `deferred` is the one excluded label that expires with
+    /// its window; every other excluded label, and the bare `deferred` of an
+    /// operator hold, still excludes.
+    #[test]
+    fn excluded_by_labels_spares_only_the_expired_marking() {
+        let now = chrono::Utc::now();
+        let past = (now - chrono::Duration::hours(1)).to_rfc3339();
+        let filters = Filters {
+            assignee: None,
+            exclude_labels: vec![
+                "deferred".to_string(),
+                "human".to_string(),
+                "blocked".to_string(),
+            ],
+            exclude_ids: std::collections::HashSet::new(),
+        };
+        let expired = |labels: &[&str]| {
+            excluded_by_labels(
+                &Bead {
+                    labels: labeled(labels),
+                    ..make_exclusion_probe_bead()
+                },
+                &filters,
+                now,
+            )
+        };
+
+        assert!(!expired(&[
+            "deferred",
+            "failure-count:1",
+            &format!("quarantine-until:{past}"),
+        ]));
+        assert!(expired(&["deferred"]));
+        assert!(expired(&["human"]));
+        assert!(expired(&[
+            "blocked",
+            "failure-count:1",
+            &format!("quarantine-until:{past}")
+        ]));
+    }
+
+    fn make_exclusion_probe_bead() -> Bead {
+        Bead {
+            id: BeadId::from("probe".to_string()),
+            title: "probe".to_string(),
+            body: None,
+            priority: 1,
+            status: BeadStatus::Open,
+            assignee: None,
+            labels: Vec::new(),
+            workspace: PathBuf::from("/tmp/probe"),
+            dependencies: Vec::new(),
+            dependents: Vec::new(),
+            comments: Vec::new(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
     }
 
     #[cfg(unix)]

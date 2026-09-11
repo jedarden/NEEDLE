@@ -1349,7 +1349,7 @@ mod tests {
             status,
             assignee: None,
             labels: Vec::new(),
-            workspace: PathBuf::from("/tmp"),
+            workspace: std::env::temp_dir(),
             dependencies: Vec::new(),
             dependents: Vec::new(),
             comments: Vec::new(),

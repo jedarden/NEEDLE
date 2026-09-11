@@ -83,6 +83,15 @@ pub struct TraceMetadata {
     pub template_version: Option<String>,
     /// Structured timeout reason if terminated by timeout (exit_code 124).
     pub timeout_reason: Option<TimeoutReason>,
+    /// Envelope `terminal_reason` from the claude_json result envelope, when the
+    /// CLI reported why the session ended (e.g. `"api_error"`). Distinguishes an
+    /// infrastructure casualty from a genuinely failed task without reading the
+    /// raw trace.
+    pub terminal_reason: Option<String>,
+    /// Envelope `api_error_status` — the HTTP status of the terminal API error
+    /// (e.g. 503 during the 2026-09-02 zai-proxy outage). Absent for every
+    /// outcome that was not an API error.
+    pub api_error_status: Option<u16>,
 }
 
 /// Adapter-specific trace format identifier.
@@ -409,6 +418,9 @@ pub struct ClaudeResultEnvelope {
     /// Envelope `terminal_reason`, when the CLI reports why the session ended
     /// (e.g. `"api_error"`).
     pub terminal_reason: Option<String>,
+    /// Envelope `api_error_status` — the HTTP status behind the terminal error
+    /// (e.g. 503).
+    pub api_error_status: Option<u16>,
 }
 
 impl ClaudeResultEnvelope {
@@ -466,6 +478,10 @@ pub fn parse_result_envelope(stdout: &str) -> Option<ClaudeResultEnvelope> {
                     .get("terminal_reason")
                     .and_then(|s| s.as_str())
                     .map(str::to_owned),
+                api_error_status: value
+                    .get("api_error_status")
+                    .and_then(|s| s.as_u64())
+                    .and_then(|status| u16::try_from(status).ok()),
             })
         })
 }
@@ -874,6 +890,8 @@ mod tests {
             pruned: false,
             template_version: Some("abc123".to_string()),
             timeout_reason: None,
+            terminal_reason: None,
+            api_error_status: None,
         };
         capture.write_metadata(&metadata).unwrap();
 
@@ -954,6 +972,8 @@ mod tests {
             pruned: false,
             template_version: None,
             timeout_reason: None,
+            terminal_reason: None,
+            api_error_status: None,
         };
         capture.write_metadata(&metadata).unwrap();
 
@@ -1033,6 +1053,23 @@ mod tests {
         assert!(envelope.is_error);
         assert_eq!(envelope.subtype.as_deref(), Some("success"));
         assert_eq!(envelope.terminal_reason.as_deref(), Some("api_error"));
+        assert_eq!(envelope.api_error_status, Some(503));
+    }
+
+    #[test]
+    fn parse_result_envelope_leaves_api_error_status_absent_when_unreported() {
+        let stdout = result_stream(r#"{"type":"result","subtype":"success","is_error":false}"#);
+        let envelope = parse_result_envelope(&stdout).expect("envelope should parse");
+        assert_eq!(envelope.api_error_status, None);
+    }
+
+    #[test]
+    fn parse_result_envelope_ignores_an_out_of_range_api_error_status() {
+        // HTTP statuses fit u16; anything wider is malformed rather than fatal.
+        let stdout = result_stream(r#"{"type":"result","is_error":true,"api_error_status":99999}"#);
+        let envelope = parse_result_envelope(&stdout).expect("envelope should parse");
+        assert_eq!(envelope.api_error_status, None);
+        assert!(envelope.is_error);
     }
 
     #[test]
@@ -1078,6 +1115,7 @@ mod tests {
             is_error: false,
             subtype: Some("success".to_string()),
             terminal_reason: Some("api_error".to_string()),
+            api_error_status: None,
         };
         assert!(envelope.indicates_failure());
     }
@@ -1088,6 +1126,7 @@ mod tests {
             is_error: false,
             subtype: Some("success".to_string()),
             terminal_reason: None,
+            api_error_status: None,
         };
         assert!(!envelope.indicates_failure());
     }
@@ -1100,6 +1139,7 @@ mod tests {
             is_error: false,
             subtype: Some("success".to_string()),
             terminal_reason: Some("user_exit".to_string()),
+            api_error_status: None,
         };
         assert!(!envelope.indicates_failure());
     }
@@ -1110,6 +1150,7 @@ mod tests {
             is_error: false,
             subtype: Some("success".to_string()),
             terminal_reason: Some(String::new()),
+            api_error_status: None,
         };
         assert!(!envelope.indicates_failure());
     }
@@ -1224,9 +1265,16 @@ mod tests {
             pruned: false,
             template_version: Some("deadbeef".to_string()),
             timeout_reason: None,
+            terminal_reason: Some("api_error".to_string()),
+            api_error_status: Some(503),
         };
 
         let json = serde_json::to_string(&metadata).unwrap();
+        // Reconstructing an outage window means reading metadata.json with
+        // tooling outside this struct, so the serialized key names are part of
+        // the contract alongside the values.
+        assert!(json.contains(r#""terminal_reason":"api_error""#));
+        assert!(json.contains(r#""api_error_status":503"#));
         let parsed: TraceMetadata = serde_json::from_str(&json).unwrap();
 
         assert_eq!(parsed.bead_id, metadata.bead_id);
@@ -1242,6 +1290,31 @@ mod tests {
         assert_eq!(parsed.trace_format, metadata.trace_format);
         assert_eq!(parsed.pruned, metadata.pruned);
         assert_eq!(parsed.template_version, metadata.template_version);
+        assert_eq!(parsed.terminal_reason, metadata.terminal_reason);
+        assert_eq!(parsed.api_error_status, metadata.api_error_status);
+    }
+
+    #[test]
+    fn metadata_written_before_the_envelope_fields_still_parses() {
+        // cleanup_traces and prune_trace_data re-read metadata.json written by
+        // older builds, which carry neither field. Deserialization must keep
+        // working or those traces silently lose their retention classification.
+        let legacy = r#"{
+            "bead_id": "needle-legacy",
+            "agent": "claude-sonnet",
+            "provider": "anthropic",
+            "model": "claude-sonnet-4-6",
+            "exit_code": 0,
+            "outcome": "failure",
+            "duration_ms": 100,
+            "captured_at": "2026-09-02T00:00:00Z",
+            "trace_format": "claude_json",
+            "pruned": false,
+            "template_version": null
+        }"#;
+        let parsed: TraceMetadata = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.terminal_reason, None);
+        assert_eq!(parsed.api_error_status, None);
     }
 
     #[test]
@@ -1270,6 +1343,8 @@ mod tests {
             pruned: false,
             template_version: None,
             timeout_reason: None,
+            terminal_reason: None,
+            api_error_status: None,
         };
         let metadata_path = bead_dir.join("metadata.json");
         std::fs::write(
@@ -1318,6 +1393,8 @@ mod tests {
             pruned: false,
             template_version: None,
             timeout_reason: None,
+            terminal_reason: None,
+            api_error_status: None,
         };
         let metadata_path = bead_dir.join("metadata.json");
         std::fs::write(
@@ -1374,6 +1451,8 @@ mod tests {
             pruned: false,
             template_version: None,
             timeout_reason: None,
+            terminal_reason: None,
+            api_error_status: None,
         };
         let metadata_path = bead_dir.join("metadata.json");
         std::fs::write(
@@ -1428,6 +1507,8 @@ mod tests {
             pruned: true, // Already pruned
             template_version: None,
             timeout_reason: None,
+            terminal_reason: None,
+            api_error_status: None,
         };
         let metadata_path = bead_dir.join("metadata.json");
         std::fs::write(
@@ -1482,6 +1563,8 @@ mod tests {
             pruned: false, // Not yet pruned
             template_version: None,
             timeout_reason: None,
+            terminal_reason: None,
+            api_error_status: None,
         };
         let metadata_path = bead_dir.join("metadata.json");
         std::fs::write(
@@ -1545,6 +1628,8 @@ mod tests {
             pruned: false, // NOT marked as pruned (partial state)
             template_version: None,
             timeout_reason: None,
+            terminal_reason: None,
+            api_error_status: None,
         };
         let metadata_path = bead_dir.join("metadata.json");
         std::fs::write(
@@ -1607,6 +1692,8 @@ mod tests {
             pruned: true,
             template_version: None,
             timeout_reason: None,
+            terminal_reason: None,
+            api_error_status: None,
         };
         std::fs::write(
             bead_dir.join("metadata.json"),

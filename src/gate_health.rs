@@ -12,19 +12,29 @@
 //! - The state file is cleared
 //! - workspace.gate_restored telemetry is emitted
 //! - The "Gate broken" bead is closed with a reason
+//!
+//! A second path into the same degradation exists for failures the gate
+//! *did* produce (N-T22): when a single verification-failure fingerprint —
+//! gate name plus normalized output — dominates a workspace's recent
+//! failures across several distinct beads, no bead is at fault and the same
+//! degradation follows. Both paths share this state file, so `is_degraded`
+//! covers both and every consumer of it (Pluck, Explore, `needle status`)
+//! skips a fingerprint-degraded workspace without knowing which path
+//! degraded it.
 
+use crate::verification_fingerprint::{DetectorConfig, FingerprintTracker, VerificationFailure};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Get the home directory, falling back to /tmp if HOME is not set.
+/// Get the home directory, falling back to the process temp dir if HOME is not set.
 fn home_dir() -> PathBuf {
     if let Some(home) = std::env::var_os("HOME") {
         PathBuf::from(home)
     } else {
-        PathBuf::from("/tmp")
+        std::env::temp_dir()
     }
 }
 
@@ -47,6 +57,22 @@ pub struct GateHealthState {
     /// Whether workspace is degraded (errors >= threshold).
     #[serde(default)]
     pub degraded: bool,
+    /// Verification-failure window behind the fingerprint detector (N-T22),
+    /// oldest first. Persisted so the window survives a worker restart and
+    /// every worker's detector sees the same failures.
+    #[serde(default)]
+    pub fingerprint_window: Vec<VerificationFailure>,
+    /// The verification fingerprint that degraded the workspace, when the
+    /// fingerprint path (rather than consecutive errors) did it.
+    #[serde(default)]
+    pub degraded_fingerprint: Option<String>,
+    /// The gate whose failures produced [`GateHealthState::degraded_fingerprint`].
+    #[serde(default)]
+    pub degraded_gate: Option<String>,
+    /// Normalized summary of the failure behind the tripped fingerprint —
+    /// the human-readable half of the "Gate broken" bead title.
+    #[serde(default)]
+    pub degraded_summary: Option<String>,
 }
 
 impl GateHealthState {
@@ -59,6 +85,27 @@ impl GateHealthState {
             last_command: command,
             last_reason: reason,
             degraded: false,
+            fingerprint_window: Vec::new(),
+            degraded_fingerprint: None,
+            degraded_gate: None,
+            degraded_summary: None,
+        }
+    }
+
+    /// An empty record for a workspace whose first recorded signal is a
+    /// verification failure rather than a gate execution error.
+    fn skeleton(workspace: PathBuf) -> Self {
+        Self {
+            workspace,
+            consecutive_errors: 0,
+            last_error_at: chrono::Utc::now().to_rfc3339(),
+            last_command: String::new(),
+            last_reason: String::new(),
+            degraded: false,
+            fingerprint_window: Vec::new(),
+            degraded_fingerprint: None,
+            degraded_gate: None,
+            degraded_summary: None,
         }
     }
 
@@ -85,6 +132,148 @@ impl GateHealthState {
         self.last_command = String::new();
         self.last_reason = String::new();
     }
+
+    /// The fingerprint this workspace is degraded for, if the fingerprint
+    /// path degraded it.
+    pub fn degraded_fingerprint(&self) -> Option<&str> {
+        self.degraded_fingerprint.as_deref()
+    }
+}
+
+/// What recording one verification failure decided.
+///
+/// The distinction the outcome handler acts on: a failure carrying the
+/// fingerprint the workspace is already degraded for (or that completes the
+/// pattern) is infrastructure and must not penalise its bead, while a failure
+/// with any other fingerprint is still a bead's own verification result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerificationRecording {
+    /// The workspace is already degraded for this fingerprint — the failure
+    /// adds nothing and must not increment the bead's failure count.
+    DegradedForThisFingerprint {
+        /// The shared fingerprint.
+        fingerprint: String,
+    },
+    /// The workspace is degraded for a different fingerprint (or by
+    /// consecutive gate errors). This failure is judged normally.
+    DegradedForOther {
+        /// The fingerprint of this failure.
+        fingerprint: String,
+        /// What the workspace is degraded for instead, for the log.
+        degraded: String,
+    },
+    /// Not degraded; the window did not trip.
+    Window {
+        /// The fingerprint of this failure.
+        fingerprint: String,
+        /// Failures now in the window.
+        failures: usize,
+        /// Distinct beads behind those failures.
+        distinct_beads: usize,
+    },
+    /// This failure completed the pattern — the workspace is now degraded.
+    Tripped {
+        /// The fingerprint that dominates the window.
+        fingerprint: String,
+        /// How many of the window's failures carry it.
+        failures: usize,
+        /// Distinct beads behind those failures.
+        distinct_beads: usize,
+        /// Normalized failure text, for the "Gate broken" bead.
+        summary: String,
+    },
+}
+
+impl VerificationRecording {
+    /// Whether this failure must be released without touching the bead's
+    /// failure count.
+    pub fn is_infra(&self) -> bool {
+        matches!(
+            self,
+            VerificationRecording::DegradedForThisFingerprint { .. }
+                | VerificationRecording::Tripped { .. }
+        )
+    }
+
+    /// The fingerprint of the failure just recorded.
+    pub fn fingerprint(&self) -> &str {
+        match self {
+            VerificationRecording::DegradedForThisFingerprint { fingerprint }
+            | VerificationRecording::DegradedForOther { fingerprint, .. }
+            | VerificationRecording::Window { fingerprint, .. }
+            | VerificationRecording::Tripped { fingerprint, .. } => fingerprint,
+        }
+    }
+}
+
+/// Record a verification failure against a workspace's fingerprint window
+/// and decide what it means.
+///
+/// `output` is the failing gate's output; it is fingerprinted here so the
+/// caller never has to normalize anything itself. The window persists in the
+/// workspace's gate-health state file, so the pattern survives a worker
+/// restart and is visible to every worker.
+pub fn record_verification_failure(
+    workspace: &Path,
+    bead: &str,
+    gate: &str,
+    output: &str,
+    config: &DetectorConfig,
+) -> Result<VerificationRecording> {
+    let failure = VerificationFailure::new(chrono::Utc::now(), bead, gate, output);
+    let summary = crate::verification_fingerprint::normalize_output(output);
+
+    let mut state = load_state(workspace)?.unwrap_or_else(|| {
+        // First recorded signal for this workspace is a verification
+        // failure, not a gate execution error.
+        GateHealthState::skeleton(workspace.to_path_buf())
+    });
+
+    let degraded_for = state.degraded_fingerprint().map(str::to_string);
+    let mut tracker = FingerprintTracker::new(state.fingerprint_window.clone(), *config);
+    let outcome = tracker.record(failure);
+    state.fingerprint_window = tracker.window();
+
+    let recording = match degraded_for {
+        Some(degraded) if degraded == outcome.fingerprint => {
+            VerificationRecording::DegradedForThisFingerprint {
+                fingerprint: outcome.fingerprint,
+            }
+        }
+        Some(degraded) => VerificationRecording::DegradedForOther {
+            fingerprint: outcome.fingerprint,
+            degraded,
+        },
+        None => match outcome.decision {
+            crate::verification_fingerprint::Decision::Tripped {
+                fingerprint,
+                failures,
+                distinct_beads,
+            } => {
+                state.degraded = true;
+                state.degraded_fingerprint = Some(fingerprint.clone());
+                state.degraded_gate = Some(gate.to_string());
+                state.degraded_summary = Some(summary.clone());
+                VerificationRecording::Tripped {
+                    fingerprint,
+                    failures,
+                    distinct_beads,
+                    summary,
+                }
+            }
+            crate::verification_fingerprint::Decision::Window {
+                failures,
+                distinct_beads,
+            } => VerificationRecording::Window {
+                fingerprint: outcome.fingerprint,
+                failures,
+                distinct_beads,
+            },
+        },
+    };
+
+    save_state(&state)?;
+    Ok(recording)
 }
 
 /// Generate a stable workspace ID from its path.
@@ -305,5 +494,161 @@ mod tests {
                 assert!(is_degraded(workspace).unwrap());
             }
         }
+    }
+
+    /// The 2026-09-01 incident failure, verbatim.
+    const INCIDENT: &str = "command 'scripts/definition-of-done.sh --fast' failed: \
+fatal: not a git repository (or any of the parent directories): .git";
+
+    fn record_verification(workspace: &Path, bead: &str) -> VerificationRecording {
+        record_verification_failure(
+            workspace,
+            bead,
+            "gate_1",
+            INCIDENT,
+            &DetectorConfig::default(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn five_shared_failures_across_beads_trip_degradation() {
+        let (_env_guard, _home) = isolated_home();
+        let temp_dir = TempDir::new().unwrap();
+        let workspace = temp_dir.path();
+
+        // The same broken gate on three distinct beads: the first four
+        // failures only fill the window.
+        for bead in ["bead-a", "bead-a", "bead-b", "bead-b", "bead-c"] {
+            let recording = record_verification(workspace, bead);
+            if bead == "bead-c" {
+                assert!(
+                    recording.is_infra(),
+                    "the fifth failure trips: {recording:?}"
+                );
+                assert!(matches!(
+                    recording,
+                    VerificationRecording::Tripped {
+                        distinct_beads: 3,
+                        failures: 5,
+                        ..
+                    }
+                ));
+            } else {
+                assert!(!recording.is_infra());
+            }
+        }
+
+        let state = load_state(workspace).unwrap().expect("state persisted");
+        assert!(
+            is_degraded(workspace).unwrap(),
+            "degradation is fleet-visible"
+        );
+        assert_eq!(
+            state.degraded_fingerprint(),
+            Some(crate::verification_fingerprint::fingerprint("gate_1", INCIDENT).as_str()),
+            "the persisted fingerprint is the detector's, so the alert bead and the window agree"
+        );
+        assert_eq!(state.degraded_gate.as_deref(), Some("gate_1"));
+        assert!(
+            state
+                .degraded_summary
+                .as_deref()
+                .unwrap_or_default()
+                .contains("not a git repository"),
+            "the summary names the failure"
+        );
+    }
+
+    #[test]
+    fn degraded_workspace_stops_penalising_that_fingerprint() {
+        let (_env_guard, _home) = isolated_home();
+        let temp_dir = TempDir::new().unwrap();
+        let workspace = temp_dir.path();
+
+        for bead in ["bead-a", "bead-b", "bead-c", "bead-d", "bead-e"] {
+            record_verification(workspace, bead);
+        }
+        assert!(is_degraded(workspace).unwrap());
+
+        // Further failures with the same fingerprint are infrastructure.
+        let recording = record_verification(workspace, "bead-f");
+        assert_eq!(
+            recording,
+            VerificationRecording::DegradedForThisFingerprint {
+                fingerprint: recording.fingerprint().to_string()
+            }
+        );
+        assert!(recording.is_infra());
+    }
+
+    #[test]
+    fn a_different_failure_is_still_judged_normally_while_degraded() {
+        let (_env_guard, _home) = isolated_home();
+        let temp_dir = TempDir::new().unwrap();
+        let workspace = temp_dir.path();
+
+        for bead in ["bead-a", "bead-b", "bead-c", "bead-d", "bead-e"] {
+            record_verification(workspace, bead);
+        }
+
+        let recording = record_verification_failure(
+            workspace,
+            "bead-f",
+            "shipped_work",
+            "no substantial pushed commit and no bead note recorded for this dispatch",
+            &DetectorConfig::default(),
+        )
+        .unwrap();
+
+        match &recording {
+            VerificationRecording::DegradedForOther { degraded, .. } => {
+                assert!(
+                    !degraded.is_empty(),
+                    "the log names what the workspace is degraded for"
+                );
+            }
+            other => panic!("expected DegradedForOther, got {other:?}"),
+        }
+        assert!(!recording.is_infra());
+    }
+
+    #[test]
+    fn clear_state_also_clears_the_fingerprint_degradation() {
+        let (_env_guard, _home) = isolated_home();
+        let temp_dir = TempDir::new().unwrap();
+        let workspace = temp_dir.path();
+
+        for bead in ["bead-a", "bead-b", "bead-c", "bead-d", "bead-e"] {
+            record_verification(workspace, bead);
+        }
+        assert!(is_degraded(workspace).unwrap());
+
+        clear_state(workspace).unwrap();
+        assert!(!is_degraded(workspace).unwrap());
+        // And the window is gone with it — the next degradation needs a
+        // fresh pattern, not a resurrected one.
+        let recording = record_verification(workspace, "bead-a");
+        assert!(!recording.is_infra());
+    }
+
+    #[test]
+    fn state_files_written_by_older_builds_still_load() {
+        let (_env_guard, _home) = isolated_home();
+        let temp_dir = TempDir::new().unwrap();
+        let workspace = temp_dir.path();
+
+        // A pre-fingerprint state file: consecutive-error fields only.
+        let legacy = format!(
+            "{{\"workspace\":\"{}\",\"consecutive_errors\":2,\
+              \"last_error_at\":\"2026-09-01T12:00:00Z\",\"last_command\":\"x\",\
+              \"last_reason\":\"y\",\"degraded\":false}}",
+            workspace.display()
+        );
+        std::fs::write(state_file_path(workspace).unwrap(), legacy).unwrap();
+
+        let state = load_state(workspace).unwrap().expect("legacy state loads");
+        assert!(state.fingerprint_window.is_empty());
+        assert!(state.degraded_fingerprint.is_none());
     }
 }

@@ -201,12 +201,12 @@ fn needle_home() -> Result<PathBuf> {
 
 /// Resolve a path relative to the user's home directory.
 ///
-/// If HOME is set, uses that. Otherwise, uses /tmp as a fallback.
+/// If HOME is set, uses that. Otherwise, falls back to the process temp dir.
 fn dirs_or_home(relative: &str) -> PathBuf {
     if let Some(home) = std::env::var_os("HOME") {
         PathBuf::from(home).join(relative)
     } else {
-        PathBuf::from("/tmp").join(relative)
+        std::env::temp_dir().join(relative)
     }
 }
 

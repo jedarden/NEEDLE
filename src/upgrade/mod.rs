@@ -684,7 +684,7 @@ fn needle_home() -> PathBuf {
     if let Some(home) = env::var_os("HOME") {
         PathBuf::from(home).join(".needle")
     } else {
-        PathBuf::from("/tmp").join(".needle")
+        std::env::temp_dir().join(".needle")
     }
 }
 

@@ -854,12 +854,22 @@ pub(crate) mod test_env {
     /// other test mutates an env var (observed in CI: needle-ci-wbgtb,
     /// commit_hook::concurrent_inject_never_cross_tags). Any test mutating
     /// one of these must hold the lock for its whole body.
-    const GUARDED_VARS: [&str; 5] = [
+    ///
+    /// The `NEEDLE_ADMISSION_*`/launch-probe group are the launch-admission
+    /// seams (plan revision 24 §4.6): admission tests point the resource probe
+    /// at a mock directory or resize the hold's backoff, and a leaked value
+    /// would silently put every later test's worker into an admission hold.
+    const GUARDED_VARS: [&str; 10] = [
         "HOME",
         "PATH",
         "NEEDLE_HOME",
         "NEEDLE_EVENTS",
         "NEEDLE_HEARTBEATS",
+        "NEEDLE_LAUNCH_RESOURCE_PROBE",
+        "NEEDLE_SKIP_LAUNCH_RESOURCE_CHECK",
+        "NEEDLE_ADMISSION_BACKOFF_BASE_MS",
+        "NEEDLE_ADMISSION_BACKOFF_CAP_MS",
+        "NEEDLE_ADMISSION_HEARTBEAT_SECS",
     ];
 
     /// Restores every guarded variable to its captured value when dropped,

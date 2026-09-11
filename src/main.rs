@@ -32,5 +32,21 @@ fn main() -> Result<()> {
 
     // Don't set a global tracing subscriber here.
     // The CLI layer will initialize it with OTel support after loading config.
-    needle::cli::run()
+    match needle::cli::run() {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // N-T33: a one-shot caller refused by launch admission is not a
+            // work failure — nothing was claimed — so it exits with a
+            // distinct temporary-unavailable code instead of the generic
+            // failure exit. Service-managed runs hold resident and never
+            // produce this error.
+            if e.downcast_ref::<needle::types::AdmissionUnavailable>()
+                .is_some()
+            {
+                eprintln!("Error: {e:#}");
+                std::process::exit(needle::types::EXIT_ADMISSION_UNAVAILABLE);
+            }
+            Err(e)
+        }
+    }
 }

@@ -10,14 +10,12 @@
 //! - the bead's own `notes` field changed during this dispatch — i.e. the agent
 //!   recorded a bead note explaining why no code change was needed.
 //!
-//! With no snapshot the gate has no baseline and **fails closed** — it cannot tell
-//! a commit made during the dispatch from one that predates it, so the bead must
-//! be treated as a failure and the retry counter incremented. This prevents beads
-//! that close without shipped work (e.g., GitHub comments, external API calls) from
-//! looping forever: every closure that fails the shipped-work check increments the
-//! failure count, and after the threshold the bead is quarantined (set deferred)
-//! rather than reopened. See GitHub issue #16 (bead needle-0fbf5145 cycled 14 times
-//! posting identical comments).
+//! Every closure that fails the shipped-work check increments the failure
+//! count, and after the threshold the bead is quarantined (set deferred)
+//! rather than reopened. This prevents beads that close without shipped work
+//! (e.g., GitHub comments, external API calls) from looping forever. See
+//! GitHub issue #16 (bead needle-0fbf5145 cycled 14 times posting identical
+//! comments).
 //!
 //! Deliberately does NOT accept a commit touching only `notes/`/`.beads/` as
 //! sufficient on its own: a prior incident (see docs/notes on ARMOR's
@@ -48,6 +46,26 @@
 //! inert from the day it shipped (2026-07-30) until this change: no closure was
 //! ever rejected, and no bead ever received the `verification-failed` label.
 //! Comparing the `notes` field instead keys on a deliberate note update.
+//!
+//! # Missing snapshot
+//!
+//! The baseline normally comes from the on-disk snapshot, but that file is
+//! single-slot per (workspace, bead): when duplicate dispatches land on one
+//! bead, the first to finish cleared it and every surviving dispatch
+//! permanently bounced with "no pre-dispatch snapshot recorded" regardless of
+//! evidence (bead needle-e4fbe47c: work shipped and verified four times, five
+//! closes bounced until an operator intervened). Two defenses:
+//!
+//! - `verify_shipped_work` accepts a `fallback` baseline — the dispatch's
+//!   own in-memory pre-dispatch HEAD, threaded through the attempt context —
+//!   substituted whenever the file is gone. Same evidence quality, because
+//!   the worker captured it itself right before the agent ran.
+//! - With no baseline of any kind, the gate judges what it still can: an
+//!   explicit bead note passes (the same epistemics as notes that were
+//!   unreadable at dispatch — accept rather than fail a comparison the gate
+//!   could not make, and the only remedy the failure text has ever offered).
+//!   A closure with neither a commit nor a note still fails, keeping the
+//!   failure-quarantine circuit reachable (GitHub issue #16).
 //!
 //! Depends on: `types`, `validation::predispatch`.
 
@@ -85,12 +103,22 @@ const TRIVIAL_PATH_PREFIXES: &[&str] = &["notes/", ".beads/", ".needle-predispat
 /// For beads labeled `deliverable:external`, the git check is skipped and
 /// the gate requires machine-checkable evidence: notes must have changed
 /// during the dispatch AND contain a line beginning with `evidence:`.
+///
+/// `fallback` substitutes for the on-disk snapshot when that file is missing
+/// — most commonly because a completing twin dispatch cleared it. It is the
+/// dispatch's own in-memory pre-dispatch HEAD (attempt context
+/// `bead_revision_start`), captured by the same worker right before the agent
+/// ran, so it judges the closure exactly as the file snapshot would have.
 pub async fn verify_shipped_work(
     post: &Bead,
     workspace: &Path,
     store: &dyn BeadStore,
+    fallback: Option<&predispatch::PreDispatch>,
 ) -> Result<GateResult> {
-    let snapshot = predispatch::load(workspace, &post.id).await;
+    let snapshot = match predispatch::load(workspace, &post.id).await {
+        Some(s) => Some(s),
+        None => fallback.cloned(),
+    };
     // `Bead` does not carry `notes`, so read the current value the same way the
     // snapshot did.
     let post_notes = predispatch::current_notes(store, &post.id)
@@ -114,26 +142,33 @@ async fn evaluate(
     post_notes: &str,
     is_external: bool,
 ) -> Result<GateResult> {
-    // No baseline means the gate has no basis to judge this dispatch: it cannot
-    // tell a commit made during the dispatch from one that predates it. When
-    // a bead closes without a snapshot and without evidence of shipped work,
-    // we must FAIL to trigger the failure-quarantine circuit — otherwise the
-    // failure counter gets reset before the shipped-work check and the bead
-    // loops forever (GitHub issue #16: bead needle-0fbf5145 posted 18
-    // identical comments because every closure reset the count).
-    let Some(snapshot) = snapshot else {
-        tracing::debug!(
-            workspace = %workspace.display(),
-            "no pre-dispatch snapshot — shipped-work gate failing to enforce quarantine"
-        );
-        return Ok(GateResult::Fail(
-            "no pre-dispatch snapshot recorded — cannot verify shipped work. \
-             This closure will be treated as a failure and increment the retry counter. \
-             Ensure the worker is recording predispatch snapshots, or record an explicit \
-             bead note explaining why no work was shipped."
-                .to_string(),
-        ));
+    // No baseline at all means the gate cannot attribute a commit to this
+    // dispatch. It still honors the one remedy it can judge without a
+    // baseline — an explicit bead note — by substituting an all-unknown
+    // baseline (the same epistemics as notes that were unreadable at
+    // dispatch: accept rather than fail a comparison the gate could not
+    // make). A closure with neither note nor commit still FAILs, so the
+    // failure-quarantine circuit stays reachable (GitHub issue #16: bead
+    // needle-0fbf5145 posted 18 identical comments because every closure
+    // reset the count).
+    let fallback_snapshot;
+    let snapshot = match snapshot {
+        Some(s) => s,
+        None => {
+            tracing::debug!(
+                workspace = %workspace.display(),
+                "no pre-dispatch snapshot — judging the closure on its note alone"
+            );
+            fallback_snapshot = predispatch::PreDispatch {
+                head_sha: None,
+                notes_hash: None,
+                dirty_files: Vec::new(),
+                captured_at: None,
+            };
+            &fallback_snapshot
+        }
     };
+    let had_usable_baseline = snapshot.captured_at.is_some() || snapshot.head_sha.is_some();
 
     // For beads with deliverable:external, skip git check entirely and
     // verify only that notes changed with an evidence: line.
@@ -153,20 +188,27 @@ async fn evaluate(
             }
         }
         None => {
-            // Notes were unreadable at dispatch, so there is nothing to diff
-            // against. Accept a non-empty note rather than failing a bead on a
-            // comparison the gate could not make.
+            // Notes were unreadable at dispatch (or no baseline was recorded
+            // at all), so there is nothing to diff against. Accept a
+            // non-empty note rather than failing a bead on a comparison the
+            // gate could not make.
             if !post_notes.trim().is_empty() {
                 return Ok(GateResult::Pass);
             }
         }
     }
 
-    Ok(GateResult::Fail(
+    Ok(GateResult::Fail(if had_usable_baseline {
         "no substantial pushed commit and no bead note recorded for this dispatch — \
          commit real work, or record an explanatory note with the configured bead backend"
-            .to_string(),
-    ))
+            .to_string()
+    } else {
+        "no pre-dispatch snapshot recorded and no evidence of shipped work: no substantial \
+         pushed commit and no bead note. This closure will be treated as a failure and \
+         increment the retry counter. Record an explicit bead note explaining why no work \
+         was shipped, and ensure the worker is recording predispatch snapshots."
+            .to_string()
+    }))
 }
 
 /// Gate logic for beads labeled with deliverable:external.
@@ -228,6 +270,46 @@ fn evaluate_external(snapshot: &predispatch::PreDispatch, post_notes: &str) -> R
 /// is unpushed" and must not be reported as the latter.
 const UPSTREAM_PROBE_ARGS: &[&str] = &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"];
 
+/// Answer to "does this workspace have an upstream configured for its current
+/// branch?" — a separate question from "is the commit pushed", which the
+/// ancestry test answers and which can only be asked once an upstream exists
+/// (GitHub issue #18).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpstreamStatus {
+    /// `@{u}` resolved. The string is the upstream's abbreviated symbolic
+    /// name, e.g. `origin/main`.
+    Present(String),
+    /// Git ran, but the branch has no upstream to compare against: plain
+    /// `git init`, or a remote added without `push -u`. Git says
+    /// `no upstream configured for branch '...'`.
+    NotConfigured,
+    /// Git could not answer at all — not a repository, detached HEAD, missing
+    /// binary, upstream configured but unresolvable. The string carries git's
+    /// own stderr so callers report the real cause rather than a guess.
+    GitError(String),
+}
+
+/// Whether the workspace's current branch has an upstream, judged by
+/// `git rev-parse --abbrev-ref --symbolic-full-name @{u}` alone: no commits
+/// are read and the working tree is untouched.
+///
+/// Extracted from the shipped-work gate so callers that only need the
+/// upstream question (the `needle doctor` shipped-work readiness check,
+/// needle-4fcd150c) consume this predicate rather than reimplementing the
+/// probe and drifting from how the gate classifies its outcomes.
+pub async fn upstream_status(workspace: &Path) -> UpstreamStatus {
+    match git_output(workspace, UPSTREAM_PROBE_ARGS).await {
+        Ok(u) if !u.trim().is_empty() => UpstreamStatus::Present(u),
+        // A zero exit with no name cannot happen for a resolved `@{u}`; treat
+        // it as "nothing to compare against" rather than inventing an upstream.
+        Ok(_) => UpstreamStatus::NotConfigured,
+        Err(e) if e.to_string().contains("no upstream configured for branch") => {
+            UpstreamStatus::NotConfigured
+        }
+        Err(e) => UpstreamStatus::GitError(e.to_string()),
+    }
+}
+
 /// Checks the git side. Returns `Ok(None)` to mean "no verdict from git,
 /// check the fallback" (no snapshot, no new commit, or only trivial paths
 /// changed) rather than a hard pass/fail.
@@ -270,9 +352,9 @@ async fn check_commit(
     // reported as "has not been pushed" (GitHub issue #18). Probe the upstream
     // by name first and keep that outcome distinct — a gate that cannot run is
     // not a gate that failed (needle-4aaa010c precedent).
-    let upstream = match git_output(workspace, UPSTREAM_PROBE_ARGS).await {
-        Ok(u) if !u.trim().is_empty() => u,
-        _ => {
+    let upstream = match upstream_status(workspace).await {
+        UpstreamStatus::Present(upstream) => upstream,
+        UpstreamStatus::NotConfigured => {
             let branch = git_output(workspace, &["rev-parse", "--abbrev-ref", "HEAD"])
                 .await
                 .unwrap_or_else(|_| "HEAD".to_string());
@@ -286,6 +368,21 @@ async fn check_commit(
                          first: `git remote add origin <url>` (adding a remote that already \
                          exists is an error, so check `git remote -v` first).",
                     branch, branch
+                ),
+            }));
+        }
+        UpstreamStatus::GitError(stderr) => {
+            // Git could not answer the upstream question at all — the ancestry
+            // test is equally unrunnable. Same verdict shape as the
+            // not-configured case, but the real cause is reported instead of
+            // claiming the branch lacks an upstream.
+            return Ok(Some(GateResult::ExecutionError {
+                command: format!("git {}", UPSTREAM_PROBE_ARGS.join(" ")),
+                reason: format!(
+                    "the shipped-work gate could not resolve an upstream for this branch \
+                     (git said: {stderr}). It cannot verify that the commit was pushed, so \
+                     this closure is not counted as a failure. If the branch should have an \
+                     upstream, `git push -u <remote> <branch>` sets one."
                 ),
             }));
         }
@@ -382,14 +479,14 @@ mod tests {
 
     // ── fallback: bead notes ──
 
-    /// When no snapshot is available, the gate fails closed to prevent unbounded
-    /// retry loops. A missing snapshot means we cannot verify shipped work, so the
-    /// closure must be treated as a failure. This triggers the failure-quarantine
-    /// circuit: the bead is reopened, released, and the failure count is incremented.
-    /// After `outcome.quarantine_after_failures` consecutive failures, the bead is
-    /// quarantined (set deferred) and stops retrying. This bounded loop prevents the
-    /// unbounded retry loop described in GitHub issue #16 (bead needle-0fbf5145
-    /// posted 18 identical GitHub comments because every closure was accepted).
+    /// With no snapshot and no note — nothing the gate can judge at all — the
+    /// closure fails so the failure-quarantine circuit stays reachable: the
+    /// bead is reopened, released, and the failure count is incremented.
+    /// After `outcome.quarantine_after_failures` consecutive failures, the
+    /// bead is quarantined (set deferred) and stops retrying. This bounded
+    /// loop prevents the unbounded retry loop described in GitHub issue #16
+    /// (bead needle-0fbf5145 posted 18 identical GitHub comments because
+    /// every closure was accepted).
     #[tokio::test]
     async fn no_snapshot_fails_closed() {
         let dir = TempDir::new().unwrap();
@@ -407,6 +504,67 @@ mod tests {
             GateResult::ExecutionError { .. } => {
                 panic!("no snapshot should return Fail, not ExecutionError");
             }
+        }
+    }
+
+    /// The remedy the no-snapshot failure text has always printed must
+    /// actually work: with no baseline the gate still judges the bead note,
+    /// passing when the agent recorded one. Before needle-e4fbe47c this arm
+    /// was unreachable — the missing-snapshot failure preempted every note
+    /// check, so closures bounced on that advice forever (five closes on
+    /// bead beadrs-5d781dc7 until an operator intervened).
+    #[tokio::test]
+    async fn no_snapshot_with_a_bead_note_passes_on_the_note_arm() {
+        let dir = TempDir::new().unwrap();
+        init_repo(dir.path()).await;
+        assert_eq!(
+            evaluate(
+                dir.path(),
+                None,
+                "verified: work already shipped at a4f8fbe, closing",
+                false
+            )
+            .await
+            .unwrap(),
+            GateResult::Pass
+        );
+    }
+
+    /// A `deliverable:external` bead with no snapshot is judged the same way
+    /// as one with a snapshot whose notes were unreadable: the evidence note
+    /// is checkable without any baseline.
+    #[tokio::test]
+    async fn no_snapshot_external_with_evidence_note_passes() {
+        let dir = TempDir::new().unwrap();
+        init_repo(dir.path()).await;
+        assert_eq!(
+            evaluate(
+                dir.path(),
+                None,
+                "evidence: https://example.com/proof",
+                true
+            )
+            .await
+            .unwrap(),
+            GateResult::Pass
+        );
+    }
+
+    /// External bead, no snapshot, and no note: fail on the missing note, not
+    /// on the missing snapshot — the message should point at the remedy.
+    #[tokio::test]
+    async fn no_snapshot_external_without_note_fails_on_the_note() {
+        let dir = TempDir::new().unwrap();
+        init_repo(dir.path()).await;
+        match evaluate(dir.path(), None, "", true).await.unwrap() {
+            GateResult::Fail(reason) => {
+                assert!(
+                    reason.contains("without note update"),
+                    "failure should name the note remedy, not the snapshot: {reason}"
+                );
+            }
+            GateResult::Pass => panic!("external bead with no evidence must fail"),
+            GateResult::ExecutionError { .. } => panic!("expected Fail, not ExecutionError"),
         }
     }
 
@@ -686,6 +844,112 @@ mod tests {
                 .unwrap(),
             GateResult::Pass
         );
+    }
+
+    // ── upstream predicate ──
+
+    /// The predicate answers the upstream question on its own, so the doctor
+    /// readiness check (needle-4fcd150c) and the gate read the same probe
+    /// rather than two implementations that can drift apart.
+    #[tokio::test]
+    async fn upstream_predicate_reports_a_configured_upstream() {
+        let dir = TempDir::new().unwrap();
+        let bare = TempDir::new().unwrap();
+        init_repo(dir.path()).await;
+        push_upstream(dir.path(), bare.path()).await;
+
+        let branch = git_output(dir.path(), &["rev-parse", "--abbrev-ref", "HEAD"])
+            .await
+            .unwrap();
+        assert_eq!(
+            upstream_status(dir.path()).await,
+            UpstreamStatus::Present(format!("origin/{branch}"))
+        );
+    }
+
+    #[tokio::test]
+    async fn upstream_predicate_reports_a_fresh_init_as_not_configured() {
+        let dir = TempDir::new().unwrap();
+        init_repo(dir.path()).await; // no remote, no upstream
+        assert_eq!(
+            upstream_status(dir.path()).await,
+            UpstreamStatus::NotConfigured
+        );
+    }
+
+    /// `git remote add` alone leaves the branch upstreamless — same answer as
+    /// having no remote at all, not an error.
+    #[tokio::test]
+    async fn upstream_predicate_reports_an_unpushed_remote_as_not_configured() {
+        let dir = TempDir::new().unwrap();
+        let bare = TempDir::new().unwrap();
+        init_repo(dir.path()).await;
+        git(bare.path(), &["init", "-q", "--bare"]);
+        git(
+            dir.path(),
+            &["remote", "add", "origin", bare.path().to_str().unwrap()],
+        );
+        assert_eq!(
+            upstream_status(dir.path()).await,
+            UpstreamStatus::NotConfigured
+        );
+    }
+
+    /// Outside a repository git cannot answer the question at all — a distinct
+    /// state from "the branch has no upstream", and not to be misreported as
+    /// one.
+    #[tokio::test]
+    async fn upstream_predicate_reports_a_git_error_outside_a_repository() {
+        let dir = TempDir::new().unwrap(); // not a git repo
+        match upstream_status(dir.path()).await {
+            UpstreamStatus::GitError(stderr) => {
+                assert!(
+                    stderr.contains("not a git repository"),
+                    "stderr should carry git's real cause: {stderr}"
+                );
+            }
+            UpstreamStatus::NotConfigured => {
+                panic!("an unusable workspace is not the same as a branch without an upstream")
+            }
+            UpstreamStatus::Present(upstream) => panic!(
+                "nothing can be an upstream for a directory outside any repository: {upstream}"
+            ),
+        }
+    }
+
+    /// Upstream configured but unresolvable (detached HEAD): the gate still
+    /// cannot run, and the cause reported is git's own — not "no upstream
+    /// configured", which would send an operator down the wrong remedy.
+    #[tokio::test]
+    async fn detached_head_reports_gits_cause_rather_than_no_upstream() {
+        let dir = TempDir::new().unwrap();
+        let bare = TempDir::new().unwrap();
+        let head = init_repo(dir.path()).await;
+        push_upstream(dir.path(), bare.path()).await;
+        git(dir.path(), &["checkout", "-q", "--detach", "HEAD"]);
+        commit_files(dir.path(), &[("src.rs", "fn main() {}\n")], "real work");
+
+        let snap = snapshot(Some(&head), Some(""));
+        match evaluate(dir.path(), Some(&snap), "", false).await.unwrap() {
+            GateResult::ExecutionError { reason, .. } => {
+                assert!(
+                    reason.contains("could not resolve an upstream"),
+                    "the unresolvable-upstream cause should be named: {reason}"
+                );
+                assert!(
+                    reason.contains("HEAD does not point to a branch"),
+                    "git's own stderr should be carried through: {reason}"
+                );
+                assert!(
+                    !reason.contains("no upstream configured"),
+                    "a detached HEAD is not a missing-upstream config: {reason}"
+                );
+            }
+            GateResult::Fail(reason) => {
+                panic!("the gate cannot run here, so this is not a Fail: {reason}")
+            }
+            GateResult::Pass => panic!("a gate that cannot run must not pass"),
+        }
     }
 
     // ── deliverable:external tests ──

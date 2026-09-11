@@ -104,6 +104,8 @@ NEEDLE installer downloads and verifies the latest release binary.
 SECURITY NOTE — CHECKSUM VERIFICATION:
   By default, the installer verifies the downloaded binary's SHA-256 checksum
   against the release metadata. Installation aborts if verification fails.
+  Every executable it installs is verified this way: the needle binary, the
+  needle-transform-* helpers, and the bead backend.
 
   Opt-out (NOT RECOMMENDED): --skip-checksum or NEEDLE_SKIP_CHECKSUM=1
     WARNING: Skipping verification is a SECURITY RISK. Only use this in
@@ -297,13 +299,86 @@ download_file() {
     fi
 }
 
+# verify_against_manifest <file> <asset> <checksums_file>
+# Compare <file>'s SHA-256 against <asset>'s entry in <checksums_file>.
+# Fail-closed, with the --skip-checksum semantics documented in --help: every
+# outcome short of a verified match aborts unless the user opted out
+# explicitly, and a MISMATCH aborts unconditionally — it is never skippable.
+# Shared by the needle, bead and transform installs (GitHub #15).
+verify_against_manifest() {
+    local file="$1" asset="$2" checksums_file="$3"
+
+    info "Verifying checksum..."
+    # `|| true`: grep exits 1 when the asset has no entry, and under
+    # `set -euo pipefail` that would abort the installer silently here —
+    # before the legible error below and before the --skip-checksum
+    # branch could apply. An empty result is handled explicitly.
+    local expected_hash
+    expected_hash=$(grep "  ${asset}$\| ${asset}$" "$checksums_file" | awk '{print $1}' || true)
+    if [[ -z "$expected_hash" ]]; then
+        if [[ "$SKIP_CHECKSUM" == "true" ]]; then
+            warn_checksum_skipped
+            warn "Skipping checksum verification (checksum for ${asset} not found)"
+        else
+            error "Could not find checksum for ${asset} in checksums.txt. Installation aborted for security reasons."
+        fi
+        return 0
+    fi
+
+    # We have an expected hash, compute the actual hash
+    local actual_hash=""
+    local found_hash_tool=false
+    if command -v sha256sum &>/dev/null; then
+        actual_hash=$(sha256sum "$file" | awk '{print $1}')
+        found_hash_tool=true
+    elif command -v shasum &>/dev/null; then
+        actual_hash=$(shasum -a 256 "$file" | awk '{print $1}')
+        found_hash_tool=true
+    elif command -v openssl &>/dev/null; then
+        actual_hash=$(openssl dgst -sha256 "$file" | awk '{print $2}')
+        found_hash_tool=true
+    fi
+
+    if [[ "$found_hash_tool" == "false" ]]; then
+        if [[ "$SKIP_CHECKSUM" == "true" ]]; then
+            warn_checksum_skipped
+            warn "Skipping checksum verification (no hash tool available)"
+        else
+            error "No SHA-256 tool found. Need sha256sum, shasum, or openssl.
+Installation aborted for security reasons."
+        fi
+        return 0
+    fi
+    if [[ -z "$actual_hash" ]]; then
+        if [[ "$SKIP_CHECKSUM" == "true" ]]; then
+            warn_checksum_skipped
+            warn "Skipping checksum verification (failed to compute checksum)"
+        else
+            error "Failed to compute checksum for downloaded binary. Installation aborted for security reasons."
+        fi
+        return 0
+    fi
+
+    # Verify checksum matches - MISMATCHES ARE NEVER SKIPPABLE (security-critical)
+    if [[ "$actual_hash" != "$expected_hash" ]]; then
+        error "Checksum mismatch for ${asset}!
+  expected: ${expected_hash}
+  got:      ${actual_hash}
+
+The downloaded binary may be corrupted or tampered with.
+Installation aborted for security reasons.
+
+NOTE: Checksum mismatches are never skippable, even with --skip-checksum.
+This flag only applies when checksums are unavailable, not when they indicate a mismatch."
+    fi
+    success "Checksum verified."
+}
+
 # download_and_verify_checksums <repo> <version> <file> <asset> <temp_dir>
-# Download <repo>'s checksums.txt for <version> into <temp_dir> and verify
-# <file> against its <asset> entry. Fail-closed, with the --skip-checksum
-# semantics documented in --help. Shared by the needle and bead installs.
+# Download <repo>'s checksums.txt for <version> into <temp_dir>, then hand off
+# to verify_against_manifest. Used where the manifest is not already on disk.
 download_and_verify_checksums() {
     local repo="$1" version="$2" file="$3" asset="$4" temp_dir="$5"
-    # Download and verify checksums (fail-closed: verification enabled by default for security)
     local checksums_url="https://github.com/${repo}/releases/download/${version}/checksums.txt"
     local checksums_file="$temp_dir/checksums.txt"
     info "Downloading checksums..."
@@ -314,69 +389,9 @@ download_and_verify_checksums() {
         else
             error "Could not download checksums.txt. Installation aborted for security reasons."
         fi
-    else
-        # Checksums downloaded successfully, proceed with verification
-        info "Verifying checksum..."
-        local expected_hash
-        # `|| true`: grep exits 1 when the asset has no entry, and under
-        # `set -euo pipefail` that would abort the installer silently here —
-        # before the legible error below and before the --skip-checksum
-        # branch could apply. An empty result is handled explicitly.
-        expected_hash=$(grep "  ${asset}$\| ${asset}$" "$checksums_file" | awk '{print $1}' || true)
-        if [[ -z "$expected_hash" ]]; then
-            if [[ "$SKIP_CHECKSUM" == "true" ]]; then
-                warn_checksum_skipped
-                warn "Skipping checksum verification (checksum for ${asset} not found)"
-            else
-                error "Could not find checksum for ${asset} in checksums.txt. Installation aborted for security reasons."
-            fi
-        else
-            # We have an expected hash, compute the actual hash
-            local actual_hash=""
-            local found_hash_tool=false
-            if command -v sha256sum &>/dev/null; then
-                actual_hash=$(sha256sum "$file" | awk '{print $1}')
-                found_hash_tool=true
-            elif command -v shasum &>/dev/null; then
-                actual_hash=$(shasum -a 256 "$file" | awk '{print $1}')
-                found_hash_tool=true
-            elif command -v openssl &>/dev/null; then
-                actual_hash=$(openssl dgst -sha256 "$file" | awk '{print $2}')
-                found_hash_tool=true
-            fi
-
-            if [[ "$found_hash_tool" == "false" ]]; then
-                if [[ "$SKIP_CHECKSUM" == "true" ]]; then
-                    warn_checksum_skipped
-                    warn "Skipping checksum verification (no hash tool available)"
-                else
-                    error "No SHA-256 tool found. Need sha256sum, shasum, or openssl.
-Installation aborted for security reasons."
-                fi
-            elif [[ -z "$actual_hash" ]]; then
-                if [[ "$SKIP_CHECKSUM" == "true" ]]; then
-                    warn_checksum_skipped
-                    warn "Skipping checksum verification (failed to compute checksum)"
-                else
-                    error "Failed to compute checksum for downloaded binary. Installation aborted for security reasons."
-                fi
-            else
-                # Verify checksum matches - MISMATCHES ARE NEVER SKIPPABLE (security-critical)
-                if [[ "$actual_hash" != "$expected_hash" ]]; then
-                    error "Checksum mismatch for ${asset}!
-  expected: ${expected_hash}
-  got:      ${actual_hash}
-
-The downloaded binary may be corrupted or tampered with.
-Installation aborted for security reasons.
-
-NOTE: Checksum mismatches are never skippable, even with --skip-checksum.
-This flag only applies when checksums are unavailable, not when they indicate a mismatch."
-                fi
-                success "Checksum verified."
-            fi
-        fi
+        return 0
     fi
+    verify_against_manifest "$file" "$asset" "$checksums_file"
 }
 
 # version_ge <a> <b>: 0 when dotted version a >= b (leading "v" ignored).
@@ -525,27 +540,55 @@ main() {
     install_dir=$(dirname "$INSTALL_PATH")
     mkdir -p "$install_dir"
 
+    # Download and checksum-verify the transform binaries BEFORE anything is
+    # moved into place (GitHub #15). They are executables the release lists in
+    # checksums.txt, so the old download-and-move-without-checking loop was
+    # the same fail-open path this installer closed for the needle binary: a
+    # tampered transform used to land in ~/.local/bin with no complaint.
+    # Rules are the ones documented in --help — a missing manifest entry
+    # aborts unless the user opted out explicitly, and a mismatch aborts
+    # unconditionally. A transform the release does not ship at all stays a
+    # warning; nothing unverified gets installed because of it.
+    local transforms=("needle-transform-claude" "needle-transform-codex")
+    local -a verified_transforms=()
+    local transform transform_asset transform_url temp_transform
+    for transform in "${transforms[@]}"; do
+        transform_asset="${transform}-${arch}-${os}"
+        transform_url="https://github.com/${REPO}/releases/download/${version}/${transform_asset}"
+        temp_transform="$temp_dir/${transform}"
+
+        info "Fetching ${transform}..."
+        if ! download_file "$transform_url" "$temp_transform" 2>/dev/null; then
+            warn "${transform} not found in release assets — skipping (needle doctor will warn if referenced by an adapter)"
+            continue
+        fi
+
+        if [[ -s "$checksums_file" ]]; then
+            verify_against_manifest "$temp_transform" "$transform_asset" "$checksums_file"
+        else
+            # Reachable only under the explicit --skip-checksum opt-out:
+            # with verification enabled, an unusable manifest already
+            # aborted at the needle binary above.
+            warn "Skipping ${transform} checksum verification (checksums.txt unavailable)"
+        fi
+        chmod +x "$temp_transform"
+        verified_transforms+=("$transform")
+    done
+
     # Move binary into place
     info "Installing to $INSTALL_PATH..."
     mv "$temp_binary" "$INSTALL_PATH"
 
-    # Download and install transform binaries alongside needle.
-    local transforms=("needle-transform-claude" "needle-transform-codex")
-    for transform in "${transforms[@]}"; do
-        local transform_asset="${transform}-${arch}-${os}"
-        local transform_url="https://github.com/${REPO}/releases/download/${version}/${transform_asset}"
-        local transform_dest="${install_dir}/${transform}"
-        local temp_transform="$temp_dir/${transform}"
-
-        info "Installing ${transform}..."
-        if download_file "$transform_url" "$temp_transform" 2>/dev/null; then
-            chmod +x "$temp_transform"
-            mv "$temp_transform" "$transform_dest"
+    # The verified transforms go next to needle. This runs only after every
+    # artifact has passed verification, so an abort above leaves no partial
+    # install behind.
+    if [[ "${#verified_transforms[@]}" -gt 0 ]]; then
+        for transform in "${verified_transforms[@]}"; do
+            local transform_dest="${install_dir}/${transform}"
+            mv "$temp_dir/${transform}" "$transform_dest"
             success "${transform} installed to ${transform_dest}"
-        else
-            warn "${transform} not found in release assets — skipping (needle doctor will warn if referenced by an adapter)"
-        fi
-    done
+        done
+    fi
 
     # The bead backend goes next to needle (GitHub #16).
     install_bead "$arch" "$os" "$install_dir" "$temp_dir"

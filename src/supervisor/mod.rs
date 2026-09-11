@@ -772,66 +772,107 @@ impl Supervisor {
 
     /// Spawn a new worker process.
     async fn spawn_worker(&self, ready_count: usize) -> Result<()> {
-        // Phase 1: resource check before worker spawn.
-        // Check system resources (CPU and memory) before spawning a worker.
-        // If saturated, retry with bounded backoff rather than proceeding into
-        // a launch that may be killed by the OS due to resource pressure.
-        const MAX_RESOURCE_WAIT_SECS: u64 = 120; // Maximum total wait time
-        const RESOURCE_RETRY_DELAY_SECS: u64 = 5; // Initial retry delay
-        let mut resource_wait_total = 0u64;
-        let mut resource_retry_delay = RESOURCE_RETRY_DELAY_SECS;
+        // Phase 1: launch admission gate before worker spawn (plan revision 24
+        // section 4.6, N-T33).
+        //
+        // CPU and memory are checked against the launch policy before forking
+        // a worker. The supervisor is service-managed, so a saturated host
+        // holds here — resident, emitting `worker.admission_blocked`
+        // rate-bounded, retrying each check on a capped jittered backoff —
+        // instead of the old behavior (120s of retries, then bail into the
+        // tick error counter), which is what produced the 2026-09-03 churn of
+        // 68 failed launches in 15 minutes under systemd Restart=always. The
+        // hold polls the shutdown flag so a signaled supervisor still exits
+        // promptly, and it can only read thresholds from config, never relax
+        // them.
+        let admission_probe = crate::rate_limit::ResourceProbe::from_env();
+        let admission_thresholds = crate::rate_limit::AdmissionThresholds::new(
+            self.needle_config.worker.cpu_load_warn,
+            self.needle_config.worker.memory_free_warn_mb,
+        );
+        let mut admission_hold = crate::rate_limit::AdmissionHold::new(
+            crate::rate_limit::AdmissionHoldConfig::from_env(),
+        );
 
-        loop {
-            match crate::rate_limit::RateLimiter::check_system_resources_for_launch(
-                self.needle_config.worker.cpu_load_warn,
-                self.needle_config.worker.memory_free_warn_mb,
-                &self.telemetry,
-            ) {
-                Ok(()) => {
-                    // Resources are acceptable, proceed to spawn
-                    break;
-                }
-                Err(e) => {
-                    if resource_wait_total >= MAX_RESOURCE_WAIT_SECS {
-                        // Still saturated after max wait, fail the spawn explicitly
+        let spawn_admitted = loop {
+            let decision = crate::rate_limit::check_launch_admission(
+                admission_thresholds,
+                crate::rate_limit::read_resource_snapshot(&admission_probe),
+            );
+            match decision {
+                crate::rate_limit::AdmissionDecision::Admitted => break true,
+                crate::rate_limit::AdmissionDecision::Blocked(block) => {
+                    if admission_hold.observe_blocked()
+                        == crate::rate_limit::BlockedObservation::Emit
+                    {
+                        tracing::warn!(
+                            resource = %block.resource,
+                            actual = %block.actual,
+                            threshold = %block.threshold,
+                            attempt = admission_hold.attempts(),
+                            "launch admission blocked; supervisor holding spawn"
+                        );
                         self.telemetry.emit(
-                            EventKind::SupervisorSpawnFailed {
-                                error: format!(
-                                    "system still saturated after {}s wait: {}",
-                                    MAX_RESOURCE_WAIT_SECS, e
-                                ),
+                            EventKind::WorkerAdmissionBlocked {
+                                resource: block.resource.to_string(),
+                                actual: block.actual.clone(),
+                                threshold: block.threshold.clone(),
+                                reason: block.reason.clone(),
+                                attempt: admission_hold.attempts(),
+                                disposition: "holding".to_string(),
                             },
                             chrono::Utc::now(),
                         )?;
-                        bail!(
-                            "worker spawn deferred {} times ({}s total wait), system still saturated: {}. Spawn aborted — retry when load drops",
-                            resource_wait_total / resource_retry_delay,
-                            resource_wait_total,
-                            e
-                        );
                     }
 
-                    // Resources are saturated, wait and retry
-                    tracing::warn!(
-                        error = %e,
-                        wait_secs = resource_retry_delay,
-                        total_waited_secs = resource_wait_total,
-                        "system resources saturated, deferring worker spawn"
-                    );
-
-                    self.telemetry.emit(
-                        EventKind::SupervisorSpawnFailed {
-                            error: format!("system saturated: {}", e),
-                        },
-                        chrono::Utc::now(),
-                    )?;
-
-                    tokio::time::sleep(Duration::from_secs(resource_retry_delay)).await;
-                    resource_wait_total += resource_retry_delay;
-
-                    // Exponential backoff with cap at 30 seconds
-                    resource_retry_delay = std::cmp::min(resource_retry_delay * 2, 30);
+                    // Capped jittered backoff, polled in small ticks so a
+                    // shutdown signal interrupts the hold within ~100 ms.
+                    let mut shutdown_requested = false;
+                    let mut remaining = admission_hold.backoff();
+                    while remaining > Duration::ZERO {
+                        if self.shutdown.load(Ordering::SeqCst) {
+                            tracing::info!(
+                                blocked_secs = admission_hold.blocked_for().as_secs(),
+                                "shutdown requested while admission-blocked; spawn abandoned"
+                            );
+                            shutdown_requested = true;
+                            break;
+                        }
+                        let tick = remaining.min(Duration::from_millis(100));
+                        tokio::time::sleep(tick).await;
+                        remaining = remaining.saturating_sub(tick);
+                    }
+                    if shutdown_requested {
+                        break false;
+                    }
                 }
+            }
+        };
+
+        if !spawn_admitted {
+            // Shutdown arrived during the hold. Surface a normal "no spawn
+            // this tick" rather than an error so a shutdown is never counted
+            // against the supervisor's consecutive-error handling.
+            tracing::info!("spawn abandoned: supervisor shutting down while admission-blocked");
+            return Ok(());
+        }
+
+        {
+            let blocked_secs = admission_hold.blocked_for().as_secs();
+            let attempts = admission_hold.attempts();
+            if admission_hold.observe_admitted() {
+                tracing::info!(
+                    blocked_secs,
+                    attempts,
+                    "launch admission restored; spawning worker"
+                );
+                self.telemetry.emit(
+                    EventKind::WorkerAdmissionRestored {
+                        blocked_secs,
+                        attempts,
+                    },
+                    chrono::Utc::now(),
+                )?;
             }
         }
 

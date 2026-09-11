@@ -1193,6 +1193,7 @@ async fn otlp_export_contains_process_owner_resource_attribute() -> Result<()> {
         data: serde_json::json!({}),
         trace_id: None,
         span_id: None,
+        attempt_id: None,
     };
 
     telemetry.emit(&event).context("failed to emit event")?;

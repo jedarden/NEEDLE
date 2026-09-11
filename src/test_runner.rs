@@ -101,6 +101,12 @@ pub struct TestMetrics {
     pub duration_ms: u128,
     /// Timestamp when the test was completed (ISO 8601).
     pub timestamp: String,
+    /// Timestamp captured before the cargo test command was launched
+    /// (ISO 8601). Retained even when the launch fails. Optional so records
+    /// written before this field existed still deserialize; new records
+    /// always carry it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_timestamp: Option<String>,
 }
 
 impl TestMetrics {
@@ -111,6 +117,7 @@ impl TestMetrics {
             exit_code: result.exit_code,
             duration_ms: result.duration.as_millis(),
             timestamp: chrono::Utc::now().to_rfc3339(),
+            launch_timestamp: Some(result.launch_timestamp.clone()),
         }
     }
 }
@@ -132,6 +139,10 @@ pub struct TestResult {
     pub exit_code: Option<i32>,
     /// Duration of the test run.
     pub duration: Duration,
+    /// Timestamp captured before the cargo test command was launched
+    /// (ISO 8601 UTC). Taken prior to building the command, so it is
+    /// retained even when the launch fails.
+    pub launch_timestamp: String,
 }
 
 /// The status of test execution.
@@ -149,7 +160,7 @@ pub enum TestStatus {
 
 impl TestResult {
     /// Create a new test result from process output and duration.
-    fn from_output(output: Output, duration: Duration) -> Self {
+    fn from_output(output: Output, duration: Duration, launch_timestamp: String) -> Self {
         let exit_code = output.status.code();
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -162,17 +173,19 @@ impl TestResult {
             stderr,
             exit_code,
             duration,
+            launch_timestamp,
         }
     }
 
     /// Create a timeout test result with duration.
-    fn timeout(duration: Duration) -> Self {
+    fn timeout(duration: Duration, launch_timestamp: String) -> Self {
         Self {
             status: TestStatus::TimedOut,
             stdout: String::new(),
             stderr: String::from("command timed out"),
             exit_code: None,
             duration,
+            launch_timestamp,
         }
     }
 
@@ -479,10 +492,12 @@ impl TestRunner {
 
         let duration = start.elapsed();
 
-        // Build the test result with captured output
+        // Build the test result with captured output, carrying the timestamp
+        // captured before launch so the outcome record shows when the run
+        // actually started.
         let test_result = match result {
-            Some(output) => TestResult::from_output(output, duration),
-            None => TestResult::timeout(duration),
+            Some(output) => TestResult::from_output(output, duration, launch_timestamp.clone()),
+            None => TestResult::timeout(duration, launch_timestamp.clone()),
         };
 
         tracing::info!(
@@ -490,6 +505,7 @@ impl TestRunner {
             duration_secs = duration.as_secs(),
             stdout_len = test_result.stdout.len(),
             stderr_len = test_result.stderr.len(),
+            launch_timestamp = %test_result.launch_timestamp,
             "cargo test completed"
         );
 
@@ -599,6 +615,7 @@ mod tests {
             stderr: String::new(),
             exit_code: Some(0),
             duration: Duration::from_millis(100),
+            launch_timestamp: String::new(),
         };
         assert!(result.is_success());
         assert!(!result.is_failure());
@@ -614,6 +631,7 @@ mod tests {
             stderr: String::new(),
             exit_code: Some(1),
             duration: Duration::from_millis(200),
+            launch_timestamp: String::new(),
         };
         assert!(!result.is_success());
         assert!(result.is_failure());
@@ -627,6 +645,7 @@ mod tests {
             stderr: String::new(),
             exit_code: Some(101),
             duration: Duration::from_millis(150),
+            launch_timestamp: String::new(),
         };
         assert!(!result.is_success());
         assert!(result.is_failure());
@@ -641,6 +660,7 @@ mod tests {
             stderr: String::from("command timed out"),
             exit_code: None,
             duration: Duration::from_secs(300),
+            launch_timestamp: String::new(),
         };
         assert!(!result.is_success());
         assert!(result.is_failure());
@@ -655,6 +675,7 @@ mod tests {
             stderr: String::new(),
             exit_code: Some(0),
             duration: Duration::from_millis(100),
+            launch_timestamp: String::new(),
         };
         assert_eq!(result.captured_stdout(), "test output");
         assert_eq!(result.captured_stderr(), "");
@@ -668,6 +689,7 @@ mod tests {
             stderr: String::from("error message"),
             exit_code: Some(1),
             duration: Duration::from_millis(200),
+            launch_timestamp: String::new(),
         };
         assert_eq!(result.captured_stdout(), "");
         assert_eq!(result.captured_stderr(), "error message");
@@ -681,6 +703,7 @@ mod tests {
             stderr: String::new(),
             exit_code: Some(0),
             duration: Duration::from_millis(100),
+            launch_timestamp: String::new(),
         };
         assert!(success.summary().contains("passed"));
 
@@ -690,6 +713,7 @@ mod tests {
             stderr: String::new(),
             exit_code: Some(1),
             duration: Duration::from_millis(200),
+            launch_timestamp: String::new(),
         };
         assert!(failed.summary().contains("failed"));
 
@@ -699,6 +723,7 @@ mod tests {
             stderr: String::new(),
             exit_code: None,
             duration: Duration::from_secs(300),
+            launch_timestamp: String::new(),
         };
         assert!(timeout.summary().contains("timed out"));
     }
@@ -743,6 +768,7 @@ mod tests {
             stderr: String::from("test stderr content"),
             exit_code: Some(0),
             duration: Duration::from_millis(100),
+            launch_timestamp: String::new(),
         };
 
         // Persist output
@@ -781,6 +807,7 @@ mod tests {
             stderr: String::from("error details"),
             exit_code: Some(1),
             duration: Duration::from_millis(50),
+            launch_timestamp: String::new(),
         };
 
         // Persist output - should create nested directories
@@ -809,6 +836,7 @@ mod tests {
             stderr: String::from("stderr"),
             exit_code: Some(0),
             duration: Duration::from_millis(250),
+            launch_timestamp: String::new(),
         };
 
         // Persist metrics
@@ -845,6 +873,7 @@ mod tests {
             stderr: String::from("timeout error"),
             exit_code: None,
             duration: Duration::from_secs(300),
+            launch_timestamp: String::new(),
         };
 
         // Persist all files
@@ -882,6 +911,7 @@ mod tests {
             stderr: String::new(),
             exit_code: Some(0),
             duration: Duration::from_millis(10),
+            launch_timestamp: String::new(),
         };
 
         // Persist empty output
@@ -922,6 +952,7 @@ mod tests {
             stderr: large_stderr.clone(),
             exit_code: Some(101),
             duration: Duration::from_secs(1),
+            launch_timestamp: String::new(),
         };
 
         // Persist large output
@@ -952,6 +983,7 @@ mod tests {
             stderr: String::from("error[E0001]"),
             exit_code: Some(101),
             duration: Duration::from_millis(500),
+            launch_timestamp: String::new(),
         };
 
         let metrics = TestMetrics::from_result(&result);
@@ -969,6 +1001,7 @@ mod tests {
             exit_code: Some(0),
             duration_ms: 1000,
             timestamp: String::from("2026-07-14T12:00:00Z"),
+            launch_timestamp: Some(String::from("2026-07-14T11:59:55Z")),
         };
 
         // Test serialization
@@ -983,5 +1016,43 @@ mod tests {
         assert_eq!(deserialized.exit_code, Some(0));
         assert_eq!(deserialized.duration_ms, 1000);
         assert_eq!(deserialized.timestamp, "2026-07-14T12:00:00Z");
+        assert_eq!(
+            deserialized.launch_timestamp.as_deref(),
+            Some("2026-07-14T11:59:55Z")
+        );
+    }
+
+    #[test]
+    fn test_test_metrics_launch_timestamp_absent_deserializes_to_none() {
+        // Metrics written before the launch_timestamp field existed must still
+        // deserialize — #[serde(default)] supplies the None.
+        let legacy = r#"{
+            "status": "Failed",
+            "exit_code": 1,
+            "duration_ms": 7,
+            "timestamp": "2026-01-01T00:00:00Z"
+        }"#;
+
+        let deserialized: TestMetrics = serde_json::from_str(legacy).unwrap();
+        assert_eq!(deserialized.status, "Failed");
+        assert_eq!(deserialized.launch_timestamp, None);
+    }
+
+    #[test]
+    fn test_test_metrics_from_result_carries_launch_timestamp() {
+        let result = TestResult {
+            status: TestStatus::Success,
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: Some(0),
+            duration: Duration::from_millis(9),
+            launch_timestamp: String::from("2026-09-07T12:30:00+00:00"),
+        };
+
+        let metrics = TestMetrics::from_result(&result);
+        assert_eq!(
+            metrics.launch_timestamp.as_deref(),
+            Some("2026-09-07T12:30:00+00:00")
+        );
     }
 }

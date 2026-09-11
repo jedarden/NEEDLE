@@ -695,14 +695,14 @@ fn regression_single_claim_staleness_threshold() {
 
     let now = Utc::now();
 
-    // Scenario 1: Single OLD claim (older than stuck_threshold_secs of 300s)
+    // Scenario 1: Single OLD claim (older than the stale_claim_ttl of 300s)
     let single_old_claim = make_bead_with_timestamp(
         "single-old-claim",
         "worker-alpha",
         now - chrono::Duration::seconds(600), // 10 minutes old (exceeds 300s threshold)
     );
 
-    // Scenario 2: Single FRESH claim (within stuck_threshold_secs)
+    // Scenario 2: Single FRESH claim (within stale_claim_ttl)
     let single_fresh_claim = make_bead_with_timestamp(
         "single-fresh-claim",
         "worker-beta",

@@ -114,6 +114,10 @@ pub struct WeaveStrand {
     state_dir: PathBuf,
     agent: Box<dyn WeaveAgent>,
     telemetry: Telemetry,
+    /// Low-water backlog policy. `None` keeps the strand's ordinary cooldown
+    /// behaviour, which is what the default constructor gives tests and
+    /// callers that do not opt into generation.
+    generation: Option<super::generation::GeneratorGate>,
 }
 
 impl WeaveStrand {
@@ -134,7 +138,28 @@ impl WeaveStrand {
             state_dir,
             agent,
             telemetry,
+            generation: None,
         }
+    }
+
+    /// Enable low-water backlog generation for this strand.
+    ///
+    /// When the fleet's eligible-ready count falls below the configured
+    /// reserve, an acquired lease lets Weave bypass its own cooldown and
+    /// replenish the backlog instead of letting the cycle end in an alert.
+    pub fn with_generation(
+        mut self,
+        config: crate::config::GenerationConfig,
+        exclude_labels: Vec<String>,
+    ) -> Self {
+        self.generation = Some(super::generation::GeneratorGate::new(
+            config,
+            self.workspace.clone(),
+            self.state_dir.clone(),
+            exclude_labels,
+            self.telemetry.clone(),
+        ));
+        self
     }
 
     /// Compute the state file path for a workspace.
@@ -323,7 +348,11 @@ fn workspace_hash(workspace: &Path) -> String {
 
 impl WeaveStrand {
     /// Internal evaluation logic (wrapped with timeout by evaluate).
-    async fn evaluate_internal(&self, store: &dyn BeadStore) -> StrandResult {
+    async fn evaluate_internal(
+        &self,
+        store: &dyn BeadStore,
+        exclusions: &HashSet<BeadId>,
+    ) -> StrandResult {
         // Guard: disabled.
         if !self.config.enabled {
             let _ = self.telemetry.emit(
@@ -366,7 +395,28 @@ impl WeaveStrand {
             return StrandResult::NoWork;
         }
 
-        // Guard: cooldown.
+        // Guard: cooldown. The low-water generation gate can override it when
+        // the fleet's eligible-ready count has fallen below the reserve.
+        let generation_permit = match &self.generation {
+            Some(gate) => Some(gate.prepare("weave", store, exclusions).await),
+            None => None,
+        };
+        let bypass_cooldown = generation_permit
+            .as_ref()
+            .is_some_and(|permit| permit.bypasses_cooldown());
+
+        // A contended lease means another empty worker is already filling this
+        // gap, so generating here would duplicate the same plan gap. Continue
+        // the waterfall instead and leave the alert to the terminal verdict.
+        if matches!(
+            generation_permit,
+            Some(super::generation::GeneratorPermit::Contended)
+        ) {
+            return StrandResult::Skipped {
+                reason: "generation_lease_contended".to_string(),
+            };
+        }
+
         let state_path = self.state_file_path();
         let mut state = match WeaveState::load(&state_path) {
             Ok(s) => s,
@@ -376,7 +426,7 @@ impl WeaveStrand {
             }
         };
 
-        if !state.cooldown_elapsed(self.config.cooldown_hours) {
+        if !bypass_cooldown && !state.cooldown_elapsed(self.config.cooldown_hours) {
             let _ = self.telemetry.emit(
                 EventKind::StrandSkipped {
                     strand_name: "weave".to_string(),
@@ -441,6 +491,7 @@ impl WeaveStrand {
             Ok(r) => r,
             Err(e) => {
                 tracing::warn!(error = %e, "weave strand: agent dispatch failed");
+                self.emit_creator_failed(&e.to_string());
                 return StrandResult::Error(crate::types::StrandError::StoreError(e));
             }
         };
@@ -542,11 +593,37 @@ impl WeaveStrand {
                 created,
                 "weave strand: created beads from documentation gaps"
             );
+            self.emit_work_created(created);
             StrandResult::WorkCreated
         } else {
             tracing::info!("weave strand: no new beads created (all duplicates or filtered)");
             StrandResult::NoWork
         }
+    }
+
+    /// Record that this run replenished the backlog with real work.
+    fn emit_work_created(&self, created: u32) {
+        let _ = self.telemetry.emit(
+            EventKind::GenerationWorkCreated {
+                strand_name: "weave".to_string(),
+                workspace: self.workspace.display().to_string(),
+                detail: format!("{created} bead(s) created from documentation gaps"),
+            },
+            Utc::now(),
+        );
+    }
+
+    /// Record a recoverable generator failure. The waterfall still falls
+    /// through to the next generator, so this must not fail the cycle.
+    fn emit_creator_failed(&self, error: &str) {
+        let _ = self.telemetry.emit(
+            EventKind::GenerationCreatorFailed {
+                strand_name: "weave".to_string(),
+                workspace: self.workspace.display().to_string(),
+                error: error.to_string(),
+            },
+            Utc::now(),
+        );
     }
 }
 
@@ -556,12 +633,18 @@ impl super::Strand for WeaveStrand {
         "weave"
     }
 
-    async fn evaluate(&self, store: &dyn BeadStore, _exclusions: &HashSet<BeadId>) -> StrandResult {
+    fn is_generator(&self) -> bool {
+        true
+    }
+
+    async fn evaluate(&self, store: &dyn BeadStore, exclusions: &HashSet<BeadId>) -> StrandResult {
         // Apply strand-level timeout to prevent a single weave from stalling
         // the entire SELECTING cycle for minutes. See: needle-bf-5hlhn
         let timeout_duration = std::time::Duration::from_secs(WEAVE_STRAND_TIMEOUT_SECS);
 
-        match tokio::time::timeout(timeout_duration, self.evaluate_internal(store)).await {
+        match tokio::time::timeout(timeout_duration, self.evaluate_internal(store, exclusions))
+            .await
+        {
             Ok(result) => result,
             Err(_) => {
                 tracing::warn!(
@@ -685,6 +768,7 @@ impl WeaveAgent for CliWeaveAgent {
 mod tests {
     use super::*;
     use crate::bead_store::{Filters, RepairReport};
+    use crate::config::GenerationConfig;
     use crate::types::{Bead, BeadId, BeadStatus, ClaimResult};
 
     use anyhow::Result;
@@ -880,7 +964,7 @@ mod tests {
         let telemetry = Telemetry::new("test".to_string());
         let strand = WeaveStrand::new(
             WeaveConfig::default(),
-            PathBuf::from("/tmp"),
+            dir.path().to_path_buf(),
             dir.path().to_path_buf(),
             Box::new(MockAgent::new("NO_GAPS")),
             telemetry,
@@ -894,7 +978,7 @@ mod tests {
         let telemetry = Telemetry::new("test".to_string());
         let strand = WeaveStrand::new(
             WeaveConfig::default(), // disabled by default
-            PathBuf::from("/tmp"),
+            dir.path().to_path_buf(),
             dir.path().to_path_buf(),
             Box::new(MockAgent::new("NO_GAPS")),
             telemetry,
@@ -950,6 +1034,110 @@ mod tests {
         let store = MockStore::empty();
         let result = strand.evaluate(&store, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::NoWork));
+    }
+
+    #[tokio::test]
+    async fn low_water_reserve_overrides_cooldown() {
+        let (_dir, workspace) = make_test_workspace();
+        let state_dir = tempfile::tempdir().unwrap();
+
+        // Weave ran recently, so its ordinary cooldown is active.
+        let state = WeaveState {
+            last_run: Some(Utc::now()),
+            seen_titles: HashSet::new(),
+        };
+        let hash = workspace_hash(&workspace);
+        let state_path = state_dir.path().join(format!("{hash}.json"));
+        state.save(&state_path).unwrap();
+
+        // The fleet's eligible-ready frontier is empty, so it sits below the
+        // reserve and the low-water gate lets this generator run anyway.
+        let response = r#"[{"title": "Replenished gap", "body": "body", "priority": 2}]"#;
+        let strand = WeaveStrand::new(
+            make_enabled_config(),
+            workspace,
+            state_dir.path().to_path_buf(),
+            Box::new(MockAgent::new(response)),
+            Telemetry::new("worker-a".to_string()),
+        )
+        .with_generation(
+            GenerationConfig {
+                enabled: true,
+                low_water_reserve: 1,
+                lease_ttl_secs: 300,
+            },
+            Vec::new(),
+        );
+
+        let store = MockStore::empty();
+        let result = strand.evaluate(&store, &HashSet::new()).await;
+
+        assert!(
+            matches!(result, StrandResult::WorkCreated),
+            "low-water reserve should override the cooldown; got {:?}",
+            result
+        );
+        assert_eq!(store.created_beads().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn contended_generation_lease_continues_without_generating() {
+        let (_dir, workspace) = make_test_workspace();
+        let state_dir = tempfile::tempdir().unwrap();
+
+        let generation = GenerationConfig {
+            enabled: true,
+            low_water_reserve: 1,
+            lease_ttl_secs: 300,
+        };
+
+        // The first empty worker sees the empty frontier, wins the
+        // workspace-plus-strand lease, and fills the gap.
+        let first_response = r#"[{"title": "Replenished gap", "body": "body", "priority": 2}]"#;
+        let first = WeaveStrand::new(
+            make_enabled_config(),
+            workspace.clone(),
+            state_dir.path().to_path_buf(),
+            Box::new(MockAgent::new(first_response)),
+            Telemetry::new("worker-a".to_string()),
+        )
+        .with_generation(generation.clone(), Vec::new());
+        let first_store = MockStore::empty();
+        assert!(
+            matches!(
+                first.evaluate(&first_store, &HashSet::new()).await,
+                StrandResult::WorkCreated
+            ),
+            "the first worker must generate while it holds the lease"
+        );
+
+        // A second empty worker sees the same empty frontier. The lease the
+        // first worker took on this workspace-plus-strand pair is still live,
+        // so this one must not ask the generator to fill the same gap.
+        let second_response = r#"[{"title": "Duplicate gap", "body": "body", "priority": 2}]"#;
+        let second = WeaveStrand::new(
+            make_enabled_config(),
+            workspace,
+            state_dir.path().to_path_buf(),
+            Box::new(MockAgent::new(second_response)),
+            Telemetry::new("worker-b".to_string()),
+        )
+        .with_generation(generation, Vec::new());
+
+        let second_store = MockStore::empty();
+        let result = second.evaluate(&second_store, &HashSet::new()).await;
+
+        assert_eq!(
+            second_store.created_beads().len(),
+            0,
+            "a contended lease must not generate a duplicate plan gap"
+        );
+        match result {
+            StrandResult::Skipped { reason } => {
+                assert_eq!(reason, "generation_lease_contended");
+            }
+            other => panic!("expected the waterfall to continue, got {:?}", other),
+        }
     }
 
     #[tokio::test]

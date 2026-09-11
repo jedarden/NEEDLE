@@ -31,10 +31,14 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::telemetry::Telemetry;
 use crate::test_output::TestOutput;
 use crate::trace::TraceCapture;
 use crate::types::BeadId;
 use crate::util::capture_timestamp;
+
+/// Telemetry phase used for structured log entries about test execution.
+const TEST_EXECUTION_PHASE: &str = "test_execution";
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Constants
@@ -448,6 +452,7 @@ impl TestOutcome {
             stdout_len: self.stdout.len(),
             stderr_len: self.stderr.len(),
             timestamp: chrono::Utc::now(),
+            launch_timestamp: Some(self.launch_timestamp.clone()),
         }
     }
 }
@@ -477,6 +482,13 @@ pub struct TestMetrics {
     pub stderr_len: usize,
     /// When the test completed.
     pub timestamp: chrono::DateTime<chrono::Utc>,
+    /// Timestamp when the cargo test command was launched (ISO 8601 UTC).
+    ///
+    /// Captured before the command is built or spawned, so it is retained
+    /// even when the launch fails. Optional so records written before this
+    /// field existed still deserialize; new records always carry it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_timestamp: Option<String>,
 }
 
 impl TestMetrics {
@@ -639,6 +651,14 @@ pub struct CargoTest {
     args: TestArgs,
     /// Timeout in seconds.
     timeout_secs: u64,
+    /// Optional telemetry emitter for test execution lifecycle events.
+    ///
+    /// When set, a structured telemetry entry carrying the pre-spawn launch
+    /// timestamp is emitted when a run starts. Telemetry failures are logged
+    /// and never fail the run itself.
+    telemetry: Option<Telemetry>,
+    /// Optional bead context attached to emitted telemetry events.
+    bead_id: Option<BeadId>,
 }
 
 impl CargoTest {
@@ -648,6 +668,8 @@ impl CargoTest {
             workspace: workspace.to_path_buf(),
             args: TestArgs::default(),
             timeout_secs: DEFAULT_TEST_TIMEOUT_SECS,
+            telemetry: None,
+            bead_id: None,
         }
     }
 
@@ -657,12 +679,29 @@ impl CargoTest {
             workspace: workspace.to_path_buf(),
             args,
             timeout_secs: DEFAULT_TEST_TIMEOUT_SECS,
+            telemetry: None,
+            bead_id: None,
         }
     }
 
     /// Set a custom timeout (default is 600 seconds).
     pub fn with_timeout(mut self, timeout_secs: u64) -> Self {
         self.timeout_secs = timeout_secs;
+        self
+    }
+
+    /// Attach a telemetry emitter for test execution lifecycle events.
+    ///
+    /// Cloning a `Telemetry` handle is cheap — the runner shares the worker's
+    /// background writer and sequence counter.
+    pub fn with_telemetry(mut self, telemetry: Telemetry) -> Self {
+        self.telemetry = Some(telemetry);
+        self
+    }
+
+    /// Attach a bead ID included in emitted telemetry events.
+    pub fn with_bead_id(mut self, bead_id: BeadId) -> Self {
+        self.bead_id = Some(bead_id);
         self
     }
 
@@ -681,12 +720,17 @@ impl CargoTest {
         // This ensures the timestamp is captured even if command construction fails
         let launch_timestamp = capture_timestamp();
 
+        let args = self.args.build_args();
+
+        // Emit the launch timestamp through telemetry before the command is
+        // built or spawned, so the start time is recorded even when the
+        // launch itself fails.
+        self.emit_started(&launch_timestamp, &args);
+
         tracing::debug!(
             launch_timestamp = %launch_timestamp,
             "captured cargo test launch timestamp"
         );
-
-        let args = self.args.build_args();
 
         tracing::info!(
             workspace = %self.workspace.display(),
@@ -753,6 +797,7 @@ impl CargoTest {
             success = output.status.success(),
             compilation_failed,
             compilation_error_count = compilation_errors.len(),
+            launch_timestamp = %launch_timestamp,
             "cargo test completed"
         );
 
@@ -781,6 +826,33 @@ impl CargoTest {
     /// Get the timeout in seconds.
     pub fn timeout_secs(&self) -> u64 {
         self.timeout_secs
+    }
+
+    /// Emit a telemetry entry recording the start of a test execution.
+    ///
+    /// Uses the generic structured-log event (`log.entry`) with phase
+    /// `test_execution`, the same emission shape as `worker::logging`. The
+    /// entry carries the launch timestamp captured before the cargo command
+    /// was built, so the start time survives even when the command fails to
+    /// start.
+    ///
+    /// A no-op when no telemetry emitter is attached. Emission failures are
+    /// logged at warn level and never fail the test run.
+    fn emit_started(&self, launch_timestamp: &str, args: &[String]) {
+        let Some(telemetry) = self.telemetry.as_ref() else {
+            return;
+        };
+
+        let context = serde_json::json!({
+            "launch_timestamp": launch_timestamp,
+            "workspace": self.workspace.display().to_string(),
+            "args": args,
+            "timeout_secs": self.timeout_secs,
+        });
+
+        if let Err(e) = telemetry.log(TEST_EXECUTION_PHASE, "info", context, self.bead_id.clone()) {
+            tracing::warn!(error = %e, "failed to emit test execution start telemetry");
+        }
     }
 
     /// Run cargo test and write output to files.
@@ -1621,6 +1693,7 @@ mod tests {
             stdout_len: 50,
             stderr_len: 0,
             timestamp: chrono::Utc::now(),
+            launch_timestamp: None,
         };
         assert!(metrics.success());
     }
@@ -1635,6 +1708,7 @@ mod tests {
             stdout_len: 50,
             stderr_len: 0,
             timestamp: chrono::Utc::now(),
+            launch_timestamp: None,
         };
         assert!(!metrics.success());
     }
@@ -1649,6 +1723,7 @@ mod tests {
             stdout_len: 50,
             stderr_len: 0,
             timestamp: chrono::Utc::now(),
+            launch_timestamp: None,
         };
         assert!(!metrics.success());
     }
@@ -1663,6 +1738,7 @@ mod tests {
             stdout_len: 50,
             stderr_len: 0,
             timestamp: chrono::Utc::now(),
+            launch_timestamp: None,
         };
 
         let duration = metrics.duration();
@@ -1680,6 +1756,7 @@ mod tests {
             stdout_len: 100,
             stderr_len: 50,
             timestamp: chrono::Utc::now(),
+            launch_timestamp: Some("2026-09-07T12:00:00+00:00".to_string()),
         };
 
         // Test JSON serialization
@@ -1688,12 +1765,73 @@ mod tests {
         assert!(json.contains("\"exit_code\":0"));
         assert!(json.contains("\"duration_ms\":1000"));
         assert!(json.contains("\"timed_out\":false"));
+        assert!(json.contains("\"launch_timestamp\":\"2026-09-07T12:00:00+00:00\""));
 
         // Test JSON deserialization
         let deserialized: TestMetrics = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.test_name, "serialization_test");
         assert_eq!(deserialized.exit_code, Some(0));
         assert_eq!(deserialized.duration_ms, 1000);
+        assert_eq!(
+            deserialized.launch_timestamp.as_deref(),
+            Some("2026-09-07T12:00:00+00:00")
+        );
+    }
+
+    #[test]
+    fn test_metrics_launch_timestamp_absent_deserializes_to_none() {
+        // Metrics records written before launch_timestamp existed carry no
+        // such key; the #[serde(default)] on the field keeps them readable.
+        let legacy = r#"{
+            "test_name": "legacy_record",
+            "exit_code": 0,
+            "duration_ms": 42,
+            "timed_out": false,
+            "stdout_len": 1,
+            "stderr_len": 0,
+            "timestamp": "2026-01-01T00:00:00Z"
+        }"#;
+
+        let deserialized: TestMetrics = serde_json::from_str(legacy).unwrap();
+        assert_eq!(deserialized.test_name, "legacy_record");
+        assert_eq!(deserialized.launch_timestamp, None);
+    }
+
+    #[test]
+    fn test_metrics_launch_timestamp_omitted_when_none() {
+        let metrics = TestMetrics {
+            test_name: "no_launch_ts".to_string(),
+            exit_code: Some(0),
+            duration_ms: 10,
+            timed_out: false,
+            stdout_len: 1,
+            stderr_len: 0,
+            timestamp: chrono::Utc::now(),
+            launch_timestamp: None,
+        };
+
+        let json = serde_json::to_string(&metrics).unwrap();
+        assert!(!json.contains("launch_timestamp"));
+    }
+
+    #[test]
+    fn test_outcome_to_metrics_carries_launch_timestamp() {
+        let outcome = TestOutcome {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: Some(0),
+            duration: Duration::from_millis(5),
+            timed_out: false,
+            compilation_failed: false,
+            compilation_errors: Vec::new(),
+            launch_timestamp: "2026-09-07T11:59:59+00:00".to_string(),
+        };
+
+        let metrics = outcome.to_metrics("carries_ts".to_string());
+        assert_eq!(
+            metrics.launch_timestamp.as_deref(),
+            Some("2026-09-07T11:59:59+00:00")
+        );
     }
 
     // ──────────────────────────────────────────────────────────────────────────────
