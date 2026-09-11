@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-09-11T10:54:09.312616693Z",
+  "timestamp": "2026-09-11T11:19:38.470645349Z",
   "total_open_beads": 455,
   "exclusion_criteria": {
     "has_assignee": 2,
@@ -7,7 +7,7 @@
     "has_dependencies": 365,
     "resource_conflicts": 0
   },
-  "final_candidate_count": 110,
+  "final_candidate_count": 111,
   "excluded_beads": [
     {
       "bead_id": "needle-6b02eb9d",
@@ -1530,17 +1530,6 @@
     {
       "bead_id": "needle-3771863e",
       "title": "A gate command that cannot execute (exit 127) must be a gate error, not a task failure",
-      "priority": 1,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
-      "bead_id": "needle-7af0a360",
-      "title": "Generate provisional attempt id (UUIDv7) at dispatch start and thread it through the trace",
       "priority": 1,
       "assignee": null,
       "manual_blocked": false,
