@@ -6413,6 +6413,50 @@ mod tests {
     }
 
     #[test]
+    fn each_dispatch_cycle_mints_a_distinct_attempt_id_and_owns_its_events() {
+        // Two dispatches back to back, each shaped like the worker's cycle:
+        // mint at dispatch start, emit, clear at cycle end. Every event must
+        // carry its own cycle's ID — never the previous attempt's — and the
+        // two IDs must differ (plan section 4.4 step 1: one provisional ID per
+        // dispatch, so ledger rows never join two dispatches together).
+        let telemetry = Telemetry::new("needle-test".to_string());
+        let mut minted: Vec<String> = Vec::new();
+
+        for _ in 0..2 {
+            let attempt_id = uuid::Uuid::now_v7().to_string();
+            telemetry.set_attempt_id(&attempt_id);
+
+            let event = telemetry.make_event(&EventKind::QueueEmpty, Utc::now());
+            assert_eq!(
+                event.attempt_id.as_deref(),
+                Some(attempt_id.as_str()),
+                "every event of a dispatch cycle carries that cycle's attempt ID"
+            );
+            let stored = event.attempt_id.as_deref().expect("just asserted present");
+            let parsed =
+                uuid::Uuid::parse_str(stored).expect("the attempt ID must be a valid UUID");
+            assert_eq!(
+                parsed.get_version_num(),
+                7,
+                "attempt IDs are UUIDv7 so ledger rows sort by dispatch start"
+            );
+            minted.push(attempt_id);
+
+            telemetry.clear_attempt_id();
+            assert_eq!(
+                telemetry.attempt_id(),
+                None,
+                "the cycle is over: no attempt ID may leak into the next dispatch"
+            );
+        }
+
+        assert_ne!(
+            minted[0], minted[1],
+            "two dispatches must never share a provisional attempt ID"
+        );
+    }
+
+    #[test]
     fn attempt_id_is_visible_through_a_cloned_handle() {
         // The outcome handler holds its own clone of the worker's telemetry
         // handle (`OutcomeHandler::new(config, telemetry.clone())`), so the ID

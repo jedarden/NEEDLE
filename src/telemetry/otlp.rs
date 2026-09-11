@@ -2530,6 +2530,86 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_exported_log_record_carries_the_provisional_attempt_id() {
+        use opentelemetry_sdk::logs::{LogBatch, SdkLogRecord, SdkLoggerProvider};
+
+        #[derive(Debug, Clone, Default)]
+        struct CapturingLogExporter {
+            records: Arc<Mutex<Vec<SdkLogRecord>>>,
+        }
+
+        impl SdkLogExporter for CapturingLogExporter {
+            async fn export(&self, batch: LogBatch<'_>) -> opentelemetry_sdk::error::OTelSdkResult {
+                let mut records = self.records.lock().expect("log exporter mutex poisoned");
+                records.extend(batch.iter().map(|(record, _)| record.clone()));
+                Ok(())
+            }
+        }
+
+        let exporter = CapturingLogExporter::default();
+        let mut sink = make_test_sink();
+        sink.logger_provider = Arc::new(
+            SdkLoggerProvider::builder()
+                .with_simple_exporter(exporter.clone())
+                .build(),
+        );
+
+        // A dispatch-cycle event: the envelope's provisional attempt ID must
+        // survive into the OTLP payload so an exported span and the JSONL rows
+        // the dispatch produced join on one field (plan section 4.4 step 1).
+        let attempt_id = uuid::Uuid::now_v7().to_string();
+        let mut in_cycle = make_test_event("state.transition", None, serde_json::json!({}));
+        in_cycle.attempt_id = Some(attempt_id.clone());
+        sink.emit_log(&in_cycle)
+            .expect("log record should be emitted");
+
+        let records = exporter
+            .records
+            .lock()
+            .expect("log exporter mutex poisoned");
+        let attr = |name: &str| {
+            records[0]
+                .attributes_iter()
+                .find(|(key, _)| key.as_str() == name)
+                .and_then(|(_, value)| match value {
+                    AnyValue::String(value) => Some(value.as_str().to_string()),
+                    _ => None,
+                })
+        };
+        assert_eq!(
+            attr("attempt_id").as_deref(),
+            Some(attempt_id.as_str()),
+            "the OTLP log record must carry the dispatch's attempt ID"
+        );
+        drop(records);
+
+        // Outside a dispatch cycle there is no attempt ID, and the payload
+        // must not invent one.
+        exporter
+            .records
+            .lock()
+            .expect("log exporter mutex poisoned")
+            .clear();
+        sink.emit_log(&make_test_event(
+            "state.transition",
+            None,
+            serde_json::json!({}),
+        ))
+        .expect("log record should be emitted");
+        let records = exporter
+            .records
+            .lock()
+            .expect("log exporter mutex poisoned");
+        assert!(
+            records[0]
+                .attributes_iter()
+                .find(|(key, _)| key.as_str() == "attempt_id")
+                .is_none(),
+            "attempt_id must be absent from the OTLP payload outside a dispatch cycle"
+        );
+    }
+
     /// Helper to create a test event.
     fn make_test_event(
         event_type: &str,
