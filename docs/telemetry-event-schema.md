@@ -368,6 +368,60 @@ as verified success over all attempts in the group.
 }
 ```
 
+**Example (a verified success — every gate passed, no `terminal_reason`):**
+```json
+{
+  "event_type": "attempt.resolved",
+  "timestamp": "2026-09-10T12:51:02.884Z",
+  "worker_id": "needle-alpha",
+  "session_id": "9f2c11aa",
+  "sequence": 907,
+  "bead_id": "needle-2f97cbb5",
+  "workspace": "/home/coding/NEEDLE",
+  "attempt_id": "0198f6a2-e4b5-7cc3-9c2e-1f4b8d6a02c1",
+  "data": {
+    "schema_version": 1,
+    "attempt_id": "0198f6a2-e4b5-7cc3-9c2e-1f4b8d6a02c1",
+    "provisional": true,
+    "bead_id": "needle-2f97cbb5",
+    "workspace": "/home/coding/NEEDLE",
+    "bead_revision_start": "f902c854",
+    "worker": "needle-alpha",
+    "adapter": "claude-code-glm-5.3-flash",
+    "model": "glm-5.3-flash",
+    "provider": "anthropic",
+    "prompt_template": "pluck",
+    "template_version": "pluck-default",
+    "gate_results": [
+      { "name": "clippy", "status": "pass", "duration_ms": 0 },
+      { "name": "fmt", "status": "pass", "duration_ms": 0 }
+    ],
+    "outcome": "verified_success",
+    "requested_action": "Completed",
+    "tokens_in": 118000,
+    "tokens_out": 5200,
+    "estimated_cost_usd": 0.0894,
+    "commits": ["deadbee"],
+    "duration_ms": 589000,
+    "exit_code": 0
+  }
+}
+```
+
+**Reading the two examples together:**
+- **Provisional ids are not authoritative.** Both rows carry
+  `provisional: true` and a dispatch-local UUIDv7 `attempt_id` minted at
+  dispatch start — the ID identifies the dispatch, not a durable attempt
+  (that starts with N-T03). No consumer may treat a provisional row as
+  authoritative, and provisional rows are excluded from SLOs (plan Gate A).
+- **`exit_code` is observation only.** It records what the agent process did,
+  never whether the work was accepted. The `work_failure` row above exited `0`
+  and is still a failure, because `clippy` ran and rejected the work; the
+  `verified_success` row exited `0` *and* passed every gate. The `outcome`
+  field — not the exit code — carries the verdict. `terminal_reason` names the
+  gate on the failure — `gate:clippy`, the `name` of the entry `gate_results`
+  shows `fail` — and is absent on the success.
+
 ---
 
 ### Upgrade Check Events

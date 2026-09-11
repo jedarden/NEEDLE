@@ -6091,6 +6091,13 @@ macro_rules! log_debug {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The attempt.resolved schema-fixture checks live in `test_utils` so the
+    // outcome handler's tests can validate captured rows against the same
+    // versioned contract.
+    use crate::telemetry::test_utils::{
+        attempt_resolved_fixture, check_object_matches, documented_attempt_resolved_examples,
+        fixture_spec,
+    };
 
     /// In-memory sink for testing — collects events via a shared Vec.
     struct MemorySink {
@@ -6474,119 +6481,10 @@ mod tests {
     }
 
     // ── attempt.resolved schema fixture (N-T16) ──────────────────────────────
-
-    /// The versioned contract every serialized `attempt.resolved` row must
-    /// satisfy. Compiled into the test binary so a moved or renamed fixture
-    /// is a build error rather than a silently skipped check.
-    fn attempt_resolved_fixture() -> serde_json::Value {
-        serde_json::from_str(include_str!(
-            "../../tests/fixtures/attempt-resolved-v1.schema.json"
-        ))
-        .expect("schema fixture must parse")
-    }
-
-    /// Check one value against one property spec from the fixture. Only the
-    /// JSON Schema subset the fixture actually uses is implemented — that
-    /// subset is closed, so an unsupported keyword here is a fixture bug to
-    /// fix, not a validation to skip.
-    fn check_value_matches_spec(
-        key: &str,
-        value: &serde_json::Value,
-        spec: &serde_json::Value,
-    ) -> Result<(), String> {
-        if let Some(expected) = spec.get("const") {
-            if value != expected {
-                return Err(format!(
-                    "{key} must equal the fixture const {expected}, got {value}"
-                ));
-            }
-        }
-        let spec_type = spec
-            .get("type")
-            .and_then(|t| t.as_str())
-            .unwrap_or_else(|| panic!("fixture spec for {key} must declare a type"));
-        match spec_type {
-            "string" => {
-                if !value.is_string() {
-                    return Err(format!("{key} must be a string, got {value}"));
-                }
-            }
-            "boolean" => {
-                if !value.is_boolean() {
-                    return Err(format!("{key} must be a boolean, got {value}"));
-                }
-            }
-            "integer" => {
-                let n = value
-                    .as_i64()
-                    .ok_or_else(|| format!("{key} must be an integer, got {value}"))?;
-                if let Some(min) = spec.get("minimum").and_then(|m| m.as_i64()) {
-                    if n < min {
-                        return Err(format!("{key}={n} is below the minimum {min}"));
-                    }
-                }
-            }
-            "number" => {
-                if !value.is_number() {
-                    return Err(format!("{key} must be a number, got {value}"));
-                }
-            }
-            "array" => {
-                let entries = value
-                    .as_array()
-                    .ok_or_else(|| format!("{key} must be an array, got {value}"))?;
-                if let Some(items) = spec.get("items") {
-                    for (i, entry) in entries.iter().enumerate() {
-                        check_value_matches_spec(&format!("{key}[{i}]"), entry, items)?;
-                    }
-                }
-            }
-            "object" => check_object_matches(key, value, spec)?,
-            other => panic!("fixture spec for {key} uses unsupported type {other}"),
-        }
-        if let Some(allowed) = spec.get("enum").and_then(|e| e.as_array()) {
-            if !allowed.contains(value) {
-                return Err(format!(
-                    "{key}={value} is not one of the fixture's enum values {allowed:?}"
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    /// Check an object value against an object spec: required keys present,
-    /// and every key that appears covered by the fixture (strict — a field
-    /// missing from the fixture is a schema change that must be versioned).
-    fn check_object_matches(
-        key: &str,
-        value: &serde_json::Value,
-        spec: &serde_json::Value,
-    ) -> Result<(), String> {
-        let obj = value
-            .as_object()
-            .ok_or_else(|| format!("{key} must be an object, got {value}"))?;
-        if let Some(required) = spec.get("required").and_then(|r| r.as_array()) {
-            for field in required {
-                let field = field.as_str().expect("required entries are strings");
-                if !obj.contains_key(field) {
-                    return Err(format!("{key} is missing required field {field}"));
-                }
-            }
-        }
-        let props = spec
-            .get("properties")
-            .and_then(|p| p.as_object())
-            .expect("object spec must declare properties");
-        for field in obj.keys() {
-            if !props.contains_key(field) {
-                return Err(format!("{key}.{field} is not part of the fixture contract"));
-            }
-        }
-        for (field, field_value) in obj {
-            check_value_matches_spec(&format!("{key}.{field}"), field_value, &props[field])?;
-        }
-        Ok(())
-    }
+    //
+    // The fixture itself, the JSON Schema subset that validates a row against
+    // it, and the extractor for the docs' published examples all live in
+    // `test_utils` (shared with the outcome handler's tests).
 
     /// A fully-populated ledger row, mirroring what the outcome handler emits
     /// at the end of a real dispatch cycle.
@@ -6627,13 +6525,6 @@ mod tests {
             terminal_reason: Some("gate:clippy".to_string()),
             exit_code: 0,
         }
-    }
-
-    fn fixture_spec() -> serde_json::Value {
-        serde_json::json!({
-            "required": attempt_resolved_fixture()["required"],
-            "properties": attempt_resolved_fixture()["properties"],
-        })
     }
 
     #[test]
@@ -6835,6 +6726,151 @@ mod tests {
             "a present hash must survive the round-trip"
         );
         assert_eq!(parsed.duration_ms, Some(fields.duration_ms));
+    }
+
+    /// The fixture must validate a payload *captured* through the real emit
+    /// path — envelope built by `make_event`, payload serialized by `to_data`
+    /// — not only values a test constructed by hand.
+    #[tokio::test]
+    async fn captured_attempt_resolved_payload_conforms_to_the_schema_fixture() {
+        let (sink, events) = MemorySink::new();
+        let telemetry = Telemetry::with_sink("needle-test".to_string(), sink);
+        telemetry.set_workspace("/home/coding/NEEDLE");
+        let attempt_id = uuid::Uuid::now_v7().to_string();
+        telemetry.set_attempt_id(&attempt_id);
+
+        // Production copies the row's id out of the telemetry cell itself
+        // (OutcomeHandler reads `telemetry.attempt_id()` into the fields), so
+        // mirror that here — a row carrying some other id than the envelope
+        // would be a producer bug this test must not simulate.
+        let mut fields = attempt_resolved_fields();
+        fields.attempt_id = attempt_id.clone();
+        telemetry
+            .emit(
+                EventKind::AttemptResolved(Box::new(fields.clone())),
+                Utc::now(),
+            )
+            .expect("emit should not fail");
+        drop(telemetry);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let captured = events.lock().unwrap();
+        assert_eq!(captured.len(), 1, "one dispatch, one captured row");
+        let row = &captured[0];
+        assert_eq!(row.event_type, "attempt.resolved");
+        // The envelope agrees with the row it carries: same attempt, same
+        // bead, same workspace — ledger consumers can join on either.
+        assert_eq!(row.attempt_id.as_deref(), Some(attempt_id.as_str()));
+        assert_eq!(
+            row.attempt_id.as_deref(),
+            row.data["attempt_id"].as_str(),
+            "envelope attempt_id must match the row's own field"
+        );
+        assert_eq!(
+            row.bead_id.as_ref().map(|bead| bead.to_string()),
+            Some(fields.bead_id.to_string()),
+            "envelope bead_id must match the row's own field"
+        );
+        assert_eq!(
+            row.workspace
+                .as_ref()
+                .map(|path| path.display().to_string()),
+            Some(fields.workspace.clone()),
+            "envelope workspace must match the row's own field"
+        );
+        check_object_matches("captured attempt.resolved", &row.data, &fixture_spec())
+            .unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// The examples published in docs/telemetry-event-schema.md are the shape
+    /// consumers copy; each one's ledger row must satisfy the same versioned
+    /// fixture the code does, and its envelope must agree with the row.
+    #[test]
+    fn documented_examples_conform_to_the_schema_fixture() {
+        let examples = documented_attempt_resolved_examples();
+        assert!(
+            examples.len() >= 2,
+            "docs must document at least a verified_success and a work_failure row, found {}",
+            examples.len()
+        );
+        for (line, example) in &examples {
+            let data = example.get("data").unwrap_or_else(|| {
+                panic!("attempt.resolved example at docs line {line} must nest its ledger row under `data`")
+            });
+            check_object_matches("docs attempt.resolved", data, &fixture_spec())
+                .unwrap_or_else(|e| panic!("docs example at line {line}: {e}"));
+            assert_eq!(
+                example["attempt_id"].as_str(),
+                data["attempt_id"].as_str(),
+                "docs line {line}: envelope attempt_id must match the row"
+            );
+            assert_eq!(
+                example["bead_id"].as_str(),
+                data["bead_id"].as_str(),
+                "docs line {line}: envelope bead_id must match the row"
+            );
+            assert_eq!(
+                example["worker_id"].as_str(),
+                data["worker"].as_str(),
+                "docs line {line}: envelope worker_id must match the row's worker"
+            );
+            assert_eq!(
+                example["workspace"].as_str(),
+                data["workspace"].as_str(),
+                "docs line {line}: envelope workspace must match the row"
+            );
+        }
+    }
+
+    /// The two rows the contract requires docs to publish: a verified success,
+    /// and the load-bearing case — a gate rejection behind a zero exit code.
+    #[test]
+    fn docs_document_a_verified_success_and_a_work_failure_row() {
+        let examples = documented_attempt_resolved_examples();
+        let outcomes: Vec<&str> = examples
+            .iter()
+            .filter_map(|(_, example)| example["data"]["outcome"].as_str())
+            .collect();
+        assert!(
+            outcomes.contains(&"verified_success"),
+            "docs need a documented verified_success row, found {outcomes:?}"
+        );
+        assert!(
+            outcomes.contains(&"work_failure"),
+            "docs need a documented work_failure row, found {outcomes:?}"
+        );
+
+        for (line, example) in &examples {
+            let data = &example["data"];
+            if data["outcome"] == "verified_success" {
+                assert!(
+                    data.get("terminal_reason").is_none(),
+                    "docs line {line}: a verified success carries no terminal_reason"
+                );
+            } else if data["outcome"] == "work_failure" {
+                assert_eq!(
+                    data["exit_code"], 0,
+                    "docs line {line}: the documented work_failure must be the case the semantics hang on — a rejected gate behind a zero exit code"
+                );
+                let reason = data["terminal_reason"].as_str().unwrap_or_else(|| {
+                    panic!("docs line {line}: the row must say which gate rejected the work")
+                });
+                let gate = reason.strip_prefix("gate:").unwrap_or_else(|| {
+                    panic!(
+                        "docs line {line}: terminal_reason {reason:?} must name the rejecting gate"
+                    )
+                });
+                assert!(
+                    data["gate_results"]
+                        .as_array()
+                        .expect("gate_results is an array")
+                        .iter()
+                        .any(|g| g["name"].as_str() == Some(gate)
+                            && g["status"].as_str() == Some("fail")),
+                    "docs line {line}: terminal_reason {reason} must name a gate the row shows failing"
+                );
+            }
+        }
     }
 
     #[test]

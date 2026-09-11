@@ -305,6 +305,195 @@ impl TestHelper {
     }
 }
 
+// ── attempt.resolved schema-fixture checks (N-T16) ──────────────────────────
+//
+// Shared helpers for validating a serialized `attempt.resolved` row against
+// `tests/fixtures/attempt-resolved-v1.schema.json` — the versioned contract.
+// They live here rather than in `telemetry::tests` so the outcome handler's
+// tests and any integration test can validate captured rows, not just
+// synthetic ones.
+
+/// The versioned contract every serialized `attempt.resolved` row must
+/// satisfy. Compiled into the test binary so a moved or renamed fixture
+/// is a build error rather than a silently skipped check.
+#[cfg(any(test, feature = "integration"))]
+pub fn attempt_resolved_fixture() -> serde_json::Value {
+    serde_json::from_str(include_str!(
+        "../../tests/fixtures/attempt-resolved-v1.schema.json"
+    ))
+    .expect("schema fixture must parse")
+}
+
+/// Check one value against one property spec from the fixture. Only the
+/// JSON Schema subset the fixture actually uses is implemented — that
+/// subset is closed, so an unsupported keyword here is a fixture bug to
+/// fix, not a validation to skip.
+#[cfg(any(test, feature = "integration"))]
+fn check_value_matches_spec(
+    key: &str,
+    value: &serde_json::Value,
+    spec: &serde_json::Value,
+) -> Result<(), String> {
+    if let Some(expected) = spec.get("const") {
+        if value != expected {
+            return Err(format!(
+                "{key} must equal the fixture const {expected}, got {value}"
+            ));
+        }
+    }
+    let spec_type = spec
+        .get("type")
+        .and_then(|t| t.as_str())
+        .unwrap_or_else(|| panic!("fixture spec for {key} must declare a type"));
+    match spec_type {
+        "string" => {
+            if !value.is_string() {
+                return Err(format!("{key} must be a string, got {value}"));
+            }
+        }
+        "boolean" => {
+            if !value.is_boolean() {
+                return Err(format!("{key} must be a boolean, got {value}"));
+            }
+        }
+        "integer" => {
+            let n = value
+                .as_i64()
+                .ok_or_else(|| format!("{key} must be an integer, got {value}"))?;
+            if let Some(min) = spec.get("minimum").and_then(|m| m.as_i64()) {
+                if n < min {
+                    return Err(format!("{key}={n} is below the minimum {min}"));
+                }
+            }
+        }
+        "number" => {
+            let n = value
+                .as_f64()
+                .ok_or_else(|| format!("{key} must be a number, got {value}"))?;
+            if let Some(min) = spec.get("minimum").and_then(|m| m.as_f64()) {
+                if n < min {
+                    return Err(format!("{key}={n} is below the minimum {min}"));
+                }
+            }
+        }
+        "array" => {
+            let entries = value
+                .as_array()
+                .ok_or_else(|| format!("{key} must be an array, got {value}"))?;
+            if let Some(items) = spec.get("items") {
+                for (i, entry) in entries.iter().enumerate() {
+                    check_value_matches_spec(&format!("{key}[{i}]"), entry, items)?;
+                }
+            }
+        }
+        "object" => check_object_matches(key, value, spec)?,
+        other => panic!("fixture spec for {key} uses unsupported type {other}"),
+    }
+    if let Some(allowed) = spec.get("enum").and_then(|e| e.as_array()) {
+        if !allowed.contains(value) {
+            return Err(format!(
+                "{key}={value} is not one of the fixture's enum values {allowed:?}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Check an object value against an object spec: required keys present,
+/// and every key that appears covered by the fixture (strict — a field
+/// missing from the fixture is a schema change that must be versioned).
+#[cfg(any(test, feature = "integration"))]
+pub fn check_object_matches(
+    key: &str,
+    value: &serde_json::Value,
+    spec: &serde_json::Value,
+) -> Result<(), String> {
+    let obj = value
+        .as_object()
+        .ok_or_else(|| format!("{key} must be an object, got {value}"))?;
+    if let Some(required) = spec.get("required").and_then(|r| r.as_array()) {
+        for field in required {
+            let field = field.as_str().expect("required entries are strings");
+            if !obj.contains_key(field) {
+                return Err(format!("{key} is missing required field {field}"));
+            }
+        }
+    }
+    let props = spec
+        .get("properties")
+        .and_then(|p| p.as_object())
+        .expect("object spec must declare properties");
+    for field in obj.keys() {
+        if !props.contains_key(field) {
+            return Err(format!("{key}.{field} is not part of the fixture contract"));
+        }
+    }
+    for (field, field_value) in obj {
+        check_value_matches_spec(&format!("{key}.{field}"), field_value, &props[field])?;
+    }
+    Ok(())
+}
+
+/// The `required` + `properties` half of the fixture — the part that
+/// constrains a serialized row's `data` object.
+#[cfg(any(test, feature = "integration"))]
+pub fn fixture_spec() -> serde_json::Value {
+    serde_json::json!({
+        "required": attempt_resolved_fixture()["required"],
+        "properties": attempt_resolved_fixture()["properties"],
+    })
+}
+
+/// Every `attempt.resolved` example documented in
+/// `docs/telemetry-event-schema.md`, as `(1-based doc line of the fence,
+/// parsed JSON)`.
+///
+/// The docs are the published shape of the row; extracting them here keeps
+/// them honest against the versioned fixture (both compiled in, so a moved
+/// or renamed doc is a build error rather than a silently skipped check).
+/// Any ```json block that fails to parse while mentioning this event is a
+/// broken published example and fails loudly; blocks about other events are
+/// not this function's concern.
+#[cfg(any(test, feature = "integration"))]
+pub fn documented_attempt_resolved_examples() -> Vec<(usize, serde_json::Value)> {
+    let doc = include_str!("../../docs/telemetry-event-schema.md");
+    let mut examples = Vec::new();
+    let mut lines = doc.lines().enumerate();
+    while let Some((start, line)) = lines.next() {
+        if line.trim() != "```json" {
+            continue;
+        }
+        let mut block = String::new();
+        let mut closed = false;
+        for (_, body) in lines.by_ref() {
+            if body.trim() == "```" {
+                closed = true;
+                break;
+            }
+            block.push_str(body);
+            block.push('\n');
+        }
+        assert!(
+            closed,
+            "unclosed ```json fence at docs/telemetry-event-schema.md:{}",
+            start + 1
+        );
+        if !block.contains("attempt.resolved") {
+            continue;
+        }
+        let parsed: serde_json::Value = serde_json::from_str(&block).unwrap_or_else(|e| {
+            panic!(
+                "attempt.resolved example at docs/telemetry-event-schema.md:{} must parse as JSON: {e}",
+                start + 1
+            )
+        });
+        if parsed.get("event_type").and_then(|t| t.as_str()) == Some("attempt.resolved") {
+            examples.push((start + 1, parsed));
+        }
+    }
+    examples
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
