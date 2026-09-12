@@ -10602,3 +10602,5 @@
 {"bead":"needle-echo","event":"claim","strand":"pluck","ts":"2026-09-12T14:46:26.963056289+00:00","worker":"test-worker"}
 {"adapter":"echo-test","attempt_id":"01a09615-8195-7d82-be75-cce9739e5eb8","bead":"needle-echo","event":"dispatch","model":null,"strand":"pluck","ts":"2026-09-12T14:46:26.965752360+00:00","worker":"test-worker"}
 {"bead":"needle-echo","duration_ms":58,"event":"complete","exit_code":0,"outcome":"success","strand":"pluck","ts":"2026-09-12T14:46:27.089307739+00:00","worker":"test-worker"}
+{"bead":"needle-29d26e3a","event":"claim","strand":"pluck","ts":"2026-09-12T15:16:37.476684983+00:00","worker":"glm-needle"}
+{"adapter":"claude-code-glm-5.3-flash","attempt_id":"01a09631-24ea-7980-b59c-051fc35a7c78","bead":"needle-29d26e3a","event":"dispatch","model":"glm-5.3-flash","strand":"pluck","ts":"2026-09-12T15:16:38.250881604+00:00","worker":"glm-needle"}

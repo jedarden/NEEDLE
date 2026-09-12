@@ -4170,3 +4170,6 @@
 {"last_strand":null,"state":"idle","ts":"2026-09-12T14:45:51.981186766+00:00","worker":"test-worker"}
 {"last_strand":null,"state":"idle","ts":"2026-09-12T14:46:27.264869873+00:00","worker":"test-zero-budget"}
 {"last_strand":null,"state":"idle","ts":"2026-09-12T14:46:29.875670647+00:00","worker":"adm-test"}
+{"last_strand":null,"state":"idle","ts":"2026-09-12T15:16:10.935010577+00:00","worker":"glm-needle"}
+{"last_strand":null,"state":"idle","ts":"2026-09-12T15:52:30.755230721+00:00","worker":"hb-test-worker"}
+{"last_strand":null,"state":"idle","ts":"2026-09-12T16:08:48.795119958+00:00","worker":"hb-test-worker"}
