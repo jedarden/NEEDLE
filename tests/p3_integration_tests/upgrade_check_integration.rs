@@ -88,9 +88,12 @@ fn manual_upgrade_command_shape_is_unchanged() {
 
     assert!(matches!(
         plain.command,
-        CliCommand::Upgrade { check: false }
+        CliCommand::Upgrade { check: false, .. }
     ));
-    assert!(matches!(check.command, CliCommand::Upgrade { check: true }));
+    assert!(matches!(
+        check.command,
+        CliCommand::Upgrade { check: true, .. }
+    ));
 }
 
 #[test]

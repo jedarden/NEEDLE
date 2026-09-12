@@ -52,6 +52,7 @@ fn make_test_config(agent_default: &str, routing: Option<RoutingConfig>) -> Conf
             args: vec![],
             timeout: 120,
             routing,
+            evidence_routing: Default::default(),
         },
         ..Default::default()
     }
