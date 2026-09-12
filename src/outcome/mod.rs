@@ -23,7 +23,9 @@ use crate::quarantine_expiry::{
     capped_exponential_backoff, content_hash_label, QUARANTINE_BASE_SECS, QUARANTINE_MAX_SECS,
 };
 use crate::telemetry::{EventKind, Telemetry};
-use crate::types::{AgentOutcome, Bead, BeadAction, BeadId, BeadStatus, HandlerResult, Outcome};
+use crate::types::{
+    AgentOutcome, Bead, BeadAction, BeadId, BeadStatus, HandlerResult, Outcome, ReleaseReason,
+};
 use crate::validation::{
     dod_bypass, predispatch, verify_shipped_work, GateConfig, GateReport, GateResult,
     ValidationGate,
@@ -416,6 +418,13 @@ pub struct OutcomeHandler {
     /// wrapper-path dispatch its row.
     ledger_row_emitted: Arc<std::sync::Mutex<Option<String>>>,
 }
+
+/// Close reason recorded when the shipped-work gate confirms an agent's work
+/// landed but the agent did not close the bead itself. Operator-visible in the
+/// bead's history, so it must say why the fleet closed something on the agent's
+/// behalf.
+const SHIPPED_WORK_CLOSE_REASON: &str =
+    "closed by NEEDLE: shipped-work gate confirmed the work landed but the agent did not close it";
 
 impl OutcomeHandler {
     pub fn new(config: Config, telemetry: Telemetry) -> Self {
@@ -1819,17 +1828,49 @@ impl OutcomeHandler {
                             .await;
                             // Shipped work detected — reset failure count.
                             let _ = self.reset_failure_count(store, bead).await;
-                            // Mark as completed - the agent shipped work but forgot to close.
-                            // We can't close via bead store (no close method), so emit completion
-                            // event and release. The bead remains open but work is done.
+                            // The gate CONFIRMED the work landed; the agent merely failed to
+                            // close the bead. Close it here.
+                            //
+                            // This previously released instead, on the stated grounds that the
+                            // store had "no close method". It has one — BeadStore::close,
+                            // implemented by cli_store against `bead close --id --reason` — so
+                            // the comment was stale. Releasing a bead whose work is finished puts
+                            // it straight back on the ready frontier, where another worker claims
+                            // and redoes it: the subscription pays twice for one unit of output
+                            // while the fleet looks busy. It also emitted BeadCompleted AND
+                            // BeadReleased for the same bead, which is why completed and released
+                            // counts overlapped and deliberate releases read as failures.
                             events.push(EventKind::BeadCompleted {
                                 bead_id: bead.id.clone(),
                                 duration_ms: 0,
                             });
-                            let mut release_events =
-                                self.prepare_release_events(store, bead).await?;
-                            events.append(&mut release_events);
-                            return Ok((BeadAction::Released, events));
+                            match self
+                                .timeout_op(
+                                    || store.close(&bead.id, SHIPPED_WORK_CLOSE_REASON),
+                                    "close",
+                                )
+                                .await
+                            {
+                                Ok(Some(())) => return Ok((BeadAction::Closed, events)),
+                                other => {
+                                    // A backend that cannot close, or a timeout. Fall back to the
+                                    // previous behaviour rather than leaving the claim dangling —
+                                    // an open bead is recoverable, a stuck claim is not.
+                                    tracing::warn!(
+                                        bead_id = %bead.id,
+                                        close_result = ?other.as_ref().map(|o| o.is_some()),
+                                        "shipped work confirmed but close failed; releasing \
+                                         instead (the bead will be re-worked)"
+                                    );
+                                    let mut release_events =
+                                        self.prepare_release_events(store, bead).await?;
+                                    events.append(&mut release_events);
+                                    return Ok((
+                                        BeadAction::Released(ReleaseReason::ShippedWorkCloseFailed),
+                                        events,
+                                    ));
+                                }
+                            }
                         }
                         Ok(crate::validation::GateResult::Fail(reason)) => {
                             tracing::warn!(
@@ -1851,7 +1892,7 @@ impl OutcomeHandler {
                             if release_succeeded {
                                 let _ = self.increment_failure_count(store, bead).await;
                             }
-                            return Ok((BeadAction::Released, events));
+                            return Ok((BeadAction::Released(ReleaseReason::GateFailed), events));
                         }
                         Ok(crate::validation::GateResult::ExecutionError { command, reason }) => {
                             tracing::warn!(
@@ -1864,7 +1905,10 @@ impl OutcomeHandler {
                             let mut release_events =
                                 self.prepare_release_events(store, bead).await?;
                             events.append(&mut release_events);
-                            return Ok((BeadAction::Released, events));
+                            return Ok((
+                                BeadAction::Released(ReleaseReason::GateExecutionError),
+                                events,
+                            ));
                         }
                         Err(e) => {
                             tracing::warn!(
@@ -1886,7 +1930,7 @@ impl OutcomeHandler {
                             if release_succeeded {
                                 let _ = self.increment_failure_count(store, bead).await;
                             }
-                            return Ok((BeadAction::Released, events));
+                            return Ok((BeadAction::Released(ReleaseReason::GateError), events));
                         }
                     }
                 } else {
@@ -1897,7 +1941,10 @@ impl OutcomeHandler {
                     // If enforce_shipped_work is disabled, just release without closing.
                     let mut release_events = self.prepare_release_events(store, bead).await?;
                     events.append(&mut release_events);
-                    return Ok((BeadAction::Released, events));
+                    return Ok((
+                        BeadAction::Released(ReleaseReason::EnforcementDisabled),
+                        events,
+                    ));
                 }
             }
             Ok(None) => {
@@ -1914,7 +1961,10 @@ impl OutcomeHandler {
                 });
                 let mut release_events = self.prepare_release_events(store, bead).await?;
                 events.append(&mut release_events);
-                return Ok((BeadAction::Released, events));
+                return Ok((
+                    BeadAction::Released(ReleaseReason::ClosureVerificationTimeout),
+                    events,
+                ));
             }
             Err(e) => {
                 // Error - we cannot verify bead closure, so release to enforce postcondition.
@@ -1931,7 +1981,10 @@ impl OutcomeHandler {
                 });
                 let mut release_events = self.prepare_release_events(store, bead).await?;
                 events.append(&mut release_events);
-                return Ok((BeadAction::Released, events));
+                return Ok((
+                    BeadAction::Released(ReleaseReason::ClosureVerificationError),
+                    events,
+                ));
             }
         }
 
@@ -2127,7 +2180,7 @@ impl OutcomeHandler {
         let release_succeeded = !events
             .iter()
             .any(|e| matches!(e, EventKind::WorkerHandlingTimeout { .. }));
-        let mut action = BeadAction::Released;
+        let mut action = BeadAction::Released(ReleaseReason::GateFailed);
         if infra_failure {
             // The gate, not the bead, produced this failure. Release without
             // incrementing the failure count — the same contract as a gate
@@ -2438,7 +2491,7 @@ impl OutcomeHandler {
         // The gate never ran, so this is not a failure of the work — it's a
         // configuration or environment issue that should be fixed before retry.
 
-        Ok((BeadAction::Released, events))
+        Ok((BeadAction::Released(ReleaseReason::AgentNotFound), events))
     }
 
     /// Create a "Gate broken" alert bead when workspace degrades.
@@ -2897,7 +2950,7 @@ impl OutcomeHandler {
         let release_succeeded = !events
             .iter()
             .any(|e| matches!(e, EventKind::WorkerHandlingTimeout { .. }));
-        let mut action = BeadAction::Released;
+        let mut action = BeadAction::Released(ReleaseReason::DispatchFailed);
         if release_succeeded {
             match self.increment_failure_count(store, bead).await {
                 Ok(new_count) => {
@@ -3138,7 +3191,7 @@ impl OutcomeHandler {
         );
 
         let events = self.prepare_release_events(store, bead).await?;
-        Ok((BeadAction::Released, events))
+        Ok((BeadAction::Released(ReleaseReason::AgentNotFound), events))
     }
 
     /// Interrupted: release bead for graceful shutdown.
@@ -3642,6 +3695,7 @@ mod tests {
     #[allow(dead_code)] // Fields read via pattern matching in test assertions
     enum StoreAction {
         Release(String),
+        Close(String, String),
         Block(String),
         Reopen(String),
         AddLabel(String, String),
@@ -3655,6 +3709,15 @@ mod tests {
         actions: Mutex<Vec<StoreAction>>,
         show_status: BeadStatus,
         labels: Vec<String>,
+        /// Dependencies `show()` should report. Needed by any test whose
+        /// behaviour depends on the POST-dispatch bead rather than the one
+        /// passed in: the handler re-reads state through `show()`, so a bead
+        /// constructed in the test body is NOT what the gates see.
+        dependencies: Vec<crate::types::BrDependency>,
+        /// Notes the shipped-work gate should read. `Bead` carries no notes, so
+        /// the gate fetches them through the store; with no predispatch snapshot
+        /// a non-empty note is what makes the gate Pass.
+        notes: Option<String>,
         fail_flush: bool,
     }
 
@@ -3664,8 +3727,15 @@ mod tests {
                 actions: Mutex::new(Vec::new()),
                 show_status,
                 labels: Vec::new(),
+                dependencies: Vec::new(),
+                notes: None,
                 fail_flush: false,
             }
+        }
+
+        fn with_notes(mut self, notes: &str) -> Self {
+            self.notes = Some(notes.to_string());
+            self
         }
 
         fn with_labels(mut self, labels: Vec<String>) -> Self {
@@ -3718,6 +3788,18 @@ mod tests {
 
     #[async_trait]
     impl BeadStore for MockBeadStore {
+        async fn notes(&self, _id: &BeadId) -> Result<Option<String>> {
+            Ok(self.notes.clone())
+        }
+
+        async fn close(&self, id: &BeadId, reason: &str) -> Result<()> {
+            self.actions
+                .lock()
+                .unwrap()
+                .push(StoreAction::Close(id.to_string(), reason.to_string()));
+            Ok(())
+        }
+
         async fn list_all(&self) -> Result<Vec<Bead>> {
             Ok(vec![])
         }
@@ -3729,7 +3811,10 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(StoreAction::Show(id.to_string()));
-            Ok(test_bead(self.show_status.clone()))
+            let mut bead = test_bead(self.show_status.clone());
+            bead.labels = self.labels.clone();
+            bead.dependencies = self.dependencies.clone();
+            Ok(bead)
         }
         async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<ClaimResult> {
             Ok(ClaimResult::NotClaimable {
@@ -3985,6 +4070,57 @@ mod tests {
 
     // ── handle tests ──
 
+    /// Confirmed shipped work must CLOSE the bead, not release it.
+    ///
+    /// Releasing a bead whose work the gate has already verified puts it back on
+    /// the ready frontier, where another worker claims and redoes it — the
+    /// subscription pays twice for one unit of output while the fleet looks
+    /// busy. It also emitted BeadCompleted and BeadReleased for the same bead,
+    /// which is why completed and released counts overlapped and deliberate
+    /// releases read as failures.
+    ///
+    /// Reaching the confirmed-shipped-work branch in a unit test uses the gate's
+    /// documented conservative path: with no predispatch snapshot available it
+    /// judges "the closure on its note alone", so a non-empty note Passes rather
+    /// than failing a bead on a comparison the gate could not make. The mock
+    /// provides no snapshot, so supplying notes is sufficient.
+    #[tokio::test]
+    async fn confirmed_shipped_work_closes_rather_than_releasing() {
+        // Enforcement ON — this is the gate under test.
+        let handler = test_handler();
+
+        // The evidence must be on the STORE, not on the bead constructed here:
+        // the gate reads notes through the store, and judges the POST-dispatch
+        // bead the handler re-reads via show(). Setting either locally silently
+        // has no effect and the gate sees a bead with no shipped work.
+        let store = test_store(BeadStatus::Open)
+            .with_notes("evidence: implemented and verified the change");
+
+        let bead = test_bead(BeadStatus::InProgress);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.bead_action,
+            BeadAction::Closed,
+            "shipped work confirmed by the gate must close the bead"
+        );
+        let actions = store.actions();
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, StoreAction::Close(_, _))),
+            "the store must be asked to close: {actions:?}"
+        );
+        assert!(
+            !actions.iter().any(|a| matches!(a, StoreAction::Release(_))),
+            "a finished bead must not be returned to the ready frontier: {actions:?}"
+        );
+    }
+
     #[tokio::test]
     async fn handle_success_bead_closed_by_agent() {
         let handler = test_handler_without_shipped_work();
@@ -4023,9 +4159,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.outcome, Outcome::Failure);
-        assert_eq!(
-            result.bead_action,
-            BeadAction::Released,
+        assert!(
+            matches!(result.bead_action, BeadAction::Released(_)),
             "exit 0 without verified closure must release the claim"
         );
         let actions = store.actions();
@@ -4056,7 +4191,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.outcome, Outcome::Failure);
-        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
         assert!(!result.telemetry_events.is_empty());
 
         let actions = store.actions();
@@ -4085,7 +4220,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
         let actions = store.actions();
         assert!(
             actions.iter().any(
@@ -4226,7 +4361,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
         let actions = store.actions();
         assert!(
             !actions.iter().any(|a| matches!(a, StoreAction::Block(_))),
@@ -4254,7 +4389,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
         let actions = store.actions();
         assert!(
             !actions.iter().any(|a| matches!(a, StoreAction::Block(_))),
@@ -4386,7 +4521,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.outcome, Outcome::Success);
-        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
         let actions = store.actions();
         assert!(
             actions.iter().any(
@@ -4469,7 +4604,7 @@ mod tests {
 
         assert_eq!(result.outcome, Outcome::Success);
         // Released (the gate-error action), not reopened or quarantined.
-        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
 
         // The unsatisfiable check must not burn the failure counter, label the
         // bead as a verification failure, or cycle it.
@@ -4578,7 +4713,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.outcome, Outcome::AgentNotFound);
-        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
 
         // NOTE: the handler no longer calls store.release() -- release is applied by
         // the worker via apply_bead_action(). The release intent is asserted above as
@@ -4861,7 +4996,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.outcome, Outcome::Failure);
-        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
 
         let actions = store.actions();
         // NOTE: the handler no longer calls store.release() -- release is applied by
@@ -4888,7 +5023,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
 
         let actions = store.actions();
         assert!(
@@ -4940,7 +5075,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
     }
 
     // ── per-workspace gate resolution (needle-da77b68a) ──
@@ -5033,7 +5168,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.outcome, Outcome::Failure);
-        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
         let actions = store.actions();
         assert!(
             actions.iter().any(
@@ -5393,7 +5528,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.outcome, Outcome::Failure);
-        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
         assert!(store
             .inner
             .actions()
@@ -5749,7 +5884,7 @@ mod tests {
             .unwrap();
 
         // Critical: the bead MUST be released even though workspace operations failed
-        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
         assert!(!result.telemetry_events.is_empty());
 
         // Verify that the error was logged and handled
@@ -5804,7 +5939,7 @@ mod tests {
         };
 
         // The bead should be released
-        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
 
         // Verify failure count was NOT incremented
         let actions = store.actions();
@@ -5866,7 +6001,7 @@ mod tests {
             .unwrap();
 
         // The bead should be released
-        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
 
         // Verify failure count WAS incremented
         let actions = store.actions();
@@ -6061,7 +6196,7 @@ mod tests {
         // Route identity: handle_success re-routed into handle_gate_error —
         // released without burning the retry counter, gate.execution_error
         // emitted — not into handle_gate_failure.
-        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
         helper.sync().await;
         assert!(
             !helper.events_by_type("gate.execution_error").is_empty(),
@@ -6146,7 +6281,7 @@ mod tests {
 
         // Route identity: handle_gate_failure released AND burned the retry
         // counter — the mirror image of the gate_error route above.
-        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
         assert!(
             store.actions().iter().any(
                 |a| matches!(a, StoreAction::AddLabel(_, label) if label == "failure-count:1")
@@ -6403,7 +6538,7 @@ mod tests {
                 .await
                 .unwrap()
         };
-        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
         helper.sync().await;
         assert_eq!(
             helper.events_by_type("attempt.resolved").len(),
@@ -6435,7 +6570,7 @@ mod tests {
             .handle(&store, &bead, &test_output(1), false)
             .await
             .unwrap();
-        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
         helper.sync().await;
         assert_eq!(
             helper.events_by_type("attempt.resolved").len(),
@@ -6492,7 +6627,7 @@ mod tests {
             .handle(&store, &bead, &test_output(1), false)
             .await
             .unwrap();
-        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
         helper.sync().await;
         let rows = helper.events_by_type("attempt.resolved");
         assert_eq!(rows.len(), 1, "cycle 1 resolved to one row, got {rows:?}");

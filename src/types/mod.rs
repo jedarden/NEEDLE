@@ -1788,7 +1788,12 @@ mod tests {
     #[test]
     fn bead_action_display() {
         assert_eq!(BeadAction::Closed.to_string(), "closed");
-        assert_eq!(BeadAction::Released.to_string(), "released");
+        // Display now carries the reason, so a release is self-describing in
+        // logs and telemetry instead of being one opaque word.
+        assert_eq!(
+            BeadAction::Released(ReleaseReason::GateFailed).to_string(),
+            "released:gate_failed"
+        );
         assert_eq!(BeadAction::Deferred.to_string(), "deferred");
         assert_eq!(BeadAction::Alerted.to_string(), "alerted");
         assert_eq!(BeadAction::Quarantined.to_string(), "quarantined");
@@ -3793,6 +3798,63 @@ pub enum IdleAction {
 // ──────────────────────────────────────────────────────────────────────────────
 // BeadAction
 // ──────────────────────────────────────────────────────────────────────────────
+/// Why a bead went back to open status.
+///
+/// Every release used to be reported as the single string
+/// `handler_action:released`, which made very different situations
+/// indistinguishable in telemetry: work that shipped but could not be closed, a
+/// gate that judged no work had shipped, a gate that could not run at all, and
+/// enforcement simply being switched off. They want opposite responses — a store
+/// problem, a bead problem, an infrastructure problem, a config choice — so they
+/// are now distinct.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReleaseReason {
+    /// The shipped-work gate confirmed the work landed, but closing the bead
+    /// failed, so it was released rather than left with a dangling claim. The
+    /// work will be redone; this is the expensive case and should be rare.
+    ShippedWorkCloseFailed,
+    /// The shipped-work gate ran and found no evidence work landed.
+    GateFailed,
+    /// The shipped-work gate could not execute (its command failed).
+    GateExecutionError,
+    /// Evaluating the shipped-work gate returned an error.
+    GateError,
+    /// `worker.enforce_shipped_work` is disabled, so the bead is released
+    /// without any closure judgement being made.
+    EnforcementDisabled,
+    /// Verifying whether the agent closed the bead timed out.
+    ClosureVerificationTimeout,
+    /// Verifying whether the agent closed the bead errored.
+    ClosureVerificationError,
+    /// The dispatch itself failed; the bead goes back for another attempt.
+    DispatchFailed,
+    /// The configured agent binary could not be found, so no work was possible.
+    AgentNotFound,
+    /// The worker was cancelled while registering the attempt.
+    RegistrationCancelled,
+    /// Post-push CI correlation failed safely, so the implementation bead is
+    /// deliberately left open for the CI lifecycle to resolve.
+    CiCorrelationFailed,
+}
+
+impl fmt::Display for ReleaseReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let s = match self {
+            ReleaseReason::ShippedWorkCloseFailed => "shipped_work_close_failed",
+            ReleaseReason::GateFailed => "gate_failed",
+            ReleaseReason::GateExecutionError => "gate_execution_error",
+            ReleaseReason::GateError => "gate_error",
+            ReleaseReason::EnforcementDisabled => "enforcement_disabled",
+            ReleaseReason::ClosureVerificationTimeout => "closure_verification_timeout",
+            ReleaseReason::ClosureVerificationError => "closure_verification_error",
+            ReleaseReason::DispatchFailed => "dispatch_failed",
+            ReleaseReason::AgentNotFound => "agent_not_found",
+            ReleaseReason::RegistrationCancelled => "registration_cancelled",
+            ReleaseReason::CiCorrelationFailed => "ci_correlation_failed",
+        };
+        write!(f, "{s}")
+    }
+}
 
 /// Terminal action produced by the outcome handler for a claimed bead.
 ///
@@ -3805,8 +3867,8 @@ pub enum IdleAction {
 pub enum BeadAction {
     /// The agent closed the bead and the handler confirmed the closed state.
     Closed,
-    /// Bead was released back to open status.
-    Released,
+    /// Bead was released back to open status, with why.
+    Released(ReleaseReason),
     /// Bead was deferred (e.g., timeout with deferred label).
     Deferred,
     /// An alert bead was created.
@@ -3824,7 +3886,7 @@ impl fmt::Display for BeadAction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             BeadAction::Closed => write!(f, "closed"),
-            BeadAction::Released => write!(f, "released"),
+            BeadAction::Released(reason) => write!(f, "released:{reason}"),
             BeadAction::Deferred => write!(f, "deferred"),
             BeadAction::Alerted => write!(f, "alerted"),
             BeadAction::Quarantined => write!(f, "quarantined"),

@@ -54,7 +54,7 @@ use crate::strand::StrandRunner;
 use crate::telemetry::{EventKind, Telemetry};
 use crate::types::{
     AgentOutcome, Bead, BeadAction, BeadId, BeadStatus, ClaimResult, IdleAction, Outcome,
-    WorkerState,
+    ReleaseReason, WorkerState,
 };
 use crate::upgrade::{self, HotReloadCheck};
 use crate::validation::worker_config::{validate_idle_action_config, WorkerConfigValidationResult};
@@ -4450,7 +4450,7 @@ impl Worker {
                         );
                         cancelled.store(true, Ordering::Release);
                         heartbeat_task.abort();
-                        return BeadAction::Released;
+                        return BeadAction::Released(ReleaseReason::RegistrationCancelled);
                     }
                     Ok(Ok(RegistrationResult::CorrelationFailed(error))) => {
                         tracing::warn!(
@@ -4460,7 +4460,7 @@ impl Worker {
                         );
                         cancelled.store(true, Ordering::Release);
                         heartbeat_task.abort();
-                        return BeadAction::Released;
+                        return BeadAction::Released(ReleaseReason::CiCorrelationFailed);
                     }
                     Ok(Ok(RegistrationResult::Disabled | RegistrationResult::NoPushedCommit)) => {}
                     Ok(Err(error)) => {
@@ -4476,7 +4476,7 @@ impl Worker {
                         }
                         cancelled.store(true, Ordering::Release);
                         heartbeat_task.abort();
-                        return BeadAction::Released;
+                        return BeadAction::Released(ReleaseReason::RegistrationCancelled);
                     }
                     Err(_) => {
                         tracing::error!(
@@ -4490,7 +4490,7 @@ impl Worker {
                         }
                         cancelled.store(true, Ordering::Release);
                         heartbeat_task.abort();
-                        return BeadAction::Released;
+                        return BeadAction::Released(ReleaseReason::RegistrationCancelled);
                     }
                 }
             }
@@ -4878,14 +4878,18 @@ impl Worker {
                     }
                 }
             }
-            BeadAction::Released => {
+            BeadAction::Released(release_reason) => {
                 // Release the bead back to open status.
                 tokio::time::timeout(Duration::from_secs(30), self.store.release(&bead.id))
                     .await??;
                 self.telemetry.emit(
                     EventKind::BeadReleased {
                         bead_id: bead.id.clone(),
-                        reason: "handler_action:released".to_string(),
+                        // The specific reason, not a single opaque string: a
+                        // release because work shipped but could not be closed
+                        // and a release because the gate found no work are
+                        // different problems with different fixes.
+                        reason: format!("handler_action:released/{release_reason}"),
                     },
                     chrono::Utc::now(),
                 )?;
@@ -4977,7 +4981,7 @@ impl Worker {
         match action {
             BeadAction::Interrupted => self.set_state(WorkerState::Stopped)?,
             BeadAction::Closed
-            | BeadAction::Released
+            | BeadAction::Released(_)
             | BeadAction::Deferred
             | BeadAction::Alerted
             | BeadAction::Quarantined
@@ -9449,7 +9453,7 @@ mod tests {
         let action = worker.do_handle().await;
 
         assert_eq!(worker.last_outcome.as_deref(), Some("failure"));
-        assert_eq!(action, BeadAction::Released);
+        assert!(matches!(action, BeadAction::Released(_)));
 
         // The state-machine boundary must consume the action before advancing.
         // do_handle() only DECIDES the action; apply_bead_action() performs it, so the
