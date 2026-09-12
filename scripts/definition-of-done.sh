@@ -203,6 +203,49 @@ declare -a FAILURES=()
 declare -a CHECKS=()
 # Checks that failed on files this commit does not stage (--changed-only).
 declare -a PREEXISTING=()
+# Slow-lane scratch directories are registered in this shell. Do not call
+# lane_tmp through command substitution: that runs the function in a subshell
+# and silently discards the LANE_TMPS append, leaking the directory at exit.
+declare -a LANE_TMPS=()
+
+lane_tmp() {
+  local label="$1" destination="$2"
+  local root="${DOD_TMP_ROOT:-/var/tmp}"
+  local directory
+
+  [[ -d "$root" && -w "$root" ]] || root="/tmp"
+  directory="$(mktemp -d "$root/needle-dod-$label.XXXXXX")"
+  LANE_TMPS+=("$directory")
+  printf -v "$destination" '%s' "$directory"
+}
+
+cleanup_lane_tmps() {
+  [[ "${#LANE_TMPS[@]}" -eq 0 ]] || rm -rf "${LANE_TMPS[@]}" 2>/dev/null || true
+  # Remove the poison below only if this run created it. Pre-existing litter
+  # stays: deleting host state we did not create is worse than leaving it, and
+  # the lanes are required to pass with it present anyway.
+  if [[ "${POISON_WE_CREATED:-0}" == 1 ]]; then
+    rm -rf "$POISON_DIR" 2>/dev/null || true
+  fi
+}
+
+needle_now_ms() {
+  local now
+  now="$(date +%s%3N)"
+  if [[ "$now" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "$now"
+  else
+    # GNU date supplies milliseconds in CI. Retain a numeric, second-resolution
+    # fallback for platforms whose date prints the %3N directive literally.
+    printf '%s000\n' "$(date +%s)"
+  fi
+}
+
+needle_duration_event() {
+  local phase="$1" target="$2" duration_ms="$3" status="$4" exit_code="$5"
+  printf 'NEEDLE_DOD_TIMING {"phase":"%s","target":"%s","duration_ms":%s,"status":"%s","exit_code":%s}\n' \
+    "$phase" "$target" "$duration_ms" "$status" "$exit_code"
+}
 
 # Helper to run a check and record failure
 # Kill anything the finished check left behind. A leftover inherits the check's
@@ -253,18 +296,28 @@ run_check() {
   #
   # Writing to a file removes the dependency on writers closing: the check
   # returns as soon as the command itself exits.
-  local log exit_code=0
+  local log exit_code=0 started_ms ended_ms duration_ms status
   log="$(mktemp "${TMPDIR:-/tmp}/dod-check-XXXXXX.log")"
 
+  started_ms="$(needle_now_ms)"
   "$@" >"$log" 2>&1 || exit_code=$?
+  ended_ms="$(needle_now_ms)"
+  if (( ended_ms >= started_ms )); then
+    duration_ms=$((ended_ms - started_ms))
+  else
+    # A wall-clock correction must not produce invalid negative telemetry.
+    duration_ms=0
+  fi
 
   # An orphan idles at ~0% CPU but holds its memory; five leaking test targets
   # would exhaust the verify container's 5Gi on their own.
   reap_orphans "$log"
 
   if [[ $exit_code -eq 0 ]]; then
+    status="pass"
     echo "✓ $name passed"
   elif ! needle_failure_is_ours "$log"; then
+    status="preexisting"
     # Someone else's in-flight file, in a checkout this commit shares.
     echo "⚠ $name failed, but every diagnostic is in a file this commit does not touch."
     echo "  Not blocking this commit. The tree is still broken — see below."
@@ -272,6 +325,7 @@ run_check() {
     echo "Pre-existing failure details for $name (last 100 lines):"
     tail -n 100 "$log" || true
   else
+    status="fail"
     echo "✗ $name failed (exit code: $exit_code)"
     FAILURES+=("$name: exit code $exit_code")
     # Show the tail here while retaining the named failure for the summary.
@@ -281,10 +335,28 @@ run_check() {
     tail -n 100 "$log" || true
   fi
 
+  if [[ -n "${DOD_TIMING_PHASE:-}" ]]; then
+    needle_duration_event "$DOD_TIMING_PHASE" "${DOD_TIMING_TARGET:-all}" \
+      "$duration_ms" "$status" "$exit_code"
+  fi
+
   rm -f "$log"
   # Keep running so every check reports its result. The summary below returns
   # the aggregate status after all requested checks have run.
   return 0
+}
+
+# Route every Cargo build and run through the same explicit slow-lane context.
+# Besides making the inputs auditable, this prevents Cargo from invalidating
+# the just-built test executable because the run received a different TMPDIR.
+run_slow_cargo_check() {
+  local phase="$1" target="$2" name="$3"
+  shift 3
+  DOD_TIMING_PHASE="$phase" DOD_TIMING_TARGET="$target" \
+    run_check "$name" env \
+      TMPDIR="$SLOW_TMPDIR" \
+      CARGO_TARGET_DIR="$SLOW_CARGO_TARGET_DIR" \
+      "$@"
 }
 
 # ── Attribution (--changed-only) ──────────────────────────────────────────────
@@ -439,6 +511,20 @@ fi
 if [[ "$RUN_SLOW" == true ]]; then
   echo "=== Slow Lane Checks ==="
 
+  # Create the build-and-run context in the parent shell before either phase.
+  # TMPDIR is isolated from both the checkout's .beads and a poisoned
+  # /tmp/.beads. CARGO_TARGET_DIR deliberately keeps Cargo's configured cache,
+  # but is resolved once so the build and every run receive the exact same
+  # inputs. The trap sees the parent-shell LANE_TMPS append and cleans it.
+  trap cleanup_lane_tmps EXIT
+  SLOW_TMPDIR=""
+  lane_tmp "${SLOW_TARGET:-all}" SLOW_TMPDIR
+  SLOW_CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_ROOT/target}"
+  if [[ "$SLOW_CARGO_TARGET_DIR" != /* ]]; then
+    SLOW_CARGO_TARGET_DIR="$REPO_ROOT/$SLOW_CARGO_TARGET_DIR"
+  fi
+  echo "Slow lane context: TMPDIR=$SLOW_TMPDIR CARGO_TARGET_DIR=$SLOW_CARGO_TARGET_DIR"
+
   # Compile every test target BEFORE the timed checks below.
   #
   # Each `timeout 900` wraps `cargo test`, which compiles AND runs. That makes
@@ -479,37 +565,11 @@ if [[ "$RUN_SLOW" == true ]]; then
       done < <(selected_cargo_targets)
     fi
 
-    run_check "cargo test --no-run (build $BUILD_LABEL)" \
+    run_slow_cargo_check build "${SLOW_TARGET:-all}" \
+      "cargo test --no-run (build $BUILD_LABEL)" \
       timeout --kill-after=30 1800 cargo test --no-run \
         ${BUILD_SELECTORS[@]+"${BUILD_SELECTORS[@]}"}
   fi
-
-  # Every test target runs with its own TMPDIR, created outside /tmp and
-  # outside this checkout. bead-rs workspace discovery stops at the first
-  # .beads it meets walking up from a temp dir: a stray /tmp/.beads (left by
-  # any test or tool on the host) refuses every fixture's `bead init`, and a
-  # temp dir under the repo would sit beneath the repo's own .beads. On
-  # 2026-08-30 one such stray dir failed 40 integration tests across four
-  # targets. Per-lane dirs also stop one target's litter from reaching the next.
-  LANE_TMPS=()
-  lane_tmp() {
-    local root="${DOD_TMP_ROOT:-/var/tmp}"
-    [ -d "$root" ] && [ -w "$root" ] || root="/tmp"
-    local d
-    d="$(mktemp -d "$root/needle-dod-$1.XXXXXX")"
-    LANE_TMPS+=("$d")
-    printf '%s' "$d"
-  }
-  cleanup_lane_tmps() {
-    [ "${#LANE_TMPS[@]}" -gt 0 ] && rm -rf "${LANE_TMPS[@]}" 2>/dev/null || true
-    # Remove the poison below only if this run created it. Pre-existing
-    # litter stays: deleting host state we did not create is worse than
-    # leaving it, and the lanes are required to pass with it present anyway.
-    if [ "${POISON_WE_CREATED:-0}" = 1 ]; then
-      rm -rf "$POISON_DIR" 2>/dev/null || true
-    fi
-  }
-  trap cleanup_lane_tmps EXIT
 
   # Standing negative control for the 2026-08-30 incident. bead-rs workspace
   # discovery stops at the first .beads it meets walking up from a temp dir,
@@ -550,14 +610,15 @@ if [[ "$RUN_SLOW" == true ]]; then
       echo "ERROR: no cargo selector for target '$target'" >&2
       exit 1
     fi
-    run_check "cargo test ${SELECTOR[*]}" \
-      env TMPDIR="$(lane_tmp "$target")" timeout --kill-after=30 900 cargo test "${SELECTOR[@]}"
+    run_slow_cargo_check run "$target" "cargo test ${SELECTOR[*]}" \
+      timeout --kill-after=30 900 cargo test "${SELECTOR[@]}"
   done < <(selected_cargo_targets)
 
   # Installer tests (isolated, shell-level regression tests). Not a cargo
   # target, so a per-target run only reaches it when it is the one asked for.
   if [[ -z "$SLOW_TARGET" || "$SLOW_TARGET" == "installer" ]]; then
-    run_check "installer tests" timeout --kill-after=30 60 bash tests/installer/run.sh
+    DOD_TIMING_PHASE=run DOD_TIMING_TARGET=installer \
+      run_check "installer tests" timeout --kill-after=30 60 bash tests/installer/run.sh
   fi
 fi
 

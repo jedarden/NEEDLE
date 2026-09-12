@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Tests for the Definition of Done's CI modes: --gate and --target.
+# Tests for the Definition of Done's aggregation and CI-mode contracts.
 #
 # --gate decides whether a failed fast lane still compiles test targets.
 # Getting it wrong in the strict direction is merely slow; getting it wrong in
@@ -16,11 +16,14 @@ DOD="$REPO_ROOT/scripts/definition-of-done.sh"
 [[ -f "$DOD" ]] || { echo "missing $DOD" >&2; exit 1; }
 
 extracted="$(mktemp "${TMPDIR:-/tmp}/dod-modes-XXXXXX.sh")"
-for fn in needle_slow_targets needle_cargo_selector selected_cargo_targets needle_gate_skips_slow_lane; do
+test_tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/dod-modes-tmp-root-XXXXXX")"
+trap 'rm -f "$extracted"; rm -rf "$test_tmp_root"' EXIT
+
+for fn in needle_now_ms needle_duration_event reap_orphans run_check lane_tmp cleanup_lane_tmps run_slow_cargo_check needle_slow_targets needle_cargo_selector selected_cargo_targets needle_gate_skips_slow_lane; do
   awk -v f="^${fn}\\\\(\\\\)" '$0 ~ f, /^}/' "$DOD" >> "$extracted"
 done
 # Every function must have been found, or the test would silently pass.
-for fn in needle_slow_targets needle_cargo_selector selected_cargo_targets needle_gate_skips_slow_lane; do
+for fn in needle_now_ms needle_duration_event reap_orphans run_check lane_tmp cleanup_lane_tmps run_slow_cargo_check needle_slow_targets needle_cargo_selector selected_cargo_targets needle_gate_skips_slow_lane; do
   grep -q "^${fn}()" "$extracted" || { echo "FAIL: could not extract $fn from $DOD" >&2; exit 1; }
 done
 # shellcheck source=/dev/null
@@ -56,6 +59,56 @@ assert_fails() {
 }
 
 echo "=== Definition of Done modes ==="
+
+# ── Structured phase duration ────────────────────────────────────────────────
+CHECKS=()
+FAILURES=()
+PREEXISTING=()
+CHANGED_ONLY=false
+needle_failure_is_ours() { return 0; }
+timing_log="$test_tmp_root/timing.log"
+DOD_TIMING_PHASE=build DOD_TIMING_TARGET=lib \
+  run_check "timed pass" true >"$timing_log" 2>&1
+if grep -Eq '^NEEDLE_DOD_TIMING \{"phase":"build","target":"lib","duration_ms":[0-9]+,"status":"pass","exit_code":0\}$' "$timing_log"; then
+  ok "run_check emits a structured duration event when timing is requested"
+else
+  bad "run_check did not emit its structured duration event"
+fi
+
+# ── run_check failure aggregation ────────────────────────────────────────────
+# The retired configurable gate had an integration target dedicated to this
+# contract. Keep the useful part of that coverage against the active DoD
+# implementation itself: failures do not stop later checks, their combined
+# output remains visible, and every failure is retained for the final summary.
+CHECKS=()
+FAILURES=()
+PREEXISTING=()
+aggregate_log="$test_tmp_root/aggregate.log"
+aggregate_marker="$test_tmp_root/final-check-ran"
+
+run_check "first aggregate failure" bash -c \
+  'echo first-stdout; echo first-stderr >&2; exit 3' >>"$aggregate_log" 2>&1
+run_check "middle aggregate failure" bash -c \
+  'echo middle-stderr >&2; exit 7' >>"$aggregate_log" 2>&1
+run_check "final aggregate pass" touch "$aggregate_marker" >>"$aggregate_log" 2>&1
+
+if [[ ${#CHECKS[@]} -eq 3 && ${#FAILURES[@]} -eq 2 ]]; then
+  ok "run_check retains all failures and continues through the lane"
+else
+  bad "run_check aggregation drifted (${#CHECKS[@]} checks, ${#FAILURES[@]} failures)"
+fi
+if [[ -f "$aggregate_marker" ]]; then
+  ok "a passing check after failures still runs"
+else
+  bad "a passing check after failures was skipped"
+fi
+if grep -q 'first-stdout' "$aggregate_log" \
+  && grep -q 'first-stderr' "$aggregate_log" \
+  && grep -q 'middle-stderr' "$aggregate_log"; then
+  ok "failed-check stdout and stderr remain in the report"
+else
+  bad "failed-check output was not retained"
+fi
 
 # ── needle_slow_targets ──────────────────────────────────────────────────────
 assert_lines "target table lists six names" 6 needle_slow_targets
@@ -137,6 +190,50 @@ FAILURES=()
 PREEXISTING=("cargo clippy")
 if needle_gate_skips_slow_lane; then bad "a pre-existing failure must not gate the slow lane"
 else ok "a pre-existing failure does not gate the slow lane"; fi
+
+# ── Hermetic slow-lane context ───────────────────────────────────────────────
+# lane_tmp must mutate the parent shell. Calling it through $(...) would create
+# the directory but lose the cleanup registration when the subshell exits.
+DOD_TMP_ROOT="$test_tmp_root"
+LANE_TMPS=()
+allocated_tmp=""
+lane_tmp regression allocated_tmp
+if [[ -d "$allocated_tmp" && "${#LANE_TMPS[@]}" -eq 1 && "${LANE_TMPS[0]}" == "$allocated_tmp" ]]; then
+  ok "lane_tmp returns through a variable and registers cleanup in the parent shell"
+else
+  bad "lane_tmp did not register the allocated directory in the parent shell"
+fi
+POISON_WE_CREATED=0
+cleanup_lane_tmps
+if [[ ! -e "$allocated_tmp" ]]; then ok "registered lane directories are cleaned"
+else bad "registered lane directory survived cleanup"; fi
+
+# Both build and run pass through one wrapper, preventing their build-context
+# inputs from drifting independently.
+SLOW_TMPDIR="$test_tmp_root/context-tmp"
+SLOW_CARGO_TARGET_DIR="$test_tmp_root/context-target"
+run_check() {
+  printf '%s|%s|%s\n' "$DOD_TIMING_PHASE" "$DOD_TIMING_TARGET" "$*"
+}
+BUILD_CALL="$(run_slow_cargo_check build lib build-check cargo test --no-run --lib)"
+RUN_CALL="$(run_slow_cargo_check run lib run-check cargo test --lib)"
+for call in "$BUILD_CALL" "$RUN_CALL"; do
+  if [[ "$call" == *"env TMPDIR=$SLOW_TMPDIR CARGO_TARGET_DIR=$SLOW_CARGO_TARGET_DIR"* ]]; then
+    ok "slow Cargo invocation uses the shared TMPDIR and CARGO_TARGET_DIR"
+  else
+    bad "slow Cargo invocation escaped the shared context (got: $call)"
+  fi
+done
+if [[ "$BUILD_CALL" == build\|lib\|* && "$RUN_CALL" == run\|lib\|* ]]; then
+  ok "slow Cargo wrapper labels build and run timing phases"
+else
+  bad "slow Cargo wrapper did not label timing phases"
+fi
+
+WANT_EVENT='NEEDLE_DOD_TIMING {"phase":"build","target":"lib","duration_ms":123,"status":"pass","exit_code":0}'
+GOT_EVENT="$(needle_duration_event build lib 123 pass 0)"
+if [[ "$GOT_EVENT" == "$WANT_EVENT" ]]; then ok "duration event is structured and machine-readable"
+else bad "duration event format drifted (got: $GOT_EVENT)"; fi
 
 echo ""
 echo "passed: $pass  failed: $fail"
