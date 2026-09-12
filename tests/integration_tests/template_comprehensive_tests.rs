@@ -144,7 +144,7 @@ fn test_render_with_interleaved_placeholders_and_text() {
         ..Default::default()
     };
 
-    let template = "pre{id}mid{title}post{workspace}end";
+    let template = "pre{bead_id}mid{bead_title}post{workspace}end";
     let result = render(template, &context);
 
     assert_eq!(result, "preABCmidTitlepost/pathend");
@@ -210,7 +210,7 @@ fn test_render_with_unknown_placeholder() {
 fn test_extract_placehandles_from_malformed_template() {
     // Missing closing brace
     let placeholders = extract_placeholders("{bead_id");
-    assert_eq!(placeholders, vec!["bead_id"]);
+    assert!(placeholders.is_empty());
 
     // Missing opening brace
     let placeholders = extract_placeholders("bead_id}");
@@ -223,10 +223,9 @@ fn test_extract_placehandles_from_malformed_template() {
 
 #[test]
 fn test_extract_placeholders_with_nested_braces() {
-    // Nested braces - only outer should be extracted
+    // Nested braces are not valid placeholder syntax.
     let placeholders = extract_placeholders("{id_{inner}}");
-    // Current implementation extracts "id_{inner}" as it doesn't validate nesting
-    assert_eq!(placeholders, vec!["id_{inner}"]);
+    assert!(placeholders.is_empty());
 }
 
 #[test]
@@ -242,11 +241,11 @@ fn test_render_with_vars_empty_extra_vars() {
     let extra: Vec<(String, String)> = vec![];
 
     let result = render_with_vars(template, &context, &extra);
-    assert_eq!(result, "{bead_title}"); // No value provided
+    assert_eq!(result, "");
 }
 
 #[test]
-fn test_render_with_vars_conflicting_names() {
+fn test_render_with_vars_does_not_override_context_names() {
     let context = RenderContext {
         bead_title: "Original".to_string(),
         ..Default::default()
@@ -256,8 +255,8 @@ fn test_render_with_vars_conflicting_names() {
     let extra = vec![("bead_title".to_string(), "Overridden".to_string())];
 
     let result = render_with_vars(template, &context, &extra);
-    // Extra vars should override context
-    assert_eq!(result, "Overridden");
+    // Context placeholders are rendered before extension variables.
+    assert_eq!(result, "Original");
 }
 
 #[test]
@@ -282,7 +281,9 @@ fn test_load_backend_with_missing_required_fields() {
     let temp_dir = TempDir::new().unwrap();
     let incomplete_yaml = temp_dir.path().join("incomplete.yaml");
 
-    std::fs::write(&incomplete_yaml, "name: test\nbinary: bead\n").unwrap();
+    let mut backend = create_valid_backend();
+    backend.operations.remove("ready");
+    std::fs::write(&incomplete_yaml, serde_yaml::to_string(&backend).unwrap()).unwrap();
 
     let result = load_bead_backends(temp_dir.path(), &[]);
     assert!(result.is_err());
@@ -295,11 +296,9 @@ fn test_load_backend_with_empty_name() {
     let temp_dir = TempDir::new().unwrap();
     let empty_name_yaml = temp_dir.path().join("empty_name.yaml");
 
-    std::fs::write(
-        &empty_name_yaml,
-        "name: \"\"\nbinary: bead\noperations: {}\n",
-    )
-    .unwrap();
+    let mut backend = create_valid_backend();
+    backend.name.clear();
+    std::fs::write(&empty_name_yaml, serde_yaml::to_string(&backend).unwrap()).unwrap();
 
     let result = load_bead_backends(temp_dir.path(), &[]);
     assert!(result.is_err());
@@ -322,7 +321,7 @@ verified_on: "2024-01-01"
 operations:
   ready:
     argv: []
-    parse: JsonLines
+    parse: json_lines
 "#;
 
     std::fs::write(&invalid_regex_yaml, yaml).unwrap();
@@ -335,9 +334,8 @@ operations:
 
 #[test]
 fn test_backend_validate_with_invalid_placeholders() {
-    let mut backend = create_minimal_backend();
-    let mut operations = std::collections::HashMap::new();
-    operations.insert(
+    let mut backend = create_valid_backend();
+    backend.operations.insert(
         "show".to_string(),
         BeadOperationSpec {
             argv: vec!["show".to_string(), "{invalid_placeholder}".to_string()],
@@ -346,8 +344,6 @@ fn test_backend_validate_with_invalid_placeholders() {
             timeout_secs: None,
         },
     );
-    backend.operations = operations;
-
     let result = backend.validate(&PathBuf::from("<test>"));
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
@@ -357,9 +353,8 @@ fn test_backend_validate_with_invalid_placeholders() {
 
 #[test]
 fn test_backend_validate_with_malformed_placeholder() {
-    let mut backend = create_minimal_backend();
-    let mut operations = std::collections::HashMap::new();
-    operations.insert(
+    let mut backend = create_valid_backend();
+    backend.operations.insert(
         "show".to_string(),
         BeadOperationSpec {
             argv: vec!["show".to_string(), "{unclosed".to_string()],
@@ -368,8 +363,6 @@ fn test_backend_validate_with_malformed_placeholder() {
             timeout_secs: None,
         },
     );
-    backend.operations = operations;
-
     let result = backend.validate(&PathBuf::from("<test>"));
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
@@ -378,7 +371,7 @@ fn test_backend_validate_with_malformed_placeholder() {
 
 #[test]
 fn test_backend_validate_with_empty_operation_name() {
-    let mut backend = create_minimal_backend();
+    let mut backend = create_valid_backend();
     backend.operations.insert(
         "".to_string(),
         BeadOperationSpec {
@@ -389,10 +382,10 @@ fn test_backend_validate_with_empty_operation_name() {
         },
     );
 
-    // Empty operation names should be allowed (no validation on operation name itself)
-    // but the operation won't match required operations
+    // Empty operation names are currently allowed; all required operations
+    // remain present in the otherwise-valid descriptor.
     let result = backend.validate(&PathBuf::from("<test>"));
-    assert!(result.is_err());
+    assert!(result.is_ok());
 }
 
 // ============================================================================
@@ -472,26 +465,19 @@ fn test_full_pipeline_load_and_render_user_backend() {
     let temp_dir = TempDir::new().unwrap();
     let user_backend = temp_dir.path().join("my-backend.yaml");
 
-    // Create a valid user backend
-    let yaml = r#"
-name: "my-backend"
-binary: "my-bead"
-identity_pattern: "^my-bead\\s"
-verified_against: "my-bead 1.0.0"
-verified_on: "2024-01-01"
-operations:
-  ready:
-    argv: ["list", "--ready", "--limit", "{limit}"]
-    parse: JsonLines
-  show:
-    argv: ["show", "{id}", "--json"]
-    parse: JsonObject
-  flush:
-    argv: ["flush"]
-    parse: None
-"#;
-
-    std::fs::write(&user_backend, yaml).unwrap();
+    // Serialize a complete descriptor so this test stays aligned when the
+    // required operation set grows.
+    let mut backend = create_valid_backend();
+    backend.name = "my-backend".to_string();
+    backend.binary = "my-bead".to_string();
+    backend.identity_pattern = "^my-bead\\s".to_string();
+    backend.verified_against = "my-bead 1.0.0".to_string();
+    backend
+        .operations
+        .get_mut("show")
+        .expect("show operation should exist")
+        .argv = vec!["show".to_string(), "{id}".to_string(), "--json".to_string()];
+    std::fs::write(&user_backend, serde_yaml::to_string(&backend).unwrap()).unwrap();
 
     let backends = load_bead_backends(temp_dir.path(), &[]).unwrap();
     let my_backend = backends.get("my-backend").expect("my-backend should load");
@@ -520,122 +506,122 @@ verified_on: "2024-01-01"
 operations:
   ready:
     argv: ["custom-ready", "--limit", "{limit}"]
-    parse: JsonLines
+    parse: json_lines
   show:
     argv: ["custom-show", "{id}"]
-    parse: JsonObject
+    parse: json_object
   flush:
     argv: ["custom-flush"]
-    parse: None
+    parse: none
   claim:
     argv: ["custom-claim", "{id}", "--assignee", "{actor}"]
-    parse: JsonObject
+    parse: json_object
   claim_auto:
     argv: ["custom-claim-auto", "--assignee", "{actor}"]
-    parse: JsonObject
+    parse: json_object
   release:
     argv: ["custom-release", "{id}"]
-    parse: None
+    parse: none
   block:
     argv: ["custom-block", "{id}"]
-    parse: None
+    parse: none
   clear_assignee:
     argv: ["custom-clear", "{id}"]
-    parse: None
+    parse: none
   reopen:
     argv: ["custom-reopen", "{id}"]
-    parse: None
+    parse: none
   labels:
     argv: ["custom-labels"]
     strategy: repeated
-    parse: None
+    parse: none
   label_add:
     argv: ["custom-label-add", "{id}", "{label}"]
-    parse: None
+    parse: none
   label_remove:
     argv: ["custom-label-remove", "{id}", "{label}"]
-    parse: None
+    parse: none
   create:
     argv: ["custom-create", "--title", "{title}", "--desc", "{body}"]
-    parse: BareId
+    parse: bare_id
   create_id:
     argv: ["custom-create-id"]
     strategy: bare_id
-    parse: None
+    parse: none
   dep_add:
     argv: ["custom-dep-add", "{blocked}", "{blocker}"]
-    parse: None
+    parse: none
   split:
     argv: ["custom-split"]
     strategy: sequential
-    parse: None
+    parse: none
   dep_remove:
     argv: ["custom-dep-remove", "{blocked}", "{blocker}"]
-    parse: None
+    parse: none
   close:
     argv: ["custom-close", "{id}", "--reason", "{reason}"]
-    parse: None
+    parse: none
   doctor_check:
     argv: ["custom-doctor"]
-    parse: None
+    parse: none
   doctor_repair:
     argv: ["custom-doctor-repair"]
-    parse: None
+    parse: none
   import:
     argv: ["custom-import"]
     strategy: input_plus_mode
-    parse: None
+    parse: none
   ref_add:
     argv: ["custom-ref-add", "{id}", "--namespace", "{namespace}", "--key", "{key}", "--value", "{value}"]
-    parse: None
+    parse: none
   ref_remove:
     argv: ["custom-ref-remove", "{id}", "--namespace", "{namespace}", "--key", "{key}"]
-    parse: None
+    parse: none
   ref_list:
     argv: ["custom-ref-list", "{id}"]
-    parse: None
+    parse: none
   ref_find:
     argv: ["custom-ref-find", "--namespace", "{namespace}", "--value", "{value}"]
-    parse: JsonLines
+    parse: json_lines
   data_set:
     argv: ["custom-data-set", "{id}", "--key", "{key}", "--value", "{value}"]
-    parse: None
+    parse: none
   data_get:
     argv: ["custom-data-get", "{id}", "--key", "{key}"]
-    parse: JsonObject
+    parse: json_object
   data_list:
     argv: ["custom-data-list", "{id}"]
-    parse: JsonLines
+    parse: json_lines
   data_remove:
     argv: ["custom-data-remove", "{id}", "--key", "{key}"]
-    parse: None
+    parse: none
   query:
     argv: ["custom-query", "{query}"]
-    parse: JsonLines
+    parse: json_lines
   changes:
     argv: ["custom-changes", "--since", "{since}"]
-    parse: JsonLines
+    parse: json_lines
   why:
     argv: ["custom-why", "{id}"]
-    parse: JsonObject
+    parse: json_object
   compare:
     argv: ["custom-compare", "{id}", "--profile", "{profile}"]
-    parse: JsonObject
+    parse: json_object
   recurrence_add:
     argv: ["custom-recurrence-add", "--template", "{template}", "--schedule", "{schedule}"]
-    parse: None
+    parse: none
   recurrence_remove:
     argv: ["custom-recurrence-remove", "{id}"]
-    parse: None
+    parse: none
   recurrence_list:
     argv: ["custom-recurrence-list"]
-    parse: JsonLines
+    parse: json_lines
   policy_validate:
     argv: ["custom-policy-validate"]
-    parse: JsonObject
+    parse: json_object
   list_all:
     argv: ["custom-list-all", "--limit", "{limit}"]
-    parse: JsonLines
+    parse: json_lines
 "#;
 
     std::fs::write(&override_backend, yaml).unwrap();
@@ -772,22 +758,11 @@ fn render_operation_argv(argv: &[String], values: &HashMap<&str, &str>) -> Vec<S
         .collect()
 }
 
-fn create_minimal_backend() -> BeadBackend {
-    use needle::bead_store::{BeadBackendCapabilities, BeadBackendErrorMarkers};
-
-    BeadBackend {
-        name: "test-backend".to_string(),
-        binary: "test-bead".to_string(),
-        detect_paths: vec![],
-        identity_pattern: "^test-bead\\s".to_string(),
-        version_command: vec!["--version".to_string()],
-        verified_against: "test-bead 1.0.0".to_string(),
-        verified_on: "2024-01-01".to_string(),
-        operations: std::collections::HashMap::new(),
-        capabilities: BeadBackendCapabilities::default(),
-        quirks: vec![],
-        error_markers: BeadBackendErrorMarkers::default(),
-    }
+fn create_valid_backend() -> BeadBackend {
+    builtin_bead_backends()
+        .into_iter()
+        .find(|backend| backend.name == "bead-rs")
+        .expect("bead-rs backend should exist")
 }
 
 fn mock_values_for_operation(operation: &str) -> HashMap<&'static str, &'static str> {

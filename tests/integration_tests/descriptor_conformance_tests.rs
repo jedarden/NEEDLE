@@ -103,65 +103,23 @@ async fn bead_rs_claim_uses_compare_and_set_strategy() {
     //!
     //! This prevents duplicate dispatch: if the bead was modified since we
     //! read it, the claim fails and we retry.
-    let root = tempfile::tempdir().unwrap();
     let backend = builtin_bead_backends()
         .into_iter()
         .find(|backend| backend.name == "bead-rs")
         .unwrap();
-    let binary = root.path().join("mock-cli");
-    executable(
-        &binary,
-        r#"#!/bin/sh
-printf '%s\n' "$@" >> invocations.log
-"#,
-    );
-    let store =
-        CliBeadStore::new(backend, binary, root.path().to_path_buf(), None, None, None).unwrap();
+    let claim = backend.operations.get("claim").unwrap();
 
-    let _result = store.claim(&BeadId::from("test-1"), "worker-a").await;
-
-    // Should fail because mock doesn't return valid JSON, but we can check invocation
-    let invocations = fs::read_to_string(root.path().join("invocations.log")).unwrap();
-    assert!(
-        invocations.contains("update")
-            && invocations.contains("--status")
-            && invocations.contains("in_progress"),
-        "bead-rs claim should use update with status in_progress: {invocations}"
-    );
-    assert!(
-        invocations.contains("--if-revision") || invocations.contains("compare"),
-        "bead-rs claim should use compare-and-set strategy: {invocations}"
-    );
-}
-
-#[tokio::test]
-#[cfg(unix)]
-async fn bead_rs_claim_uses_atomic_batch() {
-    //! Verify bead-rs claim uses atomic batch for safety.
-    //!
-    //! This prevents duplicate dispatch by ensuring the claim operation
-    //! is atomic within the SQLite transaction.
-    let root = tempfile::tempdir().unwrap();
-    let backend = builtin_bead_backends()
-        .into_iter()
-        .find(|backend| backend.name == "bead-rs")
-        .unwrap();
-    let binary = root.path().join("mock-cli");
-    executable(
-        &binary,
-        r#"#!/bin/sh
-printf '%s\n' "$@" >> invocations.log
-"#,
-    );
-    let store =
-        CliBeadStore::new(backend, binary, root.path().to_path_buf(), None, None, None).unwrap();
-
-    let _ = store.claim(&BeadId::from("bead-1"), "worker-a").await;
-
-    let invocations = fs::read_to_string(root.path().join("invocations.log")).unwrap();
-    assert!(
-        invocations.contains("batch") || invocations.contains("atomic"),
-        "bead-rs claim should use atomic batch: {invocations}"
+    assert_eq!(claim.strategy.as_deref(), Some("compare_and_set"));
+    assert_eq!(
+        claim.argv,
+        [
+            "update",
+            "{id}",
+            "--status",
+            "in_progress",
+            "--assignee",
+            "{actor}"
+        ]
     );
 }
 
@@ -250,33 +208,18 @@ printf '%s\n' "$@" >> invocations.log
 
 #[tokio::test]
 #[cfg(unix)]
-async fn bead_rs_release_uses_batch_operation() {
-    //! Verify bead-rs release uses the batch operation.
+async fn bead_rs_release_uses_native_release_subcommand() {
+    //! Verify bead-rs release uses the native release operation.
     //!
-    //! This ensures the release is part of a transaction, preventing
-    //! partial updates that could leave beads in inconsistent states.
-    let root = tempfile::tempdir().unwrap();
+    //! bead-rs performs this transition atomically in its release subcommand.
     let backend = builtin_bead_backends()
         .into_iter()
         .find(|backend| backend.name == "bead-rs")
         .unwrap();
-    let binary = root.path().join("mock-cli");
-    executable(
-        &binary,
-        r#"#!/bin/sh
-printf '%s\n' "$@" >> invocations.log
-"#,
-    );
-    let store =
-        CliBeadStore::new(backend, binary, root.path().to_path_buf(), None, None, None).unwrap();
+    let release = backend.operations.get("release").unwrap();
 
-    store.release(&BeadId::from("bead-1")).await.unwrap();
-
-    let invocations = fs::read_to_string(root.path().join("invocations.log")).unwrap();
-    assert!(
-        invocations.contains("batch") || invocations.contains("update"),
-        "bead-rs release should use batch or update operation: {invocations}"
-    );
+    assert_eq!(release.argv, ["release", "{id}"]);
+    assert!(release.strategy.is_none());
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -285,23 +228,23 @@ printf '%s\n' "$@" >> invocations.log
 
 #[tokio::test]
 #[cfg(unix)]
-async fn ready_operation_filters_by_assignee() {
-    //! Verify ready operation supports assignee filtering.
+async fn ready_operation_is_bounded_and_returns_json() {
+    //! Verify the ready operation requests bounded structured output.
     //!
-    //! This is used by workers to get their own assigned beads.
-    let root = tempfile::tempdir().unwrap();
-    let store = mock_cli(root.path(), "bead-rs");
-
-    let argv = store
-        .render_operation(
-            "ready",
-            &HashMap::from([("assignee", "worker-a".to_string())]),
-        )
+    //! Assignment is handled by atomic claim; it is not a ready-list filter.
+    let backend = builtin_bead_backends()
+        .into_iter()
+        .find(|backend| backend.name == "bead-rs")
         .unwrap();
+    let ready = backend.operations.get("ready").unwrap();
 
-    assert!(
-        argv.contains(&"worker-a".to_string()) || argv.iter().any(|arg| arg.contains("assignee")),
-        "ready command must support assignee filtering: {argv:?}"
+    assert_eq!(
+        ready.argv,
+        ["list", "--ready", "--json", "--limit", "{limit}"]
+    );
+    assert_eq!(
+        ready.parse,
+        Some(needle::bead_store::backend::ParseShape::JsonLines)
     );
 }
 
@@ -346,10 +289,9 @@ async fn show_operation_returns_json_object() {
 #[tokio::test]
 #[cfg(unix)]
 async fn dependency_operations_maintain_dialect_specific_order() {
-    //! Verify dependency operations maintain correct argument order.
+    //! Verify dependency operations maintain bead-rs argument order.
     //!
     //! bead-rs: dep add <blocked> <blocker> --kind blocks
-    //! bead-rs: dep add <blocker> --blocks <blocked>
     //!
     //! Bugs here cause corrupted dependency graphs.
     let root = tempfile::tempdir().unwrap();
@@ -361,30 +303,9 @@ async fn dependency_operations_maintain_dialect_specific_order() {
 
     let bead_rs_store = mock_cli(root.path(), "bead-rs");
     let bead_rs_argv = bead_rs_store.render_operation("dep_add", &values).unwrap();
-    assert!(
-        bead_rs_argv
-            .windows(3)
-            .any(|w| w == ["blocked", "blocked-1", "blocker-1"]),
-        "bead-rs dep_add must have blocked before blocker: {bead_rs_argv:?}"
-    );
-
-    let backend = builtin_bead_backends()
-        .into_iter()
-        .find(|backend| backend.name == "bead-rs")
-        .unwrap();
-    let binary = root.path().join("mock-cli-forge");
-    executable(&binary, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n");
-    let forge_store =
-        CliBeadStore::new(backend, binary, root.path().to_path_buf(), None, None, None).unwrap();
-    let forge_argv = forge_store.render_operation("dep_add", &values).unwrap();
-    assert!(
-        forge_argv
-            .windows(3)
-            .any(|w| w == ["blocker", "blocker-1", "--blocks"])
-            || forge_argv
-                .windows(2)
-                .any(|w| w == ["blocker-1", "--blocks"]),
-        "bead-rs dep_add must use --blocks flag: {forge_argv:?}"
+    assert_eq!(
+        bead_rs_argv,
+        ["dep", "add", "blocked-1", "blocker-1", "--kind", "blocks"]
     );
 }
 

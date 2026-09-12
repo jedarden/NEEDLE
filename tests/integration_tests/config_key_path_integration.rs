@@ -584,7 +584,9 @@ fn invalid_unknown_top_level_field_returns_error() {
 
     let error = result.unwrap_err();
     assert_eq!(error.full_path, "unknown_field");
-    assert!(error.message.contains("unknown field"));
+    assert!(error
+        .message
+        .contains("unknown top-level field 'unknown_field'"));
     assert!(error.invalid_segment.is_some());
     assert_eq!(error.invalid_segment.as_ref().unwrap(), "unknown_field");
     assert!(error.available_fields.is_some());
@@ -599,7 +601,7 @@ fn invalid_unknown_top_level_field_foo_returns_error() {
 
     let error = result.unwrap_err();
     assert_eq!(error.full_path, "foo");
-    assert!(error.message.contains("unknown field"));
+    assert!(error.message.contains("unknown top-level field 'foo'"));
 }
 
 #[test]
@@ -636,7 +638,9 @@ fn invalid_worker_unknown_field_returns_error() {
 
     let error = result.unwrap_err();
     assert_eq!(error.full_path, "worker.unknown_field");
-    assert!(error.message.contains("invalid key path segment"));
+    assert!(error
+        .message
+        .contains("unknown worker field 'unknown_field'"));
     assert!(error.invalid_segment.is_some());
     assert_eq!(error.invalid_segment.as_ref().unwrap(), "unknown_field");
     assert!(error.available_fields.is_some());
@@ -659,7 +663,9 @@ fn invalid_agent_invalid_field_returns_error() {
 
     let error = result.unwrap_err();
     assert_eq!(error.full_path, "agent.invalid_field");
-    assert!(error.message.contains("invalid key path segment"));
+    assert!(error
+        .message
+        .contains("unknown agent field 'invalid_field'"));
 }
 
 #[test]
@@ -849,7 +855,7 @@ fn invalid_key_path_error_display_is_readable() {
 
     // Error display should be informative
     assert!(display.contains("worker.nonexistent"));
-    assert!(display.contains("invalid key path segment"));
+    assert!(display.contains("unknown worker field 'nonexistent'"));
 }
 
 #[test]

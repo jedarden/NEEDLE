@@ -499,7 +499,7 @@ path = "/custom/path/bead"
     let config: BeadCliConfig = toml::from_str(toml).unwrap();
 
     assert_eq!(config.backend, BeadBackend::Auto);
-    assert_eq!(config.path, Some(PathBuf::from("/custom/path/bf")));
+    assert_eq!(config.path, Some(PathBuf::from("/custom/path/bead")));
 }
 
 #[test]

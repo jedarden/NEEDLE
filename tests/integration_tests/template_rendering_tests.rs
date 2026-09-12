@@ -233,11 +233,25 @@ fn test_render_with_label_placeholder() {
 
 #[test]
 fn test_render_with_implicit_model_placeholder() {
-    // bead-rs backend uses {model}, {harness}, {harness_version} in claim_auto
-    let backend = builtin_bead_backends()
+    let mut backend = builtin_bead_backends()
         .into_iter()
         .find(|b| b.name == "bead-rs")
         .expect("bead-rs backend should exist");
+    backend
+        .operations
+        .get_mut("claim_auto")
+        .expect("claim_auto should exist")
+        .argv = vec![
+        "claim".to_string(),
+        "--assignee".to_string(),
+        "{actor}".to_string(),
+        "--model".to_string(),
+        "{model}".to_string(),
+        "--harness".to_string(),
+        "{harness}".to_string(),
+        "--harness-version".to_string(),
+        "{harness_version}".to_string(),
+    ];
 
     let workspace = tempfile::tempdir().unwrap();
     let binary = workspace.path().join("bead");

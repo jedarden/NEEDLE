@@ -71,7 +71,7 @@ fn test_process_limits_default_is_valid() {
 #[test]
 fn test_process_limits_serde_with_valid_hard_deadline() {
     let yaml = r#"
-idle_timeout: 300s
+idle_timeout: 300
 hard_deadline:
     enabled: true
     duration_secs: 600
@@ -87,7 +87,7 @@ hard_deadline:
 #[test]
 fn test_process_limits_serde_with_disabled_hard_deadline() {
     let yaml = r#"
-idle_timeout: 300s
+idle_timeout: 300
 hard_deadline:
     enabled: false
     duration_secs: 0
@@ -103,7 +103,7 @@ hard_deadline:
 #[test]
 fn test_process_limits_serde_with_invalid_hard_deadline() {
     let yaml = r#"
-idle_timeout: 300s
+idle_timeout: 300
 hard_deadline:
     enabled: true
     duration_secs: 0
@@ -124,7 +124,7 @@ hard_deadline:
 #[test]
 fn test_process_limits_serde_without_hard_deadline_field() {
     let yaml = r#"
-idle_timeout: 300s
+idle_timeout: 300
 "#;
 
     let limits: ProcessLimits = serde_yaml::from_str(yaml).unwrap();

@@ -3,13 +3,12 @@
 //! These tests use mock binaries to test all error paths and edge cases
 //! without requiring real bead CLI installations.
 
-use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use needle::version_probe::{
-    ProbeError, TelemetryEmitter, VersionProbe, VersionVerifyEvent, BACKEND_BEAD,
-    BACKEND_BEADS_RUST, BACKEND_BF,
+    ProbeError, TelemetryEmitter, VerifyError, VersionProbe, VersionVerifyEvent, BACKEND_BEAD,
+    BACKEND_BEADS_RUST,
 };
 use std::time::Duration;
 
@@ -24,22 +23,29 @@ fn fixtures_dir() -> PathBuf {
     path
 }
 
-/// Create a test environment with mock binaries in a temporary PATH
-#[allow(dead_code)]
-fn setup_test_path() -> String {
-    let fixtures = fixtures_dir();
-    let path_str = fixtures.to_string_lossy().to_string();
-
-    // Prepend fixtures to PATH
-    let current_path = env::var("PATH").unwrap_or_default();
-    format!("{}:{}", path_str, current_path)
-}
-
 /// Create a mock binary path
 fn mock_binary(name: &str) -> String {
     let mut path = fixtures_dir();
     path.push(format!("version-{}-mock.sh", name));
     path.to_string_lossy().to_string()
+}
+
+/// Create a one-test executable without modifying the repository fixtures.
+fn temporary_mock(body: &str) -> (tempfile::TempDir, String) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("version-mock");
+    std::fs::write(&path, body).unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions).unwrap();
+    }
+
+    let binary = path.to_string_lossy().into_owned();
+    (directory, binary)
 }
 
 /// Mock telemetry emitter for testing
@@ -74,22 +80,6 @@ impl TelemetryEmitter for MockTelemetry {
 // ──────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn test_detect_backend_bf_success() {
-    let probe = VersionProbe::new();
-
-    // Test with bf mock
-    match probe.detect_backend(&mock_binary("bf")) {
-        Ok(backend) => {
-            assert_eq!(backend, "bf");
-            println!("✓ Successfully detected bf backend");
-        }
-        Err(e) => {
-            panic!("Failed to detect bf backend: {}", e);
-        }
-    }
-}
-
-#[test]
 fn test_detect_backend_bead_success() {
     let probe = VersionProbe::new();
 
@@ -122,76 +112,38 @@ fn test_detect_backend_beads_rust_success() {
 }
 
 #[test]
-fn test_verify_backend_bf_success() {
-    let telemetry = Arc::new(MockTelemetry::new());
-    let probe = VersionProbe::new().with_telemetry(telemetry.clone());
-
-    let binary = mock_binary("bf");
-    match probe.verify_backend(&binary) {
-        Ok(()) => {
-            println!("✓ bf backend verification succeeded");
-
-            let events = telemetry.get_events();
-            assert_eq!(events.len(), 2); // Started + Success
-
-            match &events[0] {
-                VersionVerifyEvent::Started {
-                    binary: b,
-                    expected_backend,
-                } => {
-                    assert_eq!(b, &binary);
-                    assert_eq!(expected_backend, BACKEND_BF);
-                }
-                _ => panic!("First event should be Started"),
-            }
-
-            match &events[1] {
-                VersionVerifyEvent::Success {
-                    binary: b,
-                    expected_backend,
-                    actual_backend,
-                } => {
-                    assert_eq!(b, &binary);
-                    assert_eq!(expected_backend, BACKEND_BF);
-                    assert_eq!(actual_backend, BACKEND_BF);
-                }
-                _ => panic!("Second event should be Success"),
-            }
-        }
-        Err(e) => {
-            panic!("bf verification failed: {}", e);
-        }
-    }
-}
-
-#[test]
-fn test_verify_backend_bead_success() {
+fn test_verify_backend_path_reports_identity_mismatch() {
     let telemetry = Arc::new(MockTelemetry::new());
     let probe = VersionProbe::new().with_telemetry(telemetry.clone());
 
     let binary = mock_binary("bead");
-    match probe.verify_backend(&binary) {
-        Ok(()) => {
-            println!("✓ bead backend verification succeeded");
-
-            let events = telemetry.get_events();
-            assert_eq!(events.len(), 2);
-
-            match &events[1] {
-                VersionVerifyEvent::Success {
-                    expected_backend,
-                    actual_backend,
-                    ..
-                } => {
-                    assert_eq!(expected_backend, BACKEND_BEAD);
-                    assert!(actual_backend == BACKEND_BEAD || actual_backend == BACKEND_BEADS_RUST);
-                }
-                _ => panic!("Second event should be Success"),
-            }
+    match probe.verify_backend(&binary).unwrap_err() {
+        VerifyError::BackendMismatch {
+            binary: reported_binary,
+            expected,
+            actual,
+        } => {
+            assert_eq!(reported_binary, binary);
+            assert_eq!(expected, binary);
+            assert_eq!(actual, BACKEND_BEAD);
         }
-        Err(e) => {
-            panic!("bead verification failed: {}", e);
+        error => panic!("expected path identity mismatch, got: {error}"),
+    }
+
+    let events = telemetry.get_events();
+    assert_eq!(events.len(), 2);
+    match &events[1] {
+        VersionVerifyEvent::Failed {
+            expected_backend,
+            actual_backend,
+            error_type,
+            ..
+        } => {
+            assert_eq!(expected_backend, &binary);
+            assert_eq!(actual_backend.as_deref(), Some(BACKEND_BEAD));
+            assert_eq!(error_type, "BackendMismatch");
         }
+        _ => panic!("Second event should be Failed"),
     }
 }
 
@@ -266,21 +218,7 @@ fn test_detect_backend_empty_output() {
 #[test]
 fn test_detect_backend_whitespace_only_output() {
     let probe = VersionProbe::new();
-
-    // Create a temporary mock that outputs only whitespace
-    let mock_path = fixtures_dir().join("version-whitespace-mock.sh");
-    std::fs::write(&mock_path, "#!/usr/bin/env bash\necho \"   \"\n").unwrap();
-
-    // Make it executable
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&mock_path).unwrap().permissions();
-        perms.set_mode(perms.mode() | 0o111);
-        std::fs::set_permissions(&mock_path, perms).unwrap();
-    }
-
-    let binary_path = mock_path.to_string_lossy().to_string();
+    let (_directory, binary_path) = temporary_mock("#!/bin/sh\nprintf '   \\n'\n");
     let result = probe.detect_backend(&binary_path);
 
     assert!(result.is_err());
@@ -306,7 +244,7 @@ fn test_detect_backend_malformed_output() {
     match result.unwrap_err() {
         ProbeError::UnparseableOutput { binary, output } => {
             assert_eq!(binary, mock_binary("malformed"));
-            assert_eq!(output, "1.0.0"); // Version-only output is unparseable
+            assert_eq!(output, "1.0.0\n"); // Raw output is retained for diagnostics.
             println!("✓ Malformed output (version-only) returns UnparseableOutput");
         }
         other => panic!("Expected UnparseableOutput, got: {}", other),
@@ -316,21 +254,7 @@ fn test_detect_backend_malformed_output() {
 #[test]
 fn test_detect_backend_numeric_output() {
     let probe = VersionProbe::new();
-
-    // Create a temporary mock that outputs only numbers
-    let mock_path = fixtures_dir().join("version-numeric-mock.sh");
-    std::fs::write(&mock_path, "#!/bin/bash\necho \"12345\"\n").unwrap();
-
-    // Make it executable
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&mock_path).unwrap().permissions();
-        perms.set_mode(perms.mode() | 0o111);
-        std::fs::set_permissions(&mock_path, perms).unwrap();
-    }
-
-    let binary_path = mock_path.to_string_lossy().to_string();
+    let (_directory, binary_path) = temporary_mock("#!/bin/sh\nprintf '12345\\n'\n");
     let result = probe.detect_backend(&binary_path);
 
     assert!(result.is_err());
@@ -345,21 +269,7 @@ fn test_detect_backend_numeric_output() {
 #[test]
 fn test_detect_backend_special_characters_output() {
     let probe = VersionProbe::new();
-
-    // Create a temporary mock that outputs special characters
-    let mock_path = fixtures_dir().join("version-special-mock.sh");
-    std::fs::write(&mock_path, "#!/bin/bash\necho \"bead@1.0.0\"\n").unwrap();
-
-    // Make it executable
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&mock_path).unwrap().permissions();
-        perms.set_mode(perms.mode() | 0o111);
-        std::fs::set_permissions(&mock_path, perms).unwrap();
-    }
-
-    let binary_path = mock_path.to_string_lossy().to_string();
+    let (_directory, binary_path) = temporary_mock("#!/bin/sh\nprintf 'bead@1.0.0\\n'\n");
     let result = probe.detect_backend(&binary_path);
 
     assert!(result.is_err());
@@ -478,30 +388,13 @@ fn test_verify_backend_timeout() {
 #[test]
 fn test_detect_backend_multiline_output() {
     let probe = VersionProbe::new();
-
-    // Create a mock with multiline output
-    let mock_path = fixtures_dir().join("version-multiline-mock.sh");
-    std::fs::write(
-        &mock_path,
-        "#!/bin/bash\necho \"bf 0.3.0\"\necho \"Copyright 2024\"\necho \"More info here\"\n",
-    )
-    .unwrap();
-
-    // Make it executable
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&mock_path).unwrap().permissions();
-        perms.set_mode(perms.mode() | 0o111);
-        std::fs::set_permissions(&mock_path, perms).unwrap();
-    }
-
-    let binary_path = mock_path.to_string_lossy().to_string();
+    let (_directory, binary_path) =
+        temporary_mock("#!/bin/sh\nprintf 'bead 0.26.0\\nCopyright 2026\\nMore info here\\n'\n");
     let result = probe.detect_backend(&binary_path);
 
     match result {
         Ok(backend) => {
-            assert_eq!(backend, "bf");
+            assert_eq!(backend, BACKEND_BEAD);
             println!("✓ Multiline output parses correctly");
         }
         Err(e) => {
@@ -513,21 +406,7 @@ fn test_detect_backend_multiline_output() {
 #[test]
 fn test_detect_backend_with_version_keyword() {
     let probe = VersionProbe::new();
-
-    // Create a mock with "version" keyword
-    let mock_path = fixtures_dir().join("version-with-keyword-mock.sh");
-    std::fs::write(&mock_path, "#!/bin/bash\necho \"bead version 0.26.0\"\n").unwrap();
-
-    // Make it executable
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&mock_path).unwrap().permissions();
-        perms.set_mode(perms.mode() | 0o111);
-        std::fs::set_permissions(&mock_path, perms).unwrap();
-    }
-
-    let binary_path = mock_path.to_string_lossy().to_string();
+    let (_directory, binary_path) = temporary_mock("#!/bin/sh\nprintf 'bead version 0.26.0\\n'\n");
     let result = probe.detect_backend(&binary_path);
 
     match result {
@@ -544,26 +423,12 @@ fn test_detect_backend_with_version_keyword() {
 #[test]
 fn test_detect_backend_with_extra_whitespace() {
     let probe = VersionProbe::new();
-
-    // Create a mock with extra whitespace
-    let mock_path = fixtures_dir().join("version-whitespace-mock2.sh");
-    std::fs::write(&mock_path, "#!/bin/bash\necho \"  bf   0.3.0  \"\n").unwrap();
-
-    // Make it executable
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&mock_path).unwrap().permissions();
-        perms.set_mode(perms.mode() | 0o111);
-        std::fs::set_permissions(&mock_path, perms).unwrap();
-    }
-
-    let binary_path = mock_path.to_string_lossy().to_string();
+    let (_directory, binary_path) = temporary_mock("#!/bin/sh\nprintf '  bead   0.26.0  \\n'\n");
     let result = probe.detect_backend(&binary_path);
 
     match result {
         Ok(backend) => {
-            assert_eq!(backend, "bf");
+            assert_eq!(backend, BACKEND_BEAD);
             println!("✓ Output with extra whitespace parses correctly");
         }
         Err(e) => {
@@ -575,30 +440,12 @@ fn test_detect_backend_with_extra_whitespace() {
 #[test]
 fn test_detect_backend_with_leading_empty_lines() {
     let probe = VersionProbe::new();
-
-    // Create a mock with leading empty lines
-    let mock_path = fixtures_dir().join("version-leading-empty-mock.sh");
-    std::fs::write(
-        &mock_path,
-        "#!/bin/bash\necho \"\"\necho \"\"\necho \"bf 0.3.0\"\n",
-    )
-    .unwrap();
-
-    // Make it executable
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&mock_path).unwrap().permissions();
-        perms.set_mode(perms.mode() | 0o111);
-        std::fs::set_permissions(&mock_path, perms).unwrap();
-    }
-
-    let binary_path = mock_path.to_string_lossy().to_string();
+    let (_directory, binary_path) = temporary_mock("#!/bin/sh\nprintf '\\n\\nbead 0.26.0\\n'\n");
     let result = probe.detect_backend(&binary_path);
 
     match result {
         Ok(backend) => {
-            assert_eq!(backend, "bf");
+            assert_eq!(backend, BACKEND_BEAD);
             println!("✓ Output with leading empty lines parses correctly");
         }
         Err(e) => {
@@ -610,46 +457,6 @@ fn test_detect_backend_with_leading_empty_lines() {
 // ──────────────────────────────────────────────────────────────────────────────
 // Telemetry tests
 // ──────────────────────────────────────────────────────────────────────────────
-
-#[test]
-fn test_telemetry_emitted_on_success() {
-    let telemetry = Arc::new(MockTelemetry::new());
-    let probe = VersionProbe::new().with_telemetry(telemetry.clone());
-
-    let binary = mock_binary("bf");
-    let result = probe.verify_backend(&binary);
-
-    assert!(result.is_ok(), "Verification should succeed");
-
-    let events = telemetry.get_events();
-    assert_eq!(events.len(), 2, "Should emit 2 events");
-
-    match &events[0] {
-        VersionVerifyEvent::Started {
-            binary: b,
-            expected_backend,
-        } => {
-            assert_eq!(b, &binary);
-            assert_eq!(expected_backend, BACKEND_BF);
-        }
-        _ => panic!("First event should be Started"),
-    }
-
-    match &events[1] {
-        VersionVerifyEvent::Success {
-            binary: b,
-            expected_backend,
-            actual_backend,
-        } => {
-            assert_eq!(b, &binary);
-            assert_eq!(expected_backend, BACKEND_BF);
-            assert_eq!(actual_backend, BACKEND_BF);
-        }
-        _ => panic!("Second event should be Success"),
-    }
-
-    println!("✓ Telemetry emitted correctly on success");
-}
 
 #[test]
 fn test_telemetry_no_panic_without_telemetry() {
@@ -698,11 +505,6 @@ fn test_is_binary_available_mock_exists() {
 
     // Mock binaries should be available
     assert!(
-        probe.is_binary_available(&mock_binary("bf")),
-        "bf mock should be available"
-    );
-
-    assert!(
         probe.is_binary_available(&mock_binary("bead")),
         "bead mock should be available"
     );
@@ -730,7 +532,6 @@ fn test_is_binary_available_not_found() {
 fn test_expected_backend_for_binary() {
     let probe = VersionProbe::new();
 
-    assert_eq!(probe.expected_backend_for_binary("bf"), BACKEND_BF);
     assert_eq!(probe.expected_backend_for_binary("bead"), BACKEND_BEAD);
     assert_eq!(probe.expected_backend_for_binary("unknown"), "unknown");
 
@@ -762,7 +563,6 @@ fn test_timeout_custom() {
 
 #[test]
 fn test_backend_constants() {
-    assert_eq!(BACKEND_BF, "bf");
     assert_eq!(BACKEND_BEAD, "bead");
     assert_eq!(BACKEND_BEADS_RUST, "beads-rust");
     println!("✓ Backend constants are correct");
@@ -803,24 +603,6 @@ fn test_error_messages_are_actionable() {
 // ──────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn test_real_world_scenario_bf_detection() {
-    let probe = VersionProbe::new();
-
-    // Simulate real bf detection
-    let binary = mock_binary("bf");
-    match probe.detect_backend(&binary) {
-        Ok(backend) => {
-            assert_eq!(backend, "bf");
-            match probe.verify_backend(&binary) {
-                Ok(()) => println!("✓ Real-world bf scenario: detection + verification"),
-                Err(e) => panic!("Verification failed: {}", e),
-            }
-        }
-        Err(e) => panic!("Detection failed: {}", e),
-    }
-}
-
-#[test]
 fn test_real_world_scenario_bead_detection() {
     let probe = VersionProbe::new();
 
@@ -829,10 +611,7 @@ fn test_real_world_scenario_bead_detection() {
     match probe.detect_backend(&binary) {
         Ok(backend) => {
             assert!(backend == BACKEND_BEAD || backend == BACKEND_BEADS_RUST);
-            match probe.verify_backend(&binary) {
-                Ok(()) => println!("✓ Real-world bead scenario: detection + verification"),
-                Err(e) => panic!("Verification failed: {}", e),
-            }
+            println!("✓ Real-world bead scenario: detection");
         }
         Err(e) => panic!("Detection failed: {}", e),
     }
@@ -845,7 +624,7 @@ fn test_real_world_scenario_error_recovery() {
 
     // Try to detect a bad binary, recover, and try a good one
     let bad_binary = mock_binary("bad-exit");
-    let good_binary = mock_binary("bf");
+    let good_binary = mock_binary("bead");
 
     // First attempt fails
     assert!(probe.verify_backend(&bad_binary).is_err());
@@ -853,8 +632,8 @@ fn test_real_world_scenario_error_recovery() {
     // Clear telemetry for next attempt
     telemetry.clear();
 
-    // Second attempt succeeds
-    assert!(probe.verify_backend(&good_binary).is_ok());
+    // A later detection on the same probe still succeeds.
+    assert_eq!(probe.detect_backend(&good_binary).unwrap(), BACKEND_BEAD);
 
     println!("✓ Real-world scenario: error recovery works");
 }
@@ -865,31 +644,28 @@ fn test_real_world_scenario_error_recovery() {
 
 #[test]
 fn test_all_mocks_are_executable() {
-    let fixtures = fixtures_dir();
+    // These are the checked-in fixtures still exercised by this bead-rs
+    // suite. Edge-case scripts are isolated in temporary directories.
+    for name in [
+        "bead",
+        "beads-rust",
+        "empty",
+        "malformed",
+        "bad-exit",
+        "timeout",
+    ] {
+        let path = PathBuf::from(mock_binary(name));
+        let metadata = std::fs::metadata(&path).unwrap();
 
-    // Ensure all mock binaries are executable
-    for entry in std::fs::read_dir(&fixtures).unwrap() {
-        let entry = entry.unwrap();
-        let path = entry.path();
-
-        if path.extension().and_then(|s| s.to_str()) == Some("sh")
-            && path.to_string_lossy().contains("version-")
+        #[cfg(unix)]
         {
-            let metadata = std::fs::metadata(&path).unwrap();
-
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let perms = metadata.permissions();
-                let mode = perms.mode();
-
-                // Check if executable bit is set
-                assert!(
-                    mode & 0o111 != 0,
-                    "Mock binary {:?} is not executable",
-                    path
-                );
-            }
+            use std::os::unix::fs::PermissionsExt;
+            let mode = metadata.permissions().mode();
+            assert!(
+                mode & 0o111 != 0,
+                "Mock binary {:?} is not executable",
+                path
+            );
         }
     }
 

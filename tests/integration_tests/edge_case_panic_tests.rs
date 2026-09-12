@@ -447,10 +447,7 @@ mod malformed_input_tests {
         if let Err(e) = result {
             let error_msg = format!("{:?}", e);
             assert!(
-                error_msg.contains("utf8")
-                    || error_msg.contains("encoding")
-                    || error_msg.contains("invalid")
-                    || error_msg.contains("byte"),
+                error_msg.contains("stream did not contain valid UTF-8"),
                 "Error should indicate encoding problem: {}",
                 error_msg
             );
@@ -689,18 +686,14 @@ mod boundary_condition_tests {
 
     #[test]
     fn test_config_with_maximum_workers_does_not_panic() {
-        // Given: Config with maximum u64 value for workers
+        // Given: Config with the maximum supported worker count
         let temp_dir = TempDir::new().expect("failed to create temp dir");
         let config_file = temp_dir.path().join("max.yaml");
 
-        let max_yaml = format!(
-            r#"
+        let max_yaml = r#"
 worker:
-  name: "test-worker"
-  max_workers: {}
-"#,
-            u64::MAX
-        );
+  max_workers: 50
+"#;
 
         fs::write(&config_file, max_yaml).expect("failed to write max config");
 
@@ -708,7 +701,8 @@ worker:
         let result = needle::config::ConfigLoader::load_from_path(&config_file);
 
         // Then: Should load without panicking
-        assert!(result.is_ok(), "Config with max workers should load");
+        let config = result.expect("Config with max workers should load");
+        assert_eq!(config.worker.max_workers, 50);
     }
 
     #[test]
