@@ -1,13 +1,13 @@
 {
-  "timestamp": "2026-09-12T19:05:52.925256179Z",
-  "total_open_beads": 608,
+  "timestamp": "2026-09-12T20:05:59.252300726Z",
+  "total_open_beads": 607,
   "exclusion_criteria": {
     "has_assignee": 3,
     "manually_blocked": 19,
-    "has_dependencies": 456,
-    "resource_conflicts": 1
+    "has_dependencies": 454,
+    "resource_conflicts": 5
   },
-  "final_candidate_count": 182,
+  "final_candidate_count": 183,
   "excluded_beads": [
     {
       "bead_id": "needle-6b02eb9d",
@@ -263,17 +263,6 @@
       "conflict_count": 0
     },
     {
-      "bead_id": "needle-e0e5433f",
-      "title": "Check out the exact workflow revision in every needle-ci stage",
-      "priority": 0,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
       "bead_id": "needle-6fca37ab",
       "title": "Epic: split beads whose productive agent work exceeds the execution deadline",
       "priority": 1,
@@ -324,7 +313,7 @@
       "assignee": null,
       "manual_blocked": false,
       "has_blockers": true,
-      "blocker_count": 16,
+      "blocker_count": 15,
       "has_resource_conflicts": false,
       "conflict_count": 0
     },
@@ -1149,7 +1138,7 @@
       "assignee": null,
       "manual_blocked": false,
       "has_blockers": true,
-      "blocker_count": 3,
+      "blocker_count": 2,
       "has_resource_conflicts": false,
       "conflict_count": 0
     },
@@ -1517,26 +1506,15 @@
       "conflict_count": 0
     },
     {
-      "bead_id": "needle-c9c125c1",
-      "title": "Keep precompiled CI target artifacts visible after workspace mounts",
-      "priority": 1,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 1,
-      "has_resource_conflicts": true,
-      "conflict_count": 1
-    },
-    {
       "bead_id": "needle-cf866e0d",
       "title": "Build one reusable nextest archive per verification fingerprint",
       "priority": 1,
       "assignee": null,
       "manual_blocked": false,
       "has_blockers": true,
-      "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
+      "blocker_count": 2,
+      "has_resource_conflicts": true,
+      "conflict_count": 1
     },
     {
       "bead_id": "needle-8cb8dfba",
@@ -1545,9 +1523,9 @@
       "assignee": null,
       "manual_blocked": false,
       "has_blockers": true,
-      "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
+      "blocker_count": 2,
+      "has_resource_conflicts": true,
+      "conflict_count": 1
     },
     {
       "bead_id": "needle-7fc5f895",
@@ -1556,7 +1534,7 @@
       "assignee": null,
       "manual_blocked": false,
       "has_blockers": true,
-      "blocker_count": 2,
+      "blocker_count": 1,
       "has_resource_conflicts": false,
       "conflict_count": 0
     },
@@ -2437,8 +2415,8 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
+      "has_resource_conflicts": true,
+      "conflict_count": 1
     },
     {
       "bead_id": "needle-35a38217",
@@ -4274,8 +4252,8 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
+      "has_resource_conflicts": true,
+      "conflict_count": 1
     },
     {
       "bead_id": "needle-f8171eb6",
@@ -4283,10 +4261,10 @@
       "priority": 2,
       "assignee": null,
       "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 2,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
+      "has_blockers": false,
+      "blocker_count": 0,
+      "has_resource_conflicts": true,
+      "conflict_count": 1
     },
     {
       "bead_id": "needle-f2b2e531",
