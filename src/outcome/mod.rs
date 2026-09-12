@@ -1290,7 +1290,10 @@ impl OutcomeHandler {
             bead_id: bead.id.clone(),
             reason: format!("infrastructure:{fingerprint}"),
         });
-        Ok((BeadAction::Released, events))
+        Ok((
+            BeadAction::Released(ReleaseReason::InfrastructureFailure),
+            events,
+        ))
     }
 
     /// Persist this attempt into the bead's history (local journal plus the
@@ -4753,7 +4756,7 @@ mod tests {
         };
 
         let first = handler.handle(&store, &bead, &output, false).await.unwrap();
-        assert_eq!(first.bead_action, BeadAction::Released);
+        assert!(matches!(first.bead_action, BeadAction::Released(_)));
 
         let records = crate::attempt_history::load_local(&bead.workspace, &bead.id).unwrap();
         assert_eq!(records.len(), 1);
@@ -4761,7 +4764,12 @@ mod tests {
         assert_eq!(record.outcome, "work_failure");
         assert_eq!(record.terminal_reason.as_deref(), Some("exit_code:1"));
         assert_eq!(record.exit_code, 1);
-        assert_eq!(record.requested_action, "released");
+        // BeadAction::Released now carries WHY, and Display renders it as
+        // released:<reason>, so the attempt history tells the next agent what
+        // sent the bead back. Nothing parses this field -- it is emitted to
+        // telemetry and rendered into the prompt -- so the richer value is a
+        // gain, not a format break.
+        assert_eq!(record.requested_action, "released:dispatch_failed");
         let summary = record.failure_summary.as_deref().unwrap();
         assert!(summary.contains("error[E0308]"), "{summary}");
         assert!(summary.contains("stderr (tail)"));
@@ -4776,7 +4784,7 @@ mod tests {
 
         // A second failure appends rather than replaces.
         let second = handler.handle(&store, &bead, &output, false).await.unwrap();
-        assert_eq!(second.bead_action, BeadAction::Released);
+        assert!(matches!(second.bead_action, BeadAction::Released(_)));
         assert_eq!(
             crate::attempt_history::load_local(&bead.workspace, &bead.id)
                 .unwrap()
@@ -4828,7 +4836,10 @@ mod tests {
             );
         }
         let tripping = last.unwrap();
-        assert_eq!(tripping.bead_action, BeadAction::Released);
+        assert!(matches!(
+            tripping.bead_action,
+            BeadAction::Released(ReleaseReason::InfrastructureFailure)
+        ));
         assert!(
             tripping.telemetry_events.iter().any(|e| matches!(
                 e,

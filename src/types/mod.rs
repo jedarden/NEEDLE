@@ -3835,6 +3835,9 @@ pub enum ReleaseReason {
     /// Post-push CI correlation failed safely, so the implementation bead is
     /// deliberately left open for the CI lifecycle to resolve.
     CiCorrelationFailed,
+    /// The adapter/provider was degraded, so the bead is released with no
+    /// failure count: the infrastructure failed, not the work (N-T23).
+    InfrastructureFailure,
 }
 
 impl fmt::Display for ReleaseReason {
@@ -3851,6 +3854,7 @@ impl fmt::Display for ReleaseReason {
             ReleaseReason::AgentNotFound => "agent_not_found",
             ReleaseReason::RegistrationCancelled => "registration_cancelled",
             ReleaseReason::CiCorrelationFailed => "ci_correlation_failed",
+            ReleaseReason::InfrastructureFailure => "infrastructure_failure",
         };
         write!(f, "{s}")
     }
