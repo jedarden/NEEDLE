@@ -7,7 +7,7 @@
 //! 3. Validating claude-print adapter configuration
 //! 4. Ensuring stream-json output format is requested
 //!
-//! Run with: cargo test --test anthropic_routing_e2e_test
+//! Run with: cargo test --test p3_integration_tests anthropic_routing_e2e_test::
 
 use std::collections::HashMap;
 use std::path::PathBuf;

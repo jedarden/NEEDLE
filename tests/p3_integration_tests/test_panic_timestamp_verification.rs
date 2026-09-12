@@ -117,7 +117,7 @@ fn test_timestamp_field_presence_in_panic_hook() {
 
     // We can't directly test the panic hook without triggering a panic,
     // but we can verify the code structure by examining the source
-    let panic_capture_source = include_str!("../src/panic_capture.rs");
+    let panic_capture_source = include_str!("../../src/panic_capture.rs");
 
     // Verify timestamp capture is present
     assert!(
@@ -160,7 +160,7 @@ fn test_timestamp_field_presence_in_panic_hook() {
 fn test_timestamp_capture_placement_before_telemetry() {
     // Verify that timestamp is captured immediately before telemetry emission
     // to ensure accuracy of the timing
-    let panic_capture_source = include_str!("../src/panic_capture.rs");
+    let panic_capture_source = include_str!("../../src/panic_capture.rs");
 
     // Find the position of timestamp capture
     let timestamp_pos = panic_capture_source.find("let timestamp = SystemTime::now();");
@@ -188,7 +188,7 @@ fn test_timestamp_capture_placement_before_telemetry() {
 #[test]
 fn test_timestamp_emission_uses_debug_formatting() {
     // Verify that timestamp uses ? formatting (Debug trait) for readability
-    let panic_capture_source = include_str!("../src/panic_capture.rs");
+    let panic_capture_source = include_str!("../../src/panic_capture.rs");
 
     // The ?timestamp format uses the Debug trait, which provides readable output
     assert!(
@@ -202,7 +202,7 @@ fn test_timestamp_emission_uses_debug_formatting() {
 #[test]
 fn test_panic_hook_installs_debug_logging() {
     // Verify that the panic hook installation includes debug logging
-    let panic_capture_source = include_str!("../src/panic_capture.rs");
+    let panic_capture_source = include_str!("../../src/panic_capture.rs");
 
     // Verify debug logging for hook installation
     assert!(
@@ -216,7 +216,7 @@ fn test_panic_hook_installs_debug_logging() {
 #[test]
 fn test_panic_hook_emits_structured_event() {
     // Verify the panic hook emits a structured event with all required fields
-    let panic_capture_source = include_str!("../src/panic_capture.rs");
+    let panic_capture_source = include_str!("../../src/panic_capture.rs");
 
     // Verify the event message is descriptive
     assert!(
@@ -240,7 +240,7 @@ fn test_panic_hook_emits_structured_event() {
 fn test_timestamp_is_captured_at_panic_time_not_hook_installation() {
     // Verify that timestamp is captured in the panic hook function itself,
     // not at hook installation time, to ensure accuracy
-    let panic_capture_source = include_str!("../src/panic_capture.rs");
+    let panic_capture_source = include_str!("../../src/panic_capture.rs");
 
     // The timestamp capture should be inside the panic_hook function
     // Find the panic_hook function definition
@@ -266,7 +266,7 @@ fn test_timestamp_is_captured_at_panic_time_not_hook_installation() {
 #[test]
 fn test_panic_hook_output_format_is_readable() {
     // Verify that the panic hook produces readable, structured output
-    let panic_capture_source = include_str!("../src/panic_capture.rs");
+    let panic_capture_source = include_str!("../../src/panic_capture.rs");
 
     // Check for structured eprintln! output (human-readable panic info)
     assert!(
@@ -285,7 +285,7 @@ fn test_panic_hook_output_format_is_readable() {
     );
 
     assert!(
-        panic_capture_source.contains("eprintln!(\"Location: {}:{}"),
+        panic_capture_source.contains("\"Location: {}:{}:{}\""),
         "should output file:line:column location"
     );
 
@@ -295,7 +295,7 @@ fn test_panic_hook_output_format_is_readable() {
 #[test]
 fn test_debug_and_telemetry_emissions_both_present() {
     // Verify that both debug output and telemetry are emitted for comprehensive coverage
-    let panic_capture_source = include_str!("../src/panic_capture.rs");
+    let panic_capture_source = include_str!("../../src/panic_capture.rs");
 
     // Check for console output (eprintln!)
     assert!(
@@ -316,7 +316,7 @@ fn test_debug_and_telemetry_emissions_both_present() {
 fn test_timestamp_capture_between_console_and_telemetry() {
     // Verify the execution order: capture timestamp → console output → telemetry
     // This ensures the timestamp is accurate and covers all emissions
-    let panic_capture_source = include_str!("../src/panic_capture.rs");
+    let panic_capture_source = include_str!("../../src/panic_capture.rs");
 
     // Find key markers
     let timestamp_pos = panic_capture_source.find("let timestamp = SystemTime::now();");
@@ -345,7 +345,7 @@ fn test_timestamp_capture_between_console_and_telemetry() {
 #[test]
 fn test_utility_timestamp_functions_exist() {
     // Verify that utility functions for timestamp capture exist and are tested
-    let util_source = include_str!("../src/util.rs");
+    let util_source = include_str!("../../src/util.rs");
 
     // Verify capture_timestamp function exists
     assert!(
@@ -367,7 +367,7 @@ fn test_panic_timestamp_uses_system_time_not_utility() {
     // Verify that panic hook uses SystemTime::now() directly, not capture_timestamp()
     // This is intentional: panic hook needs SystemTime's Debug formatting
     // rather than ISO 8601 string format, for better logging
-    let panic_capture_source = include_str!("../src/panic_capture.rs");
+    let panic_capture_source = include_str!("../../src/panic_capture.rs");
 
     // Should use SystemTime::now() directly
     assert!(
@@ -382,7 +382,7 @@ fn test_panic_timestamp_uses_system_time_not_utility() {
 #[test]
 fn test_panic_hook_idempotence() {
     // Verify the panic hook is idempotent - installing it multiple times is safe
-    let panic_capture_source = include_str!("../src/panic_capture.rs");
+    let panic_capture_source = include_str!("../../src/panic_capture.rs");
 
     // Check for Once-based installation
     assert!(
@@ -457,7 +457,7 @@ fn test_system_time_approximate_ordering() {
 fn test_timestamp_field_value_type() {
     // Verify that the timestamp field uses the correct type (SystemTime)
     // and formatting (Debug via ?)
-    let panic_capture_source = include_str!("../src/panic_capture.rs");
+    let panic_capture_source = include_str!("../../src/panic_capture.rs");
 
     // The ?timestamp syntax applies Debug formatting
     // SystemTime's Debug output is readable and structured

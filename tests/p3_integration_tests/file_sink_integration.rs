@@ -13,13 +13,14 @@ use std::io::BufRead;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use chrono::Utc;
 use needle::config::{FileSinkConfig, StdoutSinkConfig, TelemetryConfig};
 use needle::telemetry::{EventKind, Telemetry};
 use tempfile::TempDir;
 
 /// Helper to emit an event and wait for it to be flushed
 async fn emit_and_wait(telemetry: &Telemetry, kind: EventKind) -> anyhow::Result<()> {
-    telemetry.emit(kind)?;
+    telemetry.emit(kind, Utc::now())?;
     tokio::time::sleep(Duration::from_millis(100)).await;
     Ok(())
 }
@@ -45,6 +46,7 @@ async fn test_file_sink_full_flow() {
 
     let telemetry = Telemetry::from_config("test-worker-integration".to_string(), &config)
         .expect("failed to create telemetry");
+    telemetry.start();
 
     // Emit several events
     emit_and_wait(&telemetry, EventKind::QueueEmpty)
@@ -70,8 +72,7 @@ async fn test_file_sink_full_flow() {
     .await
     .expect("emit WorkerIdle failed");
 
-    // Give time for file to be flushed
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    telemetry.shutdown().await;
 
     // Find the log file
     let log_files = fs::read_dir(&log_dir).expect("failed to read log dir");
@@ -148,14 +149,14 @@ async fn test_file_sink_disabled_via_config() {
 
     let telemetry = Telemetry::from_config("test-worker-disabled".to_string(), &config)
         .expect("failed to create telemetry");
+    telemetry.start();
 
     // Emit an event
     emit_and_wait(&telemetry, EventKind::QueueEmpty)
         .await
         .expect("emit QueueEmpty failed");
 
-    // Give time for any async operations
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    telemetry.shutdown().await;
 
     // Verify no log file was created
     let log_files_exists = log_dir.exists() && fs::read_dir(&log_dir).is_ok();
@@ -191,14 +192,14 @@ async fn test_file_sink_default_log_dir() {
 
     let telemetry = Telemetry::from_config("test-worker-default".to_string(), &config)
         .expect("failed to create telemetry");
+    telemetry.start();
 
     // Emit an event
     emit_and_wait(&telemetry, EventKind::QueueEmpty)
         .await
         .expect("emit QueueEmpty failed");
 
-    // Give time for file to be created
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    telemetry.shutdown().await;
 
     // Check default log directory (~/.needle/logs/)
     let home = std::env::var("HOME").expect("HOME not set");
@@ -275,6 +276,7 @@ async fn test_file_sink_error_handling() {
 
     let telemetry = Telemetry::from_config("test-worker-errors".to_string(), &config)
         .expect("failed to create telemetry");
+    telemetry.start();
 
     // Emit events that should succeed
     for i in 0..5 {
@@ -288,8 +290,7 @@ async fn test_file_sink_error_handling() {
         .expect("emit should succeed");
     }
 
-    // Give time for all events to be written
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    telemetry.shutdown().await;
 
     // Verify events were written despite any transient errors
     let log_files = fs::read_dir(&log_dir).expect("failed to read log dir");
@@ -319,6 +320,7 @@ async fn test_file_sink_complex_serialization() {
 
     let telemetry = Telemetry::from_config("test-worker-complex".to_string(), &config)
         .expect("failed to create telemetry");
+    telemetry.start();
 
     // Emit event with complex nested data
     emit_and_wait(
@@ -337,7 +339,7 @@ async fn test_file_sink_complex_serialization() {
     .await
     .expect("emit WorkerExhausted failed");
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    telemetry.shutdown().await;
 
     // Read back and verify complex structure
     let log_files = fs::read_dir(&log_dir).expect("failed to read log dir");

@@ -255,8 +255,9 @@ async fn test_knot_alert_deduplication_workflow() {
         _ => panic!("Expected Suppressed, got {:?}", result3),
     }
 
-    // Fourth alert with different cause - should create new bead
-    let different_cause = "diagnosis=invisible, open=10, excluded=5";
+    // Numeric metrics are deliberately normalized out of fingerprints, so use
+    // a semantically different diagnosis rather than only changing counts.
+    let different_cause = "diagnosis=blocked, open=10, excluded=5";
     let result4 = check_alert_deduplication(
         &store_with_closed,
         workspace,
