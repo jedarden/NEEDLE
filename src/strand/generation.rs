@@ -70,9 +70,21 @@ impl GeneratorGate {
         config: GenerationConfig,
         workspace: PathBuf,
         state_dir: PathBuf,
-        exclude_labels: Vec<String>,
+        mut exclude_labels: Vec<String>,
         telemetry: Telemetry,
     ) -> Self {
+        // These labels are hard selection policy even when the operator's
+        // configurable list is empty. Pluck applies the same defaults; without
+        // them the generation gate can call a workspace "healthy" from raw
+        // deferred beads immediately before Pluck declares it exhausted.
+        for label in ["deferred", "human", "blocked"] {
+            if !exclude_labels
+                .iter()
+                .any(|configured| configured.eq_ignore_ascii_case(label))
+            {
+                exclude_labels.push(label.to_string());
+            }
+        }
         Self {
             config,
             workspace,
@@ -171,18 +183,43 @@ impl GeneratorGate {
             exclude_ids: exclusions.clone(),
         };
         let candidates = store.ready(&filters).await?;
+        let now = Utc::now();
         Ok(candidates
             .iter()
             .filter(|bead| {
                 bead.status == BeadStatus::Open
                     && bead.assignee.is_none()
                     && !exclusions.contains(&bead.id)
-                    && !bead
-                        .labels
-                        .iter()
-                        .any(|label| self.exclude_labels.contains(label))
+                    && !self.held_by_label_policy(bead, now)
             })
             .count())
+    }
+
+    fn held_by_label_policy(&self, bead: &crate::types::Bead, now: chrono::DateTime<Utc>) -> bool {
+        let expired_marking = crate::bead_store::expired_quarantine_marking(&bead.labels, now);
+        if crate::bead_store::active_quarantine_until(bead, now).is_some() {
+            return true;
+        }
+
+        bead.labels.iter().any(|raw| {
+            let label = raw.trim().to_ascii_lowercase();
+            let deferred =
+                crate::deferral::holds(raw, now) && !(expired_marking && label == "deferred");
+            let manual_block = matches!(
+                label.as_str(),
+                "blocked" | "manual_blocked" | "manual-blocked" | "blocked:manual"
+            );
+            let human = label == "human"
+                || label.starts_with("human:")
+                || label == "human-owned"
+                || label == "owner:human";
+            let configured = self
+                .exclude_labels
+                .iter()
+                .any(|excluded| excluded.trim().eq_ignore_ascii_case(&label))
+                && !(expired_marking && label == "deferred");
+            deferred || manual_block || human || configured
+        })
     }
 
     fn emit_gate(&self, strand_name: &str, reason: &str, eligible_ready: usize) {
@@ -616,6 +653,43 @@ mod tests {
             gate.prepare("weave", &store, &HashSet::new()).await,
             GeneratorPermit::LowWater { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn default_hard_labels_do_not_make_an_exhausted_frontier_look_healthy() {
+        let dir = tempfile::tempdir().unwrap();
+        let gate = gate(dir.path(), 300, "worker-a");
+        let mut deferred = bead("deferred");
+        deferred.labels = vec!["deferred".to_string(), "failure-count:1".to_string()];
+        let mut human = bead("human");
+        human.labels = vec!["human:review".to_string()];
+        let store = GateStore::healthy(vec![deferred, human]);
+
+        assert!(matches!(
+            gate.prepare("weave", &store, &HashSet::new()).await,
+            GeneratorPermit::LowWater { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn expired_automatic_quarantine_counts_toward_the_frontier() {
+        let dir = tempfile::tempdir().unwrap();
+        let gate = gate_with_reserve(dir.path(), 1);
+        let mut recovered = bead("recovered");
+        recovered.labels = vec![
+            "deferred".to_string(),
+            "failure-count:1".to_string(),
+            format!(
+                "quarantine-until:{}",
+                (Utc::now() - chrono::Duration::minutes(5)).to_rfc3339()
+            ),
+        ];
+        let store = GateStore::healthy(vec![recovered]);
+
+        assert_eq!(
+            gate.prepare("weave", &store, &HashSet::new()).await,
+            GeneratorPermit::Ordinary
+        );
     }
 
     #[test]
