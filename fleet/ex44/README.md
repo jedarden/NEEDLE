@@ -55,3 +55,9 @@ Worker credentials remain in the host-only `worker-common.env`; neither the
 manifest nor the shared policy contains secrets. To roll back, restore the
 timestamped files under `~/.config/systemd/user` and `~/.config/needle`, run
 `systemctl --user daemon-reload`, then restart only idle worker instances.
+
+`needle-zai-governor` protects the proxy without fighting the manifest. It
+scales only the four expansion workers (`glm-roam-18` through `20` and
+`glm-icg`) between one and four. Three or more 429 retries in a 100-second
+window remove one worker; a clean window adds one. The separate 17-worker base
+fleet is never disabled by this controller.

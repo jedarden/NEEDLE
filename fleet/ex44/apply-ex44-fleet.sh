@@ -111,7 +111,7 @@ while IFS= read -r workspace; do
     fi
 done <"$REQUIRED_EXPLORE"
 
-mkdir -p "$SYSTEMD_DIR" "$WORKERS_DIR"
+mkdir -p "$SYSTEMD_DIR" "$WORKERS_DIR" "$NEEDLE_HOST_HOME/.local/bin"
 
 install_if_changed() {
     local mode=$1 source=$2 target=$3
@@ -130,6 +130,9 @@ install_if_changed 644 "$SRC_DIR/needle.slice" "$SYSTEMD_DIR/needle.slice"
 install_if_changed 644 "$SRC_DIR/needle-worker@.service" "$SYSTEMD_DIR/needle-worker@.service"
 install_if_changed 644 "$SRC_DIR/needle-backlog-slo.service" "$SYSTEMD_DIR/needle-backlog-slo.service"
 install_if_changed 644 "$SRC_DIR/needle-backlog-slo.timer" "$SYSTEMD_DIR/needle-backlog-slo.timer"
+install_if_changed 644 "$SRC_DIR/needle-zai-governor.service" "$SYSTEMD_DIR/needle-zai-governor.service"
+install_if_changed 644 "$SRC_DIR/needle-zai-governor.timer" "$SYSTEMD_DIR/needle-zai-governor.timer"
+install_if_changed 755 "$SRC_DIR/needle-zai-governor" "$NEEDLE_HOST_HOME/.local/bin/needle-zai-governor"
 install_if_changed 644 "$SRC_DIR/fleet-policy.env" "$NEEDLE_CONFIG_DIR/fleet-policy.env"
 install_if_changed 644 "$SRC_DIR/backlog-policy.env" "$NEEDLE_CONFIG_DIR/backlog-policy.env"
 
@@ -190,6 +193,13 @@ if ! systemctl --user is-enabled -q needle-backlog-slo.timer 2>/dev/null; then
 fi
 if [[ "$START_NEW" == 1 ]] && ! systemctl --user is-active -q needle-backlog-slo.timer; then
     run systemctl --user start --no-block needle-backlog-slo.timer
+fi
+
+if ! systemctl --user is-enabled -q needle-zai-governor.timer 2>/dev/null; then
+    run systemctl --user enable needle-zai-governor.timer
+fi
+if [[ "$START_NEW" == 1 ]] && ! systemctl --user is-active -q needle-zai-governor.timer; then
+    run systemctl --user start --no-block needle-zai-governor.timer
 fi
 
 echo "- policy converged; no running worker was restarted"

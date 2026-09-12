@@ -1,0 +1,8 @@
+[Unit]
+Description=Scale the ex44 expansion pool from observed Z.ai 429 pressure
+After=default.target
+
+[Service]
+Type=oneshot
+Environment=PATH=/home/coding/.local/bin:/home/coding/.cargo/bin:/home/coding/bin:/run/current-system/sw/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=%h/.local/bin/needle-zai-governor

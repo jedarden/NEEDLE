@@ -209,8 +209,7 @@ report=$(jq -sc \
                     eligible_minimum:$roam_minimum,
                     eligible_target:$roam_target,
                     status:(if $roam_min_available < $roam_minimum then "breach" else "reserve" end)}]
-                else [] end)),
-          by_workspace: ($pools | sort_by(.workspace))
+                else [] end))
         }
     ' "$rows")
 

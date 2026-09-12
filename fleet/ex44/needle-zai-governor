@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+# Scale only the four ex44 expansion workers from observed Z.ai concurrency
+# retries. The original 17-worker fleet remains fixed; this controller cannot
+# silently disable a pinned base route.
+set -euo pipefail
+
+ELASTIC_UNITS=(glm-roam-18 glm-roam-19 glm-roam-20 glm-icg)
+FLOOR=1
+CEILING=${#ELASTIC_UNITS[@]}
+HIGH_429_COUNT=3
+KCTL=(kubectl --server=http://traefik-apexalgo-iad:8001)
+
+STATE_DIR="$HOME/.local/state/needle-zai-governor"
+# v2 intentionally starts fresh: the retired controller's state referred to a
+# different five-unit pool and cannot be interpreted for this roster.
+STATE_FILE="$STATE_DIR/desired_count-v2"
+LOG="$STATE_DIR/governor-v2.log"
+mkdir -p "$STATE_DIR"
+[[ -f "$STATE_FILE" ]] || printf '%s\n' "$CEILING" >"$STATE_FILE"
+desired=$(<"$STATE_FILE")
+[[ "$desired" =~ ^[0-9]+$ ]] || desired=$CEILING
+(( desired >= FLOOR && desired <= CEILING )) || desired=$CEILING
+
+# Read both healthy proxy replicas. A successful stream completion is the
+# denominator; upstream 429 retries are the pressure signal. The proxy already
+# retries a small amount of ordinary concurrency contention, so scale down only
+# after three observed retries in the 100-second window and scale up after a
+# completely clean window.
+counts=$("${KCTL[@]}" logs -n mcp -l app=zai-proxy --all-containers=true \
+    --prefix --since=100s 2>/dev/null \
+    | awk '/429 .*retrying/{errors++} /Token usage \(stream/{completed++}
+           END {printf "%d %d", errors+0, completed+0}' || true)
+read -r errors completed <<<"${counts:-0 0}"
+
+new_desired=$desired
+action=hold
+if (( errors >= HIGH_429_COUNT )); then
+    if (( desired > FLOOR )); then
+        new_desired=$((desired - 1))
+        action=scale-down
+    else
+        action=hold-floor
+    fi
+elif (( completed > 0 && errors == 0 )); then
+    if (( desired < CEILING )); then
+        new_desired=$((desired + 1))
+        action=scale-up
+    else
+        action=hold-clean
+    fi
+elif (( completed == 0 && errors == 0 )); then
+    action=no-samples
+fi
+
+if (( new_desired != desired )); then
+    printf '%s\n' "$new_desired" >"$STATE_FILE"
+fi
+printf '%s errors=%s completed=%s desired=%s->%s action=%s\n' \
+    "$(date -u +%FT%TZ)" "$errors" "$completed" "$desired" "$new_desired" "$action" >>"$LOG"
+
+for i in "${!ELASTIC_UNITS[@]}"; do
+    unit="needle-worker@${ELASTIC_UNITS[$i]}.service"
+    if (( i < new_desired )); then
+        systemctl --user is-enabled -q "$unit" 2>/dev/null || systemctl --user enable "$unit"
+        systemctl --user is-active -q "$unit" || systemctl --user start --no-block "$unit"
+    else
+        systemctl --user is-enabled -q "$unit" 2>/dev/null && systemctl --user disable "$unit"
+        if systemctl --user is-active -q "$unit"; then
+            systemctl --user stop --no-block "$unit"
+        fi
+    fi
+done
+
+printf '{"event":"needle.zai_governor","errors":%s,"completed":%s,"desired":%s,"action":"%s"}\n' \
+    "$errors" "$completed" "$new_desired" "$action"
