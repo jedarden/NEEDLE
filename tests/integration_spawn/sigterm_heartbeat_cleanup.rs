@@ -40,7 +40,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 // Import log capture helper for verifying log messages
-mod log_capture_helper;
+use super::log_capture_helper;
 
 /// Helper to get a test heartbeat directory.
 fn test_heartbeat_dir() -> PathBuf {

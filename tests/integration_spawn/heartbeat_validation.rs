@@ -15,7 +15,7 @@ use std::path::Path;
 use std::time::Duration;
 
 // Import log capture helper for verifying log messages
-mod log_capture_helper;
+use super::log_capture_helper;
 
 #[tokio::test]
 async fn heartbeat_file_created_on_startup() {

@@ -17,7 +17,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
 // Import log capture helper for verifying log messages
-mod log_capture_helper;
+use super::log_capture_helper;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // PermissionDenied Error Log Verification

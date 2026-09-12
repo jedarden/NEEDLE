@@ -27,7 +27,7 @@ use std::time::Duration;
 use clap::Parser;
 
 // Declare the tmux_fixture module (defined in tmux_fixture.rs in the same tests/ directory)
-mod tmux_fixture;
+use super::tmux_fixture;
 
 /// Test helper to check if a PID exists in the process table.
 #[cfg(unix)]

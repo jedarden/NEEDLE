@@ -56,7 +56,7 @@ fn hot_reload_exec_preserves_pid_and_resume_arguments() {
 
     let mut child = Command::new(std::env::current_exe().expect("current test executable"))
         .arg("--exact")
-        .arg("re_exec_helper")
+        .arg("hot_reload_reexec::re_exec_helper")
         .arg("--nocapture")
         .env(HELPER_ENV, "1")
         .env(STABLE_ENV, &stable)

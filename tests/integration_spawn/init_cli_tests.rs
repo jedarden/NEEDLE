@@ -271,7 +271,7 @@ fn init_skips_agents_md_with_flag() {
 /// Test that AGENTS.md markers are properly formatted.
 #[test]
 fn agents_md_markers_are_correct() {
-    let template = include_str!("../docs/templates/AGENTS-needle.md");
+    let template = include_str!("../../docs/templates/AGENTS-needle.md");
 
     // Verify template contains key content
     assert!(
@@ -400,7 +400,7 @@ fn init_agents_md_injection_is_idempotent() {
 /// Test replace_needle_block creates file with markers when content has no markers.
 #[test]
 fn replace_needle_block_creates_markers() {
-    let template = include_str!("../docs/templates/AGENTS-needle.md");
+    let template = include_str!("../../docs/templates/AGENTS-needle.md");
     let existing_content = "# Existing content\n";
 
     let result = needle::cli::replace_needle_block(existing_content, template);
@@ -429,7 +429,7 @@ fn replace_needle_block_creates_markers() {
 /// Test replace_needle_block replaces existing block.
 #[test]
 fn replace_needle_block_replaces_existing_block() {
-    let template = include_str!("../docs/templates/AGENTS-needle.md");
+    let template = include_str!("../../docs/templates/AGENTS-needle.md");
     let existing_content =
         "# Before\n<!-- needle:begin -->\nOLD CONTENT\n<!-- needle:end -->\n# After\n";
 
@@ -468,7 +468,7 @@ fn replace_needle_block_replaces_existing_block() {
 /// Test replace_needle_block is idempotent when template hasn't changed.
 #[test]
 fn replace_needle_block_is_idempotent() {
-    let template = include_str!("../docs/templates/AGENTS-needle.md");
+    let template = include_str!("../../docs/templates/AGENTS-needle.md");
     let content_with_template = format!(
         "# Before\n<!-- needle:begin -->\n{}\n<!-- needle:end -->\n# After\n",
         template
@@ -483,7 +483,7 @@ fn replace_needle_block_is_idempotent() {
 /// Test replace_needle_block handles missing end marker gracefully.
 #[test]
 fn replace_needle_block_handles_missing_end_marker() {
-    let template = include_str!("../docs/templates/AGENTS-needle.md");
+    let template = include_str!("../../docs/templates/AGENTS-needle.md");
     let malformed_content = "# Content\n<!-- needle:begin -->\nNo end marker here\n";
 
     let result = needle::cli::replace_needle_block(malformed_content, template);
@@ -498,7 +498,7 @@ fn replace_needle_block_handles_missing_end_marker() {
 /// Test AGENTS.md creation behavior - new file creation.
 #[test]
 fn agents_md_creates_new_file_with_markers() {
-    let template = include_str!("../docs/templates/AGENTS-needle.md");
+    let template = include_str!("../../docs/templates/AGENTS-needle.md");
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let agents_md = temp_dir.path().join("AGENTS.md");
 
@@ -528,7 +528,7 @@ fn agents_md_creates_new_file_with_markers() {
 /// Test AGENTS.md append behavior - appending to existing file.
 #[test]
 fn agents_md_appends_to_existing_file() {
-    let template = include_str!("../docs/templates/AGENTS-needle.md");
+    let template = include_str!("../../docs/templates/AGENTS-needle.md");
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let agents_md = temp_dir.path().join("AGENTS.md");
 
@@ -570,7 +570,7 @@ fn agents_md_appends_to_existing_file() {
 /// Test AGENTS.md idempotent behavior - second run with same content.
 #[test]
 fn agents_md_second_run_is_idempotent() {
-    let template = include_str!("../docs/templates/AGENTS-needle.md");
+    let template = include_str!("../../docs/templates/AGENTS-needle.md");
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
     let agents_md = temp_dir.path().join("AGENTS.md");
 
@@ -605,7 +605,7 @@ fn agents_md_opt_out_skips_creation() {
     let no_agents_md = true;
 
     if !no_agents_md {
-        let template = include_str!("../docs/templates/AGENTS-needle.md");
+        let template = include_str!("../../docs/templates/AGENTS-needle.md");
         let content = format!("<!-- needle:begin -->\n{}\n<!-- needle:end -->", template);
         fs::write(&agents_md, &content).expect("Failed to write AGENTS.md");
     }
@@ -623,7 +623,7 @@ fn agents_md_opt_out_skips_creation() {
 fn template_bead_commands_match_help_output() {
     use std::process::Command;
 
-    let _template = include_str!("../docs/templates/AGENTS-needle.md");
+    let _template = include_str!("../../docs/templates/AGENTS-needle.md");
 
     // Try to get bead help output - if bead is not available, skip this test
     let bead_help = match Command::new("bead").arg("--help").output() {
