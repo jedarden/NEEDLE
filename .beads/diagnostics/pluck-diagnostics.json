@@ -1,13 +1,13 @@
 {
-  "timestamp": "2026-09-12T16:08:19.722060894Z",
-  "total_open_beads": 597,
+  "timestamp": "2026-09-12T18:05:34.523642923Z",
+  "total_open_beads": 608,
   "exclusion_criteria": {
     "has_assignee": 3,
     "manually_blocked": 19,
     "has_dependencies": 456,
-    "resource_conflicts": 0
+    "resource_conflicts": 1
   },
-  "final_candidate_count": 168,
+  "final_candidate_count": 182,
   "excluded_beads": [
     {
       "bead_id": "needle-6b02eb9d",
@@ -324,7 +324,7 @@
       "assignee": null,
       "manual_blocked": false,
       "has_blockers": true,
-      "blocker_count": 18,
+      "blocker_count": 17,
       "has_resource_conflicts": false,
       "conflict_count": 0
     },
@@ -507,17 +507,6 @@
     {
       "bead_id": "needle-0339c178",
       "title": "needle-ci pod cannot schedule: 2000m/4Gi request + large-node selector loses to concurrent kaniko builds",
-      "priority": 1,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
-      "bead_id": "needle-a4b7da64",
-      "title": "needle-ci red: exit 101 (rust panic) + max duration exceeded on two runs; four runs queued concurrently",
       "priority": 1,
       "assignee": null,
       "manual_blocked": false,
@@ -1154,24 +1143,13 @@
       "conflict_count": 0
     },
     {
-      "bead_id": "needle-6cd75a07",
-      "title": "Consolidate the 121 auto-discovered integration test binaries",
-      "priority": 1,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 2,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
       "bead_id": "needle-9e6b0055",
       "title": "Umbrella: NEEDLE CI efficiency — 121 test binaries, ungated lanes, per-run sccache",
       "priority": 1,
       "assignee": null,
       "manual_blocked": false,
       "has_blockers": true,
-      "blocker_count": 4,
+      "blocker_count": 3,
       "has_resource_conflicts": false,
       "conflict_count": 0
     },
@@ -1546,8 +1524,8 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
+      "has_resource_conflicts": true,
+      "conflict_count": 1
     },
     {
       "bead_id": "needle-cf866e0d",
@@ -1556,7 +1534,7 @@
       "assignee": null,
       "manual_blocked": false,
       "has_blockers": true,
-      "blocker_count": 2,
+      "blocker_count": 1,
       "has_resource_conflicts": false,
       "conflict_count": 0
     },
@@ -4014,17 +3992,6 @@
       "conflict_count": 0
     },
     {
-      "bead_id": "needle-8af5510c",
-      "title": "Assert the post-consolidation test count matches the pre-consolidation count",
-      "priority": 2,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
       "bead_id": "needle-62e80c13",
       "title": "Import legacy telemetry and learnings only as non-authoritative candidates (N-T13)",
       "priority": 2,
@@ -4322,17 +4289,6 @@
       "conflict_count": 0
     },
     {
-      "bead_id": "needle-33f1eaf5",
-      "title": "Enforce explicit test tiers and test-suite growth budgets",
-      "priority": 2,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
       "bead_id": "needle-f2b2e531",
       "title": "Publish queue, build, run, shard and cache timing for every CI fingerprint",
       "priority": 2,
@@ -4520,6 +4476,28 @@
       "conflict_count": 0
     },
     {
+      "bead_id": "needle-a25d89ba",
+      "title": "telemetry.file_sink.retention_days is dead config -- no code path ever deletes aged-out logs",
+      "priority": 2,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-974def8e",
+      "title": "Add an aggregate .needle/logs/ byte budget -- per-identifier 2GiB cap gives no fleet-wide bound",
+      "priority": 2,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
       "bead_id": "needle-bc4ac726",
       "title": "16.14 Per-descriptor subprocess timeouts — DEFAULT_BR_TIMEOUT_SECS is hardcoded 30s for every backend",
       "priority": 3,
@@ -4577,17 +4555,6 @@
     {
       "bead_id": "needle-31eb8331",
       "title": "Fleet rollout note in NEEDLE docs: codinghome runs the before_pluck worker first; every other host after_pluck; onboarding pointer",
-      "priority": 3,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
-      "bead_id": "needle-0e55283f",
-      "title": "Extract pure scheduling and outcome policy into needle-core",
       "priority": 3,
       "assignee": null,
       "manual_blocked": false,
