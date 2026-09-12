@@ -2054,6 +2054,7 @@ mod tests {
         let ws1 = root.path().join("workspace1");
         fs::create_dir(&ws1).unwrap();
         fs::create_dir(ws1.join(".beads")).unwrap();
+        fs::create_dir(ws1.join(".git")).unwrap();
 
         // Empty workspaces list with a valid root should trigger discovery
         let config = make_explore_config_with_root(true, vec![], root.path().to_path_buf());
@@ -3907,6 +3908,7 @@ mod tests {
         for ws in &[&workspace1, &workspace2, &workspace3, &workspace4] {
             fs::create_dir(ws).unwrap();
             fs::create_dir(ws.join(".beads")).unwrap();
+            fs::create_dir(ws.join(".git")).unwrap();
         }
 
         // Create a non-workspace directory (no .beads/)
@@ -4089,6 +4091,7 @@ mod tests {
             let ws = root.path().join(repo_name);
             fs::create_dir(&ws).unwrap();
             fs::create_dir(ws.join(".beads")).unwrap();
+            fs::create_dir(ws.join(".git")).unwrap();
         }
 
         // Create the two newly-added repos that were missing from the static list
@@ -4097,8 +4100,10 @@ mod tests {
 
         fs::create_dir(&commitgraph).unwrap();
         fs::create_dir(commitgraph.join(".beads")).unwrap();
+        fs::create_dir(commitgraph.join(".git")).unwrap();
         fs::create_dir(&twitterapi_proxy).unwrap();
         fs::create_dir(twitterapi_proxy.join(".beads")).unwrap();
+        fs::create_dir(twitterapi_proxy.join(".git")).unwrap();
 
         // Empty workspaces config — the INTENDED default
         let config = ExploreConfig {
@@ -4210,8 +4215,10 @@ mod tests {
         let valid2 = root.path().join("valid-workspace2");
         fs::create_dir(&valid1).unwrap();
         fs::create_dir(valid1.join(".beads")).unwrap();
+        fs::create_dir(valid1.join(".git")).unwrap();
         fs::create_dir(&valid2).unwrap();
         fs::create_dir(valid2.join(".beads")).unwrap();
+        fs::create_dir(valid2.join(".git")).unwrap();
 
         // Create directories without .beads/
         let no_beads1 = root.path().join("no-beads-dir1");
@@ -4443,6 +4450,7 @@ mod tests {
         let top_level = root.path().join("top-level-workspace");
         fs::create_dir(&top_level).unwrap();
         fs::create_dir(top_level.join(".beads")).unwrap();
+        fs::create_dir(top_level.join(".git")).unwrap();
 
         // Create a nested subdirectory WITH .beads/ (should NOT be discovered)
         let parent_dir = root.path().join("parent-dir");
@@ -4450,6 +4458,7 @@ mod tests {
         let nested_dir = parent_dir.join("nested-workspace");
         fs::create_dir(&nested_dir).unwrap();
         fs::create_dir(nested_dir.join(".beads")).unwrap();
+        fs::create_dir(nested_dir.join(".git")).unwrap();
 
         let config = ExploreConfig {
             enabled: true,
