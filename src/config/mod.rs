@@ -12908,7 +12908,11 @@ agent:
         let _env_guard = crate::util::test_env::isolate_env();
         std::env::remove_var("HOME");
         let result = dirs_or_home(".config/needle");
-        assert_eq!(result, PathBuf::from("/tmp/.config/needle"));
+        // The fallback is std::env::temp_dir(), which honours TMPDIR. CI's
+        // definition-of-done wrapper sets TMPDIR to a per-run directory
+        // (/var/tmp/needle-dod-lib.XXXX), so hardcoding /tmp asserted the
+        // developer's environment rather than the behaviour.
+        assert_eq!(result, std::env::temp_dir().join(".config/needle"));
     }
 
     #[test]

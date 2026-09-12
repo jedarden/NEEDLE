@@ -205,7 +205,17 @@ mod tests {
     async fn parses_json_lines_from_the_command_and_caps_results() {
         // The command echoes the request's bead id back so the test proves
         // stdin delivery too.
-        let script = r#"read -r line; printf '%s\n' "$line" | python3 -c 'import json,sys; r=json.load(sys.stdin); [print(json.dumps({"id":"session:%d"%i,"source":"archive","title":"nd-%d fix for "%i+r["bead_id"],"text":"closed: did the thing"})) for i in range(5)]'"#;
+        // Pure POSIX shell on purpose: the previous fixture shelled out to
+        // python3, which is absent from the CI builder image, so retrieve()
+        // saw a failing command and returned zero items -- indistinguishable
+        // from a parse failure. sed and printf are everywhere.
+        let script = r#"read -r line
+bid=$(printf '%s' "$line" | sed -n 's/.*"bead_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+i=0
+while [ "$i" -lt 5 ]; do
+  printf '{"id":"session:%d","source":"archive","title":"nd-%d fix for %s","text":"closed: did the thing"}\n' "$i" "$i" "$bid"
+  i=$((i+1))
+done"#;
         let result = retrieve(&cfg(script), &req()).await;
         assert_eq!(result.items.len(), 3, "{:?}", result.items);
         assert_eq!(result.items[0].id, "session:0");

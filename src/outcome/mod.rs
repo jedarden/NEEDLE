@@ -4800,6 +4800,16 @@ mod tests {
         // signal on one adapter trip the detector; the tripping failure and
         // every later one with that fingerprint release the bead with no
         // failure count and resolve as infrastructure_failure.
+        //
+        // The detector's window is persisted per adapter under
+        // $HOME/.needle/state/provider-health (provider_health::state_dir), so
+        // this test READS $HOME even though it never sets it. Other tests
+        // remove HOME process-globally under the ENV_LOCK guard; without
+        // taking that guard here, such a test can land mid-sequence, send
+        // these four failures to a different state file, and leave the window
+        // too short to trip. That is precisely how this passed locally at
+        // --test-threads=4 and failed in CI at full parallelism.
+        let _env_guard = crate::util::test_env::isolate_env();
         let adapter = format!(
             "test-storm-adapter-{}-{}",
             std::process::id(),
