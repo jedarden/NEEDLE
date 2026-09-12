@@ -3995,3 +3995,5 @@
 {"last_strand":null,"state":"idle","ts":"2026-09-12T05:57:00.061756418+00:00","worker":"adm-test"}
 {"last_strand":null,"state":"idle","ts":"2026-09-12T05:57:00.392702994+00:00","worker":"test-worker"}
 {"last_strand":null,"state":"idle","ts":"2026-09-12T05:57:01.530786235+00:00","worker":"test-zero-budget"}
+{"last_strand":null,"state":"idle","ts":"2026-09-12T06:12:31.765310265+00:00","worker":"glm-needle"}
+{"last_strand":null,"state":"idle","ts":"2026-09-12T06:36:20.912392523+00:00","worker":"glm-needle"}
