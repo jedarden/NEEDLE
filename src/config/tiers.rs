@@ -164,7 +164,7 @@ impl ReloadTier {
 ///
 /// assert_eq!(get_tier_for_key("agent.timeout"), Some(ReloadTier::Live));
 /// assert_eq!(get_tier_for_key("workspace.home"), Some(ReloadTier::RestartRequired));
-/// assert_eq!(get_tier_for_key("telemetry.otlp.enabled"), Some(ReloadTier::Rebuild));
+/// assert_eq!(get_tier_for_key("telemetry.otlp_sink.enabled"), Some(ReloadTier::Rebuild));
 /// assert_eq!(get_tier_for_key("unknown.field"), None);
 /// ```
 pub fn get_tier_for_key(key: &str) -> Option<ReloadTier> {
@@ -367,21 +367,23 @@ static TIER_TABLE: &[(&str, ReloadTier)] = &[
     ("telemetry.file_sink.enabled", ReloadTier::Rebuild),
     ("telemetry.file_sink.log_dir", ReloadTier::Rebuild),
     ("telemetry.file_sink.retention_days", ReloadTier::Rebuild),
-    ("telemetry.file_sink.rotation", ReloadTier::Rebuild),
     ("telemetry.stdout_sink.enabled", ReloadTier::Rebuild),
     ("telemetry.stdout_sink.format", ReloadTier::Rebuild),
     ("telemetry.stdout_sink.color", ReloadTier::Rebuild),
     ("telemetry.hooks", ReloadTier::Rebuild),
-    ("telemetry.otlp.enabled", ReloadTier::Rebuild),
-    ("telemetry.otlp.endpoint", ReloadTier::Rebuild),
-    ("telemetry.otlp.protocol", ReloadTier::Rebuild),
-    ("telemetry.otlp.headers", ReloadTier::Rebuild),
-    ("telemetry.otlp.timeout_ms", ReloadTier::Rebuild),
-    ("telemetry.otlp.compression", ReloadTier::Rebuild),
-    ("telemetry.otlp.tls.insecure", ReloadTier::Rebuild),
-    ("telemetry.otlp.tls.ca_file", ReloadTier::Rebuild),
-    ("telemetry.otlp.signals", ReloadTier::Rebuild),
-    ("telemetry.otlp.resource_attributes", ReloadTier::Rebuild),
+    ("telemetry.otlp_sink.enabled", ReloadTier::Rebuild),
+    ("telemetry.otlp_sink.endpoint", ReloadTier::Rebuild),
+    ("telemetry.otlp_sink.protocol", ReloadTier::Rebuild),
+    ("telemetry.otlp_sink.headers", ReloadTier::Rebuild),
+    ("telemetry.otlp_sink.timeout_ms", ReloadTier::Rebuild),
+    ("telemetry.otlp_sink.compression", ReloadTier::Rebuild),
+    ("telemetry.otlp_sink.tls.insecure", ReloadTier::Rebuild),
+    ("telemetry.otlp_sink.tls.ca_file", ReloadTier::Rebuild),
+    ("telemetry.otlp_sink.signals", ReloadTier::Rebuild),
+    (
+        "telemetry.otlp_sink.resource_attributes",
+        ReloadTier::Rebuild,
+    ),
     // Prompt (rebuild PromptBuilder)
     ("prompt.context_files", ReloadTier::Rebuild),
     ("prompt.instructions", ReloadTier::Rebuild),
@@ -424,10 +426,12 @@ static TIER_TABLE: &[(&str, ReloadTier)] = &[
     ("bead_cli.backend", ReloadTier::RestartRequired),
     ("bead_cli.path", ReloadTier::RestartRequired),
     // Health monitoring (Tier C - installed at boot, global subscriber)
-    ("health.heartbeat_interval", ReloadTier::RestartRequired),
-    ("health.heartbeat_ttl", ReloadTier::RestartRequired),
+    (
+        "health.heartbeat_interval_secs",
+        ReloadTier::RestartRequired,
+    ),
+    ("health.heartbeat_ttl_secs", ReloadTier::RestartRequired),
     ("health.heartbeat_dir", ReloadTier::RestartRequired),
-    ("health.peer_check_interval", ReloadTier::RestartRequired),
     // Tsnet (Tier C - embed-level, subprocess-facing)
     ("tsnet", ReloadTier::RestartRequired),
     // Self-modification (Tier C - controls hot-reload itself)
@@ -468,7 +472,7 @@ mod tests {
     fn test_get_tier_for_known_keys() {
         assert_eq!(get_tier_for_key("agent.timeout"), Some(ReloadTier::Live));
         assert_eq!(
-            get_tier_for_key("telemetry.otlp.enabled"),
+            get_tier_for_key("telemetry.otlp_sink.enabled"),
             Some(ReloadTier::Rebuild)
         );
         assert_eq!(
@@ -536,8 +540,17 @@ mod tests {
         // needle-c8510ace — declared Live, read nowhere. Every entry must
         // either name a path that exists in the serialized config or be a
         // registered deprecated spelling of one that does.
+        // A real field that is `Option` + `skip_serializing_if` is simply absent
+        // from a DEFAULT serialization, so it cannot be resolved this way even
+        // though the tier entry is honest and the field is read. Exempt those
+        // by name rather than weakening the check for every key.
+        const OMITTED_WHEN_UNSET: &[&str] = &["bead_cli.path"];
+
         let value = serde_json::to_value(Config::default()).expect("default config serializes");
         for (key, _) in TIER_TABLE {
+            if OMITTED_WHEN_UNSET.contains(key) {
+                continue;
+            }
             let resolves = resolve_key(&value, key)
                 || canonical_key_spelling(key)
                     .is_some_and(|canonical| resolve_key(&value, canonical));

@@ -537,9 +537,11 @@ fatal: not a git repository (or any of the parent directories): .git";
             DetectorConfig::default().window_max_failures
         );
         // The oldest retained failure is the one 19 minutes back, not the
-        // first one recorded.
+        // first one recorded: 25 recorded a minute apart, capped at
+        // window_max_failures (20), leaves indices 5..=24, so the oldest is
+        // index 5 -- nineteen minutes behind the newest.
         let oldest = tracker.window().first().expect("non-empty").at;
-        assert_eq!(oldest, at(6 * 60));
+        assert_eq!(oldest, at(5 * 60));
     }
 
     #[test]
@@ -595,7 +597,13 @@ fatal: not a git repository (or any of the parent directories): .git";
     fn long_outputs_are_truncated_before_hashing() {
         let tail_a = "a".repeat(600);
         let tail_b = "b".repeat(600);
-        let prefix = "fatal: not a git repository (or any of the parent directories): .git ";
+        // The shared prefix has to be longer than MAX_NORMALIZED_CHARS for
+        // truncation to be what makes these collide. At one copy it is ~68
+        // chars, so the differing tails survived truncation and the two
+        // fingerprints were correctly different -- the fixture, not the
+        // truncation, was wrong.
+        let prefix =
+            "fatal: not a git repository (or any of the parent directories): .git ".repeat(10);
         assert_eq!(
             fingerprint("gate_0", &format!("{prefix}{tail_a}")),
             fingerprint("gate_0", &format!("{prefix}{tail_b}")),
