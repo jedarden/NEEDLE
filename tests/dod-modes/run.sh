@@ -19,11 +19,11 @@ extracted="$(mktemp "${TMPDIR:-/tmp}/dod-modes-XXXXXX.sh")"
 test_tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/dod-modes-tmp-root-XXXXXX")"
 trap 'rm -f "$extracted"; rm -rf "$test_tmp_root"' EXIT
 
-for fn in needle_now_ms needle_duration_event reap_orphans run_check lane_tmp cleanup_lane_tmps run_slow_cargo_check needle_slow_targets needle_cargo_selector selected_cargo_targets needle_gate_skips_slow_lane; do
+for fn in needle_now_ms needle_duration_event reap_orphans run_check lane_tmp cleanup_lane_tmps run_slow_cargo_check needle_slow_targets needle_cargo_selector selected_cargo_targets needle_declared_test_harnesses needle_affected_test_targets needle_clippy_selectors needle_run_clippy needle_gate_skips_slow_lane; do
   awk -v f="^${fn}\\\\(\\\\)" '$0 ~ f, /^}/' "$DOD" >> "$extracted"
 done
 # Every function must have been found, or the test would silently pass.
-for fn in needle_now_ms needle_duration_event reap_orphans run_check lane_tmp cleanup_lane_tmps run_slow_cargo_check needle_slow_targets needle_cargo_selector selected_cargo_targets needle_gate_skips_slow_lane; do
+for fn in needle_now_ms needle_duration_event reap_orphans run_check lane_tmp cleanup_lane_tmps run_slow_cargo_check needle_slow_targets needle_cargo_selector selected_cargo_targets needle_declared_test_harnesses needle_affected_test_targets needle_clippy_selectors needle_run_clippy needle_gate_skips_slow_lane; do
   grep -q "^${fn}()" "$extracted" || { echo "FAIL: could not extract $fn from $DOD" >&2; exit 1; }
 done
 # shellcheck source=/dev/null
@@ -148,6 +148,86 @@ SLOW_TARGET="installer"
 assert_lines "--target installer selects no cargo target" 0 selected_cargo_targets
 
 SLOW_TARGET=""
+
+# ── fast-lane Clippy target selection ────────────────────────────────────────
+WANT_HARNESSES="$(printf '%s\t%s\n' \
+  integration_spawn tests/integration_spawn.rs \
+  integration_tests tests/integration_tests.rs \
+  p2_integration_tests tests/p2_integration_tests.rs \
+  p3_integration_tests tests/p3_integration_tests.rs \
+  real_br_integration_tests tests/real_br_integration_tests.rs)"
+GOT_HARNESSES="$(needle_declared_test_harnesses)"
+if [[ "$GOT_HARNESSES" == "$WANT_HARNESSES" ]]; then
+  ok "Clippy reads the five declared test harness roots from Cargo.toml"
+else
+  bad "declared test harness parsing drifted (got: $(echo "$GOT_HARNESSES" | tr '\n' ' '))"
+fi
+
+LANE="fast"
+CHANGED_ONLY=false
+STAGED_PATHS=()
+GOT_CLIPPY="$(needle_clippy_selectors | tr '\n' ' ' | sed 's/ $//')"
+if [[ "$GOT_CLIPPY" == "--lib --bins" ]]; then
+  ok "push/gate fast lint selects only product lib and bins by default"
+else
+  bad "push/gate fast lint selectors drifted (got: $GOT_CLIPPY)"
+fi
+
+CHANGED_ONLY=true
+STAGED_PATHS=(
+  src/worker/mod.rs
+  tests/integration_tests/config_key_path_integration.rs
+  tests/integration_tests/edge_case_panic_tests.rs
+  tests/p2_integration_tests.rs
+  tests/p2_integration_tests/cli_bead_store_engine.rs
+  docs/definition-of-done.md
+)
+GOT_CLIPPY="$(needle_clippy_selectors | tr '\n' ' ' | sed 's/ $//')"
+if [[ "$GOT_CLIPPY" == "--lib --bins --test integration_tests --test p2_integration_tests" ]]; then
+  ok "changed test roots/modules add each affected declared harness once"
+else
+  bad "affected test harness selectors drifted (got: $GOT_CLIPPY)"
+fi
+
+STAGED_PATHS=(tests/integration_spawn.rs)
+GOT_CLIPPY="$(needle_clippy_selectors | tr '\n' ' ' | sed 's/ $//')"
+if [[ "$GOT_CLIPPY" == "--lib --bins --test integration_spawn" ]]; then
+  ok "a changed standalone declared test harness is linted"
+else
+  bad "standalone test harness selector drifted (got: $GOT_CLIPPY)"
+fi
+
+LANE="all"
+CHANGED_ONLY=true
+STAGED_PATHS=(tests/integration_tests/edge_case_panic_tests.rs)
+GOT_CLIPPY="$(needle_clippy_selectors | tr '\n' ' ' | sed 's/ $//')"
+if [[ "$GOT_CLIPPY" == "--all-targets" ]]; then
+  ok "all/scheduled lint remains comprehensive"
+else
+  bad "all/scheduled lint no longer uses --all-targets (got: $GOT_CLIPPY)"
+fi
+
+run_check() {
+  local name="$1"
+  shift
+  printf '%s|%s\n' "$name" "$*"
+}
+GOT_CLIPPY_CALL="$(needle_run_clippy)"
+if [[ "$GOT_CLIPPY_CALL" == "cargo clippy|cargo clippy --all-targets --message-format short -- -D warnings" ]]; then
+  ok "all/scheduled Clippy command retains zero-warning enforcement"
+else
+  bad "all/scheduled Clippy command drifted (got: $GOT_CLIPPY_CALL)"
+fi
+
+LANE="fast"
+CHANGED_ONLY=false
+STAGED_PATHS=()
+GOT_CLIPPY_CALL="$(needle_run_clippy)"
+if [[ "$GOT_CLIPPY_CALL" == "cargo clippy|cargo clippy --lib --bins -- -D warnings" ]]; then
+  ok "fast Clippy command retains zero-warning enforcement"
+else
+  bad "fast Clippy command drifted (got: $GOT_CLIPPY_CALL)"
+fi
 
 # ── argument parsing: both --target forms must reach target validation ───────
 # needle-workflowtemplate.yml passes the equals form
