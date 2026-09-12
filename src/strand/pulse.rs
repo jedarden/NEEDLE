@@ -191,6 +191,21 @@ impl PulseStrand {
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 
+        // A non-zero exit is NOT failure by itself: a great many scanners
+        // (clippy -D warnings, grep, most linters) exit non-zero precisely
+        // because they found something, and that output is the whole point.
+        // But a non-zero exit with nothing on either stream is a scanner that
+        // did not run -- a missing binary (127), a command typo, a crash --
+        // and reporting that as a clean scan is how a broken scanner stays
+        // invisible. Without this the "all scanners failed" creator-failure
+        // path below could never be reached.
+        if !output.status.success() && stdout.trim().is_empty() && stderr.trim().is_empty() {
+            anyhow::bail!(
+                "scanner '{name}' exited with {} and produced no output",
+                output.status
+            );
+        }
+
         if !stderr.is_empty() {
             Ok(format!("{}\n{}", stdout, stderr))
         } else {

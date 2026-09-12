@@ -595,7 +595,7 @@ mod tests {
   "workers": [
     {
       "id": "legacy-worker",
-      "pid": 4242,
+      "pid": __PID__,
       "workspace": "/tmp/ws",
       "agent": "claude",
       "model": "sonnet",
@@ -606,7 +606,11 @@ mod tests {
     }
   ],
   "updated_at": "2026-09-03T14:00:00Z"
-}"#;
+}"#
+        // list() drops entries whose pid is no longer alive, so the fixture
+        // has to claim a live one. What is under test is the absent `state`
+        // field, not liveness.
+        .replace("__PID__", &std::process::id().to_string());
         std::fs::write(reg.path(), legacy).unwrap();
 
         let workers = reg.list().unwrap();

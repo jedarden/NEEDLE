@@ -1535,7 +1535,13 @@ mod tests {
         drop(knot);
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        assert_eq!(events.lock().unwrap().len(), 1, "telemetry emitted");
+        let captured = events.lock().unwrap();
+        assert_eq!(
+            starvation_alerts(&captured).len(),
+            1,
+            "exactly one starvation alert emitted (every evaluation also emits \
+             a cycle.outcome, so the whole stream is not the count that matters)"
+        );
         assert!(
             was_tracking_cleared,
             "backoff tracking cleared after telemetry"

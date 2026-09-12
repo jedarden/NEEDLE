@@ -663,7 +663,10 @@ mod tests {
         assert_eq!(exit_code(&report), 1);
 
         let human = render_human(&report);
-        assert!(human.contains("1 violation(s), 955 bead(s) affected"));
+        // Two findings, one rule: the summary counts findings (the JSON report
+        // names the same value "violation_findings"), while the grouping below
+        // is what collapses them under one rule header.
+        assert!(human.contains("2 violation(s), 955 bead(s) affected"));
         assert!(human.contains("R1_WORKSPACE_UNSCANNED  (955 bead(s))"));
         // One line per finding scope, indented under the rule header.
         assert!(human.contains("    alpha: subject\n"));

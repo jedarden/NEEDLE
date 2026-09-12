@@ -4984,7 +4984,9 @@ mod tests {
         .expect("selection diagnostic should be valid JSON");
         assert_eq!(record["event"], "pluck.no_candidate");
         assert_eq!(record["target_workspace"], "/tmp/test");
-        assert_eq!(record["summary"]["open_bead_count"], 3);
+        // schema_version 2 renamed this to open_beads_total; the v1 spelling
+        // read as Null and silently asserted nothing.
+        assert_eq!(record["summary"]["open_beads_total"], 3);
         assert_eq!(record["summary"]["excluded_bead_count"], 3);
     }
 
