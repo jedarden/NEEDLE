@@ -169,6 +169,97 @@ selected_cargo_targets() {
   needle_slow_targets | grep -vx installer
 }
 
+# Emit each integration-test target declared in Cargo.toml as
+# "<target><TAB><source path>". Fast lint uses the manifest as its authority:
+# the slow-lane table is deliberately different (it includes lib/installer and
+# does not run integration_spawn), so borrowing that table would silently miss
+# a declared test harness or lint a name that is not a Cargo test target.
+needle_declared_test_harnesses() {
+  local manifest="${NEEDLE_CARGO_MANIFEST:-$REPO_ROOT/Cargo.toml}"
+  awk '
+    function emit() {
+      if (in_test && name != "" && path != "") {
+        printf "%s\t%s\n", name, path
+      }
+    }
+    /^\[\[test\]\][[:space:]]*$/ {
+      emit()
+      in_test = 1
+      name = ""
+      path = ""
+      next
+    }
+    /^\[/ {
+      emit()
+      in_test = 0
+    }
+    in_test && /^[[:space:]]*name[[:space:]]*=/ {
+      value = $0
+      sub(/^[^=]*=[[:space:]]*"/, "", value)
+      sub(/".*$/, "", value)
+      name = value
+    }
+    in_test && /^[[:space:]]*path[[:space:]]*=/ {
+      value = $0
+      sub(/^[^=]*=[[:space:]]*"/, "", value)
+      sub(/".*$/, "", value)
+      path = value
+    }
+    END { emit() }
+  ' "$manifest"
+}
+
+# Select a declared test harness when this commit stages either its root file
+# or a module below the root's sibling directory. For example,
+# tests/integration_tests/config.rs belongs to tests/integration_tests.rs.
+# Each manifest target is considered once, so multiple changed modules never
+# add duplicate --test selectors.
+needle_affected_test_targets() {
+  local target source module_dir staged
+  while IFS=$'\t' read -r target source; do
+    [[ -n "$target" && -n "$source" ]] || continue
+    module_dir="${source%.rs}"
+    for staged in ${STAGED_PATHS[@]+"${STAGED_PATHS[@]}"}; do
+      if [[ "$staged" == "$source" || "$staged" == "$module_dir/"* ]]; then
+        printf '%s\n' "$target"
+        break
+      fi
+    done
+  done < <(needle_declared_test_harnesses)
+}
+
+# `--all` is the comprehensive/scheduled lane and continues to lint every
+# Cargo target. The push/gate fast lane checks product code plus only the test
+# harnesses this staged change directly affects.
+needle_clippy_selectors() {
+  local target
+  if [[ "$LANE" == "all" ]]; then
+    printf '%s\n' --all-targets
+    return 0
+  fi
+
+  printf '%s\n' --lib --bins
+  if [[ "$CHANGED_ONLY" == true ]]; then
+    while IFS= read -r target; do
+      [[ -n "$target" ]] || continue
+      printf '%s\n' --test "$target"
+    done < <(needle_affected_test_targets)
+  fi
+}
+
+needle_run_clippy() {
+  local selectors=() selector
+  while IFS= read -r selector; do
+    selectors+=("$selector")
+  done < <(needle_clippy_selectors)
+
+  if [[ "$CHANGED_ONLY" == true ]]; then
+    run_check "cargo clippy" cargo clippy "${selectors[@]}" --message-format short -- -D warnings
+  else
+    run_check "cargo clippy" cargo clippy "${selectors[@]}" -- -D warnings
+  fi
+}
+
 # Bypass detection.  A pre-commit invocation writes a marker keyed by the
 # candidate tree; post-commit attaches the final commit SHA.  A direct script
 # invocation has no future commit to attach, so it is logged immediately.
@@ -369,11 +460,11 @@ run_slow_cargo_check() {
 # had 607 entries, 212 of them in a single day, which is a gate nobody is
 # actually passing.
 #
-# With --changed-only the lane still runs over the whole crate (clippy and
-# check are crate-scoped; there is no per-file mode), but a failure only BLOCKS
-# when a diagnostic points at a path this commit stages. Anything else is
-# printed in full and reported as a pre-existing tree failure, so the signal
-# survives without holding the commit hostage.
+# With --changed-only, Clippy always covers the product lib/bins and adds any
+# declared test harness whose root or module path this commit stages. A failure
+# only BLOCKS when a diagnostic points at a path this commit stages. Anything
+# else is printed in full and reported as a pre-existing tree failure, so the
+# signal survives without holding the commit hostage.
 STAGED_PATHS=()
 if [[ "$CHANGED_ONLY" == true ]]; then
   while IFS= read -r line; do
@@ -457,28 +548,21 @@ if [[ "$LANE" == "fast" ]] || [[ "$LANE" == "all" ]]; then
   # it, so a new loose file cannot silently add another link step.
   run_check "cargo target manifest tests" bash tests/cargo-targets/run.sh
 
-  # cargo clippy --all-targets -- -D warnings
+  # cargo clippy <lane selectors> -- -D warnings
   #
   # This is the fast lane's only type-checking pass, and that is deliberate --
-  # there is no `cargo check` after it. Clippy runs rustc's full type check
-  # over a strict superset of `cargo check`'s targets (--all-targets covers
-  # lib, bins, tests and benches; bare check covers lib and bins only), so a
-  # second pass could never surface an error clippy missed. Nor is it a cheap
-  # re-verification: the workspace's own crates keep separate fingerprints
-  # between clippy and check (only the dependency graph is shared), so check
-  # re-did the whole lib+bins pass even seconds after clippy had checked the
-  # identical tree -- measured 2026-09-09 (needle-18a7df70) at ~18s against a
+  # there is no `cargo check` after it. Fast/push runs cover the product lib and
+  # bins plus explicitly affected declared test harnesses. `--all` retains the
+  # comprehensive --all-targets lint for scheduled/manual verification. A
+  # second cargo check would only repeat the product type check with separate
+  # fingerprints -- measured 2026-09-09 (needle-18a7df70) at ~18s against a
   # warm dependency cache on this box. Do not add it back.
   #
   # `--message-format short` in --changed-only mode: the one-line-per-diagnostic
   # form is what needle_failure_is_ours parses to decide whether a failure sits
   # in a file this commit stages. The default (rendered) form still shows the
   # full diagnostic, so it stays the CI/manual default.
-  if [[ "$CHANGED_ONLY" == true ]]; then
-    run_check "cargo clippy" cargo clippy --all-targets --message-format short -- -D warnings
-  else
-    run_check "cargo clippy" cargo clippy --all-targets -- -D warnings
-  fi
+  needle_run_clippy
 fi
 
 # ── Gating (--gate) ──────────────────────────────────────────────────────────
