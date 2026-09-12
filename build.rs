@@ -4,35 +4,54 @@
 
 use std::process::Command;
 
-fn main() {
-    // Get the current git commit SHA (short form)
-    let commit_sha = Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .output()
-        .map(|output| {
-            let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if sha.is_empty() {
-                "unknown".to_string()
-            } else {
-                sha
-            }
-        })
-        .unwrap_or_else(|_| "unknown".to_string());
+fn nonempty_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
 
-    // Get the build timestamp
-    let build_timestamp = Command::new("date")
-        .arg("-u")
-        .arg("+%Y-%m-%dT%H:%M:%SZ")
-        .output()
-        .map(|output| {
-            let timestamp = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if timestamp.is_empty() {
-                "unknown".to_string()
-            } else {
-                timestamp
-            }
-        })
-        .unwrap_or_else(|_| "unknown".to_string());
+fn command_stdout(command: &mut Command) -> Option<String> {
+    let output = command.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
+fn git_stdout(args: &[&str]) -> Option<String> {
+    command_stdout(Command::new("git").args(args))
+}
+
+fn format_epoch(epoch: &str) -> Option<String> {
+    command_stdout(Command::new("date").args([
+        "-u",
+        "-d",
+        &format!("@{epoch}"),
+        "+%Y-%m-%dT%H:%M:%SZ",
+    ]))
+}
+
+fn reproducible_timestamp() -> String {
+    // Reproducible-build callers own SOURCE_DATE_EPOCH. For ordinary builds,
+    // use the immutable commit time instead of the time this script happened
+    // to run. Exported source archives without either value degrade visibly
+    // rather than reintroducing wall-clock nondeterminism.
+    nonempty_env("SOURCE_DATE_EPOCH")
+        .or_else(|| git_stdout(&["show", "-s", "--format=%ct", "HEAD"]))
+        .and_then(|epoch| format_epoch(&epoch))
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn main() {
+    // Source archives can inject their revision; git checkouts derive it.
+    let commit_sha = nonempty_env("NEEDLE_COMMIT_SHA")
+        .or_else(|| git_stdout(&["rev-parse", "--short", "HEAD"]))
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let build_timestamp = reproducible_timestamp();
 
     // Whether the working tree had uncommitted changes at build time. A build
     // from a dirty tree does not correspond to any commit, so it must never be
@@ -70,5 +89,6 @@ fn main() {
     // (so the -dirty marker cannot go stale against a rebuilt binary).
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/index");
-    println!("cargo:rerun-if-env-var=NEEDLE_COMMIT_SHA");
+    println!("cargo:rerun-if-env-changed=NEEDLE_COMMIT_SHA");
+    println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
 }
