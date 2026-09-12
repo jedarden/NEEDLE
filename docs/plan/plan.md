@@ -2,9 +2,9 @@
 
 > **N**avigates **E**very **E**nqueued **D**eliverable, **L**ogs **E**ffort
 
-Plan revision: 32
+Plan revision: 33
 
-As of: 2026-09-09
+As of: 2026-09-12
 
 Status owner: NEEDLE maintainers
 
@@ -37,6 +37,12 @@ conditioned on failure-attribution gating landing, and states the split-tree
 ceiling arithmetic explicitly so the blast radius is a documented number
 rather than a latent one (Phase 19.4; operator-facing form in
 `docs/configuration.md`).
+Revision 33 decomposes the remaining broad N-T06, N-T07, N-T08, N-T10, and
+N-T12 implementation records into single-behavior leaves; routes their
+consumers to terminal conformance leaves; and adds a root graph-reconciliation
+gate. It also turns the previously unnumbered meta-agent harness concept into a
+separate, manually held follow-on epic. That work remains unauthorized until
+Gate D evidence is complete and ADR-029 is accepted.
 
 ## 0. How to read this plan
 
@@ -729,6 +735,46 @@ own behavioral tests and necessary documentation; the 23 executable tasks
 remain implementation work pending completion, not release evidence.
 <!-- /learning-r31-leaf-map -->
 
+#### 4.8.9 Foundational and harness dispatch ownership (revision 33)
+
+Revision 33 applies the same dispatch rule to the broad foundational work that
+N-T39–43 already use: one executable bead owns one behavior, one focused
+acceptance command, and one resource key. The ten original records remain as
+manually blocked planning parents and retain their historical descriptions.
+Existing consumers now wait on terminal conformance leaves, not on held
+parents. The manifest created 61 foundational leaves atomically, so no worker
+could observe or claim a child before its dependencies and resource key
+existed.
+
+| Planning parent | Bead | Terminal implementation leaf |
+| --- | --- | --- |
+| N-T06 controller scheduling | `needle-06f1cf67` | `needle-4335f065` |
+| N-T07 proposal admission | `needle-688944b7` | `needle-273c10c9` |
+| N-T08 evidence-gated reflection | `needle-1a9331cc` | `needle-a4807e15` |
+| N-T10 policy/context authority | `needle-c4d1f243` | `needle-00caa584` |
+| N-T12 outcomes and corrections | `needle-900c51fb` | `needle-f9a858d8` |
+| N-T12 EvalCase and replay | `needle-d2bc101a` | `needle-cb837e4c` |
+| N-T12 competence and drift | `needle-ced9db0e` | `needle-b655b2a7` |
+| N-T12 curriculum and economics | `needle-009eb4a4` | `needle-3690f939` |
+| N-T12 audited delivery and rollback | `needle-99e8c972` | `needle-64165642` |
+| N-T12 experiments and promotion | `needle-0dad44d1` | `needle-5edd49f9` |
+
+The future meta-agent harness is planning epic `needle-31ed0db2`, with eight
+single-behavior leaves ending at `needle-0843f7c1`. Its first leaf requires
+both the existing combined factory release/canary (`needle-e7a6a0b8`) and the
+opt-in operational learning-loop pilot (`needle-10fc7f48`), then requires an
+accepted ADR-029 before any runner or edit authority is implemented. The epic
+is manually held and therefore cannot be mistaken for ready implementation.
+
+Root epic `needle-989c6c59` now waits on graph-reconciliation bead
+`needle-28df4f01`. That bead waits on the existing N-T31–44 rollups, the
+factory canary/release, the N-T15–30 genesis rollup, and the held meta-agent
+epic. Its acceptance command, `scripts/check-factory-transition-graph.sh`,
+must prove that every numbered transition remains on the root completion path,
+each planning parent tracks its terminal leaf, and no planning parent is
+claimable. Graph creation is planning evidence only; it does not satisfy any
+implementation, gate, canary, or release criterion.
+
 ## 5. In-process learning kernel
 
 ### 5.1 Deployment decision and dependency rule
@@ -989,13 +1035,13 @@ generated conformance report.
 | N-T03 | `src/claim/`, `src/worker/`, `src/prompt/` | Generate and propagate attempt ID, revision/fencing, tool/policy/memory hashes | One-ID end-to-end dispatch test across every adapter | transition |
 | N-T04 | `src/outcome/`, `src/resolve/`, `src/bead_store/` | Split pure resolution decision from guarded application; confirm durable state before completion | crash-boundary, stale-owner, replay, and false-close tests | transition |
 | N-T05 | `src/telemetry/`, `src/trace/`, `src/stats/`, registry/health fields | Version events; correlate by attempt; replace action-credit metrics with outcome metrics | migration fixtures and unique-resolution dashboard checks | transition |
-| N-T06 | `src/strand/mod.rs`, worker scheduling | Introduce controller scheduler and migrate Resolve, lifecycle repair, health, and Splice first | starvation and controller idempotence tests | blocked by N-T02–N-T05 |
-| N-T07 | Explore/Weave/Unravel/Pulse/Generation/Mitosis | Convert automatic backlog changes to budgeted proposals plus an admission controller | duplicate, conflict, backlog-budget, and human-intent preservation tests | blocked by N-T06 |
-| N-T08 | `crates/needle-learning` reflection/evaluator plus adapters for `src/learning/`, `src/strand/reflect.rs`, learning files | Disable direct promotion/count reinforcement; add mature reflection, uncertainty, counterexample and evaluation records | one-attempt-one-reinforcement, delayed-outcome correction and harmful-lesson demotion tests | blocked by N-T02–N-T05 |
+| N-T06 | `src/strand/mod.rs`, worker scheduling | Introduce controller scheduler and migrate Resolve, lifecycle repair, health, and Splice first | starvation and controller idempotence tests | tracking parent; manually blocked; eight leaves own implementation (4.8.9); `needle-06f1cf67` |
+| N-T07 | Explore/Weave/Unravel/Pulse/Generation/Mitosis | Convert automatic backlog changes to budgeted proposals plus an admission controller | duplicate, conflict, backlog-budget, and human-intent preservation tests | tracking parent; manually blocked; ten leaves own implementation (4.8.9); `needle-688944b7` |
+| N-T08 | `crates/needle-learning` reflection/evaluator plus adapters for `src/learning/`, `src/strand/reflect.rs`, learning files | Disable direct promotion/count reinforcement; add mature reflection, uncertainty, counterexample and evaluation records | one-attempt-one-reinforcement, delayed-outcome correction and harmful-lesson demotion tests | tracking parent; manually blocked; seven leaves own implementation (4.8.9); `needle-1a9331cc` |
 | N-T09 | kernel memory module, derived catalog store, prompt/context adapter | Index scoped source memory, explicitly inject bounded results, record exposure, expiry and effectiveness | cold rebuild, supersession, sensitivity, source-loss and adapter-parity tests | blocked by N-T03, N-T08 |
-| N-T10 | policy resolver, `needle doctor policy`, AGENTS/CLAUDE/templates/config | Define precedence, find contradictions, and produce content-addressed manifests | fixture suite for conflicts and repository/nested scope | transition |
+| N-T10 | policy resolver, `needle doctor policy`, AGENTS/CLAUDE/templates/config | Define precedence, find contradictions, and produce content-addressed manifests | fixture suite for conflicts and repository/nested scope | tracking parent; manually blocked; six leaves own implementation (4.8.9); `needle-c4d1f243` |
 | N-T11 | config schemas and capability negotiation | Add feature flags and backend capability gates; default new behavior off until verified | old-config compatibility and unsupported-backend fail-closed tests | transition; `needle-64db5118` |
-| N-T12 | `crates/needle-learning` outcome contracts, evaluator, competence, replay, experiments, drift, curriculum and promotion modules plus effect/delivery-controller adapters | Add reviewed OutcomeContracts/EvalCases, mature outcome evaluation, calibrated competence, shadow replay plans, experiments, bounded adaptation, audited reversible commit/push, rollback and promotion receipts | pure-kernel/no-side-effect conformance, scoped-index/push/revert tests, holdout/replay coverage and canary improvement without guardrail regression | blocked by N-T05, N-T08–N-T11 |
+| N-T12 | `crates/needle-learning` outcome contracts, evaluator, competence, replay, experiments, drift, curriculum and promotion modules plus effect/delivery-controller adapters | Add reviewed OutcomeContracts/EvalCases, mature outcome evaluation, calibrated competence, shadow replay plans, experiments, bounded adaptation, audited reversible commit/push, rollback and promotion receipts | pure-kernel/no-side-effect conformance, scoped-index/push/revert tests, holdout/replay coverage and canary improvement without guardrail regression | six tracking parents are manually blocked; 30 leaves own implementation across outcomes, replay, competence, curriculum, delivery, and experiments (4.8.9) |
 | N-T13 | historical telemetry/learnings | Mark legacy events non-authoritative; import learnings only as candidates | deterministic migration report with no invented attempts | blocked by N-T02, N-T08; `needle-62e80c13` |
 | N-T14 | combined consumer conformance | Exercise bead-rs atomic attempt resolution with fallback for older capabilities | pinned old/new bead-rs matrix, crash/replay tests | blocked by bead-rs BR-T18 and exact-release blockers |
 | N-T15 | `src/config/mod.rs`, `src/prompt/mod.rs`, `src/claude_md_placement.rs`, `src/strand/reflect.rs` | Default legacy learnings injection, reinforcement and CLAUDE.md placement off; files stay as candidate input | `PromptBuilder::with_workspace` emits no learnings section by default; placement removes its marker section when disabled; fixture test | transition (first; 4.4 step 0) |
@@ -5327,7 +5373,9 @@ stats       ──► telemetry, config, types
 
 # Phase 5: Fleet Robustness — Explore Strand Hardening
 
-**Status:** planned (ADR-001). The meta-agent concept sketched above as a "potential Phase 5" remains future, unnumbered work.
+**Status:** planned (ADR-001). The meta-agent concept sketched above remains
+future work, now tracked by held epic `needle-31ed0db2`; it is not part of this
+Phase 5 and has no implementation authority before Gate D and ADR-029.
 
 **Goal:** make multi-workspace roaming (the explore strand) a reliable dispatch path instead of a best-effort one. Driven by the 2026-07-11 lab incident: 24 ready beads across 24 workspaces, 4 roaming workers, throughput of ~1 bead per 40 minutes, with one workspace's unclaimable beads deadlocking the entire scan loop. Full evidence and rationale in [ADR-001](../adr/001-explore-strand-hardening.md).
 
