@@ -387,6 +387,17 @@ fn allowed_placeholders(operation: &str) -> &'static [&'static str] {
         "dep_add" | "dep_remove" => &["blocked", "blocker"],
         "split" => &["parent", "children"],
         "close" => &["id", "reason"],
+        "resolve" => &[
+            "id",
+            "attempt_id",
+            "outcome",
+            "actor",
+            "model",
+            "harness",
+            "harness_version",
+            "resolve_reason",
+            "evidence_ref",
+        ],
         "import" => &["input", "mode", "actor"],
         "compare" => &["id", "profile"],
         "query" => &["query"],
@@ -645,6 +656,44 @@ fn builtin_bead_rs() -> BeadBackend {
     operations.insert(
         "close".into(),
         operation(&["close", "{id}", "--reason", "{reason}"], None, None),
+    );
+    // bead-rs attempt-outcome-v1 (`bead resolve`, 0.2.6+): record one
+    // attempt's outcome atomically and idempotently. NEEDLE applies the
+    // lifecycle transition itself through the guarded action path, so the
+    // action here is always `none`; the receipt is the durable, cross-host
+    // attempt record and the input to the backend's failure-tier scheduling.
+    // `--model/--harness/--harness-version` are implicit worker facts and
+    // `--reason/--evidence-ref` are optional; an empty value drops the flag.
+    operations.insert(
+        "resolve".into(),
+        operation(
+            &[
+                "resolve",
+                "{id}",
+                "--attempt-id",
+                "{attempt_id}",
+                "--outcome",
+                "{outcome}",
+                "--action",
+                "none",
+                "--actor",
+                "{actor}",
+                "--model",
+                "{model}",
+                "--harness",
+                "{harness}",
+                "--harness-version",
+                "{harness_version}",
+                "--reason",
+                "{resolve_reason}",
+                "--evidence-ref",
+                "{evidence_ref}",
+                "--format",
+                "json",
+            ],
+            None,
+            Some(ParseShape::JsonObject),
+        ),
     );
     operations.insert("doctor_check".into(), operation(&["doctor"], None, None));
     operations.insert(

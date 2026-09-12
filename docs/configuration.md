@@ -67,6 +67,9 @@ This guide covers the most commonly used configuration options.
 
 **Outcome handling:**
 - `outcome.quarantine_after_failures` — Quarantine bead after N failures
+- `outcome.resolve_attempts_in_backend` — Record each resolved attempt in the
+  bead-rs attempt ledger (`bead resolve --action none`); the backend's
+  failure-tier scheduling reads it
 
 **Stop command:**
 - `stop.grace_period_secs` — Grace period for killed processes to exit

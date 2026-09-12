@@ -362,6 +362,9 @@ fn gate_result_entries(gate_report: Option<&GateReport>) -> Vec<crate::telemetry
 pub struct AttemptContext {
     /// Adapter that executed the attempt (e.g. `"claude-code-glm-4.7"`).
     pub adapter: String,
+    /// The claimant identity the bead is assigned to (the worker's qualified
+    /// id), passed to the backend as the resolving actor.
+    pub actor: String,
     /// Model identifier from the adapter config.
     pub model: Option<String>,
     /// Provider name (e.g. `"anthropic"`).
@@ -793,7 +796,9 @@ impl OutcomeHandler {
         // failures across distinct beads is the provider's outage, not this
         // bead's result — 341 claude-print watchdog kills on 2026-09-10 were
         // booked as bead failures before this existed.
-        let adapter_name = self.peek_attempt_context().adapter;
+        let attempt_context = self.peek_attempt_context();
+        let adapter_name = attempt_context.adapter;
+        let attempt_actor = attempt_context.actor;
         let adapter_judgement =
             self.judge_adapter_health(&adapter_name, bead, &outcome, output, gate_report.as_ref());
         let infra_fingerprint = match &adapter_judgement {
@@ -967,11 +972,73 @@ impl OutcomeHandler {
         self.record_attempt_history(store, bead, &ledger, failure_summary)
             .await;
 
+        // Plan section 4.4 step 4 / ADR-024: the backend's own attempt ledger
+        // gets the same outcome (bead-rs `resolve --action none`), which is
+        // what its failure-tier scheduling and cross-host attempt history
+        // read. Idempotent per attempt ID; best-effort.
+        self.record_backend_resolution(store, bead, &ledger, &attempt_actor)
+            .await;
+
         Ok(HandlerResult {
             outcome,
             bead_action,
             telemetry_events,
         })
+    }
+
+    /// Hand the resolved attempt to the backend's attempt ledger.
+    async fn record_backend_resolution(
+        &self,
+        store: &dyn BeadStore,
+        bead: &Bead,
+        ledger: &crate::telemetry::AttemptResolvedFields,
+        actor: &str,
+    ) {
+        if !self.config.outcome.resolve_attempts_in_backend {
+            return;
+        }
+        let resolution = crate::bead_store::AttemptResolution {
+            bead_id: bead.id.clone(),
+            attempt_id: ledger.attempt_id.clone(),
+            outcome: ledger.outcome.clone(),
+            actor: if actor.is_empty() {
+                ledger.worker.clone()
+            } else {
+                actor.to_string()
+            },
+            reason: ledger.terminal_reason.clone(),
+            evidence_ref: ledger.commits.first().map(|sha| format!("commit:{sha}")),
+        };
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            store.resolve_attempt(&resolution),
+        )
+        .await
+        {
+            Ok(Ok(Some(receipt))) => tracing::info!(
+                bead_id = %bead.id,
+                attempt_id = %resolution.attempt_id,
+                outcome = %resolution.outcome,
+                receipt_id = %receipt.receipt_id,
+                attempt_tier = ?receipt.resulting_attempt_tier,
+                is_replay = receipt.is_replay,
+                "attempt outcome recorded in the bead backend"
+            ),
+            Ok(Ok(None)) => tracing::debug!(
+                bead_id = %bead.id,
+                "backend does not advertise attempt outcomes; NEEDLE ledger row is the record"
+            ),
+            Ok(Err(e)) => tracing::warn!(
+                bead_id = %bead.id,
+                attempt_id = %resolution.attempt_id,
+                error = %e,
+                "backend refused the attempt resolution; NEEDLE ledger row is the record"
+            ),
+            Err(_) => tracing::warn!(
+                bead_id = %bead.id,
+                "backend attempt resolution timed out; NEEDLE ledger row is the record"
+            ),
+        }
     }
 
     /// Record the adapter's own failure signal against its host-wide health

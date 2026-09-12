@@ -334,6 +334,7 @@ static TIER_TABLE: &[(&str, ReloadTier)] = &[
     ("strands.mitosis.first_failure_only", ReloadTier::Live),
     // Outcome (live)
     ("outcome.quarantine_after_failures", ReloadTier::Live),
+    ("outcome.resolve_attempts_in_backend", ReloadTier::Live),
     // Workspace-health fingerprint thresholds (live; read per verification failure)
     (
         "workspace_health.fingerprint_window_seconds",

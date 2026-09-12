@@ -31,6 +31,8 @@ pub struct CliBeadStore {
     harness: Option<String>,
     harness_version: Option<String>,
     sync_pause: std::sync::Mutex<Option<String>>,
+    /// Whether `bead resolve` (attempt-outcome-v1) is available.
+    attempt_outcome_supported: bool,
 }
 
 impl CliBeadStore {
@@ -54,7 +56,16 @@ impl CliBeadStore {
             harness,
             harness_version,
             sync_pause: std::sync::Mutex::new(None),
+            attempt_outcome_supported: false,
         })
+    }
+
+    /// Record whether the backend advertised `attempt_outcome.supported` in
+    /// its capability document. Off by default: an older bead-rs has no
+    /// `resolve` command, and NEEDLE must not fail an attempt over it.
+    pub fn with_attempt_outcome_support(mut self, supported: bool) -> Self {
+        self.attempt_outcome_supported = supported;
+        self
     }
 
     pub fn backend(&self) -> &BeadBackend {
@@ -641,6 +652,49 @@ impl BeadStore for CliBeadStore {
         Ok((bead, claim_events))
     }
 
+    async fn resolve_attempt(
+        &self,
+        resolution: &super::AttemptResolution,
+    ) -> Result<Option<super::ResolveReceipt>> {
+        if !self.attempt_outcome_supported || self.operation("resolve").is_err() {
+            return Ok(None);
+        }
+        let values = HashMap::from([
+            ("id", resolution.bead_id.to_string()),
+            ("attempt_id", resolution.attempt_id.clone()),
+            ("outcome", resolution.outcome.clone()),
+            ("actor", resolution.actor.clone()),
+            (
+                "resolve_reason",
+                resolution.reason.clone().unwrap_or_default(),
+            ),
+            (
+                "evidence_ref",
+                resolution.evidence_ref.clone().unwrap_or_default(),
+            ),
+        ]);
+        let stdout = self.run_operation("resolve", &values).await?;
+        let value: serde_json::Value = serde_json::from_str(stdout.trim()).with_context(|| {
+            format!(
+                "resolve for {} returned non-JSON output",
+                resolution.bead_id
+            )
+        })?;
+        let field = |name: &str| value.get(name).and_then(|v| v.as_str()).map(str::to_owned);
+        Ok(Some(super::ResolveReceipt {
+            receipt_id: field("receipt_id").unwrap_or_default(),
+            resulting_state: field("resulting_state"),
+            resulting_attempt_tier: value
+                .get("resulting_attempt_tier")
+                .and_then(|v| v.as_u64())
+                .map(|t| t as u32),
+            is_replay: value
+                .get("is_replay")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+        }))
+    }
+
     async fn set_data(
         &self,
         id: &BeadId,
@@ -1224,7 +1278,10 @@ fn parse_doctor_output(output: &str) -> RepairReport {
 }
 
 fn is_optional_placeholder(name: &str) -> bool {
-    matches!(name, "model" | "harness" | "harness_version" | "limit")
+    matches!(
+        name,
+        "model" | "harness" | "harness_version" | "limit" | "resolve_reason" | "evidence_ref"
+    )
 }
 
 #[cfg(test)]
@@ -1830,6 +1887,49 @@ mod tests {
                 "--json"
             ]
         );
+
+        // `resolve` renders attempt-outcome-v1 with `--action none`; the
+        // store carries no model/harness here and no reason or evidence was
+        // given, so each optional flag disappears with its value.
+        let values = HashMap::from([
+            ("id", "needle-1".to_string()),
+            ("attempt_id", "0192-attempt".to_string()),
+            ("outcome", "work_failure".to_string()),
+            ("actor", "needle-alpha".to_string()),
+            ("resolve_reason", String::new()),
+            ("evidence_ref", String::new()),
+        ]);
+        let result = store.render_operation("resolve", &values).unwrap();
+        assert_eq!(
+            result,
+            vec![
+                "resolve",
+                "needle-1",
+                "--attempt-id",
+                "0192-attempt",
+                "--outcome",
+                "work_failure",
+                "--action",
+                "none",
+                "--actor",
+                "needle-alpha",
+                "--format",
+                "json"
+            ]
+        );
+        let values = HashMap::from([
+            ("id", "needle-1".to_string()),
+            ("attempt_id", "0192-attempt".to_string()),
+            ("outcome", "verified_success".to_string()),
+            ("actor", "needle-alpha".to_string()),
+            ("resolve_reason", String::new()),
+            ("evidence_ref", "commit:abc123".to_string()),
+        ]);
+        let result = store.render_operation("resolve", &values).unwrap();
+        assert!(result
+            .windows(2)
+            .any(|w| w == ["--evidence-ref", "commit:abc123"]));
+        assert!(!result.contains(&"--reason".to_string()));
     }
 
     #[test]

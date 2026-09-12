@@ -6282,12 +6282,24 @@ pub struct OutcomeConfig {
     /// mitosis gets first crack at splitting the bead before quarantine kicks in.
     #[serde(default = "OutcomeConfig::default_quarantine_after_failures")]
     pub quarantine_after_failures: u32,
+
+    /// Record every resolved attempt in the backend's own attempt ledger
+    /// (bead-rs `resolve --action none`, attempt-outcome-v1) after the NEEDLE
+    /// ledger row (default: true; plan section 4.4 step 4, ADR-024).
+    ///
+    /// The backend's failure-tier scheduling and cross-host attempt history
+    /// read that ledger; before this it had zero rows. NEEDLE still applies
+    /// the lifecycle action itself. Backends without the capability are
+    /// skipped silently.
+    #[serde(default = "OutcomeConfig::default_resolve_attempts_in_backend")]
+    pub resolve_attempts_in_backend: bool,
 }
 
 impl Default for OutcomeConfig {
     fn default() -> Self {
         OutcomeConfig {
             quarantine_after_failures: Self::default_quarantine_after_failures(),
+            resolve_attempts_in_backend: Self::default_resolve_attempts_in_backend(),
         }
     }
 }
@@ -6295,6 +6307,9 @@ impl Default for OutcomeConfig {
 impl OutcomeConfig {
     fn default_quarantine_after_failures() -> u32 {
         5
+    }
+    fn default_resolve_attempts_in_backend() -> bool {
+        true
     }
 }
 

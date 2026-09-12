@@ -215,9 +215,11 @@ pub fn open_configured(
             )
         })?;
     verify_backend_identity(&backend, &binary, &workspace)?;
-    if backend == crate::config::Backend::Bead {
-        verify_bead_rs_capabilities(&binary, &workspace)?;
-    }
+    let attempt_outcome_supported = if backend == crate::config::Backend::Bead {
+        verify_bead_rs_capabilities(&binary, &workspace)?
+    } else {
+        false
+    };
 
     match backend {
         crate::config::Backend::Bead => {
@@ -225,14 +227,17 @@ pub fn open_configured(
                 .into_iter()
                 .find(|candidate| candidate.name == "bead-rs")
                 .ok_or_else(|| anyhow::anyhow!("built-in bead-rs descriptor is missing"))?;
-            Ok(Arc::new(CliBeadStore::new(
-                descriptor,
-                binary,
-                workspace,
-                model,
-                harness,
-                harness_version,
-            )?))
+            Ok(Arc::new(
+                CliBeadStore::new(
+                    descriptor,
+                    binary,
+                    workspace,
+                    model,
+                    harness,
+                    harness_version,
+                )?
+                .with_attempt_outcome_support(attempt_outcome_supported),
+            ))
         }
     }
 }
@@ -417,7 +422,9 @@ fn derive_expected_backend_from_filename(binary: &Path) -> String {
         .to_string()
 }
 
-fn verify_bead_rs_capabilities(binary: &Path, workspace: &Path) -> Result<()> {
+/// Probe and validate the bead-rs capability document. Returns whether the
+/// backend advertises `attempt_outcome.supported` (the `resolve` command).
+fn verify_bead_rs_capabilities(binary: &Path, workspace: &Path) -> Result<bool> {
     // Derive expected backend from binary filename BEFORE probing capabilities
     let expected_backend = derive_expected_backend_from_filename(binary);
 
@@ -570,7 +577,12 @@ fn verify_bead_rs_capabilities(binary: &Path, workspace: &Path) -> Result<()> {
             );
         }
     }
-    Ok(())
+    // Optional: attempt-outcome-v1 (`bead resolve`). Absent on older
+    // releases, which is a capability gap NEEDLE tolerates, not a mismatch.
+    let attempt_outcome_supported = capabilities["attempt_outcome"]["supported"]
+        .as_bool()
+        .unwrap_or(false);
+    Ok(attempt_outcome_supported)
 }
 
 /// Load a target workspace's configuration and open only its explicitly bound
@@ -1258,6 +1270,38 @@ pub struct SyncRecoveryError {
 // ─── Filters ─────────────────────────────────────────────────────────────────
 
 /// Filters applied when listing ready beads.
+/// One attempt's outcome as handed to the backend's attempt ledger
+/// (`bead resolve --action none`, attempt-outcome-v1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttemptResolution {
+    /// The bead the attempt ran against.
+    pub bead_id: BeadId,
+    /// The attempt's ledger ID — the idempotency key on the backend side.
+    pub attempt_id: String,
+    /// Semantic outcome class: `verified_success`, `work_failure`,
+    /// `infrastructure_failure`, `cancelled` or `indeterminate`.
+    pub outcome: String,
+    /// The claimant identity (the assignee the claim was made under).
+    pub actor: String,
+    /// Optional short reason (the ledger row's terminal reason).
+    pub reason: Option<String>,
+    /// Optional `NAMESPACE:VALUE` evidence reference (e.g. `commit:<sha>`).
+    pub evidence_ref: Option<String>,
+}
+
+/// What the backend answered a resolution with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolveReceipt {
+    /// Backend receipt identifier.
+    pub receipt_id: String,
+    /// Bead state after the (no-op) action.
+    pub resulting_state: Option<String>,
+    /// Attempt tier after this outcome was folded in.
+    pub resulting_attempt_tier: Option<u32>,
+    /// Whether the backend had already recorded this attempt ID.
+    pub is_replay: bool,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Filters {
     /// Only return beads assigned to this actor. `None` = no filter.
@@ -1349,6 +1393,21 @@ pub trait BeadStore: Send + Sync {
     /// Backends without a notes projection return `None`; this keeps notes a
     /// capability rather than forcing it into NEEDLE's common bead model.
     async fn notes(&self, _id: &BeadId) -> Result<Option<String>> {
+        Ok(None)
+    }
+
+    /// Record one attempt's outcome in the backend's attempt ledger (bead-rs
+    /// `resolve`, attempt-outcome-v1) without applying a lifecycle action —
+    /// NEEDLE's guarded action path does that. Idempotent per attempt ID:
+    /// a replay returns the original receipt.
+    ///
+    /// `Ok(None)` when the backend does not advertise attempt outcomes; that
+    /// is a capability gap, not an error, and the NEEDLE ledger row remains
+    /// the record.
+    async fn resolve_attempt(
+        &self,
+        _resolution: &AttemptResolution,
+    ) -> Result<Option<ResolveReceipt>> {
         Ok(None)
     }
 

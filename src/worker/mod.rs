@@ -3774,6 +3774,7 @@ impl Worker {
         self.outcome_handler
             .set_attempt_context(crate::outcome::AttemptContext {
                 adapter: adapter.name.clone(),
+                actor: self.qualified_id(),
                 model: adapter.model.clone(),
                 provider: adapter.provider.clone(),
                 // The prompt has been taken out of built_prompt above; its
