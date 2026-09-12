@@ -16,6 +16,8 @@
 # superseded after the base tag published and before with-deps could start.
 # Rebuild marker (2026-09-12, retry 3): the dependency-stub repair push reached
 # Forgejo but its webhook event never reached the Argo Events sensor.
+# Rebuild marker (2026-09-12, retry 4): GitHub delivery resumed after the
+# webhooks-ci ingress received a hostname-valid cert-manager certificate.
 #
 # After triggering, confirm BOTH tags moved -- the template runs docker-build-base
 # and docker-build-with-deps as separate kaniko steps, and a run that is stopped
