@@ -10511,3 +10511,14 @@
 {"adapter":"claude-code-glm-5.3-flash","bead":"needle-e6dc1fe9","event":"dispatch","model":"glm-5.3-flash","strand":"pluck","ts":"2026-09-12T01:30:47.763917007+00:00","worker":"glm-needle"}
 {"bead":"needle-e6dc1fe9","event":"claim","strand":"pluck","ts":"2026-09-12T01:58:55.684885471+00:00","worker":"glm-needle"}
 {"adapter":"claude-code-glm-5.3-flash","bead":"needle-e6dc1fe9","event":"dispatch","model":"glm-5.3-flash","strand":"pluck","ts":"2026-09-12T01:58:56.262434327+00:00","worker":"glm-needle"}
+{"adapter":"claude-sonnet","attempt_id":"01a09380-52ac-7402-9ca4-436b50f7532a","bead":"needle-attempt-id","event":"dispatch","model":"claude-sonnet-4-6","ts":"2026-09-12T02:44:15.660556532+00:00","worker":"test-worker"}
+{"adapter":"claude-sonnet","attempt_id":"01a09380-52e0-7993-b851-4d4f13cc27d7","bead":"needle-unreadable-claim","event":"dispatch","model":"claude-sonnet-4-6","ts":"2026-09-12T02:44:15.712214617+00:00","worker":"test-worker"}
+{"bead":"needle-eligible","event":"claim","strand":"pluck","ts":"2026-09-12T02:44:17.272052718+00:00","worker":"test-worker"}
+{"bead":"needle-test-001","event":"claim","strand":"pluck","ts":"2026-09-12T02:44:17.439191866+00:00","worker":"test-worker"}
+{"bead":"needle-echo","event":"claim","strand":"pluck","ts":"2026-09-12T02:44:18.443306123+00:00","worker":"test-worker"}
+{"adapter":"echo-test","attempt_id":"01a09380-5d8d-7f30-9c4b-13438f29a200","bead":"needle-echo","event":"dispatch","model":null,"strand":"pluck","ts":"2026-09-12T02:44:18.445057137+00:00","worker":"test-worker"}
+{"bead":"needle-echo","duration_ms":7,"event":"complete","exit_code":0,"outcome":"success","strand":"pluck","ts":"2026-09-12T02:44:18.462511311+00:00","worker":"test-worker"}
+{"bead":"needle-claim-a","event":"claim","strand":"pluck","ts":"2026-09-12T02:44:30.401270868+00:00","worker":"test-worker"}
+{"bead":"needle-e6dc1fe9","duration_ms":3601497,"event":"timeout","exit_code":124,"outcome":"timeout","strand":"pluck","ts":"2026-09-12T02:58:57.882360144+00:00","worker":"glm-needle"}
+{"bead":"needle-4504fee0","event":"claim","strand":"pluck","ts":"2026-09-12T02:59:02.364556245+00:00","worker":"glm-needle"}
+{"adapter":"claude-code-glm-5.3-flash","bead":"needle-4504fee0","event":"dispatch","model":"glm-5.3-flash","strand":"pluck","ts":"2026-09-12T02:59:02.882435901+00:00","worker":"glm-needle"}
