@@ -23,6 +23,8 @@ pub mod decision;
 mod deferral;
 pub mod dispatch;
 pub mod drift;
+pub mod evidence_routing;
+pub mod experiments;
 pub mod fingerprint;
 pub mod gate_health;
 pub mod health;

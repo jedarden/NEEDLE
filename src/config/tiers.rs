@@ -231,6 +231,13 @@ static TIER_TABLE: &[(&str, ReloadTier)] = &[
     ("agent.routing", ReloadTier::Live),
     ("agent.routing.rules", ReloadTier::Live),
     ("agent.routing.default_adapter", ReloadTier::Live),
+    ("agent.evidence_routing.enabled", ReloadTier::Live),
+    ("agent.evidence_routing.candidates", ReloadTier::Live),
+    ("agent.evidence_routing.min_attempts", ReloadTier::Live),
+    ("agent.evidence_routing.exploration_share", ReloadTier::Live),
+    ("agent.evidence_routing.min_improvement", ReloadTier::Live),
+    ("agent.evidence_routing.window_days", ReloadTier::Live),
+    ("agent.evidence_routing.refresh_secs", ReloadTier::Live),
     ("agent.routing.strict", ReloadTier::Live),
     // Worker configuration (mostly live)
     ("worker.idle_timeout", ReloadTier::Live),
@@ -396,6 +403,11 @@ static TIER_TABLE: &[(&str, ReloadTier)] = &[
     ("prompt.instructions", ReloadTier::Rebuild),
     ("prompt.templates", ReloadTier::Rebuild),
     ("prompt.variants", ReloadTier::Rebuild),
+    ("prompt.experiments.enabled", ReloadTier::Live),
+    ("prompt.experiments.min_attempts", ReloadTier::Live),
+    ("prompt.experiments.regression_margin", ReloadTier::Live),
+    ("prompt.experiments.window_days", ReloadTier::Live),
+    ("prompt.experiments.refresh_secs", ReloadTier::Live),
     // Agent adapter directory (rebuild Dispatcher's adapter loader)
     ("agent.adapters_dir", ReloadTier::Rebuild),
     // Rate limiting (rebuild RateLimiter)

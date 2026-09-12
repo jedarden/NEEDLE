@@ -666,6 +666,9 @@ pub struct PromptBuilder {
     /// skills together). `None` leaves it unbounded — the pre-N-T15 behavior,
     /// kept only for the byte-identical legacy regression path.
     learning_context_cap: Option<usize>,
+    /// Where stopped-variant receipts live (see [`crate::experiments`]).
+    /// `None` skips the check, so a stopped variant stays exposed.
+    experiment_state_dir: Option<std::path::PathBuf>,
 }
 
 impl PromptBuilder {
@@ -701,7 +704,15 @@ impl PromptBuilder {
             skill_library: None,
             variants: config.variants.clone(),
             learning_context_cap: None,
+            experiment_state_dir: None,
         }
+    }
+
+    /// Consult `dir` for stopped-variant receipts when selecting a variant
+    /// (N-T19): a stopped variant falls back to the built-in template.
+    pub fn with_experiment_state_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.experiment_state_dir = Some(dir);
+        self
     }
 
     /// Create a new `PromptBuilder` with the workspace's skill library.
@@ -1274,6 +1285,14 @@ impl PromptBuilder {
         for variant in variants {
             cumulative += u32::from(variant.weight);
             if u32::from(bucket) < cumulative {
+                // A variant the canary evaluator stopped is no longer
+                // exposed: its cohort takes the built-in template until an
+                // operator removes the receipt or changes the config.
+                if let Some(dir) = &self.experiment_state_dir {
+                    if crate::experiments::is_stopped(dir, template_name, &variant.name) {
+                        return (format!("{template_name}-default"), None);
+                    }
+                }
                 let abs_path = workspace.join(&variant.content_file);
                 match std::fs::read_to_string(&abs_path) {
                     Ok(content) => {
@@ -1651,6 +1670,59 @@ mod tests {
     }
 
     #[test]
+    fn a_stopped_variant_falls_back_to_the_builtin_template() {
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(ws.path().join("prompts")).unwrap();
+        std::fs::write(
+            ws.path().join("prompts/pluck-v2.md"),
+            "VARIANT V2 {bead_id}",
+        )
+        .unwrap();
+        let mut variants = std::collections::BTreeMap::new();
+        variants.insert(
+            "pluck".to_string(),
+            vec![crate::config::VariantConfig {
+                name: "v2".to_string(),
+                weight: 100,
+                content_file: PathBuf::from("prompts/pluck-v2.md"),
+            }],
+        );
+        let config = PromptConfig {
+            variants,
+            ..PromptConfig::default()
+        };
+        let bead = test_bead();
+        let state = tempfile::tempdir().unwrap();
+
+        let builder =
+            PromptBuilder::new(&config).with_experiment_state_dir(state.path().to_path_buf());
+        let exposed = builder.build_pluck(&bead, ws.path(), "worker-01").unwrap();
+        assert_eq!(exposed.template_version, "pluck-v2");
+        assert!(exposed.content.starts_with("VARIANT V2"));
+
+        let stop = crate::experiments::Decision::Stop {
+            template: "pluck".into(),
+            variant: "v2".into(),
+            variant_rate: 0.3,
+            baseline_rate: 0.7,
+            variant_attempts: 40,
+            baseline_attempts: 40,
+            margin: 0.15,
+            stopped_at: "2026-09-12T17:00:00Z".into(),
+        };
+        crate::experiments::record_stop(state.path(), &stop).unwrap();
+        let withdrawn = builder.build_pluck(&bead, ws.path(), "worker-01").unwrap();
+        assert_eq!(withdrawn.template_version, "pluck-default");
+        assert!(withdrawn.content.contains("## Task"));
+
+        // Without a state dir the check is skipped (pre-N-T19 behaviour).
+        let unchecked = PromptBuilder::new(&config)
+            .build_pluck(&bead, ws.path(), "worker-01")
+            .unwrap();
+        assert_eq!(unchecked.template_version, "pluck-v2");
+    }
+
+    #[test]
     fn cap_learning_context_respects_char_boundaries() {
         let text = "é".repeat(100);
         let capped = cap_learning_context(text, Some(101));
@@ -1816,6 +1888,7 @@ mod tests {
             instructions: None,
             templates: BTreeMap::new(),
             variants: BTreeMap::new(),
+            experiments: Default::default(),
         };
         let builder = PromptBuilder::new(&config);
         let bead = test_bead();
@@ -1842,6 +1915,7 @@ mod tests {
             instructions: Some("Always run tests.".to_string()),
             templates: BTreeMap::new(),
             variants: BTreeMap::new(),
+            experiments: Default::default(),
         };
         let builder = PromptBuilder::new(&config);
         let bead = test_bead();
@@ -2015,6 +2089,7 @@ mod tests {
             instructions: None,
             templates,
             variants: BTreeMap::new(),
+            experiments: Default::default(),
         };
         let builder = PromptBuilder::new(&config);
         let bead = test_bead();
@@ -2035,6 +2110,7 @@ mod tests {
             instructions: None,
             templates,
             variants: BTreeMap::new(),
+            experiments: Default::default(),
         };
         let builder = PromptBuilder::new(&config);
 
@@ -2072,6 +2148,7 @@ mod tests {
             instructions: None,
             templates,
             variants: BTreeMap::new(),
+            experiments: Default::default(),
         };
         let builder = PromptBuilder::new(&config);
         let err = builder.validate();
@@ -2097,6 +2174,7 @@ mod tests {
             instructions: None,
             templates,
             variants: BTreeMap::new(),
+            experiments: Default::default(),
         };
         let builder = PromptBuilder::new(&config);
         builder
@@ -2115,6 +2193,7 @@ mod tests {
             instructions: None,
             templates,
             variants: BTreeMap::new(),
+            experiments: Default::default(),
         };
         let builder = PromptBuilder::new(&config);
         let err = builder.validate();

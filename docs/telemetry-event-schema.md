@@ -81,6 +81,20 @@ Additional fields are event-specific and documented per type below.
   injected into its prompt. Fields: `bead_id`, `attempt`, `ids` (the exact
   retrieved entries the attempt saw — the exposure record), `bytes`.
 
+### Adaptation Receipts (plan 4.4 steps 4–5, N-T18/N-T19)
+- `agent.evidence_routing` — Evidence-based adapter selection made a choice.
+  Fields: `bead_id`, `static_adapter`, `chosen_adapter`, `reason`
+  (`default_is_best`, `evidence:<best>_vs_<default>_over_<n>`,
+  `below_min_improvement:…`, `insufficient_evidence:…`, `explore:<share>`,
+  `frozen:<why>`, `no_eligible_candidate`), `explored`, `considered` (every
+  candidate's `attempts`, `judged`, `verified`, `success_rate`,
+  `cost_per_success`).
+- `experiment.stopped` — A prompt-variant canary trailed the default by more
+  than the margin with enough attempts on both sides and was stopped; the
+  receipt file under `~/.needle/state/experiments/` carries the same numbers.
+  Fields: `template`, `variant`, `variant_rate`, `baseline_rate`,
+  `variant_attempts`, `baseline_attempts`.
+
 ### Configuration
 - `config.warning` — Configuration validation warning
 

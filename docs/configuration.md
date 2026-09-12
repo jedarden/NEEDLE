@@ -486,6 +486,57 @@ process_limits:
     enabled: false             # No hard deadline (no absolute time limit)
 ```
 
+### Evidence-Based Adapter Selection (N-T18)
+
+Static routing matches on a model name and never learns. With
+`agent.evidence_routing` a worker chooses among **already configured**
+candidate adapters by what the attempt ledger (`attempt.resolved` rows in
+`~/.needle/logs`, bounded by file date) says about them: verified success
+over judged attempts (infrastructure failures excluded), cost per verified
+success as the tie-break. Guardrails: an adapter needs `min_attempts`
+judged attempts to be chosen as best; routing only moves away from the
+static default when the best leads it by `min_improvement`; an
+`exploration_share` of dispatches goes to a non-best eligible candidate so
+evidence keeps accruing; a gate-degraded workspace or a provider-degraded
+adapter freezes the choice on the static default. Every decision is a
+receipt (`agent.evidence_routing`). Off by default — this selects among
+approved variants and records exposure (plan 5.7 L1); it never creates or
+widens anything.
+
+```yaml
+agent:
+  evidence_routing:
+    enabled: false
+    candidates: [claude-code-glm-5.3-flash, claude-code-glm-5.3]
+    min_attempts: 20
+    exploration_share: 0.10
+    min_improvement: 0.05
+    window_days: 7
+    refresh_secs: 600
+```
+
+### Prompt-Variant Canaries (N-T19)
+
+`prompt.variants` assigns workers to template variants deterministically and
+stamps `template_version` on every attempt. `prompt.experiments` closes the
+loop the safe way round: it never promotes a variant, it **stops** one whose
+verified-success rate trails the default by more than `regression_margin`
+once both cohorts have `min_attempts` judged attempts. A stop is a receipt
+under `~/.needle/state/experiments/<template>--<variant>.stopped.json` plus
+an `experiment.stopped` event; workers then build that cohort's prompts from
+the built-in template. Removing the receipt re-arms the variant; editing
+the config promotes one — both are operator actions.
+
+```yaml
+prompt:
+  experiments:
+    enabled: true
+    min_attempts: 30
+    regression_margin: 0.15
+    window_days: 14
+    refresh_secs: 600
+```
+
 ### Model-to-Adapter Routing
 
 ```yaml

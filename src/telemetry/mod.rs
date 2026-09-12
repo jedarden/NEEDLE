@@ -1012,6 +1012,26 @@ pub enum EventKind {
         ids: Vec<String>,
         bytes: usize,
     },
+    /// Evidence-based adapter selection made a choice (N-T18). `considered`
+    /// carries every candidate's evidence so the receipt explains itself.
+    EvidenceRoutingDecision {
+        bead_id: BeadId,
+        static_adapter: String,
+        chosen_adapter: String,
+        reason: String,
+        explored: bool,
+        considered: Vec<serde_json::Value>,
+    },
+    /// A prompt-variant canary regressed past the margin and was stopped
+    /// (N-T19); the receipt file carries the same numbers.
+    ExperimentStopped {
+        template: String,
+        variant: String,
+        variant_rate: f64,
+        baseline_rate: f64,
+        variant_attempts: u64,
+        baseline_attempts: u64,
+    },
 
     // ── Unravel ──
     UnravelAnalyzed {
@@ -1602,6 +1622,8 @@ impl EventKind {
             EventKind::ProviderDegraded { .. } => "provider.degraded",
             EventKind::ProviderRestored { .. } => "provider.restored",
             EventKind::PromptMemoryRetrieved { .. } => "prompt.memory_retrieved",
+            EventKind::EvidenceRoutingDecision { .. } => "agent.evidence_routing",
+            EventKind::ExperimentStopped { .. } => "experiment.stopped",
             EventKind::UnravelAnalyzed { .. } => "bead.unravel.analyzed",
             EventKind::UnravelSkipped { .. } => "bead.unravel.skipped",
             EventKind::ReflectStarted { .. } => "reflect.started",
@@ -1725,6 +1747,7 @@ impl EventKind {
             | EventKind::ProviderDegraded { bead_id, .. }
             | EventKind::ProviderRestored { bead_id, .. }
             | EventKind::PromptMemoryRetrieved { bead_id, .. }
+            | EventKind::EvidenceRoutingDecision { bead_id, .. }
             | EventKind::UnravelAnalyzed { bead_id, .. }
             | EventKind::UnravelSkipped { bead_id, .. }
             | EventKind::OutputTransformSpawned { bead_id, .. }
@@ -1868,6 +1891,7 @@ impl EventKind {
             EventKind::PulseBeadCreated { bead_id, .. } => Some(bead_id.clone()),
             EventKind::Log { bead_id, .. } => bead_id.clone(),
             EventKind::UpgradeCheckStarted { .. } => None,
+            EventKind::ExperimentStopped { .. } => None,
             EventKind::UpgradeCheckCompleted { .. } => None,
             EventKind::UpgradeCheckFailed { .. } => None,
             EventKind::PluckOrderingDegraded { .. } => None,
@@ -2647,6 +2671,40 @@ impl EventKind {
                     "attempt": attempt,
                     "ids": ids,
                     "bytes": bytes,
+                })
+            }
+            EventKind::EvidenceRoutingDecision {
+                bead_id,
+                static_adapter,
+                chosen_adapter,
+                reason,
+                explored,
+                considered,
+            } => {
+                serde_json::json!({
+                    "bead_id": bead_id.as_ref(),
+                    "static_adapter": static_adapter,
+                    "chosen_adapter": chosen_adapter,
+                    "reason": reason,
+                    "explored": explored,
+                    "considered": considered,
+                })
+            }
+            EventKind::ExperimentStopped {
+                template,
+                variant,
+                variant_rate,
+                baseline_rate,
+                variant_attempts,
+                baseline_attempts,
+            } => {
+                serde_json::json!({
+                    "template": template,
+                    "variant": variant,
+                    "variant_rate": variant_rate,
+                    "baseline_rate": baseline_rate,
+                    "variant_attempts": variant_attempts,
+                    "baseline_attempts": baseline_attempts,
                 })
             }
             EventKind::UnravelAnalyzed {
@@ -3681,6 +3739,8 @@ impl EventKind {
             | EventKind::ProviderDegraded { .. }
             | EventKind::ProviderRestored { .. }
             | EventKind::PromptMemoryRetrieved { .. }
+            | EventKind::EvidenceRoutingDecision { .. }
+            | EventKind::ExperimentStopped { .. }
             | EventKind::UnravelAnalyzed { .. }
             | EventKind::UnravelSkipped { .. }
             | EventKind::PulseScannerStarted { .. }

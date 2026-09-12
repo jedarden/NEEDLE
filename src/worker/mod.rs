@@ -87,7 +87,10 @@ fn apply_learning_context_policy(
     learning: &crate::config::LearningConfig,
     workspace: &Path,
 ) -> PromptBuilder {
-    let builder = builder.with_learning_context_cap(learning.max_learning_context_bytes);
+    let builder = builder
+        .with_learning_context_cap(learning.max_learning_context_bytes)
+        // N-T19: a stopped prompt variant is no longer exposed.
+        .with_experiment_state_dir(crate::experiments::default_state_dir());
     if learning.inject_legacy_learnings {
         builder
             .with_legacy_learnings(workspace)
@@ -122,6 +125,15 @@ fn remove_placed_learnings_for_workspace(workspace: &Path) {
             "could not strip legacy NEEDLE learning blocks from CLAUDE.md"
         ),
     }
+}
+
+/// Attempt-ledger aggregates a worker keeps for its routing and canary
+/// decisions, rebuilt from the telemetry logs at a bounded cadence.
+#[derive(Debug, Clone)]
+struct LedgerCache {
+    computed_at: Instant,
+    adapters: std::collections::HashMap<String, crate::evidence_routing::AdapterEvidence>,
+    variants: std::collections::HashMap<String, crate::experiments::VariantOutcome>,
 }
 
 /// Remove the trailing source annotation from a formatted config dump line.
@@ -731,6 +743,9 @@ pub struct Worker {
     /// These are added to exclusion_set to prevent immediate re-selection.
     /// Cleared at the start of the next SELECTING cycle.
     race_lost_this_cycle: HashSet<BeadId>,
+    /// Cached attempt-ledger aggregates for evidence routing and canary
+    /// evaluation, refreshed at most every `refresh_secs` (N-T18/N-T19).
+    ledger_cache: std::sync::Mutex<Option<LedgerCache>>,
     retry_count: u32,
     consecutive_race_lost: u32,
     beads_processed: u64,
@@ -1174,6 +1189,7 @@ impl Worker {
             exclusion_set: HashSet::new(),
             race_lost_exclusions: Vec::new(),
             race_lost_this_cycle: HashSet::new(),
+            ledger_cache: std::sync::Mutex::new(None),
             retry_count: 0,
             consecutive_race_lost: 0,
             beads_processed,
@@ -6999,6 +7015,13 @@ impl Worker {
         // Apply routing rules if configured.
         let (chosen_adapter_name, matched_rule) = self.apply_routing_rules(&default_adapter)?;
 
+        // N-T18: let the attempt ledger choose among configured candidates,
+        // inside the L1 envelope (evidence floor, minimum improvement,
+        // bounded exploration, frozen while degraded). Static routing is
+        // the fallback and the default when evidence is insufficient.
+        let (chosen_adapter_name, matched_rule) =
+            self.apply_evidence_routing(chosen_adapter_name, matched_rule, bead_id.as_ref());
+
         // Emit routing decision telemetry on every routing decision.
         if let Some(id) = bead_id {
             let model = default_adapter
@@ -7054,6 +7077,225 @@ impl Worker {
             ))?;
 
         Ok(adapter)
+    }
+
+    /// The cached ledger aggregates, rebuilt when older than the shortest
+    /// configured refresh interval. Also runs the canary evaluation on each
+    /// rebuild, so a regressed variant is stopped without any extra
+    /// scheduling (N-T19).
+    fn ledger_snapshot(&self) -> LedgerCache {
+        let refresh = self
+            .config
+            .agent
+            .evidence_routing
+            .refresh_secs
+            .min(self.config.prompt.experiments.refresh_secs)
+            .max(30);
+        let mut guard = self.ledger_cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(cache) = guard.as_ref() {
+            if cache.computed_at.elapsed() < Duration::from_secs(refresh) {
+                return cache.clone();
+            }
+        }
+        let log_dir = self.config.workspace.home.join("logs");
+        let window = self
+            .config
+            .agent
+            .evidence_routing
+            .window_days
+            .max(self.config.prompt.experiments.window_days)
+            .max(1);
+        let rows = crate::evidence_routing::ledger_rows(&log_dir, window);
+        let mut adapters = std::collections::HashMap::new();
+        for row in &rows {
+            let adapter = row
+                .get("adapter")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if adapter.is_empty() {
+                continue;
+            }
+            let entry = adapters.entry(adapter.clone()).or_insert_with(|| {
+                crate::evidence_routing::AdapterEvidence {
+                    adapter,
+                    ..Default::default()
+                }
+            });
+            entry.attempts += 1;
+            match row.get("outcome").and_then(|v| v.as_str()) {
+                Some("verified_success") => entry.verified += 1,
+                Some("infrastructure_failure") => entry.infrastructure += 1,
+                _ => {}
+            }
+            if let Some(cost) = row.get("estimated_cost_usd").and_then(|v| v.as_f64()) {
+                entry.cost_usd += cost;
+                entry.costed += 1;
+            }
+        }
+        let variants = crate::experiments::variant_outcomes(&rows);
+        let cache = LedgerCache {
+            computed_at: Instant::now(),
+            adapters,
+            variants,
+        };
+        *guard = Some(cache.clone());
+        drop(guard);
+        self.evaluate_prompt_canaries(&cache);
+        cache
+    }
+
+    /// N-T19: stop any configured prompt variant that regressed past the
+    /// margin. Receipts are idempotent; a stop is emitted once.
+    fn evaluate_prompt_canaries(&self, cache: &LedgerCache) {
+        let experiments = &self.config.prompt.experiments;
+        if !experiments.enabled || self.config.prompt.variants.is_empty() {
+            return;
+        }
+        let state_dir = crate::experiments::default_state_dir();
+        for (template, variants) in &self.config.prompt.variants {
+            for decision in
+                crate::experiments::evaluate(template, variants, &cache.variants, experiments)
+            {
+                if let crate::experiments::Decision::Stop {
+                    template,
+                    variant,
+                    variant_rate,
+                    baseline_rate,
+                    variant_attempts,
+                    baseline_attempts,
+                    ..
+                } = &decision
+                {
+                    match crate::experiments::record_stop(&state_dir, &decision) {
+                        Ok(true) => {
+                            tracing::warn!(
+                                template = %template,
+                                variant = %variant,
+                                variant_rate,
+                                baseline_rate,
+                                variant_attempts,
+                                baseline_attempts,
+                                "prompt variant regressed past the margin — stopped"
+                            );
+                            let _ = self.telemetry.emit(
+                                EventKind::ExperimentStopped {
+                                    template: template.clone(),
+                                    variant: variant.clone(),
+                                    variant_rate: *variant_rate,
+                                    baseline_rate: *baseline_rate,
+                                    variant_attempts: *variant_attempts,
+                                    baseline_attempts: *baseline_attempts,
+                                },
+                                chrono::Utc::now(),
+                            );
+                        }
+                        Ok(false) => {}
+                        Err(e) => tracing::warn!(
+                            template = %template,
+                            variant = %variant,
+                            error = %e,
+                            "could not record the canary stop receipt"
+                        ),
+                    }
+                }
+            }
+        }
+    }
+
+    /// N-T18: evidence-based selection among configured candidates after
+    /// static routing. Returns the (possibly changed) adapter and rule tag.
+    fn apply_evidence_routing(
+        &self,
+        static_adapter: String,
+        matched_rule: String,
+        bead_id: Option<&BeadId>,
+    ) -> (String, String) {
+        let config = &self.config.agent.evidence_routing;
+        if !config.enabled || config.candidates.is_empty() {
+            return (static_adapter, matched_rule);
+        }
+        let cache = self.ledger_snapshot();
+        let degraded: std::collections::HashSet<String> =
+            crate::provider_health::degraded_adapters()
+                .into_iter()
+                .map(|s| s.adapter)
+                .collect();
+        let frozen = if is_workspace_unset(&self.current_workspace) {
+            None
+        } else {
+            match crate::gate_health::is_degraded(&self.current_workspace) {
+                Ok(true) => Some("workspace_degraded"),
+                _ => None,
+            }
+        };
+        let roll = {
+            // Cheap uniform sample without a new dependency: hash of time+worker.
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            std::time::SystemTime::now().hash(&mut h);
+            self.worker_name.hash(&mut h);
+            (h.finish() % 10_000) as f64 / 10_000.0
+        };
+        let choice = crate::evidence_routing::choose(
+            &static_adapter,
+            config,
+            &cache.adapters,
+            &degraded,
+            frozen,
+            roll,
+        );
+        // Only an adapter the dispatcher can load is a real choice.
+        let chosen = if choice.adapter != static_adapter
+            && self.dispatcher.adapter(&choice.adapter).is_none()
+        {
+            tracing::warn!(
+                adapter = %choice.adapter,
+                "evidence routing chose an adapter the dispatcher cannot load — keeping the static adapter"
+            );
+            static_adapter.clone()
+        } else {
+            choice.adapter.clone()
+        };
+        if let Some(id) = bead_id {
+            let considered = choice
+                .considered
+                .iter()
+                .map(|e| {
+                    serde_json::json!({
+                        "adapter": e.adapter,
+                        "attempts": e.attempts,
+                        "judged": e.judged(),
+                        "verified": e.verified,
+                        "success_rate": e.success_rate(),
+                        "cost_per_success": e.cost_per_success(),
+                    })
+                })
+                .collect();
+            let _ = self.telemetry.emit(
+                EventKind::EvidenceRoutingDecision {
+                    bead_id: id.clone(),
+                    static_adapter: static_adapter.clone(),
+                    chosen_adapter: chosen.clone(),
+                    reason: choice.reason.clone(),
+                    explored: choice.explored,
+                    considered,
+                },
+                chrono::Utc::now(),
+            );
+        }
+        if chosen != static_adapter {
+            tracing::info!(
+                static_adapter = %static_adapter,
+                chosen_adapter = %chosen,
+                reason = %choice.reason,
+                explored = choice.explored,
+                "evidence routing selected a different adapter"
+            );
+            (chosen, format!("evidence:{}", choice.reason))
+        } else {
+            (static_adapter, matched_rule)
+        }
     }
 
     /// Apply routing rules to determine the final adapter.

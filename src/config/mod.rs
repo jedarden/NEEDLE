@@ -231,6 +231,76 @@ pub struct AgentConfig {
     /// Model-to-adapter routing rules (optional).
     #[serde(default)]
     pub routing: Option<RoutingConfig>,
+
+    /// Evidence-based selection among configured candidate adapters (plan
+    /// section 4.4 step 4, N-T18). Off by default; see
+    /// [`crate::evidence_routing`].
+    #[serde(default)]
+    pub evidence_routing: EvidenceRoutingConfig,
+}
+
+/// Choose among already configured adapters by verified success per attempt
+/// from the attempt ledger, inside the L1 envelope (select among approved
+/// variants, record exposure, never create or widen anything).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvidenceRoutingConfig {
+    /// Master switch (default: false).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Adapter names eligible for selection; the statically routed adapter
+    /// is always a candidate. Empty = nothing to choose between (no-op).
+    #[serde(default)]
+    pub candidates: Vec<String>,
+    /// Judged attempts an adapter needs in the window before it can be
+    /// chosen as best (default: 20).
+    #[serde(default = "EvidenceRoutingConfig::default_min_attempts")]
+    pub min_attempts: u64,
+    /// Share of dispatches sent to a non-best eligible candidate so its
+    /// evidence keeps accruing (default: 0.10; 0 disables exploration).
+    #[serde(default = "EvidenceRoutingConfig::default_exploration_share")]
+    pub exploration_share: f64,
+    /// Verified-success-rate lead the best candidate needs over the static
+    /// default before routing moves (default: 0.05).
+    #[serde(default = "EvidenceRoutingConfig::default_min_improvement")]
+    pub min_improvement: f64,
+    /// Ledger window in days (default: 7).
+    #[serde(default = "EvidenceRoutingConfig::default_window_days")]
+    pub window_days: u32,
+    /// How often a worker re-reads the ledger (default: 600 s).
+    #[serde(default = "EvidenceRoutingConfig::default_refresh_secs")]
+    pub refresh_secs: u64,
+}
+
+impl Default for EvidenceRoutingConfig {
+    fn default() -> Self {
+        EvidenceRoutingConfig {
+            enabled: false,
+            candidates: Vec::new(),
+            min_attempts: Self::default_min_attempts(),
+            exploration_share: Self::default_exploration_share(),
+            min_improvement: Self::default_min_improvement(),
+            window_days: Self::default_window_days(),
+            refresh_secs: Self::default_refresh_secs(),
+        }
+    }
+}
+
+impl EvidenceRoutingConfig {
+    fn default_min_attempts() -> u64 {
+        20
+    }
+    fn default_exploration_share() -> f64 {
+        0.10
+    }
+    fn default_min_improvement() -> f64 {
+        0.05
+    }
+    fn default_window_days() -> u32 {
+        7
+    }
+    fn default_refresh_secs() -> u64 {
+        600
+    }
 }
 
 impl Default for AgentConfig {
@@ -241,6 +311,7 @@ impl Default for AgentConfig {
             timeout: Self::default_timeout(),
             adapters_dir: Self::default_adapters_dir(),
             routing: Self::default_routing(),
+            evidence_routing: EvidenceRoutingConfig::default(),
         }
     }
 }
@@ -6219,6 +6290,64 @@ pub struct PromptConfig {
     /// ```
     #[serde(default)]
     pub variants: std::collections::BTreeMap<String, Vec<VariantConfig>>,
+
+    /// Automatic stop for a `variants` canary that regresses (plan section
+    /// 4.4 step 5, N-T19). See [`crate::experiments`].
+    #[serde(default)]
+    pub experiments: ExperimentConfig,
+}
+
+/// Prompt-variant canary evaluation: a variant whose verified-success rate
+/// trails the default by more than `regression_margin`, once both have
+/// `min_attempts`, is stopped (receipt under `~/.needle/state/experiments/`)
+/// and workers fall back to the built-in template. Promotion stays manual.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentConfig {
+    /// Evaluate and auto-stop (default: true; harmless without variants).
+    #[serde(default = "ExperimentConfig::default_enabled")]
+    pub enabled: bool,
+    /// Judged attempts both cohorts need before a verdict (default: 30).
+    #[serde(default = "ExperimentConfig::default_min_attempts")]
+    pub min_attempts: u64,
+    /// Rate gap that stops a variant (default: 0.15).
+    #[serde(default = "ExperimentConfig::default_regression_margin")]
+    pub regression_margin: f64,
+    /// Ledger window in days (default: 14).
+    #[serde(default = "ExperimentConfig::default_window_days")]
+    pub window_days: u32,
+    /// How often a worker re-evaluates (default: 600 s).
+    #[serde(default = "ExperimentConfig::default_refresh_secs")]
+    pub refresh_secs: u64,
+}
+
+impl Default for ExperimentConfig {
+    fn default() -> Self {
+        ExperimentConfig {
+            enabled: Self::default_enabled(),
+            min_attempts: Self::default_min_attempts(),
+            regression_margin: Self::default_regression_margin(),
+            window_days: Self::default_window_days(),
+            refresh_secs: Self::default_refresh_secs(),
+        }
+    }
+}
+
+impl ExperimentConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+    fn default_min_attempts() -> u64 {
+        30
+    }
+    fn default_regression_margin() -> f64 {
+        0.15
+    }
+    fn default_window_days() -> u32 {
+        14
+    }
+    fn default_refresh_secs() -> u64 {
+        600
+    }
 }
 
 impl ConfigTier for PromptConfig {
