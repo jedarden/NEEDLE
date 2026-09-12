@@ -499,7 +499,30 @@ impl OutcomeHandler {
     /// never had (needle-da77b68a, live incident 2026-09-09). This is the
     /// same per-workspace resolution `bead_cli.backend` already gets, and a
     /// workspace that declares no gates runs none — not another workspace's.
+    /// A workspace directory with no `.needle.yaml` at all resolves the same
+    /// way: `load_workspace` returns `Ok(None)` and no gate runs.
+    ///
+    /// An unset or relative bead workspace resolves no gates at all.
+    /// `load_workspace` joins `.needle.yaml` onto the given path, so an
+    /// empty, `.`, or otherwise relative path reads whatever config the
+    /// process CWD happens to contain — during `cargo test` that is this
+    /// repo's own `.needle.yaml`, whose clean-mode gates (definition-of-done
+    /// plus `cargo test --lib`) then ran *inside* the unit test and crawled
+    /// CI's lib lane to its timeout (full_cycle_with_echo_agent, whose bead
+    /// carries workspace `.`, 2026-09-11). The claim path resolves unset
+    /// workspaces onto the worker's absolute `current_workspace` before the
+    /// outcome handler runs, so anything still relative here never named a
+    /// real workspace; running no gates beats running gates read from an
+    /// arbitrary directory.
     async fn run_verification_gates(&self, bead: &Bead) -> Result<(bool, Option<GateReport>)> {
+        if bead.workspace.as_os_str().is_empty() || bead.workspace.is_relative() {
+            tracing::debug!(
+                bead_id = %bead.id,
+                workspace = %bead.workspace.display(),
+                "bead workspace is unset or relative — no workspace config to resolve gates from, running none"
+            );
+            return Ok((true, None));
+        }
         let (workspace_gates, workspace_verification) =
             ConfigLoader::load_workspace(&bead.workspace)
                 .with_context(|| {
@@ -4338,6 +4361,103 @@ mod tests {
             workspace.path().join("gate-ran-in-this-workspace").exists(),
             "the gate must execute with the bead's workspace as its cwd"
         );
+    }
+
+    #[tokio::test]
+    async fn unset_or_relative_bead_workspace_resolves_no_gates() {
+        // Follow-up to the per-workspace resolution above: gate resolution
+        // joins `.needle.yaml` onto the bead's workspace path, so an unset
+        // ("") or relative (".") workspace reads that file from the process
+        // CWD — during `cargo test` this repo's own config, whose clean-mode
+        // gates (definition-of-done plus `cargo test --lib`) then ran inside
+        // the unit test and crawled CI's lib lane to its timeout via
+        // full_cycle_with_echo_agent (2026-09-11). A bead without an
+        // absolute workspace never named a workspace config: zero gates, no
+        // matter what the worker's home config or the CWD declares.
+        let (_guard, _home) = isolated_home();
+        let config = Config {
+            gates: vec![GateConfig::Command {
+                commands: vec!["exit 7".to_string()],
+                stderr_cap_bytes: None,
+                run_in: Default::default(),
+            }],
+            worker: crate::config::WorkerConfig {
+                enforce_shipped_work: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let handler = test_handler_with_config(config);
+
+        for workspace in [
+            PathBuf::new(),
+            PathBuf::from("."),
+            PathBuf::from("some/relative/path"),
+        ] {
+            let bead = Bead {
+                workspace,
+                ..test_bead(BeadStatus::InProgress)
+            };
+            let store = test_store(BeadStatus::Done);
+
+            let result = handler
+                .handle(&store, &bead, &test_output(0), false)
+                .await
+                .unwrap();
+
+            // Had a gate resolved, the configured `exit 7` (or, for "" and
+            // ".", this repo's own clean-mode gates) would fail the dispatch.
+            assert_eq!(
+                result.outcome,
+                Outcome::Success,
+                "a bead without an absolute workspace must run no gates"
+            );
+            assert_eq!(result.bead_action, BeadAction::Closed);
+        }
+    }
+
+    #[tokio::test]
+    async fn absolute_workspace_without_config_file_resolves_no_gates() {
+        // The remaining resolution branch: an absolute bead workspace whose
+        // directory exists but carries no `.needle.yaml` at all. Unlike the
+        // unset/relative guard above (an early return before any config
+        // read) and direction 1 (a config file that declares no gates), this
+        // reaches `load_workspace`, gets Ok(None), and must fall through the
+        // same "no gates" default — a bead in a workspace that says nothing
+        // never inherits the worker's home gates (needle-da77b68a).
+        let (_guard, _home) = isolated_home();
+        let config = Config {
+            gates: vec![GateConfig::Command {
+                commands: vec!["exit 7".to_string()],
+                stderr_cap_bytes: None,
+                run_in: Default::default(),
+            }],
+            worker: crate::config::WorkerConfig {
+                enforce_shipped_work: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let handler = test_handler_with_config(config);
+
+        let workspace = tempfile::TempDir::new().unwrap();
+        let bead = Bead {
+            workspace: workspace.path().to_path_buf(),
+            ..test_bead(BeadStatus::InProgress)
+        };
+        let store = test_store(BeadStatus::Done);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.outcome,
+            Outcome::Success,
+            "a workspace with no .needle.yaml declares no gates — run none"
+        );
+        assert_eq!(result.bead_action, BeadAction::Closed);
     }
 
     // ── timeout and resilience tests ──
