@@ -15,6 +15,7 @@ use std::io::BufRead;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use chrono::Utc;
 use needle::config::{FileSinkConfig, StdoutSinkConfig, TelemetryConfig};
 use needle::telemetry::{EventKind, Sink, Telemetry, TelemetryEvent};
 use needle::types::BeadId;
@@ -54,7 +55,7 @@ impl Sink for MemorySink {
 
 /// Helper to emit an event and wait for it to be flushed
 async fn emit_and_wait(telemetry: &Telemetry, kind: EventKind) -> anyhow::Result<()> {
-    telemetry.emit(kind)?;
+    telemetry.emit(kind, Utc::now())?;
     tokio::time::sleep(Duration::from_millis(50)).await;
     Ok(())
 }
@@ -251,25 +252,34 @@ async fn end_to_end_claim_with_file_sink() {
     let test_bead_id = BeadId::from("bf-file-test-456");
 
     telemetry
-        .emit(EventKind::WorkerBooting {
-            worker_name: worker_id.to_string(),
-            version: "test-1.0.0".to_string(),
-        })
+        .emit(
+            EventKind::WorkerBooting {
+                worker_name: worker_id.to_string(),
+                version: "test-1.0.0".to_string(),
+            },
+            Utc::now(),
+        )
         .expect("emit should succeed");
 
     telemetry
-        .emit(EventKind::ClaimAttempt {
-            bead_id: test_bead_id.clone(),
-            attempt: 1,
-        })
+        .emit(
+            EventKind::ClaimAttempt {
+                bead_id: test_bead_id.clone(),
+                attempt: 1,
+            },
+            Utc::now(),
+        )
         .expect("ClaimAttempt should succeed");
 
     telemetry
-        .emit(EventKind::ClaimSuccess {
-            bead_id: test_bead_id.clone(),
-            priority: 1,
-            strand: "test-strand".to_string(),
-        })
+        .emit(
+            EventKind::ClaimSuccess {
+                bead_id: test_bead_id.clone(),
+                priority: 1,
+                strand: "test-strand".to_string(),
+            },
+            Utc::now(),
+        )
         .expect("ClaimSuccess should succeed");
 
     // Shutdown telemetry to ensure all events are flushed
@@ -524,18 +534,24 @@ async fn end_to_end_multi_worker_isolation() {
 
     // Worker 1 claims bead1
     telemetry1
-        .emit(EventKind::ClaimAttempt {
-            bead_id: bead1.clone(),
-            attempt: 1,
-        })
+        .emit(
+            EventKind::ClaimAttempt {
+                bead_id: bead1.clone(),
+                attempt: 1,
+            },
+            Utc::now(),
+        )
         .expect("Worker 1 claim attempt should succeed");
 
     // Worker 2 claims bead2
     telemetry2
-        .emit(EventKind::ClaimAttempt {
-            bead_id: bead2.clone(),
-            attempt: 1,
-        })
+        .emit(
+            EventKind::ClaimAttempt {
+                bead_id: bead2.clone(),
+                attempt: 1,
+            },
+            Utc::now(),
+        )
         .expect("Worker 2 claim attempt should succeed");
 
     tokio::time::sleep(Duration::from_millis(100)).await;

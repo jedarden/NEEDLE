@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use chrono::Utc;
 use needle::telemetry::{EventKind, Sink, Telemetry};
 use needle::types::{BeadId, WorkerState};
 
@@ -22,7 +23,7 @@ use needle::types::{BeadId, WorkerState};
 
 /// Helper to emit an event and wait for it to be flushed
 async fn emit_and_wait(telemetry: &Telemetry, kind: EventKind) -> anyhow::Result<()> {
-    telemetry.emit(kind)?;
+    telemetry.emit(kind, Utc::now())?;
     tokio::time::sleep(Duration::from_millis(50)).await;
     Ok(())
 }
@@ -577,7 +578,7 @@ async fn test_session_id_consistent_across_events() {
     // Emit multiple events
     for _i in 0..5 {
         telemetry
-            .emit(EventKind::QueueEmpty)
+            .emit(EventKind::QueueEmpty, Utc::now())
             .expect("emit should succeed");
     }
 

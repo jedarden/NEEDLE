@@ -403,7 +403,7 @@ fn interval_with_mock_times_deterministic() {
         base + Duration::from_secs(0),  // First poll
         base + Duration::from_secs(10), // Second poll
         base + Duration::from_secs(20), // Third poll
-        base + Duration::from_secs(35), // Should skip
+        base + Duration::from_secs(25), // Should skip
         base + Duration::from_secs(40), // Fourth poll
     ];
 

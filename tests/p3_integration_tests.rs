@@ -14,10 +14,77 @@
 //!
 //! Each test uses isolated temporary workspaces for parallel safety.
 
+#[path = "p3_integration_tests/alert_deduplication_test.rs"]
+mod alert_deduplication_test;
+#[path = "p3_integration_tests/alert_fingerprint_integration.rs"]
+mod alert_fingerprint_integration;
+#[path = "p3_integration_tests/anthropic_routing_e2e_test.rs"]
+mod anthropic_routing_e2e_test;
+#[path = "p3_integration_tests/anthropic_routing_verification.rs"]
+mod anthropic_routing_verification;
+#[path = "p3_integration_tests/binary_freshness_edge_cases.rs"]
+mod binary_freshness_edge_cases;
+#[path = "p3_integration_tests/binary_freshness_integration.rs"]
+mod binary_freshness_integration;
+#[path = "p3_integration_tests/binary_freshness_logging.rs"]
+mod binary_freshness_logging;
+#[path = "p3_integration_tests/default_routing_uses_builtin_adapters.rs"]
+mod default_routing_uses_builtin_adapters;
+#[path = "p3_integration_tests/dispatch_model_routing_validation.rs"]
+mod dispatch_model_routing_validation;
+#[path = "p3_integration_tests/end_to_end_telemetry_test.rs"]
+mod end_to_end_telemetry_test;
+#[path = "p3_integration_tests/file_sink_integration.rs"]
+mod file_sink_integration;
+#[path = "p3_integration_tests/gate_health_degradation_integration.rs"]
+mod gate_health_degradation_integration;
+#[path = "p3_integration_tests/github_release_upgrade_regression.rs"]
+mod github_release_upgrade_regression;
+#[path = "p3_integration_tests/immediate_check_trigger.rs"]
+mod immediate_check_trigger;
+#[path = "p3_integration_tests/interval_calculation.rs"]
+mod interval_calculation;
+#[path = "p3_integration_tests/long_lived_worker_binary_rotation.rs"]
+mod long_lived_worker_binary_rotation;
+#[path = "p3_integration_tests/manual_upgrade_path_tests.rs"]
+mod manual_upgrade_path_tests;
+#[path = "p3_integration_tests/otlp_integration.rs"]
+mod otlp_integration;
+#[path = "p3_integration_tests/otlp_runtime_test.rs"]
+mod otlp_runtime_test;
+#[path = "p3_integration_tests/otlp_transport_seam_tests.rs"]
+mod otlp_transport_seam_tests;
+#[path = "p3_integration_tests/post_dispatch_audit_test.rs"]
+mod post_dispatch_audit_test;
+#[path = "p3_integration_tests/query_integration_test.rs"]
+mod query_integration_test;
+#[path = "p3_integration_tests/routing_integration.rs"]
+mod routing_integration;
+#[path = "p3_integration_tests/routing_matcher_baseline.rs"]
+mod routing_matcher_baseline;
+#[path = "p3_integration_tests/routing_telemetry_verification.rs"]
+mod routing_telemetry_verification;
+#[path = "p3_integration_tests/starvation_tests.rs"]
+mod starvation_tests;
+#[path = "p3_integration_tests/supervisor_periodic_polling.rs"]
+mod supervisor_periodic_polling;
+#[path = "p3_integration_tests/telemetry_field_verification.rs"]
+mod telemetry_field_verification;
+#[path = "p3_integration_tests/test_otlp_config_syntax.rs"]
+mod test_otlp_config_syntax;
+#[path = "p3_integration_tests/test_panic_timestamp_verification.rs"]
+mod test_panic_timestamp_verification;
+#[path = "p3_integration_tests/timestamp_telemetry_tests.rs"]
+mod timestamp_telemetry_tests;
+#[path = "p3_integration_tests/upgrade_check_integration.rs"]
+mod upgrade_check_integration;
+#[path = "p3_integration_tests/verification_fingerprint_replay.rs"]
+mod verification_fingerprint_replay;
+
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result};
 use tempfile::TempDir;
@@ -41,9 +108,63 @@ use needle::validation::ValidationGate;
 // Test infrastructure
 // ═════════════════════════════════════════════════════════════════════════════
 
-/// Path to the native bead-rs binary required by these integration fixtures.
+/// Path to a native bead-rs binary that is independent of operator HOME state.
+///
+/// The first `bead` on PATH may be a host queue-fence wrapper. Probe every
+/// candidate with a disposable workspace and HOME so these fixtures retain
+/// real CLI/database coverage without copying host policy into the test.
 fn bead_path() -> PathBuf {
-    which::which("bead").expect("bead CLI must be installed for strand integration tests")
+    static NATIVE_BEAD: OnceLock<PathBuf> = OnceLock::new();
+
+    NATIVE_BEAD
+        .get_or_init(|| {
+            let mut candidates = Vec::new();
+            if let Some(configured) = std::env::var_os("BEAD_RS_BIN") {
+                candidates.push(PathBuf::from(configured));
+            }
+            if let Ok(paths) = which::which_all("bead") {
+                candidates.extend(paths);
+            }
+
+            let mut seen = HashSet::new();
+            for candidate in candidates {
+                let identity = std::fs::canonicalize(&candidate).unwrap_or(candidate.clone());
+                if !seen.insert(identity) || !candidate.is_file() {
+                    continue;
+                }
+
+                let Ok(probe) = TempDir::new() else {
+                    continue;
+                };
+                let workspace = probe.path().join("workspace");
+                let home = probe.path().join("home");
+                if fs::create_dir_all(&workspace).is_err() || fs::create_dir_all(&home).is_err() {
+                    continue;
+                }
+                let usable = std::process::Command::new(&candidate)
+                    .current_dir(&workspace)
+                    .env("HOME", &home)
+                    .args([
+                        "init",
+                        "--prefix",
+                        "probe",
+                        "--skip-foreign-workspace",
+                        "--no-auto-flush",
+                    ])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .is_ok_and(|status| status.success());
+                if usable {
+                    return candidate;
+                }
+            }
+
+            panic!(
+                "a native bead-rs CLI must be installed; queue-fence wrappers requiring operator HOME are not valid test binaries"
+            );
+        })
+        .clone()
 }
 
 fn bead_command(workspace: &Path) -> std::process::Command {
@@ -62,7 +183,7 @@ fn create_test_workspace(prefix: &str) -> Result<TempDir> {
         .context("failed to create temp dir")?;
 
     let output = bead_command(dir.path())
-        .args(["init", "--prefix", "p3"])
+        .args(["init", "--prefix", "p3", "--skip-foreign-workspace"])
         .output()
         .context("failed to run bead init")?;
 
@@ -73,9 +194,11 @@ fn create_test_workspace(prefix: &str) -> Result<TempDir> {
         );
     }
 
+    let native_bead = serde_json::to_string(&bead_path())
+        .context("failed to encode native bead path for workspace config")?;
     fs::write(
         dir.path().join(".needle.yaml"),
-        "bead_cli:\n  backend: bead-rs\n",
+        format!("bead_cli:\n  backend: bead-rs\n  path: {native_bead}\n"),
     )
     .context("failed to bind test workspace to bead-rs")?;
 

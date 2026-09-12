@@ -4,7 +4,7 @@
 //! Config::default(), the routing configuration references only adapter
 //! names that exist in the builtin_adapters() list.
 //!
-//! Run with: cargo test --test default_routing_uses_builtin_adapters
+//! Run with: cargo test --test p3_integration_tests default_routing_uses_builtin_adapters::
 
 use needle::config::AgentConfig;
 use needle::dispatch::builtin_adapters;

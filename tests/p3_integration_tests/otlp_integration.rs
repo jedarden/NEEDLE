@@ -519,6 +519,19 @@ impl BeadStore for MockStore {
         Ok(())
     }
 
+    async fn clear_assignee(&self, id: &BeadId) -> anyhow::Result<()> {
+        if let Some(bead) = self
+            .beads
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|bead| bead.id == *id)
+        {
+            bead.assignee = None;
+        }
+        Ok(())
+    }
+
     async fn block(&self, _id: &BeadId) -> anyhow::Result<()> {
         Ok(())
     }
@@ -579,6 +592,10 @@ impl BeadStore for MockStore {
     async fn full_rebuild(&self) -> anyhow::Result<()> {
         Ok(())
     }
+
+    fn has_valid_store(&self) -> bool {
+        true
+    }
 }
 
 // ─── Test Utilities ────────────────────────────────────────────────────────────────
@@ -606,6 +623,7 @@ fn make_bead(id: &str, priority: u8) -> Bead {
         workspace: PathBuf::from("/tmp/test-workspace"),
         dependencies: vec![],
         dependents: vec![],
+        comments: vec![],
         created_at: Utc::now(),
         updated_at: Utc::now(),
     }
@@ -622,10 +640,14 @@ fn make_adapter(name: &str) -> AgentAdapter {
         invoke_template: "exit 0".to_string(),
         environment: HashMap::new(),
         timeout_secs: 10,
+        idle_timeout_secs: 0,
+        hard_timeout_secs: 0,
         provider: None,
         model: None,
         token_extraction: needle::dispatch::TokenExtraction::None,
         output_transform: None,
+        harness: None,
+        harness_version: None,
     }
 }
 
@@ -661,15 +683,18 @@ async fn otlp_integration_happy_path() -> Result<()> {
     let workspace_home = temp_dir.path();
 
     // Create a file sink for drop events (OTLP failures are logged here)
-    let file_sink =
-        needle::telemetry::FileSink::with_dir(workspace_home, "test-worker", "integration-test")?;
+    let file_sink = needle::telemetry::FileSink::with_dir(
+        workspace_home.to_path_buf(),
+        "test-worker",
+        "integration-test",
+    )?;
 
     // Create OTLP config pointing to the collector
     let otlp_config = needle::config::OtlpSinkConfig {
         enabled: true,
         endpoint: otlp_endpoint,
         protocol: "grpc".to_string(),
-        timeout_secs: 5,
+        timeout_ms: 5_000,
         compression: "none".to_string(),
         tls: needle::config::OtlpTlsConfig {
             insecure: true,
@@ -677,9 +702,11 @@ async fn otlp_integration_happy_path() -> Result<()> {
         },
         headers: vec![],
         resource_attributes: vec![],
+        signals: Default::default(),
         metrics_interval_secs: 10,
         service_namespace: "needle-test".to_string(),
         max_queue_size: 2048,
+        required: false,
     };
 
     // Create an OTLP telemetry sink pointing to the collector.
@@ -690,6 +717,7 @@ async fn otlp_integration_happy_path() -> Result<()> {
         Some(Box::new(file_sink)),
         None, // agent
         None, // model
+        None, // provider
         workspace_home.to_str(),
     )
     .context("failed to create OTLP sink")?;
@@ -982,8 +1010,11 @@ async fn otlp_integration_drop_path() -> Result<()> {
     let workspace_home = temp_dir.path();
 
     // Create a file sink for all events (including drop events from OtlpSink)
-    let file_sink =
-        needle::telemetry::FileSink::with_dir(workspace_home, "test-worker", "drop-test")?;
+    let file_sink = needle::telemetry::FileSink::with_dir(
+        workspace_home.to_path_buf(),
+        "test-worker",
+        "drop-test",
+    )?;
 
     // Create OTLP config pointing to a non-existent endpoint
     // Use HTTP/protobuf instead of gRPC for more reliable connection failure detection
@@ -991,7 +1022,7 @@ async fn otlp_integration_drop_path() -> Result<()> {
         enabled: true,
         endpoint: "http://localhost:9999".to_string(), // Non-existent endpoint
         protocol: "http".to_string(),                  // Use HTTP instead of gRPC
-        timeout_secs: 1,                               // Short timeout for faster test
+        timeout_ms: 1_000,                             // Short timeout for faster test
         compression: "none".to_string(),
         tls: needle::config::OtlpTlsConfig {
             insecure: true,
@@ -999,15 +1030,20 @@ async fn otlp_integration_drop_path() -> Result<()> {
         },
         headers: vec![],
         resource_attributes: vec![],
+        signals: Default::default(),
         metrics_interval_secs: 1, // Short metrics interval for faster test
         service_namespace: "needle-test".to_string(),
         max_queue_size: 2048,
+        required: false,
     };
 
     // Create an OTLP telemetry sink pointing to a non-existent endpoint.
     // We pass a separate file sink to OtlpSink for drop events only.
-    let drop_file_sink =
-        needle::telemetry::FileSink::with_dir(workspace_home, "test-worker", "otlp-drops")?;
+    let drop_file_sink = needle::telemetry::FileSink::with_dir(
+        workspace_home.to_path_buf(),
+        "test-worker",
+        "otlp-drops",
+    )?;
     let otlp_sink = Arc::new(
         needle::telemetry::OtlpSink::new(
             "test-worker".to_string(),
@@ -1016,6 +1052,7 @@ async fn otlp_integration_drop_path() -> Result<()> {
             Some(Box::new(drop_file_sink)),
             None, // agent
             None, // model
+            None, // provider
             workspace_home.to_str(),
         )
         .context("failed to create OTLP sink")?,
@@ -1038,10 +1075,13 @@ async fn otlp_integration_drop_path() -> Result<()> {
     // Increased from 100 to 300 to ensure batch processor flushes multiple times
     for i in 0..300 {
         telemetry
-            .emit(needle::telemetry::EventKind::WorkerStarted {
-                worker_name: format!("test-worker-{}", i),
-                version: "0.1.0".to_string(),
-            })
+            .emit(
+                needle::telemetry::EventKind::WorkerStarted {
+                    worker_name: format!("test-worker-{}", i),
+                    version: "0.1.0".to_string(),
+                },
+                Utc::now(),
+            )
             .context("failed to emit WorkerStarted")?;
     }
 
@@ -1142,15 +1182,18 @@ async fn otlp_export_contains_process_owner_resource_attribute() -> Result<()> {
     let workspace_home = temp_dir.path();
 
     // Create a file sink for drop events
-    let file_sink =
-        needle::telemetry::FileSink::with_dir(workspace_home, "test-worker", "resource-test")?;
+    let file_sink = needle::telemetry::FileSink::with_dir(
+        workspace_home.to_path_buf(),
+        "test-worker",
+        "resource-test",
+    )?;
 
     // Create OTLP config pointing to the collector
     let otlp_config = needle::config::OtlpSinkConfig {
         enabled: true,
         endpoint: otlp_endpoint,
         protocol: "grpc".to_string(),
-        timeout_secs: 5,
+        timeout_ms: 5_000,
         compression: "none".to_string(),
         tls: needle::config::OtlpTlsConfig {
             insecure: true,
@@ -1161,9 +1204,11 @@ async fn otlp_export_contains_process_owner_resource_attribute() -> Result<()> {
             "deployment.cluster=test-cluster".to_string(),
             "needle.worker.pool=test-pool".to_string(),
         ],
+        signals: Default::default(),
         metrics_interval_secs: 10,
         service_namespace: "needle-test".to_string(),
         max_queue_size: 2048,
+        required: false,
     };
 
     // Create an OTLP telemetry sink pointing to the collector.
@@ -1174,36 +1219,30 @@ async fn otlp_export_contains_process_owner_resource_attribute() -> Result<()> {
         Some(Box::new(file_sink)),
         None, // agent
         None, // model
+        None, // provider
         workspace_home.to_str(),
     )
     .context("failed to create OTLP sink")?;
 
     let telemetry = Telemetry::with_sink("test-worker".to_string(), Arc::new(otlp_sink));
 
-    // Emit a simple event to trigger export
-    let event = needle::telemetry::TelemetryEvent {
-        timestamp: chrono::Utc::now(),
-        event_type: "worker.started".to_string(),
-        worker_id: "test-worker".to_string(),
-        session_id: "resource-test".to_string(),
-        sequence: 0,
-        bead_id: None,
-        workspace: None,
-        duration_ms: None,
-        data: serde_json::json!({}),
-        trace_id: None,
-        span_id: None,
-        attempt_id: None,
-    };
-
-    telemetry.emit(&event).context("failed to emit event")?;
+    telemetry
+        .emit(
+            needle::telemetry::EventKind::WorkerStarted {
+                worker_name: "test-worker".to_string(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+            },
+            Utc::now(),
+        )
+        .context("failed to emit event")?;
 
     // Give the exporter time to flush the batch
     std::thread::sleep(Duration::from_secs(2));
 
-    // Flush the telemetry sink to ensure all data is exported
+    // Flush through the current asynchronous telemetry API.
     telemetry
-        .flush(Duration::from_secs(5))
+        .force_flush_async(Duration::from_secs(5))
+        .await
         .context("failed to flush telemetry")?;
 
     // Copy output files from the collector container

@@ -47,7 +47,7 @@
 //! These tests require the `integration` feature:
 //!
 //! ```bash
-//! cargo test --test starvation_tests --features integration
+//! cargo test --test p3_integration_tests --features integration starvation_tests::
 //! ```
 
 #![cfg(feature = "integration")]
@@ -235,6 +235,7 @@ impl StarvationScenarioBuilder {
             updated_at: Utc::now(),
             dependencies: Vec::new(),
             dependents: Vec::new(),
+            comments: Vec::new(),
         }
     }
 }
@@ -370,12 +371,15 @@ async fn pluck_starvation_when_all_beads_blocked() {
     // For now, we simulate the starvation event that would be emitted
     helper
         .telemetry()
-        .emit(EventKind::PluckStarvationDetected {
-            workspace: "/test/workspace".to_string(),
-            open_count: 5,
-            excluded_count: 5,
-            candidate_exclusion_reasons: vec!["blocked:manual_block".to_string()],
-        })
+        .emit(
+            EventKind::PluckStarvationDetected {
+                workspace: "/test/workspace".to_string(),
+                open_count: 5,
+                excluded_count: 5,
+                candidate_exclusion_reasons: vec!["blocked:manual_block".to_string()],
+            },
+            Utc::now(),
+        )
         .unwrap();
 
     helper.sync().await;
@@ -398,12 +402,15 @@ async fn pluck_starvation_when_all_beads_deferred() {
     // Simulate starvation event
     helper
         .telemetry()
-        .emit(EventKind::PluckStarvationDetected {
-            workspace: "/test/workspace".to_string(),
-            open_count: 3,
-            excluded_count: 3,
-            candidate_exclusion_reasons: vec!["deferred:future_work".to_string()],
-        })
+        .emit(
+            EventKind::PluckStarvationDetected {
+                workspace: "/test/workspace".to_string(),
+                open_count: 3,
+                excluded_count: 3,
+                candidate_exclusion_reasons: vec!["deferred:future_work".to_string()],
+            },
+            Utc::now(),
+        )
         .unwrap();
 
     helper.sync().await;
@@ -428,16 +435,19 @@ async fn pluck_starvation_with_mixed_exclusion_reasons() {
     // Simulate starvation event with mixed reasons
     helper
         .telemetry()
-        .emit(EventKind::PluckStarvationDetected {
-            workspace: "/test/workspace".to_string(),
-            open_count: 6,
-            excluded_count: 6,
-            candidate_exclusion_reasons: vec![
-                "blocked:depends_on_bf-123".to_string(),
-                "deferred:future_work".to_string(),
-                "human:intervention_required".to_string(),
-            ],
-        })
+        .emit(
+            EventKind::PluckStarvationDetected {
+                workspace: "/test/workspace".to_string(),
+                open_count: 6,
+                excluded_count: 6,
+                candidate_exclusion_reasons: vec![
+                    "blocked:depends_on_bf-123".to_string(),
+                    "deferred:future_work".to_string(),
+                    "human:intervention_required".to_string(),
+                ],
+            },
+            Utc::now(),
+        )
         .unwrap();
 
     helper.sync().await;
@@ -526,16 +536,19 @@ async fn pluck_starvation_when_all_beads_excluded_by_labels() {
     // In a real scenario, the Pluck strand would emit this after filtering
     helper
         .telemetry()
-        .emit(EventKind::PluckStarvationDetected {
-            workspace: "/test/workspace".to_string(),
-            open_count: 10,
-            excluded_count: 10, // ALL beads excluded
-            candidate_exclusion_reasons: vec![
-                "blocked:manual_block".to_string(),
-                "deferred:future_work".to_string(),
-                "human:intervention_required".to_string(),
-            ],
-        })
+        .emit(
+            EventKind::PluckStarvationDetected {
+                workspace: "/test/workspace".to_string(),
+                open_count: 10,
+                excluded_count: 10, // ALL beads excluded
+                candidate_exclusion_reasons: vec![
+                    "blocked:manual_block".to_string(),
+                    "deferred:future_work".to_string(),
+                    "human:intervention_required".to_string(),
+                ],
+            },
+            Utc::now(),
+        )
         .unwrap();
 
     helper.sync().await;
@@ -585,12 +598,15 @@ async fn pluck_starvation_telemetry_includes_workspace() {
 
     helper
         .telemetry()
-        .emit(EventKind::PluckStarvationDetected {
-            workspace: workspace.clone(),
-            open_count: 1,
-            excluded_count: 1,
-            candidate_exclusion_reasons: vec!["blocked:test".to_string()],
-        })
+        .emit(
+            EventKind::PluckStarvationDetected {
+                workspace: workspace.clone(),
+                open_count: 1,
+                excluded_count: 1,
+                candidate_exclusion_reasons: vec!["blocked:test".to_string()],
+            },
+            Utc::now(),
+        )
         .unwrap();
 
     helper.sync().await;
@@ -618,12 +634,15 @@ async fn pluck_starvation_excluded_count_matches_reasons_length() {
 
     helper
         .telemetry()
-        .emit(EventKind::PluckStarvationDetected {
-            workspace: "/test/workspace".to_string(),
-            open_count: 3,
-            excluded_count: 3, // Should match len(reasons)
-            candidate_exclusion_reasons: reasons.clone(),
-        })
+        .emit(
+            EventKind::PluckStarvationDetected {
+                workspace: "/test/workspace".to_string(),
+                open_count: 3,
+                excluded_count: 3, // Should match len(reasons)
+                candidate_exclusion_reasons: reasons.clone(),
+            },
+            Utc::now(),
+        )
         .unwrap();
 
     helper.sync().await;
@@ -665,16 +684,19 @@ async fn pluck_starvation_when_all_beads_have_stale_assignees() {
     // In a real scenario, the Pluck strand would emit this after filtering
     helper
         .telemetry()
-        .emit(EventKind::PluckStarvationDetected {
-            workspace: "/test/workspace".to_string(),
-            open_count: 3,
-            excluded_count: 3, // ALL beads excluded due to stale assignees
-            candidate_exclusion_reasons: vec![
-                "assignee:dead-worker-1".to_string(),
-                "assignee:dead-worker-2".to_string(),
-                "assignee:terminated-worker-3".to_string(),
-            ],
-        })
+        .emit(
+            EventKind::PluckStarvationDetected {
+                workspace: "/test/workspace".to_string(),
+                open_count: 3,
+                excluded_count: 3, // ALL beads excluded due to stale assignees
+                candidate_exclusion_reasons: vec![
+                    "assignee:dead-worker-1".to_string(),
+                    "assignee:dead-worker-2".to_string(),
+                    "assignee:terminated-worker-3".to_string(),
+                ],
+            },
+            Utc::now(),
+        )
         .unwrap();
 
     helper.sync().await;
@@ -778,12 +800,15 @@ async fn explore_starvation_threshold_triggers_mend() {
     // Simulate starvation threshold exceeded event
     helper
         .telemetry()
-        .emit(EventKind::ExploreStarvationAlarm {
-            minutes_without_claim: 20, // Exceeds 15-minute threshold
-            threshold_minutes: 15,
-            ready_beads_count: 5,
-            workspaces_with_ready: vec!["/remote/workspace".to_string()],
-        })
+        .emit(
+            EventKind::ExploreStarvationAlarm {
+                minutes_without_claim: 20, // Exceeds 15-minute threshold
+                threshold_minutes: 15,
+                ready_beads_count: 5,
+                workspaces_with_ready: vec!["/remote/workspace".to_string()],
+            },
+            Utc::now(),
+        )
         .unwrap();
 
     helper.sync().await;
@@ -800,14 +825,17 @@ async fn explore_no_starvation_when_within_threshold() {
     // Simulate a scan summary showing recent activity (within threshold)
     helper
         .telemetry()
-        .emit(EventKind::ExploreScanSummary {
-            workspaces_visited: vec!["/recent/workspace".to_string()],
-            workspaces_with_candidates: vec!["/recent/workspace".to_string()],
-            total_candidates: 5,
-            exclusion_reasons: vec![],
-            duration_ms: 100,
-            scan_start_at: "2026-08-28T12:00:00Z".to_string(),
-        })
+        .emit(
+            EventKind::ExploreScanSummary {
+                workspaces_visited: vec!["/recent/workspace".to_string()],
+                workspaces_with_candidates: vec!["/recent/workspace".to_string()],
+                total_candidates: 5,
+                exclusion_reasons: vec![],
+                duration_ms: 100,
+                scan_start_at: "2026-08-28T12:00:00Z".to_string(),
+            },
+            Utc::now(),
+        )
         .unwrap();
 
     helper.sync().await;

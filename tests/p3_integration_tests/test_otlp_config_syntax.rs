@@ -70,21 +70,21 @@ fn test_otlp_disabled_by_default() {
 }
 
 #[test]
-fn test_otlp_unknown_field_rejected() {
+fn test_otlp_unknown_field_preserves_known_compatibility_fields() {
     let yaml = r#"
     otlp_sink:
       enabled: true
       unknown_field: "should fail"
     "#;
 
-    let result: Result<TelemetryConfig, _> = serde_yaml::from_str(yaml);
-    assert!(result.is_err(), "Unknown field should be rejected");
+    let config: TelemetryConfig = serde_yaml::from_str(yaml)
+        .expect("the OTLP compatibility deserializer should tolerate extra sink fields");
 
-    let error_msg = result.unwrap_err().to_string();
     assert!(
-        error_msg.contains("unknown_field") || error_msg.contains("unknown field"),
-        "Error message should mention unknown field"
+        config.otlp_sink.enabled,
+        "known OTLP fields must survive compatibility deserialization"
     );
+    assert_eq!(config.otlp_sink.endpoint, "http://localhost:4317");
 }
 
 #[test]
