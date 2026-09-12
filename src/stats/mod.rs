@@ -833,6 +833,26 @@ pub enum StatsDimension {
     /// Group by the semantic ledger outcome of each attempt (e.g.
     /// `"verified_success"`), read from `attempt.resolved` ledger rows.
     Outcome,
+    /// Group by the model that executed each attempt (e.g. `"glm-5.3-flash"`),
+    /// read from `attempt.resolved` ledger rows.
+    Model,
+    /// Group by the workspace each attempt ran in (last path component),
+    /// read from `attempt.resolved` ledger rows.
+    Workspace,
+}
+
+impl StatsDimension {
+    /// Whether this dimension aggregates `attempt.resolved` ledger rows
+    /// (one attempt per row) rather than correlating per-bead dispatch events.
+    pub fn is_attempt_dimension(self) -> bool {
+        matches!(
+            self,
+            StatsDimension::Adapter
+                | StatsDimension::Outcome
+                | StatsDimension::Model
+                | StatsDimension::Workspace
+        )
+    }
 }
 
 /// Aggregated statistics row for one value of a grouping dimension.
@@ -859,6 +879,10 @@ pub struct StatsRow {
     pub fail: u64,
     /// Number of beads that completed with `"Timeout"` outcome.
     pub timeout: u64,
+    /// Number of attempts that resolved as `infrastructure_failure` (provider
+    /// or gate outage, not the bead's fault). Attempt dimensions only.
+    #[serde(default)]
+    pub infra: u64,
     /// Sum of (tokens_in + tokens_out) across all effort events in this group.
     pub total_tokens: u64,
     /// Sum of `estimated_cost_usd` across all effort events in this group.
@@ -910,7 +934,7 @@ pub fn compute_stats(
     events: &[crate::telemetry::TelemetryEvent],
     dimension: StatsDimension,
 ) -> Vec<StatsRow> {
-    if matches!(dimension, StatsDimension::Adapter | StatsDimension::Outcome) {
+    if dimension.is_attempt_dimension() {
         return compute_attempt_stats(events, dimension);
     }
 
@@ -943,7 +967,10 @@ pub fn compute_stats(
                     StatsDimension::Worker => event.worker_id.clone(),
                     // Attempt dimensions never reach this loop — compute_stats
                     // routes them to compute_attempt_stats before it.
-                    StatsDimension::Adapter | StatsDimension::Outcome => continue,
+                    StatsDimension::Adapter
+                    | StatsDimension::Outcome
+                    | StatsDimension::Model
+                    | StatsDimension::Workspace => continue,
                 };
                 bead_key.insert(bead_id, key.clone());
                 let row = rows.entry(key.clone()).or_insert_with(|| StatsRow {
@@ -1030,18 +1057,32 @@ pub fn compute_attempt_stats(
         let key_field = match dimension {
             StatsDimension::Adapter => "adapter",
             StatsDimension::Outcome => "outcome",
+            StatsDimension::Model => "model",
+            StatsDimension::Workspace => "workspace",
             // Only called with the attempt dimensions; the dispatch
             // dimensions take the bead-correlated path above.
             StatsDimension::TemplateVersion | StatsDimension::TaskType | StatsDimension::Worker => {
                 continue
             }
         };
-        let key = event
+        let raw_key = event
             .data
             .get(key_field)
             .and_then(|v| v.as_str())
-            .unwrap_or("unknown")
-            .to_string();
+            .filter(|s| !s.is_empty())
+            .unwrap_or("unknown");
+        // A workspace is a path; its last component is the readable name.
+        let key = if matches!(dimension, StatsDimension::Workspace) {
+            raw_key
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(raw_key)
+                .to_string()
+        } else {
+            raw_key.to_string()
+        };
 
         let row = rows.entry(key.clone()).or_insert_with(|| StatsRow {
             key,
@@ -1056,6 +1097,7 @@ pub fn compute_attempt_stats(
             Some("verified_success") => row.pass += 1,
             Some("work_failure") => row.fail += 1,
             Some("indeterminate") => row.timeout += 1,
+            Some("infrastructure_failure") => row.infra += 1,
             _ => {}
         }
 

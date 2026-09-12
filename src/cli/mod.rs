@@ -505,6 +505,14 @@ pub enum StatsBy {
     /// `"verified_success"`), over `attempt.resolved` ledger rows.
     #[value(name = "outcome")]
     Outcome,
+    /// Group by the model that executed each attempt (e.g. `"glm-5.3-flash"`),
+    /// over `attempt.resolved` ledger rows.
+    #[value(name = "model")]
+    Model,
+    /// Group by the workspace each attempt ran in, over `attempt.resolved`
+    /// ledger rows.
+    #[value(name = "workspace")]
+    Workspace,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -3754,6 +3762,8 @@ fn cmd_stats(
         StatsBy::Worker => StatsDimension::Worker,
         StatsBy::Adapter => StatsDimension::Adapter,
         StatsBy::Outcome => StatsDimension::Outcome,
+        StatsBy::Model => StatsDimension::Model,
+        StatsBy::Workspace => StatsDimension::Workspace,
     };
 
     let mut rows = compute_stats(&events, dimension);
@@ -3767,10 +3777,12 @@ fn cmd_stats(
         StatsBy::Worker => ("WORKER", "BEADS"),
         StatsBy::Adapter => ("ADAPTER", "ATTEMPTS"),
         StatsBy::Outcome => ("OUTCOME", "ATTEMPTS"),
+        StatsBy::Model => ("MODEL", "ATTEMPTS"),
+        StatsBy::Workspace => ("WORKSPACE", "ATTEMPTS"),
     };
     // Only the attempt dimensions read `attempt.resolved` rows, so only they
-    // carry a provisional-attempt-ID count to surface.
-    let show_provisional = matches!(by, StatsBy::Adapter | StatsBy::Outcome);
+    // carry a provisional-attempt-ID count (and an infrastructure column).
+    let show_provisional = dimension.is_attempt_dimension();
 
     match format {
         ListFormat::Table => {
@@ -3781,13 +3793,14 @@ fn cmd_stats(
             let key_width = rows.iter().map(|r| r.key.len()).max().unwrap_or(16).max(16);
             if show_provisional {
                 println!(
-                    "{:<width$} {:>8} {:>11} {:>6} {:>6} {:>8} {:>9} {:>10} {:>12}",
+                    "{:<width$} {:>8} {:>11} {:>6} {:>6} {:>8} {:>6} {:>9} {:>10} {:>12}",
                     dim_label,
                     count_label,
                     "PROVISIONAL",
                     "PASS",
                     "FAIL",
                     "TIMEOUT",
+                    "INFRA",
                     "PASS RATE",
                     "AVG TOK",
                     "AVG COST",
@@ -3795,7 +3808,7 @@ fn cmd_stats(
                 );
                 println!(
                     "{}",
-                    "-".repeat(key_width + 8 + 11 + 6 + 6 + 8 + 9 + 10 + 12 + 8)
+                    "-".repeat(key_width + 8 + 11 + 6 + 6 + 8 + 6 + 9 + 10 + 12 + 9)
                 );
             } else {
                 println!(
@@ -3830,13 +3843,14 @@ fn cmd_stats(
                     .unwrap_or_else(|| "-".to_string());
                 if show_provisional {
                     println!(
-                        "{:<width$} {:>8} {:>11} {:>6} {:>6} {:>8} {:>9} {:>10} {:>12}",
+                        "{:<width$} {:>8} {:>11} {:>6} {:>6} {:>8} {:>6} {:>9} {:>10} {:>12}",
                         row.key,
                         row.beads,
                         row.provisional,
                         row.pass,
                         row.fail,
                         row.timeout,
+                        row.infra,
                         pass_rate,
                         avg_tok,
                         avg_cost,
@@ -3879,6 +3893,7 @@ fn cmd_stats(
                         "pass": row.pass,
                         "fail": row.fail,
                         "timeout": row.timeout,
+                        "infra": row.infra,
                         "pass_rate": row.pass_rate(),
                         "avg_tokens": row.avg_tokens(),
                         "avg_cost_usd": row.avg_cost_usd(),

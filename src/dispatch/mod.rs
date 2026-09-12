@@ -433,19 +433,88 @@ pub fn extract_tokens(extraction: &TokenExtraction, stdout: &str, stderr: &str) 
     }
 }
 
-/// Extract tokens from JSON output using dot-separated path notation.
-fn extract_tokens_json(stdout: &str, input_path: &str, output_path: &str) -> TokenUsage {
-    let parsed: serde_json::Value = match serde_json::from_str(stdout) {
-        Ok(v) => v,
-        Err(_) => return TokenUsage::default(),
+/// Token usage plus whatever the agent's own result envelope reported.
+///
+/// Wraps [`extract_tokens`] with the claude stream-json fallback: when the
+/// configured extractor yields nothing — the fleet's adapters configured
+/// `result.usage.input_tokens` against a multi-line stream, and every
+/// `effort.recorded` row in the week to 2026-09-12 carried `tokens_in: null`
+/// — the final `type="result"` envelope's `usage` fills the gap, and its
+/// `total_cost_usd` (when positive; subscription runs report 0) is the
+/// reported cost.
+pub fn extract_tokens_with_envelope(
+    extraction: &TokenExtraction,
+    stdout: &str,
+    stderr: &str,
+) -> (TokenUsage, Option<f64>) {
+    let mut tokens = extract_tokens(extraction, stdout, stderr);
+    let envelope = if tokens.input_tokens.is_none()
+        || tokens.output_tokens.is_none()
+        || stdout.contains("\"total_cost_usd\"")
+    {
+        crate::trace::parse_result_envelope(stdout)
+    } else {
+        None
     };
+    let mut reported_cost = None;
+    if let Some(envelope) = envelope {
+        if tokens.input_tokens.is_none() {
+            tokens.input_tokens = envelope.input_tokens;
+        }
+        if tokens.output_tokens.is_none() {
+            tokens.output_tokens = envelope.output_tokens;
+        }
+        reported_cost = envelope.total_cost_usd.filter(|c| *c > 0.0);
+    }
+    (tokens, reported_cost)
+}
 
-    let input_tokens = resolve_json_path(&parsed, input_path).and_then(|v| v.as_u64());
-    let output_tokens = resolve_json_path(&parsed, output_path).and_then(|v| v.as_u64());
+/// Extract tokens from JSON output using dot-separated path notation.
+///
+/// Accepts either one JSON document or a stream of one object per line
+/// (Claude Code `--output-format stream-json`). In a stream the totals live
+/// on the final `type="result"` line, so lines are tried newest first; a
+/// path prefixed `result.` names that envelope's fields.
+fn extract_tokens_json(stdout: &str, input_path: &str, output_path: &str) -> TokenUsage {
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(stdout) {
+        let usage = tokens_from_value(&parsed, input_path, output_path);
+        if usage.input_tokens.is_some() || usage.output_tokens.is_some() {
+            return usage;
+        }
+    }
 
+    for line in stdout.lines().rev() {
+        let line = line.trim();
+        if !line.starts_with('{') {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let usage = tokens_from_value(&value, input_path, output_path);
+        if usage.input_tokens.is_some() && usage.output_tokens.is_some() {
+            return usage;
+        }
+        if value.get("type").and_then(|t| t.as_str()) == Some("result") {
+            if let (Some(input), Some(output)) = (
+                input_path.strip_prefix("result."),
+                output_path.strip_prefix("result."),
+            ) {
+                let usage = tokens_from_value(&value, input, output);
+                if usage.input_tokens.is_some() && usage.output_tokens.is_some() {
+                    return usage;
+                }
+            }
+        }
+    }
+
+    TokenUsage::default()
+}
+
+fn tokens_from_value(value: &serde_json::Value, input_path: &str, output_path: &str) -> TokenUsage {
     TokenUsage {
-        input_tokens,
-        output_tokens,
+        input_tokens: resolve_json_path(value, input_path).and_then(|v| v.as_u64()),
+        output_tokens: resolve_json_path(value, output_path).and_then(|v| v.as_u64()),
     }
 }
 
@@ -4015,6 +4084,55 @@ output_transform: "needle-transform-custom"
         );
         assert_eq!(usage.input_tokens, None);
         assert_eq!(usage.output_tokens, None);
+    }
+
+    /// The fleet's real shape: a claude stream-json run, one object per line,
+    /// with the totals on the final `type="result"` envelope. The adapters
+    /// configure `result.usage.input_tokens`, which names that envelope.
+    const STREAM_WITH_RESULT: &str = "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s1\"}\n\
+        {\"type\":\"assistant\",\"message\":{\"usage\":{\"input_tokens\":0,\"output_tokens\":0}}}\n\
+        {\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"total_cost_usd\":0.71256,\"usage\":{\"input_tokens\":66163,\"output_tokens\":1403},\"session_id\":\"s1\"}\n";
+
+    #[test]
+    fn extract_tokens_json_reads_the_result_line_of_a_stream() {
+        let usage = extract_tokens_json(
+            STREAM_WITH_RESULT,
+            "result.usage.input_tokens",
+            "result.usage.output_tokens",
+        );
+        assert_eq!(usage.input_tokens, Some(66163));
+        assert_eq!(usage.output_tokens, Some(1403));
+
+        // An un-prefixed path works on the envelope line too.
+        let usage = extract_tokens_json(
+            STREAM_WITH_RESULT,
+            "usage.input_tokens",
+            "usage.output_tokens",
+        );
+        assert_eq!(usage.input_tokens, Some(66163));
+    }
+
+    #[test]
+    fn extract_tokens_with_envelope_fills_from_the_result_envelope() {
+        // No extractor configured (claude-print pairs a transform with
+        // TokenExtraction::None): the envelope is the only source.
+        let (usage, cost) =
+            extract_tokens_with_envelope(&TokenExtraction::None, STREAM_WITH_RESULT, "");
+        assert_eq!(usage.input_tokens, Some(66163));
+        assert_eq!(usage.output_tokens, Some(1403));
+        assert_eq!(cost, Some(0.71256));
+
+        // A zero cost is unknown, not free.
+        let zero = STREAM_WITH_RESULT.replace("0.71256", "0");
+        let (usage, cost) = extract_tokens_with_envelope(&TokenExtraction::None, &zero, "");
+        assert_eq!(usage.input_tokens, Some(66163));
+        assert_eq!(cost, None);
+
+        // No envelope at all: nothing is invented.
+        let (usage, cost) =
+            extract_tokens_with_envelope(&TokenExtraction::None, "plain text output", "");
+        assert_eq!(usage.input_tokens, None);
+        assert_eq!(cost, None);
     }
 
     #[test]

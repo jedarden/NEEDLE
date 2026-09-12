@@ -348,6 +348,11 @@ static TIER_TABLE: &[(&str, ReloadTier)] = &[
         ReloadTier::Live,
     ),
     ("workspace_health.fingerprint_trip_ratio", ReloadTier::Live),
+    ("workspace_health.adapter_health_enabled", ReloadTier::Live),
+    (
+        "workspace_health.adapter_degraded_cooldown_secs",
+        ReloadTier::Live,
+    ),
     (
         "workspace_health.fingerprint_min_distinct_beads",
         ReloadTier::Live,

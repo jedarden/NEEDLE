@@ -926,6 +926,40 @@ health:
 
 ---
 
+## Workspace and Adapter Health
+
+Two fingerprint detectors share one window policy. The gate detector (N-T22)
+degrades a *workspace* when one verification-failure fingerprint dominates
+recent failures across distinct beads. The adapter detector (N-T23) degrades
+an *adapter* when one infrastructure-shaped failure signal — a stream
+envelope reporting an API error, exit code 124/126/127 or a signal, a crash,
+a missing agent binary — dominates that adapter's recent failures across
+distinct beads. An ordinary non-zero exit is a task result and is never
+fingerprinted, so an agent that legitimately exits 1 cannot look like an
+outage.
+
+While an adapter is degraded, failures carrying its fingerprint resolve as
+`infrastructure_failure` with no failure count (on 2026-09-10 the
+`claude-print` watchdog's 341 exit-124 kills were all booked as bead
+failures), and every worker on that adapter holds before claiming until the
+cooldown since the last such failure elapses. A verified success on the
+adapter lifts the degradation immediately. State lives in
+`~/.needle/state/provider-health/`; `needle stats --by adapter|model|workspace`
+shows the `INFRA` column these resolutions land in.
+
+```yaml
+workspace_health:
+  fingerprint_window_seconds: 7200      # sliding window for both detectors
+  fingerprint_window_max_failures: 20
+  fingerprint_min_window_failures: 5    # failures before a trip is evaluated
+  fingerprint_trip_ratio: 0.80          # share one fingerprint must cover
+  fingerprint_min_distinct_beads: 3     # beads a fingerprint must span
+  adapter_health_enabled: true          # N-T23 adapter detector
+  adapter_degraded_cooldown_secs: 300   # claim hold after the last degraded failure
+```
+
+---
+
 ## Validation Configuration
 
 ```yaml

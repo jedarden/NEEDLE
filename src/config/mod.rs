@@ -6340,6 +6340,22 @@ pub struct WorkspaceHealthConfig {
     /// identically is infrastructure.
     #[serde(default = "WorkspaceHealthConfig::default_fingerprint_min_distinct_beads")]
     pub fingerprint_min_distinct_beads: usize,
+
+    /// Track adapter-level failure storms (N-T23). When one non-gate failure
+    /// fingerprint — exit code, terminal reason, API error status — dominates
+    /// an adapter's recent failures across several beads, the adapter is
+    /// degraded: those failures resolve as `infrastructure_failure`, release
+    /// the bead without a failure count, and workers on that adapter hold
+    /// before claiming. Uses the same window thresholds as the gate
+    /// fingerprint detector above. Default: true.
+    #[serde(default = "WorkspaceHealthConfig::default_adapter_health_enabled")]
+    pub adapter_health_enabled: bool,
+
+    /// How long a worker on a degraded adapter waits after that adapter's
+    /// last degraded failure before claiming again (default: 300 seconds).
+    /// A verified success on the adapter lifts the degradation immediately.
+    #[serde(default = "WorkspaceHealthConfig::default_adapter_degraded_cooldown_secs")]
+    pub adapter_degraded_cooldown_secs: u64,
 }
 
 impl Default for WorkspaceHealthConfig {
@@ -6350,11 +6366,19 @@ impl Default for WorkspaceHealthConfig {
             fingerprint_min_window_failures: Self::default_fingerprint_min_window_failures(),
             fingerprint_trip_ratio: Self::default_fingerprint_trip_ratio(),
             fingerprint_min_distinct_beads: Self::default_fingerprint_min_distinct_beads(),
+            adapter_health_enabled: Self::default_adapter_health_enabled(),
+            adapter_degraded_cooldown_secs: Self::default_adapter_degraded_cooldown_secs(),
         }
     }
 }
 
 impl WorkspaceHealthConfig {
+    fn default_adapter_health_enabled() -> bool {
+        true
+    }
+    fn default_adapter_degraded_cooldown_secs() -> u64 {
+        300
+    }
     fn default_fingerprint_window_seconds() -> u64 {
         2 * 60 * 60
     }

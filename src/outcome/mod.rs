@@ -206,6 +206,41 @@ fn terminal_reason(
     }
 }
 
+/// What the adapter-health detector concluded about one failure (N-T23).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AdapterJudgement {
+    /// The failure carries the fingerprint the adapter is degraded for (or
+    /// just tripped it): the provider's outage, released without penalty.
+    Infrastructure { fingerprint: String },
+    /// Recorded in the window; judged as the bead's own failure.
+    Judged,
+}
+
+/// The adapter-level failure signal in an agent's output, if it has one.
+///
+/// A stream envelope that reports an API error names the error and its
+/// status; an infrastructure-shaped exit code names the code. An ordinary
+/// non-zero exit is the agent's task result and yields `None`.
+fn adapter_failure_signal(output: &AgentOutcome) -> Option<String> {
+    if let Some(envelope) = crate::trace::parse_result_envelope(&output.stdout) {
+        if envelope.indicates_failure() {
+            return Some(format!(
+                "terminal_reason={} api_error_status={}",
+                envelope.terminal_reason.as_deref().unwrap_or("error"),
+                envelope
+                    .api_error_status
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "none".to_string())
+            ));
+        }
+    }
+    match output.exit_code {
+        124 | 126 | 127 => Some(format!("exit_code:{}", output.exit_code)),
+        code if code > 128 => Some(format!("exit_code:{code}")),
+        _ => None,
+    }
+}
+
 /// The bounded failure text recorded against the attempt for the next
 /// attempt to read (R3). `None` on a verified success.
 ///
@@ -753,11 +788,32 @@ impl OutcomeHandler {
         let outcome =
             classify_with_stream(output.exit_code, was_interrupted, verified, &output.stdout);
 
+        // N-T23: judge the adapter's own failure signal before the bead is
+        // penalised. A fingerprint that dominates the adapter's recent
+        // failures across distinct beads is the provider's outage, not this
+        // bead's result — 341 claude-print watchdog kills on 2026-09-10 were
+        // booked as bead failures before this existed.
+        let adapter_name = self.peek_attempt_context().adapter;
+        let adapter_judgement =
+            self.judge_adapter_health(&adapter_name, bead, &outcome, output, gate_report.as_ref());
+        let infra_fingerprint = match &adapter_judgement {
+            Some(AdapterJudgement::Infrastructure { fingerprint }) => Some(fingerprint.clone()),
+            _ => None,
+        };
+
         // Gate evidence is captured before the routing match below, which
         // moves the report into the terminal handlers (N-T16 ledger row).
         let gate_results = gate_result_entries(gate_report.as_ref());
-        let resolved_outcome = semantic_outcome(&outcome);
-        let resolved_reason = terminal_reason(&outcome, output.exit_code, gate_report.as_ref());
+        let (resolved_outcome, resolved_reason) = match infra_fingerprint.as_deref() {
+            Some(fingerprint) => (
+                "infrastructure_failure".to_string(),
+                Some(format!("provider_degraded:{fingerprint}")),
+            ),
+            None => (
+                semantic_outcome(&outcome).to_string(),
+                terminal_reason(&outcome, output.exit_code, gate_report.as_ref()),
+            ),
+        };
         // The bounded failure text the *next* attempt is shown (R3). Taken
         // here, before the report moves, from the same evidence the ledger
         // summarizes as a name.
@@ -785,65 +841,75 @@ impl OutcomeHandler {
             Utc::now(),
         );
 
-        let (bead_action, telemetry_events) = match outcome.clone() {
-            Outcome::Success => self.handle_success(store, bead, gate_report).await?,
-            Outcome::Failure => {
-                // If we have a gate report with failures, check if any gate had execution errors.
-                if let Some(report) = gate_report {
-                    if !report.all_passed {
-                        // Check if any result is an ExecutionError
-                        let execution_error =
-                            report.results.iter().find(|(_, r)| r.is_execution_error());
-                        if let Some((gate_name, result)) = execution_error {
-                            if let GateResult::ExecutionError { command, reason } = result {
-                                self.handle_gate_error(
-                                    store,
-                                    bead,
-                                    &bead.workspace.display().to_string(),
-                                    gate_name,
-                                    command,
-                                    reason,
-                                )
-                                .await?
+        if matches!(outcome, Outcome::Success) {
+            self.note_adapter_success(&adapter_name, bead);
+        }
+
+        let (bead_action, telemetry_events) =
+            if let Some(fingerprint) = infra_fingerprint.as_deref() {
+                self.handle_infrastructure_failure(store, bead, fingerprint)
+                    .await?
+            } else {
+                match outcome.clone() {
+                    Outcome::Success => self.handle_success(store, bead, gate_report).await?,
+                    Outcome::Failure => {
+                        // If we have a gate report with failures, check if any gate had execution errors.
+                        if let Some(report) = gate_report {
+                            if !report.all_passed {
+                                // Check if any result is an ExecutionError
+                                let execution_error =
+                                    report.results.iter().find(|(_, r)| r.is_execution_error());
+                                if let Some((gate_name, result)) = execution_error {
+                                    if let GateResult::ExecutionError { command, reason } = result {
+                                        self.handle_gate_error(
+                                            store,
+                                            bead,
+                                            &bead.workspace.display().to_string(),
+                                            gate_name,
+                                            command,
+                                            reason,
+                                        )
+                                        .await?
+                                    } else {
+                                        unreachable!() // We already checked is_execution_error()
+                                    }
+                                } else {
+                                    self.handle_gate_failure(store, bead, &report).await?
+                                }
                             } else {
-                                unreachable!() // We already checked is_execution_error()
+                                self.handle_failure(store, bead).await?
                             }
                         } else {
-                            self.handle_gate_failure(store, bead, &report).await?
+                            self.handle_failure(store, bead).await?
                         }
-                    } else {
+                    }
+                    Outcome::Timeout => self.handle_timeout(store, bead).await?,
+                    Outcome::AgentNotFound => self.handle_agent_not_found(store, bead).await?,
+                    Outcome::Interrupted => self.handle_interrupted(store, bead).await?,
+                    Outcome::Crash(code) => self.handle_crash(store, bead, code).await?,
+                    Outcome::GateError => {
+                        // This should not be reached - GateError is only produced during outcome handling
+                        // when gate execution errors are detected. For now, treat as regular failure.
+                        tracing::error!(
+                            bead_id = %bead.id,
+                            "unexpected GateError outcome — treating as regular failure"
+                        );
                         self.handle_failure(store, bead).await?
                     }
-                } else {
-                    self.handle_failure(store, bead).await?
+                    Outcome::GateUnsatisfiable => {
+                        // Not reachable yet: no classification path produces GateUnsatisfiable —
+                        // it is assigned from gate-report analysis (precondition unsatisfiable),
+                        // which lands separately. Placeholder follows the GateError precedent;
+                        // the real handling must NOT attribute the failure to the work or retry
+                        // the bead, since no work can satisfy the gate.
+                        tracing::error!(
+                            bead_id = %bead.id,
+                            "unexpected GateUnsatisfiable outcome — treating as regular failure"
+                        );
+                        self.handle_failure(store, bead).await?
+                    }
                 }
-            }
-            Outcome::Timeout => self.handle_timeout(store, bead).await?,
-            Outcome::AgentNotFound => self.handle_agent_not_found(store, bead).await?,
-            Outcome::Interrupted => self.handle_interrupted(store, bead).await?,
-            Outcome::Crash(code) => self.handle_crash(store, bead, code).await?,
-            Outcome::GateError => {
-                // This should not be reached - GateError is only produced during outcome handling
-                // when gate execution errors are detected. For now, treat as regular failure.
-                tracing::error!(
-                    bead_id = %bead.id,
-                    "unexpected GateError outcome — treating as regular failure"
-                );
-                self.handle_failure(store, bead).await?
-            }
-            Outcome::GateUnsatisfiable => {
-                // Not reachable yet: no classification path produces GateUnsatisfiable —
-                // it is assigned from gate-report analysis (precondition unsatisfiable),
-                // which lands separately. Placeholder follows the GateError precedent;
-                // the real handling must NOT attribute the failure to the work or retry
-                // the bead, since no work can satisfy the gate.
-                tracing::error!(
-                    bead_id = %bead.id,
-                    "unexpected GateUnsatisfiable outcome — treating as regular failure"
-                );
-                self.handle_failure(store, bead).await?
-            }
-        };
+            };
 
         // Emit sub-handler events (e.g. BeadCompleted, BeadOrphaned) to the
         // telemetry sink so they appear in the JSONL log.
@@ -890,7 +956,7 @@ impl OutcomeHandler {
             bead,
             output,
             bead_action.to_string(),
-            resolved_outcome,
+            &resolved_outcome,
             resolved_reason,
             gate_results,
         );
@@ -906,6 +972,154 @@ impl OutcomeHandler {
             bead_action,
             telemetry_events,
         })
+    }
+
+    /// Record the adapter's own failure signal against its host-wide health
+    /// window (N-T23) and say whether this failure is the provider's, not the
+    /// bead's. `None` when adapter health is off, the adapter is unknown, or
+    /// the outcome carries no adapter-level signal (a rejecting gate is the
+    /// bead's result; a plain timeout follows the ADR-022 ladder).
+    ///
+    /// Only infrastructure-shaped signals are fingerprinted: a stream
+    /// envelope that reports an API error, an exit code the wrappers and the
+    /// kernel use (124 timeout, 126/127 exec failure, >128 signal), a crash,
+    /// or a missing agent binary. An ordinary non-zero exit is a task result
+    /// and never counts, so an adapter whose agent legitimately exits 1 on
+    /// hard tasks cannot be misjudged as an outage.
+    fn judge_adapter_health(
+        &self,
+        adapter: &str,
+        bead: &Bead,
+        outcome: &Outcome,
+        output: &AgentOutcome,
+        gate_report: Option<&GateReport>,
+    ) -> Option<AdapterJudgement> {
+        if !self.config.workspace_health.adapter_health_enabled || adapter.is_empty() {
+            return None;
+        }
+        let reason = match outcome {
+            Outcome::Failure => {
+                if gate_report.is_some_and(|r| !r.all_passed) {
+                    return None;
+                }
+                adapter_failure_signal(output)?
+            }
+            Outcome::Crash(code) => {
+                let signal = if *code > 128 { code - 128 } else { *code };
+                format!("signal:{signal}")
+            }
+            Outcome::AgentNotFound => format!("agent_not_found exit_code:{}", output.exit_code),
+            Outcome::Success
+            | Outcome::Timeout
+            | Outcome::Interrupted
+            | Outcome::GateError
+            | Outcome::GateUnsatisfiable => return None,
+        };
+
+        match crate::provider_health::record_adapter_failure(
+            adapter,
+            bead.id.as_ref(),
+            &reason,
+            &self.config.workspace_health.detector_config(),
+        ) {
+            Ok(recording) => {
+                if let gate_health::VerificationRecording::Tripped {
+                    fingerprint,
+                    failures,
+                    distinct_beads,
+                    summary,
+                } = &recording
+                {
+                    tracing::error!(
+                        adapter = %adapter,
+                        bead_id = %bead.id,
+                        fingerprint = %fingerprint,
+                        failures = failures,
+                        distinct_beads = distinct_beads,
+                        summary = %summary,
+                        "adapter failure fingerprint dominates its window — provider degraded"
+                    );
+                    let _ = self.telemetry.emit_try_lock(
+                        EventKind::ProviderDegraded {
+                            adapter: adapter.to_string(),
+                            fingerprint: fingerprint.clone(),
+                            summary: summary.clone(),
+                            failures: *failures as u32,
+                            distinct_beads: *distinct_beads as u32,
+                            bead_id: bead.id.clone(),
+                        },
+                        Utc::now(),
+                    );
+                }
+                if recording.is_infra() {
+                    Some(AdapterJudgement::Infrastructure {
+                        fingerprint: recording.fingerprint().to_string(),
+                    })
+                } else {
+                    Some(AdapterJudgement::Judged)
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    adapter = %adapter,
+                    bead_id = %bead.id,
+                    error = %e,
+                    "could not record adapter health — judging the failure as the bead's"
+                );
+                None
+            }
+        }
+    }
+
+    /// A verified success lifts the adapter's degradation (N-T23).
+    fn note_adapter_success(&self, adapter: &str, bead: &Bead) {
+        if !self.config.workspace_health.adapter_health_enabled || adapter.is_empty() {
+            return;
+        }
+        match crate::provider_health::record_adapter_success(adapter) {
+            Ok(Some(prior)) => {
+                tracing::info!(
+                    adapter = %adapter,
+                    bead_id = %bead.id,
+                    "adapter produced a verified success — provider restored"
+                );
+                let _ = self.telemetry.emit_try_lock(
+                    EventKind::ProviderRestored {
+                        adapter: adapter.to_string(),
+                        bead_id: bead.id.clone(),
+                        degraded_duration_secs: prior.degraded_for_secs().unwrap_or(0),
+                    },
+                    Utc::now(),
+                );
+            }
+            Ok(None) => {}
+            Err(e) => tracing::debug!(
+                adapter = %adapter,
+                error = %e,
+                "could not clear adapter health state"
+            ),
+        }
+    }
+
+    /// Infrastructure failure: release the bead with no failure count. The
+    /// provider, not the work, is what failed (N-T23; ADR-023 for gates).
+    async fn handle_infrastructure_failure(
+        &self,
+        store: &dyn BeadStore,
+        bead: &Bead,
+        fingerprint: &str,
+    ) -> Result<(BeadAction, Vec<EventKind>)> {
+        tracing::warn!(
+            bead_id = %bead.id,
+            fingerprint = %fingerprint,
+            "adapter is degraded for this failure — releasing bead without penalty"
+        );
+        let mut events = self.prepare_release_events(store, bead).await?;
+        events.push(EventKind::BeadReleased {
+            bead_id: bead.id.clone(),
+            reason: format!("infrastructure:{fingerprint}"),
+        });
+        Ok((BeadAction::Released, events))
     }
 
     /// Persist this attempt into the bead's history (local journal plus the
@@ -4273,6 +4487,90 @@ mod tests {
             2
         );
         let _ = std::fs::remove_dir_all(&bead.workspace);
+    }
+
+    #[tokio::test]
+    async fn adapter_failure_storm_resolves_as_infrastructure_without_penalty() {
+        // N-T23: four distinct beads failing with the same infrastructure-shaped
+        // signal on one adapter trip the detector; the tripping failure and
+        // every later one with that fingerprint release the bead with no
+        // failure count and resolve as infrastructure_failure.
+        let adapter = format!(
+            "test-storm-adapter-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        );
+        let mut config = Config::default();
+        config.workspace_health.fingerprint_min_window_failures = 4;
+        config.workspace_health.fingerprint_min_distinct_beads = 3;
+        let handler = test_handler_with_config(config);
+        let store = test_store(BeadStatus::InProgress);
+        // The 2026-09-02 zai-proxy outage shape: the CLI exits 0 but its
+        // result envelope reports a terminal API error.
+        let api_outage = AgentOutcome {
+            exit_code: 0,
+            stdout: "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s1\"}\n\
+                     {\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":503,\"terminal_reason\":\"api_error\",\"result\":\"API Error: 503 no available server\",\"session_id\":\"s1\"}\n"
+                .to_string(),
+            stderr: String::new(),
+        };
+
+        let mut last = None;
+        for n in 0..4 {
+            let mut bead = test_bead(BeadStatus::InProgress);
+            bead.id = BeadId::from(format!("needle-storm-{n}").as_str());
+            handler.set_attempt_context(AttemptContext {
+                adapter: adapter.clone(),
+                ..AttemptContext::default()
+            });
+            last = Some(
+                handler
+                    .handle(&store, &bead, &api_outage, false)
+                    .await
+                    .unwrap(),
+            );
+        }
+        let tripping = last.unwrap();
+        assert_eq!(tripping.bead_action, BeadAction::Released);
+        assert!(
+            tripping.telemetry_events.iter().any(|e| matches!(
+                e,
+                EventKind::BeadReleased { reason, .. } if reason.starts_with("infrastructure:")
+            )),
+            "{:?}",
+            tripping.telemetry_events
+        );
+        // The first three failures were judged as the beads' own (label added);
+        // the tripping one was not penalised.
+        let label_adds = store
+            .actions()
+            .iter()
+            .filter(|a| matches!(a, StoreAction::AddLabel(_, l) if l.starts_with("failure-count:")))
+            .count();
+        assert_eq!(label_adds, 3, "{:?}", store.actions());
+        let state = crate::provider_health::degraded_state(&adapter)
+            .unwrap()
+            .expect("adapter degraded");
+        assert!(state.degraded_fingerprint.is_some());
+
+        // A verified success on the adapter restores it.
+        let mut ok_bead = test_bead(BeadStatus::InProgress);
+        ok_bead.id = BeadId::from("needle-storm-ok");
+        let ok_store = test_store(BeadStatus::Done);
+        let ok_handler = test_handler_without_shipped_work();
+        ok_handler.set_attempt_context(AttemptContext {
+            adapter: adapter.clone(),
+            ..AttemptContext::default()
+        });
+        let ok = ok_handler
+            .handle(&ok_store, &ok_bead, &test_output(0), false)
+            .await
+            .unwrap();
+        assert_eq!(ok.outcome, Outcome::Success);
+        assert!(crate::provider_health::degraded_state(&adapter)
+            .unwrap()
+            .is_none());
+        crate::provider_health::clear_state(&adapter).unwrap();
     }
 
     #[tokio::test]

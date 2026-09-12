@@ -2270,6 +2270,10 @@ impl Worker {
         // never written).
         self.hold_for_admission().await?;
 
+        // N-T23: a worker whose adapter is degraded waits out the cooldown
+        // instead of claiming beads a dead provider will fail.
+        self.hold_for_adapter_health().await;
+
         // A shutdown signal that arrived mid-hold must not select: hand
         // control back to the run loop, whose top-of-loop shutdown branch
         // stops the worker cleanly.
@@ -2400,6 +2404,55 @@ impl Worker {
     /// a capped jittered backoff. On recovery it emits
     /// `worker.admission_restored` and returns to `SELECTING` before any
     /// selection runs.
+    /// Hold while this worker's adapter is degraded (N-T23) and its last
+    /// degraded failure is younger than
+    /// `workspace_health.adapter_degraded_cooldown_secs`.
+    ///
+    /// The hold is bounded: it re-reads the shared state file every minute,
+    /// so a verified success on any worker (which clears the state) or the
+    /// cooldown elapsing releases it, and a shutdown signal ends it at once.
+    /// Nothing here weakens the detector — the state is read, never written.
+    async fn hold_for_adapter_health(&mut self) {
+        if !self.config.workspace_health.adapter_health_enabled {
+            return;
+        }
+        let adapter = self
+            .resolve_adapter()
+            .map(|a| a.name)
+            .unwrap_or_else(|_| self.config.agent.default.clone());
+        let cooldown = self.config.workspace_health.adapter_degraded_cooldown_secs;
+        let mut announced = false;
+        loop {
+            if self.shutdown.load(Ordering::SeqCst) {
+                return;
+            }
+            let state = match crate::provider_health::degraded_state(&adapter) {
+                Ok(Some(state)) => state,
+                Ok(None) => return,
+                Err(e) => {
+                    tracing::debug!(adapter = %adapter, error = %e, "adapter health unreadable");
+                    return;
+                }
+            };
+            let since = state.secs_since_last_degraded_failure().unwrap_or(u64::MAX);
+            if since >= cooldown {
+                return;
+            }
+            let remaining = cooldown - since;
+            if !announced {
+                tracing::warn!(
+                    adapter = %adapter,
+                    fingerprint = ?state.degraded_fingerprint,
+                    summary = ?state.degraded_summary,
+                    remaining_secs = remaining,
+                    "adapter is degraded — holding before claiming"
+                );
+                announced = true;
+            }
+            tokio::time::sleep(Duration::from_secs(remaining.clamp(1, 60))).await;
+        }
+    }
+
     async fn hold_for_admission(&mut self) -> Result<()> {
         // Operator/test override honored identically at every admission check:
         // some callers must launch regardless of host load.
@@ -3620,7 +3673,7 @@ impl Worker {
                 }
 
                 // Extract tokens from the result while still in the execution span.
-                let exec_tokens = dispatch::extract_tokens(
+                let (exec_tokens, _) = dispatch::extract_tokens_with_envelope(
                     &adapter.token_extraction,
                     &result.stdout,
                     &result.stderr,
@@ -3667,11 +3720,18 @@ impl Worker {
             },
         };
 
-        // Extract tokens and compute cost for effort tracking.
-        let tokens =
-            dispatch::extract_tokens(&adapter.token_extraction, &output.stdout, &output.stderr);
+        // Extract tokens and compute cost for effort tracking. The agent's
+        // own result envelope fills in tokens the configured extractor missed
+        // and supplies the cost when it reports a positive one; otherwise the
+        // pricing table estimates it from the token counts.
+        let (tokens, reported_cost) = dispatch::extract_tokens_with_envelope(
+            &adapter.token_extraction,
+            &output.stdout,
+            &output.stderr,
+        );
         let model_name = adapter.model.as_deref().unwrap_or("");
-        let estimated_cost = cost::estimate_cost(&tokens, model_name, &self.config.pricing);
+        let estimated_cost = reported_cost
+            .or_else(|| cost::estimate_cost(&tokens, model_name, &self.config.pricing));
         // Read the figures out before `tokens` moves into the effort record —
         // the attempt ledger row below needs the same numbers.
         let (tokens_in, tokens_out) = (tokens.input_tokens, tokens.output_tokens);

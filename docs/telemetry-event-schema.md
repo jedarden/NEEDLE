@@ -64,6 +64,18 @@ Additional fields are event-specific and documented per type below.
 ### Attempt Ledger
 - `attempt.resolved` — Terminal ledger row for one dispatch (one per dispatch, N-T16)
 
+### Provider Health (N-T23)
+- `provider.degraded` — One non-gate failure fingerprint (`exit_code:124`,
+  `terminal_reason=api_error api_error_status=503`, `signal:9`) dominates an
+  adapter's recent failures across several distinct beads. Fields: `adapter`,
+  `fingerprint`, `summary`, `failures`, `distinct_beads`, `bead_id`. From this
+  point failures carrying the fingerprint resolve as `infrastructure_failure`
+  (ledger `terminal_reason: provider_degraded:<fingerprint>`), release the bead
+  with no failure count, and workers on the adapter hold before claiming for
+  `workspace_health.adapter_degraded_cooldown_secs` after the last such failure.
+- `provider.restored` — A degraded adapter produced a verified success again.
+  Fields: `adapter`, `bead_id`, `degraded_duration_secs`.
+
 ### Configuration
 - `config.warning` — Configuration validation warning
 
