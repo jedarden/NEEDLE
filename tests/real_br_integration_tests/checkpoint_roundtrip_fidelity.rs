@@ -62,7 +62,7 @@ fn create_test_workspace(prefix: &str) -> Result<TempDir> {
 
     let bead = bead_path();
     let output = Command::new(&bead)
-        .args(["init"])
+        .args(["init", "--skip-foreign-workspace"])
         .current_dir(dir.path())
         .output()
         .context("failed to run bead init")?;

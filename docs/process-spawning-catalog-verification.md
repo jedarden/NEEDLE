@@ -50,7 +50,7 @@ The catalog methodology section states:
 - `tests/process_guard.rs` - 4 invocations (sleep, true)
 - `tests/stop_kills_process_tree.rs` - 2 invocations (tmux, ps)
 - `tests/doctor_exit_code_tests.rs` - 5 invocations (CARGO_BIN_EXE_needle)
-- `tests/workspace_equality_tests.rs` - 4 invocations (bead CLI)
+- `tests/real_br_integration_tests/workspace_equality_tests.rs` - 4 invocations (bead CLI)
 - `tests/config_cli_tests.rs` - 1 invocation (CARGO_BIN_EXE_needle)
 - `tests/sigpipe_test.rs` - 1 invocation (binary path)
 - `tests/cli_integration.rs` - 6 invocations (CARGO_BIN_EXE_needle)
