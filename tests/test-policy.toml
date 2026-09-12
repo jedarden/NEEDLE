@@ -1,0 +1,470 @@
+version = 1
+
+# These ceilings are deliberate review gates, not aspirational coverage goals.
+# Raise one only when a reviewer agrees that the named tier is the cheapest
+# correct home for the added behavior. Counts are literal Rust test attributes.
+[unit]
+max_tests = 3869
+
+[tier_budget]
+push = 650
+contract = 67
+e2e = 634
+soak = 0
+fuzz = 0
+
+[[harness]]
+name = "integration_spawn"
+path = "tests/integration_spawn.rs"
+tier = "e2e"
+max_tests = 262
+owner = "component:process-integration"
+
+[[harness]]
+name = "integration_tests"
+path = "tests/integration_tests.rs"
+tier = "push"
+max_tests = 545
+owner = "component:core-integration"
+
+[[harness]]
+name = "p2_integration_tests"
+path = "tests/p2_integration_tests.rs"
+tier = "push"
+max_tests = 105
+owner = "component:pluck-mend-explore"
+
+[[harness]]
+name = "p3_integration_tests"
+path = "tests/p3_integration_tests.rs"
+tier = "e2e"
+max_tests = 372
+owner = "component:weave-unravel-pulse"
+
+[[harness]]
+name = "real_br_integration_tests"
+path = "tests/real_br_integration_tests.rs"
+tier = "contract"
+max_tests = 67
+owner = "component:bead-rs-contract"
+
+# These are strict ceilings on existing debt. A new occurrence fails the fast
+# lane; deleting an occurrence makes the corresponding exception stale so the
+# policy shrinks with the implementation.
+[[unit_exception]]
+path = "src/attempt_archive.rs"
+kind = "process"
+max_occurrences = 2
+owner = "component:attempt-archive"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/bead_store/cli_store.rs"
+kind = "process"
+max_occurrences = 1
+owner = "component:bead-store-cli-store"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/bead_store/mod.rs"
+kind = "process"
+max_occurrences = 2
+owner = "component:bead-store"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/build_metadata.rs"
+kind = "global-env"
+max_occurrences = 4
+owner = "component:build-metadata"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/ci.rs"
+kind = "process"
+max_occurrences = 1
+owner = "component:ci"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/cli/mod.rs"
+kind = "global-env"
+max_occurrences = 6
+owner = "component:cli"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/cli/mod.rs"
+kind = "process"
+max_occurrences = 2
+owner = "component:cli"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/cli/mod.rs"
+kind = "sleep"
+max_occurrences = 1
+owner = "component:cli"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/claim/mod.rs"
+kind = "sleep"
+max_occurrences = 9
+owner = "component:claim"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/commit_hook.rs"
+kind = "process"
+max_occurrences = 3
+owner = "component:commit-hook"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/config/mod.rs"
+kind = "global-env"
+max_occurrences = 278
+owner = "component:config"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/dispatch/extraction.rs"
+kind = "process"
+max_occurrences = 1
+owner = "component:dispatch-extraction"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/dispatch/mod.rs"
+kind = "sleep"
+max_occurrences = 5
+owner = "component:dispatch"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/gate_health.rs"
+kind = "global-env"
+max_occurrences = 1
+owner = "component:gate-health"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/health/mod.rs"
+kind = "global-env"
+max_occurrences = 13
+owner = "component:health"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/health/mod.rs"
+kind = "sleep"
+max_occurrences = 5
+owner = "component:health"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/hoop_hooks.rs"
+kind = "global-env"
+max_occurrences = 8
+owner = "component:hoop-hooks"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/integration_t/mod.rs"
+kind = "sleep"
+max_occurrences = 5
+owner = "component:integration-t"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/outcome/mod.rs"
+kind = "global-env"
+max_occurrences = 1
+owner = "component:outcome"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/outcome/mod.rs"
+kind = "process"
+max_occurrences = 3
+owner = "component:outcome"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/outcome/mod.rs"
+kind = "sleep"
+max_occurrences = 3
+owner = "component:outcome"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/panic_capture.rs"
+kind = "global-env"
+max_occurrences = 4
+owner = "component:panic-capture"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/rate_limit/mod.rs"
+kind = "global-env"
+max_occurrences = 2
+owner = "component:rate-limit"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/rate_limit/mod.rs"
+kind = "sleep"
+max_occurrences = 1
+owner = "component:rate-limit"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/registry/mod.rs"
+kind = "process"
+max_occurrences = 1
+owner = "component:registry"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/registry/mod.rs"
+kind = "sleep"
+max_occurrences = 1
+owner = "component:registry"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/sanitize/mod.rs"
+kind = "process"
+max_occurrences = 1
+owner = "component:sanitize"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/scratch_sweep.rs"
+kind = "process"
+max_occurrences = 2
+owner = "component:scratch-sweep"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/spawn_path/mod.rs"
+kind = "sleep"
+max_occurrences = 2
+owner = "component:spawn-path"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/strand/knot.rs"
+kind = "sleep"
+max_occurrences = 8
+owner = "component:strand-knot"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/strand/mend.rs"
+kind = "sleep"
+max_occurrences = 21
+owner = "component:strand-mend"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/strand/pulse.rs"
+kind = "sleep"
+max_occurrences = 1
+owner = "component:strand-pulse"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/strand/unravel.rs"
+kind = "sleep"
+max_occurrences = 1
+owner = "component:strand-unravel"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/supervisor/mod.rs"
+kind = "process"
+max_occurrences = 1
+owner = "component:supervisor"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/supervisor/mod.rs"
+kind = "sleep"
+max_occurrences = 5
+owner = "component:supervisor"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/tailscale_api.rs"
+kind = "global-env"
+max_occurrences = 2
+owner = "component:tailscale-api"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/telemetry/file_sink.rs"
+kind = "global-env"
+max_occurrences = 3
+owner = "component:telemetry-file-sink"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/telemetry/mod.rs"
+kind = "sleep"
+max_occurrences = 18
+owner = "component:telemetry"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/telemetry/otlp.rs"
+kind = "global-env"
+max_occurrences = 6
+owner = "component:telemetry-otlp"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/telemetry/otlp.rs"
+kind = "sleep"
+max_occurrences = 1
+owner = "component:telemetry-otlp"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/mitosis/timeout_context.rs"
+kind = "process"
+max_occurrences = 6
+owner = "component:mitosis-timeout-context"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/transcript/mod.rs"
+kind = "sleep"
+max_occurrences = 2
+owner = "component:transcript"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/util.rs"
+kind = "global-env"
+max_occurrences = 24
+owner = "component:util"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/util.rs"
+kind = "process"
+max_occurrences = 1
+owner = "component:util"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/util.rs"
+kind = "sleep"
+max_occurrences = 3
+owner = "component:util"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/validation/dod_bypass.rs"
+kind = "process"
+max_occurrences = 2
+owner = "component:validation-dod-bypass"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/validation/mod.rs"
+kind = "process"
+max_occurrences = 5
+owner = "component:validation"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/validation/mod.rs"
+kind = "sleep"
+max_occurrences = 2
+owner = "component:validation"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/validation/predispatch.rs"
+kind = "process"
+max_occurrences = 13
+owner = "component:validation-predispatch"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/validation/shipped_work.rs"
+kind = "process"
+max_occurrences = 1
+owner = "component:validation-shipped-work"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/worker/mod.rs"
+kind = "global-env"
+max_occurrences = 18
+owner = "component:worker"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/worker/mod.rs"
+kind = "sleep"
+max_occurrences = 8
+owner = "component:worker"
+reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+# Files under tests/ that are not compiled into a Rust harness are still test
+# assets. Each must match a rule with a durable component owner.
+[[artifact]]
+pattern = "tests/*.md"
+owner = "component:test-documentation"
+
+[[artifact]]
+pattern = "tests/*.sh"
+owner = "component:shell-verification"
+
+[[artifact]]
+pattern = "tests/cargo-targets/*"
+owner = "component:cargo-target-policy"
+
+[[artifact]]
+pattern = "tests/dod-attribution/*"
+owner = "component:definition-of-done"
+
+[[artifact]]
+pattern = "tests/dod-modes/*"
+owner = "component:definition-of-done"
+
+[[artifact]]
+pattern = "tests/e2e/*"
+owner = "component:e2e"
+
+[[artifact]]
+pattern = "tests/fixtures/*"
+owner = "component:test-fixtures"
+
+[[artifact]]
+pattern = "tests/helpers/*"
+owner = "component:test-infrastructure"
+
+[[artifact]]
+pattern = "tests/install_sh/*"
+owner = "component:installer"
+
+[[artifact]]
+pattern = "tests/installer/*"
+owner = "component:installer"
+
+[[artifact]]
+pattern = "tests/integration/*"
+owner = "component:shell-integration"
+
+[[artifact]]
+pattern = "tests/pending/*"
+owner = "component:test-debt"
+
+[[artifact]]
+pattern = "tests/test-policy/*"
+owner = "component:test-policy"

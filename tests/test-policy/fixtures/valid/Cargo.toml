@@ -1,0 +1,13 @@
+[package]
+name = "test-policy-fixture"
+version = "0.0.0"
+edition = "2021"
+autotests = false
+
+[lib]
+path = "src/lib.rs"
+
+[[test]]
+name = "contract_tests"
+path = "tests/contract_tests.rs"
+harness = true
