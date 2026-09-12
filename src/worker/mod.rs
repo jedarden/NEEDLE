@@ -76,6 +76,54 @@ fn truncate_for_display(s: &str, max_len: usize) -> &str {
     }
 }
 
+/// Apply the N-T15 learning-context policy to a freshly built `PromptBuilder`.
+///
+/// Legacy workspace and global learnings are injected only when
+/// `strands.learning.inject_legacy_learnings` is on; the learning-derived
+/// tail (learnings plus skills) is always capped at
+/// `strands.learning.max_learning_context_bytes`.
+fn apply_learning_context_policy(
+    builder: PromptBuilder,
+    learning: &crate::config::LearningConfig,
+    workspace: &Path,
+) -> PromptBuilder {
+    let builder = builder.with_learning_context_cap(learning.max_learning_context_bytes);
+    if learning.inject_legacy_learnings {
+        builder
+            .with_legacy_learnings(workspace)
+            .with_global_learnings(&learning.global_learnings_file)
+    } else {
+        builder
+    }
+}
+
+/// Strip marker-fenced NEEDLE learning blocks from the CLAUDE.md files the
+/// legacy placer would have targeted for `workspace` (N-T15).
+///
+/// Best-effort: a read or write failure is logged and never blocks a boot.
+fn remove_placed_learnings_for_workspace(workspace: &Path) {
+    let placer = crate::claude_md_placement::ClaudeMdPlacer::new(vec![workspace.to_path_buf()]);
+    let Some(target) = placer.find_target_claude_md(&[workspace.to_path_buf()]) else {
+        return;
+    };
+    if !target.exists() {
+        return;
+    }
+    match crate::claude_md_placement::remove_needle_sections(&target) {
+        Ok(0) => {}
+        Ok(removed) => tracing::info!(
+            target = %target.display(),
+            removed,
+            "removed legacy NEEDLE learning blocks from CLAUDE.md (claude_md_placement is off)"
+        ),
+        Err(e) => tracing::warn!(
+            target = %target.display(),
+            error = %e,
+            "could not strip legacy NEEDLE learning blocks from CLAUDE.md"
+        ),
+    }
+}
+
 /// Remove the trailing source annotation from a formatted config dump line.
 fn strip_source_annotation(line: &str) -> String {
     line.rsplit_once(" (from: ")
@@ -910,14 +958,24 @@ impl Worker {
             &config.workspace.default,
         )
         .unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "failed to load workspace learnings, using default prompt builder");
+            tracing::warn!(error = %e, "failed to load workspace skills, using default prompt builder");
             PromptBuilder::new(&config.prompt)
         })
         .with_cross_workspace_skills(
             &config.strands.explore.workspaces,
             &config.workspace.labels,
-        )
-        .with_global_learnings(&config.strands.learning.global_learnings_file);
+        );
+        let prompt_builder = apply_learning_context_policy(
+            prompt_builder,
+            &config.strands.learning,
+            &config.workspace.default,
+        );
+        // N-T15: when CLAUDE.md placement is off, a booting worker strips the
+        // marker-fenced blocks the legacy placer wrote earlier instead of
+        // leaving stale learnings in a top-authority policy file.
+        if !config.strands.reflect.claude_md_placement {
+            remove_placed_learnings_for_workspace(&config.workspace.default);
+        }
         let _ = telemetry.emit(
             EventKind::InitStepCompleted {
                 step: "prompt_builder_setup".to_string(),
@@ -5459,14 +5517,15 @@ impl Worker {
             let rebuilt =
                 PromptBuilder::with_workspace(&candidate.prompt, &self.config.workspace.default)
                     .map(|builder| {
-                        builder
-                            .with_cross_workspace_skills(
-                                &self.config.strands.explore.workspaces,
-                                &self.config.workspace.labels,
-                            )
-                            .with_global_learnings(
-                                &self.config.strands.learning.global_learnings_file,
-                            )
+                        let builder = builder.with_cross_workspace_skills(
+                            &self.config.strands.explore.workspaces,
+                            &self.config.workspace.labels,
+                        );
+                        apply_learning_context_policy(
+                            builder,
+                            &self.config.strands.learning,
+                            &self.config.workspace.default,
+                        )
                     })
                     .and_then(|builder| {
                         builder.validate()?;

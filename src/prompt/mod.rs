@@ -648,6 +648,10 @@ pub struct PromptBuilder {
     skill_library: Option<SkillLibrary>,
     /// A/B test variant configurations per template name.
     variants: BTreeMap<String, Vec<VariantConfig>>,
+    /// Byte cap on learning-derived context (learnings, global learnings and
+    /// skills together). `None` leaves it unbounded — the pre-N-T15 behavior,
+    /// kept only for the byte-identical legacy regression path.
+    learning_context_cap: Option<usize>,
 }
 
 impl PromptBuilder {
@@ -682,23 +686,20 @@ impl PromptBuilder {
             global_learnings_content: None,
             skill_library: None,
             variants: config.variants.clone(),
+            learning_context_cap: None,
         }
     }
 
-    /// Create a new `PromptBuilder` with workspace-specific learnings.
+    /// Create a new `PromptBuilder` with the workspace's skill library.
     ///
-    /// This variant loads the `.beads/learnings.md` file if it exists,
-    /// automatically injecting workspace learnings into all prompts.
+    /// Since N-T15 (plan section 4.4 step 0) this does **not** read
+    /// `.beads/learnings.md`: the legacy consolidator's output is candidate
+    /// input, not policy, and a default-configured prompt carries no
+    /// `## Workspace Learnings` section. Opt back in with
+    /// [`PromptBuilder::with_legacy_learnings`] (config
+    /// `strands.learning.inject_legacy_learnings: true`).
     pub fn with_workspace(config: &PromptConfig, workspace: &Path) -> Result<Self> {
         let mut builder = Self::new(config);
-
-        // Load learnings if the file exists.
-        let learnings = LearningsFile::load(workspace);
-        if let Ok(learnings_file) = learnings {
-            if !learnings_file.entries().is_empty() {
-                builder.learnings_content = Some(learnings_file.to_prompt_content());
-            }
-        }
 
         // Load skill library (missing directory is silently ignored).
         if let Ok(lib) = SkillLibrary::load(workspace) {
@@ -708,6 +709,27 @@ impl PromptBuilder {
         }
 
         Ok(builder)
+    }
+
+    /// Load the legacy `.beads/learnings.md` file into this builder so it is
+    /// injected as `## Workspace Learnings` (pre-N-T15 behavior).
+    ///
+    /// A missing or empty file is silently ignored.
+    pub fn with_legacy_learnings(mut self, workspace: &Path) -> Self {
+        if let Ok(learnings_file) = LearningsFile::load(workspace) {
+            if !learnings_file.entries().is_empty() {
+                self.learnings_content = Some(learnings_file.to_prompt_content());
+            }
+        }
+        self
+    }
+
+    /// Cap the learning-derived context (learnings, global learnings and
+    /// skills together) at `max_bytes`. Configured context files are never
+    /// truncated by this cap.
+    pub fn with_learning_context_cap(mut self, max_bytes: usize) -> Self {
+        self.learning_context_cap = Some(max_bytes);
+        self
     }
 
     /// Load skills from additional workspaces whose skill labels match the given
@@ -841,14 +863,42 @@ impl PromptBuilder {
                 .as_str(),
         };
 
-        // Build context section: files + learnings + matching skills (in that order).
-        let mut context_parts = vec![self.load_context_files(workspace)];
+        // Build context section: files + learnings + matching skills (in that
+        // order). Configured files are operator policy and go in whole; the
+        // learning-derived tail is capped (N-T15) so a runaway learnings file
+        // cannot crowd out the task.
+        let file_sections = self.load_context_file_sections(workspace);
+        let mut learning_parts: Vec<String> = Vec::new();
+        if let Some(ref learnings) = self.learnings_content {
+            learning_parts.push(learnings.clone());
+        }
+        if let Some(ref global) = self.global_learnings_content {
+            learning_parts.push(global.clone());
+        }
+        let learnings_present = !learning_parts.is_empty();
         if let Some(ref lib) = self.skill_library {
             let matching = lib.matching_skills(&bead.labels, &bead.title);
             if !matching.is_empty() {
-                let skill_content = SkillLibrary::to_prompt_content(&matching);
-                context_parts.push(skill_content);
+                learning_parts.push(SkillLibrary::to_prompt_content(&matching));
             }
+        }
+        let learning_blob = cap_learning_context(
+            learning_parts
+                .into_iter()
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+            self.learning_context_cap,
+        );
+
+        let mut context_parts: Vec<String> = Vec::new();
+        if file_sections.is_empty() && !learnings_present {
+            context_parts.push("(no context files found)".to_string());
+        } else {
+            context_parts.extend(file_sections);
+        }
+        if !learning_blob.is_empty() {
+            context_parts.push(learning_blob);
         }
         let context_file_contents = context_parts
             .into_iter()
@@ -1103,14 +1153,14 @@ impl PromptBuilder {
         self.templates.keys().map(|s| s.as_str())
     }
 
-    /// Load and concatenate context files from the workspace.
+    /// Load the configured context files from the workspace, one section per
+    /// file, each prefixed with a header showing the file path.
     ///
-    /// Each file is prefixed with a header showing the file path.
-    /// Missing files are silently skipped.
-    fn load_context_files(&self, workspace: &Path) -> String {
+    /// Missing files are silently skipped. Learning-derived context is
+    /// assembled separately in `build_with_vars` so it can be capped.
+    fn load_context_file_sections(&self, workspace: &Path) -> Vec<String> {
         let mut sections = Vec::new();
 
-        // Load configured context files
         for rel_path in &self.context_file_paths {
             let abs_path = workspace.join(rel_path);
             match std::fs::read_to_string(&abs_path) {
@@ -1127,21 +1177,7 @@ impl PromptBuilder {
             }
         }
 
-        // Append workspace learnings if available
-        if let Some(ref learnings) = self.learnings_content {
-            sections.push(learnings.clone());
-        }
-
-        // Append global learnings after workspace learnings (cross-workspace patterns)
-        if let Some(ref global) = self.global_learnings_content {
-            sections.push(global.clone());
-        }
-
-        if sections.is_empty() {
-            "(no context files found)".to_string()
-        } else {
-            sections.join("\n\n")
-        }
+        sections
     }
 
     /// Select the variant version for a given template and worker.
@@ -1193,6 +1229,27 @@ impl PromptBuilder {
 // ──────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ──────────────────────────────────────────────────────────────────────────────
+
+/// Truncate learning-derived prompt context to `cap` bytes (on a char
+/// boundary), appending a visible marker so the agent knows the tail was cut.
+/// `None` leaves the text untouched.
+fn cap_learning_context(text: String, cap: Option<usize>) -> String {
+    let Some(cap) = cap else {
+        return text;
+    };
+    if text.len() <= cap {
+        return text;
+    }
+    let mut cut = cap;
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let mut truncated = text[..cut].trim_end().to_string();
+    truncated.push_str(&format!(
+        "\n\n(learning context truncated to {cap} bytes — see strands.learning.max_learning_context_bytes)"
+    ));
+    truncated
+}
 
 /// Compute the worker's variant bucket: `hash(worker_id) % 100` in `[0, 99]`.
 ///
@@ -1366,6 +1423,124 @@ mod tests {
             result.content.contains("needle-abc"),
             "prompt must contain bead ID"
         );
+    }
+
+    /// Write a legacy `.beads/learnings.md` with one entry into `workspace`.
+    fn seed_legacy_learnings(workspace: &Path, observation: &str) {
+        std::fs::create_dir_all(workspace.join(".beads")).unwrap();
+        let mut file = crate::learning::LearningsFile::load(workspace).unwrap();
+        file.add_entry(crate::learning::LearningEntry::new(
+            "nd-legacy".to_string(),
+            "test-worker".to_string(),
+            crate::learning::BeadType::Other,
+            observation.to_string(),
+            crate::learning::Confidence::High,
+            "transcript".to_string(),
+        ))
+        .unwrap();
+    }
+
+    #[test]
+    fn default_workspace_builder_injects_no_legacy_learnings() {
+        // N-T15 acceptance: with default config a built prompt contains
+        // neither the workspace learnings section nor global learnings.
+        let dir = tempfile::tempdir().unwrap();
+        seed_legacy_learnings(dir.path(), "Read -> File read successfully (83905 bytes)");
+        let config = PromptConfig::default();
+        let builder = PromptBuilder::with_workspace(&config, dir.path()).unwrap();
+        let bead = test_bead();
+
+        let result = builder.build_pluck(&bead, dir.path(), "worker-01").unwrap();
+
+        assert!(
+            !result.content.contains("## Workspace Learnings"),
+            "{}",
+            result.content
+        );
+        assert!(!result.content.contains("File read successfully"));
+        assert!(result.content.contains("(no context files found)"));
+    }
+
+    #[test]
+    fn legacy_learnings_flag_restores_the_old_injection_byte_for_byte() {
+        // N-T15 acceptance: with inject_legacy_learnings the old behaviour is
+        // byte-identical to what `load_context_files` produced before.
+        let dir = tempfile::tempdir().unwrap();
+        seed_legacy_learnings(dir.path(), "prefer cargo nextest for flaky suites");
+        let config = PromptConfig::default();
+        let bead = test_bead();
+
+        let legacy = PromptBuilder::with_workspace(&config, dir.path())
+            .unwrap()
+            .with_legacy_learnings(dir.path())
+            .build_pluck(&bead, dir.path(), "worker-01")
+            .unwrap();
+
+        // The pre-N-T15 rendering: the learnings section stands alone in the
+        // context slot, with no placeholder and nothing after it.
+        let expected_section = crate::learning::LearningsFile::load(dir.path())
+            .unwrap()
+            .to_prompt_content();
+        let expected = DEFAULT_PLUCK_TEMPLATE
+            .replace("{bead_id}", "needle-abc")
+            .replace("{bead_title}", &bead.title)
+            .replace("{bead_body}", bead.body.as_deref().unwrap())
+            .replace("{bead_comments}", "")
+            .replace("{workspace_path}", &dir.path().display().to_string())
+            .replace("{context_file_contents}", &expected_section)
+            .replace("{workspace_instructions}", "(no workspace instructions)")
+            .replace("{worker_id}", "worker-01")
+            .replace("{bead_cli}", "bead")
+            .replace(
+                "{dep_add_command}",
+                "bead dep add <blocked-id> <blocker-id> --kind blocks",
+            );
+        assert_eq!(legacy.content, expected);
+        assert!(legacy.content.contains("## Workspace Learnings"));
+        assert!(!legacy.content.contains("(no context files found)"));
+    }
+
+    #[test]
+    fn learning_context_is_capped_but_context_files_are_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let long = "x".repeat(4000);
+        seed_legacy_learnings(dir.path(), &long);
+        std::fs::write(dir.path().join("AGENTS.md"), "y".repeat(3000)).unwrap();
+        let config = PromptConfig {
+            context_files: vec![PathBuf::from("AGENTS.md")],
+            ..PromptConfig::default()
+        };
+        let bead = test_bead();
+
+        let result = PromptBuilder::with_workspace(&config, dir.path())
+            .unwrap()
+            .with_legacy_learnings(dir.path())
+            .with_learning_context_cap(512)
+            .build_pluck(&bead, dir.path(), "worker-01")
+            .unwrap();
+
+        assert!(
+            result.content.contains(&"y".repeat(3000)),
+            "context file kept whole"
+        );
+        assert!(
+            !result.content.contains(&"x".repeat(4000)),
+            "learnings truncated"
+        );
+        assert!(result
+            .content
+            .contains("learning context truncated to 512 bytes"));
+        assert!(result.content.contains("## Workspace Learnings"));
+    }
+
+    #[test]
+    fn cap_learning_context_respects_char_boundaries() {
+        let text = "é".repeat(100);
+        let capped = cap_learning_context(text, Some(101));
+        assert!(capped.starts_with(&"é".repeat(50)));
+        assert!(capped.contains("truncated to 101 bytes"));
+        assert_eq!(cap_learning_context("short".to_string(), Some(10)), "short");
+        assert_eq!(cap_learning_context("abc".to_string(), None), "abc");
     }
 
     #[test]

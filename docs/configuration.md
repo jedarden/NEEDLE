@@ -784,6 +784,40 @@ strands:
         command: cargo clippy --all-targets -- -D warnings
 ```
 
+### Reflect and Learning Context (legacy, off by default)
+
+Since N-T15 (plan section 4.4 step 0, ADR-026) the legacy Reflect
+consolidator and everything it feeds are **off by default**. Its output —
+`.beads/learnings.md`, `.beads/skills/`, decision and drift files — is
+count-reinforced transcript scrape, which ADR-026 classifies as candidate
+input rather than validated knowledge. A default-configured worker therefore:
+
+- runs no Reflect pass (`strands.reflect.enabled: false`);
+- builds prompts with **no** `## Workspace Learnings` or global-learnings
+  section (`strands.learning.inject_legacy_learnings: false`);
+- never writes to CLAUDE.md, and on boot strips any marker-fenced
+  `<!-- needle-learning:* -->` block a previous placer run left there
+  (`strands.reflect.claude_md_placement: false`) — text outside the markers
+  is never touched;
+- caps whatever learning-derived context it does inject (matched skills, or
+  the legacy files when opted back in) at
+  `strands.learning.max_learning_context_bytes` (default 8192). Configured
+  `prompt.context_files` are operator policy and are never truncated.
+
+The files on disk are left in place as the untrusted candidate corpus for the
+N-T13 migration. To restore the pre-N-T15 behaviour byte-for-byte:
+
+```yaml
+strands:
+  reflect:
+    enabled: true
+    drift_enabled: true
+    claude_md_placement: true
+  learning:
+    inject_legacy_learnings: true
+    max_learning_context_bytes: 1000000
+```
+
 ---
 
 ## Telemetry Configuration

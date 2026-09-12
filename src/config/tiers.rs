@@ -306,6 +306,15 @@ static TIER_TABLE: &[(&str, ReloadTier)] = &[
         "strands.learning.trace_retention_success_days",
         ReloadTier::Rebuild,
     ),
+    // Learning context injection is read when the PromptBuilder is built.
+    (
+        "strands.learning.inject_legacy_learnings",
+        ReloadTier::Rebuild,
+    ),
+    (
+        "strands.learning.max_learning_context_bytes",
+        ReloadTier::Rebuild,
+    ),
     // Mitosis (live)
     ("strands.mitosis.enabled", ReloadTier::Live),
     ("strands.mitosis.first_failure_only", ReloadTier::Live),
