@@ -746,6 +746,11 @@ pub struct Worker {
     /// Cached attempt-ledger aggregates for evidence routing and canary
     /// evaluation, refreshed at most every `refresh_secs` (N-T18/N-T19).
     ledger_cache: std::sync::Mutex<Option<LedgerCache>>,
+    /// The evidence-routing choice for the bead currently in flight:
+    /// `(bead, chosen adapter, rule tag)`. Resolution runs more than once per
+    /// cycle and exploration is randomized, so the first choice sticks for
+    /// the whole attempt.
+    evidence_choice: std::sync::Mutex<Option<(BeadId, String, String)>>,
     retry_count: u32,
     consecutive_race_lost: u32,
     beads_processed: u64,
@@ -1190,6 +1195,7 @@ impl Worker {
             race_lost_exclusions: Vec::new(),
             race_lost_this_cycle: HashSet::new(),
             ledger_cache: std::sync::Mutex::new(None),
+            evidence_choice: std::sync::Mutex::new(None),
             retry_count: 0,
             consecutive_race_lost: 0,
             beads_processed,
@@ -7215,6 +7221,19 @@ impl Worker {
         if !config.enabled || config.candidates.is_empty() {
             return (static_adapter, matched_rule);
         }
+        // One choice per attempt: a later resolution for the same bead
+        // (prompt build, then dispatch) must see what the first one chose.
+        if let Some(id) = bead_id {
+            let sticky = self
+                .evidence_choice
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some((bead, chosen, rule)) = sticky.as_ref() {
+                if bead == id {
+                    return (chosen.clone(), rule.clone());
+                }
+            }
+        }
         let cache = self.ledger_snapshot();
         let degraded: std::collections::HashSet<String> =
             crate::provider_health::degraded_adapters()
@@ -7284,7 +7303,7 @@ impl Worker {
                 chrono::Utc::now(),
             );
         }
-        if chosen != static_adapter {
+        let result = if chosen != static_adapter {
             tracing::info!(
                 static_adapter = %static_adapter,
                 chosen_adapter = %chosen,
@@ -7295,7 +7314,15 @@ impl Worker {
             (chosen, format!("evidence:{}", choice.reason))
         } else {
             (static_adapter, matched_rule)
+        };
+        if let Some(id) = bead_id {
+            *self
+                .evidence_choice
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) =
+                Some((id.clone(), result.0.clone(), result.1.clone()));
         }
+        result
     }
 
     /// Apply routing rules to determine the final adapter.
