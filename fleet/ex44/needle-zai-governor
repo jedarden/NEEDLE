@@ -4,7 +4,9 @@
 # silently disable a pinned base route.
 set -euo pipefail
 
-ELASTIC_UNITS=(glm-roam-18 glm-roam-19 glm-roam-20 glm-icg)
+# Keep the pinned ICG route first: the floor therefore always preserves route
+# coverage, while pressure sheds general-purpose roamers before pinned work.
+ELASTIC_UNITS=(glm-icg glm-roam-18 glm-roam-19 glm-roam-20)
 FLOOR=1
 CEILING=${#ELASTIC_UNITS[@]}
 HIGH_429_COUNT=3

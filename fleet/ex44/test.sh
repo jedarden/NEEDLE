@@ -22,7 +22,7 @@ grep -qx 'FLEET_ELIGIBLE_MINIMUM=42' "$SRC_DIR/backlog-policy.env"
 grep -qx 'ELIGIBLE_TARGET_PER_WORKER=4' "$SRC_DIR/backlog-policy.env"
 grep -qx 'ELIGIBLE_MINIMUM_PER_WORKER=2' "$SRC_DIR/backlog-policy.env"
 grep -q 'Environment=PATH=.*/home/coding/.local/bin' "$SRC_DIR/needle-backlog-slo.service"
-grep -qx 'ELASTIC_UNITS=(glm-roam-18 glm-roam-19 glm-roam-20 glm-icg)' "$SRC_DIR/needle-zai-governor"
+grep -qx 'ELASTIC_UNITS=(glm-icg glm-roam-18 glm-roam-19 glm-roam-20)' "$SRC_DIR/needle-zai-governor"
 grep -qx 'HIGH_429_COUNT=3' "$SRC_DIR/needle-zai-governor"
 
 fleet_policy_line=$(grep -n 'EnvironmentFile=%h/.config/needle/fleet-policy.env' "$SRC_DIR/needle-worker@.service" | cut -d: -f1)
