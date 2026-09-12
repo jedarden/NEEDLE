@@ -296,7 +296,11 @@ pub struct OutcomeHandler {
     /// Attempt ID of the `attempt.resolved` row this handler already emitted
     /// for the attempt in flight, if any. The exactly-once guard: the wrapper
     /// paths that end a dispatch without reaching one of `handle`'s terminal
-    /// sub-handlers consult it before emitting their own row.
+    /// sub-handlers consult it before emitting their own row. Cleared when a
+    /// new attempt is recorded ([`Self::set_attempt_context`]) — the guard
+    /// answers "has *this* dispatch resolved?", never "has any dispatch ever
+    /// resolved through this handler?", which would deny every later
+    /// wrapper-path dispatch its row.
     ledger_row_emitted: Arc<std::sync::Mutex<Option<String>>>,
 }
 
@@ -313,8 +317,16 @@ impl OutcomeHandler {
     /// Record the dispatch context for the attempt about to be resolved.
     ///
     /// Called by the worker each cycle once execution has finished; the next
-    /// [`OutcomeHandler::handle`] call consumes it.
+    /// [`OutcomeHandler::handle`] call consumes it. This is also the point
+    /// where the exactly-once guard resets: the handler outlives every cycle
+    /// it serves, so a guard left set by a previous dispatch would make
+    /// [`Self::emit_unresolved_terminal_row`] skip a dispatch that has not
+    /// resolved at all.
     pub fn set_attempt_context(&self, context: AttemptContext) {
+        *self
+            .ledger_row_emitted
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         *self
             .attempt_context
             .lock()
@@ -5233,16 +5245,22 @@ mod tests {
         // (label, exit code, interrupted, verification commands). The exit
         // codes and the gate configuration each select a different
         // sub-handler: success and gate_failure (gate ran and rejected)
-        // arrive via exit 0. The gate_error sub-handler (gate could not run)
-        // has no entry here because it is currently unreachable through
-        // handle(): CommandGate::validate flattens its GateReport through
-        // to_gate_result, so an ExecutionError (a child that cannot even
-        // start) reaches the routing match as a plain Fail and lands in
-        // handle_gate_failure. Preserving the error kind through that
-        // flattening — and the question of whether sh exit 127 should count
-        // as an execution error at all (the aa-48a6e726 incident's shape) —
-        // is needle-3771863e's scope; when it lands, add the gate_error row
-        // here.
+        // arrive via exit 0.
+        //
+        // The gate_error sub-handler has no entry in this loop because it is
+        // not reachable through the exit-code classifications the loop
+        // drives: an ExecutionError in a CommandGate report is flattened to
+        // a plain Fail by to_gate_result before the routing match ever sees
+        // it (whether sh exit 127 should even count as an execution error —
+        // the aa-48a6e726 incident's shape — is needle-3771863e's scope).
+        // The route that DOES reach it through handle() is handle_success's
+        // shipped-work re-route, pinned by
+        // attempt_resolved_emitted_exactly_once_on_the_gate_error_path; its
+        // sibling re-route (the shipped-work gate ran and rejected the
+        // closure) is pinned by
+        // attempt_resolved_emitted_exactly_once_when_success_reroutes_to_gate_failure.
+        // The cancelled-before-start, handler-timeout and handler-error
+        // wrapper paths each have their own test below.
         let paths: Vec<(&str, i32, bool, Vec<String>)> = vec![
             ("success", 0, false, vec![]),
             ("gate_failure", 0, false, vec!["false".to_string()]),
@@ -5261,6 +5279,181 @@ mod tests {
                 "terminal path {label} must emit exactly one attempt.resolved, got {rows:?}"
             );
         }
+    }
+
+    /// The eighth terminal path: a dispatch whose work was never judged
+    /// because the shipped-work gate could not run (no upstream configured —
+    /// GitHub issue #18) reaches `handle_gate_error` through `handle_success`'s
+    /// re-route, and still resolves to exactly one ledger row. This is the
+    /// only route through `handle()` that reaches `handle_gate_error` today:
+    /// the `Outcome::Failure` arm's report scan never sees an ExecutionError,
+    /// because `CommandGate::validate` flattens the error kind into a plain
+    /// Fail before the routing match (needle-3771863e owns preserving it).
+    #[tokio::test]
+    async fn attempt_resolved_emitted_exactly_once_on_the_gate_error_path() {
+        let (_env, _home) = isolated_home();
+
+        // A real repo with a substantial new commit and NO upstream: exactly
+        // the shape the shipped-work gate cannot judge.
+        let repo = tempfile::TempDir::new().unwrap();
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .output()
+                .unwrap()
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "test@example.com"]);
+        run(&["config", "user.name", "test"]);
+        std::fs::write(repo.path().join("README.md"), "init\n").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "init"]);
+        let pre_sha = String::from_utf8(run(&["rev-parse", "HEAD"]).stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+        std::fs::write(repo.path().join("src.rs"), "fn main() {}\n").unwrap();
+        run(&["add", "-A"]);
+        run(&["commit", "-q", "-m", "real work"]);
+        // No remote, no `push -u` — `@{u}` does not resolve.
+
+        // The dispatch baseline: HEAD was pre_sha, notes were empty.
+        let mut bead = test_bead(BeadStatus::InProgress);
+        bead.workspace = repo.path().to_path_buf();
+        let snapshot = crate::validation::predispatch::PreDispatch {
+            head_sha: Some(pre_sha),
+            notes_hash: Some(crate::validation::predispatch::hash_notes("")),
+            dirty_files: Vec::new(),
+            captured_at: None,
+        };
+        let snap_path = crate::validation::predispatch::snapshot_path(repo.path(), &bead.id);
+        std::fs::create_dir_all(snap_path.parent().unwrap()).unwrap();
+        std::fs::write(&snap_path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+
+        let mut config = Config::default();
+        config.worker.enforce_shipped_work = true;
+        let helper = crate::telemetry::test_utils::TestHelper::new("ledger-row-test");
+        let attempt_id = uuid::Uuid::now_v7().to_string();
+        helper.telemetry().set_attempt_id(attempt_id.clone());
+        let handler = OutcomeHandler::new(config, helper.telemetry().clone());
+        handler.set_attempt_context(AttemptContext::default());
+        let store = test_store(BeadStatus::Done);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+
+        // Route identity: handle_success re-routed into handle_gate_error —
+        // released without burning the retry counter, gate.execution_error
+        // emitted — not into handle_gate_failure.
+        assert_eq!(result.bead_action, BeadAction::Released);
+        helper.sync().await;
+        assert!(
+            !helper.events_by_type("gate.execution_error").is_empty(),
+            "the dispatch must have taken the gate_error route"
+        );
+
+        let rows = helper.events_by_type("attempt.resolved");
+        assert_eq!(
+            rows.len(),
+            1,
+            "the gate_error path must emit exactly one attempt.resolved, got {rows:?}"
+        );
+        assert_eq!(rows[0].data["attempt_id"], attempt_id);
+        assert_row_satisfies_v1_contract("gate_error path", &rows[0]);
+    }
+
+    /// The re-route the single emission point exists for: `handle_success`
+    /// classifies the dispatch as verified (exit 0, no configured gate
+    /// objected) and only then discovers the shipped-work gate rejects the
+    /// closure, re-routing into `handle_gate_failure` from inside the success
+    /// arm. The row is emitted once, after the routing match — this pins that
+    /// a sub-handler reached through a re-route fires it exactly once, never
+    /// twice.
+    #[tokio::test]
+    async fn attempt_resolved_emitted_exactly_once_when_success_reroutes_to_gate_failure() {
+        let (_env, _home) = isolated_home();
+
+        // A real repo WITH an upstream, carrying a substantial unpushed
+        // commit: the shipped-work gate can run here, and it rejects.
+        let repo = tempfile::TempDir::new().unwrap();
+        let remote = tempfile::TempDir::new().unwrap();
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(repo.path())
+                .output()
+                .unwrap()
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "test@example.com"]);
+        run(&["config", "user.name", "test"]);
+        std::fs::write(repo.path().join("README.md"), "init\n").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-q", "-m", "init"]);
+        let pre_sha = String::from_utf8(run(&["rev-parse", "HEAD"]).stdout)
+            .unwrap()
+            .trim()
+            .to_string();
+        run(&["init", "-q", "--bare", remote.path().to_str().unwrap()]);
+        run(&["remote", "add", "origin", remote.path().to_str().unwrap()]);
+        run(&["push", "-q", "-u", "origin", "HEAD"]);
+        std::fs::write(repo.path().join("src.rs"), "fn main() {}\n").unwrap();
+        run(&["add", "-A"]);
+        run(&["commit", "-q", "-m", "unpushed work"]);
+
+        // The dispatch baseline: HEAD was pre_sha, notes were empty.
+        let mut bead = test_bead(BeadStatus::InProgress);
+        bead.workspace = repo.path().to_path_buf();
+        let snapshot = crate::validation::predispatch::PreDispatch {
+            head_sha: Some(pre_sha),
+            notes_hash: Some(crate::validation::predispatch::hash_notes("")),
+            dirty_files: Vec::new(),
+            captured_at: None,
+        };
+        let snap_path = crate::validation::predispatch::snapshot_path(repo.path(), &bead.id);
+        std::fs::create_dir_all(snap_path.parent().unwrap()).unwrap();
+        std::fs::write(&snap_path, serde_json::to_vec(&snapshot).unwrap()).unwrap();
+
+        let mut config = Config::default();
+        config.worker.enforce_shipped_work = true;
+        let helper = crate::telemetry::test_utils::TestHelper::new("ledger-row-test");
+        let attempt_id = uuid::Uuid::now_v7().to_string();
+        helper.telemetry().set_attempt_id(attempt_id.clone());
+        let handler = OutcomeHandler::new(config, helper.telemetry().clone());
+        handler.set_attempt_context(AttemptContext::default());
+        let store = test_store(BeadStatus::Done);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+
+        // Route identity: handle_gate_failure released AND burned the retry
+        // counter — the mirror image of the gate_error route above.
+        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(
+            store.actions().iter().any(
+                |a| matches!(a, StoreAction::AddLabel(_, label) if label == "failure-count:1")
+            ),
+            "a shipped-work gate that ran and rejected must increment the failure count"
+        );
+        helper.sync().await;
+        assert!(
+            helper.events_by_type("gate.execution_error").is_empty(),
+            "a gate that ran and rejected is a gate failure, not an execution error"
+        );
+
+        let rows = helper.events_by_type("attempt.resolved");
+        assert_eq!(
+            rows.len(),
+            1,
+            "the re-routed gate_failure must emit exactly one attempt.resolved, got {rows:?}"
+        );
+        assert_eq!(rows[0].data["attempt_id"], attempt_id);
+        assert_row_satisfies_v1_contract("success→gate_failure re-route", &rows[0]);
     }
 
     /// Exit 0 means nothing on its own: when verification ran and rejected
@@ -5463,5 +5656,202 @@ mod tests {
         );
         assert_eq!(rows[0].data["attempt_id"], attempt_id);
         assert_row_satisfies_v1_contract("handler error", &rows[0]);
+    }
+
+    /// The emit-failure fallthrough: when the ledger row's own emission is
+    /// lost (the telemetry writer died mid-dispatch), the dispatch still
+    /// completes, and a wrapper fallback firing afterwards must NOT
+    /// compensate with a second row. The guard is recorded before the
+    /// emission, so a dispatch that resolved — even to a row that was then
+    /// lost — can never emit twice. Compensation would be worse than the
+    /// loss: the fallback's `infrastructure_failure` verdict would misreport
+    /// a dispatch whose work WAS judged. Also pins the guard's other half on
+    /// a live transport (no fallback emission after a resolved dispatch) and
+    /// that the next dispatch emits normally — a lost row must not wedge the
+    /// ledger.
+    #[tokio::test]
+    async fn attempt_resolved_fallthrough_keeps_exactly_once_when_the_emit_fails() {
+        let (_guard, _home) = isolated_home();
+        let mut config = Config::default();
+        config.worker.enforce_shipped_work = false;
+        let helper = crate::telemetry::test_utils::TestHelper::new("ledger-row-test");
+        let handler = OutcomeHandler::new(config, helper.telemetry().clone());
+        handler.set_attempt_context(AttemptContext::default());
+        let store = test_store(BeadStatus::InProgress);
+        let bead = test_bead(BeadStatus::InProgress);
+
+        // Dispatch A: the transport dies before the row is written. The
+        // handler itself must not fail — losing the row surfaces in the
+        // telemetry layer, not as a dispatch error.
+        let result = {
+            let _dead = helper.telemetry().disconnected_transport_for_testing();
+            handler
+                .handle(&store, &bead, &test_output(1), false)
+                .await
+                .unwrap()
+        };
+        assert_eq!(result.bead_action, BeadAction::Released);
+        helper.sync().await;
+        assert_eq!(
+            helper.events_by_type("attempt.resolved").len(),
+            0,
+            "the transport was down: dispatch A's row was lost"
+        );
+
+        // The wrapper fallback for dispatch A fires anyway (the handler-
+        // timeout race can land in exactly this state: the primary emission
+        // ran, the fallback cannot know whether its row survived). It must
+        // stay silent — the dispatch already resolved.
+        handler.emit_unresolved_terminal_row(
+            &bead,
+            &test_output(1),
+            "Errored",
+            "infrastructure_failure",
+            "outcome_handler_error",
+        );
+        helper.sync().await;
+        assert_eq!(
+            helper.events_by_type("attempt.resolved").len(),
+            0,
+            "a dispatch that resolved must never emit a second row, not even \
+             after its first row was lost"
+        );
+
+        // Dispatch B, transport restored: the ledger emits normally again.
+        let result = handler
+            .handle(&store, &bead, &test_output(1), false)
+            .await
+            .unwrap();
+        assert_eq!(result.bead_action, BeadAction::Released);
+        helper.sync().await;
+        assert_eq!(
+            helper.events_by_type("attempt.resolved").len(),
+            1,
+            "the next dispatch after a lost row emits exactly one row"
+        );
+
+        // And the fallback stays silent for a dispatch whose row is alive —
+        // the guard-after-success half of the same pin.
+        handler.emit_unresolved_terminal_row(
+            &bead,
+            &test_output(1),
+            "Errored",
+            "infrastructure_failure",
+            "outcome_handler_error",
+        );
+        helper.sync().await;
+        assert_eq!(
+            helper.events_by_type("attempt.resolved").len(),
+            1,
+            "no fallback emission may follow a dispatch that resolved to a live row"
+        );
+    }
+
+    /// The exactly-once guard is per dispatch, not per handler. The worker
+    /// reuses one `OutcomeHandler` across every cycle it serves, and records
+    /// the next dispatch's context (`set_attempt_context`) once the previous
+    /// cycle is long gone — so a guard left set by a resolved dispatch must
+    /// not silence the wrapper fallbacks of the dispatches after it. Before
+    /// the guard reset lived in `set_attempt_context`, the first resolved
+    /// dispatch permanently disarmed all three wrapper paths: every later
+    /// cancelled-before-start, handler-error or handler-timeout dispatch in
+    /// that worker process ended with NO ledger row at all. The same pin in
+    /// reverse — a wrapper-path dispatch must not double when its own row
+    /// already fired — is held by the fallthrough test above.
+    #[tokio::test]
+    async fn a_resolved_dispatch_does_not_silence_the_next_dispatchs_wrapper_paths() {
+        let (_guard, _home) = isolated_home();
+        let mut config = Config::default();
+        config.worker.enforce_shipped_work = false;
+        // Long enough that the first three cycles never race it, short enough
+        // that the fourth cycle's 2s `show()` triggers the handler timeout.
+        config.validation.outcome_timeout_seconds = 1;
+        let helper = crate::telemetry::test_utils::TestHelper::new("ledger-row-test");
+        let handler = OutcomeHandler::new(config, helper.telemetry().clone());
+        let bead = test_bead(BeadStatus::InProgress);
+        let not_cancelled = Arc::new(AtomicBool::new(false));
+
+        // Cycle 1 resolves normally: a work failure releases the bead and
+        // emits the row — and sets the guard this test exists to exonerate.
+        handler.set_attempt_context(AttemptContext::default());
+        let store = test_store(BeadStatus::InProgress);
+        let result = handler
+            .handle(&store, &bead, &test_output(1), false)
+            .await
+            .unwrap();
+        assert_eq!(result.bead_action, BeadAction::Released);
+        helper.sync().await;
+        let rows = helper.events_by_type("attempt.resolved");
+        assert_eq!(rows.len(), 1, "cycle 1 resolved to one row, got {rows:?}");
+        assert_eq!(rows[0].data["outcome"], "work_failure");
+
+        // Cycle 2 is cancelled before its handler starts. It is still
+        // terminal: it must get its own row despite cycle 1 having resolved.
+        handler.set_attempt_context(AttemptContext::default());
+        let cancelled = Arc::new(AtomicBool::new(true));
+        let _ = handler
+            .handle_with_cancellation(
+                &test_store(BeadStatus::InProgress),
+                &bead,
+                &test_output(0),
+                false,
+                cancelled,
+            )
+            .await
+            .unwrap();
+        helper.sync().await;
+        let rows = helper.events_by_type("attempt.resolved");
+        assert_eq!(
+            rows.len(),
+            2,
+            "a cancelled dispatch after a resolved one still gets its own row, got {rows:?}"
+        );
+        assert_eq!(rows[1].data["outcome"], "cancelled");
+        assert_row_satisfies_v1_contract("cancelled after resolved", &rows[1]);
+
+        // Cycle 3 dies inside its handler (the completion flush fails). Its
+        // `handle` never reached its own emission, so the wrapper fallback
+        // must fire — the stale guard must not eat it.
+        handler.set_attempt_context(AttemptContext::default());
+        let mut store = test_store(BeadStatus::Done);
+        store.fail_flush = true;
+        let result = handler
+            .handle_with_cancellation(&store, &bead, &test_output(0), false, not_cancelled.clone())
+            .await;
+        assert!(
+            result.is_err(),
+            "the failing flush must surface as an error"
+        );
+        helper.sync().await;
+        let rows = helper.events_by_type("attempt.resolved");
+        assert_eq!(
+            rows.len(),
+            3,
+            "an errored dispatch after a resolved one still gets its own row, got {rows:?}"
+        );
+        assert_eq!(rows[2].data["outcome"], "infrastructure_failure");
+        assert_eq!(rows[2].data["terminal_reason"], "outcome_handler_error");
+        assert_row_satisfies_v1_contract("errored after resolved", &rows[2]);
+
+        // Cycle 4 is torn down by the handler timeout. The aborted `handle`
+        // never emitted, so the timeout fallback must fire for it.
+        handler.set_attempt_context(AttemptContext::default());
+        let slow = SlowShowStore {
+            inner: MockBeadStore::new(BeadStatus::Done),
+        };
+        let _ = handler
+            .handle_with_cancellation(&slow, &bead, &test_output(0), false, not_cancelled)
+            .await
+            .unwrap();
+        helper.sync().await;
+        let rows = helper.events_by_type("attempt.resolved");
+        assert_eq!(
+            rows.len(),
+            4,
+            "a timed-out dispatch after a resolved one still gets its own row, got {rows:?}"
+        );
+        assert_eq!(rows[3].data["outcome"], "indeterminate");
+        assert_eq!(rows[3].data["terminal_reason"], "outcome_handler_timeout");
+        assert_row_satisfies_v1_contract("timed out after resolved", &rows[3]);
     }
 }

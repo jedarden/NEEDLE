@@ -4273,6 +4273,25 @@ impl Sink for HookSink {
 
 // ─── Telemetry emitter ───────────────────────────────────────────────────────
 
+/// Restores the writer channel that
+/// [`Telemetry::disconnected_transport_for_testing`] swapped out when dropped.
+#[cfg(test)]
+pub(crate) struct DisconnectedTransport<'a> {
+    telemetry: &'a Telemetry,
+    original: Option<mpsc::UnboundedSender<WriterMessage>>,
+}
+
+#[cfg(test)]
+impl Drop for DisconnectedTransport<'_> {
+    fn drop(&mut self) {
+        *self
+            .telemetry
+            .sender
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = self.original.take();
+    }
+}
+
 /// Non-blocking telemetry emitter.
 ///
 /// Cloning a `Telemetry` handle is cheap — it shares the same background
@@ -4811,6 +4830,23 @@ impl Telemetry {
         }
     }
 
+    /// Test support: replace the writer channel with one whose receiver is
+    /// already dropped, so every `send` fails and `emit_try_lock` reports the
+    /// transport as disconnected — the shape of a writer that died while the
+    /// emitter (and its clones) stayed alive. The original channel — whose
+    /// writer task is untouched — is restored when the returned guard is
+    /// dropped.
+    #[cfg(test)]
+    pub(crate) fn disconnected_transport_for_testing(&self) -> DisconnectedTransport<'_> {
+        let (sender, receiver) = mpsc::unbounded_channel::<WriterMessage>();
+        drop(receiver);
+        let original = (*self.sender.lock().unwrap_or_else(|e| e.into_inner())).replace(sender);
+        DisconnectedTransport {
+            telemetry: self,
+            original,
+        }
+    }
+
     /// Replace the sinks owned by the background writer.
     ///
     /// The replacement is sent through the same FIFO channel as events. This
@@ -4990,7 +5026,11 @@ impl Telemetry {
     /// Emit an event without blocking — uses try_lock() instead of lock().
     ///
     /// Returns `Ok(())` if emitted successfully or if the lock is contended
-    /// (gracefully degrades). Returns `Err` only if the channel is disconnected.
+    /// (gracefully degrades). Returns `Err` only if the channel is disconnected
+    /// — the writer is gone, so the event is *lost*, not skipped, and the
+    /// caller (the attempt.resolved ledger emission) can surface that loss.
+    /// A deliberate `shutdown()` — sender dropped, `None` in the cell — still
+    /// degrades to `Ok(())`: that is an ordered stop, not a failure.
     ///
     /// Use this in timeout recovery paths where blocking on emit() would
     /// prevent the worker from recovering.
@@ -5002,10 +5042,11 @@ impl Telemetry {
         // Ok(()) to allow the worker to continue.
         match self.sender.try_lock() {
             Ok(guard) => {
-                if let Some(ref s) = *guard {
-                    s.send(WriterMessage::Event(event)).ok();
-                }
-                Ok(())
+                let Some(ref s) = *guard else {
+                    return Ok(()); // shutdown closed the channel deliberately
+                };
+                s.send(WriterMessage::Event(event))
+                    .map_err(|_| anyhow::anyhow!("telemetry writer channel is disconnected"))
             }
             Err(_) => {
                 tracing::warn!(
@@ -7198,6 +7239,54 @@ mod tests {
         drop(_guard);
         drop(telemetry);
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    /// A dead transport is a *loss*, not a skip: `emit_try_lock` must report
+    /// `Err` so the attempt.resolved ledger emission can surface that its row
+    /// died, while a deliberate `shutdown()` still degrades to `Ok(())` — an
+    /// ordered stop is not a failure. And a transport restored by dropping
+    /// [`Telemetry::disconnected_transport_for_testing`]'s guard carries
+    /// events again: swapping the channel must not wedge the emitter.
+    #[tokio::test]
+    async fn emit_try_lock_distinguishes_a_dead_transport_from_shutdown() {
+        let (sink, events) = MemorySink::new();
+        let telemetry = Telemetry::with_sink("test-try-lock-dead".to_string(), sink);
+
+        // Disconnected transport: the receiver is gone, so the send fails and
+        // the loss is reported.
+        {
+            let _dead = telemetry.disconnected_transport_for_testing();
+            let result = telemetry.emit_try_lock(EventKind::QueueEmpty, Utc::now());
+            assert!(
+                result.is_err(),
+                "a dead transport must report the event as lost, got {result:?}"
+            );
+        }
+
+        // The guard dropped: the original channel is back and delivering.
+        telemetry
+            .emit_try_lock(EventKind::QueueEmpty, Utc::now())
+            .unwrap();
+
+        // A deliberate shutdown puts `None` in the sender cell — that is an
+        // ordered stop and must degrade to Ok(()) exactly as before.
+        *telemetry.sender.lock().unwrap() = None;
+        let result = telemetry.emit_try_lock(EventKind::QueueEmpty, Utc::now());
+        assert!(
+            result.is_ok(),
+            "shutdown is an ordered stop, not an emission failure, got {result:?}"
+        );
+
+        drop(telemetry);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let collected = events.lock().unwrap();
+        assert_eq!(
+            collected.len(),
+            1,
+            "only the post-restore emission reaches the sink, got {}",
+            collected.len()
+        );
     }
 
     #[tokio::test]
