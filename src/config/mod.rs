@@ -4758,7 +4758,13 @@ impl PulseConfig {
 /// them into learnings.md, and promotes high-frequency patterns to skill files.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReflectConfig {
-    /// Whether the Reflect strand is enabled (default: true).
+    /// Whether the legacy Reflect strand is enabled (default: **false** since
+    /// N-T15, plan section 4.4 step 0).
+    ///
+    /// The legacy consolidator reinforces observations by text similarity and
+    /// writes them to `.beads/learnings.md`, `.beads/skills/`, decision and
+    /// drift files. ADR-026 classifies that output as candidate input at
+    /// best; it is off by default until the evidence-gated replacement lands.
     #[serde(default = "ReflectConfig::default_enabled")]
     pub enabled: bool,
 
@@ -4814,7 +4820,8 @@ pub struct ReflectConfig {
     #[serde(default = "ReflectConfig::default_drift_similarity_threshold")]
     pub drift_similarity_threshold: f64,
 
-    /// Enable drift detection (default: true).
+    /// Enable drift detection (default: false since N-T15; the reports are
+    /// written to `.beads/drifts/` and read by nothing).
     #[serde(default = "ReflectConfig::default_drift_enabled")]
     pub drift_enabled: bool,
 
@@ -4822,7 +4829,11 @@ pub struct ReflectConfig {
     #[serde(default = "ReflectConfig::default_adr_enabled")]
     pub adr_enabled: bool,
 
-    /// Enable writing learnings to CLAUDE.md (default: true).
+    /// Enable writing learnings to CLAUDE.md (default: **false** since N-T15).
+    ///
+    /// CLAUDE.md is a top-authority policy file (ADR-027). When this is off,
+    /// a booting worker removes any marker-fenced `<!-- needle-learning:* -->`
+    /// block the placer wrote earlier and touches nothing outside the markers.
     #[serde(default = "ReflectConfig::default_claude_md_placement")]
     pub claude_md_placement: bool,
 }
@@ -4852,7 +4863,7 @@ impl Default for ReflectConfig {
 
 impl ReflectConfig {
     fn default_enabled() -> bool {
-        true
+        false
     }
     fn default_min_beads_since_last() -> usize {
         10
@@ -4885,13 +4896,13 @@ impl ReflectConfig {
         0.6
     }
     fn default_drift_enabled() -> bool {
-        true
+        false
     }
     fn default_adr_enabled() -> bool {
         true
     }
     fn default_claude_md_placement() -> bool {
-        true
+        false
     }
 }
 
@@ -5173,6 +5184,90 @@ pub struct LearningConfig {
     /// Cross-cutting lessons should be distilled; this cap keeps the file focused.
     #[serde(default = "LearningConfig::default_max_global_learnings")]
     pub max_global_learnings: usize,
+
+    /// Inject the legacy `.beads/learnings.md` and global learnings files into
+    /// every dispatch prompt (default: **false** since N-T15).
+    ///
+    /// The legacy files are count-reinforced transcript scrapes (ADR-026 calls
+    /// them candidate input, not validated knowledge). With this off a built
+    /// prompt carries no `## Workspace Learnings` section at all; the files
+    /// are left on disk untouched as the candidate corpus for N-T13.
+    #[serde(default)]
+    pub inject_legacy_learnings: bool,
+
+    /// Byte cap on learning-derived prompt context — workspace learnings,
+    /// global learnings and matched skills together (default: 8192).
+    ///
+    /// Configured `prompt.context_files` are operator policy and are never
+    /// truncated by this cap. Learning context was previously unbounded: the
+    /// NEEDLE workspace's own file reached 83 KB and was prepended verbatim
+    /// to every dispatch.
+    #[serde(default = "LearningConfig::default_max_learning_context_bytes")]
+    pub max_learning_context_bytes: usize,
+
+    /// What a retried bead's prompt is told about its previous attempts
+    /// (plan revision 31 leaf R3, `needle-60163eac`).
+    #[serde(default)]
+    pub failure_history: FailureHistoryConfig,
+}
+
+/// Per-bead attempt history shown to the next attempt.
+///
+/// Every resolved attempt is appended to
+/// `<workspace>/.beads/traces/<bead>/attempts.jsonl` and mirrored, bounded,
+/// into bead-rs structured data (namespace `needle-attempts`) so another host
+/// sees it. The newest few are rendered into the `{failure_history}` prompt
+/// variable of the pluck and split templates.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FailureHistoryConfig {
+    /// Record attempts and inject the history (default: true).
+    #[serde(default = "FailureHistoryConfig::default_enabled")]
+    pub enabled: bool,
+    /// Newest attempts rendered into the prompt (default: 3).
+    #[serde(default = "FailureHistoryConfig::default_max_attempts")]
+    pub max_attempts: usize,
+    /// Byte cap on the rendered section (default: 4000).
+    #[serde(default = "FailureHistoryConfig::default_max_bytes")]
+    pub max_bytes: usize,
+    /// Mirror the bounded history into bead-rs structured data (default:
+    /// true). Backends without a `data` command silently keep the local
+    /// journal only.
+    #[serde(default = "FailureHistoryConfig::default_sync_to_bead_data")]
+    pub sync_to_bead_data: bool,
+}
+
+impl Default for FailureHistoryConfig {
+    fn default() -> Self {
+        FailureHistoryConfig {
+            enabled: Self::default_enabled(),
+            max_attempts: Self::default_max_attempts(),
+            max_bytes: Self::default_max_bytes(),
+            sync_to_bead_data: Self::default_sync_to_bead_data(),
+        }
+    }
+}
+
+impl FailureHistoryConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+    fn default_max_attempts() -> usize {
+        3
+    }
+    fn default_max_bytes() -> usize {
+        4000
+    }
+    fn default_sync_to_bead_data() -> bool {
+        true
+    }
+
+    /// The renderer's limits.
+    pub fn limits(&self) -> crate::attempt_history::HistoryLimits {
+        crate::attempt_history::HistoryLimits {
+            max_attempts: self.max_attempts,
+            max_bytes: self.max_bytes,
+        }
+    }
 }
 
 impl Default for LearningConfig {
@@ -5184,6 +5279,9 @@ impl Default for LearningConfig {
             trace_sanitization: TraceSanitizationConfig::default(),
             global_learnings_file: Self::default_global_learnings_file(),
             max_global_learnings: Self::default_max_global_learnings(),
+            inject_legacy_learnings: false,
+            max_learning_context_bytes: Self::default_max_learning_context_bytes(),
+            failure_history: FailureHistoryConfig::default(),
         }
     }
 }
@@ -5191,6 +5289,10 @@ impl Default for LearningConfig {
 impl LearningConfig {
     fn default_trace_retention_failed() -> u32 {
         7
+    }
+
+    fn default_max_learning_context_bytes() -> usize {
+        8192
     }
 
     fn default_trace_retention_success() -> u32 {
@@ -10402,7 +10504,11 @@ strands:
     #[test]
     fn default_reflect_config_values() {
         let config = ReflectConfig::default();
-        assert!(config.enabled);
+        // N-T15: legacy Reflect, drift reports and CLAUDE.md placement are
+        // off until the evidence-gated replacement lands (plan 4.4 step 0).
+        assert!(!config.enabled);
+        assert!(!config.drift_enabled);
+        assert!(!config.claude_md_placement);
         assert_eq!(config.min_beads_since_last, 10);
         assert_eq!(config.cooldown_hours, 24);
         assert_eq!(config.max_learnings_per_run, 10);

@@ -1352,6 +1352,27 @@ pub trait BeadStore: Send + Sync {
         Ok(None)
     }
 
+    /// Attach a schema-governed JSON document to a bead under `namespace`
+    /// (bead-rs `data set`). Replaces any document already in the namespace.
+    ///
+    /// Returns `Ok(false)` when the backend has no structured-data command:
+    /// that is a capability gap, not an error, and callers keep a local copy.
+    async fn set_data(
+        &self,
+        _id: &BeadId,
+        _namespace: &str,
+        _schema_ref: &str,
+        _value: &serde_json::Value,
+    ) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// Read the document under `namespace` (bead-rs `data get`). `None` when
+    /// the namespace is empty or the backend has no structured-data command.
+    async fn get_data(&self, _id: &BeadId, _namespace: &str) -> Result<Option<serde_json::Value>> {
+        Ok(None)
+    }
+
     /// Query the current claim state of a bead from the live store.
     ///
     /// This method reads directly from the live database (not from any cached

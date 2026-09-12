@@ -206,6 +206,81 @@ fn terminal_reason(
     }
 }
 
+/// The bounded failure text recorded against the attempt for the next
+/// attempt to read (R3). `None` on a verified success.
+///
+/// A rejecting gate contributes its name and its captured output; a plain
+/// process failure contributes the stream's terminal envelope (an API error
+/// that exited 0 is not a hard task) and the tail of stderr. Everything is
+/// cut to [`crate::attempt_history::LOCAL_SUMMARY_BYTES`] head-and-tail so
+/// both the leading diagnostic and the closing summary survive.
+fn attempt_failure_summary(
+    outcome: &Outcome,
+    output: &AgentOutcome,
+    gate_report: Option<&GateReport>,
+) -> Option<String> {
+    use crate::attempt_history::{truncate_head_tail, LOCAL_SUMMARY_BYTES};
+
+    if matches!(outcome, Outcome::Success) {
+        return None;
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(report) = gate_report {
+        // Stable order: the report is a HashMap.
+        let mut results: Vec<(&String, &GateResult)> = report.results.iter().collect();
+        results.sort_by(|a, b| a.0.cmp(b.0));
+        for (name, result) in results {
+            match result {
+                GateResult::Fail(reason) => {
+                    parts.push(format!("gate `{name}` failed:\n{}", reason.trim_end()));
+                }
+                GateResult::ExecutionError { command, reason } => {
+                    parts.push(format!(
+                        "gate `{name}` could not run ({reason}) — command: {command}"
+                    ));
+                }
+                GateResult::Pass => {}
+            }
+        }
+    }
+    if parts.is_empty() {
+        if let Some(envelope) = crate::trace::parse_result_envelope(&output.stdout) {
+            if let Some(reason) = envelope.terminal_reason.as_deref() {
+                parts.push(format!(
+                    "agent stream ended with terminal_reason={reason}{}",
+                    envelope
+                        .api_error_status
+                        .map(|s| format!(" api_error_status={s}"))
+                        .unwrap_or_default()
+                ));
+            }
+        }
+        let stderr = output.stderr.trim();
+        if !stderr.is_empty() {
+            let tail: String = stderr
+                .lines()
+                .rev()
+                .take(40)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("\n");
+            parts.push(format!("stderr (tail):\n{tail}"));
+        }
+        match outcome {
+            Outcome::Timeout => parts.push("the agent hit the hard timeout".to_string()),
+            Outcome::Crash(code) => parts.push(format!("the agent crashed (code {code})")),
+            _ => {}
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(truncate_head_tail(&parts.join("\n\n"), LOCAL_SUMMARY_BYTES))
+}
+
 /// Convert a gate report into the ledger's per-gate entries, ordered by name.
 ///
 /// Gate execution is not individually timed today, so `duration_ms` is 0
@@ -683,6 +758,10 @@ impl OutcomeHandler {
         let gate_results = gate_result_entries(gate_report.as_ref());
         let resolved_outcome = semantic_outcome(&outcome);
         let resolved_reason = terminal_reason(&outcome, output.exit_code, gate_report.as_ref());
+        // The bounded failure text the *next* attempt is shown (R3). Taken
+        // here, before the report moves, from the same evidence the ledger
+        // summarizes as a name.
+        let failure_summary = attempt_failure_summary(&outcome, output, gate_report.as_ref());
 
         // Set outcome as span attribute
         tracing::Span::current().record("needle.outcome", outcome.as_str());
@@ -807,7 +886,7 @@ impl OutcomeHandler {
             tracing::Span::current().record("otel.status_description", outcome.as_str());
         }
 
-        self.emit_attempt_resolved(
+        let ledger = self.emit_attempt_resolved(
             bead,
             output,
             bead_action.to_string(),
@@ -816,11 +895,63 @@ impl OutcomeHandler {
             gate_results,
         );
 
+        // R3: what this attempt was and why it ended becomes the next
+        // attempt's context. Best-effort and bounded; it never changes the
+        // action decided above.
+        self.record_attempt_history(store, bead, &ledger, failure_summary)
+            .await;
+
         Ok(HandlerResult {
             outcome,
             bead_action,
             telemetry_events,
         })
+    }
+
+    /// Persist this attempt into the bead's history (local journal plus the
+    /// bead-rs structured-data mirror) so the next dispatch prompt can show
+    /// it. See [`crate::attempt_history`].
+    async fn record_attempt_history(
+        &self,
+        store: &dyn BeadStore,
+        bead: &Bead,
+        ledger: &crate::telemetry::AttemptResolvedFields,
+        failure_summary: Option<String>,
+    ) {
+        let history = &self.config.strands.learning.failure_history;
+        if !history.enabled {
+            return;
+        }
+        let workspace = if bead.workspace.as_os_str().is_empty()
+            || bead.workspace == std::path::Path::new(".")
+        {
+            self.config.workspace.default.clone()
+        } else {
+            bead.workspace.clone()
+        };
+        let record = crate::attempt_history::AttemptRecord {
+            schema_version: crate::attempt_history::SCHEMA_VERSION,
+            attempt_id: ledger.attempt_id.clone(),
+            recorded_at: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            worker: ledger.worker.clone(),
+            adapter: ledger.adapter.clone(),
+            model: ledger.model.clone(),
+            outcome: ledger.outcome.clone(),
+            terminal_reason: ledger.terminal_reason.clone(),
+            exit_code: ledger.exit_code,
+            requested_action: ledger.requested_action.clone(),
+            commits: ledger.commits.clone(),
+            duration_ms: ledger.duration_ms,
+            failure_summary,
+        };
+        crate::attempt_history::record(
+            &workspace,
+            &bead.id,
+            record,
+            store,
+            history.sync_to_bead_data,
+        )
+        .await;
     }
 
     /// Emit the terminal `attempt.resolved` ledger row for this dispatch.
@@ -844,7 +975,7 @@ impl OutcomeHandler {
         resolved_outcome: &str,
         resolved_reason: Option<String>,
         gate_results: Vec<crate::telemetry::GateResultEntry>,
-    ) {
+    ) -> crate::telemetry::AttemptResolvedFields {
         let attempt = self.take_attempt_context();
         let attempt_id = match self.telemetry.attempt_id() {
             Some(id) => id,
@@ -871,7 +1002,7 @@ impl OutcomeHandler {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(attempt_id.clone());
 
-        let event = EventKind::AttemptResolved(Box::new(crate::telemetry::AttemptResolvedFields {
+        let fields = crate::telemetry::AttemptResolvedFields {
             attempt_id,
             // Always true until N-T03 lands: NEEDLE cannot yet attest that an
             // attempt ID identifies a durable attempt rather than a dispatch.
@@ -903,7 +1034,8 @@ impl OutcomeHandler {
             // The exit code is observation only: it says what the process did,
             // not whether the work was accepted — `outcome` carries that.
             exit_code: output.exit_code,
-        }));
+        };
+        let event = EventKind::AttemptResolved(Box::new(fields.clone()));
 
         let timestamp = Utc::now();
         if let Err(e) = self.telemetry.emit_try_lock(event, timestamp) {
@@ -915,6 +1047,7 @@ impl OutcomeHandler {
                 "failed to enqueue attempt.resolved ledger event"
             );
         }
+        fields
     }
 
     /// Emit the ledger row for a dispatch that ended without reaching one of
@@ -4093,6 +4226,53 @@ mod tests {
         // NOTE: the handler no longer calls store.release() -- release is applied by
         // the worker via apply_bead_action(). The release intent is asserted above as
         // result.bead_action; a StoreAction::Release here would now never appear.
+    }
+
+    #[tokio::test]
+    async fn handle_failure_records_the_attempt_for_the_next_prompt() {
+        // R3 (needle-60163eac): a failed attempt leaves a bounded record the
+        // next dispatch prompt renders — outcome, reason and the failure text.
+        let handler = test_handler();
+        let store = test_store(BeadStatus::InProgress);
+        let bead = test_bead(BeadStatus::InProgress);
+        let output = AgentOutcome {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "error[E0308]: mismatched types\n --> src/lib.rs:3:5\n".to_string(),
+        };
+
+        let first = handler.handle(&store, &bead, &output, false).await.unwrap();
+        assert_eq!(first.bead_action, BeadAction::Released);
+
+        let records = crate::attempt_history::load_local(&bead.workspace, &bead.id).unwrap();
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert_eq!(record.outcome, "work_failure");
+        assert_eq!(record.terminal_reason.as_deref(), Some("exit_code:1"));
+        assert_eq!(record.exit_code, 1);
+        assert_eq!(record.requested_action, "released");
+        let summary = record.failure_summary.as_deref().unwrap();
+        assert!(summary.contains("error[E0308]"), "{summary}");
+        assert!(summary.contains("stderr (tail)"));
+
+        // The rendered history names the failure so the next agent reads it.
+        let rendered = crate::attempt_history::render(
+            &records,
+            crate::attempt_history::HistoryLimits::default(),
+        );
+        assert!(rendered.contains("## Previous attempts on this bead"));
+        assert!(rendered.contains("error[E0308]"));
+
+        // A second failure appends rather than replaces.
+        let second = handler.handle(&store, &bead, &output, false).await.unwrap();
+        assert_eq!(second.bead_action, BeadAction::Released);
+        assert_eq!(
+            crate::attempt_history::load_local(&bead.workspace, &bead.id)
+                .unwrap()
+                .len(),
+            2
+        );
+        let _ = std::fs::remove_dir_all(&bead.workspace);
     }
 
     #[tokio::test]

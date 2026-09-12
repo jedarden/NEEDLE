@@ -306,6 +306,29 @@ static TIER_TABLE: &[(&str, ReloadTier)] = &[
         "strands.learning.trace_retention_success_days",
         ReloadTier::Rebuild,
     ),
+    // Learning context injection is read when the PromptBuilder is built.
+    (
+        "strands.learning.inject_legacy_learnings",
+        ReloadTier::Rebuild,
+    ),
+    (
+        "strands.learning.max_learning_context_bytes",
+        ReloadTier::Rebuild,
+    ),
+    // Attempt history is read per dispatch and per resolution (live).
+    ("strands.learning.failure_history.enabled", ReloadTier::Live),
+    (
+        "strands.learning.failure_history.max_attempts",
+        ReloadTier::Live,
+    ),
+    (
+        "strands.learning.failure_history.max_bytes",
+        ReloadTier::Live,
+    ),
+    (
+        "strands.learning.failure_history.sync_to_bead_data",
+        ReloadTier::Live,
+    ),
     // Mitosis (live)
     ("strands.mitosis.enabled", ReloadTier::Live),
     ("strands.mitosis.first_failure_only", ReloadTier::Live),
