@@ -14,6 +14,8 @@
 # Rebuild marker (2026-09-12): replay 0.1.8 after exact-revision diffing landed.
 # Rebuild marker (2026-09-12, retry 2): the first replay was externally
 # superseded after the base tag published and before with-deps could start.
+# Rebuild marker (2026-09-12, retry 3): the dependency-stub repair push reached
+# Forgejo but its webhook event never reached the Argo Events sensor.
 #
 # After triggering, confirm BOTH tags moved -- the template runs docker-build-base
 # and docker-build-with-deps as separate kaniko steps, and a run that is stopped
