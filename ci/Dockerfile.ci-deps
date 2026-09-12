@@ -1,9 +1,29 @@
 ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
-# Pre-compile all dependencies.
-# Copy only Cargo.toml/Cargo.lock first, create dummy source, build deps.
-# This layer is cached unless Cargo.toml/Cargo.lock change.
+# Pre-compile all dependencies. Keep the resulting target tree outside
+# /workspace: every workflow pod mounts a checkout volume there, which hides
+# image-layer files at that path. Jobs recreate the same absolute target
+# symlink after checkout, making these warmed artifacts visible to Cargo.
+#
+# rust-toolchain.toml is part of this layer because Cargo selects the compiler
+# from the source tree. Record the exact release that produced the artifacts so
+# jobs can reject an image/source/compiler mismatch instead of reusing an
+# incompatible target tree.
+WORKDIR /workspace
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+RUN set -eux; \
+    source_toolchain="$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml)"; \
+    actual_toolchain="$(rustc -vV | sed -n 's/^release: //p')"; \
+    test -n "$source_toolchain"; \
+    test -n "$actual_toolchain"; \
+    test "$source_toolchain" = "$actual_toolchain"; \
+    printf '%s\n' "$actual_toolchain" > /opt/needle-ci-toolchain-version; \
+    mkdir -p /opt/needle-ci-target; \
+    ln -s /opt/needle-ci-target /workspace/target
+
+# Create dummy source and build dependencies. This layer is cached unless the
+# manifest, lockfile, pinned toolchain, or explicit target inventory changes.
 #
 # Every target Cargo.toml declares needs a stub here, including [[bench]] and
 # [[test]] entries -- cargo fails to load the manifest if a declared target's
@@ -13,7 +33,6 @@ FROM ${BASE_IMAGE}
 # by 3bec5897 on 2026-08-17; it made every docker-build-with-deps run fail with
 # cargo's exit 101). Plain `cargo build` does NOT catch a missing [[test]] stub
 # -- only `cargo build --tests`, which is why it is the second command here.
-COPY Cargo.toml Cargo.lock ./
 COPY src/bin/needle_transform_claude.rs ./src/bin/needle_transform_claude.rs
 COPY src/bin/needle_transform_codex.rs ./src/bin/needle_transform_codex.rs
 COPY src/bin/needle_transform_opencode.rs ./src/bin/needle_transform_opencode.rs
@@ -34,6 +53,8 @@ RUN mkdir -p src benches tests && \
     echo "fn main() {}" > tests/real_br_integration_tests.rs && \
     cargo build && \
     cargo build --tests && \
+    test -d /opt/needle-ci-target/debug/deps && \
+    rm /workspace/target && \
     rm -rf src benches tests
 
 WORKDIR /workspace
