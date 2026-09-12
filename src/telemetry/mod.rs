@@ -1003,6 +1003,15 @@ pub enum EventKind {
         bead_id: BeadId,
         degraded_duration_secs: u64,
     },
+    /// Prior fixes were retrieved and injected into a retry's prompt (plan
+    /// 4.4 step 7). `ids` is the exposure record: exactly which memory
+    /// entries this attempt saw.
+    PromptMemoryRetrieved {
+        bead_id: BeadId,
+        attempt: u32,
+        ids: Vec<String>,
+        bytes: usize,
+    },
 
     // ── Unravel ──
     UnravelAnalyzed {
@@ -1592,6 +1601,7 @@ impl EventKind {
             EventKind::WorkspaceGateRestored { .. } => "workspace.gate_restored",
             EventKind::ProviderDegraded { .. } => "provider.degraded",
             EventKind::ProviderRestored { .. } => "provider.restored",
+            EventKind::PromptMemoryRetrieved { .. } => "prompt.memory_retrieved",
             EventKind::UnravelAnalyzed { .. } => "bead.unravel.analyzed",
             EventKind::UnravelSkipped { .. } => "bead.unravel.skipped",
             EventKind::ReflectStarted { .. } => "reflect.started",
@@ -1714,6 +1724,7 @@ impl EventKind {
             | EventKind::WorkspaceGateRestored { bead_id, .. }
             | EventKind::ProviderDegraded { bead_id, .. }
             | EventKind::ProviderRestored { bead_id, .. }
+            | EventKind::PromptMemoryRetrieved { bead_id, .. }
             | EventKind::UnravelAnalyzed { bead_id, .. }
             | EventKind::UnravelSkipped { bead_id, .. }
             | EventKind::OutputTransformSpawned { bead_id, .. }
@@ -2623,6 +2634,19 @@ impl EventKind {
                     "adapter": adapter,
                     "bead_id": bead_id.as_ref(),
                     "degraded_duration_secs": degraded_duration_secs,
+                })
+            }
+            EventKind::PromptMemoryRetrieved {
+                bead_id,
+                attempt,
+                ids,
+                bytes,
+            } => {
+                serde_json::json!({
+                    "bead_id": bead_id.as_ref(),
+                    "attempt": attempt,
+                    "ids": ids,
+                    "bytes": bytes,
                 })
             }
             EventKind::UnravelAnalyzed {
@@ -3656,6 +3680,7 @@ impl EventKind {
             | EventKind::WorkspaceGateRestored { .. }
             | EventKind::ProviderDegraded { .. }
             | EventKind::ProviderRestored { .. }
+            | EventKind::PromptMemoryRetrieved { .. }
             | EventKind::UnravelAnalyzed { .. }
             | EventKind::UnravelSkipped { .. }
             | EventKind::PulseScannerStarted { .. }

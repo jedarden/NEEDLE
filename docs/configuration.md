@@ -829,6 +829,30 @@ strands:
       sync_to_bead_data: true  # mirror into bead-rs `data` (needs bead-rs >= 0.2.6)
 ```
 
+On a retry (attempt ≥ `min_attempt`) NEEDLE can also ask an external command
+for **prior fixes** of the failure and inject them as a bounded, clearly
+labelled hints section (`{prior_fixes}`, after the attempt history). The
+command gets one JSON request on stdin — `{bead_id, title, workspace,
+attempt, failure_summary, terminal_reason}` — and answers with JSON lines
+`{id, source, title, text}`, best first. A non-zero exit, a timeout or
+malformed output yields no hints and never fails the dispatch. The IDs that
+reached the prompt are emitted as `prompt.memory_retrieved` (the exposure
+record). Retrieval reads; it never promotes anything (ADR-026 L0).
+
+```yaml
+strands:
+  learning:
+    retrieval:
+      enabled: true
+      # This fleet: the transcript knowledge graph (60k sessions, 22k error
+      # signatures) queried by exact error-signature hash, FTS fallback.
+      command: "python3 /home/coding/agent-transcript-archive/scripts/graph_query.py prior-fixes --limit 5"
+      timeout_secs: 20
+      max_results: 3
+      max_bytes: 3000
+      min_attempt: 2
+```
+
 The files on disk are left in place as the untrusted candidate corpus for the
 N-T13 migration. To restore the pre-N-T15 behaviour byte-for-byte:
 

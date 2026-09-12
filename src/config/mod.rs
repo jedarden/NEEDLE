@@ -5216,6 +5216,69 @@ pub struct LearningConfig {
     /// (plan revision 31 leaf R3, `needle-60163eac`).
     #[serde(default)]
     pub failure_history: FailureHistoryConfig,
+
+    /// Retry-time retrieval of prior fixes for the bead's failure (plan
+    /// section 4.4 step 7). Off until `command` is set.
+    #[serde(default)]
+    pub retrieval: RetrievalConfig,
+}
+
+/// Retry-time retrieval of prior fixes (see [`crate::retrieval`]).
+///
+/// The command receives one JSON request on stdin and answers with JSON
+/// lines `{id, source, title, text}`. On this fleet:
+/// `python3 ~/agent-transcript-archive/scripts/graph_query.py prior-fixes --limit 5`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetrievalConfig {
+    /// Master switch (default: true); nothing runs without `command`.
+    #[serde(default = "RetrievalConfig::default_enabled")]
+    pub enabled: bool,
+    /// Shell command run with `sh -c` (default: none).
+    #[serde(default)]
+    pub command: Option<String>,
+    /// Wall-clock budget for the command (default: 20 s).
+    #[serde(default = "RetrievalConfig::default_timeout_secs")]
+    pub timeout_secs: u64,
+    /// Hints injected at most (default: 3).
+    #[serde(default = "RetrievalConfig::default_max_results")]
+    pub max_results: usize,
+    /// Byte cap on the rendered hints section (default: 3000).
+    #[serde(default = "RetrievalConfig::default_max_bytes")]
+    pub max_bytes: usize,
+    /// First attempt number that retrieves (default: 2 — the first retry).
+    #[serde(default = "RetrievalConfig::default_min_attempt")]
+    pub min_attempt: u32,
+}
+
+impl Default for RetrievalConfig {
+    fn default() -> Self {
+        RetrievalConfig {
+            enabled: Self::default_enabled(),
+            command: None,
+            timeout_secs: Self::default_timeout_secs(),
+            max_results: Self::default_max_results(),
+            max_bytes: Self::default_max_bytes(),
+            min_attempt: Self::default_min_attempt(),
+        }
+    }
+}
+
+impl RetrievalConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+    fn default_timeout_secs() -> u64 {
+        20
+    }
+    fn default_max_results() -> usize {
+        3
+    }
+    fn default_max_bytes() -> usize {
+        3000
+    }
+    fn default_min_attempt() -> u32 {
+        2
+    }
 }
 
 /// Per-bead attempt history shown to the next attempt.
@@ -5289,6 +5352,7 @@ impl Default for LearningConfig {
             inject_legacy_learnings: false,
             max_learning_context_bytes: Self::default_max_learning_context_bytes(),
             failure_history: FailureHistoryConfig::default(),
+            retrieval: RetrievalConfig::default(),
         }
     }
 }

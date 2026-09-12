@@ -63,6 +63,7 @@ pub mod quarantine_expiry;
 pub mod rate_limit;
 pub mod registry;
 pub mod resolve;
+pub mod retrieval;
 pub mod routing;
 pub mod sanitize;
 pub mod scratch_sweep;

@@ -329,6 +329,13 @@ static TIER_TABLE: &[(&str, ReloadTier)] = &[
         "strands.learning.failure_history.sync_to_bead_data",
         ReloadTier::Live,
     ),
+    // Retrieval is read per retry dispatch (live).
+    ("strands.learning.retrieval.enabled", ReloadTier::Live),
+    ("strands.learning.retrieval.command", ReloadTier::Live),
+    ("strands.learning.retrieval.timeout_secs", ReloadTier::Live),
+    ("strands.learning.retrieval.max_results", ReloadTier::Live),
+    ("strands.learning.retrieval.max_bytes", ReloadTier::Live),
+    ("strands.learning.retrieval.min_attempt", ReloadTier::Live),
     // Mitosis (live)
     ("strands.mitosis.enabled", ReloadTier::Live),
     ("strands.mitosis.first_failure_only", ReloadTier::Live),

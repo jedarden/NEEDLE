@@ -3166,25 +3166,79 @@ impl Worker {
         // R3: what the previous attempts on this bead did and why they ended
         // is part of the next attempt's context. Loaded from the local
         // journal (or the bead-rs mirror on another host), rendered bounded.
-        let failure_history = if self.config.strands.learning.failure_history.enabled {
-            let records =
-                crate::attempt_history::load_for_prompt(&build_ws, &bead.id, self.store.as_ref())
-                    .await;
-            let rendered = crate::attempt_history::render(
-                &records,
-                self.config.strands.learning.failure_history.limits(),
-            );
-            if !rendered.is_empty() {
-                tracing::info!(
-                    bead_id = %bead_id,
-                    prior_attempts = records.len(),
-                    history_bytes = rendered.len(),
-                    "injecting the bead's attempt history into the prompt"
+        let (failure_history, prior_records) =
+            if self.config.strands.learning.failure_history.enabled {
+                let records = crate::attempt_history::load_for_prompt(
+                    &build_ws,
+                    &bead.id,
+                    self.store.as_ref(),
+                )
+                .await;
+                let rendered = crate::attempt_history::render(
+                    &records,
+                    self.config.strands.learning.failure_history.limits(),
                 );
+                if !rendered.is_empty() {
+                    tracing::info!(
+                        bead_id = %bead_id,
+                        prior_attempts = records.len(),
+                        history_bytes = rendered.len(),
+                        "injecting the bead's attempt history into the prompt"
+                    );
+                }
+                (rendered, records)
+            } else {
+                (String::new(), Vec::new())
+            };
+
+        // Plan section 4.4 step 7: on a retry, ask the configured retrieval
+        // command for prior fixes of the failure and inject them as bounded
+        // hints; record the exposure so it is observable.
+        let prior_fixes = {
+            let retrieval = &self.config.strands.learning.retrieval;
+            let attempt_no = prior_records.len() as u32 + 1;
+            let last_failure = prior_records
+                .iter()
+                .rev()
+                .find(|r| !r.is_verified_success());
+            match last_failure {
+                Some(last)
+                    if retrieval.enabled
+                        && retrieval.command.is_some()
+                        && attempt_no >= retrieval.min_attempt =>
+                {
+                    let request = crate::retrieval::RetrievalRequest {
+                        bead_id: bead.id.to_string(),
+                        title: bead.title.clone(),
+                        workspace: build_ws.display().to_string(),
+                        attempt: attempt_no,
+                        failure_summary: last.failure_summary.clone().unwrap_or_default(),
+                        terminal_reason: last.terminal_reason.clone(),
+                    };
+                    let result = crate::retrieval::retrieve(retrieval, &request).await;
+                    if !result.items.is_empty() {
+                        tracing::info!(
+                            bead_id = %bead_id,
+                            attempt = attempt_no,
+                            hints = result.items.len(),
+                            ids = ?result.ids(),
+                            bytes = result.rendered.len(),
+                            "injecting retrieved prior fixes into the prompt"
+                        );
+                        let _ = self.telemetry.emit(
+                            EventKind::PromptMemoryRetrieved {
+                                bead_id: bead_id.clone(),
+                                attempt: attempt_no,
+                                ids: result.ids(),
+                                bytes: result.rendered.len(),
+                            },
+                            chrono::Utc::now(),
+                        );
+                    }
+                    result.rendered
+                }
+                _ => String::new(),
             }
-            rendered
-        } else {
-            String::new()
         };
 
         let mut prompt = match tokio::time::timeout(
@@ -3197,6 +3251,7 @@ impl Worker {
                         &worker_name,
                         failure_count,
                         &failure_history,
+                        &prior_fixes,
                     )
                 } else {
                     prompt_builder.build_pluck_with_history(
@@ -3204,6 +3259,7 @@ impl Worker {
                         &build_ws,
                         &worker_name,
                         &failure_history,
+                        &prior_fixes,
                     )
                 }
             }),

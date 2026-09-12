@@ -38,6 +38,8 @@ const DEFAULT_PLUCK_TEMPLATE: &str = "\
 
 {failure_history}
 
+{prior_fixes}
+
 ## Workspace
 
 {workspace_path}
@@ -446,6 +448,8 @@ into smaller, manageable pieces.
 
 {failure_history}
 
+{prior_fixes}
+
 ### Your Task
 
 You MUST split this bead into 3-5 smaller child beads. The parent is too big \
@@ -531,6 +535,9 @@ const COMMON_VARS: &[&str] = &[
     // Rendered history of the bead's previous attempts (R3); empty on a
     // first attempt or when a template is built without one.
     "{failure_history}",
+    // Retrieved prior fixes for the failure (plan 4.4 step 7); empty unless a
+    // retry retrieved something.
+    "{prior_fixes}",
 ];
 
 /// Returns the extra (strand-specific) variables allowed for a given template name.
@@ -940,9 +947,11 @@ impl PromptBuilder {
         for (var, value) in extra_vars {
             content = content.replace(var, value);
         }
-        // A template may reference the attempt history without the caller
-        // supplying one (first attempt, or a strand that has none).
-        content = content.replace("{failure_history}", "");
+        // A template may reference the attempt history or prior fixes without
+        // the caller supplying them (first attempt, or a strand that has none).
+        content = content
+            .replace("{failure_history}", "")
+            .replace("{prior_fixes}", "");
 
         let hash = hex_sha256(&content);
         let token_estimate = content.len() as u64 / 4;
@@ -971,24 +980,30 @@ impl PromptBuilder {
     }
 
     /// Build a pluck prompt carrying the bead's rendered attempt history
-    /// (see [`crate::attempt_history::render`]); `""` renders nothing.
+    /// (see [`crate::attempt_history::render`]) and retrieved prior fixes
+    /// (see [`crate::retrieval::render`]); `""` renders nothing for either.
     pub fn build_pluck_with_history(
         &self,
         bead: &Bead,
         workspace: &Path,
         worker_id: &str,
         failure_history: &str,
+        prior_fixes: &str,
     ) -> Result<BuiltPrompt> {
         self.build_with_vars(
             bead,
             workspace,
             worker_id,
             "pluck",
-            &[("{failure_history}", failure_history)],
+            &[
+                ("{failure_history}", failure_history),
+                ("{prior_fixes}", prior_fixes),
+            ],
         )
     }
 
-    /// Build a split prompt carrying the bead's rendered attempt history.
+    /// Build a split prompt carrying the bead's rendered attempt history and
+    /// retrieved prior fixes.
     pub fn build_split_with_history(
         &self,
         bead: &Bead,
@@ -996,6 +1011,7 @@ impl PromptBuilder {
         worker_id: &str,
         failure_count: u32,
         failure_history: &str,
+        prior_fixes: &str,
     ) -> Result<BuiltPrompt> {
         self.build_with_vars(
             bead,
@@ -1005,6 +1021,7 @@ impl PromptBuilder {
             &[
                 ("{failure_count}", &failure_count.to_string()),
                 ("{failure_history}", failure_history),
+                ("{prior_fixes}", prior_fixes),
             ],
         )
     }
@@ -1544,7 +1561,8 @@ mod tests {
                 "{dep_add_command}",
                 "bead dep add <blocked-id> <blocker-id> --kind blocks",
             )
-            .replace("{failure_history}", "");
+            .replace("{failure_history}", "")
+            .replace("{prior_fixes}", "");
         assert_eq!(legacy.content, expected);
         assert!(legacy.content.contains("## Workspace Learnings"));
         assert!(!legacy.content.contains("(no context files found)"));
@@ -1592,26 +1610,34 @@ mod tests {
         let history = "## Previous attempts on this bead (newest first)\n\n\
                        ### Attempt 1 — outcome: work_failure (gate:dod)\n```\nerror[E0308]\n```";
 
+        let fixes =
+            "## Prior fixes for similar failures\n\n- **nd-9 — fix**\n  closed: cast the usize";
         let pluck = builder
-            .build_pluck_with_history(&bead, ws, "worker-01", history)
+            .build_pluck_with_history(&bead, ws, "worker-01", history, fixes)
             .unwrap();
         assert!(pluck.content.contains("## Previous attempts on this bead"));
         assert!(pluck.content.contains("error[E0308]"));
-        // The history sits between the task description and the workspace.
+        assert!(pluck
+            .content
+            .contains("## Prior fixes for similar failures"));
+        // History, then prior fixes, sit between the description and the workspace.
         let desc = pluck.content.find("## Description").unwrap();
         let hist = pluck.content.find("## Previous attempts").unwrap();
+        let fix = pluck.content.find("## Prior fixes").unwrap();
         let wsp = pluck.content.find("## Workspace").unwrap();
-        assert!(desc < hist && hist < wsp);
+        assert!(desc < hist && hist < fix && fix < wsp);
 
         let split = builder
-            .build_split_with_history(&bead, ws, "worker-01", 3, history)
+            .build_split_with_history(&bead, ws, "worker-01", 3, history, fixes)
             .unwrap();
         assert!(split.content.contains("failed 3 times in a row"));
         assert!(split.content.contains("error[E0308]"));
+        assert!(split.content.contains("cast the usize"));
 
-        // Without a history the placeholder vanishes entirely.
+        // Without a history the placeholders vanish entirely.
         let bare = builder.build_pluck(&bead, ws, "worker-01").unwrap();
         assert!(!bare.content.contains("{failure_history}"));
+        assert!(!bare.content.contains("{prior_fixes}"));
         assert!(!bare.content.contains("Previous attempts"));
         // And a user template may reference it.
         let custom = PromptConfig {

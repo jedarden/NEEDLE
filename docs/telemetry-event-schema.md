@@ -76,6 +76,11 @@ Additional fields are event-specific and documented per type below.
 - `provider.restored` — A degraded adapter produced a verified success again.
   Fields: `adapter`, `bead_id`, `degraded_duration_secs`.
 
+### Memory Exposure (plan 4.4 step 7)
+- `prompt.memory_retrieved` — Prior fixes were retrieved for a retry and
+  injected into its prompt. Fields: `bead_id`, `attempt`, `ids` (the exact
+  retrieved entries the attempt saw — the exposure record), `bytes`.
+
 ### Configuration
 - `config.warning` — Configuration validation warning
 
