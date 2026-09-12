@@ -1,0 +1,4 @@
+# Maintained repositories that must be reachable by the roaming worker pool.
+# The apply script merges missing entries into the host's explicit Explore
+# list; it never removes operator-managed entries.
+/home/coding/FABRIC

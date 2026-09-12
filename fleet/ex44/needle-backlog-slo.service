@@ -1,0 +1,11 @@
+[Unit]
+Description=Audit the NEEDLE eligible-backlog SLO
+After=default.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/coding/NEEDLE
+EnvironmentFile=%h/.config/needle/backlog-policy.env
+ExecStart=/home/coding/NEEDLE/fleet/ex44/backlog-slo.sh --json
+# Exit 1 is a measured SLO breach and is logged as such, not a broken probe.
+SuccessExitStatus=1

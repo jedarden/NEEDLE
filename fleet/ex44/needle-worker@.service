@@ -1,0 +1,30 @@
+[Unit]
+Description=NEEDLE worker %i
+After=default.target
+StartLimitIntervalSec=900
+StartLimitBurst=3
+
+[Service]
+Type=simple
+Slice=needle.slice
+WorkingDirectory=/home/coding
+
+# Instance identity/routing is source-controlled in workers.tsv and rendered by
+# apply-ex44-fleet.sh. Credentials stay in the host-only common file.
+EnvironmentFile=%h/.config/needle/workers/%i.env
+EnvironmentFile=-%h/.config/needle/worker-common.env
+EnvironmentFile=%h/.config/needle/fleet-policy.env
+Environment=NEEDLE_INNER=1
+Environment=PATH=/home/coding/.local/bin:/home/coding/.cargo/bin:/home/coding/bin:/run/current-system/sw/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+ExecStartPre=/bin/sh -c 'sleep "${NEEDLE_START_DELAY:-0}"'
+ExecStart=/home/coding/.needle/bin/needle run --workspace ${NEEDLE_WS} --agent ${NEEDLE_AGENT} --count 1 --identifier %i --timeout 3600
+
+Restart=always
+RestartSec=120
+TimeoutStartSec=420
+TimeoutStopSec=120
+KillSignal=SIGINT
+
+[Install]
+WantedBy=default.target

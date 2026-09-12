@@ -8264,6 +8264,42 @@ impl ConfigLoader {
                         config.strands.explore.workspace_root = PathBuf::from(&value);
                         sources.insert(config_path, source);
                     }
+                    "strands.generation.enabled" => {
+                        if let Ok(v) = value.parse::<bool>() {
+                            config.strands.generation.enabled = v;
+                            sources.insert(config_path, source);
+                        } else {
+                            tracing::warn!(
+                                env_var = %key,
+                                value = %value,
+                                "invalid value for strands.generation.enabled — expected true/false"
+                            );
+                        }
+                    }
+                    "strands.generation.low_water_reserve" => {
+                        if let Ok(v) = value.parse::<usize>() {
+                            config.strands.generation.low_water_reserve = v;
+                            sources.insert(config_path, source);
+                        } else {
+                            tracing::warn!(
+                                env_var = %key,
+                                value = %value,
+                                "invalid value for strands.generation.low_water_reserve — expected integer"
+                            );
+                        }
+                    }
+                    "strands.generation.lease_ttl_secs" => {
+                        if let Ok(v) = value.parse::<u64>() {
+                            config.strands.generation.lease_ttl_secs = v;
+                            sources.insert(config_path, source);
+                        } else {
+                            tracing::warn!(
+                                env_var = %key,
+                                value = %value,
+                                "invalid value for strands.generation.lease_ttl_secs — expected integer"
+                            );
+                        }
+                    }
                     "supervisor.heartbeat_path" => {
                         config.supervisor.heartbeat_path =
                             Some(expand_tilde(&PathBuf::from(value)));
@@ -12106,6 +12142,36 @@ agent:
 
         assert!(config.strands.mitosis.timeout_triggered.enabled);
         assert!(sources.contains_key("strands.mitosis.timeout_triggered.enabled"));
+    }
+
+    #[test]
+    fn env_overrides_low_water_generation_policy() {
+        let mut config = Config::default();
+        let mut sources = SourceMap::new();
+        let values = [
+            ("NEEDLE_STRANDS__GENERATION__ENABLED", "false"),
+            ("NEEDLE_STRANDS__GENERATION__LOW_WATER_RESERVE", "6"),
+            ("NEEDLE_STRANDS__GENERATION__LEASE_TTL_SECS", "420"),
+        ];
+
+        for (key, value) in values {
+            std::env::set_var(key, value);
+        }
+        ConfigLoader::apply_env_overrides(&mut config, &mut sources);
+        for (key, _) in values {
+            std::env::remove_var(key);
+        }
+
+        assert!(!config.strands.generation.enabled);
+        assert_eq!(config.strands.generation.low_water_reserve, 6);
+        assert_eq!(config.strands.generation.lease_ttl_secs, 420);
+        for key in [
+            "strands.generation.enabled",
+            "strands.generation.low_water_reserve",
+            "strands.generation.lease_ttl_secs",
+        ] {
+            assert!(sources.contains_key(key), "missing source for {key}");
+        }
     }
 
     #[test]

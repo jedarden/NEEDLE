@@ -206,18 +206,17 @@ impl QuarantineRegistry {
         let entry = self
             .entries
             .entry(workspace.to_path_buf())
-            .and_modify(|e| {
-                e.consecutive_failures += 1;
-            })
             .or_insert_with(|| QuarantineEntry {
-                consecutive_failures: 1,
+                consecutive_failures: 0,
                 last_reason: reason.clone(),
             });
+        let reason_changed =
+            entry.consecutive_failures == 0 || entry.last_reason.slug() != reason.slug();
+        entry.consecutive_failures += 1;
         entry.last_reason = reason;
 
         let failures = entry.consecutive_failures;
-        let reason_changed = failures == 1;
-        let threshold_met = failures >= TRANSIENT_FAILURE_THRESHOLD;
+        let threshold_met = failures == TRANSIENT_FAILURE_THRESHOLD;
         let reminder_due = failures % QUARANTINE_REMINDER_INTERVAL == 0;
 
         if transient && failures < TRANSIENT_FAILURE_THRESHOLD {
@@ -229,8 +228,10 @@ impl QuarantineRegistry {
             };
         }
 
-        if reason_changed || threshold_met || reminder_due {
+        if reason_changed || (transient && threshold_met) {
             QuarantineTransition::Report
+        } else if reminder_due {
+            QuarantineTransition::Reminder
         } else {
             QuarantineTransition::Silent
         }
@@ -461,10 +462,21 @@ fn repository_key(url: &str) -> String {
 fn normalize_git_url(url: &str) -> String {
     let mut normalized = url.trim().to_lowercase();
 
-    // Strip credentials from scp-like and https URLs: everything before the
-    // last '@' in the authority. Applied before host parsing so the host is
-    // all that survives. Only stripped when the '@' sits before any path
-    // separator, so a credential-looking string inside a path is left alone.
+    // Normalize scp-like remotes before stripping URL credentials. If the
+    // `git@` prefix were removed first, `github.com:owner/repo` would later be
+    // mistaken for a host-with-port and collapse to just the repository name.
+    if !normalized.contains("://") {
+        if let Some((authority, path)) = normalized.split_once(':') {
+            if authority.contains('@') {
+                let host = authority.rsplit('@').next().unwrap_or(authority);
+                normalized = format!("{host}/{path}");
+            }
+        }
+    }
+
+    // Strip credentials from ordinary URL authorities: everything before the
+    // last '@'. Only strip when '@' sits before the first path separator, so a
+    // credential-looking string inside a path is left alone.
     if let Some(at_pos) = normalized.find('@') {
         let before_path = match normalized.find('/') {
             Some(slash) => slash > at_pos,
@@ -473,11 +485,6 @@ fn normalize_git_url(url: &str) -> String {
         if before_path {
             normalized = normalized[at_pos + 1..].to_string();
         }
-    }
-
-    // git@host:owner/repo → git/host/owner/repo, so the path split below works.
-    if let Some(rest) = normalized.strip_prefix("git@") {
-        normalized = format!("git/{}", rest.replace(':', "/"));
     }
 
     if let Some(rest) = normalized.strip_prefix("ssh://") {
@@ -509,10 +516,12 @@ fn normalize_git_url(url: &str) -> String {
 
 /// Check if a workspace is a hidden test fixture.
 ///
-/// Fixtures are recognized by name: a leading `.` or `_` on the workspace or
-/// its parent, or a name that says it is a fixture. Deliberately narrow — a
-/// name merely *containing* "test" would exiling real repositories like a
-/// `test-runner` service.
+/// Fixtures are recognized by name: a leading `.` or `_` on the workspace, a
+/// fixture-shaped parent, or a name that says it is a fixture. A generic
+/// hidden parent is not enough: `tempfile` uses `.tmpXXXX` directories, and a
+/// real repository nested there must still validate by its own shape.
+/// Deliberately narrow — a name merely *containing* "test" would exile real
+/// repositories like a `test-runner` service.
 pub fn is_hidden_test_fixture(workspace: &Path) -> bool {
     let dir_name = match workspace.file_name().and_then(|n| n.to_str()) {
         Some(name) => name,
@@ -525,7 +534,9 @@ pub fn is_hidden_test_fixture(workspace: &Path) -> bool {
 
     if let Some(parent) = workspace.parent().and_then(|p| p.file_name()) {
         if let Some(parent_str) = parent.to_str() {
-            if parent_str.starts_with('.') || parent_str.starts_with('_') {
+            let lower = parent_str.to_lowercase();
+            let marked_hidden = parent_str.starts_with('.') || parent_str.starts_with('_');
+            if marked_hidden && (lower.contains("fixture") || lower.contains("test")) {
                 return true;
             }
         }

@@ -1,0 +1,26 @@
+# codinghome/ex44 fleet membership. This is the only source-controlled roster.
+#
+# Columns (tab-separated):
+#   identifier  workspace  agent  start_delay_seconds  explore_enabled
+#identifier	workspace	agent	start_delay	explore
+glm-needle	/home/coding/NEEDLE	claude-code-glm-5.3-flash	0	false
+glm-loom	/home/coding/LOOM	claude-code-glm-5.3	15	false
+glm-armor	/home/coding/ARMOR	claude-code-glm-5.3-flash	30	false
+glm-mta	/home/coding/mta-my-way	claude-code-glm-5.3-flash	45	false
+glm-pdftract	/home/coding/pdftract	claude-code-glm-5.3	60	false
+glm-spaxel	/home/coding/spaxel	claude-code-glm-5.3-flash	75	false
+glm-tradegraph	/home/coding/tradegraph	claude-code-glm-5.3-flash	90	false
+glm53-tgplat	/home/coding/tradegraph-platform	claude-code-glm-5.3	105	false
+glm53-cgraph2	/home/coding/commitgraph	claude-code-glm-5.3	120	false
+glm53-adc	/home/coding/aide-de-camp	claude-code-glm-5.3	135	false
+glm53-ibkr	/home/coding/ibkr-mcp	claude-code-glm-5.3	150	false
+glm53-irmcp	/home/coding/investment-research-mcp	claude-code-glm-5.3	165	false
+glm-archivist	/home/coding/agent-archivist	claude-code-glm-5.3	180	false
+glm-archivist-b	/home/coding/agent-archivist	claude-code-glm-5.3	195	false
+glm-seam	/home/coding/SEAM	claude-code-glm-5.3-flash	210	false
+glm-icg	/home/coding/irreversible-command-gate	claude-code-glm-5.3-flash	225	false
+glm-cgraph	/home/coding/claude-governor	claude-code-glm-5.3-flash	240	false
+glm-tgp	/home/coding/claude-print	claude-code-glm-5.3-flash	255	false
+glm-roam-18	/home/coding/jedarden.com	claude-code-glm-5.3-flash	270	true
+glm-roam-19	/home/coding/ytt	claude-code-glm-5.3-flash	285	true
+glm-roam-20	/home/coding/bead-rs	claude-code-glm-5.3-flash	300	true

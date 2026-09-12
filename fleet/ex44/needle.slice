@@ -1,0 +1,13 @@
+# Fleet containment for codinghome/ex44: 21 workers on 20 logical cores.
+# Fourteen cores and 34 GiB remain the fleet ceiling; the rest is reserved for
+# operators and host services. This reproduces the live policy in git.
+[Unit]
+Description=NEEDLE worker fleet containment
+
+[Slice]
+MemoryHigh=24G
+MemoryMax=34G
+MemorySwapMax=12G
+CPUQuota=1400%
+CPUWeight=50
+IOWeight=50
