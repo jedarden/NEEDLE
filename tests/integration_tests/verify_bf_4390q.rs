@@ -8,6 +8,9 @@ fn verify_test_output_txt_created() {
     let temp_dir = TempDir::new().unwrap();
     let workspace = temp_dir.path();
 
+    // Trace capture is deliberately restricted to real bead workspaces.
+    fs::create_dir_all(workspace.join(".beads")).unwrap();
+
     // Create a minimal Cargo project
     let cargo_toml = workspace.join("Cargo.toml");
     fs::write(

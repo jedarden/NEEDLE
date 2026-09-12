@@ -26,6 +26,65 @@
 //! - In-process Worker tests: `isolation::isolated_config()` combines the HOME
 //!   guard with a config whose Explore scan root is pinned to the temp directory.
 
+#[path = "integration_tests/backend_strategy_validation.rs"]
+mod backend_strategy_validation;
+#[path = "integration_tests/bead_backend_descriptors.rs"]
+mod bead_backend_descriptors;
+#[path = "integration_tests/bead_cli_config_serde.rs"]
+mod bead_cli_config_serde;
+#[path = "integration_tests/benchmark_harness_smoke.rs"]
+mod benchmark_harness_smoke;
+#[path = "integration_tests/benchmark_output_format.rs"]
+mod benchmark_output_format;
+#[path = "integration_tests/compilation_error_detection.rs"]
+mod compilation_error_detection;
+#[path = "integration_tests/config_key_path_integration.rs"]
+mod config_key_path_integration;
+#[path = "integration_tests/descriptor_conformance_tests.rs"]
+mod descriptor_conformance_tests;
+#[path = "integration_tests/edge_case_panic_tests.rs"]
+mod edge_case_panic_tests;
+#[path = "integration_tests/error_path_panic_tests.rs"]
+mod error_path_panic_tests;
+#[path = "integration_tests/multi_iteration_p95_validation.rs"]
+mod multi_iteration_p95_validation;
+#[path = "integration_tests/p95_aggregation.rs"]
+mod p95_aggregation;
+#[path = "integration_tests/p95_correctness.rs"]
+mod p95_correctness;
+#[path = "integration_tests/placeholder_validation_tests.rs"]
+mod placeholder_validation_tests;
+#[path = "integration_tests/process_limits_config_tests.rs"]
+mod process_limits_config_tests;
+#[path = "integration_tests/property_tests.rs"]
+mod property_tests;
+#[path = "integration_tests/remaining_config_tilde_expansion_tests.rs"]
+mod remaining_config_tilde_expansion_tests;
+#[path = "integration_tests/sanitize_latency_assertion.rs"]
+mod sanitize_latency_assertion;
+#[path = "integration_tests/strand_tilde_expansion_tests.rs"]
+mod strand_tilde_expansion_tests;
+#[path = "integration_tests/template_comprehensive_tests.rs"]
+mod template_comprehensive_tests;
+#[path = "integration_tests/template_rendering_tests.rs"]
+mod template_rendering_tests;
+#[path = "integration_tests/test_llms_drift.rs"]
+mod test_llms_drift;
+#[path = "integration_tests/test_no_tmp_in_fixtures.rs"]
+mod test_no_tmp_in_fixtures;
+#[path = "integration_tests/timeout_config_integration.rs"]
+mod timeout_config_integration;
+#[path = "integration_tests/timeout_config_integration_tests.rs"]
+mod timeout_config_integration_tests;
+#[path = "integration_tests/verify_bf_4390q.rs"]
+mod verify_bf_4390q;
+#[path = "integration_tests/version_probe_comprehensive.rs"]
+mod version_probe_comprehensive;
+#[path = "integration_tests/version_probe_test.rs"]
+mod version_probe_test;
+#[path = "integration_tests/workspace_tilde_expansion_tests.rs"]
+mod workspace_tilde_expansion_tests;
+
 use chrono::{DateTime, Duration, Utc};
 use needle::bead_store::{BeadStore, Filters};
 use needle::strand::{PluckStrand, Strand};

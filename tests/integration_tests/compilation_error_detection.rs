@@ -515,6 +515,9 @@ fn test_end_to_end_compilation_error_workflow() {
     let workspace = temp_dir.path();
     let bead_id = "bf-e2e-test";
 
+    // Trace capture is deliberately restricted to real bead workspaces.
+    fs::create_dir_all(workspace.join(".beads")).unwrap();
+
     // Create a Cargo.toml
     let cargo_toml = workspace.join("Cargo.toml");
     fs::write(
@@ -696,6 +699,9 @@ fn test_end_to_end_successful_compilation_workflow() {
     let workspace = temp_dir.path();
     let bead_id = "bf-e2e-success";
 
+    // Trace capture is deliberately restricted to real bead workspaces.
+    fs::create_dir_all(workspace.join(".beads")).unwrap();
+
     // Create a Cargo.toml
     let cargo_toml = workspace.join("Cargo.toml");
     fs::write(
@@ -789,6 +795,9 @@ fn test_end_to_end_test_failure_workflow() {
     let temp_dir = TempDir::new().unwrap();
     let workspace = temp_dir.path();
     let bead_id = "bf-e2e-test-fail";
+
+    // Trace capture is deliberately restricted to real bead workspaces.
+    fs::create_dir_all(workspace.join(".beads")).unwrap();
 
     // Create a Cargo.toml
     let cargo_toml = workspace.join("Cargo.toml");

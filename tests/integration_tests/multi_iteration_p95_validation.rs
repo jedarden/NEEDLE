@@ -7,7 +7,6 @@
 //! 4. The mathematical approach is statistically sound
 
 use needle::stats::{calculate_p95, P95Collector};
-use std::time::Instant;
 
 /// Demonstrates the WRONG approach: averaging p95 values from individual iterations.
 ///
@@ -228,18 +227,15 @@ fn test_p95_mathematical_correctness() {
 
 #[test]
 fn test_p95_aggregation_with_realistic_benchmark() {
-    // Simulate a realistic benchmark scenario with actual timing
+    // Use deterministic microsecond samples. Measuring a few arithmetic
+    // instructions with `Instant` can legitimately round every sample down to
+    // zero on fast hosts, making this aggregation test machine-dependent.
     let mut collector = P95Collector::with_capacity(100);
 
     // Simulate 10 benchmark iterations, each with 5 samples
     for iter_num in 0..10 {
-        for _ in 0..5 {
-            let start = Instant::now();
-            // Simulate variable work (adds some variance)
-            let work = iter_num * 10 + 42;
-            let _ = std::hint::black_box(work * work);
-            let elapsed = start.elapsed().as_micros();
-            collector.record(elapsed);
+        for sample_num in 0..5 {
+            collector.record(42 + iter_num * 10 + sample_num);
         }
     }
 
