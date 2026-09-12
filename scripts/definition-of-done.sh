@@ -552,6 +552,12 @@ if [[ "$LANE" == "fast" ]] || [[ "$LANE" == "all" ]]; then
   # from paying to compile a test suite. Pure bash, milliseconds.
   run_check "dod mode tests" bash tests/dod-modes/run.sh
 
+  # Keep new tests in an explicitly scheduled tier and stop the unit tier from
+  # acquiring more sleeps, child processes, or process-global environment
+  # mutation. This is a source-only check and runs before Rust compilation.
+  run_check "test tier and growth policy" bash scripts/check-test-policy.sh
+  run_check "test policy checker tests" bash tests/test-policy/run.sh
+
   # Keep Cargo's test-binary set explicit. This test also creates a real
   # tests/scratch.rs in a temporary package and proves auto-discovery ignores
   # it, so a new loose file cannot silently add another link step.

@@ -1,0 +1,22 @@
+version = 1
+
+[unit]
+max_tests = 1
+
+[tier_budget]
+push = 0
+contract = 1
+e2e = 0
+soak = 0
+fuzz = 0
+
+[[harness]]
+name = "contract_tests"
+path = "tests/contract_tests.rs"
+tier = "contract"
+max_tests = 1
+owner = "component:fixture-contract"
+
+[[artifact]]
+pattern = "tests/*.sh"
+owner = "component:fixture-verification"
