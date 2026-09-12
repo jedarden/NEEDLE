@@ -82,7 +82,7 @@ fn descriptor_and_binary_are_bound_together() {
 
 #[test]
 #[cfg(unix)]
-fn rendering_preserves_dialect_specific_dependency_orientation() {
+fn rendering_uses_bead_rs_dependency_orientation() {
     let root = tempfile::tempdir().unwrap();
     let values = HashMap::from([
         ("blocked", "blocked-1".to_string()),
@@ -94,12 +94,6 @@ fn rendering_preserves_dialect_specific_dependency_orientation() {
             .render_operation("dep_add", &values)
             .unwrap(),
         ["dep", "add", "blocked-1", "blocker-1", "--kind", "blocks"]
-    );
-    assert_eq!(
-        store(root.path(), "bead-rs")
-            .render_operation("dep_add", &values)
-            .unwrap(),
-        ["dep", "add", "blocker-1", "--blocks", "blocked-1"]
     );
 }
 
@@ -210,7 +204,7 @@ async fn explicit_bead_rs_claim_uses_revision_guard() {
 
 #[tokio::test]
 #[cfg(unix)]
-async fn bead_rs_release_uses_atomic_batch_update() {
+async fn bead_rs_release_uses_descriptor_command() {
     let root = tempfile::tempdir().unwrap();
     let backend = builtin_bead_backends()
         .into_iter()
@@ -226,15 +220,12 @@ async fn bead_rs_release_uses_atomic_batch_update() {
 
     store.release(&BeadId::from("bead-1")).await.unwrap();
     let invocations = fs::read_to_string(root.path().join("invocations.log")).unwrap();
-    assert!(invocations.starts_with("batch\n--json\n"));
-    assert!(
-        invocations.contains(r#"[{"assignee":"","id":"bead-1","op":"update","status":"open"}]"#)
-    );
+    assert_eq!(invocations, "release\nbead-1\n");
 }
 
 #[tokio::test]
 #[cfg(unix)]
-async fn bead_rs_explicit_claim_uses_atomic_batch_update() {
+async fn bead_rs_explicit_claim_uses_revision_guarded_update() {
     let root = tempfile::tempdir().unwrap();
     let backend = builtin_bead_backends()
         .into_iter()
@@ -247,11 +238,11 @@ async fn bead_rs_explicit_claim_uses_atomic_batch_update() {
 printf '%s\n' "$@" >> invocations.log
 if [ "$1" = show ]; then
   if [ -f claimed ]; then
-    printf '%s\n' '[{"id":"bead-1","title":"fixture","description":null,"priority":2,"status":"in_progress","assignee":"worker-a","labels":[],"source_repo":"","dependencies":[],"dependents":[],"comments":[],"created_at":"2026-08-12T00:00:00Z","updated_at":"2026-08-12T00:00:00Z"}]'
+    printf '%s\n' '[{"id":"bead-1","title":"fixture","description":null,"priority":2,"status":"in_progress","assignee":"worker-a","labels":[],"source_repo":"","dependencies":[],"dependents":[],"comments":[],"created_at":"2026-08-12T00:00:00Z","updated_at":"2026-08-12T00:00:00Z","revision":8}]'
   else
-    printf '%s\n' '[{"id":"bead-1","title":"fixture","description":null,"priority":2,"status":"open","assignee":null,"labels":[],"source_repo":"","dependencies":[],"dependents":[],"comments":[],"created_at":"2026-08-12T00:00:00Z","updated_at":"2026-08-12T00:00:00Z"}]'
+    printf '%s\n' '[{"id":"bead-1","title":"fixture","description":null,"priority":2,"status":"open","assignee":null,"labels":[],"source_repo":"","dependencies":[],"dependents":[],"comments":[],"created_at":"2026-08-12T00:00:00Z","updated_at":"2026-08-12T00:00:00Z","revision":7}]'
   fi
-elif [ "$1" = batch ]; then
+elif [ "$1" = update ]; then
   touch claimed
 fi
 "#,
@@ -265,16 +256,16 @@ fi
         .unwrap();
     assert!(matches!(result, ClaimResult::Claimed(_)));
     let invocations = fs::read_to_string(root.path().join("invocations.log")).unwrap();
-    assert!(invocations.contains("batch\n--json\n"));
+    assert_eq!(invocations.matches("show\n").count(), 3);
     assert!(invocations.contains(
-        r#"[{"assignee":"worker-a","id":"bead-1","op":"update","status":"in_progress"}]"#
+        "update\nbead-1\n--status\nin_progress\n--assignee\nworker-a\n--if-revision\n7\n"
     ));
-    assert!(!invocations.contains("update\nbead-1\n--assignee\n"));
+    assert!(!invocations.contains("batch\n"));
 }
 
 #[tokio::test]
 #[cfg(unix)]
-async fn bead_forge_clear_assignee_uses_atomic_batch_update() {
+async fn bead_rs_clear_assignee_uses_descriptor_command() {
     let root = tempfile::tempdir().unwrap();
     let backend = builtin_bead_backends()
         .into_iter()
@@ -290,14 +281,12 @@ async fn bead_forge_clear_assignee_uses_atomic_batch_update() {
 
     store.clear_assignee(&BeadId::from("bead-1")).await.unwrap();
     let invocations = fs::read_to_string(root.path().join("invocations.log")).unwrap();
-    assert!(invocations.starts_with("batch\n--json\n"));
-    assert!(invocations.contains(r#"[{"assignee":"","id":"bead-1","op":"update"}]"#));
-    assert!(!invocations.contains("update\nbead-1\n--assignee\n"));
+    assert_eq!(invocations, "update\nbead-1\n--clear-assignee\n");
 }
 
 #[tokio::test]
 #[cfg(unix)]
-async fn bead_forge_split_is_one_transactional_batch() {
+async fn bead_rs_split_uses_sequential_create_and_dependency_commands() {
     use needle::bead_store::NewChild;
 
     let root = tempfile::tempdir().unwrap();
@@ -308,7 +297,7 @@ async fn bead_forge_split_is_one_transactional_batch() {
     let binary = root.path().join("fixture-cli");
     executable(
         &binary,
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> invocations.log\nprintf '%s\\n' '[op 0] ok: bead-child-a' '[op 1] ok: bead-child-b' '[op 2] ok' '[op 3] ok'\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> invocations.log\nif [ \"$1\" = create ]; then\n  case \"$3\" in\n    A) printf '%s\\n' bead-child-a ;;\n    B) printf '%s\\n' bead-child-b ;;\n  esac\nfi\n",
     );
     let store =
         CliBeadStore::new(backend, binary, root.path().to_path_buf(), None, None, None).unwrap();
@@ -336,15 +325,13 @@ async fn bead_forge_split_is_one_transactional_batch() {
         [BeadId::from("bead-child-a"), BeadId::from("bead-child-b")]
     );
     let invocations = fs::read_to_string(root.path().join("invocations.log")).unwrap();
-    assert_eq!(invocations.matches("batch\n").count(), 1);
-    let payload: serde_json::Value =
-        serde_json::from_str(invocations.lines().nth(2).unwrap()).unwrap();
-    assert_eq!(payload[2]["op"], "dep_add_blocker");
-    assert_eq!(payload[2]["id"], "bead-parent");
-    assert_eq!(payload[2]["blocker"], "@0");
-    assert_eq!(payload[3]["op"], "dep_add_blocker");
-    assert_eq!(payload[3]["id"], "bead-parent");
-    assert_eq!(payload[3]["blocker"], "@1");
+    assert_eq!(
+        invocations,
+        "create\n--title\nA\n--description\nbody A\n--label\none\n\
+         dep\nadd\nbead-parent\nbead-child-a\n--kind\nblocks\n\
+         create\n--title\nB\n--description\nbody B\n--label\ntwo\n\
+         dep\nadd\nbead-parent\nbead-child-b\n--kind\nblocks\n"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

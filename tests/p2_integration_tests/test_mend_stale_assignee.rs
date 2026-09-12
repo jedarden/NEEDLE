@@ -420,6 +420,7 @@ async fn test_no_heartbeat_but_in_registry() {
     );
 }
 
+#[allow(dead_code)]
 fn main() {
-    println!("Run with: cargo test --test test_mend_stale_assignee");
+    println!("Run with: cargo test --test p2_integration_tests test_mend_stale_assignee::");
 }
