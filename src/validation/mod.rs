@@ -20,6 +20,7 @@
 //!
 //! Inspired by bg-gate (docs/research/bg-gate-validation.md).
 
+pub mod default_gates;
 pub mod dod_bypass;
 pub mod predispatch;
 mod shipped_work;

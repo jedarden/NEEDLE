@@ -650,8 +650,9 @@ impl OutcomeHandler {
             return Ok((true, None));
         }
         let GatesConfig {
-            gates: workspace_gates,
+            gates: mut workspace_gates,
             verification: workspace_verification,
+            declared,
         } = crate::config::gates_for_workspace(&bead.workspace).with_context(|| {
             format!(
                 "failed to load validation gates from the bead's workspace config {}",
@@ -659,10 +660,36 @@ impl OutcomeHandler {
             )
         })?;
 
+        // Plan section 4.4 step 6: a workspace that says nothing about gates
+        // is judged by the language default its build files imply. An
+        // explicit `gates: []` is the opt-out and still runs none.
+        let mut default_gate_name: Option<String> = None;
+        if workspace_gates.is_empty() && workspace_verification.is_empty() && !declared {
+            if let Some(detected) = crate::validation::default_gates::detect(
+                &bead.workspace,
+                &self.config.validation.default_gates,
+            ) {
+                tracing::info!(
+                    bead_id = %bead.id,
+                    workspace = %bead.workspace.display(),
+                    language = detected.language,
+                    evidence = %detected.evidence,
+                    commands = ?detected.commands,
+                    "bead's workspace declares no gates — applying the language default gate"
+                );
+                default_gate_name = Some(detected.gate_name());
+                workspace_gates.push(GateConfig::Command {
+                    commands: detected.commands,
+                    stderr_cap_bytes: None,
+                    run_in: crate::validation::RunIn::Clean,
+                });
+            }
+        }
+
         if workspace_gates.is_empty() && workspace_verification.is_empty() {
-            // The bead's workspace declares no gates — the dispatch is judged
-            // on its own merits, even when the worker's home workspace gates
-            // everything homed there.
+            // The bead's workspace declares no gates and its layout implies
+            // none — the dispatch is judged on its own merits, even when the
+            // worker's home workspace gates everything homed there.
             tracing::debug!(
                 bead_id = %bead.id,
                 workspace = %bead.workspace.display(),
@@ -734,7 +761,14 @@ impl OutcomeHandler {
                     if stderr_cap_bytes.is_none() {
                         *stderr_cap_bytes = Some(default_stderr_cap);
                     }
-                    (format!("gate_{}", i), config)
+                    // A language default carries its provenance in its name
+                    // so the ledger's gate_results say `default_rust`, not
+                    // `gate_0`.
+                    let name = match &default_gate_name {
+                        Some(name) => name.clone(),
+                        None => format!("gate_{}", i),
+                    };
+                    (name, config)
                 })
                 .collect();
             ValidationGate::new(gate_configs, bead.workspace.clone())

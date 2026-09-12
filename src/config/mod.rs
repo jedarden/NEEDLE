@@ -1170,6 +1170,11 @@ pub struct GatesConfig {
     /// Legacy verification commands (`verification:` in `.needle.yaml`).
     /// Empty when the workspace declares none.
     pub verification: Vec<String>,
+    /// Whether the workspace's `.needle.yaml` carried a `gates:` or
+    /// `verification:` key at all — even an empty one. An explicit `gates: []`
+    /// is the opt-out from the language default gate; a workspace that says
+    /// nothing gets the default (plan section 4.4 step 6).
+    pub declared: bool,
 }
 
 impl GatesConfig {
@@ -1216,9 +1221,11 @@ pub fn gates_for_workspace(workspace_root: &Path) -> Result<GatesConfig> {
         )
     })?;
 
+    let declared = overrides.gates.is_some() || overrides.verification.is_some();
     Ok(GatesConfig {
         gates: overrides.gates.unwrap_or_default(),
         verification: overrides.verification.unwrap_or_default(),
+        declared,
     })
 }
 
@@ -6447,6 +6454,64 @@ pub struct ValidationConfig {
     /// Maximum bytes of gate command stderr captured on failure.
     #[serde(default = "ValidationConfig::default_stderr_cap_bytes")]
     pub stderr_cap_bytes: usize,
+
+    /// Language-default verification gate for workspaces that declare none
+    /// (plan section 4.4 step 6).
+    #[serde(default)]
+    pub default_gates: DefaultGatesConfig,
+}
+
+/// A workspace that declares no `gates:` gets one derived from what it is —
+/// `Cargo.toml`, `go.mod`, a Python project, a `package.json` with a real
+/// test script — so "success" means something more than exit 0 there too.
+/// On 2026-09-12 only 5 of 79 workspaces declared gates, so in the other 74
+/// the ledger's `verified_success` was the agent's own opinion, which
+/// ADR-024 rules out as evidence.
+///
+/// The builtin commands are deliberately the cheap, deterministic checks
+/// (compile, vet, byte-compile, or the project's own test script), because
+/// gates run in a clean extraction under `validation.outcome_timeout_seconds`
+/// and a cold full test run of a large repository would time out into a
+/// gate execution error. Override per language to run more.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DefaultGatesConfig {
+    /// Apply a language default when a workspace declares no gates
+    /// (default: true). An explicit `gates: []` in `.needle.yaml` opts a
+    /// workspace out.
+    #[serde(default = "DefaultGatesConfig::default_enabled")]
+    pub enabled: bool,
+    /// Commands for a Rust workspace (`Cargo.toml`). Empty = builtin.
+    #[serde(default)]
+    pub rust: Vec<String>,
+    /// Commands for a Go workspace (`go.mod`). Empty = builtin.
+    #[serde(default)]
+    pub go: Vec<String>,
+    /// Commands for a Python workspace (`pyproject.toml`, `setup.py`,
+    /// `setup.cfg`, `requirements.txt`). Empty = builtin.
+    #[serde(default)]
+    pub python: Vec<String>,
+    /// Commands for a Node workspace (`package.json` with a real `test`
+    /// script). Empty = builtin.
+    #[serde(default)]
+    pub node: Vec<String>,
+}
+
+impl Default for DefaultGatesConfig {
+    fn default() -> Self {
+        DefaultGatesConfig {
+            enabled: Self::default_enabled(),
+            rust: Vec::new(),
+            go: Vec::new(),
+            python: Vec::new(),
+            node: Vec::new(),
+        }
+    }
+}
+
+impl DefaultGatesConfig {
+    fn default_enabled() -> bool {
+        true
+    }
 }
 
 impl Default for ValidationConfig {
@@ -6454,6 +6519,7 @@ impl Default for ValidationConfig {
         ValidationConfig {
             outcome_timeout_seconds: Self::default_outcome_timeout_seconds(),
             stderr_cap_bytes: Self::default_stderr_cap_bytes(),
+            default_gates: DefaultGatesConfig::default(),
         }
     }
 }

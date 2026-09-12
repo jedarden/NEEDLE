@@ -363,6 +363,15 @@ pub enum CliCommand {
     /// Rollback to the previous :stable binary.
     Rollback,
 
+    /// Show the verification gates a workspace's beads are judged by:
+    /// its declared `gates:`/`verification:`, or the language default its
+    /// build files imply when it declares none.
+    Gates {
+        /// Workspace root (default: current directory).
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+    },
+
     /// Run learning consolidation on demand.
     ///
     /// Reads bead close bodies since the last consolidation, extracts
@@ -600,6 +609,7 @@ pub fn run() -> Result<()> {
             skip_canary,
         } => cmd_upgrade(check, from_file, skip_canary),
         CliCommand::Rollback => cmd_rollback(),
+        CliCommand::Gates { workspace } => cmd_gates(workspace),
         CliCommand::Reflect { workspace, force } => cmd_reflect(workspace, force),
         CliCommand::UpdateRules { output } => cmd_update_rules(output),
         CliCommand::Stats {
@@ -6978,6 +6988,60 @@ fn cmd_upgrade(check_only: bool, from_file: Option<PathBuf>, skip_canary: bool) 
 }
 
 /// `needle rollback` — restore the previous :stable binary.
+/// `needle gates` — print the gates that resolve for a workspace.
+fn cmd_gates(workspace: Option<PathBuf>) -> Result<()> {
+    let root = match workspace {
+        Some(path) => path,
+        None => std::env::current_dir().context("failed to read the current directory")?,
+    };
+    let root = std::fs::canonicalize(&root).unwrap_or(root);
+    let config = ConfigLoader::load_global()?;
+    let resolved = crate::config::gates_for_workspace(&root)?;
+
+    println!("Workspace: {}", root.display());
+    if !resolved.gates.is_empty() {
+        println!("Declared gates ({}):", resolved.gates.len());
+        for (i, gate) in resolved.gates.iter().enumerate() {
+            let crate::validation::GateConfig::Command {
+                commands, run_in, ..
+            } = gate;
+            println!("  gate_{i} [{run_in:?}]");
+            for command in commands {
+                println!("    $ {command}");
+            }
+        }
+        return Ok(());
+    }
+    if !resolved.verification.is_empty() {
+        println!("Declared verification commands (legacy `verification:`):");
+        for command in &resolved.verification {
+            println!("    $ {command}");
+        }
+        return Ok(());
+    }
+    if resolved.declared {
+        println!("Declared: none (explicit `gates: []` — the language default is opted out).");
+        return Ok(());
+    }
+    match crate::validation::default_gates::detect(&root, &config.validation.default_gates) {
+        Some(detected) => {
+            println!(
+                "Declared: none. Language default ({}, from {}) [Clean]:",
+                detected.gate_name(),
+                detected.evidence
+            );
+            for command in &detected.commands {
+                println!("    $ {command}");
+            }
+        }
+        None if config.validation.default_gates.enabled => {
+            println!("Declared: none, and no language default applies — beads are judged on exit code alone.");
+        }
+        None => println!("Declared: none; validation.default_gates.enabled is false."),
+    }
+    Ok(())
+}
+
 fn cmd_rollback() -> Result<()> {
     let config = ConfigLoader::load_global()?;
 
