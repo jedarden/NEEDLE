@@ -49,7 +49,7 @@ This audit compiles findings from previous investigation beads into a comprehens
 
 **Files spawning `CARGO_BIN_EXE_needle`:**
 1. `tests/adapter_validation_tests.rs` (22 tests)
-2. `tests/bead_rs_lifecycle.rs`
+2. `tests/real_br_integration_tests/bead_rs_lifecycle.rs`
 3. `tests/binary_freshness_fix_loop_e2e.rs`
 4. `tests/cleanup_liveness_regression.rs`
 5. `tests/doctor_exit_code_tests.rs`
@@ -67,7 +67,7 @@ This audit compiles findings from previous investigation beads into a comprehens
 5. `tests/strand_tilde_expansion_tests.rs`
 6. `tests/real_br_integration_tests.rs`
 7. `tests/integration_tests.rs`
-8. `tests/bead_rs_lifecycle.rs`
+8. `tests/real_br_integration_tests/bead_rs_lifecycle.rs`
 
 ---
 

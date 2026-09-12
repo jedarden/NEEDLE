@@ -10,7 +10,7 @@ reconciliation disposition. Never open a bead-forge SQLite file with `bead`,
 write native SQLite directly, or synthesize a bead-rs checkpoint.
 
 The executable proof is
-`tests/bead_rehydration_verification.rs`. It covers a nontrivial source with
+`tests/real_br_integration_tests/bead_rehydration_verification.rs`. It covers a nontrivial source with
 open, dependency-blocked, in-progress, deferred, and closed work; exact graph
 comparison; ready-frontier equivalence; native checkpoint flush and clean
 restore; source immutability; and rollback backup readability. Its verifier is
@@ -169,7 +169,7 @@ Run the repository proof with:
 ```text
 BF_BIN=/absolute/path/to/bf \
 BEAD_RS_BIN=/absolute/path/to/bead \
-cargo test --test bead_rehydration_verification -- --ignored --nocapture
+cargo test --test real_br_integration_tests bead_rehydration_verification:: -- --ignored --nocapture
 ```
 
 ## Cutover

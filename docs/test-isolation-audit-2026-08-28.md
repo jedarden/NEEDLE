@@ -204,7 +204,7 @@ These tests correctly isolate the Explore strand to a temporary directory.
 
 These tests don't use the Explore strand or spawn subprocesses (covered by existing policy).
 
-#### tests/workspace_equality_tests.rs
+#### tests/real_br_integration_tests/workspace_equality_tests.rs
 - **Status**: ✅ SAFE (subprocess-only)
 - **Pattern**: Spawns bf CLI via `Command::new("bf")`
 - **Coverage**: Already protected by subprocess isolation policy (HOME env var)

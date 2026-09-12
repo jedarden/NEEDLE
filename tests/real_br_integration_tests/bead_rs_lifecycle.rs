@@ -1,7 +1,7 @@
 //! Real NEEDLE lifecycle gate for the bead-rs backend.
 //!
 //! Run explicitly after installing or building bead-rs:
-//! `BEAD_RS_BIN=/path/to/bead cargo test --test bead_rs_lifecycle -- --ignored`
+//! `BEAD_RS_BIN=/path/to/bead cargo test --test real_br_integration_tests bead_rs_lifecycle:: -- --ignored`
 
 use std::fs;
 use std::path::{Path, PathBuf};

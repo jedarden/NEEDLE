@@ -16,9 +16,20 @@
 //! 7. Concurrent mitosis on same parent: flock serializes
 //! 10. Database corruption — corrupt SQLite, verify auto-repair from JSONL
 
+#[path = "real_br_integration_tests/bead_rehydration_verification.rs"]
+mod bead_rehydration_verification;
+#[path = "real_br_integration_tests/bead_rs_lifecycle.rs"]
+mod bead_rs_lifecycle;
+#[path = "real_br_integration_tests/checkpoint_dispatch_guard.rs"]
+mod checkpoint_dispatch_guard;
+#[path = "real_br_integration_tests/checkpoint_roundtrip_fidelity.rs"]
+mod checkpoint_roundtrip_fidelity;
+#[path = "real_br_integration_tests/workspace_equality_tests.rs"]
+mod workspace_equality_tests;
+
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -38,15 +49,109 @@ use needle::types::{BeadId, BeadStatus, ClaimOutcome, StrandResult};
 // Test infrastructure
 // ═════════════════════════════════════════════════════════════════════════════
 
-/// Path to the native bead-rs binary required by these integration fixtures.
-fn bead_path() -> PathBuf {
-    which::which("bead").expect("bead CLI must be installed for strand integration tests")
+/// Locate a bead-rs binary that can initialize an isolated workspace without
+/// consulting operator HOME state. The first `bead` on PATH may intentionally
+/// be a host queue-fence wrapper; probing with a disposable HOME rejects that
+/// wrapper while retaining real CLI/database coverage through the native
+/// binary later on PATH.
+fn native_bead_path() -> PathBuf {
+    static NATIVE_BEAD: OnceLock<PathBuf> = OnceLock::new();
+
+    NATIVE_BEAD
+        .get_or_init(|| {
+            let mut candidates = Vec::new();
+            if let Some(configured) = std::env::var_os("BEAD_RS_BIN") {
+                candidates.push(PathBuf::from(configured));
+            }
+            if let Ok(paths) = which::which_all("bead") {
+                candidates.extend(paths);
+            }
+
+            let mut seen = HashSet::new();
+            for candidate in candidates {
+                let identity = std::fs::canonicalize(&candidate).unwrap_or(candidate.clone());
+                if !seen.insert(identity) || !candidate.is_file() {
+                    continue;
+                }
+
+                let Ok(probe) = TempDir::new() else {
+                    continue;
+                };
+                let workspace = probe.path().join("workspace");
+                let home = probe.path().join("home");
+                if std::fs::create_dir_all(&workspace).is_err()
+                    || std::fs::create_dir_all(&home).is_err()
+                {
+                    continue;
+                }
+                let usable = std::process::Command::new(&candidate)
+                    .current_dir(&workspace)
+                    .env("HOME", &home)
+                    .args([
+                        "init",
+                        "--prefix",
+                        "probe",
+                        "--skip-foreign-workspace",
+                        "--no-auto-flush",
+                    ])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .is_ok_and(|status| status.success());
+                if usable {
+                    return candidate;
+                }
+            }
+
+            panic!(
+                "a native bead-rs CLI must be installed; queue-fence wrappers requiring operator HOME are not valid test binaries"
+            );
+        })
+        .clone()
+}
+
+/// Install a workspace-local command shim. `CliBeadStore` owns only a binary
+/// path and working directory, not an environment map, so the shim supplies
+/// the same isolated HOME used by direct fixture commands without mutating the
+/// process-wide environment (which would race between parallel tests).
+#[cfg(unix)]
+fn bead_path(workspace: &Path) -> PathBuf {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    let bin_dir = workspace.join(".test-bin");
+    let home = workspace.join(".test-home");
+    std::fs::create_dir_all(&bin_dir).expect("failed to create isolated bead bin directory");
+    std::fs::create_dir_all(&home).expect("failed to create isolated test HOME");
+
+    let native_link = bin_dir.join("bead-native");
+    if !native_link.exists() {
+        symlink(native_bead_path(), &native_link).expect("failed to link native bead-rs binary");
+    }
+
+    let shim = bin_dir.join("bead");
+    if !shim.exists() {
+        std::fs::write(
+            &shim,
+            "#!/bin/sh\nHOME=\"$PWD/.test-home\"\nexport HOME\nexec \"${0%/*}/bead-native\" \"$@\"\n",
+        )
+        .expect("failed to write isolated bead command shim");
+        let mut permissions = std::fs::metadata(&shim).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&shim, permissions)
+            .expect("failed to make isolated bead command shim executable");
+    }
+    shim
+}
+
+#[cfg(not(unix))]
+fn bead_path(_workspace: &Path) -> PathBuf {
+    native_bead_path()
 }
 
 fn bead_command(workspace: &Path) -> std::process::Command {
     let test_home = workspace.join(".test-home");
     std::fs::create_dir_all(&test_home).expect("failed to create isolated test HOME");
-    let mut command = std::process::Command::new(bead_path());
+    let mut command = std::process::Command::new(bead_path(workspace));
     command.current_dir(workspace).env("HOME", test_home);
     command
 }
@@ -64,7 +169,7 @@ fn create_test_workspace(prefix: &str) -> Result<TempDir> {
 
     // Initialize .beads/ directory.
     let output = bead_command(dir.path())
-        .args(["init", "--prefix", "test"])
+        .args(["init", "--prefix", "test", "--skip-foreign-workspace"])
         .output()
         .context("failed to run bead init")?;
 
@@ -152,7 +257,7 @@ fn store_for_workspace(workspace: &Path) -> Result<CliBeadStore> {
         .ok_or_else(|| anyhow::anyhow!("built-in bead-rs descriptor missing"))?;
     CliBeadStore::new(
         backend,
-        bead_path(),
+        bead_path(workspace),
         workspace.to_path_buf(),
         None,
         None,
@@ -2176,11 +2281,15 @@ fn read_telemetry_events(log_dir: &Path) -> Vec<serde_json::Value> {
     let entries =
         std::fs::read_dir(log_dir).unwrap_or_else(|e| panic!("telemetry log dir readable: {e}"));
     for entry in entries.flatten() {
-        let content = std::fs::read_to_string(entry.path()).unwrap_or_default();
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let content = std::fs::read_to_string(&path).unwrap_or_default();
         for line in content.lines().filter(|l| !l.trim().is_empty()) {
             match serde_json::from_str::<serde_json::Value>(line) {
                 Ok(event) => events.push(event),
-                Err(e) => panic!("telemetry line {} is not JSON: {e}", entry.path().display()),
+                Err(e) => panic!("telemetry line {} is not JSON: {e}", path.display()),
             }
         }
     }
@@ -2197,7 +2306,7 @@ fn event_ts(event: &serde_json::Value) -> chrono::DateTime<chrono::FixedOffset> 
 /// restart churn, no claims — and resume selection once load clears.
 #[test]
 fn saturated_host_worker_stays_resident_until_load_clears() -> Result<()> {
-    let bead_bin = bead_path();
+    let bead_bin = native_bead_path();
 
     let root = tempfile::Builder::new()
         .prefix("needle-satfix-")
@@ -2212,10 +2321,15 @@ fn saturated_host_worker_stays_resident_until_load_clears() -> Result<()> {
         std::fs::create_dir_all(dir)?;
     }
 
-    // Pin the same real bead binary this suite validates onto the child PATH,
-    // so the worker claims and closes against bead-rs and nothing else.
+    // Pin the real bead and shell binaries onto the child PATH. The dispatcher
+    // launches templates through `bash -c`; minimal/NixOS hosts need that
+    // resolved explicitly rather than assuming it lives under /bin.
     let pinned_bead = bin_dir.join("bead");
     std::fs::copy(&bead_bin, &pinned_bead)?;
+    std::fs::copy(
+        which::which("bash").context("bash is required by the dispatcher")?,
+        bin_dir.join("bash"),
+    )?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -2226,7 +2340,7 @@ fn saturated_host_worker_stays_resident_until_load_clears() -> Result<()> {
 
     // Workspace with exactly one claimable canary bead.
     let init = bead_command(&workspace)
-        .args(["init", "--prefix", "sat"])
+        .args(["init", "--prefix", "sat", "--skip-foreign-workspace"])
         .output()?;
     if !init.status.success() {
         anyhow::bail!(
@@ -2259,7 +2373,7 @@ fn saturated_host_worker_stays_resident_until_load_clears() -> Result<()> {
     std::fs::write(
         home.join(".config/needle/config.yaml"),
         format!(
-            "agent:\n  default: sat-agent\n  timeout: 30\n  adapters_dir: {}\n  routing: null\nworker:\n  idle_action: exit\n  enforce_shipped_work: false\n  cpu_load_warn: 1.0\n  memory_free_warn_mb: 64\nworkspace:\n  home: {}\nstrands:\n  explore:\n    enabled: false\n    workspace_root: {}\n    workspaces: []\n  splice:\n    enabled: false\n  reflect:\n    enabled: false\ntelemetry:\n  file_sink:\n    enabled: true\n    log_dir: {}\n",
+            "agent:\n  default: sat-agent\n  timeout: 30\n  adapters_dir: {}\n  routing: null\nworker:\n  idle_action: exit\n  allow_exit_without_supervisor: true\n  enforce_shipped_work: false\n  cpu_load_warn: 1.0\n  memory_free_warn_mb: 64\nworkspace:\n  home: {}\nstrands:\n  explore:\n    enabled: false\n    workspace_root: {}\n    workspaces: []\n  splice:\n    enabled: false\n  reflect:\n    enabled: false\ntelemetry:\n  file_sink:\n    enabled: true\n    log_dir: {}\n",
             adapters.display(),
             home.join(".needle").display(),
             root.path().display(),
@@ -2345,10 +2459,21 @@ fn saturated_host_worker_stays_resident_until_load_clears() -> Result<()> {
         }
         std::thread::sleep(Duration::from_millis(200));
     }
-    let status = status.expect("worker did not exit after load cleared");
-    assert!(status.success(), "worker exited non-success: {status}");
-
+    let status = match status {
+        Some(status) => status,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let stdout = std::fs::read_to_string(&stdout_log).unwrap_or_default();
+            let stderr = std::fs::read_to_string(&stderr_log).unwrap_or_default();
+            panic!("worker did not exit after load cleared; stdout: {stdout}; stderr: {stderr}");
+        }
+    };
     let stderr = std::fs::read_to_string(&stderr_log)?;
+    assert!(
+        status.success(),
+        "worker exited non-success: {status}; stderr: {stderr}"
+    );
     assert!(
         !stderr.contains("stopped unexpectedly"),
         "worker must not crash under admission pressure; stderr: {stderr}"
@@ -2399,11 +2524,17 @@ fn saturated_host_worker_stays_resident_until_load_clears() -> Result<()> {
             "blocked heartbeat missing reason: {event}"
         );
         assert!(
-            event["data"]["actual"].as_f64().is_some(),
+            event["data"]["actual"]
+                .as_str()
+                .and_then(|value| value.parse::<f64>().ok())
+                .is_some(),
             "blocked heartbeat missing actual reading: {event}"
         );
         assert!(
-            event["data"]["threshold"].as_f64().is_some(),
+            event["data"]["threshold"]
+                .as_str()
+                .and_then(|value| value.parse::<f64>().ok())
+                .is_some(),
             "blocked heartbeat missing threshold: {event}"
         );
         assert_eq!(
