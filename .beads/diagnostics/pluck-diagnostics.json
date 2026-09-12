@@ -1,13 +1,13 @@
 {
-  "timestamp": "2026-09-12T09:03:47.344002313Z",
-  "total_open_beads": 490,
+  "timestamp": "2026-09-12T09:38:31.933343769Z",
+  "total_open_beads": 495,
   "exclusion_criteria": {
     "has_assignee": 2,
     "manually_blocked": 8,
-    "has_dependencies": 360,
+    "has_dependencies": 364,
     "resource_conflicts": 0
   },
-  "final_candidate_count": 150,
+  "final_candidate_count": 151,
   "excluded_beads": [
     {
       "bead_id": "needle-6b02eb9d",
@@ -237,6 +237,28 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 2,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-da77b68a",
+      "title": "Validation gates are loaded from the worker's home workspace, not the bead's workspace",
+      "priority": 0,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-fec3edc2",
+      "title": "Resolve command gates from the dispatched bead's workspace at both gate execution sites",
+      "priority": 0,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
       "has_resource_conflicts": false,
       "conflict_count": 0
     },
@@ -1530,6 +1552,17 @@
     {
       "bead_id": "needle-3771863e",
       "title": "A gate command that cannot execute (exit 127) must be a gate error, not a task failure",
+      "priority": 1,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-8750c2ee",
+      "title": "Write two-workspace regression tests covering both gate resolution directions",
       "priority": 1,
       "assignee": null,
       "manual_blocked": false,
@@ -3675,6 +3708,17 @@
     {
       "bead_id": "needle-00fbe3bc",
       "title": "Pin provisional attempt-id threading through JSONL and OTLP, and needle stats --by aggregations",
+      "priority": 2,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-49701a27",
+      "title": "Add gate-source telemetry and document the resolved gate origin",
       "priority": 2,
       "assignee": null,
       "manual_blocked": false,
