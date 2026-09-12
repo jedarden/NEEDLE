@@ -6093,3 +6093,139 @@ Gate *execution* errors (19.1) are not failures and do not advance a bead down t
 - The human-rung count across all workspaces is below 10 and every one of them carries a rung-4 `analysis:` note.
 - No workspace with open, unblocked work has `ready = 0` for more than one Mend interval.
 - No stale in-progress claim (older than `stuck_threshold_secs`) survives two Mend intervals in any workspace, including NEEDLE's own.
+
+---
+
+# Phase 20: Concurrent-Mutation Safety — File-Level Claims in the Shared Checkout
+
+ADR-015 rejected per-worker worktrees and gave good reasons: merge-back complexity,
+build-cache duplication, and the observation that the failure mode it was reaching
+for — a bead worked twice — lives at the bead level, where blocking dependencies
+already serialize it. Those reasons stand and this phase does not reopen them.
+
+But ADR-015's own Context states the residual gap plainly:
+
+> The per-workspace claim `flock` guards only the CLAIMING step's `br update
+> --claim` call. Once two workers are each dispatched into the same workspace,
+> their agents can run concurrent `git add`, `commit`, `reset --hard`, and
+> `checkout` operations in that single shared tree for the full duration of both
+> dispatches, with nothing serializing them beyond whatever the agents themselves
+> happen to do.
+
+That gap is now measured, not hypothetical. Observed on codinghome 2026-09-12 in
+NEEDLE's own checkout, with three workers dispatched plus one interactive session:
+
+- Eight source files were modified inside thirty minutes by different actors,
+  including `types/mod.rs`, `bead_store/`, `validation/shipped_work.rs` and
+  `strand/pluck.rs`.
+- Three files carried 827 added lines of which one actor's work was 39. That actor
+  could not commit its own change without sweeping in ~700 lines of another's
+  half-finished work, and could not separate them, because `git` stages paths and
+  the contention is *within* the path.
+- The lib test suite moved from 33 to 35 failures between two consecutive runs
+  with an entirely different module distribution, because the tree was being
+  rewritten during the run. Nobody was testing what they thought they were testing.
+
+Bead-level serialization cannot address this. The interactive session held no bead,
+so no dependency edge could have ordered it; and two workers on *different* beads
+legitimately touched the same file. The unit of contention is the file, so the
+claim must be on the file.
+
+## 20.1 Advisory file claims
+
+A claim is an advisory lock on a path, taken before first mutation and released at
+dispatch end. Advisory, not mandatory: nothing in the OS enforces it, and a
+participant that ignores it is not prevented from writing — the value is that
+every participant that *does* check gets a truthful answer about who else is
+editing.
+
+Claims live under `~/.needle/locks/<workspace-id>/<path-id>.json`, not inside the
+target repository. Putting them in the workspace would add an untracked directory
+to every repo the fleet touches and invite a `.gitignore` per repo; NEEDLE already
+keeps per-workspace state centrally (`agents/`, `cache/`, `diagnostics/`), and a
+lock is state about a dispatch, not content of the project.
+
+Each claim records: absolute path, workspace, holder identity (worker id, or an
+interactive session id), PID where one exists, acquisition time, and a TTL.
+
+## 20.2 Liveness and staleness — the part that must not be got wrong
+
+A lock whose holder dies is worse than no lock: it blocks every future worker
+forever and is invisible until someone asks why a repo went quiet. This is the
+exact shape of the 583 assigned-but-open beads that starved ten workspaces on
+2026-08-16, and of the `stuck_threshold_secs` claim-TTL behaviour that releases a
+LIVE worker's claim when the age check overrides the liveness check.
+
+So claims expire by TTL **and** are reclaimable on proven holder death, and the
+two are separate checks:
+- TTL expiry is a backstop, sized well above the longest legitimate dispatch.
+- Holder liveness is the primary signal — a PID that is gone, or a heartbeat that
+  has stopped, releases the claim immediately rather than after the TTL.
+- A live holder's claim is never reclaimed on age alone. The claim-TTL bug this
+  mirrors is documented in `~/.config/needle/config.yaml` under
+  `stuck_threshold_secs`; do not reproduce its precedence order.
+
+## 20.3 Granularity and deadlock
+
+Claims are per-file, taken in a deterministic order (lexicographic by absolute
+path) when several are needed at once, so two participants requesting overlapping
+sets cannot deadlock. A participant that cannot acquire the full set releases
+what it holds and retries with backoff rather than waiting while holding.
+
+Directory-level claims are explicitly out of scope: they re-create worktree-shaped
+contention at a coarser grain, which is what ADR-015 rejected.
+
+## 20.4 Hook architecture for non-worker participants
+
+The interactive case is the one bead dependencies can never cover, and on this box
+it is common: operators run Claude Code and codex sessions in the same checkouts
+the fleet roams. Those sessions must be able to participate.
+
+NEEDLE already has hook precedent (`src/commit_hook.rs`, which validates that
+agents do not sweep in other workers' changes, and `src/hoop_hooks.rs`). This
+phase generalises that into a documented hook surface a non-worker can call:
+
+- `needle claim-file <path>...` / `needle release-file <path>...` — the CLI verbs.
+- `needle claims [--workspace <w>]` — who holds what, for the fleet panel.
+- A `PreToolUse`-shaped contract so a Claude Code session can acquire a claim
+  before `Write`/`Edit` and refuse (or warn) when another participant holds it.
+
+The hook must fail **open**, loudly. A claim subsystem that cannot answer must not
+be able to stop an operator from editing their own repository — the same posture
+`org-rule-guard.py` takes. A claim system that blocks work when it breaks will be
+disabled within a day and then relied upon while disabled, which is worse than not
+having it.
+
+## 20.5 What this does NOT do
+
+- It does not isolate checkouts. One shared working directory per repo remains the
+  model (ADR-015).
+- It does not serialize `git` itself. Two participants can still race on the index;
+  that is a narrower, separately-tracked problem (see the shared-checkout
+  `git add`+`commit` race).
+- It does not replace bead-level dependencies for work that genuinely overlaps in
+  scope. It covers the case dependencies structurally cannot: participants holding
+  no bead, and distinct beads that happen to share a file.
+
+## Changes
+- `~/.needle/locks/` claim store with acquisition, release, listing, and
+  liveness-first staleness reclamation.
+- Worker integration: claim on first mutation of a path within a dispatch, release
+  at every terminal outcome path — the same exhaustiveness requirement the
+  `attempt.resolved` work established across all eight terminal paths.
+- CLI verbs `claim-file`, `release-file`, `claims`.
+- A documented hook contract plus a reference `PreToolUse` implementation for
+  Claude Code sessions.
+- `needle doctor` check: claims held by dead holders, and claims older than TTL.
+
+## Exit criteria
+- Two workers dispatched into one workspace, both instructed to edit the same
+  file, produce exactly one writer; the second reports the holder and backs off.
+- An interactive session holding a claim is visible in `needle claims` and blocks
+  a worker from editing that path for the claim's life.
+- A holder killed with SIGKILL has its claims reclaimed within one Mend interval,
+  proven by PID death rather than by TTL expiry.
+- A live holder mid-dispatch never loses a claim to age alone, for a dispatch
+  longer than the TTL.
+- With the claim subsystem forcibly broken (store unreadable), an operator can
+  still edit files and a worker can still dispatch; both log the degradation.
