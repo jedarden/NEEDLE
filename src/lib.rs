@@ -3,6 +3,7 @@
 //! Library crate exposing the public API for integration tests and embedding.
 
 pub mod agent_event;
+pub mod attempt_history;
 pub mod bead_store;
 pub mod build_metadata;
 /// CI build-status probe behind the claim-time circuit breaker.

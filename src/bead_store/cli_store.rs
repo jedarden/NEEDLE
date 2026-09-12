@@ -641,6 +641,43 @@ impl BeadStore for CliBeadStore {
         Ok((bead, claim_events))
     }
 
+    async fn set_data(
+        &self,
+        id: &BeadId,
+        namespace: &str,
+        schema_ref: &str,
+        value: &serde_json::Value,
+    ) -> Result<bool> {
+        if self.operation("data_set").is_err() {
+            return Ok(false);
+        }
+        let values = HashMap::from([
+            ("id", id.to_string()),
+            ("key", namespace.to_string()),
+            ("schema_ref", schema_ref.to_string()),
+            ("value", serde_json::to_string(value)?),
+        ]);
+        self.run_operation("data_set", &values).await?;
+        Ok(true)
+    }
+
+    async fn get_data(&self, id: &BeadId, namespace: &str) -> Result<Option<serde_json::Value>> {
+        if self.operation("data_get").is_err() {
+            return Ok(None);
+        }
+        let values = HashMap::from([("id", id.to_string()), ("key", namespace.to_string())]);
+        let stdout = match self.run_operation("data_get", &values).await {
+            Ok(stdout) => stdout,
+            // bead-rs reports an empty namespace as a workspace error, not as
+            // an empty document; that is the "no history yet" case.
+            Err(e) if format!("{e:#}").contains("No structured data found") => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+            .with_context(|| format!("data_get for {id} returned non-JSON output"))?;
+        Ok(parsed.get("value").cloned().or(Some(parsed)))
+    }
+
     async fn notes(&self, id: &BeadId) -> Result<Option<String>> {
         let values = HashMap::from([("id", id.to_string())]);
         let stdout = self.run_operation("show", &values).await?;
@@ -1748,6 +1785,51 @@ mod tests {
         let values = HashMap::from([("id", "bf-123".to_string())]);
         let result = store.render_operation("show", &values).unwrap();
         assert_eq!(result, vec!["show", "bf-123", "--json"]);
+
+        // Structured data ops render the bead-rs 0.2.6 CLI shape (`--id`,
+        // `--namespace`, `--schema-ref`, `--value`), not the retired `--key`.
+        let values = HashMap::from([
+            ("id", "needle-1".to_string()),
+            ("key", "needle-attempts".to_string()),
+            (
+                "schema_ref",
+                "urn:needle:schema:attempt-history:v1".to_string(),
+            ),
+            ("value", r#"{"attempts":[]}"#.to_string()),
+        ]);
+        let result = store.render_operation("data_set", &values).unwrap();
+        assert_eq!(
+            result,
+            vec![
+                "data",
+                "set",
+                "--id",
+                "needle-1",
+                "--namespace",
+                "needle-attempts",
+                "--schema-ref",
+                "urn:needle:schema:attempt-history:v1",
+                "--value",
+                r#"{"attempts":[]}"#,
+            ]
+        );
+        let values = HashMap::from([
+            ("id", "needle-1".to_string()),
+            ("key", "needle-attempts".to_string()),
+        ]);
+        let result = store.render_operation("data_get", &values).unwrap();
+        assert_eq!(
+            result,
+            vec![
+                "data",
+                "get",
+                "--id",
+                "needle-1",
+                "--namespace",
+                "needle-attempts",
+                "--json"
+            ]
+        );
     }
 
     #[test]

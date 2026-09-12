@@ -804,6 +804,28 @@ input rather than validated knowledge. A default-configured worker therefore:
   `strands.learning.max_learning_context_bytes` (default 8192). Configured
   `prompt.context_files` are operator policy and are never truncated.
 
+What a retried bead *is* told is its own attempt history (plan revision 31
+leaf R3). Every resolved attempt is appended to
+`<workspace>/.beads/traces/<bead>/attempts.jsonl` — outcome, terminal reason,
+exit code, commits it left, and a bounded, sanitized failure summary (the
+rejecting gate's output, or the stream's terminal envelope plus a stderr
+tail). The bounded newest five are mirrored into bead-rs structured data
+(`bead data get --id <bead> --namespace needle-attempts`) so a worker on
+another host sees them, and they survive `bead update --notes`, which
+replaces notes. The newest attempts render into the `{failure_history}`
+variable of the pluck and split templates as a "Previous attempts on this
+bead" section that tells the agent not to repeat what already failed.
+
+```yaml
+strands:
+  learning:
+    failure_history:
+      enabled: true            # record attempts and inject the history
+      max_attempts: 3          # newest attempts rendered into the prompt
+      max_bytes: 4000          # byte cap on the rendered section
+      sync_to_bead_data: true  # mirror into bead-rs `data` (needs bead-rs >= 0.2.6)
+```
+
 The files on disk are left in place as the untrusted candidate corpus for the
 N-T13 migration. To restore the pre-N-T15 behaviour byte-for-byte:
 

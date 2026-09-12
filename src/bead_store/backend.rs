@@ -396,7 +396,7 @@ fn allowed_placeholders(operation: &str) -> &'static [&'static str] {
         "ref_remove" => &["id", "namespace", "key"],
         "ref_list" => &["id"],
         "ref_find" => &["namespace", "value"],
-        "data_set" => &["id", "key", "value"],
+        "data_set" => &["id", "key", "schema_ref", "value"],
         "data_get" => &["id", "key"],
         "data_list" => &["id"],
         "data_remove" => &["id", "key"],
@@ -708,11 +708,24 @@ fn builtin_bead_rs() -> BeadBackend {
             Some(ParseShape::JsonLines),
         ),
     );
+    // bead-rs ≥ 0.2.6 `data` command: `--id`, `--namespace` (NEEDLE's `{key}`),
+    // an immutable `--schema-ref`, and a JSON `--value`. The namespace must be
+    // `[a-z0-9_-]+`. Verified against the installed CLI on 2026-09-12; the
+    // earlier `{id} --key` spelling was never accepted by any release.
     operations.insert(
         "data_set".into(),
         operation(
             &[
-                "data", "set", "{id}", "--key", "{key}", "--value", "{value}",
+                "data",
+                "set",
+                "--id",
+                "{id}",
+                "--namespace",
+                "{key}",
+                "--schema-ref",
+                "{schema_ref}",
+                "--value",
+                "{value}",
             ],
             None,
             None,
@@ -721,18 +734,34 @@ fn builtin_bead_rs() -> BeadBackend {
     operations.insert(
         "data_get".into(),
         operation(
-            &["data", "get", "{id}", "--key", "{key}"],
+            &[
+                "data",
+                "get",
+                "--id",
+                "{id}",
+                "--namespace",
+                "{key}",
+                "--json",
+            ],
             None,
             Some(ParseShape::JsonObject),
         ),
     );
     operations.insert(
         "data_list".into(),
-        operation(&["data", "list", "{id}"], None, Some(ParseShape::JsonLines)),
+        operation(
+            &["data", "list", "--id", "{id}", "--json"],
+            None,
+            Some(ParseShape::JsonLines),
+        ),
     );
     operations.insert(
         "data_remove".into(),
-        operation(&["data", "remove", "{id}", "--key", "{key}"], None, None),
+        operation(
+            &["data", "remove", "--id", "{id}", "--namespace", "{key}"],
+            None,
+            None,
+        ),
     );
     operations.insert(
         "query".into(),

@@ -3110,13 +3110,48 @@ impl Worker {
             return Ok(());
         }
 
+        // R3: what the previous attempts on this bead did and why they ended
+        // is part of the next attempt's context. Loaded from the local
+        // journal (or the bead-rs mirror on another host), rendered bounded.
+        let failure_history = if self.config.strands.learning.failure_history.enabled {
+            let records =
+                crate::attempt_history::load_for_prompt(&build_ws, &bead.id, self.store.as_ref())
+                    .await;
+            let rendered = crate::attempt_history::render(
+                &records,
+                self.config.strands.learning.failure_history.limits(),
+            );
+            if !rendered.is_empty() {
+                tracing::info!(
+                    bead_id = %bead_id,
+                    prior_attempts = records.len(),
+                    history_bytes = rendered.len(),
+                    "injecting the bead's attempt history into the prompt"
+                );
+            }
+            rendered
+        } else {
+            String::new()
+        };
+
         let mut prompt = match tokio::time::timeout(
             timeout_dur,
             tokio::task::spawn_blocking(move || {
                 if template_name == "split" {
-                    prompt_builder.build_split(&bead, &build_ws, &worker_name, failure_count)
+                    prompt_builder.build_split_with_history(
+                        &bead,
+                        &build_ws,
+                        &worker_name,
+                        failure_count,
+                        &failure_history,
+                    )
                 } else {
-                    prompt_builder.build_pluck(&bead, &build_ws, &worker_name)
+                    prompt_builder.build_pluck_with_history(
+                        &bead,
+                        &build_ws,
+                        &worker_name,
+                        &failure_history,
+                    )
                 }
             }),
         )

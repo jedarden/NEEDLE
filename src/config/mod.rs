@@ -5204,6 +5204,70 @@ pub struct LearningConfig {
     /// to every dispatch.
     #[serde(default = "LearningConfig::default_max_learning_context_bytes")]
     pub max_learning_context_bytes: usize,
+
+    /// What a retried bead's prompt is told about its previous attempts
+    /// (plan revision 31 leaf R3, `needle-60163eac`).
+    #[serde(default)]
+    pub failure_history: FailureHistoryConfig,
+}
+
+/// Per-bead attempt history shown to the next attempt.
+///
+/// Every resolved attempt is appended to
+/// `<workspace>/.beads/traces/<bead>/attempts.jsonl` and mirrored, bounded,
+/// into bead-rs structured data (namespace `needle-attempts`) so another host
+/// sees it. The newest few are rendered into the `{failure_history}` prompt
+/// variable of the pluck and split templates.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FailureHistoryConfig {
+    /// Record attempts and inject the history (default: true).
+    #[serde(default = "FailureHistoryConfig::default_enabled")]
+    pub enabled: bool,
+    /// Newest attempts rendered into the prompt (default: 3).
+    #[serde(default = "FailureHistoryConfig::default_max_attempts")]
+    pub max_attempts: usize,
+    /// Byte cap on the rendered section (default: 4000).
+    #[serde(default = "FailureHistoryConfig::default_max_bytes")]
+    pub max_bytes: usize,
+    /// Mirror the bounded history into bead-rs structured data (default:
+    /// true). Backends without a `data` command silently keep the local
+    /// journal only.
+    #[serde(default = "FailureHistoryConfig::default_sync_to_bead_data")]
+    pub sync_to_bead_data: bool,
+}
+
+impl Default for FailureHistoryConfig {
+    fn default() -> Self {
+        FailureHistoryConfig {
+            enabled: Self::default_enabled(),
+            max_attempts: Self::default_max_attempts(),
+            max_bytes: Self::default_max_bytes(),
+            sync_to_bead_data: Self::default_sync_to_bead_data(),
+        }
+    }
+}
+
+impl FailureHistoryConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+    fn default_max_attempts() -> usize {
+        3
+    }
+    fn default_max_bytes() -> usize {
+        4000
+    }
+    fn default_sync_to_bead_data() -> bool {
+        true
+    }
+
+    /// The renderer's limits.
+    pub fn limits(&self) -> crate::attempt_history::HistoryLimits {
+        crate::attempt_history::HistoryLimits {
+            max_attempts: self.max_attempts,
+            max_bytes: self.max_bytes,
+        }
+    }
 }
 
 impl Default for LearningConfig {
@@ -5217,6 +5281,7 @@ impl Default for LearningConfig {
             max_global_learnings: Self::default_max_global_learnings(),
             inject_legacy_learnings: false,
             max_learning_context_bytes: Self::default_max_learning_context_bytes(),
+            failure_history: FailureHistoryConfig::default(),
         }
     }
 }
