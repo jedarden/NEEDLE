@@ -16,6 +16,31 @@
 //! 13. Duplicate mitosis on same parent: zero new children
 //! 14. Two workers mitosis on same parent: flock serializes
 
+#[path = "p2_integration_tests/atomic_spawn_verification.rs"]
+mod atomic_spawn_verification;
+#[path = "p2_integration_tests/bead_cli_argv_assertions.rs"]
+mod bead_cli_argv_assertions;
+#[path = "p2_integration_tests/claim_cycle_span_depth_regression.rs"]
+mod claim_cycle_span_depth_regression;
+#[path = "p2_integration_tests/claim_strategies.rs"]
+mod claim_strategies;
+#[path = "p2_integration_tests/cli_bead_store_engine.rs"]
+mod cli_bead_store_engine;
+#[path = "p2_integration_tests/double_dispatch_prevention.rs"]
+mod double_dispatch_prevention;
+#[path = "p2_integration_tests/label_import_strategies.rs"]
+mod label_import_strategies;
+#[path = "p2_integration_tests/mend_multi_claim_staleness.rs"]
+mod mend_multi_claim_staleness;
+#[path = "p2_integration_tests/show_method_tests.rs"]
+mod show_method_tests;
+#[path = "p2_integration_tests/split_strategies.rs"]
+mod split_strategies;
+#[path = "p2_integration_tests/test_bead_visibility.rs"]
+mod test_bead_visibility;
+#[path = "p2_integration_tests/test_mend_stale_assignee.rs"]
+mod test_mend_stale_assignee;
+
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -1490,6 +1515,30 @@ async fn explore_discovers_work_in_other_workspace() {
     // fixture workspace. This keeps bead-rs from reading operator state even
     // after the initial setup commands have completed.
     let bead = bead_path();
+    let canonical_bead = std::fs::canonicalize(&bead).unwrap_or_else(|_| bead.clone());
+    let native_bead = which::which_all("bead")
+        .expect("PATH should contain the installed bead CLI")
+        .map(|candidate| std::fs::canonicalize(&candidate).unwrap_or(candidate))
+        .find(|candidate| candidate != &canonical_bead)
+        .expect("PATH should contain a native bead CLI behind the host wrapper");
+
+    // The host's `bead` command may be a queue-fence wrapper. Give the
+    // isolated HOME a complete, test-local policy that routes this unrelated
+    // temporary workspace to the next native bead binary on PATH. This keeps
+    // the wrapper contract intact without copying operator HOME state.
+    let queue_fence = test_home.join(".config/bead/queue-fence.json");
+    std::fs::create_dir_all(queue_fence.parent().unwrap()).unwrap();
+    std::fs::write(
+        &queue_fence,
+        serde_json::to_vec(&serde_json::json!({
+            "workspace": scan_root.path().join("guarded-workspace"),
+            "fallback_binary": &native_bead,
+            "guarded_binary": &native_bead,
+            "owner_host": "test-owner",
+        }))
+        .unwrap(),
+    )
+    .unwrap();
     let bead_wrapper = scan_root.path().join("isolated-bead");
     std::fs::write(
         &bead_wrapper,
@@ -1512,7 +1561,7 @@ async fn explore_discovers_work_in_other_workspace() {
     let output = std::process::Command::new(&bead)
         .current_dir(&remote_workspace)
         .env("HOME", &test_home)
-        .args(["init", "--prefix", "test"])
+        .args(["--skip-foreign-workspace", "init", "--prefix", "test"])
         .output()
         .expect("bead init failed");
     assert!(

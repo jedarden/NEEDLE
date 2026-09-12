@@ -394,7 +394,7 @@ fn beads_without_assignee_are_ignored() {
 }
 
 #[test]
-fn identical_timestamps_newest_by_id_order() {
+fn identical_timestamps_tie_break_by_id() {
     // Given: 2 claims for same assignee with identical timestamps
     let now = Utc::now();
     let bead_a = make_bead_with_timestamp("bead-a", "worker-z", now);
@@ -405,16 +405,15 @@ fn identical_timestamps_newest_by_id_order() {
     // When: Apply staleness detection
     let stale = get_stale_by_assignee_overlap(&all_beads);
 
-    // Then: Neither is marked stale (identical timestamps means no clear winner)
-    // The implementation marks beads as stale only when updated_at < newest_updated.
-    // With identical timestamps, this condition is never met, so both beads are
-    // considered valid. This is the correct behavior - we can't determine which
-    // is newer if timestamps are identical.
-    assert_eq!(
-        stale.len(),
-        0,
-        "with identical timestamps, neither should be marked stale"
-    );
+    // Then: the lexicographically greater ID is the deterministic keeper. This
+    // prevents equal-resolution backend timestamps from preserving two claims.
+    assert_eq!(stale.len(), 1);
+    assert!(stale.contains(&bead_a.id));
+    assert!(!stale.contains(&bead_b.id));
+
+    // Input order must not affect the tie-break.
+    let reversed = get_stale_by_assignee_overlap(&[bead_b.clone(), bead_a.clone()]);
+    assert_eq!(reversed, stale);
 }
 
 #[test]
