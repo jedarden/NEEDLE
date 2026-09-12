@@ -1148,6 +1148,81 @@ pub fn detect_bead_backend(workspace_root: &Path) -> Result<(Backend, PathBuf)> 
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Per-workspace gates
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Validation gates resolved from a single workspace's `.needle.yaml`.
+///
+/// The per-workspace counterpart of the `gates`/`verification` sections in
+/// the worker's global config. Every field is empty when the workspace
+/// declares none; the worker's home config is never a fallback. A worker
+/// homed in a gate-declaring workspace that roams onto a foreign bead must
+/// judge that bead by the foreign workspace's own rules — workers homed in
+/// commitgraph ran commitgraph's `scripts/definition-of-done.sh` against
+/// every foreign bead they touched and failed them all with exit 127 on a
+/// script that workspace never had (needle-da77b68a, live incident
+/// 2026-09-09).
+#[derive(Debug, Clone, Default)]
+pub struct GatesConfig {
+    /// Pluggable validation gates (`gates:` in `.needle.yaml`). Empty when
+    /// the workspace declares none.
+    pub gates: Vec<GateConfig>,
+    /// Legacy verification commands (`verification:` in `.needle.yaml`).
+    /// Empty when the workspace declares none.
+    pub verification: Vec<String>,
+}
+
+impl GatesConfig {
+    /// True when the workspace declares no gates in either format.
+    pub fn is_empty(&self) -> bool {
+        self.gates.is_empty() && self.verification.is_empty()
+    }
+}
+
+/// Load the validation gates one workspace declares for itself.
+///
+/// Joins `.needle.yaml` onto `workspace_root` — the same per-workspace
+/// resolution `detect_bead_backend` uses for `bead_cli.backend` — and parses
+/// the workspace's `gates:` (pluggable) and `verification:` (legacy) blocks.
+///
+/// # Resolution
+///
+/// - A workspace whose `.needle.yaml` declares a `gates:` block gets exactly
+///   those gates.
+/// - A workspace that declares no gates — or has no `.needle.yaml` at all —
+///   resolves to an empty `GatesConfig`. The worker's own home gates are
+///   deliberately **not** a fallback: a workspace that declares no gates
+///   runs none, not another workspace's.
+///
+/// # Errors
+///
+/// An unreadable or invalid `.needle.yaml` is an error, not an empty result:
+/// a workspace that tried to declare gates must not silently lose them and
+/// have its dispatches accepted unvalidated.
+pub fn gates_for_workspace(workspace_root: &Path) -> Result<GatesConfig> {
+    let needle_yaml = workspace_root.join(".needle.yaml");
+
+    if !needle_yaml.exists() {
+        return Ok(GatesConfig::default());
+    }
+
+    let text = std::fs::read_to_string(&needle_yaml)
+        .with_context(|| format!("failed to read {}", needle_yaml.display()))?;
+
+    let overrides: WorkspaceOverrides = serde_yaml::from_str(&text).with_context(|| {
+        format!(
+            "invalid YAML in workspace config: {}",
+            needle_yaml.display()
+        )
+    })?;
+
+    Ok(GatesConfig {
+        gates: overrides.gates.unwrap_or_default(),
+        verification: overrides.verification.unwrap_or_default(),
+    })
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Common test helpers (shared across all test modules)
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -2967,6 +3042,160 @@ path: /path with spaces/to/bead
         let (backend, path) = detect_bead_backend(ws_root).unwrap();
         assert_eq!(backend, Backend::Bead); // br maps to Bead backend
         assert_eq!(path, bead_bin); // but uses bead binary
+    }
+
+    // ─── gates_for_workspace tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_gates_for_workspace_declared_gates_parsed() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let ws_root = tmp_dir.path();
+
+        // Workspace declares a gates: block — those exact gates must load,
+        // alongside an unrelated override proving the file was really parsed.
+        let needle_yaml = ws_root.join(".needle.yaml");
+        std::fs::write(
+            &needle_yaml,
+            concat!(
+                "agent:\n",
+                "  timeout: 99\n",
+                "gates:\n",
+                "  - type: command\n",
+                "    commands:\n",
+                "      - scripts/definition-of-done.sh --fast\n",
+                "  - type: command\n",
+                "    commands:\n",
+                "      - cargo test\n",
+                "    stderr_cap_bytes: 65536\n",
+                "    run_in: workspace\n",
+            ),
+        )
+        .unwrap();
+
+        let gates = gates_for_workspace(ws_root).unwrap();
+        assert_eq!(gates.gates.len(), 2);
+        match gates.gates[0].clone() {
+            GateConfig::Command {
+                commands,
+                stderr_cap_bytes,
+                run_in,
+            } => {
+                assert_eq!(commands, vec!["scripts/definition-of-done.sh --fast"]);
+                // Not set in YAML — the caller fills in validation.stderr_cap_bytes.
+                assert_eq!(stderr_cap_bytes, None);
+                // Not set in YAML — clean extraction of committed state is the
+                // default execution mode; a workspace gate must not start
+                // running against the shared checkout just because it was
+                // terse.
+                assert_eq!(run_in, crate::validation::RunIn::Clean);
+            }
+        }
+        match gates.gates[1].clone() {
+            GateConfig::Command {
+                commands,
+                stderr_cap_bytes,
+                run_in,
+            } => {
+                assert_eq!(commands, vec!["cargo test"]);
+                assert_eq!(stderr_cap_bytes, Some(65536));
+                assert_eq!(run_in, crate::validation::RunIn::Workspace);
+            }
+        }
+        assert!(!gates.is_empty());
+    }
+
+    #[test]
+    fn test_gates_for_workspace_legacy_verification_parsed() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let ws_root = tmp_dir.path();
+
+        let needle_yaml = ws_root.join(".needle.yaml");
+        std::fs::write(
+            &needle_yaml,
+            "verification:\n  - echo verify-one\n  - echo verify-two\n",
+        )
+        .unwrap();
+
+        let gates = gates_for_workspace(ws_root).unwrap();
+        assert!(gates.gates.is_empty());
+        assert_eq!(
+            gates.verification,
+            vec!["echo verify-one".to_string(), "echo verify-two".to_string()]
+        );
+        assert!(!gates.is_empty());
+    }
+
+    #[test]
+    fn test_gates_for_workspace_no_gates_block_returns_empty() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let ws_root = tmp_dir.path();
+
+        // .needle.yaml exists but overrides only unrelated settings — no
+        // gates in either format.
+        let needle_yaml = ws_root.join(".needle.yaml");
+        std::fs::write(&needle_yaml, "agent:\n  timeout: 99\n").unwrap();
+
+        let gates = gates_for_workspace(ws_root).unwrap();
+        assert!(gates.gates.is_empty());
+        assert!(gates.verification.is_empty());
+        assert!(gates.is_empty());
+    }
+
+    #[test]
+    fn test_gates_for_workspace_no_needle_yaml_returns_empty() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let ws_root = tmp_dir.path();
+
+        // No .needle.yaml at all — no gates, not an error.
+        let gates = gates_for_workspace(ws_root).unwrap();
+        assert!(gates.gates.is_empty());
+        assert!(gates.verification.is_empty());
+        assert!(gates.is_empty());
+    }
+
+    #[serial]
+    #[test]
+    fn test_gates_for_workspace_never_falls_back_to_worker_home_gates() {
+        // Root cause of needle-da77b68a: a worker homed in a gate-declaring
+        // workspace judged foreign beads by its own home gates. Even with a
+        // gates-everything global config in HOME, a workspace that declares
+        // none must resolve none.
+        let (_env, _tmp_dir) = isolate_bead_cli_env();
+        let home = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+
+        std::env::set_var("HOME", home.path());
+        let global_config = home.path().join(".config/needle/config.yaml");
+        std::fs::create_dir_all(global_config.parent().unwrap()).unwrap();
+        std::fs::write(
+            &global_config,
+            "gates:\n  - type: command\n    commands:\n      - scripts/definition-of-done.sh --fast\n",
+        )
+        .unwrap();
+
+        // The bead's workspace has no .needle.yaml at all.
+        let gates = gates_for_workspace(ws.path()).unwrap();
+        assert!(gates.is_empty());
+    }
+
+    #[test]
+    fn test_gates_for_workspace_invalid_yaml_is_error() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let ws_root = tmp_dir.path();
+
+        // A malformed gates block must fail loudly, not silently resolve to
+        // "no gates" and let dispatches pass unvalidated.
+        let needle_yaml = ws_root.join(".needle.yaml");
+        std::fs::write(
+            &needle_yaml,
+            "gates:\n  - type: command\n    commands: not-a-list\n",
+        )
+        .unwrap();
+
+        let result = gates_for_workspace(ws_root);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("invalid YAML in workspace config"));
     }
 
     #[test]
