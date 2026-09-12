@@ -139,13 +139,14 @@ done
 # tests/dod-modes/run.sh rather than copied, so they cannot drift from what
 # actually runs.
 needle_slow_targets() {
-  printf '%s\n' lib integration_tests p2_integration_tests \
+  printf '%s\n' lib integration_spawn integration_tests p2_integration_tests \
     p3_integration_tests real_br_integration_tests installer
 }
 
 needle_cargo_selector() {
   case "$1" in
     lib)                       printf '%s\n' --lib ;;
+    integration_spawn)         printf '%s\n' --test integration_spawn ;;
     integration_tests)         printf '%s\n' --test integration_tests ;;
     p2_integration_tests)      printf '%s\n' --test p2_integration_tests ;;
     p3_integration_tests)      printf '%s\n' --test p3_integration_tests ;;
@@ -179,10 +180,9 @@ selected_cargo_targets() {
 }
 
 # Emit each integration-test target declared in Cargo.toml as
-# "<target><TAB><source path>". Fast lint uses the manifest as its authority:
-# the slow-lane table is deliberately different (it includes lib/installer and
-# does not run integration_spawn), so borrowing that table would silently miss
-# a declared test harness or lint a name that is not a Cargo test target.
+# "<target><TAB><source path>". The manifest is the authority for both fast
+# lint attribution and the invariant that the explicit slow-lane table covers
+# every declared harness.
 needle_declared_test_harnesses() {
   local manifest="${NEEDLE_CARGO_MANIFEST:-$REPO_ROOT/Cargo.toml}"
   awk '
@@ -216,6 +216,38 @@ needle_declared_test_harnesses() {
     }
     END { emit() }
   ' "$manifest"
+}
+
+# The slow target table stays explicit because its stable names form the CI
+# matrix and the public --target interface. Check that table against Cargo's
+# manifest before any slow build: adding a [[test]] without scheduling it must
+# fail deterministically instead of silently reducing full-suite coverage.
+# `installer` is intentionally present in the slow table but absent from the
+# Cargo subset because it is a shell suite.
+needle_expected_slow_targets() {
+  local target source
+  printf '%s\n' lib
+  while IFS=$'\t' read -r target source; do
+    [[ -n "$target" && -n "$source" ]] || continue
+    printf '%s\n' "$target"
+  done < <(needle_declared_test_harnesses)
+  printf '%s\n' installer
+}
+
+needle_validate_slow_target_coverage() {
+  local expected actual
+  expected="$(needle_expected_slow_targets)"
+  actual="$(needle_slow_targets)"
+  if [[ "$actual" == "$expected" ]]; then
+    return 0
+  fi
+
+  echo "slow target table does not exactly match Cargo.toml plus lib/installer" >&2
+  echo "expected:" >&2
+  printf '%s\n' "$expected" | sed 's/^/  /' >&2
+  echo "actual:" >&2
+  printf '%s\n' "$actual" | sed 's/^/  /' >&2
+  return 1
 }
 
 # Select a declared test harness when this commit stages either its root file
@@ -614,6 +646,10 @@ fi
 # Slow lane checks (tests)
 if [[ "$RUN_SLOW" == true ]]; then
   echo "=== Slow Lane Checks ==="
+
+  # Keep a targeted invocation selective, but require the complete target
+  # registry it selects from to remain exhaustive for default/full runs.
+  needle_validate_slow_target_coverage || exit 1
 
   # Create the build-and-run context in the parent shell before either phase.
   # TMPDIR is isolated from both the checkout's .beads and a poisoned

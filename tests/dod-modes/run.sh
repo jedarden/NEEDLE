@@ -19,11 +19,11 @@ extracted="$(mktemp "${TMPDIR:-/tmp}/dod-modes-XXXXXX.sh")"
 test_tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/dod-modes-tmp-root-XXXXXX")"
 trap 'rm -f "$extracted"; rm -rf "$test_tmp_root"' EXIT
 
-for fn in needle_now_ms needle_duration_event reap_orphans run_check lane_tmp cleanup_lane_tmps run_slow_cargo_check needle_slow_targets needle_cargo_selector selected_cargo_targets needle_declared_test_harnesses needle_affected_test_targets needle_clippy_selectors needle_run_clippy needle_gate_skips_slow_lane; do
+for fn in needle_now_ms needle_duration_event reap_orphans run_check lane_tmp cleanup_lane_tmps run_slow_cargo_check needle_slow_targets needle_cargo_selector selected_cargo_targets needle_declared_test_harnesses needle_expected_slow_targets needle_validate_slow_target_coverage needle_affected_test_targets needle_clippy_selectors needle_run_clippy needle_gate_skips_slow_lane; do
   awk -v f="^${fn}\\\\(\\\\)" '$0 ~ f, /^}/' "$DOD" >> "$extracted"
 done
 # Every function must have been found, or the test would silently pass.
-for fn in needle_now_ms needle_duration_event reap_orphans run_check lane_tmp cleanup_lane_tmps run_slow_cargo_check needle_slow_targets needle_cargo_selector selected_cargo_targets needle_declared_test_harnesses needle_affected_test_targets needle_clippy_selectors needle_run_clippy needle_gate_skips_slow_lane; do
+for fn in needle_now_ms needle_duration_event reap_orphans run_check lane_tmp cleanup_lane_tmps run_slow_cargo_check needle_slow_targets needle_cargo_selector selected_cargo_targets needle_declared_test_harnesses needle_expected_slow_targets needle_validate_slow_target_coverage needle_affected_test_targets needle_clippy_selectors needle_run_clippy needle_gate_skips_slow_lane; do
   grep -q "^${fn}()" "$extracted" || { echo "FAIL: could not extract $fn from $DOD" >&2; exit 1; }
 done
 # shellcheck source=/dev/null
@@ -111,20 +111,21 @@ else
 fi
 
 # ── needle_slow_targets ──────────────────────────────────────────────────────
-assert_lines "target table lists six names" 6 needle_slow_targets
+assert_lines "target table lists seven names" 7 needle_slow_targets
 
 # Exact set, asserted literally: a renamed or dropped target must be caught
 # here rather than silently accepted by every consumer of the table.
-WANT_TABLE="$(printf '%s\n' lib integration_tests p2_integration_tests p3_integration_tests real_br_integration_tests installer)"
+WANT_TABLE="$(printf '%s\n' lib integration_spawn integration_tests p2_integration_tests p3_integration_tests real_br_integration_tests installer)"
 GOT_TABLE="$(needle_slow_targets)"
 if [[ "$GOT_TABLE" == "$WANT_TABLE" ]]; then
-  ok "target table is exactly the five cargo targets plus installer"
+  ok "target table is exactly the six cargo targets plus installer"
 else
   bad "target table drifted (got: $(echo "$GOT_TABLE" | tr '\n' ' '))"
 fi
 
 # ── needle_cargo_selector ────────────────────────────────────────────────────
 assert_selector "lib selects the unit-test target" "--lib" lib
+assert_selector "integration_spawn selects its target" "--test integration_spawn" integration_spawn
 assert_selector "integration_tests selects its target" "--test integration_tests" integration_tests
 assert_selector "p2 selects its target" "--test p2_integration_tests" p2_integration_tests
 assert_selector "p3 selects its target" "--test p3_integration_tests" p3_integration_tests
@@ -134,11 +135,37 @@ assert_fails "installer is not a cargo target" needle_cargo_selector installer
 
 # ── selected_cargo_targets ───────────────────────────────────────────────────
 SLOW_TARGET=""
-assert_lines "default selection is all five cargo targets" 5 selected_cargo_targets
+assert_lines "default selection is all six cargo targets" 6 selected_cargo_targets
 
-SLOW_TARGET="integration_tests"
+WANT_DEFAULT="$(needle_expected_slow_targets | grep -vx installer)"
+GOT_DEFAULT="$(selected_cargo_targets)"
+if [[ "$GOT_DEFAULT" == "$WANT_DEFAULT" ]]; then
+  ok "default Cargo selection covers lib and every declared [[test]] harness"
+else
+  bad "default Cargo selection does not match Cargo.toml (got: $(echo "$GOT_DEFAULT" | tr '\n' ' '))"
+fi
+
+if needle_validate_slow_target_coverage >/dev/null 2>&1; then
+  ok "explicit slow target table matches Cargo.toml plus lib/installer"
+else
+  bad "explicit slow target table failed its manifest coverage invariant"
+fi
+
+if (
+  needle_slow_targets() {
+    printf '%s\n' lib integration_tests p2_integration_tests \
+      p3_integration_tests real_br_integration_tests installer
+  }
+  needle_validate_slow_target_coverage
+) >/dev/null 2>&1; then
+  bad "coverage invariant accepted a table missing integration_spawn"
+else
+  ok "coverage invariant rejects an omitted declared harness"
+fi
+
+SLOW_TARGET="integration_spawn"
 GOT_TARGET="$(selected_cargo_targets)"
-if [[ "$GOT_TARGET" == "integration_tests" ]]; then
+if [[ "$GOT_TARGET" == "integration_spawn" ]]; then
   ok "a single --target selects only that target"
 else
   bad "a single --target should select only that target (got: $GOT_TARGET)"
