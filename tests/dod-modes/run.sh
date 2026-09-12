@@ -165,6 +165,7 @@ fi
 
 LANE="fast"
 CHANGED_ONLY=false
+COMPREHENSIVE_LINT=false
 STAGED_PATHS=()
 GOT_CLIPPY="$(needle_clippy_selectors | tr '\n' ' ' | sed 's/ $//')"
 if [[ "$GOT_CLIPPY" == "--lib --bins" ]]; then
@@ -199,6 +200,7 @@ fi
 
 LANE="all"
 CHANGED_ONLY=true
+COMPREHENSIVE_LINT=false
 STAGED_PATHS=(tests/integration_tests/edge_case_panic_tests.rs)
 GOT_CLIPPY="$(needle_clippy_selectors | tr '\n' ' ' | sed 's/ $//')"
 if [[ "$GOT_CLIPPY" == "--all-targets" ]]; then
@@ -207,11 +209,26 @@ else
   bad "all/scheduled lint no longer uses --all-targets (got: $GOT_CLIPPY)"
 fi
 
+LANE="fast"
+CHANGED_ONLY=false
+COMPREHENSIVE_LINT=true
+STAGED_PATHS=()
+GOT_CLIPPY="$(needle_clippy_selectors | tr '\n' ' ' | sed 's/ $//')"
+if [[ "$GOT_CLIPPY" == "--all-targets" ]]; then
+  ok "periodic fast lane can request comprehensive lint without running tests"
+else
+  bad "periodic comprehensive lint selector drifted (got: $GOT_CLIPPY)"
+fi
+
 run_check() {
   local name="$1"
   shift
   printf '%s|%s\n' "$name" "$*"
 }
+LANE="all"
+CHANGED_ONLY=true
+COMPREHENSIVE_LINT=false
+STAGED_PATHS=(tests/integration_tests/edge_case_panic_tests.rs)
 GOT_CLIPPY_CALL="$(needle_run_clippy)"
 if [[ "$GOT_CLIPPY_CALL" == "cargo clippy|cargo clippy --all-targets --message-format short -- -D warnings" ]]; then
   ok "all/scheduled Clippy command retains zero-warning enforcement"
@@ -221,6 +238,18 @@ fi
 
 LANE="fast"
 CHANGED_ONLY=false
+COMPREHENSIVE_LINT=true
+STAGED_PATHS=()
+GOT_CLIPPY_CALL="$(needle_run_clippy)"
+if [[ "$GOT_CLIPPY_CALL" == "cargo clippy|cargo clippy --all-targets -- -D warnings" ]]; then
+  ok "periodic comprehensive Clippy command retains zero-warning enforcement"
+else
+  bad "periodic comprehensive Clippy command drifted (got: $GOT_CLIPPY_CALL)"
+fi
+
+LANE="fast"
+CHANGED_ONLY=false
+COMPREHENSIVE_LINT=false
 STAGED_PATHS=()
 GOT_CLIPPY_CALL="$(needle_run_clippy)"
 if [[ "$GOT_CLIPPY_CALL" == "cargo clippy|cargo clippy --lib --bins -- -D warnings" ]]; then
