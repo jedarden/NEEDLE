@@ -3,6 +3,7 @@ name = "needle"
 version = "0.6.0"
 edition = "2021"
 rust-version = "1.75"
+autotests = false
 description = "Navigates Every Enqueued Deliverable, Logs Effort"
 license = "MIT"
 
@@ -146,6 +147,26 @@ os_pipe = "1"
 [[test]]
 name = "integration_spawn"
 path = "tests/integration_spawn.rs"
+harness = true
+
+[[test]]
+name = "integration_tests"
+path = "tests/integration_tests.rs"
+harness = true
+
+[[test]]
+name = "p2_integration_tests"
+path = "tests/p2_integration_tests.rs"
+harness = true
+
+[[test]]
+name = "p3_integration_tests"
+path = "tests/p3_integration_tests.rs"
+harness = true
+
+[[test]]
+name = "real_br_integration_tests"
+path = "tests/real_br_integration_tests.rs"
 harness = true
 
 [[bench]]

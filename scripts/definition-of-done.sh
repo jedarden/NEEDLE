@@ -452,6 +452,11 @@ if [[ "$LANE" == "fast" ]] || [[ "$LANE" == "all" ]]; then
   # from paying to compile a test suite. Pure bash, milliseconds.
   run_check "dod mode tests" bash tests/dod-modes/run.sh
 
+  # Keep Cargo's test-binary set explicit. This test also creates a real
+  # tests/scratch.rs in a temporary package and proves auto-discovery ignores
+  # it, so a new loose file cannot silently add another link step.
+  run_check "cargo target manifest tests" bash tests/cargo-targets/run.sh
+
   # cargo clippy --all-targets -- -D warnings
   #
   # This is the fast lane's only type-checking pass, and that is deliberate --
