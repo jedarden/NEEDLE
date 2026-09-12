@@ -566,6 +566,31 @@ fn replace_config_value<T: Clone + serde::Serialize>(running: &mut T, candidate:
     }
 }
 
+/// Load the validation gates the worker's home workspace declares for itself.
+///
+/// With per-bead-workspace gate resolution these are the only gates boot-time
+/// path validation can vouch for: they are what runs for home-workspace beads.
+/// Gates a foreign workspace declares are validated at resolution time, when a
+/// dispatch actually resolves them — not at boot.
+///
+/// An unreadable or invalid home `.needle.yaml` degrades to "declares none"
+/// with a warning. This check is advisory: the same broken file fails the
+/// config load for real at startup, and at gate resolution time in the
+/// outcome handler it is an error rather than a silent empty result — a
+/// workspace that tried to declare gates must not have its dispatches
+/// accepted unvalidated.
+fn home_workspace_gates(workspace_root: &Path) -> crate::config::GatesConfig {
+    crate::config::gates_for_workspace(workspace_root).unwrap_or_else(|error| {
+        tracing::warn!(
+            workspace = %workspace_root.display(),
+            error = %error,
+            "failed to load the home workspace's gate declaration; \
+             treating it as declaring none for boot-time path validation"
+        );
+        crate::config::GatesConfig::default()
+    })
+}
+
 /// Result of rebuilding the non-telemetry Tier-B components for one candidate.
 ///
 /// Successful components are installed immediately, while failures retain the
@@ -1140,10 +1165,18 @@ impl Worker {
         // Validate gate command paths at worker boot.
         // This prevents silent failures where a non-existent verification script
         // causes every dispatch to fail without any clear error message.
+        //
+        // Gates resolve per bead from the bead's own workspace config, so the
+        // only gates boot can vouch for are the ones the home workspace
+        // declares for itself — that is what runs for home-workspace beads.
+        // Gates a foreign workspace declares are validated at resolution time,
+        // when a dispatch actually resolves them (the outcome handler's gate
+        // path check), not here.
         let workspace_path = &worker.config.workspace.default;
+        let home_gates = home_workspace_gates(workspace_path);
         let validation_result = crate::validation::validate_gate_command_paths(
-            &worker.config.gates,
-            &worker.config.verification,
+            &home_gates.gates,
+            &home_gates.verification,
             workspace_path,
             Some(&workspace_path.join(".needle.yaml")),
         );
@@ -1162,6 +1195,25 @@ impl Worker {
                     "gate command path does not exist"
                 );
             }
+        }
+
+        // A `gates:`/`verification:` block the resolved config carries but the
+        // home workspace itself does not declare can only have come from a
+        // non-workspace layer (the global config file). Those blocks used to
+        // gate every dispatch this worker ran; under per-bead resolution they
+        // gate none. Say so once at boot rather than letting the operator
+        // discover it through gates silently not running.
+        if home_gates.is_empty()
+            && (!worker.config.gates.is_empty() || !worker.config.verification.is_empty())
+        {
+            tracing::warn!(
+                workspace = %workspace_path.display(),
+                config_gates = worker.config.gates.len(),
+                config_verification = worker.config.verification.len(),
+                "config declares validation gates outside any workspace; gates resolve from \
+                 each dispatched bead's own .needle.yaml, so these gates will not execute — \
+                 declare them in the .needle.yaml of each workspace that needs them"
+            );
         }
 
         worker
@@ -1626,11 +1678,15 @@ impl Worker {
         )?;
         let step_start = Instant::now();
 
-        // Validate gate command paths
+        // Validate gate command paths — the home workspace's own declaration
+        // only (see Worker::new). Gates resolve per bead from each dispatched
+        // bead's workspace, so boot cannot vouch for gates a foreign
+        // workspace declares; those are validated at resolution time.
         let workspace = &self.config.workspace.default;
+        let home_gates = home_workspace_gates(workspace);
         let gate_validation_result = crate::validation::validate_gate_command_paths(
-            &self.config.gates,
-            &self.config.verification,
+            &home_gates.gates,
+            &home_gates.verification,
             workspace,
             None, // Config file path not needed for boot warnings
         );
@@ -5467,14 +5523,17 @@ impl Worker {
             }
         }
 
-        let outcome_changed = config_values_differ(&self.config.gates, &candidate.gates)
-            || config_values_differ(&self.config.verification, &candidate.verification)
-            || config_values_differ(&self.config.validation, &candidate.validation)
+        // `gates`/`verification` are deliberately absent from this trigger:
+        // the outcome handler resolves validation gates from each dispatched
+        // bead's own workspace config at outcome time (needle-da77b68a) and
+        // no longer reads them from its config snapshot, so a changed
+        // worker-static gate block is not a drift signal for this component —
+        // a reload that changes only those keys rebuilds nothing, and the
+        // candidate's gate values are never copied into the running config.
+        let outcome_changed = config_values_differ(&self.config.validation, &candidate.validation)
             || config_values_differ(&self.config.outcome, &candidate.outcome);
         if outcome_changed {
             let mut component_config = self.config.clone();
-            component_config.gates = candidate.gates.clone();
-            component_config.verification = candidate.verification.clone();
             component_config.validation = candidate.validation.clone();
             component_config.outcome = candidate.outcome.clone();
             let rebuilt = Ok(OutcomeHandler::new(
@@ -5488,17 +5547,9 @@ impl Worker {
                 rebuilt,
                 &mut report,
             ) {
-                if config_values_differ(&self.config.gates, &candidate.gates) {
-                    report.applied_keys.push("gates".to_string());
-                }
-                if config_values_differ(&self.config.verification, &candidate.verification) {
-                    report.applied_keys.push("verification".to_string());
-                }
                 if config_values_differ(&self.config.validation, &candidate.validation) {
                     report.applied_keys.push("validation".to_string());
                 }
-                self.config.gates = candidate.gates.clone();
-                self.config.verification = candidate.verification.clone();
                 self.config.validation = candidate.validation.clone();
                 // `outcome` remains Tier A and is copied immediately after
                 // this function by apply_tier_a_config.
@@ -8147,6 +8198,73 @@ mod tests {
         assert!(unchanged.rebuilt_components.is_empty());
         assert!(unchanged.applied_keys.is_empty());
         assert!(unchanged.failures.is_empty());
+    }
+
+    #[test]
+    fn gates_only_config_change_is_no_longer_an_outcome_handler_drift_signal() {
+        // Per-bead-workspace gate resolution (needle-da77b68a): the outcome
+        // handler resolves validation gates from each dispatched bead's own
+        // workspace and no longer reads `gates`/`verification` from its
+        // config snapshot. A candidate that changes only those keys must not
+        // rebuild the component, must not report them as applied, and must
+        // not copy the candidate's worker-static gate set into the running
+        // config — the running worker's behavior does not depend on them.
+        let mut worker = make_worker(Arc::new(MockStore::empty()));
+        let mut candidate = worker.config.clone();
+        candidate.gates = vec![crate::validation::GateConfig::Command {
+            commands: vec!["echo reloaded".to_string()],
+            stderr_cap_bytes: None,
+            run_in: Default::default(),
+        }];
+        candidate.verification = vec!["echo reloaded-verify".to_string()];
+        assert!(config_values_differ(&worker.config.gates, &candidate.gates));
+
+        let report = worker.rebuild_tier_b_components(&candidate);
+
+        assert!(report.failures.is_empty());
+        assert!(
+            report.rebuilt_components.is_empty(),
+            "a gates-only change must not rebuild any component, got {:?}",
+            report.rebuilt_components
+        );
+        assert!(report.applied_keys.is_empty());
+        assert!(config_values_differ(&worker.config.gates, &candidate.gates));
+        assert_ne!(worker.config.verification, candidate.verification);
+    }
+
+    #[test]
+    fn home_workspace_gates_resolve_from_the_home_needle_yaml_not_the_global_layer() {
+        // Boot-time gate path validation must vouch for the home workspace's
+        // own declaration, not the resolved config's `gates:` block: under
+        // per-bead resolution a block that came from the global config file
+        // gates nothing, so validating its paths (or skipping the home
+        // workspace's real ones) would vouch for gates that never run.
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join("scripts")).unwrap();
+        std::fs::write(home.path().join("scripts/exists.sh"), "#!/bin/sh\n").unwrap();
+        std::fs::write(
+            home.path().join(".needle.yaml"),
+            "gates:\n\
+             \x20 - type: command\n\
+             \x20   commands:\n\
+             \x20     - scripts/exists.sh\n",
+        )
+        .unwrap();
+
+        let gates = home_workspace_gates(home.path());
+        assert_eq!(gates.gates.len(), 1);
+        assert!(crate::validation::validate_gate_command_paths(
+            &gates.gates,
+            &gates.verification,
+            home.path(),
+            None,
+        )
+        .is_valid());
+
+        // A home workspace that declares no gates resolves none — the
+        // workspace layer is the only source, with no global fallback.
+        let bare = tempfile::tempdir().unwrap();
+        assert!(home_workspace_gates(bare.path()).is_empty());
     }
 
     #[test]

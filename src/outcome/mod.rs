@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 
 use crate::bead_store::BeadStore;
-use crate::config::{Config, ConfigLoader};
+use crate::config::{Config, GatesConfig};
 use crate::fingerprint::{
     append_alert_note, build_alert_labels, check_alert_deduplication, AlertDeduplication, AlertKind,
 };
@@ -512,10 +512,11 @@ impl OutcomeHandler {
     /// same per-workspace resolution `bead_cli.backend` already gets, and a
     /// workspace that declares no gates runs none — not another workspace's.
     /// A workspace directory with no `.needle.yaml` at all resolves the same
-    /// way: `load_workspace` returns `Ok(None)` and no gate runs.
+    /// way: `gates_for_workspace` returns an empty `GatesConfig` and no gate
+    /// runs.
     ///
     /// An unset or relative bead workspace resolves no gates at all.
-    /// `load_workspace` joins `.needle.yaml` onto the given path, so an
+    /// `gates_for_workspace` joins `.needle.yaml` onto the given path, so an
     /// empty, `.`, or otherwise relative path reads whatever config the
     /// process CWD happens to contain — during `cargo test` that is this
     /// repo's own `.needle.yaml`, whose clean-mode gates (definition-of-done
@@ -535,21 +536,15 @@ impl OutcomeHandler {
             );
             return Ok((true, None));
         }
-        let (workspace_gates, workspace_verification) =
-            ConfigLoader::load_workspace(&bead.workspace)
-                .with_context(|| {
-                    format!(
-                        "failed to load validation gates from the bead's workspace config {}",
-                        bead.workspace.join(".needle.yaml").display()
-                    )
-                })?
-                .map(|overrides| {
-                    (
-                        overrides.gates.unwrap_or_default(),
-                        overrides.verification.unwrap_or_default(),
-                    )
-                })
-                .unwrap_or_default();
+        let GatesConfig {
+            gates: workspace_gates,
+            verification: workspace_verification,
+        } = crate::config::gates_for_workspace(&bead.workspace).with_context(|| {
+            format!(
+                "failed to load validation gates from the bead's workspace config {}",
+                bead.workspace.join(".needle.yaml").display()
+            )
+        })?;
 
         if workspace_gates.is_empty() && workspace_verification.is_empty() {
             // The bead's workspace declares no gates — the dispatch is judged
@@ -569,6 +564,43 @@ impl OutcomeHandler {
             legacy_verification = workspace_verification.len(),
             "resolved validation gates from the bead's workspace config"
         );
+
+        // Validate the resolved gates' command paths against the bead's own
+        // workspace — the resolution-time counterpart of the boot-time check,
+        // which can only ever see the worker's home declaration. A workspace
+        // that declares a gate whose script does not exist there used to
+        // surface only as the gate's own exit 127; name the missing path
+        // first. Warn and let the gate run: the verdict still belongs to the
+        // gate's execution, same contract as boot.
+        if let crate::validation::GatePathValidationResult::Invalid { errors } =
+            crate::validation::validate_gate_command_paths(
+                &workspace_gates,
+                &workspace_verification,
+                &bead.workspace,
+                Some(&bead.workspace.join(".needle.yaml")),
+            )
+        {
+            for error in &errors {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    workspace = %bead.workspace.display(),
+                    command = %error.command,
+                    path = %error.path,
+                    path_type = ?error.path_type,
+                    "gate.command_missing: bead-workspace gate command path does not exist — \
+                     the gate will fail when it runs"
+                );
+            }
+            if let Err(error) = self.telemetry.emit(
+                EventKind::GatePathMissing {
+                    count: errors.len(),
+                    paths: errors.iter().map(|e| e.path.clone()).collect(),
+                },
+                chrono::Utc::now(),
+            ) {
+                tracing::warn!(error = %error, "failed to emit gate.path_missing");
+            }
+        }
 
         // Pluggable gates first, fall back to legacy verification commands.
         // Fill in each command gate's stderr cap from
@@ -4373,6 +4405,47 @@ mod tests {
             workspace.path().join("gate-ran-in-this-workspace").exists(),
             "the gate must execute with the bead's workspace as its cwd"
         );
+    }
+
+    #[tokio::test]
+    async fn bead_workspace_gate_paths_are_validated_at_resolution_time_but_still_run() {
+        // Resolution-time counterpart of the boot-time gate path check: the
+        // boot check can only ever see the worker's home declaration, so a
+        // foreign workspace's gate naming a script that workspace does not
+        // have is validated here, where the dispatch actually resolves it —
+        // the missing path is named in a warning before the gate runs,
+        // instead of surfacing only as the gate's own exit 127 (the
+        // incident's only symptom). Resolution warns and runs; it does not
+        // fail the dispatch on the path check alone — the verdict still
+        // belongs to the gate's execution.
+        let (_guard, _home) = isolated_home();
+        let handler = test_handler();
+
+        let workspace = tempfile::TempDir::new().unwrap();
+        // `run_in: workspace` so the failure is the missing script itself and
+        // not a clean-mode `git archive` extraction on a bare directory.
+        std::fs::write(
+            workspace.path().join(".needle.yaml"),
+            "gates:\n\
+             \x20 - type: command\n\
+             \x20   run_in: workspace\n\
+             \x20   commands:\n\
+             \x20     - scripts/definition-of-done.sh --fast\n",
+        )
+        .unwrap();
+        let bead = Bead {
+            workspace: workspace.path().to_path_buf(),
+            ..test_bead(BeadStatus::InProgress)
+        };
+
+        let (all_passed, report) = handler.run_verification_gates(&bead).await.unwrap();
+
+        // Resolution completed and handed the verdict to the gate: the
+        // missing script failed in execution, exactly as it does today.
+        assert!(!all_passed);
+        let report = report.expect("the resolved gate must still run after a path warning");
+        assert!(!report.all_passed);
+        assert!(report.results.values().any(|result| !result.passed()));
     }
 
     #[tokio::test]
