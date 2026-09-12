@@ -57,6 +57,21 @@ RUN set -eux; \
     rm -rf "/tmp/${archive}" "${root}"; \
     test "$(sccache --version)" = "sccache ${SCCACHE_VERSION}"
 
+# The P2/P3 integration fixtures invoke bead-rs at test runtime. Bake the exact
+# release binary into the builder so six parallel verification pods do not
+# each download the same executable before useful work can start. This must
+# stay in lockstep with NEEDLE's bead-rs compatibility contract.
+ARG BEAD_RS_VERSION=0.2.6
+ARG BEAD_RS_SHA256=15324894af38a8ffce8ad54da47ac067c7fd198779a7744f967bcf56a9aa3aee
+RUN set -eux; \
+    curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-all-errors \
+      "https://github.com/jedarden/bead-rs/releases/download/v${BEAD_RS_VERSION}/bead-x86_64-unknown-linux-gnu" \
+      -o /tmp/bead-dl; \
+    echo "${BEAD_RS_SHA256}  /tmp/bead-dl" | sha256sum --check --strict; \
+    install -m 0755 /tmp/bead-dl /usr/local/bin/bead; \
+    rm -f /tmp/bead-dl; \
+    test "$(bead --version | cut -d' ' -f1-2)" = "bead ${BEAD_RS_VERSION}"
+
 # Install gh CLI
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg 2>/dev/null \

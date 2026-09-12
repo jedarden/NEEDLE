@@ -4,6 +4,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 MANIFEST="$REPO_ROOT/Cargo.toml"
+BASE_DOCKERFILE="$REPO_ROOT/ci/Dockerfile.ci"
 DEPS_DOCKERFILE="$REPO_ROOT/ci/Dockerfile.ci-deps"
 TOOLCHAIN_FILE="$REPO_ROOT/rust-toolchain.toml"
 EXPECTED_TARGETS="$(printf '%s\n' \
@@ -84,6 +85,36 @@ actual_toolchain="$(rustc -vV | sed -n 's/^release: //p')"
 [[ "$source_toolchain" == "$actual_toolchain" ]] || fail \
   "local rustc release $actual_toolchain differs from source pin $source_toolchain"
 
+# P2/P3 fixtures need bead-rs at test runtime. Keep its builder-image release
+# contract exact and ordered: HTTPS download, checksum verification, executable
+# install, then a version assertion. A runtime fallback would multiply this
+# download across every parallel cargo-target pod.
+grep -Fq 'ARG BEAD_RS_VERSION=0.2.6' "$BASE_DOCKERFILE" \
+  || fail 'base image must pin bead-rs 0.2.6'
+[[ "$(grep -c '^ARG BEAD_RS_VERSION=' "$BASE_DOCKERFILE")" -eq 1 ]] \
+  || fail 'base image must declare exactly one bead-rs version pin'
+grep -Fq 'ARG BEAD_RS_SHA256=15324894af38a8ffce8ad54da47ac067c7fd198779a7744f967bcf56a9aa3aee' "$BASE_DOCKERFILE" \
+  || fail 'base image must pin the bead-rs 0.2.6 checksum'
+[[ "$(grep -c '^ARG BEAD_RS_SHA256=' "$BASE_DOCKERFILE")" -eq 1 ]] \
+  || fail 'base image must declare exactly one bead-rs checksum pin'
+grep -Fq '"https://github.com/jedarden/bead-rs/releases/download/v${BEAD_RS_VERSION}/bead-x86_64-unknown-linux-gnu"' "$BASE_DOCKERFILE" \
+  || fail 'base image must download the pinned bead-rs Linux release over HTTPS'
+grep -Fq 'echo "${BEAD_RS_SHA256}  /tmp/bead-dl" | sha256sum --check --strict' "$BASE_DOCKERFILE" \
+  || fail 'base image must verify bead-rs before installation'
+grep -Fq 'install -m 0755 /tmp/bead-dl /usr/local/bin/bead' "$BASE_DOCKERFILE" \
+  || fail 'base image must install bead-rs with executable permissions'
+grep -Fq 'test "$(bead --version | cut -d'\'' '\'' -f1-2)" = "bead ${BEAD_RS_VERSION}"' "$BASE_DOCKERFILE" \
+  || fail 'base image must assert the exact installed bead-rs version'
+
+bead_download_line="$(grep -nF '"https://github.com/jedarden/bead-rs/releases/download/v${BEAD_RS_VERSION}/bead-x86_64-unknown-linux-gnu"' "$BASE_DOCKERFILE" | cut -d: -f1)"
+bead_checksum_line="$(grep -nF 'echo "${BEAD_RS_SHA256}  /tmp/bead-dl" | sha256sum --check --strict' "$BASE_DOCKERFILE" | cut -d: -f1)"
+bead_install_line="$(grep -nF 'install -m 0755 /tmp/bead-dl /usr/local/bin/bead' "$BASE_DOCKERFILE" | cut -d: -f1)"
+bead_assert_line="$(grep -nF 'test "$(bead --version | cut -d'\'' '\'' -f1-2)" = "bead ${BEAD_RS_VERSION}"' "$BASE_DOCKERFILE" | cut -d: -f1)"
+[[ "$bead_download_line" -lt "$bead_checksum_line" && \
+   "$bead_checksum_line" -lt "$bead_install_line" && \
+   "$bead_install_line" -lt "$bead_assert_line" ]] || fail \
+  'base image must verify bead-rs before installing and version-checking it'
+
 actual_targets="$(test_targets "$MANIFEST")"
 [[ "$actual_targets" == "$EXPECTED_TARGETS" ]] || fail \
   "repository test targets differ from the intended roots: $(tr '\n' ' ' <<<"$actual_targets")"
@@ -124,3 +155,4 @@ echo 'PASS: a stray tests/scratch.rs is not auto-discovered'
 echo 'PASS: dependency-image stubs cover every declared Cargo target'
 echo 'PASS: dependency image preserves its target tree outside /workspace'
 echo "PASS: rustc release matches the source toolchain pin ($source_toolchain)"
+echo 'PASS: base image pins and verifies bead-rs 0.2.6 before installation'
