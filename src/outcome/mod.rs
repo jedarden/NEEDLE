@@ -979,11 +979,72 @@ impl OutcomeHandler {
         self.record_backend_resolution(store, bead, &ledger, &attempt_actor)
             .await;
 
+        // Plan section 4.4 step 1: the durable copy of the attempt lives off
+        // the worker host. Bundle the attempt's trace into the spool the
+        // external drain uploads from (attempt_archive.enabled).
+        self.spool_attempt_archive(bead, &ledger).await;
+
         Ok(HandlerResult {
             outcome,
             bead_action,
             telemetry_events,
         })
+    }
+
+    /// Hand the resolved attempt's trace to the attempt-archive spool.
+    async fn spool_attempt_archive(
+        &self,
+        bead: &Bead,
+        ledger: &crate::telemetry::AttemptResolvedFields,
+    ) {
+        let archive = self.config.attempt_archive.clone();
+        if !archive.enabled {
+            return;
+        }
+        let workspace = if bead.workspace.as_os_str().is_empty()
+            || bead.workspace == std::path::Path::new(".")
+        {
+            self.config.workspace.default.clone()
+        } else {
+            bead.workspace.clone()
+        };
+        let trace_dir = workspace
+            .join(".beads")
+            .join("traces")
+            .join(bead.id.as_ref());
+        let input = crate::attempt_archive::AttemptArchiveInput {
+            attempt_id: ledger.attempt_id.clone(),
+            bead_id: bead.id.to_string(),
+            workspace: workspace.display().to_string(),
+            worker: ledger.worker.clone(),
+            adapter: ledger.adapter.clone(),
+            model: ledger.model.clone(),
+            outcome: ledger.outcome.clone(),
+            terminal_reason: ledger.terminal_reason.clone(),
+            recorded_at: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        };
+        let bead_id = bead.id.clone();
+        let work = tokio::task::spawn_blocking(move || {
+            crate::attempt_archive::spool_attempt(&archive, &input, Some(&trace_dir))
+        });
+        match tokio::time::timeout(std::time::Duration::from_secs(60), work).await {
+            Ok(Ok(Ok(Some(receipt)))) => tracing::info!(
+                bead_id = %bead_id,
+                bundle = %receipt.bundle.display(),
+                bundle_bytes = receipt.bundle_bytes,
+                "attempt archived to spool"
+            ),
+            Ok(Ok(Ok(None))) => {}
+            Ok(Ok(Err(e))) => tracing::warn!(
+                bead_id = %bead_id,
+                error = %e,
+                "attempt archive spool failed"
+            ),
+            Ok(Err(e)) => {
+                tracing::warn!(bead_id = %bead_id, error = %e, "attempt archive task failed")
+            }
+            Err(_) => tracing::warn!(bead_id = %bead_id, "attempt archive spool timed out"),
+        }
     }
 
     /// Hand the resolved attempt to the backend's attempt ledger.

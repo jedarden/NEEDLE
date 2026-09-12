@@ -346,6 +346,18 @@ pub enum CliCommand {
         /// Check only — show available update without installing.
         #[arg(long)]
         check: bool,
+
+        /// Install this locally built binary instead of a GitHub release,
+        /// through the same :testing → canary → :stable channel. Sibling
+        /// `needle-transform-*` binaries in the same directory are installed
+        /// alongside. Running workers pick the new :stable up at their next
+        /// bead boundary.
+        #[arg(long, value_name = "PATH", conflicts_with = "check")]
+        from_file: Option<PathBuf>,
+
+        /// With --from-file: promote without running the canary suite.
+        #[arg(long, requires = "from_file")]
+        skip_canary: bool,
     },
 
     /// Rollback to the previous :stable binary.
@@ -582,7 +594,11 @@ pub fn run() -> Result<()> {
             cmd_bead_backend_bind(&backend, &workspace)
         }
         CliCommand::Canary { status } => cmd_canary(status),
-        CliCommand::Upgrade { check } => cmd_upgrade(check),
+        CliCommand::Upgrade {
+            check,
+            from_file,
+            skip_canary,
+        } => cmd_upgrade(check, from_file, skip_canary),
         CliCommand::Rollback => cmd_rollback(),
         CliCommand::Reflect { workspace, force } => cmd_reflect(workspace, force),
         CliCommand::UpdateRules { output } => cmd_update_rules(output),
@@ -6925,7 +6941,13 @@ fn cmd_canary(show_status: bool) -> Result<()> {
 }
 
 /// `needle upgrade` — check for and install updates.
-fn cmd_upgrade(check_only: bool) -> Result<()> {
+fn cmd_upgrade(check_only: bool, from_file: Option<PathBuf>, skip_canary: bool) -> Result<()> {
+    if let Some(path) = from_file {
+        let stable = crate::upgrade::perform_upgrade_from_file(&path, skip_canary)?;
+        println!("Stable binary: {}", stable.display());
+        return Ok(());
+    }
+
     // Set up telemetry for upgrade operations
     let config = ConfigLoader::load_global()?;
     let tel = crate::telemetry::Telemetry::from_config("upgrade".to_string(), &config.telemetry)
@@ -8100,11 +8122,47 @@ mod tests {
         let cli = Cli::try_parse_from(["needle", "upgrade", "--check"]);
         assert!(cli.is_ok(), "needle upgrade --check should parse");
         if let Ok(Cli {
-            command: CliCommand::Upgrade { check },
+            command: CliCommand::Upgrade { check, .. },
         }) = cli
         {
             assert!(check);
         }
+    }
+
+    #[test]
+    fn cli_parses_upgrade_from_file() {
+        let cli = Cli::try_parse_from([
+            "needle",
+            "upgrade",
+            "--from-file",
+            "/tmp/needle-build/needle",
+            "--skip-canary",
+        ]);
+        assert!(
+            cli.is_ok(),
+            "needle upgrade --from-file should parse: {cli:?}"
+        );
+        if let Ok(Cli {
+            command:
+                CliCommand::Upgrade {
+                    check,
+                    from_file,
+                    skip_canary,
+                },
+        }) = cli
+        {
+            assert!(!check);
+            assert_eq!(
+                from_file.as_deref(),
+                Some(Path::new("/tmp/needle-build/needle"))
+            );
+            assert!(skip_canary);
+        }
+        // --skip-canary without --from-file, and --check with --from-file, are refused.
+        assert!(Cli::try_parse_from(["needle", "upgrade", "--skip-canary"]).is_err());
+        assert!(
+            Cli::try_parse_from(["needle", "upgrade", "--check", "--from-file", "/x"]).is_err()
+        );
     }
 
     #[test]

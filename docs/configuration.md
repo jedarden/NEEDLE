@@ -1010,6 +1010,28 @@ operator-installed drain (`contrib/attempt-archive/`, see
 the two. ARMOR is the reference sink in this fleet; any S3-compatible endpoint,
 or none, works.
 
+The producer is `src/attempt_archive.rs`, called from the outcome handler
+after the `attempt.resolved` ledger row. Each attempt yields
+`<spool>/<host>/<YYYY-MM-DD>/<bead>-<attempt>.tar.zst` (system `tar` and
+`zstd`; `.tar` when zstd is unavailable or `compression: none`) containing
+`attempt.json` plus the trace-directory files selected by `include`, and a
+sidecar `<bead>-<attempt>.json` written last through a `.partial` temp file
+and rename, carrying `bundle_path`, `bundle_sha256`, `bundle_bytes`, the
+attempt facts and the file list. The drain validates the pair, uploads bundle
+then sidecar, and deletes both. Before this producer existed the drain had
+uploaded zero bytes.
+
+To install an unreleased local build safely (running workers pick the new
+`:stable` up at their next bead boundary):
+
+```bash
+cargo build --release
+target/release/needle upgrade --from-file target/release/needle   # :testing → canary → :stable
+```
+
+`--skip-canary` promotes without the canary suite. Never `cp`/`mv` onto
+`~/.needle/bin/needle-stable` while workers run.
+
 ```yaml
 attempt_archive:
   # Master switch. false (default) means nothing below has any effect.
