@@ -179,4 +179,9 @@ lto = true
 codegen-units = 1
 
 [profile.test]
+opt-level = 0
+
+# Keep the stable dependency graph optimized while making the frequently
+# rebuilt NEEDLE crate and its integration harnesses cheap to compile.
+[profile.test.package."*"]
 opt-level = 2
