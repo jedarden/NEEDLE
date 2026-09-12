@@ -11,6 +11,7 @@
 # rust-toolchain.toml, ci/Dockerfile.ci, ci/Dockerfile.ci-deps or ci/VERSION.
 # A no-op edit to this file is therefore the way to force a rebuild without
 # disturbing that contract.
+# Rebuild marker (2026-09-12): replay 0.1.8 after exact-revision diffing landed.
 #
 # After triggering, confirm BOTH tags moved -- the template runs docker-build-base
 # and docker-build-with-deps as separate kaniko steps, and a run that is stopped
