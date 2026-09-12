@@ -11,9 +11,11 @@ WorkingDirectory=/home/coding
 
 # Instance identity/routing is source-controlled in workers.tsv and rendered by
 # apply-ex44-fleet.sh. Credentials stay in the host-only common file.
-EnvironmentFile=%h/.config/needle/workers/%i.env
 EnvironmentFile=-%h/.config/needle/worker-common.env
 EnvironmentFile=%h/.config/needle/fleet-policy.env
+# Instance policy is last so roaming workers can disable home-store generation
+# while retaining the shared low-water policy for every pinned route.
+EnvironmentFile=%h/.config/needle/workers/%i.env
 Environment=NEEDLE_INNER=1
 Environment=PATH=/home/coding/.local/bin:/home/coding/.cargo/bin:/home/coding/bin:/run/current-system/sw/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 

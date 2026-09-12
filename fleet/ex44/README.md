@@ -19,7 +19,10 @@ GLM-5.3-Flash, staying below the configured per-model ceilings.
    explicit roaming set.
 4. **Replenish automatically.** `fleet-policy.env` enables the low-water
    generation gate with six eligible beads in reserve and a five-minute
-   workspace/strand lease, preventing a thundering herd of generators.
+   workspace/strand lease, preventing a thundering herd of generators. The
+   gate is enabled for pinned pools and disabled for roaming identities: a
+   roamer consumes the shared frontier instead of inventing work in its
+   arbitrary home repository.
 5. **Enforce a backlog SLO.** For 21 workers, the nominal target is 84
    eligible beads (four per worker) and the minimum is 42 (two per worker).
    The verdict is route-aware: every pinned repository must cover its assigned

@@ -25,5 +25,9 @@ grep -q 'Environment=PATH=.*/home/coding/.local/bin' "$SRC_DIR/needle-backlog-sl
 grep -qx 'ELASTIC_UNITS=(glm-roam-18 glm-roam-19 glm-roam-20 glm-icg)' "$SRC_DIR/needle-zai-governor"
 grep -qx 'HIGH_429_COUNT=3' "$SRC_DIR/needle-zai-governor"
 
+fleet_policy_line=$(grep -n 'EnvironmentFile=%h/.config/needle/fleet-policy.env' "$SRC_DIR/needle-worker@.service" | cut -d: -f1)
+instance_policy_line=$(grep -n 'EnvironmentFile=%h/.config/needle/workers/%i.env' "$SRC_DIR/needle-worker@.service" | cut -d: -f1)
+[[ "$fleet_policy_line" -lt "$instance_policy_line" ]]
+
 "$SRC_DIR/backlog-slo.sh" --self-test
 echo "ex44 fleet policy tests passed"
