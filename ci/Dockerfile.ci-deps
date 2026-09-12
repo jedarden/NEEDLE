@@ -16,13 +16,22 @@ FROM ${BASE_IMAGE}
 COPY Cargo.toml Cargo.lock ./
 COPY src/bin/needle_transform_claude.rs ./src/bin/needle_transform_claude.rs
 COPY src/bin/needle_transform_codex.rs ./src/bin/needle_transform_codex.rs
+COPY src/bin/needle_transform_opencode.rs ./src/bin/needle_transform_opencode.rs
+COPY src/bin/needle_transform_omp.rs ./src/bin/needle_transform_omp.rs
 RUN mkdir -p src benches tests && \
+    echo "fn main() {}" > build.rs && \
     echo "pub fn _dummy() {}" > src/lib.rs && \
     echo "fn main() {}" > src/main.rs && \
     echo "fn main() {}" > src/bin/needle_transform_claude.rs && \
     echo "fn main() {}" > src/bin/needle_transform_codex.rs && \
+    echo "fn main() {}" > src/bin/needle_transform_opencode.rs && \
+    echo "fn main() {}" > src/bin/needle_transform_omp.rs && \
     echo "fn main() {}" > benches/sanitize.rs && \
     echo "fn main() {}" > tests/integration_spawn.rs && \
+    echo "fn main() {}" > tests/integration_tests.rs && \
+    echo "fn main() {}" > tests/p2_integration_tests.rs && \
+    echo "fn main() {}" > tests/p3_integration_tests.rs && \
+    echo "fn main() {}" > tests/real_br_integration_tests.rs && \
     cargo build && \
     cargo build --tests && \
     rm -rf src benches tests
