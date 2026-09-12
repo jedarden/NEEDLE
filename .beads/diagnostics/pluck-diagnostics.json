@@ -1,13 +1,13 @@
 {
-  "timestamp": "2026-09-12T20:05:59.252300726Z",
-  "total_open_beads": 607,
+  "timestamp": "2026-09-12T21:06:03.177074404Z",
+  "total_open_beads": 605,
   "exclusion_criteria": {
     "has_assignee": 3,
     "manually_blocked": 19,
-    "has_dependencies": 454,
-    "resource_conflicts": 5
+    "has_dependencies": 452,
+    "resource_conflicts": 3
   },
-  "final_candidate_count": 183,
+  "final_candidate_count": 184,
   "excluded_beads": [
     {
       "bead_id": "needle-6b02eb9d",
@@ -313,7 +313,7 @@
       "assignee": null,
       "manual_blocked": false,
       "has_blockers": true,
-      "blocker_count": 15,
+      "blocker_count": 13,
       "has_resource_conflicts": false,
       "conflict_count": 0
     },
@@ -1523,7 +1523,7 @@
       "assignee": null,
       "manual_blocked": false,
       "has_blockers": true,
-      "blocker_count": 2,
+      "blocker_count": 1,
       "has_resource_conflicts": true,
       "conflict_count": 1
     },
@@ -2320,17 +2320,6 @@
       "conflict_count": 0
     },
     {
-      "bead_id": "needle-1ee41395",
-      "title": "Optimize needle-ci runtime to under 10 minutes",
-      "priority": 2,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
       "bead_id": "needle-334e0134",
       "title": "Validate test output file creation and contents",
       "priority": 2,
@@ -2406,17 +2395,6 @@
       "blocker_count": 1,
       "has_resource_conflicts": false,
       "conflict_count": 0
-    },
-    {
-      "bead_id": "needle-38c118f2",
-      "title": "Add needle-ci concurrency limit to prevent queue pile-up",
-      "priority": 2,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 1,
-      "has_resource_conflicts": true,
-      "conflict_count": 1
     },
     {
       "bead_id": "needle-35a38217",
@@ -4252,17 +4230,6 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 1,
-      "has_resource_conflicts": true,
-      "conflict_count": 1
-    },
-    {
-      "bead_id": "needle-f8171eb6",
-      "title": "Post Forgejo and GitHub CI statuses concurrently",
-      "priority": 2,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": false,
-      "blocker_count": 0,
       "has_resource_conflicts": true,
       "conflict_count": 1
     },
