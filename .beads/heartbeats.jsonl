@@ -3685,3 +3685,5 @@
 {"last_strand":null,"state":"idle","ts":"2026-09-12T00:19:39.153597603+00:00","worker":"glm-needle"}
 {"last_strand":null,"state":"idle","ts":"2026-09-12T00:38:36.627413595+00:00","worker":"test-worker"}
 {"last_strand":null,"state":"idle","ts":"2026-09-12T00:42:49.320813312+00:00","worker":"luna-needle"}
+{"last_strand":null,"state":"idle","ts":"2026-09-12T01:19:46.427125434+00:00","worker":"glm-needle"}
+{"last_strand":null,"state":"idle","ts":"2026-09-12T01:30:46.460202683+00:00","worker":"glm-needle"}
