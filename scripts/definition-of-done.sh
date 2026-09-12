@@ -16,7 +16,8 @@
 #
 # Usage:
 #   scripts/definition-of-done.sh [--fast|--slow|--all] [--count-bypass]
-#                                 [--changed-only] [--gate] [--target <name>]
+#                                 [--changed-only] [--comprehensive-lint]
+#                                 [--gate] [--target <name>]
 #
 # Flags:
 #   --fast          Run fast lane only (default for NEEDLE gate)
@@ -27,6 +28,9 @@
 #   --changed-only   Hold this commit responsible only for the paths it stages.
 #                    A problem in a file this commit does not touch is reported
 #                    loudly but does not block. See "Attribution" below.
+#   --comprehensive-lint
+#                    Lint all Cargo targets while otherwise retaining the fast
+#                    lane. Periodic CI uses this backstop; push CI omits it.
 #   --gate           Short-circuit: a failed fast lane returns before the slow
 #                    lane starts, so CI never compiles test targets for code
 #                    already known to be rejected. Default behaviour is
@@ -60,6 +64,7 @@ cd "$REPO_ROOT"
 LANE="fast"
 COUNT_BYPASS=false
 CHANGED_ONLY=false
+COMPREHENSIVE_LINT=false
 GATE=false
 SLOW_TARGET=""
 NEEDLE_BYPASS_ARGUMENT=""
@@ -87,6 +92,10 @@ while [[ $# -gt 0 ]]; do
       CHANGED_ONLY=true
       shift
       ;;
+    --comprehensive-lint)
+      COMPREHENSIVE_LINT=true
+      shift
+      ;;
     --gate)
       GATE=true
       shift
@@ -111,7 +120,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     *)
       echo "Error: Unknown argument: $1" >&2
-      echo "Usage: $0 [--fast|--slow|--all] [--count-bypass] [--changed-only] [--gate] [--target <name>] [--no-verify]" >&2
+      echo "Usage: $0 [--fast|--slow|--all] [--count-bypass] [--changed-only] [--comprehensive-lint] [--gate] [--target <name>] [--no-verify]" >&2
       exit 1
       ;;
   esac
@@ -233,7 +242,7 @@ needle_affected_test_targets() {
 # harnesses this staged change directly affects.
 needle_clippy_selectors() {
   local target
-  if [[ "$LANE" == "all" ]]; then
+  if [[ "$LANE" == "all" || "$COMPREHENSIVE_LINT" == true ]]; then
     printf '%s\n' --all-targets
     return 0
   fi
