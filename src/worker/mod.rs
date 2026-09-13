@@ -6995,7 +6995,11 @@ impl Worker {
         if let Some(ws) = current_workspace {
             self.current_workspace = ws.to_path_buf();
         }
-        self.state = to;
+        // Concurrency limits are defined over live agent sessions, so the
+        // registry must track every normal transition rather than retaining
+        // the BOOTING state written at registration.
+        self.state = to.clone();
+        self.registry.update_state(&self.qualified_id(), Some(to));
         Ok(())
     }
 
@@ -10928,6 +10932,12 @@ mod tests {
 
         // Verify that current_workspace was updated with the remote workspace
         assert_eq!(worker.current_workspace, remote_ws);
+        let entry = worker
+            .registry
+            .get(&worker.qualified_id())
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.state, Some(WorkerState::Executing));
     }
 
     #[tokio::test]
