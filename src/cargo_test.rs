@@ -2557,4 +2557,109 @@ mod tests {
         assert_eq!(metrics.duration_ms, 1);
         assert_eq!(metrics.duration().as_nanos(), 1_000_000);
     }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // Telemetry emission of the pre-spawn launch timestamp
+    // ──────────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn start_telemetry_survives_command_failure_to_start() {
+        let helper = crate::telemetry::test_utils::TestHelper::new("cargo-test-start-tel");
+        let temp_dir = TempDir::new().unwrap();
+        // A workspace directory that does not exist makes the spawn itself
+        // fail. This is exactly the failed-to-start path: the launch
+        // timestamp must already be out through telemetry by the time the
+        // run returns Err.
+        let missing = temp_dir.path().join("no-such-workspace");
+
+        let outcome = CargoTest::new(&missing)
+            .with_telemetry(helper.telemetry().clone())
+            .with_bead_id(BeadId::from("needle-d6864d47"))
+            .run();
+
+        assert!(
+            outcome.is_err(),
+            "spawning with a nonexistent working directory must fail"
+        );
+
+        helper.sync().await;
+
+        let entries = helper.events_by_type("log.entry");
+        assert_eq!(entries.len(), 1, "exactly one start entry expected");
+        let entry = &entries[0];
+        assert_eq!(
+            entry.data["phase"].as_str().unwrap(),
+            TEST_EXECUTION_PHASE,
+            "start entry must carry the test_execution phase"
+        );
+        assert_eq!(entry.data["level"].as_str().unwrap(), "info");
+        assert_eq!(entry.data["bead_id"].as_str().unwrap(), "needle-d6864d47");
+
+        let context = &entry.data["context"];
+        let launch_ts = context["launch_timestamp"].as_str().unwrap();
+        assert!(!launch_ts.is_empty(), "launch timestamp must be captured");
+        chrono::DateTime::parse_from_rfc3339(launch_ts)
+            .expect("launch timestamp must be a valid RFC 3339 timestamp");
+        assert_eq!(
+            context["workspace"].as_str().unwrap(),
+            missing.display().to_string()
+        );
+        assert!(context["args"].as_array().is_some());
+        assert_eq!(context["timeout_secs"].as_u64().unwrap(), 600);
+    }
+
+    #[tokio::test]
+    async fn start_telemetry_timestamp_matches_outcome_record() {
+        let helper = crate::telemetry::test_utils::TestHelper::new("cargo-test-start-tel");
+        let temp_dir = TempDir::new().unwrap();
+        // A manifest cargo cannot parse: the cargo process starts (this is a
+        // real launch, not a spawn failure) but bails out on the manifest
+        // instead of compiling anything, so the run is fast and offline.
+        fs::write(
+            temp_dir.path().join("Cargo.toml"),
+            "this is not valid toml =",
+        )
+        .unwrap();
+
+        let outcome = CargoTest::new(temp_dir.path())
+            .with_telemetry(helper.telemetry().clone())
+            .run()
+            .expect("run should return an outcome even when cargo exits nonzero");
+
+        assert!(
+            !outcome.success(),
+            "an unparsable manifest must produce a failed run"
+        );
+
+        helper.sync().await;
+
+        let entries = helper.events_by_type("log.entry");
+        assert_eq!(entries.len(), 1, "exactly one start entry expected");
+        assert_eq!(
+            entries[0].data["context"]["launch_timestamp"]
+                .as_str()
+                .unwrap(),
+            outcome.launch_timestamp,
+            "telemetry and the outcome record must carry the same launch timestamp"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_telemetry_is_noop_without_an_emitter() {
+        let helper = crate::telemetry::test_utils::TestHelper::new("cargo-test-start-tel");
+        let temp_dir = TempDir::new().unwrap();
+        let missing = temp_dir.path().join("no-such-workspace");
+
+        // No `.with_telemetry(...)` attached: the run must still work, and
+        // the unattached helper must collect nothing.
+        let outcome = CargoTest::new(&missing).run();
+        assert!(outcome.is_err());
+
+        helper.sync().await;
+        assert!(
+            helper.all_events().is_empty(),
+            "no telemetry may be emitted without an attached emitter, got: {:?}",
+            helper.all_events()
+        );
+    }
 }
