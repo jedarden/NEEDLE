@@ -158,12 +158,26 @@ nextest_assert_line="$(grep -nF 'cargo-nextest --version | grep -Fx "release: ${
 
 [[ "$(tr -d '\n' < "$CI_VERSION_FILE")" == "0.1.11" ]] \
   || fail 'ci/VERSION must move with the cargo-nextest image contents'
+grep -Fq 'nextest-version = { required = "0.9.144" }' "$NEXTEST_CONFIG" \
+  || fail 'nextest config must require the runner image version exactly'
 grep -Fq '[profile.ci]' "$NEXTEST_CONFIG" \
   || fail 'nextest config must declare the CI profile'
 grep -Fq 'fail-fast = false' "$NEXTEST_CONFIG" \
   || fail 'nextest CI profile must preserve aggregate failure reporting'
+grep -Fq 'retries = 0' "$NEXTEST_CONFIG" \
+  || fail 'nextest CI profile must disable implicit retries'
+grep -Fq 'flaky-result = "fail"' "$NEXTEST_CONFIG" \
+  || fail 'nextest CI profile must fail on flaky results'
 grep -Fq 'test-threads = 2' "$NEXTEST_CONFIG" \
   || fail 'nextest CI profile must retain two-way target concurrency'
+grep -Fq 'failure-output = "immediate-final"' "$NEXTEST_CONFIG" \
+  || fail 'nextest CI profile must show failures immediately and in the final summary'
+grep -Fq 'success-output = "never"' "$NEXTEST_CONFIG" \
+  || fail 'nextest CI profile must suppress successful test output'
+grep -Fq 'status-level = "pass"' "$NEXTEST_CONFIG" \
+  || fail 'nextest CI profile must report live passing-test status'
+grep -Fq 'final-status-level = "fail"' "$NEXTEST_CONFIG" \
+  || fail 'nextest CI profile final summary must focus on failures'
 grep -Fq '[profile.ci.junit]' "$NEXTEST_CONFIG" \
   || fail 'nextest CI profile must emit JUnit'
 grep -Fq 'path = "junit.xml"' "$NEXTEST_CONFIG" \

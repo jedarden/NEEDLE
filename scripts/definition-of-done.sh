@@ -212,7 +212,8 @@ needle_validate_archive_mode() {
   fi
 
   if [[ "$ARCHIVE_FILE" != /* ]]; then
-    ARCHIVE_FILE="$REPO_ROOT/$ARCHIVE_FILE"
+    echo "Error: --archive-file must be an absolute path" >&2
+    return 1
   fi
   if [[ "$ARCHIVE_FILE" != *.tar.zst ]]; then
     echo "Error: --archive-file must name a .tar.zst nextest archive" >&2
@@ -571,16 +572,17 @@ run_slow_cargo_check() {
 }
 
 # Archive consumers retain the slow lane's isolated TMPDIR, deadline, timing,
-# log capture and orphan reaping, but deliberately do not set CARGO_TARGET_DIR
-# or invoke Cargo's build path. --extract-to must be the exact source checkout:
+# log capture and orphan reaping, and explicitly remove any inherited
+# CARGO_TARGET_DIR before invoking the cargo-nextest executable directly.
+# --extract-to must be the exact source checkout:
 # several integration tests embed CARGO_MANIFEST_DIR and CARGO_BIN_EXE_* at
 # compile time, so extracting into an unrelated temporary directory is wrong.
 run_slow_nextest_check() {
   local target="$1" filter="$2"
   DOD_TIMING_PHASE=run DOD_TIMING_TARGET="$target" \
-    run_check "cargo nextest archive target $target" env \
+    run_check "cargo-nextest archive target $target" env -u CARGO_TARGET_DIR \
       TMPDIR="$SLOW_TMPDIR" \
-      timeout --kill-after=30 900 cargo nextest run \
+      timeout --kill-after=30 900 cargo-nextest nextest run \
         --archive-file "$ARCHIVE_FILE" \
         --extract-to "$REPO_ROOT" \
         --profile ci \

@@ -229,6 +229,9 @@ ARCHIVE_FILE_ARGUMENT_COUNT=2
 assert_fails "archive mode rejects repeated --archive-file arguments" needle_validate_archive_mode
 
 ARCHIVE_FILE_ARGUMENT_COUNT=1
+ARCHIVE_FILE="needle-nextest.tar.zst"
+assert_fails "archive mode rejects a non-absolute archive path" needle_validate_archive_mode
+
 ARCHIVE_FILE="$empty_archive"
 assert_fails "archive mode rejects an empty archive" needle_validate_archive_mode
 
@@ -456,20 +459,21 @@ fi
 ARCHIVE_FILE="$test_tmp_root/needle-nextest.tar.zst"
 REPO_ROOT="$real_repo_root"
 NEXTEST_CALL="$(run_slow_nextest_check lib 'binary_id(=needle)')"
-if [[ "$NEXTEST_CALL" == run\|lib\|*"env TMPDIR=$SLOW_TMPDIR timeout --kill-after=30 900 cargo nextest run"* \
+if [[ "$NEXTEST_CALL" == run\|lib\|*"env -u CARGO_TARGET_DIR TMPDIR=$SLOW_TMPDIR timeout --kill-after=30 900 cargo-nextest nextest run"* \
   && "$NEXTEST_CALL" == *"--archive-file $ARCHIVE_FILE --extract-to $REPO_ROOT --profile ci"* \
   && "$NEXTEST_CALL" == *"--run-ignored default --ignore-default-filter --no-fail-fast --no-tests fail -E binary_id(=needle)"* ]]; then
   ok "archive runner preserves the slow-lane deadline and exact nextest filter"
 else
   bad "archive runner command drifted (got: $NEXTEST_CALL)"
 fi
-if [[ "$NEXTEST_CALL" != *CARGO_TARGET_DIR* \
+if [[ "$NEXTEST_CALL" == *"env -u CARGO_TARGET_DIR"* \
+  && "$NEXTEST_CALL" != *"cargo nextest"* \
   && "$NEXTEST_CALL" != *"cargo test"* \
   && "$NEXTEST_CALL" != *" --lib"* \
   && "$NEXTEST_CALL" != *" --test"* ]]; then
-  ok "archive runner cannot compile or pass conflicting Cargo target selectors"
+  ok "archive runner clears inherited target configuration and cannot compile or pass conflicting Cargo target selectors"
 else
-  bad "archive runner reintroduced a build context or Cargo target selector"
+  bad "archive runner reintroduced Cargo dispatch, a build context, or a Cargo target selector"
 fi
 
 WANT_EVENT='NEEDLE_DOD_TIMING {"phase":"build","target":"lib","duration_ms":123,"status":"pass","exit_code":0}'
