@@ -1,10 +1,11 @@
 # ex44 NEEDLE fleet policy
 
 This directory makes the codinghome/ex44 worker capacity and backlog policy
-reproducible. It targets 21 workers against the shared Z.ai proxy: 18 pinned
-workers for the busiest or highest-leverage repositories and 3 roaming workers
-for the maintained-workspace frontier. Nine workers use GLM-5.3 and twelve use
-GLM-5.3-Flash, staying below the configured per-model ceilings.
+reproducible. It targets up to 25 workers against the shared Z.ai proxy: 18
+pinned workers for the busiest or highest-leverage repositories and 7 roaming
+workers for the maintained-workspace frontier. Nine workers use GLM-5.3 and up
+to sixteen use GLM-5.3-Flash, with live-session concurrency enforced separately
+from the number of registered workers.
 
 ## What this implements
 
@@ -23,8 +24,8 @@ GLM-5.3-Flash, staying below the configured per-model ceilings.
    gate is enabled for pinned pools and disabled for roaming identities: a
    roamer consumes the shared frontier instead of inventing work in its
    arbitrary home repository.
-5. **Enforce a backlog SLO.** For 21 workers, the nominal target is 84
-   eligible beads (four per worker) and the minimum is 42 (two per worker).
+5. **Enforce a backlog SLO.** For 25 workers, the nominal target is 100
+   eligible beads (four per worker) and the minimum is 50 (two per worker).
    The verdict is route-aware: every pinned repository must cover its assigned
    workers, and the roaming pool must have enough residual work after pinned
    reservations. This prevents a large NEEDLE queue from hiding an idle SEAM
@@ -60,9 +61,12 @@ timestamped files under `~/.config/systemd/user` and `~/.config/needle`, run
 `systemctl --user daemon-reload`, then restart only idle worker instances.
 
 `needle-zai-governor` protects the proxy without fighting the manifest. It
-scales only the four expansion workers (`glm-icg` and `glm-roam-18` through
-`20`) between one and four. The pinned ICG route is first in the pool and is
-therefore preserved by the one-worker floor; pressure sheds roamers first.
-Three or more 429 retries in a 100-second window remove one worker; a clean
-window adds one. The separate 17-worker base fleet is never disabled by this
-controller.
+scales the eight expansion workers (`glm-icg` and `glm-roam-18` through `24`)
+between one and eight, for 18--25 active workers including the fixed base. The
+pinned ICG route is first in the pool and is therefore preserved by the
+one-worker floor; pressure sheds roamers first. A productive window with no
+recoverable 429 adds one worker. One independently affected request holds the
+quota boundary; multiple affected requests or any terminal 429 remove one.
+The separate 17-worker base fleet is never disabled by this controller. A v3
+state file starts at the prior four-worker expansion ceiling, so the four new
+roamers are probed one per clean window rather than enabled together.

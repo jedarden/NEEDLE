@@ -44,8 +44,8 @@ manifest_ids() {
 }
 
 worker_count=$(manifest_ids | wc -l)
-[[ "$worker_count" -eq 21 ]] || {
-    echo "workers.tsv must contain exactly 21 workers; found $worker_count" >&2
+[[ "$worker_count" -eq 25 ]] || {
+    echo "workers.tsv must contain exactly 25 workers; found $worker_count" >&2
     exit 1
 }
 [[ "$(manifest_ids | sort -u | wc -l)" -eq "$worker_count" ]] || {
