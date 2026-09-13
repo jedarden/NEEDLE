@@ -8108,7 +8108,15 @@ mod tests {
         let terminal_state = runtime
             .block_on(async {
                 let request_reload_during_dispatch = async {
-                    tokio::time::timeout(Duration::from_secs(60), async {
+                    // 180s, not 60s: this is a hang guard, not the property
+                    // under test (which is that a reload waits for the cycle
+                    // boundary). CI pods are guaranteed 1000m CPU and the lib
+                    // suite takes ~309s there against ~37s on a 20-core box,
+                    // so waiting for a spawned process to create a file can
+                    // exceed a minute under contention. It failed exactly that
+                    // way in needle-ci-periodic-1789280220:
+                    // "old-config dispatch did not start: Elapsed(())".
+                    tokio::time::timeout(Duration::from_secs(180), async {
                         while !dispatch_started.exists() {
                             tokio::time::sleep(Duration::from_millis(10)).await;
                         }
@@ -8272,7 +8280,15 @@ mod tests {
         let result = runtime.block_on(async {
             let request_invalid_reload =
                 async {
-                    tokio::time::timeout(Duration::from_secs(60), async {
+                    // 180s, not 60s: this is a hang guard, not the property
+                    // under test (which is that a reload waits for the cycle
+                    // boundary). CI pods are guaranteed 1000m CPU and the lib
+                    // suite takes ~309s there against ~37s on a 20-core box,
+                    // so waiting for a spawned process to create a file can
+                    // exceed a minute under contention. It failed exactly that
+                    // way in needle-ci-periodic-1789280220:
+                    // "old-config dispatch did not start: Elapsed(())".
+                    tokio::time::timeout(Duration::from_secs(180), async {
                         while !dispatch_started.exists() {
                             tokio::time::sleep(Duration::from_millis(10)).await;
                         }
