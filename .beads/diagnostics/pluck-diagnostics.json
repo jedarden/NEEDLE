@@ -1,11 +1,11 @@
 {
-  "timestamp": "2026-09-13T19:09:00.911908488Z",
-  "total_open_beads": 616,
+  "timestamp": "2026-09-13T20:07:46.119216705Z",
+  "total_open_beads": 620,
   "exclusion_criteria": {
     "has_assignee": 3,
     "manually_blocked": 19,
-    "has_dependencies": 455,
-    "resource_conflicts": 6
+    "has_dependencies": 459,
+    "resource_conflicts": 5
   },
   "final_candidate_count": 193,
   "excluded_beads": [
@@ -155,6 +155,17 @@
     {
       "bead_id": "needle-7158f1bc",
       "title": "bead_references_parent returns true for any body containing 'file', 'test' or 'verify'",
+      "priority": 0,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-2ab969d5",
+      "title": "Fail closed when dispatch cannot verify a claim in its target workspace",
       "priority": 0,
       "assignee": null,
       "manual_blocked": false,
@@ -1495,17 +1506,6 @@
       "conflict_count": 0
     },
     {
-      "bead_id": "needle-cf866e0d",
-      "title": "Build one reusable nextest archive per verification fingerprint",
-      "priority": 1,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 1,
-      "has_resource_conflicts": true,
-      "conflict_count": 1
-    },
-    {
       "bead_id": "needle-8cb8dfba",
       "title": "Run duration-balanced nextest archive shards in low-memory pods",
       "priority": 1,
@@ -2107,6 +2107,50 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 15,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-b677fbbe",
+      "title": "Extend dispatch-time verification to the full claim identity and record workspace plus epoch in telemetry",
+      "priority": 1,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-40ca2f6e",
+      "title": "Make dispatch fail closed on every claim-verification error",
+      "priority": 1,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-805b5ba2",
+      "title": "Release unverifiable claims only through the held claim credential against the target store",
+      "priority": 1,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-653ec4be",
+      "title": "Add the end-to-end dispatch claim-verification regression matrix",
+      "priority": 1,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
       "has_resource_conflicts": false,
       "conflict_count": 0
     },
