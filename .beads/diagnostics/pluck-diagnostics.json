@@ -1,11 +1,11 @@
 {
-  "timestamp": "2026-09-13T20:07:46.119216705Z",
+  "timestamp": "2026-09-13T21:07:51.355262716Z",
   "total_open_beads": 620,
   "exclusion_criteria": {
     "has_assignee": 3,
     "manually_blocked": 19,
     "has_dependencies": 459,
-    "resource_conflicts": 5
+    "resource_conflicts": 2
   },
   "final_candidate_count": 193,
   "excluded_beads": [
@@ -116,8 +116,8 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 1,
-      "has_resource_conflicts": true,
-      "conflict_count": 1
+      "has_resource_conflicts": false,
+      "conflict_count": 0
     },
     {
       "bead_id": "needle-c3163d59",
@@ -611,8 +611,8 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 1,
-      "has_resource_conflicts": true,
-      "conflict_count": 1
+      "has_resource_conflicts": false,
+      "conflict_count": 0
     },
     {
       "bead_id": "needle-b5cd1938",
@@ -721,8 +721,8 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 1,
-      "has_resource_conflicts": true,
-      "conflict_count": 1
+      "has_resource_conflicts": false,
+      "conflict_count": 0
     },
     {
       "bead_id": "needle-989c6c59",
