@@ -1,8 +1,8 @@
 //! Provider/model concurrency limits, RPM rate limiting, and host admission.
 //!
 //! Before dispatching an agent, the worker checks:
-//! 1. **Concurrency limits**: Are fewer than `max_concurrent` workers using
-//!    this provider/model? Checked via the worker registry.
+//! 1. **Concurrency limits**: Are fewer than `max_concurrent` executing
+//!    workers using this provider/model? Checked via the worker registry.
 //! 2. **RPM limits**: Has the provider's requests-per-minute budget been
 //!    exceeded? Checked via a file-based token bucket.
 //! 3. **Host admission**: Are CPU load and available memory inside the launch
@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::LimitsConfig;
 use crate::registry::Registry;
 use crate::telemetry::{EventKind, Telemetry};
+use crate::types::WorkerState;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Host admission — typed launch deferral
@@ -657,7 +658,7 @@ impl RateLimiter {
         Ok(RateLimitDecision::Allowed)
     }
 
-    /// Check provider concurrency against the worker registry.
+    /// Check executing provider concurrency against the worker registry.
     fn check_provider_concurrency(
         &self,
         provider: &str,
@@ -667,7 +668,10 @@ impl RateLimiter {
         let workers = registry.list()?;
         let active_count = workers
             .iter()
-            .filter(|w| w.provider.as_deref() == Some(provider))
+            .filter(|w| {
+                w.provider.as_deref() == Some(provider)
+                    && w.state.as_ref() == Some(&WorkerState::Executing)
+            })
             .count() as u32;
 
         if active_count >= max_concurrent {
@@ -681,7 +685,7 @@ impl RateLimiter {
         }
     }
 
-    /// Check model concurrency against the worker registry.
+    /// Check executing model concurrency against the worker registry.
     fn check_model_concurrency(
         &self,
         model: &str,
@@ -691,7 +695,10 @@ impl RateLimiter {
         let workers = registry.list()?;
         let active_count = workers
             .iter()
-            .filter(|w| w.model.as_deref() == Some(model))
+            .filter(|w| {
+                w.model.as_deref() == Some(model)
+                    && w.state.as_ref() == Some(&WorkerState::Executing)
+            })
             .count() as u32;
 
         if active_count >= max_concurrent {
@@ -1138,6 +1145,15 @@ mod tests {
     use std::path::PathBuf;
 
     fn make_entry(id: &str, provider: Option<&str>, model: Option<&str>) -> WorkerEntry {
+        make_entry_in_state(id, provider, model, WorkerState::Executing)
+    }
+
+    fn make_entry_in_state(
+        id: &str,
+        provider: Option<&str>,
+        model: Option<&str>,
+        state: WorkerState,
+    ) -> WorkerEntry {
         WorkerEntry {
             id: id.to_string(),
             pid: std::process::id(),
@@ -1148,7 +1164,7 @@ mod tests {
             started_at: Utc::now(),
             beads_processed: 0,
             config_reload_generation: 0,
-            state: None,
+            state: Some(state),
         }
     }
 
@@ -1289,6 +1305,33 @@ mod tests {
 
         let decision = limiter
             .check(Some("anthropic"), Some("claude-opus"), &registry)
+            .unwrap();
+        assert_eq!(decision, RateLimitDecision::Allowed);
+    }
+
+    #[test]
+    fn dispatching_workers_do_not_consume_provider_or_model_concurrency() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = Registry::new(dir.path());
+        for i in 0..18 {
+            registry
+                .register(make_entry_in_state(
+                    &format!("waiting-{i}"),
+                    Some("zai-proxy"),
+                    Some("glm-5.3"),
+                    WorkerState::Dispatching,
+                ))
+                .unwrap();
+        }
+
+        let limits = make_limits(
+            vec![("zai-proxy", Some(10), None)],
+            vec![("glm-5.3", Some(10))],
+        );
+        let limiter = RateLimiter::new(limits, dir.path());
+
+        let decision = limiter
+            .check(Some("zai-proxy"), Some("glm-5.3"), &registry)
             .unwrap();
         assert_eq!(decision, RateLimitDecision::Allowed);
     }
