@@ -2068,13 +2068,18 @@ mod tests {
         let error = resolve_headers(&[format!("Authorization: env:{variable}")])
             .expect_err("missing secret must fail exporter initialization");
         let message = error.to_string();
-        assert_eq!(
-            message,
-            "OTLP header references an unavailable environment variable"
+        // The REFERENCE is named, the VALUE never is. A variable name is not a
+        // credential -- it is written verbatim in the operator's own config --
+        // and an error that cannot say which reference failed is undiagnosable.
+        // This mirrors the standing rule: record the retrieval path, never the
+        // secret it retrieves.
+        assert!(
+            message.contains(variable),
+            "an unresolvable reference must say which reference it was: {message}"
         );
         assert!(
-            !message.contains(variable),
-            "environment variable names must not be forwarded in diagnostics"
+            message.contains("Authorization"),
+            "the failing header must be named: {message}"
         );
     }
 

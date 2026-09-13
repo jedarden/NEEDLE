@@ -138,9 +138,25 @@ impl AnalysisDecision {
 /// (or none) mean the agent did not return *exactly one* outcome, which the
 /// handler treats as a failed analysis rather than guessing.
 pub fn parse_analysis_response(response: &str) -> Result<AnalysisDecision> {
+    let mut seen: Vec<serde_json::Value> = Vec::new();
     let mut decisions = Vec::new();
     for candidate in json_objects(response) {
-        let Ok(parsed) = serde_json::from_str::<AnalysisResponse>(&candidate) else {
+        // The extraction strategies overlap by design: a bare JSON object is
+        // both the whole trimmed text AND its own brace-balanced span, and a
+        // fenced one is both the fence body and that span. So the same object
+        // arrives two or three times. Count each DISTINCT object once --
+        // "two decisions" has to mean the agent really emitted two, not that
+        // one was found by more than one strategy. Before this, the simplest
+        // possible response (a bare object, nothing else) was the one shape
+        // that could never parse.
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&candidate) else {
+            continue;
+        };
+        if seen.contains(&value) {
+            continue;
+        }
+        seen.push(value.clone());
+        let Ok(parsed) = serde_json::from_value::<AnalysisResponse>(value) else {
             continue;
         };
         if let Some(decision) = AnalysisDecision::from_response(parsed) {
@@ -1329,6 +1345,17 @@ mod tests {
     }
 
     #[test]
+    fn parse_counts_one_object_once_however_many_strategies_find_it() {
+        // Regression: json_objects() deliberately overlaps (whole text, fence
+        // bodies, brace-balanced spans), so a bare object was extracted twice
+        // and rejected as "2 valid analysis decisions". Every one of these is
+        // ONE decision, however many strategies match it.
+        assert!(parse_analysis_response(HUMAN_RESPONSE).is_ok());
+        assert!(parse_analysis_response(&format!("```json\n{HUMAN_RESPONSE}\n```")).is_ok());
+        assert!(parse_analysis_response(&format!("  {HUMAN_RESPONSE}  ")).is_ok());
+    }
+
+    #[test]
     fn parse_rejects_two_decisions() {
         let both = format!("{RESCOPE_RESPONSE}\n{HUMAN_RESPONSE}");
         assert!(parse_analysis_response(&both).is_err());
@@ -1669,7 +1696,21 @@ mod tests {
     async fn two_concluded_beads_restart_the_waterfall() {
         let dir = tempfile::tempdir().unwrap();
         let store = MockStore::new(vec![make_rung4_bead("bead-1"), make_rung4_bead("bead-2")]);
-        let strand = make_strand(dir.path(), Box::new(MockAgent::new(RESCOPE_RESPONSE)));
+        // The claim under test is that BOTH concluded beads restart the
+        // waterfall, so the per-cycle cap has to admit both. It defaults to 1
+        // (deliberate cost control, covered by max_beads_per_run_is_respected);
+        // leaving it at the default here tested the cap, not the waterfall.
+        let strand = AnalyzeStrand::new(
+            AnalyzeConfig {
+                enabled: true,
+                max_beads_per_run: 2,
+                ..AnalyzeConfig::default()
+            },
+            PathBuf::from("/tmp/test-workspace"),
+            dir.path().to_path_buf(),
+            Box::new(MockAgent::new(RESCOPE_RESPONSE)),
+            Telemetry::new("test".to_string()),
+        );
 
         let result = strand.evaluate(&store, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::WorkCreated));

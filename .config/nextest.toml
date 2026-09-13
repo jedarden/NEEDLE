@@ -1,0 +1,23 @@
+# This is nextest's minimum-version compatibility guard. Archive execution also
+# checks the installed release for exact equality because archives and runner
+# behavior are intentionally pinned together.
+nextest-version = { required = "0.9.144" }
+
+[profile.ci]
+# Preserve the aggregate slow lane's diagnostic contract: run every selected
+# test even after one fails, with the same two-way per-target concurrency used
+# by the Cargo path today.
+fail-fast = false
+retries = 0
+flaky-result = "fail"
+test-threads = 2
+failure-output = "immediate-final"
+success-output = "never"
+status-level = "pass"
+final-status-level = "fail"
+
+[profile.ci.junit]
+path = "junit.xml"
+store-success-output = false
+store-failure-output = true
+report-skipped = "none"

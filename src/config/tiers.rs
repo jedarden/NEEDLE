@@ -164,7 +164,7 @@ impl ReloadTier {
 ///
 /// assert_eq!(get_tier_for_key("agent.timeout"), Some(ReloadTier::Live));
 /// assert_eq!(get_tier_for_key("workspace.home"), Some(ReloadTier::RestartRequired));
-/// assert_eq!(get_tier_for_key("telemetry.otlp.enabled"), Some(ReloadTier::Rebuild));
+/// assert_eq!(get_tier_for_key("telemetry.otlp_sink.enabled"), Some(ReloadTier::Rebuild));
 /// assert_eq!(get_tier_for_key("unknown.field"), None);
 /// ```
 pub fn get_tier_for_key(key: &str) -> Option<ReloadTier> {
@@ -231,6 +231,13 @@ static TIER_TABLE: &[(&str, ReloadTier)] = &[
     ("agent.routing", ReloadTier::Live),
     ("agent.routing.rules", ReloadTier::Live),
     ("agent.routing.default_adapter", ReloadTier::Live),
+    ("agent.evidence_routing.enabled", ReloadTier::Live),
+    ("agent.evidence_routing.candidates", ReloadTier::Live),
+    ("agent.evidence_routing.min_attempts", ReloadTier::Live),
+    ("agent.evidence_routing.exploration_share", ReloadTier::Live),
+    ("agent.evidence_routing.min_improvement", ReloadTier::Live),
+    ("agent.evidence_routing.window_days", ReloadTier::Live),
+    ("agent.evidence_routing.refresh_secs", ReloadTier::Live),
     ("agent.routing.strict", ReloadTier::Live),
     // Worker configuration (mostly live)
     ("worker.idle_timeout", ReloadTier::Live),
@@ -306,11 +313,42 @@ static TIER_TABLE: &[(&str, ReloadTier)] = &[
         "strands.learning.trace_retention_success_days",
         ReloadTier::Rebuild,
     ),
+    // Learning context injection is read when the PromptBuilder is built.
+    (
+        "strands.learning.inject_legacy_learnings",
+        ReloadTier::Rebuild,
+    ),
+    (
+        "strands.learning.max_learning_context_bytes",
+        ReloadTier::Rebuild,
+    ),
+    // Attempt history is read per dispatch and per resolution (live).
+    ("strands.learning.failure_history.enabled", ReloadTier::Live),
+    (
+        "strands.learning.failure_history.max_attempts",
+        ReloadTier::Live,
+    ),
+    (
+        "strands.learning.failure_history.max_bytes",
+        ReloadTier::Live,
+    ),
+    (
+        "strands.learning.failure_history.sync_to_bead_data",
+        ReloadTier::Live,
+    ),
+    // Retrieval is read per retry dispatch (live).
+    ("strands.learning.retrieval.enabled", ReloadTier::Live),
+    ("strands.learning.retrieval.command", ReloadTier::Live),
+    ("strands.learning.retrieval.timeout_secs", ReloadTier::Live),
+    ("strands.learning.retrieval.max_results", ReloadTier::Live),
+    ("strands.learning.retrieval.max_bytes", ReloadTier::Live),
+    ("strands.learning.retrieval.min_attempt", ReloadTier::Live),
     // Mitosis (live)
     ("strands.mitosis.enabled", ReloadTier::Live),
     ("strands.mitosis.first_failure_only", ReloadTier::Live),
     // Outcome (live)
     ("outcome.quarantine_after_failures", ReloadTier::Live),
+    ("outcome.resolve_attempts_in_backend", ReloadTier::Live),
     // Workspace-health fingerprint thresholds (live; read per verification failure)
     (
         "workspace_health.fingerprint_window_seconds",
@@ -325,6 +363,11 @@ static TIER_TABLE: &[(&str, ReloadTier)] = &[
         ReloadTier::Live,
     ),
     ("workspace_health.fingerprint_trip_ratio", ReloadTier::Live),
+    ("workspace_health.adapter_health_enabled", ReloadTier::Live),
+    (
+        "workspace_health.adapter_degraded_cooldown_secs",
+        ReloadTier::Live,
+    ),
     (
         "workspace_health.fingerprint_min_distinct_beads",
         ReloadTier::Live,
@@ -338,26 +381,33 @@ static TIER_TABLE: &[(&str, ReloadTier)] = &[
     ("telemetry.file_sink.enabled", ReloadTier::Rebuild),
     ("telemetry.file_sink.log_dir", ReloadTier::Rebuild),
     ("telemetry.file_sink.retention_days", ReloadTier::Rebuild),
-    ("telemetry.file_sink.rotation", ReloadTier::Rebuild),
     ("telemetry.stdout_sink.enabled", ReloadTier::Rebuild),
     ("telemetry.stdout_sink.format", ReloadTier::Rebuild),
     ("telemetry.stdout_sink.color", ReloadTier::Rebuild),
     ("telemetry.hooks", ReloadTier::Rebuild),
-    ("telemetry.otlp.enabled", ReloadTier::Rebuild),
-    ("telemetry.otlp.endpoint", ReloadTier::Rebuild),
-    ("telemetry.otlp.protocol", ReloadTier::Rebuild),
-    ("telemetry.otlp.headers", ReloadTier::Rebuild),
-    ("telemetry.otlp.timeout_ms", ReloadTier::Rebuild),
-    ("telemetry.otlp.compression", ReloadTier::Rebuild),
-    ("telemetry.otlp.tls.insecure", ReloadTier::Rebuild),
-    ("telemetry.otlp.tls.ca_file", ReloadTier::Rebuild),
-    ("telemetry.otlp.signals", ReloadTier::Rebuild),
-    ("telemetry.otlp.resource_attributes", ReloadTier::Rebuild),
+    ("telemetry.otlp_sink.enabled", ReloadTier::Rebuild),
+    ("telemetry.otlp_sink.endpoint", ReloadTier::Rebuild),
+    ("telemetry.otlp_sink.protocol", ReloadTier::Rebuild),
+    ("telemetry.otlp_sink.headers", ReloadTier::Rebuild),
+    ("telemetry.otlp_sink.timeout_ms", ReloadTier::Rebuild),
+    ("telemetry.otlp_sink.compression", ReloadTier::Rebuild),
+    ("telemetry.otlp_sink.tls.insecure", ReloadTier::Rebuild),
+    ("telemetry.otlp_sink.tls.ca_file", ReloadTier::Rebuild),
+    ("telemetry.otlp_sink.signals", ReloadTier::Rebuild),
+    (
+        "telemetry.otlp_sink.resource_attributes",
+        ReloadTier::Rebuild,
+    ),
     // Prompt (rebuild PromptBuilder)
     ("prompt.context_files", ReloadTier::Rebuild),
     ("prompt.instructions", ReloadTier::Rebuild),
     ("prompt.templates", ReloadTier::Rebuild),
     ("prompt.variants", ReloadTier::Rebuild),
+    ("prompt.experiments.enabled", ReloadTier::Live),
+    ("prompt.experiments.min_attempts", ReloadTier::Live),
+    ("prompt.experiments.regression_margin", ReloadTier::Live),
+    ("prompt.experiments.window_days", ReloadTier::Live),
+    ("prompt.experiments.refresh_secs", ReloadTier::Live),
     // Agent adapter directory (rebuild Dispatcher's adapter loader)
     ("agent.adapters_dir", ReloadTier::Rebuild),
     // Rate limiting (rebuild RateLimiter)
@@ -367,6 +417,11 @@ static TIER_TABLE: &[(&str, ReloadTier)] = &[
     ("gates", ReloadTier::Rebuild),
     ("validation.outcome_timeout_seconds", ReloadTier::Rebuild),
     ("validation.stderr_cap_bytes", ReloadTier::Rebuild),
+    ("validation.default_gates.enabled", ReloadTier::Rebuild),
+    ("validation.default_gates.rust", ReloadTier::Rebuild),
+    ("validation.default_gates.go", ReloadTier::Rebuild),
+    ("validation.default_gates.python", ReloadTier::Rebuild),
+    ("validation.default_gates.node", ReloadTier::Rebuild),
     // ═══════════════════════════════════════════════════════════════════════════════
     // TIER C: RESTART REQUIRED
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -390,10 +445,12 @@ static TIER_TABLE: &[(&str, ReloadTier)] = &[
     ("bead_cli.backend", ReloadTier::RestartRequired),
     ("bead_cli.path", ReloadTier::RestartRequired),
     // Health monitoring (Tier C - installed at boot, global subscriber)
-    ("health.heartbeat_interval", ReloadTier::RestartRequired),
-    ("health.heartbeat_ttl", ReloadTier::RestartRequired),
+    (
+        "health.heartbeat_interval_secs",
+        ReloadTier::RestartRequired,
+    ),
+    ("health.heartbeat_ttl_secs", ReloadTier::RestartRequired),
     ("health.heartbeat_dir", ReloadTier::RestartRequired),
-    ("health.peer_check_interval", ReloadTier::RestartRequired),
     // Tsnet (Tier C - embed-level, subprocess-facing)
     ("tsnet", ReloadTier::RestartRequired),
     // Self-modification (Tier C - controls hot-reload itself)
@@ -434,7 +491,7 @@ mod tests {
     fn test_get_tier_for_known_keys() {
         assert_eq!(get_tier_for_key("agent.timeout"), Some(ReloadTier::Live));
         assert_eq!(
-            get_tier_for_key("telemetry.otlp.enabled"),
+            get_tier_for_key("telemetry.otlp_sink.enabled"),
             Some(ReloadTier::Rebuild)
         );
         assert_eq!(
@@ -502,8 +559,17 @@ mod tests {
         // needle-c8510ace — declared Live, read nowhere. Every entry must
         // either name a path that exists in the serialized config or be a
         // registered deprecated spelling of one that does.
+        // A real field that is `Option` + `skip_serializing_if` is simply absent
+        // from a DEFAULT serialization, so it cannot be resolved this way even
+        // though the tier entry is honest and the field is read. Exempt those
+        // by name rather than weakening the check for every key.
+        const OMITTED_WHEN_UNSET: &[&str] = &["bead_cli.path"];
+
         let value = serde_json::to_value(Config::default()).expect("default config serializes");
         for (key, _) in TIER_TABLE {
+            if OMITTED_WHEN_UNSET.contains(key) {
+                continue;
+            }
             let resolves = resolve_key(&value, key)
                 || canonical_key_spelling(key)
                     .is_some_and(|canonical| resolve_key(&value, canonical));

@@ -387,6 +387,17 @@ fn allowed_placeholders(operation: &str) -> &'static [&'static str] {
         "dep_add" | "dep_remove" => &["blocked", "blocker"],
         "split" => &["parent", "children"],
         "close" => &["id", "reason"],
+        "resolve" => &[
+            "id",
+            "attempt_id",
+            "outcome",
+            "actor",
+            "model",
+            "harness",
+            "harness_version",
+            "resolve_reason",
+            "evidence_ref",
+        ],
         "import" => &["input", "mode", "actor"],
         "compare" => &["id", "profile"],
         "query" => &["query"],
@@ -396,7 +407,7 @@ fn allowed_placeholders(operation: &str) -> &'static [&'static str] {
         "ref_remove" => &["id", "namespace", "key"],
         "ref_list" => &["id"],
         "ref_find" => &["namespace", "value"],
-        "data_set" => &["id", "key", "value"],
+        "data_set" => &["id", "key", "schema_ref", "value"],
         "data_get" => &["id", "key"],
         "data_list" => &["id"],
         "data_remove" => &["id", "key"],
@@ -646,6 +657,44 @@ fn builtin_bead_rs() -> BeadBackend {
         "close".into(),
         operation(&["close", "{id}", "--reason", "{reason}"], None, None),
     );
+    // bead-rs attempt-outcome-v1 (`bead resolve`, 0.2.6+): record one
+    // attempt's outcome atomically and idempotently. NEEDLE applies the
+    // lifecycle transition itself through the guarded action path, so the
+    // action here is always `none`; the receipt is the durable, cross-host
+    // attempt record and the input to the backend's failure-tier scheduling.
+    // `--model/--harness/--harness-version` are implicit worker facts and
+    // `--reason/--evidence-ref` are optional; an empty value drops the flag.
+    operations.insert(
+        "resolve".into(),
+        operation(
+            &[
+                "resolve",
+                "{id}",
+                "--attempt-id",
+                "{attempt_id}",
+                "--outcome",
+                "{outcome}",
+                "--action",
+                "none",
+                "--actor",
+                "{actor}",
+                "--model",
+                "{model}",
+                "--harness",
+                "{harness}",
+                "--harness-version",
+                "{harness_version}",
+                "--reason",
+                "{resolve_reason}",
+                "--evidence-ref",
+                "{evidence_ref}",
+                "--format",
+                "json",
+            ],
+            None,
+            Some(ParseShape::JsonObject),
+        ),
+    );
     operations.insert("doctor_check".into(), operation(&["doctor"], None, None));
     operations.insert(
         "doctor_repair".into(),
@@ -708,11 +757,24 @@ fn builtin_bead_rs() -> BeadBackend {
             Some(ParseShape::JsonLines),
         ),
     );
+    // bead-rs ≥ 0.2.6 `data` command: `--id`, `--namespace` (NEEDLE's `{key}`),
+    // an immutable `--schema-ref`, and a JSON `--value`. The namespace must be
+    // `[a-z0-9_-]+`. Verified against the installed CLI on 2026-09-12; the
+    // earlier `{id} --key` spelling was never accepted by any release.
     operations.insert(
         "data_set".into(),
         operation(
             &[
-                "data", "set", "{id}", "--key", "{key}", "--value", "{value}",
+                "data",
+                "set",
+                "--id",
+                "{id}",
+                "--namespace",
+                "{key}",
+                "--schema-ref",
+                "{schema_ref}",
+                "--value",
+                "{value}",
             ],
             None,
             None,
@@ -721,18 +783,34 @@ fn builtin_bead_rs() -> BeadBackend {
     operations.insert(
         "data_get".into(),
         operation(
-            &["data", "get", "{id}", "--key", "{key}"],
+            &[
+                "data",
+                "get",
+                "--id",
+                "{id}",
+                "--namespace",
+                "{key}",
+                "--json",
+            ],
             None,
             Some(ParseShape::JsonObject),
         ),
     );
     operations.insert(
         "data_list".into(),
-        operation(&["data", "list", "{id}"], None, Some(ParseShape::JsonLines)),
+        operation(
+            &["data", "list", "--id", "{id}", "--json"],
+            None,
+            Some(ParseShape::JsonLines),
+        ),
     );
     operations.insert(
         "data_remove".into(),
-        operation(&["data", "remove", "{id}", "--key", "{key}"], None, None),
+        operation(
+            &["data", "remove", "--id", "{id}", "--namespace", "{key}"],
+            None,
+            None,
+        ),
     );
     operations.insert(
         "query".into(),

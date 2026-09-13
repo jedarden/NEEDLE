@@ -231,6 +231,76 @@ pub struct AgentConfig {
     /// Model-to-adapter routing rules (optional).
     #[serde(default)]
     pub routing: Option<RoutingConfig>,
+
+    /// Evidence-based selection among configured candidate adapters (plan
+    /// section 4.4 step 4, N-T18). Off by default; see
+    /// [`crate::evidence_routing`].
+    #[serde(default)]
+    pub evidence_routing: EvidenceRoutingConfig,
+}
+
+/// Choose among already configured adapters by verified success per attempt
+/// from the attempt ledger, inside the L1 envelope (select among approved
+/// variants, record exposure, never create or widen anything).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvidenceRoutingConfig {
+    /// Master switch (default: false).
+    #[serde(default)]
+    pub enabled: bool,
+    /// Adapter names eligible for selection; the statically routed adapter
+    /// is always a candidate. Empty = nothing to choose between (no-op).
+    #[serde(default)]
+    pub candidates: Vec<String>,
+    /// Judged attempts an adapter needs in the window before it can be
+    /// chosen as best (default: 20).
+    #[serde(default = "EvidenceRoutingConfig::default_min_attempts")]
+    pub min_attempts: u64,
+    /// Share of dispatches sent to a non-best eligible candidate so its
+    /// evidence keeps accruing (default: 0.10; 0 disables exploration).
+    #[serde(default = "EvidenceRoutingConfig::default_exploration_share")]
+    pub exploration_share: f64,
+    /// Verified-success-rate lead the best candidate needs over the static
+    /// default before routing moves (default: 0.05).
+    #[serde(default = "EvidenceRoutingConfig::default_min_improvement")]
+    pub min_improvement: f64,
+    /// Ledger window in days (default: 7).
+    #[serde(default = "EvidenceRoutingConfig::default_window_days")]
+    pub window_days: u32,
+    /// How often a worker re-reads the ledger (default: 600 s).
+    #[serde(default = "EvidenceRoutingConfig::default_refresh_secs")]
+    pub refresh_secs: u64,
+}
+
+impl Default for EvidenceRoutingConfig {
+    fn default() -> Self {
+        EvidenceRoutingConfig {
+            enabled: false,
+            candidates: Vec::new(),
+            min_attempts: Self::default_min_attempts(),
+            exploration_share: Self::default_exploration_share(),
+            min_improvement: Self::default_min_improvement(),
+            window_days: Self::default_window_days(),
+            refresh_secs: Self::default_refresh_secs(),
+        }
+    }
+}
+
+impl EvidenceRoutingConfig {
+    fn default_min_attempts() -> u64 {
+        20
+    }
+    fn default_exploration_share() -> f64 {
+        0.10
+    }
+    fn default_min_improvement() -> f64 {
+        0.05
+    }
+    fn default_window_days() -> u32 {
+        7
+    }
+    fn default_refresh_secs() -> u64 {
+        600
+    }
 }
 
 impl Default for AgentConfig {
@@ -241,6 +311,7 @@ impl Default for AgentConfig {
             timeout: Self::default_timeout(),
             adapters_dir: Self::default_adapters_dir(),
             routing: Self::default_routing(),
+            evidence_routing: EvidenceRoutingConfig::default(),
         }
     }
 }
@@ -1170,6 +1241,11 @@ pub struct GatesConfig {
     /// Legacy verification commands (`verification:` in `.needle.yaml`).
     /// Empty when the workspace declares none.
     pub verification: Vec<String>,
+    /// Whether the workspace's `.needle.yaml` carried a `gates:` or
+    /// `verification:` key at all — even an empty one. An explicit `gates: []`
+    /// is the opt-out from the language default gate; a workspace that says
+    /// nothing gets the default (plan section 4.4 step 6).
+    pub declared: bool,
 }
 
 impl GatesConfig {
@@ -1216,9 +1292,11 @@ pub fn gates_for_workspace(workspace_root: &Path) -> Result<GatesConfig> {
         )
     })?;
 
+    let declared = overrides.gates.is_some() || overrides.verification.is_some();
     Ok(GatesConfig {
         gates: overrides.gates.unwrap_or_default(),
         verification: overrides.verification.unwrap_or_default(),
+        declared,
     })
 }
 
@@ -4758,7 +4836,13 @@ impl PulseConfig {
 /// them into learnings.md, and promotes high-frequency patterns to skill files.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReflectConfig {
-    /// Whether the Reflect strand is enabled (default: true).
+    /// Whether the legacy Reflect strand is enabled (default: **false** since
+    /// N-T15, plan section 4.4 step 0).
+    ///
+    /// The legacy consolidator reinforces observations by text similarity and
+    /// writes them to `.beads/learnings.md`, `.beads/skills/`, decision and
+    /// drift files. ADR-026 classifies that output as candidate input at
+    /// best; it is off by default until the evidence-gated replacement lands.
     #[serde(default = "ReflectConfig::default_enabled")]
     pub enabled: bool,
 
@@ -4814,7 +4898,8 @@ pub struct ReflectConfig {
     #[serde(default = "ReflectConfig::default_drift_similarity_threshold")]
     pub drift_similarity_threshold: f64,
 
-    /// Enable drift detection (default: true).
+    /// Enable drift detection (default: false since N-T15; the reports are
+    /// written to `.beads/drifts/` and read by nothing).
     #[serde(default = "ReflectConfig::default_drift_enabled")]
     pub drift_enabled: bool,
 
@@ -4822,7 +4907,11 @@ pub struct ReflectConfig {
     #[serde(default = "ReflectConfig::default_adr_enabled")]
     pub adr_enabled: bool,
 
-    /// Enable writing learnings to CLAUDE.md (default: true).
+    /// Enable writing learnings to CLAUDE.md (default: **false** since N-T15).
+    ///
+    /// CLAUDE.md is a top-authority policy file (ADR-027). When this is off,
+    /// a booting worker removes any marker-fenced `<!-- needle-learning:* -->`
+    /// block the placer wrote earlier and touches nothing outside the markers.
     #[serde(default = "ReflectConfig::default_claude_md_placement")]
     pub claude_md_placement: bool,
 }
@@ -4852,7 +4941,7 @@ impl Default for ReflectConfig {
 
 impl ReflectConfig {
     fn default_enabled() -> bool {
-        true
+        false
     }
     fn default_min_beads_since_last() -> usize {
         10
@@ -4885,13 +4974,13 @@ impl ReflectConfig {
         0.6
     }
     fn default_drift_enabled() -> bool {
-        true
+        false
     }
     fn default_adr_enabled() -> bool {
         true
     }
     fn default_claude_md_placement() -> bool {
-        true
+        false
     }
 }
 
@@ -5173,6 +5262,153 @@ pub struct LearningConfig {
     /// Cross-cutting lessons should be distilled; this cap keeps the file focused.
     #[serde(default = "LearningConfig::default_max_global_learnings")]
     pub max_global_learnings: usize,
+
+    /// Inject the legacy `.beads/learnings.md` and global learnings files into
+    /// every dispatch prompt (default: **false** since N-T15).
+    ///
+    /// The legacy files are count-reinforced transcript scrapes (ADR-026 calls
+    /// them candidate input, not validated knowledge). With this off a built
+    /// prompt carries no `## Workspace Learnings` section at all; the files
+    /// are left on disk untouched as the candidate corpus for N-T13.
+    #[serde(default)]
+    pub inject_legacy_learnings: bool,
+
+    /// Byte cap on learning-derived prompt context — workspace learnings,
+    /// global learnings and matched skills together (default: 8192).
+    ///
+    /// Configured `prompt.context_files` are operator policy and are never
+    /// truncated by this cap. Learning context was previously unbounded: the
+    /// NEEDLE workspace's own file reached 83 KB and was prepended verbatim
+    /// to every dispatch.
+    #[serde(default = "LearningConfig::default_max_learning_context_bytes")]
+    pub max_learning_context_bytes: usize,
+
+    /// What a retried bead's prompt is told about its previous attempts
+    /// (plan revision 31 leaf R3, `needle-60163eac`).
+    #[serde(default)]
+    pub failure_history: FailureHistoryConfig,
+
+    /// Retry-time retrieval of prior fixes for the bead's failure (plan
+    /// section 4.4 step 7). Off until `command` is set.
+    #[serde(default)]
+    pub retrieval: RetrievalConfig,
+}
+
+/// Retry-time retrieval of prior fixes (see [`crate::retrieval`]).
+///
+/// The command receives one JSON request on stdin and answers with JSON
+/// lines `{id, source, title, text}`. On this fleet:
+/// `python3 ~/agent-transcript-archive/scripts/graph_query.py prior-fixes --limit 5`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetrievalConfig {
+    /// Master switch (default: true); nothing runs without `command`.
+    #[serde(default = "RetrievalConfig::default_enabled")]
+    pub enabled: bool,
+    /// Shell command run with `sh -c` (default: none).
+    #[serde(default)]
+    pub command: Option<String>,
+    /// Wall-clock budget for the command (default: 20 s).
+    #[serde(default = "RetrievalConfig::default_timeout_secs")]
+    pub timeout_secs: u64,
+    /// Hints injected at most (default: 3).
+    #[serde(default = "RetrievalConfig::default_max_results")]
+    pub max_results: usize,
+    /// Byte cap on the rendered hints section (default: 3000).
+    #[serde(default = "RetrievalConfig::default_max_bytes")]
+    pub max_bytes: usize,
+    /// First attempt number that retrieves (default: 2 — the first retry).
+    #[serde(default = "RetrievalConfig::default_min_attempt")]
+    pub min_attempt: u32,
+}
+
+impl Default for RetrievalConfig {
+    fn default() -> Self {
+        RetrievalConfig {
+            enabled: Self::default_enabled(),
+            command: None,
+            timeout_secs: Self::default_timeout_secs(),
+            max_results: Self::default_max_results(),
+            max_bytes: Self::default_max_bytes(),
+            min_attempt: Self::default_min_attempt(),
+        }
+    }
+}
+
+impl RetrievalConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+    fn default_timeout_secs() -> u64 {
+        20
+    }
+    fn default_max_results() -> usize {
+        3
+    }
+    fn default_max_bytes() -> usize {
+        3000
+    }
+    fn default_min_attempt() -> u32 {
+        2
+    }
+}
+
+/// Per-bead attempt history shown to the next attempt.
+///
+/// Every resolved attempt is appended to
+/// `<workspace>/.beads/traces/<bead>/attempts.jsonl` and mirrored, bounded,
+/// into bead-rs structured data (namespace `needle-attempts`) so another host
+/// sees it. The newest few are rendered into the `{failure_history}` prompt
+/// variable of the pluck and split templates.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FailureHistoryConfig {
+    /// Record attempts and inject the history (default: true).
+    #[serde(default = "FailureHistoryConfig::default_enabled")]
+    pub enabled: bool,
+    /// Newest attempts rendered into the prompt (default: 3).
+    #[serde(default = "FailureHistoryConfig::default_max_attempts")]
+    pub max_attempts: usize,
+    /// Byte cap on the rendered section (default: 4000).
+    #[serde(default = "FailureHistoryConfig::default_max_bytes")]
+    pub max_bytes: usize,
+    /// Mirror the bounded history into bead-rs structured data (default:
+    /// true). Backends without a `data` command silently keep the local
+    /// journal only.
+    #[serde(default = "FailureHistoryConfig::default_sync_to_bead_data")]
+    pub sync_to_bead_data: bool,
+}
+
+impl Default for FailureHistoryConfig {
+    fn default() -> Self {
+        FailureHistoryConfig {
+            enabled: Self::default_enabled(),
+            max_attempts: Self::default_max_attempts(),
+            max_bytes: Self::default_max_bytes(),
+            sync_to_bead_data: Self::default_sync_to_bead_data(),
+        }
+    }
+}
+
+impl FailureHistoryConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+    fn default_max_attempts() -> usize {
+        3
+    }
+    fn default_max_bytes() -> usize {
+        4000
+    }
+    fn default_sync_to_bead_data() -> bool {
+        true
+    }
+
+    /// The renderer's limits.
+    pub fn limits(&self) -> crate::attempt_history::HistoryLimits {
+        crate::attempt_history::HistoryLimits {
+            max_attempts: self.max_attempts,
+            max_bytes: self.max_bytes,
+        }
+    }
 }
 
 impl Default for LearningConfig {
@@ -5184,6 +5420,10 @@ impl Default for LearningConfig {
             trace_sanitization: TraceSanitizationConfig::default(),
             global_learnings_file: Self::default_global_learnings_file(),
             max_global_learnings: Self::default_max_global_learnings(),
+            inject_legacy_learnings: false,
+            max_learning_context_bytes: Self::default_max_learning_context_bytes(),
+            failure_history: FailureHistoryConfig::default(),
+            retrieval: RetrievalConfig::default(),
         }
     }
 }
@@ -5191,6 +5431,10 @@ impl Default for LearningConfig {
 impl LearningConfig {
     fn default_trace_retention_failed() -> u32 {
         7
+    }
+
+    fn default_max_learning_context_bytes() -> usize {
+        8192
     }
 
     fn default_trace_retention_success() -> u32 {
@@ -6046,6 +6290,64 @@ pub struct PromptConfig {
     /// ```
     #[serde(default)]
     pub variants: std::collections::BTreeMap<String, Vec<VariantConfig>>,
+
+    /// Automatic stop for a `variants` canary that regresses (plan section
+    /// 4.4 step 5, N-T19). See [`crate::experiments`].
+    #[serde(default)]
+    pub experiments: ExperimentConfig,
+}
+
+/// Prompt-variant canary evaluation: a variant whose verified-success rate
+/// trails the default by more than `regression_margin`, once both have
+/// `min_attempts`, is stopped (receipt under `~/.needle/state/experiments/`)
+/// and workers fall back to the built-in template. Promotion stays manual.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExperimentConfig {
+    /// Evaluate and auto-stop (default: true; harmless without variants).
+    #[serde(default = "ExperimentConfig::default_enabled")]
+    pub enabled: bool,
+    /// Judged attempts both cohorts need before a verdict (default: 30).
+    #[serde(default = "ExperimentConfig::default_min_attempts")]
+    pub min_attempts: u64,
+    /// Rate gap that stops a variant (default: 0.15).
+    #[serde(default = "ExperimentConfig::default_regression_margin")]
+    pub regression_margin: f64,
+    /// Ledger window in days (default: 14).
+    #[serde(default = "ExperimentConfig::default_window_days")]
+    pub window_days: u32,
+    /// How often a worker re-evaluates (default: 600 s).
+    #[serde(default = "ExperimentConfig::default_refresh_secs")]
+    pub refresh_secs: u64,
+}
+
+impl Default for ExperimentConfig {
+    fn default() -> Self {
+        ExperimentConfig {
+            enabled: Self::default_enabled(),
+            min_attempts: Self::default_min_attempts(),
+            regression_margin: Self::default_regression_margin(),
+            window_days: Self::default_window_days(),
+            refresh_secs: Self::default_refresh_secs(),
+        }
+    }
+}
+
+impl ExperimentConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+    fn default_min_attempts() -> u64 {
+        30
+    }
+    fn default_regression_margin() -> f64 {
+        0.15
+    }
+    fn default_window_days() -> u32 {
+        14
+    }
+    fn default_refresh_secs() -> u64 {
+        600
+    }
 }
 
 impl ConfigTier for PromptConfig {
@@ -6180,12 +6482,24 @@ pub struct OutcomeConfig {
     /// mitosis gets first crack at splitting the bead before quarantine kicks in.
     #[serde(default = "OutcomeConfig::default_quarantine_after_failures")]
     pub quarantine_after_failures: u32,
+
+    /// Record every resolved attempt in the backend's own attempt ledger
+    /// (bead-rs `resolve --action none`, attempt-outcome-v1) after the NEEDLE
+    /// ledger row (default: true; plan section 4.4 step 4, ADR-024).
+    ///
+    /// The backend's failure-tier scheduling and cross-host attempt history
+    /// read that ledger; before this it had zero rows. NEEDLE still applies
+    /// the lifecycle action itself. Backends without the capability are
+    /// skipped silently.
+    #[serde(default = "OutcomeConfig::default_resolve_attempts_in_backend")]
+    pub resolve_attempts_in_backend: bool,
 }
 
 impl Default for OutcomeConfig {
     fn default() -> Self {
         OutcomeConfig {
             quarantine_after_failures: Self::default_quarantine_after_failures(),
+            resolve_attempts_in_backend: Self::default_resolve_attempts_in_backend(),
         }
     }
 }
@@ -6193,6 +6507,9 @@ impl Default for OutcomeConfig {
 impl OutcomeConfig {
     fn default_quarantine_after_failures() -> u32 {
         5
+    }
+    fn default_resolve_attempts_in_backend() -> bool {
+        true
     }
 }
 
@@ -6238,6 +6555,22 @@ pub struct WorkspaceHealthConfig {
     /// identically is infrastructure.
     #[serde(default = "WorkspaceHealthConfig::default_fingerprint_min_distinct_beads")]
     pub fingerprint_min_distinct_beads: usize,
+
+    /// Track adapter-level failure storms (N-T23). When one non-gate failure
+    /// fingerprint — exit code, terminal reason, API error status — dominates
+    /// an adapter's recent failures across several beads, the adapter is
+    /// degraded: those failures resolve as `infrastructure_failure`, release
+    /// the bead without a failure count, and workers on that adapter hold
+    /// before claiming. Uses the same window thresholds as the gate
+    /// fingerprint detector above. Default: true.
+    #[serde(default = "WorkspaceHealthConfig::default_adapter_health_enabled")]
+    pub adapter_health_enabled: bool,
+
+    /// How long a worker on a degraded adapter waits after that adapter's
+    /// last degraded failure before claiming again (default: 300 seconds).
+    /// A verified success on the adapter lifts the degradation immediately.
+    #[serde(default = "WorkspaceHealthConfig::default_adapter_degraded_cooldown_secs")]
+    pub adapter_degraded_cooldown_secs: u64,
 }
 
 impl Default for WorkspaceHealthConfig {
@@ -6248,11 +6581,19 @@ impl Default for WorkspaceHealthConfig {
             fingerprint_min_window_failures: Self::default_fingerprint_min_window_failures(),
             fingerprint_trip_ratio: Self::default_fingerprint_trip_ratio(),
             fingerprint_min_distinct_beads: Self::default_fingerprint_min_distinct_beads(),
+            adapter_health_enabled: Self::default_adapter_health_enabled(),
+            adapter_degraded_cooldown_secs: Self::default_adapter_degraded_cooldown_secs(),
         }
     }
 }
 
 impl WorkspaceHealthConfig {
+    fn default_adapter_health_enabled() -> bool {
+        true
+    }
+    fn default_adapter_degraded_cooldown_secs() -> u64 {
+        300
+    }
     fn default_fingerprint_window_seconds() -> u64 {
         2 * 60 * 60
     }
@@ -6306,6 +6647,64 @@ pub struct ValidationConfig {
     /// Maximum bytes of gate command stderr captured on failure.
     #[serde(default = "ValidationConfig::default_stderr_cap_bytes")]
     pub stderr_cap_bytes: usize,
+
+    /// Language-default verification gate for workspaces that declare none
+    /// (plan section 4.4 step 6).
+    #[serde(default)]
+    pub default_gates: DefaultGatesConfig,
+}
+
+/// A workspace that declares no `gates:` gets one derived from what it is —
+/// `Cargo.toml`, `go.mod`, a Python project, a `package.json` with a real
+/// test script — so "success" means something more than exit 0 there too.
+/// On 2026-09-12 only 5 of 79 workspaces declared gates, so in the other 74
+/// the ledger's `verified_success` was the agent's own opinion, which
+/// ADR-024 rules out as evidence.
+///
+/// The builtin commands are deliberately the cheap, deterministic checks
+/// (compile, vet, byte-compile, or the project's own test script), because
+/// gates run in a clean extraction under `validation.outcome_timeout_seconds`
+/// and a cold full test run of a large repository would time out into a
+/// gate execution error. Override per language to run more.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DefaultGatesConfig {
+    /// Apply a language default when a workspace declares no gates
+    /// (default: true). An explicit `gates: []` in `.needle.yaml` opts a
+    /// workspace out.
+    #[serde(default = "DefaultGatesConfig::default_enabled")]
+    pub enabled: bool,
+    /// Commands for a Rust workspace (`Cargo.toml`). Empty = builtin.
+    #[serde(default)]
+    pub rust: Vec<String>,
+    /// Commands for a Go workspace (`go.mod`). Empty = builtin.
+    #[serde(default)]
+    pub go: Vec<String>,
+    /// Commands for a Python workspace (`pyproject.toml`, `setup.py`,
+    /// `setup.cfg`, `requirements.txt`). Empty = builtin.
+    #[serde(default)]
+    pub python: Vec<String>,
+    /// Commands for a Node workspace (`package.json` with a real `test`
+    /// script). Empty = builtin.
+    #[serde(default)]
+    pub node: Vec<String>,
+}
+
+impl Default for DefaultGatesConfig {
+    fn default() -> Self {
+        DefaultGatesConfig {
+            enabled: Self::default_enabled(),
+            rust: Vec::new(),
+            go: Vec::new(),
+            python: Vec::new(),
+            node: Vec::new(),
+        }
+    }
+}
+
+impl DefaultGatesConfig {
+    fn default_enabled() -> bool {
+        true
+    }
 }
 
 impl Default for ValidationConfig {
@@ -6313,6 +6712,7 @@ impl Default for ValidationConfig {
         ValidationConfig {
             outcome_timeout_seconds: Self::default_outcome_timeout_seconds(),
             stderr_cap_bytes: Self::default_stderr_cap_bytes(),
+            default_gates: DefaultGatesConfig::default(),
         }
     }
 }
@@ -10402,7 +10802,11 @@ strands:
     #[test]
     fn default_reflect_config_values() {
         let config = ReflectConfig::default();
-        assert!(config.enabled);
+        // N-T15: legacy Reflect, drift reports and CLAUDE.md placement are
+        // off until the evidence-gated replacement lands (plan 4.4 step 0).
+        assert!(!config.enabled);
+        assert!(!config.drift_enabled);
+        assert!(!config.claude_md_placement);
         assert_eq!(config.min_beads_since_last, 10);
         assert_eq!(config.cooldown_hours, 24);
         assert_eq!(config.max_learnings_per_run, 10);
@@ -12504,7 +12908,11 @@ agent:
         let _env_guard = crate::util::test_env::isolate_env();
         std::env::remove_var("HOME");
         let result = dirs_or_home(".config/needle");
-        assert_eq!(result, PathBuf::from("/tmp/.config/needle"));
+        // The fallback is std::env::temp_dir(), which honours TMPDIR. CI's
+        // definition-of-done wrapper sets TMPDIR to a per-run directory
+        // (/var/tmp/needle-dod-lib.XXXX), so hardcoding /tmp asserted the
+        // developer's environment rather than the behaviour.
+        assert_eq!(result, std::env::temp_dir().join(".config/needle"));
     }
 
     #[test]

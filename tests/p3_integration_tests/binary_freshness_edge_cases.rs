@@ -71,6 +71,19 @@ fn test_binary_becomes_unreadable() {
     perms.set_mode(0o000);
     fs::set_permissions(&binary_path, perms).expect("failed to set permissions");
 
+    // Root bypasses DAC entirely, so chmod 000 does not make a file
+    // unreadable for uid 0 and the scenario under test cannot be produced.
+    // CI runs this container as root, where the checker correctly returned
+    // Unchanged and the assertion below was simply false. Probe the actual
+    // precondition rather than guessing at the uid.
+    if fs::File::open(&binary_path).is_ok() {
+        eprintln!(
+            "skipping test_binary_becomes_unreadable: chmod 000 is not enforced \
+             for this uid (running as root), so the read cannot fail"
+        );
+        return;
+    }
+
     // Next check should handle permission error gracefully
     let result = checker
         .poll_at(now + Duration::from_secs(2))

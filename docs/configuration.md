@@ -67,6 +67,9 @@ This guide covers the most commonly used configuration options.
 
 **Outcome handling:**
 - `outcome.quarantine_after_failures` — Quarantine bead after N failures
+- `outcome.resolve_attempts_in_backend` — Record each resolved attempt in the
+  bead-rs attempt ledger (`bead resolve --action none`); the backend's
+  failure-tier scheduling reads it
 
 **Stop command:**
 - `stop.grace_period_secs` — Grace period for killed processes to exit
@@ -483,6 +486,57 @@ process_limits:
     enabled: false             # No hard deadline (no absolute time limit)
 ```
 
+### Evidence-Based Adapter Selection (N-T18)
+
+Static routing matches on a model name and never learns. With
+`agent.evidence_routing` a worker chooses among **already configured**
+candidate adapters by what the attempt ledger (`attempt.resolved` rows in
+`~/.needle/logs`, bounded by file date) says about them: verified success
+over judged attempts (infrastructure failures excluded), cost per verified
+success as the tie-break. Guardrails: an adapter needs `min_attempts`
+judged attempts to be chosen as best; routing only moves away from the
+static default when the best leads it by `min_improvement`; an
+`exploration_share` of dispatches goes to a non-best eligible candidate so
+evidence keeps accruing; a gate-degraded workspace or a provider-degraded
+adapter freezes the choice on the static default. Every decision is a
+receipt (`agent.evidence_routing`). Off by default — this selects among
+approved variants and records exposure (plan 5.7 L1); it never creates or
+widens anything.
+
+```yaml
+agent:
+  evidence_routing:
+    enabled: false
+    candidates: [claude-code-glm-5.3-flash, claude-code-glm-5.3]
+    min_attempts: 20
+    exploration_share: 0.10
+    min_improvement: 0.05
+    window_days: 7
+    refresh_secs: 600
+```
+
+### Prompt-Variant Canaries (N-T19)
+
+`prompt.variants` assigns workers to template variants deterministically and
+stamps `template_version` on every attempt. `prompt.experiments` closes the
+loop the safe way round: it never promotes a variant, it **stops** one whose
+verified-success rate trails the default by more than `regression_margin`
+once both cohorts have `min_attempts` judged attempts. A stop is a receipt
+under `~/.needle/state/experiments/<template>--<variant>.stopped.json` plus
+an `experiment.stopped` event; workers then build that cohort's prompts from
+the built-in template. Removing the receipt re-arms the variant; editing
+the config promotes one — both are operator actions.
+
+```yaml
+prompt:
+  experiments:
+    enabled: true
+    min_attempts: 30
+    regression_margin: 0.15
+    window_days: 14
+    refresh_secs: 600
+```
+
 ### Model-to-Adapter Routing
 
 ```yaml
@@ -784,6 +838,86 @@ strands:
         command: cargo clippy --all-targets -- -D warnings
 ```
 
+### Reflect and Learning Context (legacy, off by default)
+
+Since N-T15 (plan section 4.4 step 0, ADR-026) the legacy Reflect
+consolidator and everything it feeds are **off by default**. Its output —
+`.beads/learnings.md`, `.beads/skills/`, decision and drift files — is
+count-reinforced transcript scrape, which ADR-026 classifies as candidate
+input rather than validated knowledge. A default-configured worker therefore:
+
+- runs no Reflect pass (`strands.reflect.enabled: false`);
+- builds prompts with **no** `## Workspace Learnings` or global-learnings
+  section (`strands.learning.inject_legacy_learnings: false`);
+- never writes to CLAUDE.md, and on boot strips any marker-fenced
+  `<!-- needle-learning:* -->` block a previous placer run left there
+  (`strands.reflect.claude_md_placement: false`) — text outside the markers
+  is never touched;
+- caps whatever learning-derived context it does inject (matched skills, or
+  the legacy files when opted back in) at
+  `strands.learning.max_learning_context_bytes` (default 8192). Configured
+  `prompt.context_files` are operator policy and are never truncated.
+
+What a retried bead *is* told is its own attempt history (plan revision 31
+leaf R3). Every resolved attempt is appended to
+`<workspace>/.beads/traces/<bead>/attempts.jsonl` — outcome, terminal reason,
+exit code, commits it left, and a bounded, sanitized failure summary (the
+rejecting gate's output, or the stream's terminal envelope plus a stderr
+tail). The bounded newest five are mirrored into bead-rs structured data
+(`bead data get --id <bead> --namespace needle-attempts`) so a worker on
+another host sees them, and they survive `bead update --notes`, which
+replaces notes. The newest attempts render into the `{failure_history}`
+variable of the pluck and split templates as a "Previous attempts on this
+bead" section that tells the agent not to repeat what already failed.
+
+```yaml
+strands:
+  learning:
+    failure_history:
+      enabled: true            # record attempts and inject the history
+      max_attempts: 3          # newest attempts rendered into the prompt
+      max_bytes: 4000          # byte cap on the rendered section
+      sync_to_bead_data: true  # mirror into bead-rs `data` (needs bead-rs >= 0.2.6)
+```
+
+On a retry (attempt ≥ `min_attempt`) NEEDLE can also ask an external command
+for **prior fixes** of the failure and inject them as a bounded, clearly
+labelled hints section (`{prior_fixes}`, after the attempt history). The
+command gets one JSON request on stdin — `{bead_id, title, workspace,
+attempt, failure_summary, terminal_reason}` — and answers with JSON lines
+`{id, source, title, text}`, best first. A non-zero exit, a timeout or
+malformed output yields no hints and never fails the dispatch. The IDs that
+reached the prompt are emitted as `prompt.memory_retrieved` (the exposure
+record). Retrieval reads; it never promotes anything (ADR-026 L0).
+
+```yaml
+strands:
+  learning:
+    retrieval:
+      enabled: true
+      # This fleet: the transcript knowledge graph (60k sessions, 22k error
+      # signatures) queried by exact error-signature hash, FTS fallback.
+      command: "python3 /home/coding/agent-transcript-archive/scripts/graph_query.py prior-fixes --limit 5"
+      timeout_secs: 20
+      max_results: 3
+      max_bytes: 3000
+      min_attempt: 2
+```
+
+The files on disk are left in place as the untrusted candidate corpus for the
+N-T13 migration. To restore the pre-N-T15 behaviour byte-for-byte:
+
+```yaml
+strands:
+  reflect:
+    enabled: true
+    drift_enabled: true
+    claude_md_placement: true
+  learning:
+    inject_legacy_learnings: true
+    max_learning_context_bytes: 1000000
+```
+
 ---
 
 ## Telemetry Configuration
@@ -870,7 +1004,73 @@ health:
 
 ---
 
+## Workspace and Adapter Health
+
+Two fingerprint detectors share one window policy. The gate detector (N-T22)
+degrades a *workspace* when one verification-failure fingerprint dominates
+recent failures across distinct beads. The adapter detector (N-T23) degrades
+an *adapter* when one infrastructure-shaped failure signal — a stream
+envelope reporting an API error, exit code 124/126/127 or a signal, a crash,
+a missing agent binary — dominates that adapter's recent failures across
+distinct beads. An ordinary non-zero exit is a task result and is never
+fingerprinted, so an agent that legitimately exits 1 cannot look like an
+outage.
+
+While an adapter is degraded, failures carrying its fingerprint resolve as
+`infrastructure_failure` with no failure count (on 2026-09-10 the
+`claude-print` watchdog's 341 exit-124 kills were all booked as bead
+failures), and every worker on that adapter holds before claiming until the
+cooldown since the last such failure elapses. A verified success on the
+adapter lifts the degradation immediately. State lives in
+`~/.needle/state/provider-health/`; `needle stats --by adapter|model|workspace`
+shows the `INFRA` column these resolutions land in.
+
+```yaml
+workspace_health:
+  fingerprint_window_seconds: 7200      # sliding window for both detectors
+  fingerprint_window_max_failures: 20
+  fingerprint_min_window_failures: 5    # failures before a trip is evaluated
+  fingerprint_trip_ratio: 0.80          # share one fingerprint must cover
+  fingerprint_min_distinct_beads: 3     # beads a fingerprint must span
+  adapter_health_enabled: true          # N-T23 adapter detector
+  adapter_degraded_cooldown_secs: 300   # claim hold after the last degraded failure
+```
+
+---
+
 ## Validation Configuration
+
+### Language-Default Gates (plan 4.4 step 6)
+
+A workspace whose `.needle.yaml` declares no `gates:` (or `verification:`)
+is judged by the gate its build files imply; an explicit `gates: []` opts
+out, and a declared list always wins. `needle gates --workspace PATH` prints
+the resolution. The gate is named `default_<language>` in gate reports and
+the attempt ledger.
+
+| Build file | Builtin command | Note |
+|---|---|---|
+| `Cargo.toml` | `cargo check --all-targets --quiet` | cheap, uses the shared cargo cache |
+| `go.mod` | `go vet ./...` then `go build ./...` | |
+| `pyproject.toml` / `setup.py` / `setup.cfg` / `requirements.txt` | none | set `validation.default_gates.python` |
+| `package.json` with a real `test` script | none | set `validation.default_gates.node` |
+
+Python and Node deliberately have no builtin: gates run in a clean
+extraction of committed state, which has no virtualenv and no
+`node_modules`, so `pytest` and `npm test` failed every time there on
+2026-09-12 (25 false failures, two workspaces degraded) before the builtin
+was removed. Configure a command that works in the extraction — one that
+installs dependencies first, or a byte-compile step — per host or per repo.
+
+```yaml
+validation:
+  default_gates:
+    enabled: true
+    rust: []      # empty = builtin
+    go: []
+    python: ["python3 -m compileall -q ."]
+    node: ["npm ci --silent && npm test --silent"]
+```
 
 ```yaml
 validation:
@@ -916,6 +1116,28 @@ operator-installed drain (`contrib/attempt-archive/`, see
 `docs/attempt-archive.md`), and the spool layout is the only contract between
 the two. ARMOR is the reference sink in this fleet; any S3-compatible endpoint,
 or none, works.
+
+The producer is `src/attempt_archive.rs`, called from the outcome handler
+after the `attempt.resolved` ledger row. Each attempt yields
+`<spool>/<host>/<YYYY-MM-DD>/<bead>-<attempt>.tar.zst` (system `tar` and
+`zstd`; `.tar` when zstd is unavailable or `compression: none`) containing
+`attempt.json` plus the trace-directory files selected by `include`, and a
+sidecar `<bead>-<attempt>.json` written last through a `.partial` temp file
+and rename, carrying `bundle_path`, `bundle_sha256`, `bundle_bytes`, the
+attempt facts and the file list. The drain validates the pair, uploads bundle
+then sidecar, and deletes both. Before this producer existed the drain had
+uploaded zero bytes.
+
+To install an unreleased local build safely (running workers pick the new
+`:stable` up at their next bead boundary):
+
+```bash
+cargo build --release
+target/release/needle upgrade --from-file target/release/needle   # :testing → canary → :stable
+```
+
+`--skip-canary` promotes without the canary suite. Never `cp`/`mv` onto
+`~/.needle/bin/needle-stable` while workers run.
 
 ```yaml
 attempt_archive:

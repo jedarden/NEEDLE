@@ -986,6 +986,52 @@ pub enum EventKind {
         bead_id: BeadId,
         degraded_duration_secs: u64,
     },
+    /// An adapter's recent non-gate failures are dominated by one fingerprint
+    /// across several beads (N-T23): the provider/adapter is degraded, and
+    /// failures carrying that fingerprint are infrastructure, not the bead's.
+    ProviderDegraded {
+        adapter: String,
+        fingerprint: String,
+        summary: String,
+        failures: u32,
+        distinct_beads: u32,
+        bead_id: BeadId,
+    },
+    /// A degraded adapter produced a verified success again.
+    ProviderRestored {
+        adapter: String,
+        bead_id: BeadId,
+        degraded_duration_secs: u64,
+    },
+    /// Prior fixes were retrieved and injected into a retry's prompt (plan
+    /// 4.4 step 7). `ids` is the exposure record: exactly which memory
+    /// entries this attempt saw.
+    PromptMemoryRetrieved {
+        bead_id: BeadId,
+        attempt: u32,
+        ids: Vec<String>,
+        bytes: usize,
+    },
+    /// Evidence-based adapter selection made a choice (N-T18). `considered`
+    /// carries every candidate's evidence so the receipt explains itself.
+    EvidenceRoutingDecision {
+        bead_id: BeadId,
+        static_adapter: String,
+        chosen_adapter: String,
+        reason: String,
+        explored: bool,
+        considered: Vec<serde_json::Value>,
+    },
+    /// A prompt-variant canary regressed past the margin and was stopped
+    /// (N-T19); the receipt file carries the same numbers.
+    ExperimentStopped {
+        template: String,
+        variant: String,
+        variant_rate: f64,
+        baseline_rate: f64,
+        variant_attempts: u64,
+        baseline_attempts: u64,
+    },
 
     // ── Unravel ──
     UnravelAnalyzed {
@@ -1573,6 +1619,11 @@ impl EventKind {
             EventKind::GateExecutionError { .. } => "gate.execution_error",
             EventKind::WorkspaceGateDegraded { .. } => "workspace.gate_degraded",
             EventKind::WorkspaceGateRestored { .. } => "workspace.gate_restored",
+            EventKind::ProviderDegraded { .. } => "provider.degraded",
+            EventKind::ProviderRestored { .. } => "provider.restored",
+            EventKind::PromptMemoryRetrieved { .. } => "prompt.memory_retrieved",
+            EventKind::EvidenceRoutingDecision { .. } => "agent.evidence_routing",
+            EventKind::ExperimentStopped { .. } => "experiment.stopped",
             EventKind::UnravelAnalyzed { .. } => "bead.unravel.analyzed",
             EventKind::UnravelSkipped { .. } => "bead.unravel.skipped",
             EventKind::ReflectStarted { .. } => "reflect.started",
@@ -1693,6 +1744,10 @@ impl EventKind {
             | EventKind::GateExecutionError { bead_id, .. }
             | EventKind::WorkspaceGateDegraded { bead_id, .. }
             | EventKind::WorkspaceGateRestored { bead_id, .. }
+            | EventKind::ProviderDegraded { bead_id, .. }
+            | EventKind::ProviderRestored { bead_id, .. }
+            | EventKind::PromptMemoryRetrieved { bead_id, .. }
+            | EventKind::EvidenceRoutingDecision { bead_id, .. }
             | EventKind::UnravelAnalyzed { bead_id, .. }
             | EventKind::UnravelSkipped { bead_id, .. }
             | EventKind::OutputTransformSpawned { bead_id, .. }
@@ -1836,6 +1891,7 @@ impl EventKind {
             EventKind::PulseBeadCreated { bead_id, .. } => Some(bead_id.clone()),
             EventKind::Log { bead_id, .. } => bead_id.clone(),
             EventKind::UpgradeCheckStarted { .. } => None,
+            EventKind::ExperimentStopped { .. } => None,
             EventKind::UpgradeCheckCompleted { .. } => None,
             EventKind::UpgradeCheckFailed { .. } => None,
             EventKind::PluckOrderingDegraded { .. } => None,
@@ -2574,6 +2630,81 @@ impl EventKind {
                     "workspace": workspace,
                     "bead_id": bead_id.as_ref(),
                     "degraded_duration_secs": degraded_duration_secs,
+                })
+            }
+            EventKind::ProviderDegraded {
+                adapter,
+                fingerprint,
+                summary,
+                failures,
+                distinct_beads,
+                bead_id,
+            } => {
+                serde_json::json!({
+                    "adapter": adapter,
+                    "fingerprint": fingerprint,
+                    "summary": summary,
+                    "failures": failures,
+                    "distinct_beads": distinct_beads,
+                    "bead_id": bead_id.as_ref(),
+                })
+            }
+            EventKind::ProviderRestored {
+                adapter,
+                bead_id,
+                degraded_duration_secs,
+            } => {
+                serde_json::json!({
+                    "adapter": adapter,
+                    "bead_id": bead_id.as_ref(),
+                    "degraded_duration_secs": degraded_duration_secs,
+                })
+            }
+            EventKind::PromptMemoryRetrieved {
+                bead_id,
+                attempt,
+                ids,
+                bytes,
+            } => {
+                serde_json::json!({
+                    "bead_id": bead_id.as_ref(),
+                    "attempt": attempt,
+                    "ids": ids,
+                    "bytes": bytes,
+                })
+            }
+            EventKind::EvidenceRoutingDecision {
+                bead_id,
+                static_adapter,
+                chosen_adapter,
+                reason,
+                explored,
+                considered,
+            } => {
+                serde_json::json!({
+                    "bead_id": bead_id.as_ref(),
+                    "static_adapter": static_adapter,
+                    "chosen_adapter": chosen_adapter,
+                    "reason": reason,
+                    "explored": explored,
+                    "considered": considered,
+                })
+            }
+            EventKind::ExperimentStopped {
+                template,
+                variant,
+                variant_rate,
+                baseline_rate,
+                variant_attempts,
+                baseline_attempts,
+            } => {
+                serde_json::json!({
+                    "template": template,
+                    "variant": variant,
+                    "variant_rate": variant_rate,
+                    "baseline_rate": baseline_rate,
+                    "variant_attempts": variant_attempts,
+                    "baseline_attempts": baseline_attempts,
                 })
             }
             EventKind::UnravelAnalyzed {
@@ -3605,6 +3736,11 @@ impl EventKind {
             | EventKind::GateExecutionError { .. }
             | EventKind::WorkspaceGateDegraded { .. }
             | EventKind::WorkspaceGateRestored { .. }
+            | EventKind::ProviderDegraded { .. }
+            | EventKind::ProviderRestored { .. }
+            | EventKind::PromptMemoryRetrieved { .. }
+            | EventKind::EvidenceRoutingDecision { .. }
+            | EventKind::ExperimentStopped { .. }
             | EventKind::UnravelAnalyzed { .. }
             | EventKind::UnravelSkipped { .. }
             | EventKind::PulseScannerStarted { .. }

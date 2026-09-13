@@ -329,6 +329,92 @@ impl ClaudeMdPlacer {
     }
 }
 
+/// Opening marker prefix shared by every block the placer writes
+/// (`<!-- needle-learning -->` and `<!-- needle-learning:<id> -->`).
+const MARKER_OPEN: &str = "<!-- needle-learning";
+/// Closing marker prefix (`<!-- /needle-learning -->` / `<!-- /needle-learning:<id> -->`).
+const MARKER_CLOSE: &str = "<!-- /needle-learning";
+/// Section header the placer creates when it has to.
+const SECTION_HEADER: &str = "## NEEDLE Learnings";
+
+/// Remove every marker-fenced NEEDLE learning block from the CLAUDE.md at
+/// `path`, and the `## NEEDLE Learnings` header if nothing but whitespace is
+/// left under it. Text outside the markers is never touched.
+///
+/// Returns the number of blocks removed (0 when the file has none, in which
+/// case it is not rewritten). Used when `strands.reflect.claude_md_placement`
+/// is off (N-T15): a top-authority policy file must not keep stale,
+/// count-reinforced learnings the placer wrote before the default flipped.
+pub fn remove_needle_sections(path: &Path) -> Result<usize> {
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let (stripped, removed) = strip_needle_blocks(&content);
+    if removed == 0 {
+        return Ok(0);
+    }
+    let tmp = path.with_extension("md.needle-tmp");
+    std::fs::write(&tmp, &stripped)
+        .with_context(|| format!("failed to write {}", tmp.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("failed to replace {}", path.display()))?;
+    Ok(removed)
+}
+
+/// Pure half of [`remove_needle_sections`]: returns the stripped content and
+/// the number of blocks removed.
+fn strip_needle_blocks(content: &str) -> (String, usize) {
+    let mut out = String::with_capacity(content.len());
+    let mut rest = content;
+    let mut removed = 0usize;
+
+    while let Some(start) = rest.find(MARKER_OPEN) {
+        // Only a genuine opening marker (not the closing `<!-- /needle-learning`).
+        let after = &rest[start..];
+        let Some(close_rel) = after.find(MARKER_CLOSE) else {
+            break;
+        };
+        let close_abs = start + close_rel;
+        let Some(end_rel) = rest[close_abs..].find("-->") else {
+            break;
+        };
+        let mut end = close_abs + end_rel + "-->".len();
+        // Swallow the newline that terminated the closing marker line.
+        if rest[end..].starts_with("\r\n") {
+            end += 2;
+        } else if rest[end..].starts_with('\n') {
+            end += 1;
+        }
+        out.push_str(&rest[..start]);
+        rest = &rest[end..];
+        removed += 1;
+    }
+    out.push_str(rest);
+
+    if removed == 0 {
+        return (content.to_string(), 0);
+    }
+
+    // Drop the section header when nothing is left under it.
+    if let Some(header_idx) = out.find(SECTION_HEADER) {
+        let body_start = header_idx + SECTION_HEADER.len();
+        let body = &out[body_start..];
+        let body_end = body.find("\n## ").map(|i| i + 1).unwrap_or(body.len());
+        if body[..body_end].trim().is_empty() {
+            let mut trimmed = String::with_capacity(out.len());
+            trimmed.push_str(out[..header_idx].trim_end_matches(['\n', '\r']));
+            let tail = &body[body_end..];
+            if !tail.is_empty() {
+                trimmed.push_str("\n\n");
+                trimmed.push_str(tail);
+            } else {
+                trimmed.push('\n');
+            }
+            out = trimmed;
+        }
+    }
+
+    (out, removed)
+}
+
 /// Get the home directory.
 fn home_dir() -> PathBuf {
     std::env::var("HOME")
@@ -470,6 +556,58 @@ mod tests {
             Confidence::High,
             "test-source".to_string(),
         )
+    }
+
+    #[test]
+    fn remove_needle_sections_strips_only_marker_blocks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("CLAUDE.md");
+        std::fs::write(
+            &path,
+            "# Conventions\n\nKeep this.\n\n## NEEDLE Learnings\n\n\
+             <!-- needle-learning:nd-1 -->\n- **other** (bead: nd-1, confidence: high): scrape\n<!-- /needle-learning:nd-1 -->\n\
+             - hand-written note stays\n\
+             <!-- needle-learning -->\n- **Decision**: x\n  **Context**: y\n  **Rationale**: z\n<!-- /needle-learning -->\n\n\
+             ## After\n\nAlso keep this.\n",
+        )
+        .unwrap();
+
+        let removed = remove_needle_sections(&path).unwrap();
+        assert_eq!(removed, 2);
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(!after.contains("needle-learning"), "{after}");
+        assert!(after.contains("Keep this."));
+        assert!(after.contains("- hand-written note stays"));
+        assert!(
+            after.contains("## NEEDLE Learnings"),
+            "header kept: section not empty"
+        );
+        assert!(after.contains("## After\n\nAlso keep this."));
+    }
+
+    #[test]
+    fn remove_needle_sections_drops_header_when_section_becomes_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("CLAUDE.md");
+        let original = "# Conventions\n\nBody.\n\n## NEEDLE Learnings\n\n\
+             <!-- needle-learning:nd-test -->\n- **other** (bead: nd-test, confidence: high): use existing patterns\n<!-- /needle-learning:nd-test -->\n";
+        std::fs::write(&path, original).unwrap();
+
+        let removed = remove_needle_sections(&path).unwrap();
+        assert_eq!(removed, 1);
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(after, "# Conventions\n\nBody.\n");
+    }
+
+    #[test]
+    fn remove_needle_sections_is_a_noop_without_markers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("CLAUDE.md");
+        let original = "# Conventions\n\n## NEEDLE Learnings\n\n- a human wrote this\n";
+        std::fs::write(&path, original).unwrap();
+
+        assert_eq!(remove_needle_sections(&path).unwrap(), 0);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
     }
 
     #[test]

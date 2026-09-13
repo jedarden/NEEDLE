@@ -23,7 +23,9 @@ use crate::quarantine_expiry::{
     capped_exponential_backoff, content_hash_label, QUARANTINE_BASE_SECS, QUARANTINE_MAX_SECS,
 };
 use crate::telemetry::{EventKind, Telemetry};
-use crate::types::{AgentOutcome, Bead, BeadAction, BeadId, BeadStatus, HandlerResult, Outcome};
+use crate::types::{
+    AgentOutcome, Bead, BeadAction, BeadId, BeadStatus, HandlerResult, Outcome, ReleaseReason,
+};
 use crate::validation::{
     dod_bypass, predispatch, verify_shipped_work, GateConfig, GateReport, GateResult,
     ValidationGate,
@@ -206,6 +208,116 @@ fn terminal_reason(
     }
 }
 
+/// What the adapter-health detector concluded about one failure (N-T23).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AdapterJudgement {
+    /// The failure carries the fingerprint the adapter is degraded for (or
+    /// just tripped it): the provider's outage, released without penalty.
+    Infrastructure { fingerprint: String },
+    /// Recorded in the window; judged as the bead's own failure.
+    Judged,
+}
+
+/// The adapter-level failure signal in an agent's output, if it has one.
+///
+/// A stream envelope that reports an API error names the error and its
+/// status; an infrastructure-shaped exit code names the code. An ordinary
+/// non-zero exit is the agent's task result and yields `None`.
+fn adapter_failure_signal(output: &AgentOutcome) -> Option<String> {
+    if let Some(envelope) = crate::trace::parse_result_envelope(&output.stdout) {
+        if envelope.indicates_failure() {
+            return Some(format!(
+                "terminal_reason={} api_error_status={}",
+                envelope.terminal_reason.as_deref().unwrap_or("error"),
+                envelope
+                    .api_error_status
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "none".to_string())
+            ));
+        }
+    }
+    match output.exit_code {
+        124 | 126 | 127 => Some(format!("exit_code:{}", output.exit_code)),
+        code if code > 128 => Some(format!("exit_code:{code}")),
+        _ => None,
+    }
+}
+
+/// The bounded failure text recorded against the attempt for the next
+/// attempt to read (R3). `None` on a verified success.
+///
+/// A rejecting gate contributes its name and its captured output; a plain
+/// process failure contributes the stream's terminal envelope (an API error
+/// that exited 0 is not a hard task) and the tail of stderr. Everything is
+/// cut to [`crate::attempt_history::LOCAL_SUMMARY_BYTES`] head-and-tail so
+/// both the leading diagnostic and the closing summary survive.
+fn attempt_failure_summary(
+    outcome: &Outcome,
+    output: &AgentOutcome,
+    gate_report: Option<&GateReport>,
+) -> Option<String> {
+    use crate::attempt_history::{truncate_head_tail, LOCAL_SUMMARY_BYTES};
+
+    if matches!(outcome, Outcome::Success) {
+        return None;
+    }
+
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(report) = gate_report {
+        // Stable order: the report is a HashMap.
+        let mut results: Vec<(&String, &GateResult)> = report.results.iter().collect();
+        results.sort_by(|a, b| a.0.cmp(b.0));
+        for (name, result) in results {
+            match result {
+                GateResult::Fail(reason) => {
+                    parts.push(format!("gate `{name}` failed:\n{}", reason.trim_end()));
+                }
+                GateResult::ExecutionError { command, reason } => {
+                    parts.push(format!(
+                        "gate `{name}` could not run ({reason}) — command: {command}"
+                    ));
+                }
+                GateResult::Pass => {}
+            }
+        }
+    }
+    if parts.is_empty() {
+        if let Some(envelope) = crate::trace::parse_result_envelope(&output.stdout) {
+            if let Some(reason) = envelope.terminal_reason.as_deref() {
+                parts.push(format!(
+                    "agent stream ended with terminal_reason={reason}{}",
+                    envelope
+                        .api_error_status
+                        .map(|s| format!(" api_error_status={s}"))
+                        .unwrap_or_default()
+                ));
+            }
+        }
+        let stderr = output.stderr.trim();
+        if !stderr.is_empty() {
+            let tail: String = stderr
+                .lines()
+                .rev()
+                .take(40)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("\n");
+            parts.push(format!("stderr (tail):\n{tail}"));
+        }
+        match outcome {
+            Outcome::Timeout => parts.push("the agent hit the hard timeout".to_string()),
+            Outcome::Crash(code) => parts.push(format!("the agent crashed (code {code})")),
+            _ => {}
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(truncate_head_tail(&parts.join("\n\n"), LOCAL_SUMMARY_BYTES))
+}
+
 /// Convert a gate report into the ledger's per-gate entries, ordered by name.
 ///
 /// Gate execution is not individually timed today, so `duration_ms` is 0
@@ -252,6 +364,9 @@ fn gate_result_entries(gate_report: Option<&GateReport>) -> Vec<crate::telemetry
 pub struct AttemptContext {
     /// Adapter that executed the attempt (e.g. `"claude-code-glm-4.7"`).
     pub adapter: String,
+    /// The claimant identity the bead is assigned to (the worker's qualified
+    /// id), passed to the backend as the resolving actor.
+    pub actor: String,
     /// Model identifier from the adapter config.
     pub model: Option<String>,
     /// Provider name (e.g. `"anthropic"`).
@@ -303,6 +418,13 @@ pub struct OutcomeHandler {
     /// wrapper-path dispatch its row.
     ledger_row_emitted: Arc<std::sync::Mutex<Option<String>>>,
 }
+
+/// Close reason recorded when the shipped-work gate confirms an agent's work
+/// landed but the agent did not close the bead itself. Operator-visible in the
+/// bead's history, so it must say why the fleet closed something on the agent's
+/// behalf.
+const SHIPPED_WORK_CLOSE_REASON: &str =
+    "closed by NEEDLE: shipped-work gate confirmed the work landed but the agent did not close it";
 
 impl OutcomeHandler {
     pub fn new(config: Config, telemetry: Telemetry) -> Self {
@@ -540,8 +662,9 @@ impl OutcomeHandler {
             return Ok((true, None));
         }
         let GatesConfig {
-            gates: workspace_gates,
+            gates: mut workspace_gates,
             verification: workspace_verification,
+            declared,
         } = crate::config::gates_for_workspace(&bead.workspace).with_context(|| {
             format!(
                 "failed to load validation gates from the bead's workspace config {}",
@@ -549,10 +672,36 @@ impl OutcomeHandler {
             )
         })?;
 
+        // Plan section 4.4 step 6: a workspace that says nothing about gates
+        // is judged by the language default its build files imply. An
+        // explicit `gates: []` is the opt-out and still runs none.
+        let mut default_gate_name: Option<String> = None;
+        if workspace_gates.is_empty() && workspace_verification.is_empty() && !declared {
+            if let Some(detected) = crate::validation::default_gates::detect(
+                &bead.workspace,
+                &self.config.validation.default_gates,
+            ) {
+                tracing::info!(
+                    bead_id = %bead.id,
+                    workspace = %bead.workspace.display(),
+                    language = detected.language,
+                    evidence = %detected.evidence,
+                    commands = ?detected.commands,
+                    "bead's workspace declares no gates — applying the language default gate"
+                );
+                default_gate_name = Some(detected.gate_name());
+                workspace_gates.push(GateConfig::Command {
+                    commands: detected.commands,
+                    stderr_cap_bytes: None,
+                    run_in: crate::validation::RunIn::Clean,
+                });
+            }
+        }
+
         if workspace_gates.is_empty() && workspace_verification.is_empty() {
-            // The bead's workspace declares no gates — the dispatch is judged
-            // on its own merits, even when the worker's home workspace gates
-            // everything homed there.
+            // The bead's workspace declares no gates and its layout implies
+            // none — the dispatch is judged on its own merits, even when the
+            // worker's home workspace gates everything homed there.
             tracing::debug!(
                 bead_id = %bead.id,
                 workspace = %bead.workspace.display(),
@@ -624,7 +773,14 @@ impl OutcomeHandler {
                     if stderr_cap_bytes.is_none() {
                         *stderr_cap_bytes = Some(default_stderr_cap);
                     }
-                    (format!("gate_{}", i), config)
+                    // A language default carries its provenance in its name
+                    // so the ledger's gate_results say `default_rust`, not
+                    // `gate_0`.
+                    let name = match &default_gate_name {
+                        Some(name) => name.clone(),
+                        None => format!("gate_{}", i),
+                    };
+                    (name, config)
                 })
                 .collect();
             ValidationGate::new(gate_configs, bead.workspace.clone())
@@ -681,11 +837,38 @@ impl OutcomeHandler {
         let outcome =
             classify_with_stream(output.exit_code, was_interrupted, verified, &output.stdout);
 
+        // N-T23: judge the adapter's own failure signal before the bead is
+        // penalised. A fingerprint that dominates the adapter's recent
+        // failures across distinct beads is the provider's outage, not this
+        // bead's result — 341 claude-print watchdog kills on 2026-09-10 were
+        // booked as bead failures before this existed.
+        let attempt_context = self.peek_attempt_context();
+        let adapter_name = attempt_context.adapter;
+        let attempt_actor = attempt_context.actor;
+        let adapter_judgement =
+            self.judge_adapter_health(&adapter_name, bead, &outcome, output, gate_report.as_ref());
+        let infra_fingerprint = match &adapter_judgement {
+            Some(AdapterJudgement::Infrastructure { fingerprint }) => Some(fingerprint.clone()),
+            _ => None,
+        };
+
         // Gate evidence is captured before the routing match below, which
         // moves the report into the terminal handlers (N-T16 ledger row).
         let gate_results = gate_result_entries(gate_report.as_ref());
-        let resolved_outcome = semantic_outcome(&outcome);
-        let resolved_reason = terminal_reason(&outcome, output.exit_code, gate_report.as_ref());
+        let (resolved_outcome, resolved_reason) = match infra_fingerprint.as_deref() {
+            Some(fingerprint) => (
+                "infrastructure_failure".to_string(),
+                Some(format!("provider_degraded:{fingerprint}")),
+            ),
+            None => (
+                semantic_outcome(&outcome).to_string(),
+                terminal_reason(&outcome, output.exit_code, gate_report.as_ref()),
+            ),
+        };
+        // The bounded failure text the *next* attempt is shown (R3). Taken
+        // here, before the report moves, from the same evidence the ledger
+        // summarizes as a name.
+        let failure_summary = attempt_failure_summary(&outcome, output, gate_report.as_ref());
 
         // Set outcome as span attribute
         tracing::Span::current().record("needle.outcome", outcome.as_str());
@@ -709,65 +892,75 @@ impl OutcomeHandler {
             Utc::now(),
         );
 
-        let (bead_action, telemetry_events) = match outcome.clone() {
-            Outcome::Success => self.handle_success(store, bead, gate_report).await?,
-            Outcome::Failure => {
-                // If we have a gate report with failures, check if any gate had execution errors.
-                if let Some(report) = gate_report {
-                    if !report.all_passed {
-                        // Check if any result is an ExecutionError
-                        let execution_error =
-                            report.results.iter().find(|(_, r)| r.is_execution_error());
-                        if let Some((gate_name, result)) = execution_error {
-                            if let GateResult::ExecutionError { command, reason } = result {
-                                self.handle_gate_error(
-                                    store,
-                                    bead,
-                                    &bead.workspace.display().to_string(),
-                                    gate_name,
-                                    command,
-                                    reason,
-                                )
-                                .await?
+        if matches!(outcome, Outcome::Success) {
+            self.note_adapter_success(&adapter_name, bead);
+        }
+
+        let (bead_action, telemetry_events) =
+            if let Some(fingerprint) = infra_fingerprint.as_deref() {
+                self.handle_infrastructure_failure(store, bead, fingerprint)
+                    .await?
+            } else {
+                match outcome.clone() {
+                    Outcome::Success => self.handle_success(store, bead, gate_report).await?,
+                    Outcome::Failure => {
+                        // If we have a gate report with failures, check if any gate had execution errors.
+                        if let Some(report) = gate_report {
+                            if !report.all_passed {
+                                // Check if any result is an ExecutionError
+                                let execution_error =
+                                    report.results.iter().find(|(_, r)| r.is_execution_error());
+                                if let Some((gate_name, result)) = execution_error {
+                                    if let GateResult::ExecutionError { command, reason } = result {
+                                        self.handle_gate_error(
+                                            store,
+                                            bead,
+                                            &bead.workspace.display().to_string(),
+                                            gate_name,
+                                            command,
+                                            reason,
+                                        )
+                                        .await?
+                                    } else {
+                                        unreachable!() // We already checked is_execution_error()
+                                    }
+                                } else {
+                                    self.handle_gate_failure(store, bead, &report).await?
+                                }
                             } else {
-                                unreachable!() // We already checked is_execution_error()
+                                self.handle_failure(store, bead).await?
                             }
                         } else {
-                            self.handle_gate_failure(store, bead, &report).await?
+                            self.handle_failure(store, bead).await?
                         }
-                    } else {
+                    }
+                    Outcome::Timeout => self.handle_timeout(store, bead).await?,
+                    Outcome::AgentNotFound => self.handle_agent_not_found(store, bead).await?,
+                    Outcome::Interrupted => self.handle_interrupted(store, bead).await?,
+                    Outcome::Crash(code) => self.handle_crash(store, bead, code).await?,
+                    Outcome::GateError => {
+                        // This should not be reached - GateError is only produced during outcome handling
+                        // when gate execution errors are detected. For now, treat as regular failure.
+                        tracing::error!(
+                            bead_id = %bead.id,
+                            "unexpected GateError outcome — treating as regular failure"
+                        );
                         self.handle_failure(store, bead).await?
                     }
-                } else {
-                    self.handle_failure(store, bead).await?
+                    Outcome::GateUnsatisfiable => {
+                        // Not reachable yet: no classification path produces GateUnsatisfiable —
+                        // it is assigned from gate-report analysis (precondition unsatisfiable),
+                        // which lands separately. Placeholder follows the GateError precedent;
+                        // the real handling must NOT attribute the failure to the work or retry
+                        // the bead, since no work can satisfy the gate.
+                        tracing::error!(
+                            bead_id = %bead.id,
+                            "unexpected GateUnsatisfiable outcome — treating as regular failure"
+                        );
+                        self.handle_failure(store, bead).await?
+                    }
                 }
-            }
-            Outcome::Timeout => self.handle_timeout(store, bead).await?,
-            Outcome::AgentNotFound => self.handle_agent_not_found(store, bead).await?,
-            Outcome::Interrupted => self.handle_interrupted(store, bead).await?,
-            Outcome::Crash(code) => self.handle_crash(store, bead, code).await?,
-            Outcome::GateError => {
-                // This should not be reached - GateError is only produced during outcome handling
-                // when gate execution errors are detected. For now, treat as regular failure.
-                tracing::error!(
-                    bead_id = %bead.id,
-                    "unexpected GateError outcome — treating as regular failure"
-                );
-                self.handle_failure(store, bead).await?
-            }
-            Outcome::GateUnsatisfiable => {
-                // Not reachable yet: no classification path produces GateUnsatisfiable —
-                // it is assigned from gate-report analysis (precondition unsatisfiable),
-                // which lands separately. Placeholder follows the GateError precedent;
-                // the real handling must NOT attribute the failure to the work or retry
-                // the bead, since no work can satisfy the gate.
-                tracing::error!(
-                    bead_id = %bead.id,
-                    "unexpected GateUnsatisfiable outcome — treating as regular failure"
-                );
-                self.handle_failure(store, bead).await?
-            }
-        };
+            };
 
         // Emit sub-handler events (e.g. BeadCompleted, BeadOrphaned) to the
         // telemetry sink so they appear in the JSONL log.
@@ -810,20 +1003,346 @@ impl OutcomeHandler {
             tracing::Span::current().record("otel.status_description", outcome.as_str());
         }
 
-        self.emit_attempt_resolved(
+        let ledger = self.emit_attempt_resolved(
             bead,
             output,
             bead_action.to_string(),
-            resolved_outcome,
+            &resolved_outcome,
             resolved_reason,
             gate_results,
         );
+
+        // R3: what this attempt was and why it ended becomes the next
+        // attempt's context. Best-effort and bounded; it never changes the
+        // action decided above.
+        self.record_attempt_history(store, bead, &ledger, failure_summary)
+            .await;
+
+        // Plan section 4.4 step 4 / ADR-024: the backend's own attempt ledger
+        // gets the same outcome (bead-rs `resolve --action none`), which is
+        // what its failure-tier scheduling and cross-host attempt history
+        // read. Idempotent per attempt ID; best-effort.
+        self.record_backend_resolution(store, bead, &ledger, &attempt_actor)
+            .await;
+
+        // Plan section 4.4 step 1: the durable copy of the attempt lives off
+        // the worker host. Bundle the attempt's trace into the spool the
+        // external drain uploads from (attempt_archive.enabled).
+        self.spool_attempt_archive(bead, &ledger).await;
 
         Ok(HandlerResult {
             outcome,
             bead_action,
             telemetry_events,
         })
+    }
+
+    /// Hand the resolved attempt's trace to the attempt-archive spool.
+    async fn spool_attempt_archive(
+        &self,
+        bead: &Bead,
+        ledger: &crate::telemetry::AttemptResolvedFields,
+    ) {
+        let archive = self.config.attempt_archive.clone();
+        if !archive.enabled {
+            return;
+        }
+        let workspace = if bead.workspace.as_os_str().is_empty()
+            || bead.workspace == std::path::Path::new(".")
+        {
+            self.config.workspace.default.clone()
+        } else {
+            bead.workspace.clone()
+        };
+        let trace_dir = workspace
+            .join(".beads")
+            .join("traces")
+            .join(bead.id.as_ref());
+        let input = crate::attempt_archive::AttemptArchiveInput {
+            attempt_id: ledger.attempt_id.clone(),
+            bead_id: bead.id.to_string(),
+            workspace: workspace.display().to_string(),
+            worker: ledger.worker.clone(),
+            adapter: ledger.adapter.clone(),
+            model: ledger.model.clone(),
+            outcome: ledger.outcome.clone(),
+            terminal_reason: ledger.terminal_reason.clone(),
+            recorded_at: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        };
+        let bead_id = bead.id.clone();
+        let work = tokio::task::spawn_blocking(move || {
+            crate::attempt_archive::spool_attempt(&archive, &input, Some(&trace_dir))
+        });
+        match tokio::time::timeout(std::time::Duration::from_secs(60), work).await {
+            Ok(Ok(Ok(Some(receipt)))) => tracing::info!(
+                bead_id = %bead_id,
+                bundle = %receipt.bundle.display(),
+                bundle_bytes = receipt.bundle_bytes,
+                "attempt archived to spool"
+            ),
+            Ok(Ok(Ok(None))) => {}
+            Ok(Ok(Err(e))) => tracing::warn!(
+                bead_id = %bead_id,
+                error = %e,
+                "attempt archive spool failed"
+            ),
+            Ok(Err(e)) => {
+                tracing::warn!(bead_id = %bead_id, error = %e, "attempt archive task failed")
+            }
+            Err(_) => tracing::warn!(bead_id = %bead_id, "attempt archive spool timed out"),
+        }
+    }
+
+    /// Hand the resolved attempt to the backend's attempt ledger.
+    async fn record_backend_resolution(
+        &self,
+        store: &dyn BeadStore,
+        bead: &Bead,
+        ledger: &crate::telemetry::AttemptResolvedFields,
+        actor: &str,
+    ) {
+        if !self.config.outcome.resolve_attempts_in_backend {
+            return;
+        }
+        let resolution = crate::bead_store::AttemptResolution {
+            bead_id: bead.id.clone(),
+            attempt_id: ledger.attempt_id.clone(),
+            outcome: ledger.outcome.clone(),
+            actor: if actor.is_empty() {
+                ledger.worker.clone()
+            } else {
+                actor.to_string()
+            },
+            reason: ledger.terminal_reason.clone(),
+            evidence_ref: ledger.commits.first().map(|sha| format!("commit:{sha}")),
+        };
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            store.resolve_attempt(&resolution),
+        )
+        .await
+        {
+            Ok(Ok(Some(receipt))) => tracing::info!(
+                bead_id = %bead.id,
+                attempt_id = %resolution.attempt_id,
+                outcome = %resolution.outcome,
+                receipt_id = %receipt.receipt_id,
+                attempt_tier = ?receipt.resulting_attempt_tier,
+                is_replay = receipt.is_replay,
+                "attempt outcome recorded in the bead backend"
+            ),
+            Ok(Ok(None)) => tracing::debug!(
+                bead_id = %bead.id,
+                "backend does not advertise attempt outcomes; NEEDLE ledger row is the record"
+            ),
+            Ok(Err(e)) => tracing::warn!(
+                bead_id = %bead.id,
+                attempt_id = %resolution.attempt_id,
+                error = %e,
+                "backend refused the attempt resolution; NEEDLE ledger row is the record"
+            ),
+            Err(_) => tracing::warn!(
+                bead_id = %bead.id,
+                "backend attempt resolution timed out; NEEDLE ledger row is the record"
+            ),
+        }
+    }
+
+    /// Record the adapter's own failure signal against its host-wide health
+    /// window (N-T23) and say whether this failure is the provider's, not the
+    /// bead's. `None` when adapter health is off, the adapter is unknown, or
+    /// the outcome carries no adapter-level signal (a rejecting gate is the
+    /// bead's result; a plain timeout follows the ADR-022 ladder).
+    ///
+    /// Only infrastructure-shaped signals are fingerprinted: a stream
+    /// envelope that reports an API error, an exit code the wrappers and the
+    /// kernel use (124 timeout, 126/127 exec failure, >128 signal), a crash,
+    /// or a missing agent binary. An ordinary non-zero exit is a task result
+    /// and never counts, so an adapter whose agent legitimately exits 1 on
+    /// hard tasks cannot be misjudged as an outage.
+    fn judge_adapter_health(
+        &self,
+        adapter: &str,
+        bead: &Bead,
+        outcome: &Outcome,
+        output: &AgentOutcome,
+        gate_report: Option<&GateReport>,
+    ) -> Option<AdapterJudgement> {
+        if !self.config.workspace_health.adapter_health_enabled || adapter.is_empty() {
+            return None;
+        }
+        let reason = match outcome {
+            Outcome::Failure => {
+                if gate_report.is_some_and(|r| !r.all_passed) {
+                    return None;
+                }
+                adapter_failure_signal(output)?
+            }
+            Outcome::Crash(code) => {
+                let signal = if *code > 128 { code - 128 } else { *code };
+                format!("signal:{signal}")
+            }
+            Outcome::AgentNotFound => format!("agent_not_found exit_code:{}", output.exit_code),
+            Outcome::Success
+            | Outcome::Timeout
+            | Outcome::Interrupted
+            | Outcome::GateError
+            | Outcome::GateUnsatisfiable => return None,
+        };
+
+        match crate::provider_health::record_adapter_failure(
+            adapter,
+            bead.id.as_ref(),
+            &reason,
+            &self.config.workspace_health.detector_config(),
+        ) {
+            Ok(recording) => {
+                if let gate_health::VerificationRecording::Tripped {
+                    fingerprint,
+                    failures,
+                    distinct_beads,
+                    summary,
+                } = &recording
+                {
+                    tracing::error!(
+                        adapter = %adapter,
+                        bead_id = %bead.id,
+                        fingerprint = %fingerprint,
+                        failures = failures,
+                        distinct_beads = distinct_beads,
+                        summary = %summary,
+                        "adapter failure fingerprint dominates its window — provider degraded"
+                    );
+                    let _ = self.telemetry.emit_try_lock(
+                        EventKind::ProviderDegraded {
+                            adapter: adapter.to_string(),
+                            fingerprint: fingerprint.clone(),
+                            summary: summary.clone(),
+                            failures: *failures as u32,
+                            distinct_beads: *distinct_beads as u32,
+                            bead_id: bead.id.clone(),
+                        },
+                        Utc::now(),
+                    );
+                }
+                if recording.is_infra() {
+                    Some(AdapterJudgement::Infrastructure {
+                        fingerprint: recording.fingerprint().to_string(),
+                    })
+                } else {
+                    Some(AdapterJudgement::Judged)
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    adapter = %adapter,
+                    bead_id = %bead.id,
+                    error = %e,
+                    "could not record adapter health — judging the failure as the bead's"
+                );
+                None
+            }
+        }
+    }
+
+    /// A verified success lifts the adapter's degradation (N-T23).
+    fn note_adapter_success(&self, adapter: &str, bead: &Bead) {
+        if !self.config.workspace_health.adapter_health_enabled || adapter.is_empty() {
+            return;
+        }
+        match crate::provider_health::record_adapter_success(adapter) {
+            Ok(Some(prior)) => {
+                tracing::info!(
+                    adapter = %adapter,
+                    bead_id = %bead.id,
+                    "adapter produced a verified success — provider restored"
+                );
+                let _ = self.telemetry.emit_try_lock(
+                    EventKind::ProviderRestored {
+                        adapter: adapter.to_string(),
+                        bead_id: bead.id.clone(),
+                        degraded_duration_secs: prior.degraded_for_secs().unwrap_or(0),
+                    },
+                    Utc::now(),
+                );
+            }
+            Ok(None) => {}
+            Err(e) => tracing::debug!(
+                adapter = %adapter,
+                error = %e,
+                "could not clear adapter health state"
+            ),
+        }
+    }
+
+    /// Infrastructure failure: release the bead with no failure count. The
+    /// provider, not the work, is what failed (N-T23; ADR-023 for gates).
+    async fn handle_infrastructure_failure(
+        &self,
+        store: &dyn BeadStore,
+        bead: &Bead,
+        fingerprint: &str,
+    ) -> Result<(BeadAction, Vec<EventKind>)> {
+        tracing::warn!(
+            bead_id = %bead.id,
+            fingerprint = %fingerprint,
+            "adapter is degraded for this failure — releasing bead without penalty"
+        );
+        let mut events = self.prepare_release_events(store, bead).await?;
+        events.push(EventKind::BeadReleased {
+            bead_id: bead.id.clone(),
+            reason: format!("infrastructure:{fingerprint}"),
+        });
+        Ok((
+            BeadAction::Released(ReleaseReason::InfrastructureFailure),
+            events,
+        ))
+    }
+
+    /// Persist this attempt into the bead's history (local journal plus the
+    /// bead-rs structured-data mirror) so the next dispatch prompt can show
+    /// it. See [`crate::attempt_history`].
+    async fn record_attempt_history(
+        &self,
+        store: &dyn BeadStore,
+        bead: &Bead,
+        ledger: &crate::telemetry::AttemptResolvedFields,
+        failure_summary: Option<String>,
+    ) {
+        let history = &self.config.strands.learning.failure_history;
+        if !history.enabled {
+            return;
+        }
+        let workspace = if bead.workspace.as_os_str().is_empty()
+            || bead.workspace == std::path::Path::new(".")
+        {
+            self.config.workspace.default.clone()
+        } else {
+            bead.workspace.clone()
+        };
+        let record = crate::attempt_history::AttemptRecord {
+            schema_version: crate::attempt_history::SCHEMA_VERSION,
+            attempt_id: ledger.attempt_id.clone(),
+            recorded_at: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            worker: ledger.worker.clone(),
+            adapter: ledger.adapter.clone(),
+            model: ledger.model.clone(),
+            outcome: ledger.outcome.clone(),
+            terminal_reason: ledger.terminal_reason.clone(),
+            exit_code: ledger.exit_code,
+            requested_action: ledger.requested_action.clone(),
+            commits: ledger.commits.clone(),
+            duration_ms: ledger.duration_ms,
+            failure_summary,
+        };
+        crate::attempt_history::record(
+            &workspace,
+            &bead.id,
+            record,
+            store,
+            history.sync_to_bead_data,
+        )
+        .await;
     }
 
     /// Emit the terminal `attempt.resolved` ledger row for this dispatch.
@@ -847,7 +1366,7 @@ impl OutcomeHandler {
         resolved_outcome: &str,
         resolved_reason: Option<String>,
         gate_results: Vec<crate::telemetry::GateResultEntry>,
-    ) {
+    ) -> crate::telemetry::AttemptResolvedFields {
         let attempt = self.take_attempt_context();
         let attempt_id = match self.telemetry.attempt_id() {
             Some(id) => id,
@@ -874,7 +1393,7 @@ impl OutcomeHandler {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(attempt_id.clone());
 
-        let event = EventKind::AttemptResolved(Box::new(crate::telemetry::AttemptResolvedFields {
+        let fields = crate::telemetry::AttemptResolvedFields {
             attempt_id,
             // Always true until N-T03 lands: NEEDLE cannot yet attest that an
             // attempt ID identifies a durable attempt rather than a dispatch.
@@ -906,7 +1425,8 @@ impl OutcomeHandler {
             // The exit code is observation only: it says what the process did,
             // not whether the work was accepted — `outcome` carries that.
             exit_code: output.exit_code,
-        }));
+        };
+        let event = EventKind::AttemptResolved(Box::new(fields.clone()));
 
         let timestamp = Utc::now();
         if let Err(e) = self.telemetry.emit_try_lock(event, timestamp) {
@@ -918,6 +1438,7 @@ impl OutcomeHandler {
                 "failed to enqueue attempt.resolved ledger event"
             );
         }
+        fields
     }
 
     /// Emit the ledger row for a dispatch that ended without reaching one of
@@ -1313,17 +1834,49 @@ impl OutcomeHandler {
                             .await;
                             // Shipped work detected — reset failure count.
                             let _ = self.reset_failure_count(store, bead).await;
-                            // Mark as completed - the agent shipped work but forgot to close.
-                            // We can't close via bead store (no close method), so emit completion
-                            // event and release. The bead remains open but work is done.
+                            // The gate CONFIRMED the work landed; the agent merely failed to
+                            // close the bead. Close it here.
+                            //
+                            // This previously released instead, on the stated grounds that the
+                            // store had "no close method". It has one — BeadStore::close,
+                            // implemented by cli_store against `bead close --id --reason` — so
+                            // the comment was stale. Releasing a bead whose work is finished puts
+                            // it straight back on the ready frontier, where another worker claims
+                            // and redoes it: the subscription pays twice for one unit of output
+                            // while the fleet looks busy. It also emitted BeadCompleted AND
+                            // BeadReleased for the same bead, which is why completed and released
+                            // counts overlapped and deliberate releases read as failures.
                             events.push(EventKind::BeadCompleted {
                                 bead_id: bead.id.clone(),
                                 duration_ms: 0,
                             });
-                            let mut release_events =
-                                self.prepare_release_events(store, bead).await?;
-                            events.append(&mut release_events);
-                            return Ok((BeadAction::Released, events));
+                            match self
+                                .timeout_op(
+                                    || store.close(&bead.id, SHIPPED_WORK_CLOSE_REASON),
+                                    "close",
+                                )
+                                .await
+                            {
+                                Ok(Some(())) => return Ok((BeadAction::Closed, events)),
+                                other => {
+                                    // A backend that cannot close, or a timeout. Fall back to the
+                                    // previous behaviour rather than leaving the claim dangling —
+                                    // an open bead is recoverable, a stuck claim is not.
+                                    tracing::warn!(
+                                        bead_id = %bead.id,
+                                        close_result = ?other.as_ref().map(|o| o.is_some()),
+                                        "shipped work confirmed but close failed; releasing \
+                                         instead (the bead will be re-worked)"
+                                    );
+                                    let mut release_events =
+                                        self.prepare_release_events(store, bead).await?;
+                                    events.append(&mut release_events);
+                                    return Ok((
+                                        BeadAction::Released(ReleaseReason::ShippedWorkCloseFailed),
+                                        events,
+                                    ));
+                                }
+                            }
                         }
                         Ok(crate::validation::GateResult::Fail(reason)) => {
                             tracing::warn!(
@@ -1345,7 +1898,7 @@ impl OutcomeHandler {
                             if release_succeeded {
                                 let _ = self.increment_failure_count(store, bead).await;
                             }
-                            return Ok((BeadAction::Released, events));
+                            return Ok((BeadAction::Released(ReleaseReason::GateFailed), events));
                         }
                         Ok(crate::validation::GateResult::ExecutionError { command, reason }) => {
                             tracing::warn!(
@@ -1358,7 +1911,10 @@ impl OutcomeHandler {
                             let mut release_events =
                                 self.prepare_release_events(store, bead).await?;
                             events.append(&mut release_events);
-                            return Ok((BeadAction::Released, events));
+                            return Ok((
+                                BeadAction::Released(ReleaseReason::GateExecutionError),
+                                events,
+                            ));
                         }
                         Err(e) => {
                             tracing::warn!(
@@ -1380,7 +1936,7 @@ impl OutcomeHandler {
                             if release_succeeded {
                                 let _ = self.increment_failure_count(store, bead).await;
                             }
-                            return Ok((BeadAction::Released, events));
+                            return Ok((BeadAction::Released(ReleaseReason::GateError), events));
                         }
                     }
                 } else {
@@ -1391,7 +1947,10 @@ impl OutcomeHandler {
                     // If enforce_shipped_work is disabled, just release without closing.
                     let mut release_events = self.prepare_release_events(store, bead).await?;
                     events.append(&mut release_events);
-                    return Ok((BeadAction::Released, events));
+                    return Ok((
+                        BeadAction::Released(ReleaseReason::EnforcementDisabled),
+                        events,
+                    ));
                 }
             }
             Ok(None) => {
@@ -1408,7 +1967,10 @@ impl OutcomeHandler {
                 });
                 let mut release_events = self.prepare_release_events(store, bead).await?;
                 events.append(&mut release_events);
-                return Ok((BeadAction::Released, events));
+                return Ok((
+                    BeadAction::Released(ReleaseReason::ClosureVerificationTimeout),
+                    events,
+                ));
             }
             Err(e) => {
                 // Error - we cannot verify bead closure, so release to enforce postcondition.
@@ -1425,7 +1987,10 @@ impl OutcomeHandler {
                 });
                 let mut release_events = self.prepare_release_events(store, bead).await?;
                 events.append(&mut release_events);
-                return Ok((BeadAction::Released, events));
+                return Ok((
+                    BeadAction::Released(ReleaseReason::ClosureVerificationError),
+                    events,
+                ));
             }
         }
 
@@ -1621,7 +2186,7 @@ impl OutcomeHandler {
         let release_succeeded = !events
             .iter()
             .any(|e| matches!(e, EventKind::WorkerHandlingTimeout { .. }));
-        let mut action = BeadAction::Released;
+        let mut action = BeadAction::Released(ReleaseReason::GateFailed);
         if infra_failure {
             // The gate, not the bead, produced this failure. Release without
             // incrementing the failure count — the same contract as a gate
@@ -1932,7 +2497,7 @@ impl OutcomeHandler {
         // The gate never ran, so this is not a failure of the work — it's a
         // configuration or environment issue that should be fixed before retry.
 
-        Ok((BeadAction::Released, events))
+        Ok((BeadAction::Released(ReleaseReason::AgentNotFound), events))
     }
 
     /// Create a "Gate broken" alert bead when workspace degrades.
@@ -2391,7 +2956,7 @@ impl OutcomeHandler {
         let release_succeeded = !events
             .iter()
             .any(|e| matches!(e, EventKind::WorkerHandlingTimeout { .. }));
-        let mut action = BeadAction::Released;
+        let mut action = BeadAction::Released(ReleaseReason::DispatchFailed);
         if release_succeeded {
             match self.increment_failure_count(store, bead).await {
                 Ok(new_count) => {
@@ -2632,7 +3197,7 @@ impl OutcomeHandler {
         );
 
         let events = self.prepare_release_events(store, bead).await?;
-        Ok((BeadAction::Released, events))
+        Ok((BeadAction::Released(ReleaseReason::AgentNotFound), events))
     }
 
     /// Interrupted: release bead for graceful shutdown.
@@ -3144,6 +3709,7 @@ mod tests {
     #[allow(dead_code)] // Fields read via pattern matching in test assertions
     enum StoreAction {
         Release(String),
+        Close(String, String),
         Block(String),
         Reopen(String),
         AddLabel(String, String),
@@ -3157,6 +3723,15 @@ mod tests {
         actions: Mutex<Vec<StoreAction>>,
         show_status: BeadStatus,
         labels: Vec<String>,
+        /// Dependencies `show()` should report. Needed by any test whose
+        /// behaviour depends on the POST-dispatch bead rather than the one
+        /// passed in: the handler re-reads state through `show()`, so a bead
+        /// constructed in the test body is NOT what the gates see.
+        dependencies: Vec<crate::types::BrDependency>,
+        /// Notes the shipped-work gate should read. `Bead` carries no notes, so
+        /// the gate fetches them through the store; with no predispatch snapshot
+        /// a non-empty note is what makes the gate Pass.
+        notes: Option<String>,
         fail_flush: bool,
     }
 
@@ -3166,8 +3741,15 @@ mod tests {
                 actions: Mutex::new(Vec::new()),
                 show_status,
                 labels: Vec::new(),
+                dependencies: Vec::new(),
+                notes: None,
                 fail_flush: false,
             }
+        }
+
+        fn with_notes(mut self, notes: &str) -> Self {
+            self.notes = Some(notes.to_string());
+            self
         }
 
         fn with_labels(mut self, labels: Vec<String>) -> Self {
@@ -3220,6 +3802,18 @@ mod tests {
 
     #[async_trait]
     impl BeadStore for MockBeadStore {
+        async fn notes(&self, _id: &BeadId) -> Result<Option<String>> {
+            Ok(self.notes.clone())
+        }
+
+        async fn close(&self, id: &BeadId, reason: &str) -> Result<()> {
+            self.actions
+                .lock()
+                .unwrap()
+                .push(StoreAction::Close(id.to_string(), reason.to_string()));
+            Ok(())
+        }
+
         async fn list_all(&self) -> Result<Vec<Bead>> {
             Ok(vec![])
         }
@@ -3231,7 +3825,10 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(StoreAction::Show(id.to_string()));
-            Ok(test_bead(self.show_status.clone()))
+            let mut bead = test_bead(self.show_status.clone());
+            bead.labels = self.labels.clone();
+            bead.dependencies = self.dependencies.clone();
+            Ok(bead)
         }
         async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<ClaimResult> {
             Ok(ClaimResult::NotClaimable {
@@ -3487,6 +4084,57 @@ mod tests {
 
     // ── handle tests ──
 
+    /// Confirmed shipped work must CLOSE the bead, not release it.
+    ///
+    /// Releasing a bead whose work the gate has already verified puts it back on
+    /// the ready frontier, where another worker claims and redoes it — the
+    /// subscription pays twice for one unit of output while the fleet looks
+    /// busy. It also emitted BeadCompleted and BeadReleased for the same bead,
+    /// which is why completed and released counts overlapped and deliberate
+    /// releases read as failures.
+    ///
+    /// Reaching the confirmed-shipped-work branch in a unit test uses the gate's
+    /// documented conservative path: with no predispatch snapshot available it
+    /// judges "the closure on its note alone", so a non-empty note Passes rather
+    /// than failing a bead on a comparison the gate could not make. The mock
+    /// provides no snapshot, so supplying notes is sufficient.
+    #[tokio::test]
+    async fn confirmed_shipped_work_closes_rather_than_releasing() {
+        // Enforcement ON — this is the gate under test.
+        let handler = test_handler();
+
+        // The evidence must be on the STORE, not on the bead constructed here:
+        // the gate reads notes through the store, and judges the POST-dispatch
+        // bead the handler re-reads via show(). Setting either locally silently
+        // has no effect and the gate sees a bead with no shipped work.
+        let store = test_store(BeadStatus::Open)
+            .with_notes("evidence: implemented and verified the change");
+
+        let bead = test_bead(BeadStatus::InProgress);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.bead_action,
+            BeadAction::Closed,
+            "shipped work confirmed by the gate must close the bead"
+        );
+        let actions = store.actions();
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, StoreAction::Close(_, _))),
+            "the store must be asked to close: {actions:?}"
+        );
+        assert!(
+            !actions.iter().any(|a| matches!(a, StoreAction::Release(_))),
+            "a finished bead must not be returned to the ready frontier: {actions:?}"
+        );
+    }
+
     #[tokio::test]
     async fn handle_success_bead_closed_by_agent() {
         let handler = test_handler_without_shipped_work();
@@ -3525,9 +4173,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.outcome, Outcome::Failure);
-        assert_eq!(
-            result.bead_action,
-            BeadAction::Released,
+        assert!(
+            matches!(result.bead_action, BeadAction::Released(_)),
             "exit 0 without verified closure must release the claim"
         );
         let actions = store.actions();
@@ -3558,7 +4205,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.outcome, Outcome::Failure);
-        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
         assert!(!result.telemetry_events.is_empty());
 
         let actions = store.actions();
@@ -3587,7 +4234,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
         let actions = store.actions();
         assert!(
             actions.iter().any(
@@ -3728,7 +4375,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
         let actions = store.actions();
         assert!(
             !actions.iter().any(|a| matches!(a, StoreAction::Block(_))),
@@ -3756,7 +4403,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
         let actions = store.actions();
         assert!(
             !actions.iter().any(|a| matches!(a, StoreAction::Block(_))),
@@ -3888,7 +4535,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.outcome, Outcome::Success);
-        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
         let actions = store.actions();
         assert!(
             actions.iter().any(
@@ -3971,7 +4618,7 @@ mod tests {
 
         assert_eq!(result.outcome, Outcome::Success);
         // Released (the gate-error action), not reopened or quarantined.
-        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
 
         // The unsatisfiable check must not burn the failure counter, label the
         // bead as a verification failure, or cycle it.
@@ -4080,7 +4727,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.outcome, Outcome::AgentNotFound);
-        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
 
         // NOTE: the handler no longer calls store.release() -- release is applied by
         // the worker via apply_bead_action(). The release intent is asserted above as
@@ -4104,6 +4751,155 @@ mod tests {
         // NOTE: the handler no longer calls store.release() -- release is applied by
         // the worker via apply_bead_action(). The release intent is asserted above as
         // result.bead_action; a StoreAction::Release here would now never appear.
+    }
+
+    #[tokio::test]
+    async fn handle_failure_records_the_attempt_for_the_next_prompt() {
+        // R3 (needle-60163eac): a failed attempt leaves a bounded record the
+        // next dispatch prompt renders — outcome, reason and the failure text.
+        let handler = test_handler();
+        let store = test_store(BeadStatus::InProgress);
+        let bead = test_bead(BeadStatus::InProgress);
+        let output = AgentOutcome {
+            exit_code: 1,
+            stdout: String::new(),
+            stderr: "error[E0308]: mismatched types\n --> src/lib.rs:3:5\n".to_string(),
+        };
+
+        let first = handler.handle(&store, &bead, &output, false).await.unwrap();
+        assert!(matches!(first.bead_action, BeadAction::Released(_)));
+
+        let records = crate::attempt_history::load_local(&bead.workspace, &bead.id).unwrap();
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert_eq!(record.outcome, "work_failure");
+        assert_eq!(record.terminal_reason.as_deref(), Some("exit_code:1"));
+        assert_eq!(record.exit_code, 1);
+        // BeadAction::Released now carries WHY, and Display renders it as
+        // released:<reason>, so the attempt history tells the next agent what
+        // sent the bead back. Nothing parses this field -- it is emitted to
+        // telemetry and rendered into the prompt -- so the richer value is a
+        // gain, not a format break.
+        assert_eq!(record.requested_action, "released:dispatch_failed");
+        let summary = record.failure_summary.as_deref().unwrap();
+        assert!(summary.contains("error[E0308]"), "{summary}");
+        assert!(summary.contains("stderr (tail)"));
+
+        // The rendered history names the failure so the next agent reads it.
+        let rendered = crate::attempt_history::render(
+            &records,
+            crate::attempt_history::HistoryLimits::default(),
+        );
+        assert!(rendered.contains("## Previous attempts on this bead"));
+        assert!(rendered.contains("error[E0308]"));
+
+        // A second failure appends rather than replaces.
+        let second = handler.handle(&store, &bead, &output, false).await.unwrap();
+        assert!(matches!(second.bead_action, BeadAction::Released(_)));
+        assert_eq!(
+            crate::attempt_history::load_local(&bead.workspace, &bead.id)
+                .unwrap()
+                .len(),
+            2
+        );
+        let _ = std::fs::remove_dir_all(&bead.workspace);
+    }
+
+    #[tokio::test]
+    async fn adapter_failure_storm_resolves_as_infrastructure_without_penalty() {
+        // N-T23: four distinct beads failing with the same infrastructure-shaped
+        // signal on one adapter trip the detector; the tripping failure and
+        // every later one with that fingerprint release the bead with no
+        // failure count and resolve as infrastructure_failure.
+        //
+        // The detector's window is persisted per adapter under
+        // $HOME/.needle/state/provider-health (provider_health::state_dir), so
+        // this test READS $HOME even though it never sets it. Other tests
+        // remove HOME process-globally under the ENV_LOCK guard; without
+        // taking that guard here, such a test can land mid-sequence, send
+        // these four failures to a different state file, and leave the window
+        // too short to trip. That is precisely how this passed locally at
+        // --test-threads=4 and failed in CI at full parallelism.
+        let _env_guard = crate::util::test_env::isolate_env();
+        let adapter = format!(
+            "test-storm-adapter-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        );
+        let mut config = Config::default();
+        config.workspace_health.fingerprint_min_window_failures = 4;
+        config.workspace_health.fingerprint_min_distinct_beads = 3;
+        let handler = test_handler_with_config(config);
+        let store = test_store(BeadStatus::InProgress);
+        // The 2026-09-02 zai-proxy outage shape: the CLI exits 0 but its
+        // result envelope reports a terminal API error.
+        let api_outage = AgentOutcome {
+            exit_code: 0,
+            stdout: "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"s1\"}\n\
+                     {\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":503,\"terminal_reason\":\"api_error\",\"result\":\"API Error: 503 no available server\",\"session_id\":\"s1\"}\n"
+                .to_string(),
+            stderr: String::new(),
+        };
+
+        let mut last = None;
+        for n in 0..4 {
+            let mut bead = test_bead(BeadStatus::InProgress);
+            bead.id = BeadId::from(format!("needle-storm-{n}").as_str());
+            handler.set_attempt_context(AttemptContext {
+                adapter: adapter.clone(),
+                ..AttemptContext::default()
+            });
+            last = Some(
+                handler
+                    .handle(&store, &bead, &api_outage, false)
+                    .await
+                    .unwrap(),
+            );
+        }
+        let tripping = last.unwrap();
+        assert!(matches!(
+            tripping.bead_action,
+            BeadAction::Released(ReleaseReason::InfrastructureFailure)
+        ));
+        assert!(
+            tripping.telemetry_events.iter().any(|e| matches!(
+                e,
+                EventKind::BeadReleased { reason, .. } if reason.starts_with("infrastructure:")
+            )),
+            "{:?}",
+            tripping.telemetry_events
+        );
+        // The first three failures were judged as the beads' own (label added);
+        // the tripping one was not penalised.
+        let label_adds = store
+            .actions()
+            .iter()
+            .filter(|a| matches!(a, StoreAction::AddLabel(_, l) if l.starts_with("failure-count:")))
+            .count();
+        assert_eq!(label_adds, 3, "{:?}", store.actions());
+        let state = crate::provider_health::degraded_state(&adapter)
+            .unwrap()
+            .expect("adapter degraded");
+        assert!(state.degraded_fingerprint.is_some());
+
+        // A verified success on the adapter restores it.
+        let mut ok_bead = test_bead(BeadStatus::InProgress);
+        ok_bead.id = BeadId::from("needle-storm-ok");
+        let ok_store = test_store(BeadStatus::Done);
+        let ok_handler = test_handler_without_shipped_work();
+        ok_handler.set_attempt_context(AttemptContext {
+            adapter: adapter.clone(),
+            ..AttemptContext::default()
+        });
+        let ok = ok_handler
+            .handle(&ok_store, &ok_bead, &test_output(0), false)
+            .await
+            .unwrap();
+        assert_eq!(ok.outcome, Outcome::Success);
+        assert!(crate::provider_health::degraded_state(&adapter)
+            .unwrap()
+            .is_none());
+        crate::provider_health::clear_state(&adapter).unwrap();
     }
 
     #[tokio::test]
@@ -4232,7 +5028,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.outcome, Outcome::Failure);
-        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
 
         let actions = store.actions();
         // NOTE: the handler no longer calls store.release() -- release is applied by
@@ -4259,7 +5055,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
 
         let actions = store.actions();
         assert!(
@@ -4311,7 +5107,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
     }
 
     // ── per-workspace gate resolution (needle-da77b68a) ──
@@ -4404,7 +5200,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.outcome, Outcome::Failure);
-        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
         let actions = store.actions();
         assert!(
             actions.iter().any(
@@ -4764,7 +5560,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.outcome, Outcome::Failure);
-        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
         assert!(store
             .inner
             .actions()
@@ -5120,7 +5916,7 @@ mod tests {
             .unwrap();
 
         // Critical: the bead MUST be released even though workspace operations failed
-        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
         assert!(!result.telemetry_events.is_empty());
 
         // Verify that the error was logged and handled
@@ -5175,7 +5971,7 @@ mod tests {
         };
 
         // The bead should be released
-        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
 
         // Verify failure count was NOT incremented
         let actions = store.actions();
@@ -5237,7 +6033,7 @@ mod tests {
             .unwrap();
 
         // The bead should be released
-        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
 
         // Verify failure count WAS incremented
         let actions = store.actions();
@@ -5432,7 +6228,7 @@ mod tests {
         // Route identity: handle_success re-routed into handle_gate_error —
         // released without burning the retry counter, gate.execution_error
         // emitted — not into handle_gate_failure.
-        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
         helper.sync().await;
         assert!(
             !helper.events_by_type("gate.execution_error").is_empty(),
@@ -5517,7 +6313,7 @@ mod tests {
 
         // Route identity: handle_gate_failure released AND burned the retry
         // counter — the mirror image of the gate_error route above.
-        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
         assert!(
             store.actions().iter().any(
                 |a| matches!(a, StoreAction::AddLabel(_, label) if label == "failure-count:1")
@@ -5774,7 +6570,7 @@ mod tests {
                 .await
                 .unwrap()
         };
-        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
         helper.sync().await;
         assert_eq!(
             helper.events_by_type("attempt.resolved").len(),
@@ -5806,7 +6602,7 @@ mod tests {
             .handle(&store, &bead, &test_output(1), false)
             .await
             .unwrap();
-        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
         helper.sync().await;
         assert_eq!(
             helper.events_by_type("attempt.resolved").len(),
@@ -5863,7 +6659,7 @@ mod tests {
             .handle(&store, &bead, &test_output(1), false)
             .await
             .unwrap();
-        assert_eq!(result.bead_action, BeadAction::Released);
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
         helper.sync().await;
         let rows = helper.events_by_type("attempt.resolved");
         assert_eq!(rows.len(), 1, "cycle 1 resolved to one row, got {rows:?}");

@@ -408,7 +408,7 @@ pub fn detect_trace_format(agent_name: &str) -> TraceFormat {
 /// (observed across the commitgraph workspace during the 2026-09-02 zai-proxy
 /// outage) — so `is_error` and `terminal_reason` are the only usable failure
 /// signals.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ClaudeResultEnvelope {
     /// Envelope `is_error` flag.
     pub is_error: bool,
@@ -421,6 +421,14 @@ pub struct ClaudeResultEnvelope {
     /// Envelope `api_error_status` — the HTTP status behind the terminal error
     /// (e.g. 503).
     pub api_error_status: Option<u16>,
+    /// `usage.input_tokens` — the session's total input tokens, as the CLI
+    /// reports them on the final envelope.
+    pub input_tokens: Option<u64>,
+    /// `usage.output_tokens` — the session's total output tokens.
+    pub output_tokens: Option<u64>,
+    /// `total_cost_usd` as the CLI computed it. Subscription-billed runs
+    /// (claude-print) report `0`, which callers must treat as unknown.
+    pub total_cost_usd: Option<f64>,
 }
 
 impl ClaudeResultEnvelope {
@@ -482,6 +490,15 @@ pub fn parse_result_envelope(stdout: &str) -> Option<ClaudeResultEnvelope> {
                     .get("api_error_status")
                     .and_then(|s| s.as_u64())
                     .and_then(|status| u16::try_from(status).ok()),
+                input_tokens: value
+                    .get("usage")
+                    .and_then(|u| u.get("input_tokens"))
+                    .and_then(|t| t.as_u64()),
+                output_tokens: value
+                    .get("usage")
+                    .and_then(|u| u.get("output_tokens"))
+                    .and_then(|t| t.as_u64()),
+                total_cost_usd: value.get("total_cost_usd").and_then(|c| c.as_f64()),
             })
         })
 }
@@ -1046,6 +1063,22 @@ mod tests {
     }
 
     #[test]
+    fn parse_result_envelope_reads_usage_and_cost() {
+        let line = r#"{"type":"result","subtype":"success","is_error":false,"total_cost_usd":0.71256,"usage":{"input_tokens":66163,"cache_read_input_tokens":667840,"output_tokens":1403},"num_turns":17,"result":"done","session_id":"s1"}"#;
+        let envelope = parse_result_envelope(&result_stream(line)).expect("envelope");
+        assert_eq!(envelope.input_tokens, Some(66163));
+        assert_eq!(envelope.output_tokens, Some(1403));
+        assert_eq!(envelope.total_cost_usd, Some(0.71256));
+        assert!(!envelope.indicates_failure());
+
+        // Subscription runs report a zero cost and no usage is optional.
+        let line = r#"{"type":"result","subtype":"success","is_error":false,"cost_usd":0,"session_id":"s1"}"#;
+        let envelope = parse_result_envelope(&result_stream(line)).expect("envelope");
+        assert_eq!(envelope.input_tokens, None);
+        assert_eq!(envelope.total_cost_usd, None);
+    }
+
+    #[test]
     fn parse_result_envelope_finds_the_final_result_line() {
         let stdout = result_stream(API_ERROR_RESULT_LINE);
         let envelope = parse_result_envelope(&stdout).expect("envelope should parse");
@@ -1116,6 +1149,7 @@ mod tests {
             subtype: Some("success".to_string()),
             terminal_reason: Some("api_error".to_string()),
             api_error_status: None,
+            ..Default::default()
         };
         assert!(envelope.indicates_failure());
     }
@@ -1127,6 +1161,7 @@ mod tests {
             subtype: Some("success".to_string()),
             terminal_reason: None,
             api_error_status: None,
+            ..Default::default()
         };
         assert!(!envelope.indicates_failure());
     }
@@ -1140,6 +1175,7 @@ mod tests {
             subtype: Some("success".to_string()),
             terminal_reason: Some("user_exit".to_string()),
             api_error_status: None,
+            ..Default::default()
         };
         assert!(!envelope.indicates_failure());
     }
@@ -1151,6 +1187,7 @@ mod tests {
             subtype: Some("success".to_string()),
             terminal_reason: Some(String::new()),
             api_error_status: None,
+            ..Default::default()
         };
         assert!(!envelope.indicates_failure());
     }

@@ -18,6 +18,7 @@
 #   scripts/definition-of-done.sh [--fast|--slow|--all] [--count-bypass]
 #                                 [--changed-only] [--comprehensive-lint]
 #                                 [--gate] [--target <name>]
+#                                 [--archive-file <path>]
 #
 # Flags:
 #   --fast          Run fast lane only (default for NEEDLE gate)
@@ -44,6 +45,11 @@
 #                    Both the space form and the equals form are accepted;
 #                    needle-workflowtemplate.yml passes the equals form, so
 #                    that one is the one CI actually exercises.
+#   --archive-file <path>
+#                    Run one non-installer --target from a precompiled nextest
+#                    archive. This mode never invokes a Cargo build and refuses
+#                    aggregate execution: one archive is built centrally, then
+#                    independent CI pods select one exact binary from it.
 
 set -euo pipefail
 
@@ -67,6 +73,9 @@ CHANGED_ONLY=false
 COMPREHENSIVE_LINT=false
 GATE=false
 SLOW_TARGET=""
+SLOW_TARGET_ARGUMENT_COUNT=0
+ARCHIVE_FILE=""
+ARCHIVE_FILE_ARGUMENT_COUNT=0
 NEEDLE_BYPASS_ARGUMENT=""
 
 # Parse arguments
@@ -103,6 +112,7 @@ while [[ $# -gt 0 ]]; do
     --target)
       [[ $# -ge 2 ]] || { echo "Error: --target requires a name" >&2; exit 1; }
       SLOW_TARGET="$2"
+      SLOW_TARGET_ARGUMENT_COUNT=$((SLOW_TARGET_ARGUMENT_COUNT + 1))
       shift 2
       ;;
     --target=*)
@@ -112,6 +122,20 @@ while [[ $# -gt 0 ]]; do
       # with "Unknown argument" while the fast lane stayed green.
       [[ -n "${1#--target=}" ]] || { echo "Error: --target requires a name" >&2; exit 1; }
       SLOW_TARGET="${1#--target=}"
+      SLOW_TARGET_ARGUMENT_COUNT=$((SLOW_TARGET_ARGUMENT_COUNT + 1))
+      shift
+      ;;
+    --archive-file)
+      [[ $# -ge 2 ]] || { echo "Error: --archive-file requires a path" >&2; exit 1; }
+      [[ -n "$2" ]] || { echo "Error: --archive-file requires a path" >&2; exit 1; }
+      ARCHIVE_FILE="$2"
+      ARCHIVE_FILE_ARGUMENT_COUNT=$((ARCHIVE_FILE_ARGUMENT_COUNT + 1))
+      shift 2
+      ;;
+    --archive-file=*)
+      [[ -n "${1#--archive-file=}" ]] || { echo "Error: --archive-file requires a path" >&2; exit 1; }
+      ARCHIVE_FILE="${1#--archive-file=}"
+      ARCHIVE_FILE_ARGUMENT_COUNT=$((ARCHIVE_FILE_ARGUMENT_COUNT + 1))
       shift
       ;;
     --no-verify)
@@ -120,7 +144,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     *)
       echo "Error: Unknown argument: $1" >&2
-      echo "Usage: $0 [--fast|--slow|--all] [--count-bypass] [--changed-only] [--comprehensive-lint] [--gate] [--target <name>] [--no-verify]" >&2
+      echo "Usage: $0 [--fast|--slow|--all] [--count-bypass] [--changed-only] [--comprehensive-lint] [--gate] [--target <name>] [--archive-file <path>] [--no-verify]" >&2
       exit 1
       ;;
   esac
@@ -139,19 +163,74 @@ done
 # tests/dod-modes/run.sh rather than copied, so they cannot drift from what
 # actually runs.
 needle_slow_targets() {
-  printf '%s\n' lib integration_tests p2_integration_tests \
+  printf '%s\n' lib integration_spawn integration_tests p2_integration_tests \
     p3_integration_tests real_br_integration_tests installer
 }
 
 needle_cargo_selector() {
   case "$1" in
     lib)                       printf '%s\n' --lib ;;
+    integration_spawn)         printf '%s\n' --test integration_spawn ;;
     integration_tests)         printf '%s\n' --test integration_tests ;;
     p2_integration_tests)      printf '%s\n' --test p2_integration_tests ;;
     p3_integration_tests)      printf '%s\n' --test p3_integration_tests ;;
     real_br_integration_tests) printf '%s\n' --test real_br_integration_tests ;;
     *)                         return 1 ;;
   esac
+}
+
+# An archive contains all six Cargo test binaries, so archive consumers must
+# select by nextest's stable binary ID rather than passing Cargo target flags
+# (Cargo build options conflict with --archive-file). Equality matchers are
+# deliberate: contains/glob matching could silently run a newly added binary.
+needle_nextest_filter() {
+  case "$1" in
+    lib)                       printf '%s\n' 'binary_id(=needle)' ;;
+    integration_spawn)         printf '%s\n' 'binary_id(=needle::integration_spawn)' ;;
+    integration_tests)         printf '%s\n' 'binary_id(=needle::integration_tests)' ;;
+    p2_integration_tests)      printf '%s\n' 'binary_id(=needle::p2_integration_tests)' ;;
+    p3_integration_tests)      printf '%s\n' 'binary_id(=needle::p3_integration_tests)' ;;
+    real_br_integration_tests) printf '%s\n' 'binary_id(=needle::real_br_integration_tests)' ;;
+    *)                         return 1 ;;
+  esac
+}
+
+needle_validate_archive_mode() {
+  [[ -n "$ARCHIVE_FILE" ]] || return 0
+
+  if [[ "$ARCHIVE_FILE_ARGUMENT_COUNT" -ne 1 ]]; then
+    echo "Error: --archive-file must be specified exactly once" >&2
+    return 1
+  fi
+  if [[ "$SLOW_TARGET_ARGUMENT_COUNT" -ne 1 || -z "$SLOW_TARGET" ]]; then
+    echo "Error: --archive-file requires exactly one --target" >&2
+    return 1
+  fi
+  if [[ "$SLOW_TARGET" == "installer" ]] || ! needle_nextest_filter "$SLOW_TARGET" >/dev/null; then
+    echo "Error: --archive-file requires one of the six Cargo test targets, not '$SLOW_TARGET'" >&2
+    return 1
+  fi
+
+  if [[ "$ARCHIVE_FILE" != /* ]]; then
+    echo "Error: --archive-file must be an absolute path" >&2
+    return 1
+  fi
+  if [[ "$ARCHIVE_FILE" != *.tar.zst ]]; then
+    echo "Error: --archive-file must name a .tar.zst nextest archive" >&2
+    return 1
+  fi
+  if [[ ! -f "$ARCHIVE_FILE" || ! -r "$ARCHIVE_FILE" || ! -s "$ARCHIVE_FILE" ]]; then
+    echo "Error: nextest archive is not a readable, non-empty file: $ARCHIVE_FILE" >&2
+    return 1
+  fi
+
+  # nextest extracts the archive's target tree below --extract-to. Refuse to
+  # overwrite a local build or the CI image's /opt target symlink: archive
+  # execution is correct only in a fresh exact-source checkout.
+  if [[ -e "$REPO_ROOT/target" || -L "$REPO_ROOT/target" ]]; then
+    echo "Error: archive mode requires $REPO_ROOT/target to be absent before extraction" >&2
+    return 1
+  fi
 }
 
 # --target runs exactly one slow-lane check, so it implies the slow lane even
@@ -164,6 +243,8 @@ if [[ -n "$SLOW_TARGET" ]]; then
     exit 1
   fi
 fi
+
+needle_validate_archive_mode || exit 1
 
 # Which cargo targets this invocation covers. --target installer names no
 # cargo target at all, so this yields nothing rather than every target.
@@ -179,10 +260,9 @@ selected_cargo_targets() {
 }
 
 # Emit each integration-test target declared in Cargo.toml as
-# "<target><TAB><source path>". Fast lint uses the manifest as its authority:
-# the slow-lane table is deliberately different (it includes lib/installer and
-# does not run integration_spawn), so borrowing that table would silently miss
-# a declared test harness or lint a name that is not a Cargo test target.
+# "<target><TAB><source path>". The manifest is the authority for both fast
+# lint attribution and the invariant that the explicit slow-lane table covers
+# every declared harness.
 needle_declared_test_harnesses() {
   local manifest="${NEEDLE_CARGO_MANIFEST:-$REPO_ROOT/Cargo.toml}"
   awk '
@@ -216,6 +296,38 @@ needle_declared_test_harnesses() {
     }
     END { emit() }
   ' "$manifest"
+}
+
+# The slow target table stays explicit because its stable names form the CI
+# matrix and the public --target interface. Check that table against Cargo's
+# manifest before any slow build: adding a [[test]] without scheduling it must
+# fail deterministically instead of silently reducing full-suite coverage.
+# `installer` is intentionally present in the slow table but absent from the
+# Cargo subset because it is a shell suite.
+needle_expected_slow_targets() {
+  local target source
+  printf '%s\n' lib
+  while IFS=$'\t' read -r target source; do
+    [[ -n "$target" && -n "$source" ]] || continue
+    printf '%s\n' "$target"
+  done < <(needle_declared_test_harnesses)
+  printf '%s\n' installer
+}
+
+needle_validate_slow_target_coverage() {
+  local expected actual
+  expected="$(needle_expected_slow_targets)"
+  actual="$(needle_slow_targets)"
+  if [[ "$actual" == "$expected" ]]; then
+    return 0
+  fi
+
+  echo "slow target table does not exactly match Cargo.toml plus lib/installer" >&2
+  echo "expected:" >&2
+  printf '%s\n' "$expected" | sed 's/^/  /' >&2
+  echo "actual:" >&2
+  printf '%s\n' "$actual" | sed 's/^/  /' >&2
+  return 1
 }
 
 # Select a declared test harness when this commit stages either its root file
@@ -459,6 +571,48 @@ run_slow_cargo_check() {
       "$@"
 }
 
+# nextest-version.required is a minimum-version constraint, so it cannot keep a
+# newer runner from silently changing the archive contract. Accept exactly one
+# release field from the executable's structured version output and require the
+# release baked into the CI image.
+needle_validate_nextest_release() {
+  local version_output
+  local -a release_lines=()
+
+  if ! version_output="$(env -u CARGO_TARGET_DIR cargo-nextest --version 2>&1)"; then
+    echo "Error: cargo-nextest --version failed in archive mode" >&2
+    return 1
+  fi
+  mapfile -t release_lines < <(printf '%s\n' "$version_output" | sed -n '/^release:/p')
+  if [[ "${#release_lines[@]}" -ne 1 || "${release_lines[0]:-}" != "release: 0.9.144" ]]; then
+    echo "Error: archive mode requires exactly one 'release: 0.9.144' cargo-nextest version field" >&2
+    return 1
+  fi
+}
+
+# Archive consumers retain the slow lane's isolated TMPDIR, deadline, timing,
+# log capture and orphan reaping, and explicitly remove any inherited
+# CARGO_TARGET_DIR before invoking the cargo-nextest executable directly.
+# --extract-to must be the exact source checkout:
+# several integration tests embed CARGO_MANIFEST_DIR and CARGO_BIN_EXE_* at
+# compile time, so extracting into an unrelated temporary directory is wrong.
+run_slow_nextest_check() {
+  local target="$1" filter="$2"
+  needle_validate_nextest_release || return 1
+  DOD_TIMING_PHASE=run DOD_TIMING_TARGET="$target" \
+    run_check "cargo-nextest archive target $target" env -u CARGO_TARGET_DIR \
+      TMPDIR="$SLOW_TMPDIR" \
+      timeout --kill-after=30 900 cargo-nextest nextest run \
+        --archive-file "$ARCHIVE_FILE" \
+        --extract-to "$REPO_ROOT" \
+        --profile ci \
+        --run-ignored default \
+        --ignore-default-filter \
+        --no-fail-fast \
+        --no-tests fail \
+        -E "$filter"
+}
+
 # ── Attribution (--changed-only) ──────────────────────────────────────────────
 #
 # NEEDLE repos are worked by several agents in ONE shared checkout, so at any
@@ -615,6 +769,10 @@ fi
 if [[ "$RUN_SLOW" == true ]]; then
   echo "=== Slow Lane Checks ==="
 
+  # Keep a targeted invocation selective, but require the complete target
+  # registry it selects from to remain exhaustive for default/full runs.
+  needle_validate_slow_target_coverage || exit 1
+
   # Create the build-and-run context in the parent shell before either phase.
   # TMPDIR is isolated from both the checkout's .beads and a poisoned
   # /tmp/.beads. CARGO_TARGET_DIR deliberately keeps Cargo's configured cache,
@@ -654,7 +812,7 @@ if [[ "$RUN_SLOW" == true ]]; then
   #
   BUILD_LABEL="all test targets"
   BUILD_SELECTORS=()
-  if [[ "$SLOW_TARGET" != "installer" ]]; then
+  if [[ -z "$ARCHIVE_FILE" && "$SLOW_TARGET" != "installer" ]]; then
     if [[ -n "$SLOW_TARGET" ]]; then
       BUILD_LABEL="$SLOW_TARGET"
       while IFS= read -r arg; do
@@ -705,18 +863,26 @@ if [[ "$RUN_SLOW" == true ]]; then
   # The loop reads a process substitution, NOT a pipe: `run_check` appends to
   # FAILURES, and a piped `while` would do that in a subshell and lose every
   # failure it recorded.
-  while IFS= read -r target; do
-    SELECTOR=()
-    while IFS= read -r arg; do
-      SELECTOR+=("$arg")
-    done < <(needle_cargo_selector "$target")
-    if [[ ${#SELECTOR[@]} -eq 0 ]]; then
-      echo "ERROR: no cargo selector for target '$target'" >&2
+  if [[ -n "$ARCHIVE_FILE" ]]; then
+    NEXTEST_FILTER="$(needle_nextest_filter "$SLOW_TARGET")" || {
+      echo "ERROR: no nextest filter for target '$SLOW_TARGET'" >&2
       exit 1
-    fi
-    run_slow_cargo_check run "$target" "cargo test ${SELECTOR[*]}" \
-      timeout --kill-after=30 900 cargo test "${SELECTOR[@]}"
-  done < <(selected_cargo_targets)
+    }
+    run_slow_nextest_check "$SLOW_TARGET" "$NEXTEST_FILTER"
+  else
+    while IFS= read -r target; do
+      SELECTOR=()
+      while IFS= read -r arg; do
+        SELECTOR+=("$arg")
+      done < <(needle_cargo_selector "$target")
+      if [[ ${#SELECTOR[@]} -eq 0 ]]; then
+        echo "ERROR: no cargo selector for target '$target'" >&2
+        exit 1
+      fi
+      run_slow_cargo_check run "$target" "cargo test ${SELECTOR[*]}" \
+        timeout --kill-after=30 900 cargo test "${SELECTOR[@]}"
+    done < <(selected_cargo_targets)
+  fi
 
   # Installer tests (isolated, shell-level regression tests). Not a cargo
   # target, so a per-target run only reaches it when it is the one asked for.

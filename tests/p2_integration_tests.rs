@@ -1520,7 +1520,12 @@ async fn explore_discovers_work_in_other_workspace() {
         .expect("PATH should contain the installed bead CLI")
         .map(|candidate| std::fs::canonicalize(&candidate).unwrap_or(candidate))
         .find(|candidate| candidate != &canonical_bead)
-        .expect("PATH should contain a native bead CLI behind the host wrapper");
+        // Only an operator workstation has a queue-fence wrapper first on
+        // PATH with a native bead behind it. CI installs exactly one pinned
+        // bead-rs and no wrapper, so there is nothing "behind" it -- that one
+        // IS the native binary. Requiring a second entry asserted the
+        // developer's PATH layout, not the behaviour under test.
+        .unwrap_or_else(|| canonical_bead.clone());
 
     // The host's `bead` command may be a queue-fence wrapper. Give the
     // isolated HOME a complete, test-local policy that routes this unrelated

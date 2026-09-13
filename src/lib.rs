@@ -3,6 +3,8 @@
 //! Library crate exposing the public API for integration tests and embedding.
 
 pub mod agent_event;
+pub mod attempt_archive;
+pub mod attempt_history;
 pub mod bead_store;
 pub mod build_metadata;
 /// CI build-status probe behind the claim-time circuit breaker.
@@ -21,6 +23,8 @@ pub mod decision;
 mod deferral;
 pub mod dispatch;
 pub mod drift;
+pub mod evidence_routing;
+pub mod experiments;
 pub mod fingerprint;
 pub mod gate_health;
 pub mod health;
@@ -56,11 +60,13 @@ pub mod panic_safety_tests;
 pub mod peer;
 pub mod process_guard;
 pub mod prompt;
+pub mod provider_health;
 /// Quarantine-expiry re-evaluation: an expired window is a question, not a verdict.
 pub mod quarantine_expiry;
 pub mod rate_limit;
 pub mod registry;
 pub mod resolve;
+pub mod retrieval;
 pub mod routing;
 pub mod sanitize;
 pub mod scratch_sweep;

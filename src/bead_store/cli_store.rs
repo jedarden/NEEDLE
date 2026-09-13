@@ -31,6 +31,8 @@ pub struct CliBeadStore {
     harness: Option<String>,
     harness_version: Option<String>,
     sync_pause: std::sync::Mutex<Option<String>>,
+    /// Whether `bead resolve` (attempt-outcome-v1) is available.
+    attempt_outcome_supported: bool,
 }
 
 impl CliBeadStore {
@@ -54,7 +56,16 @@ impl CliBeadStore {
             harness,
             harness_version,
             sync_pause: std::sync::Mutex::new(None),
+            attempt_outcome_supported: false,
         })
+    }
+
+    /// Record whether the backend advertised `attempt_outcome.supported` in
+    /// its capability document. Off by default: an older bead-rs has no
+    /// `resolve` command, and NEEDLE must not fail an attempt over it.
+    pub fn with_attempt_outcome_support(mut self, supported: bool) -> Self {
+        self.attempt_outcome_supported = supported;
+        self
     }
 
     pub fn backend(&self) -> &BeadBackend {
@@ -641,6 +652,86 @@ impl BeadStore for CliBeadStore {
         Ok((bead, claim_events))
     }
 
+    async fn resolve_attempt(
+        &self,
+        resolution: &super::AttemptResolution,
+    ) -> Result<Option<super::ResolveReceipt>> {
+        if !self.attempt_outcome_supported || self.operation("resolve").is_err() {
+            return Ok(None);
+        }
+        let values = HashMap::from([
+            ("id", resolution.bead_id.to_string()),
+            ("attempt_id", resolution.attempt_id.clone()),
+            ("outcome", resolution.outcome.clone()),
+            ("actor", resolution.actor.clone()),
+            (
+                "resolve_reason",
+                resolution.reason.clone().unwrap_or_default(),
+            ),
+            (
+                "evidence_ref",
+                resolution.evidence_ref.clone().unwrap_or_default(),
+            ),
+        ]);
+        let stdout = self.run_operation("resolve", &values).await?;
+        let value: serde_json::Value = serde_json::from_str(stdout.trim()).with_context(|| {
+            format!(
+                "resolve for {} returned non-JSON output",
+                resolution.bead_id
+            )
+        })?;
+        let field = |name: &str| value.get(name).and_then(|v| v.as_str()).map(str::to_owned);
+        Ok(Some(super::ResolveReceipt {
+            receipt_id: field("receipt_id").unwrap_or_default(),
+            resulting_state: field("resulting_state"),
+            resulting_attempt_tier: value
+                .get("resulting_attempt_tier")
+                .and_then(|v| v.as_u64())
+                .map(|t| t as u32),
+            is_replay: value
+                .get("is_replay")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+        }))
+    }
+
+    async fn set_data(
+        &self,
+        id: &BeadId,
+        namespace: &str,
+        schema_ref: &str,
+        value: &serde_json::Value,
+    ) -> Result<bool> {
+        if self.operation("data_set").is_err() {
+            return Ok(false);
+        }
+        let values = HashMap::from([
+            ("id", id.to_string()),
+            ("key", namespace.to_string()),
+            ("schema_ref", schema_ref.to_string()),
+            ("value", serde_json::to_string(value)?),
+        ]);
+        self.run_operation("data_set", &values).await?;
+        Ok(true)
+    }
+
+    async fn get_data(&self, id: &BeadId, namespace: &str) -> Result<Option<serde_json::Value>> {
+        if self.operation("data_get").is_err() {
+            return Ok(None);
+        }
+        let values = HashMap::from([("id", id.to_string()), ("key", namespace.to_string())]);
+        let stdout = match self.run_operation("data_get", &values).await {
+            Ok(stdout) => stdout,
+            // bead-rs reports an empty namespace as a workspace error, not as
+            // an empty document; that is the "no history yet" case.
+            Err(e) if format!("{e:#}").contains("No structured data found") => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+            .with_context(|| format!("data_get for {id} returned non-JSON output"))?;
+        Ok(parsed.get("value").cloned().or(Some(parsed)))
+    }
+
     async fn notes(&self, id: &BeadId) -> Result<Option<String>> {
         let values = HashMap::from([("id", id.to_string())]);
         let stdout = self.run_operation("show", &values).await?;
@@ -1187,7 +1278,10 @@ fn parse_doctor_output(output: &str) -> RepairReport {
 }
 
 fn is_optional_placeholder(name: &str) -> bool {
-    matches!(name, "model" | "harness" | "harness_version" | "limit")
+    matches!(
+        name,
+        "model" | "harness" | "harness_version" | "limit" | "resolve_reason" | "evidence_ref"
+    )
 }
 
 #[cfg(test)]
@@ -1748,6 +1842,94 @@ mod tests {
         let values = HashMap::from([("id", "bf-123".to_string())]);
         let result = store.render_operation("show", &values).unwrap();
         assert_eq!(result, vec!["show", "bf-123", "--json"]);
+
+        // Structured data ops render the bead-rs 0.2.6 CLI shape (`--id`,
+        // `--namespace`, `--schema-ref`, `--value`), not the retired `--key`.
+        let values = HashMap::from([
+            ("id", "needle-1".to_string()),
+            ("key", "needle-attempts".to_string()),
+            (
+                "schema_ref",
+                "urn:needle:schema:attempt-history:v1".to_string(),
+            ),
+            ("value", r#"{"attempts":[]}"#.to_string()),
+        ]);
+        let result = store.render_operation("data_set", &values).unwrap();
+        assert_eq!(
+            result,
+            vec![
+                "data",
+                "set",
+                "--id",
+                "needle-1",
+                "--namespace",
+                "needle-attempts",
+                "--schema-ref",
+                "urn:needle:schema:attempt-history:v1",
+                "--value",
+                r#"{"attempts":[]}"#,
+            ]
+        );
+        let values = HashMap::from([
+            ("id", "needle-1".to_string()),
+            ("key", "needle-attempts".to_string()),
+        ]);
+        let result = store.render_operation("data_get", &values).unwrap();
+        assert_eq!(
+            result,
+            vec![
+                "data",
+                "get",
+                "--id",
+                "needle-1",
+                "--namespace",
+                "needle-attempts",
+                "--json"
+            ]
+        );
+
+        // `resolve` renders attempt-outcome-v1 with `--action none`; the
+        // store carries no model/harness here and no reason or evidence was
+        // given, so each optional flag disappears with its value.
+        let values = HashMap::from([
+            ("id", "needle-1".to_string()),
+            ("attempt_id", "0192-attempt".to_string()),
+            ("outcome", "work_failure".to_string()),
+            ("actor", "needle-alpha".to_string()),
+            ("resolve_reason", String::new()),
+            ("evidence_ref", String::new()),
+        ]);
+        let result = store.render_operation("resolve", &values).unwrap();
+        assert_eq!(
+            result,
+            vec![
+                "resolve",
+                "needle-1",
+                "--attempt-id",
+                "0192-attempt",
+                "--outcome",
+                "work_failure",
+                "--action",
+                "none",
+                "--actor",
+                "needle-alpha",
+                "--format",
+                "json"
+            ]
+        );
+        let values = HashMap::from([
+            ("id", "needle-1".to_string()),
+            ("attempt_id", "0192-attempt".to_string()),
+            ("outcome", "verified_success".to_string()),
+            ("actor", "needle-alpha".to_string()),
+            ("resolve_reason", String::new()),
+            ("evidence_ref", "commit:abc123".to_string()),
+        ]);
+        let result = store.render_operation("resolve", &values).unwrap();
+        assert!(result
+            .windows(2)
+            .any(|w| w == ["--evidence-ref", "commit:abc123"]));
+        assert!(!result.contains(&"--reason".to_string()));
     }
 
     #[test]

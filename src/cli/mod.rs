@@ -360,10 +360,31 @@ pub enum CliCommand {
         /// Check only — show available update without installing.
         #[arg(long)]
         check: bool,
+
+        /// Install this locally built binary instead of a GitHub release,
+        /// through the same :testing → canary → :stable channel. Sibling
+        /// `needle-transform-*` binaries in the same directory are installed
+        /// alongside. Running workers pick the new :stable up at their next
+        /// bead boundary.
+        #[arg(long, value_name = "PATH", conflicts_with = "check")]
+        from_file: Option<PathBuf>,
+
+        /// With --from-file: promote without running the canary suite.
+        #[arg(long, requires = "from_file")]
+        skip_canary: bool,
     },
 
     /// Rollback to the previous :stable binary.
     Rollback,
+
+    /// Show the verification gates a workspace's beads are judged by:
+    /// its declared `gates:`/`verification:`, or the language default its
+    /// build files imply when it declares none.
+    Gates {
+        /// Workspace root (default: current directory).
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+    },
 
     /// Run learning consolidation on demand.
     ///
@@ -519,6 +540,14 @@ pub enum StatsBy {
     /// `"verified_success"`), over `attempt.resolved` ledger rows.
     #[value(name = "outcome")]
     Outcome,
+    /// Group by the model that executed each attempt (e.g. `"glm-5.3-flash"`),
+    /// over `attempt.resolved` ledger rows.
+    #[value(name = "model")]
+    Model,
+    /// Group by the workspace each attempt ran in, over `attempt.resolved`
+    /// ledger rows.
+    #[value(name = "workspace")]
+    Workspace,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -590,8 +619,13 @@ pub fn run() -> Result<()> {
             cmd_bead_backend_bind(&backend, &workspace)
         }
         CliCommand::Canary { status } => cmd_canary(status),
-        CliCommand::Upgrade { check } => cmd_upgrade(check),
+        CliCommand::Upgrade {
+            check,
+            from_file,
+            skip_canary,
+        } => cmd_upgrade(check, from_file, skip_canary),
         CliCommand::Rollback => cmd_rollback(),
+        CliCommand::Gates { workspace } => cmd_gates(workspace),
         CliCommand::Reflect { workspace, force } => cmd_reflect(workspace, force),
         CliCommand::UpdateRules { output } => cmd_update_rules(output),
         CliCommand::Stats {
@@ -3811,6 +3845,8 @@ fn cmd_stats(
         StatsBy::Worker => StatsDimension::Worker,
         StatsBy::Adapter => StatsDimension::Adapter,
         StatsBy::Outcome => StatsDimension::Outcome,
+        StatsBy::Model => StatsDimension::Model,
+        StatsBy::Workspace => StatsDimension::Workspace,
     };
 
     let mut rows = compute_stats(&events, dimension);
@@ -3824,10 +3860,12 @@ fn cmd_stats(
         StatsBy::Worker => ("WORKER", "BEADS"),
         StatsBy::Adapter => ("ADAPTER", "ATTEMPTS"),
         StatsBy::Outcome => ("OUTCOME", "ATTEMPTS"),
+        StatsBy::Model => ("MODEL", "ATTEMPTS"),
+        StatsBy::Workspace => ("WORKSPACE", "ATTEMPTS"),
     };
     // Only the attempt dimensions read `attempt.resolved` rows, so only they
-    // carry a provisional-attempt-ID count to surface.
-    let show_provisional = matches!(by, StatsBy::Adapter | StatsBy::Outcome);
+    // carry a provisional-attempt-ID count (and an infrastructure column).
+    let show_provisional = dimension.is_attempt_dimension();
 
     match format {
         ListFormat::Table => {
@@ -3838,13 +3876,14 @@ fn cmd_stats(
             let key_width = rows.iter().map(|r| r.key.len()).max().unwrap_or(16).max(16);
             if show_provisional {
                 println!(
-                    "{:<width$} {:>8} {:>11} {:>6} {:>6} {:>8} {:>9} {:>10} {:>12}",
+                    "{:<width$} {:>8} {:>11} {:>6} {:>6} {:>8} {:>6} {:>9} {:>10} {:>12}",
                     dim_label,
                     count_label,
                     "PROVISIONAL",
                     "PASS",
                     "FAIL",
                     "TIMEOUT",
+                    "INFRA",
                     "PASS RATE",
                     "AVG TOK",
                     "AVG COST",
@@ -3852,7 +3891,7 @@ fn cmd_stats(
                 );
                 println!(
                     "{}",
-                    "-".repeat(key_width + 8 + 11 + 6 + 6 + 8 + 9 + 10 + 12 + 8)
+                    "-".repeat(key_width + 8 + 11 + 6 + 6 + 8 + 6 + 9 + 10 + 12 + 9)
                 );
             } else {
                 println!(
@@ -3887,13 +3926,14 @@ fn cmd_stats(
                     .unwrap_or_else(|| "-".to_string());
                 if show_provisional {
                     println!(
-                        "{:<width$} {:>8} {:>11} {:>6} {:>6} {:>8} {:>9} {:>10} {:>12}",
+                        "{:<width$} {:>8} {:>11} {:>6} {:>6} {:>8} {:>6} {:>9} {:>10} {:>12}",
                         row.key,
                         row.beads,
                         row.provisional,
                         row.pass,
                         row.fail,
                         row.timeout,
+                        row.infra,
                         pass_rate,
                         avg_tok,
                         avg_cost,
@@ -3936,6 +3976,7 @@ fn cmd_stats(
                         "pass": row.pass,
                         "fail": row.fail,
                         "timeout": row.timeout,
+                        "infra": row.infra,
                         "pass_rate": row.pass_rate(),
                         "avg_tokens": row.avg_tokens(),
                         "avg_cost_usd": row.avg_cost_usd(),
@@ -7028,7 +7069,13 @@ fn cmd_canary(show_status: bool) -> Result<()> {
 }
 
 /// `needle upgrade` — check for and install updates.
-fn cmd_upgrade(check_only: bool) -> Result<()> {
+fn cmd_upgrade(check_only: bool, from_file: Option<PathBuf>, skip_canary: bool) -> Result<()> {
+    if let Some(path) = from_file {
+        let stable = crate::upgrade::perform_upgrade_from_file(&path, skip_canary)?;
+        println!("Stable binary: {}", stable.display());
+        return Ok(());
+    }
+
     // Set up telemetry for upgrade operations
     let config = ConfigLoader::load_global()?;
     let tel = crate::telemetry::Telemetry::from_config("upgrade".to_string(), &config.telemetry)
@@ -7059,6 +7106,60 @@ fn cmd_upgrade(check_only: bool) -> Result<()> {
 }
 
 /// `needle rollback` — restore the previous :stable binary.
+/// `needle gates` — print the gates that resolve for a workspace.
+fn cmd_gates(workspace: Option<PathBuf>) -> Result<()> {
+    let root = match workspace {
+        Some(path) => path,
+        None => std::env::current_dir().context("failed to read the current directory")?,
+    };
+    let root = std::fs::canonicalize(&root).unwrap_or(root);
+    let config = ConfigLoader::load_global()?;
+    let resolved = crate::config::gates_for_workspace(&root)?;
+
+    println!("Workspace: {}", root.display());
+    if !resolved.gates.is_empty() {
+        println!("Declared gates ({}):", resolved.gates.len());
+        for (i, gate) in resolved.gates.iter().enumerate() {
+            let crate::validation::GateConfig::Command {
+                commands, run_in, ..
+            } = gate;
+            println!("  gate_{i} [{run_in:?}]");
+            for command in commands {
+                println!("    $ {command}");
+            }
+        }
+        return Ok(());
+    }
+    if !resolved.verification.is_empty() {
+        println!("Declared verification commands (legacy `verification:`):");
+        for command in &resolved.verification {
+            println!("    $ {command}");
+        }
+        return Ok(());
+    }
+    if resolved.declared {
+        println!("Declared: none (explicit `gates: []` — the language default is opted out).");
+        return Ok(());
+    }
+    match crate::validation::default_gates::detect(&root, &config.validation.default_gates) {
+        Some(detected) => {
+            println!(
+                "Declared: none. Language default ({}, from {}) [Clean]:",
+                detected.gate_name(),
+                detected.evidence
+            );
+            for command in &detected.commands {
+                println!("    $ {command}");
+            }
+        }
+        None if config.validation.default_gates.enabled => {
+            println!("Declared: none, and no language default applies — beads are judged on exit code alone.");
+        }
+        None => println!("Declared: none; validation.default_gates.enabled is false."),
+    }
+    Ok(())
+}
+
 fn cmd_rollback() -> Result<()> {
     let config = ConfigLoader::load_global()?;
 
@@ -8203,11 +8304,47 @@ mod tests {
         let cli = Cli::try_parse_from(["needle", "upgrade", "--check"]);
         assert!(cli.is_ok(), "needle upgrade --check should parse");
         if let Ok(Cli {
-            command: CliCommand::Upgrade { check },
+            command: CliCommand::Upgrade { check, .. },
         }) = cli
         {
             assert!(check);
         }
+    }
+
+    #[test]
+    fn cli_parses_upgrade_from_file() {
+        let cli = Cli::try_parse_from([
+            "needle",
+            "upgrade",
+            "--from-file",
+            "/tmp/needle-build/needle",
+            "--skip-canary",
+        ]);
+        assert!(
+            cli.is_ok(),
+            "needle upgrade --from-file should parse: {cli:?}"
+        );
+        if let Ok(Cli {
+            command:
+                CliCommand::Upgrade {
+                    check,
+                    from_file,
+                    skip_canary,
+                },
+        }) = cli
+        {
+            assert!(!check);
+            assert_eq!(
+                from_file.as_deref(),
+                Some(Path::new("/tmp/needle-build/needle"))
+            );
+            assert!(skip_canary);
+        }
+        // --skip-canary without --from-file, and --check with --from-file, are refused.
+        assert!(Cli::try_parse_from(["needle", "upgrade", "--skip-canary"]).is_err());
+        assert!(
+            Cli::try_parse_from(["needle", "upgrade", "--check", "--from-file", "/x"]).is_err()
+        );
     }
 
     #[test]

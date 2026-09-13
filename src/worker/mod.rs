@@ -54,7 +54,7 @@ use crate::strand::StrandRunner;
 use crate::telemetry::{EventKind, Telemetry};
 use crate::types::{
     AgentOutcome, Bead, BeadAction, BeadId, BeadStatus, ClaimResult, IdleAction, Outcome,
-    WorkerState,
+    ReleaseReason, WorkerState,
 };
 use crate::upgrade::{self, HotReloadCheck};
 use crate::validation::worker_config::{validate_idle_action_config, WorkerConfigValidationResult};
@@ -74,6 +74,66 @@ fn truncate_for_display(s: &str, max_len: usize) -> &str {
         Some((idx, _)) => &s[..idx],
         None => s, // String is shorter than max_len, return as-is
     }
+}
+
+/// Apply the N-T15 learning-context policy to a freshly built `PromptBuilder`.
+///
+/// Legacy workspace and global learnings are injected only when
+/// `strands.learning.inject_legacy_learnings` is on; the learning-derived
+/// tail (learnings plus skills) is always capped at
+/// `strands.learning.max_learning_context_bytes`.
+fn apply_learning_context_policy(
+    builder: PromptBuilder,
+    learning: &crate::config::LearningConfig,
+    workspace: &Path,
+) -> PromptBuilder {
+    let builder = builder
+        .with_learning_context_cap(learning.max_learning_context_bytes)
+        // N-T19: a stopped prompt variant is no longer exposed.
+        .with_experiment_state_dir(crate::experiments::default_state_dir());
+    if learning.inject_legacy_learnings {
+        builder
+            .with_legacy_learnings(workspace)
+            .with_global_learnings(&learning.global_learnings_file)
+    } else {
+        builder
+    }
+}
+
+/// Strip marker-fenced NEEDLE learning blocks from the CLAUDE.md files the
+/// legacy placer would have targeted for `workspace` (N-T15).
+///
+/// Best-effort: a read or write failure is logged and never blocks a boot.
+fn remove_placed_learnings_for_workspace(workspace: &Path) {
+    let placer = crate::claude_md_placement::ClaudeMdPlacer::new(vec![workspace.to_path_buf()]);
+    let Some(target) = placer.find_target_claude_md(&[workspace.to_path_buf()]) else {
+        return;
+    };
+    if !target.exists() {
+        return;
+    }
+    match crate::claude_md_placement::remove_needle_sections(&target) {
+        Ok(0) => {}
+        Ok(removed) => tracing::info!(
+            target = %target.display(),
+            removed,
+            "removed legacy NEEDLE learning blocks from CLAUDE.md (claude_md_placement is off)"
+        ),
+        Err(e) => tracing::warn!(
+            target = %target.display(),
+            error = %e,
+            "could not strip legacy NEEDLE learning blocks from CLAUDE.md"
+        ),
+    }
+}
+
+/// Attempt-ledger aggregates a worker keeps for its routing and canary
+/// decisions, rebuilt from the telemetry logs at a bounded cadence.
+#[derive(Debug, Clone)]
+struct LedgerCache {
+    computed_at: Instant,
+    adapters: std::collections::HashMap<String, crate::evidence_routing::AdapterEvidence>,
+    variants: std::collections::HashMap<String, crate::experiments::VariantOutcome>,
 }
 
 /// Remove the trailing source annotation from a formatted config dump line.
@@ -683,6 +743,14 @@ pub struct Worker {
     /// These are added to exclusion_set to prevent immediate re-selection.
     /// Cleared at the start of the next SELECTING cycle.
     race_lost_this_cycle: HashSet<BeadId>,
+    /// Cached attempt-ledger aggregates for evidence routing and canary
+    /// evaluation, refreshed at most every `refresh_secs` (N-T18/N-T19).
+    ledger_cache: std::sync::Mutex<Option<LedgerCache>>,
+    /// The evidence-routing choice for the bead currently in flight:
+    /// `(bead, chosen adapter, rule tag)`. Resolution runs more than once per
+    /// cycle and exploration is randomized, so the first choice sticks for
+    /// the whole attempt.
+    evidence_choice: std::sync::Mutex<Option<(BeadId, String, String)>>,
     retry_count: u32,
     consecutive_race_lost: u32,
     beads_processed: u64,
@@ -910,14 +978,24 @@ impl Worker {
             &config.workspace.default,
         )
         .unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "failed to load workspace learnings, using default prompt builder");
+            tracing::warn!(error = %e, "failed to load workspace skills, using default prompt builder");
             PromptBuilder::new(&config.prompt)
         })
         .with_cross_workspace_skills(
             &config.strands.explore.workspaces,
             &config.workspace.labels,
-        )
-        .with_global_learnings(&config.strands.learning.global_learnings_file);
+        );
+        let prompt_builder = apply_learning_context_policy(
+            prompt_builder,
+            &config.strands.learning,
+            &config.workspace.default,
+        );
+        // N-T15: when CLAUDE.md placement is off, a booting worker strips the
+        // marker-fenced blocks the legacy placer wrote earlier instead of
+        // leaving stale learnings in a top-authority policy file.
+        if !config.strands.reflect.claude_md_placement {
+            remove_placed_learnings_for_workspace(&config.workspace.default);
+        }
         let _ = telemetry.emit(
             EventKind::InitStepCompleted {
                 step: "prompt_builder_setup".to_string(),
@@ -1116,6 +1194,8 @@ impl Worker {
             exclusion_set: HashSet::new(),
             race_lost_exclusions: Vec::new(),
             race_lost_this_cycle: HashSet::new(),
+            ledger_cache: std::sync::Mutex::new(None),
+            evidence_choice: std::sync::Mutex::new(None),
             retry_count: 0,
             consecutive_race_lost: 0,
             beads_processed,
@@ -2212,6 +2292,10 @@ impl Worker {
         // never written).
         self.hold_for_admission().await?;
 
+        // N-T23: a worker whose adapter is degraded waits out the cooldown
+        // instead of claiming beads a dead provider will fail.
+        self.hold_for_adapter_health().await;
+
         // A shutdown signal that arrived mid-hold must not select: hand
         // control back to the run loop, whose top-of-loop shutdown branch
         // stops the worker cleanly.
@@ -2342,6 +2426,55 @@ impl Worker {
     /// a capped jittered backoff. On recovery it emits
     /// `worker.admission_restored` and returns to `SELECTING` before any
     /// selection runs.
+    /// Hold while this worker's adapter is degraded (N-T23) and its last
+    /// degraded failure is younger than
+    /// `workspace_health.adapter_degraded_cooldown_secs`.
+    ///
+    /// The hold is bounded: it re-reads the shared state file every minute,
+    /// so a verified success on any worker (which clears the state) or the
+    /// cooldown elapsing releases it, and a shutdown signal ends it at once.
+    /// Nothing here weakens the detector — the state is read, never written.
+    async fn hold_for_adapter_health(&mut self) {
+        if !self.config.workspace_health.adapter_health_enabled {
+            return;
+        }
+        let adapter = self
+            .resolve_adapter()
+            .map(|a| a.name)
+            .unwrap_or_else(|_| self.config.agent.default.clone());
+        let cooldown = self.config.workspace_health.adapter_degraded_cooldown_secs;
+        let mut announced = false;
+        loop {
+            if self.shutdown.load(Ordering::SeqCst) {
+                return;
+            }
+            let state = match crate::provider_health::degraded_state(&adapter) {
+                Ok(Some(state)) => state,
+                Ok(None) => return,
+                Err(e) => {
+                    tracing::debug!(adapter = %adapter, error = %e, "adapter health unreadable");
+                    return;
+                }
+            };
+            let since = state.secs_since_last_degraded_failure().unwrap_or(u64::MAX);
+            if since >= cooldown {
+                return;
+            }
+            let remaining = cooldown - since;
+            if !announced {
+                tracing::warn!(
+                    adapter = %adapter,
+                    fingerprint = ?state.degraded_fingerprint,
+                    summary = ?state.degraded_summary,
+                    remaining_secs = remaining,
+                    "adapter is degraded — holding before claiming"
+                );
+                announced = true;
+            }
+            tokio::time::sleep(Duration::from_secs(remaining.clamp(1, 60))).await;
+        }
+    }
+
     async fn hold_for_admission(&mut self) -> Result<()> {
         // Operator/test override honored identically at every admission check:
         // some callers must launch regardless of host load.
@@ -3052,13 +3185,104 @@ impl Worker {
             return Ok(());
         }
 
+        // R3: what the previous attempts on this bead did and why they ended
+        // is part of the next attempt's context. Loaded from the local
+        // journal (or the bead-rs mirror on another host), rendered bounded.
+        let (failure_history, prior_records) =
+            if self.config.strands.learning.failure_history.enabled {
+                let records = crate::attempt_history::load_for_prompt(
+                    &build_ws,
+                    &bead.id,
+                    self.store.as_ref(),
+                )
+                .await;
+                let rendered = crate::attempt_history::render(
+                    &records,
+                    self.config.strands.learning.failure_history.limits(),
+                );
+                if !rendered.is_empty() {
+                    tracing::info!(
+                        bead_id = %bead_id,
+                        prior_attempts = records.len(),
+                        history_bytes = rendered.len(),
+                        "injecting the bead's attempt history into the prompt"
+                    );
+                }
+                (rendered, records)
+            } else {
+                (String::new(), Vec::new())
+            };
+
+        // Plan section 4.4 step 7: on a retry, ask the configured retrieval
+        // command for prior fixes of the failure and inject them as bounded
+        // hints; record the exposure so it is observable.
+        let prior_fixes = {
+            let retrieval = &self.config.strands.learning.retrieval;
+            let attempt_no = prior_records.len() as u32 + 1;
+            let last_failure = prior_records
+                .iter()
+                .rev()
+                .find(|r| !r.is_verified_success());
+            match last_failure {
+                Some(last)
+                    if retrieval.enabled
+                        && retrieval.command.is_some()
+                        && attempt_no >= retrieval.min_attempt =>
+                {
+                    let request = crate::retrieval::RetrievalRequest {
+                        bead_id: bead.id.to_string(),
+                        title: bead.title.clone(),
+                        workspace: build_ws.display().to_string(),
+                        attempt: attempt_no,
+                        failure_summary: last.failure_summary.clone().unwrap_or_default(),
+                        terminal_reason: last.terminal_reason.clone(),
+                    };
+                    let result = crate::retrieval::retrieve(retrieval, &request).await;
+                    if !result.items.is_empty() {
+                        tracing::info!(
+                            bead_id = %bead_id,
+                            attempt = attempt_no,
+                            hints = result.items.len(),
+                            ids = ?result.ids(),
+                            bytes = result.rendered.len(),
+                            "injecting retrieved prior fixes into the prompt"
+                        );
+                        let _ = self.telemetry.emit(
+                            EventKind::PromptMemoryRetrieved {
+                                bead_id: bead_id.clone(),
+                                attempt: attempt_no,
+                                ids: result.ids(),
+                                bytes: result.rendered.len(),
+                            },
+                            chrono::Utc::now(),
+                        );
+                    }
+                    result.rendered
+                }
+                _ => String::new(),
+            }
+        };
+
         let mut prompt = match tokio::time::timeout(
             timeout_dur,
             tokio::task::spawn_blocking(move || {
                 if template_name == "split" {
-                    prompt_builder.build_split(&bead, &build_ws, &worker_name, failure_count)
+                    prompt_builder.build_split_with_history(
+                        &bead,
+                        &build_ws,
+                        &worker_name,
+                        failure_count,
+                        &failure_history,
+                        &prior_fixes,
+                    )
                 } else {
-                    prompt_builder.build_pluck(&bead, &build_ws, &worker_name)
+                    prompt_builder.build_pluck_with_history(
+                        &bead,
+                        &build_ws,
+                        &worker_name,
+                        &failure_history,
+                        &prior_fixes,
+                    )
                 }
             }),
         )
@@ -3527,7 +3751,7 @@ impl Worker {
                 }
 
                 // Extract tokens from the result while still in the execution span.
-                let exec_tokens = dispatch::extract_tokens(
+                let (exec_tokens, _) = dispatch::extract_tokens_with_envelope(
                     &adapter.token_extraction,
                     &result.stdout,
                     &result.stderr,
@@ -3574,11 +3798,18 @@ impl Worker {
             },
         };
 
-        // Extract tokens and compute cost for effort tracking.
-        let tokens =
-            dispatch::extract_tokens(&adapter.token_extraction, &output.stdout, &output.stderr);
+        // Extract tokens and compute cost for effort tracking. The agent's
+        // own result envelope fills in tokens the configured extractor missed
+        // and supplies the cost when it reports a positive one; otherwise the
+        // pricing table estimates it from the token counts.
+        let (tokens, reported_cost) = dispatch::extract_tokens_with_envelope(
+            &adapter.token_extraction,
+            &output.stdout,
+            &output.stderr,
+        );
         let model_name = adapter.model.as_deref().unwrap_or("");
-        let estimated_cost = cost::estimate_cost(&tokens, model_name, &self.config.pricing);
+        let estimated_cost = reported_cost
+            .or_else(|| cost::estimate_cost(&tokens, model_name, &self.config.pricing));
         // Read the figures out before `tokens` moves into the effort record —
         // the attempt ledger row below needs the same numbers.
         let (tokens_in, tokens_out) = (tokens.input_tokens, tokens.output_tokens);
@@ -3621,6 +3852,7 @@ impl Worker {
         self.outcome_handler
             .set_attempt_context(crate::outcome::AttemptContext {
                 adapter: adapter.name.clone(),
+                actor: self.qualified_id(),
                 model: adapter.model.clone(),
                 provider: adapter.provider.clone(),
                 // The prompt has been taken out of built_prompt above; its
@@ -4296,7 +4528,7 @@ impl Worker {
                         );
                         cancelled.store(true, Ordering::Release);
                         heartbeat_task.abort();
-                        return BeadAction::Released;
+                        return BeadAction::Released(ReleaseReason::RegistrationCancelled);
                     }
                     Ok(Ok(RegistrationResult::CorrelationFailed(error))) => {
                         tracing::warn!(
@@ -4306,7 +4538,7 @@ impl Worker {
                         );
                         cancelled.store(true, Ordering::Release);
                         heartbeat_task.abort();
-                        return BeadAction::Released;
+                        return BeadAction::Released(ReleaseReason::CiCorrelationFailed);
                     }
                     Ok(Ok(RegistrationResult::Disabled | RegistrationResult::NoPushedCommit)) => {}
                     Ok(Err(error)) => {
@@ -4322,7 +4554,7 @@ impl Worker {
                         }
                         cancelled.store(true, Ordering::Release);
                         heartbeat_task.abort();
-                        return BeadAction::Released;
+                        return BeadAction::Released(ReleaseReason::RegistrationCancelled);
                     }
                     Err(_) => {
                         tracing::error!(
@@ -4336,7 +4568,7 @@ impl Worker {
                         }
                         cancelled.store(true, Ordering::Release);
                         heartbeat_task.abort();
-                        return BeadAction::Released;
+                        return BeadAction::Released(ReleaseReason::RegistrationCancelled);
                     }
                 }
             }
@@ -4724,14 +4956,18 @@ impl Worker {
                     }
                 }
             }
-            BeadAction::Released => {
+            BeadAction::Released(release_reason) => {
                 // Release the bead back to open status.
                 tokio::time::timeout(Duration::from_secs(30), self.store.release(&bead.id))
                     .await??;
                 self.telemetry.emit(
                     EventKind::BeadReleased {
                         bead_id: bead.id.clone(),
-                        reason: "handler_action:released".to_string(),
+                        // The specific reason, not a single opaque string: a
+                        // release because work shipped but could not be closed
+                        // and a release because the gate found no work are
+                        // different problems with different fixes.
+                        reason: format!("handler_action:released/{release_reason}"),
                     },
                     chrono::Utc::now(),
                 )?;
@@ -4823,7 +5059,7 @@ impl Worker {
         match action {
             BeadAction::Interrupted => self.set_state(WorkerState::Stopped)?,
             BeadAction::Closed
-            | BeadAction::Released
+            | BeadAction::Released(_)
             | BeadAction::Deferred
             | BeadAction::Alerted
             | BeadAction::Quarantined
@@ -5459,14 +5695,15 @@ impl Worker {
             let rebuilt =
                 PromptBuilder::with_workspace(&candidate.prompt, &self.config.workspace.default)
                     .map(|builder| {
-                        builder
-                            .with_cross_workspace_skills(
-                                &self.config.strands.explore.workspaces,
-                                &self.config.workspace.labels,
-                            )
-                            .with_global_learnings(
-                                &self.config.strands.learning.global_learnings_file,
-                            )
+                        let builder = builder.with_cross_workspace_skills(
+                            &self.config.strands.explore.workspaces,
+                            &self.config.workspace.labels,
+                        );
+                        apply_learning_context_policy(
+                            builder,
+                            &self.config.strands.learning,
+                            &self.config.workspace.default,
+                        )
                     })
                     .and_then(|builder| {
                         builder.validate()?;
@@ -6788,6 +7025,13 @@ impl Worker {
         // Apply routing rules if configured.
         let (chosen_adapter_name, matched_rule) = self.apply_routing_rules(&default_adapter)?;
 
+        // N-T18: let the attempt ledger choose among configured candidates,
+        // inside the L1 envelope (evidence floor, minimum improvement,
+        // bounded exploration, frozen while degraded). Static routing is
+        // the fallback and the default when evidence is insufficient.
+        let (chosen_adapter_name, matched_rule) =
+            self.apply_evidence_routing(chosen_adapter_name, matched_rule, bead_id.as_ref());
+
         // Emit routing decision telemetry on every routing decision.
         if let Some(id) = bead_id {
             let model = default_adapter
@@ -6843,6 +7087,246 @@ impl Worker {
             ))?;
 
         Ok(adapter)
+    }
+
+    /// The cached ledger aggregates, rebuilt when older than the shortest
+    /// configured refresh interval. Also runs the canary evaluation on each
+    /// rebuild, so a regressed variant is stopped without any extra
+    /// scheduling (N-T19).
+    fn ledger_snapshot(&self) -> LedgerCache {
+        let refresh = self
+            .config
+            .agent
+            .evidence_routing
+            .refresh_secs
+            .min(self.config.prompt.experiments.refresh_secs)
+            .max(30);
+        let mut guard = self.ledger_cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(cache) = guard.as_ref() {
+            if cache.computed_at.elapsed() < Duration::from_secs(refresh) {
+                return cache.clone();
+            }
+        }
+        let log_dir = self.config.workspace.home.join("logs");
+        let window = self
+            .config
+            .agent
+            .evidence_routing
+            .window_days
+            .max(self.config.prompt.experiments.window_days)
+            .max(1);
+        let rows = crate::evidence_routing::ledger_rows(&log_dir, window);
+        let mut adapters = std::collections::HashMap::new();
+        for row in &rows {
+            let adapter = row
+                .get("adapter")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if adapter.is_empty() {
+                continue;
+            }
+            let entry = adapters.entry(adapter.clone()).or_insert_with(|| {
+                crate::evidence_routing::AdapterEvidence {
+                    adapter,
+                    ..Default::default()
+                }
+            });
+            entry.attempts += 1;
+            match row.get("outcome").and_then(|v| v.as_str()) {
+                Some("verified_success") => entry.verified += 1,
+                Some("infrastructure_failure") => entry.infrastructure += 1,
+                _ => {}
+            }
+            if let Some(cost) = row.get("estimated_cost_usd").and_then(|v| v.as_f64()) {
+                entry.cost_usd += cost;
+                entry.costed += 1;
+            }
+        }
+        let variants = crate::experiments::variant_outcomes(&rows);
+        let cache = LedgerCache {
+            computed_at: Instant::now(),
+            adapters,
+            variants,
+        };
+        *guard = Some(cache.clone());
+        drop(guard);
+        self.evaluate_prompt_canaries(&cache);
+        cache
+    }
+
+    /// N-T19: stop any configured prompt variant that regressed past the
+    /// margin. Receipts are idempotent; a stop is emitted once.
+    fn evaluate_prompt_canaries(&self, cache: &LedgerCache) {
+        let experiments = &self.config.prompt.experiments;
+        if !experiments.enabled || self.config.prompt.variants.is_empty() {
+            return;
+        }
+        let state_dir = crate::experiments::default_state_dir();
+        for (template, variants) in &self.config.prompt.variants {
+            for decision in
+                crate::experiments::evaluate(template, variants, &cache.variants, experiments)
+            {
+                if let crate::experiments::Decision::Stop {
+                    template,
+                    variant,
+                    variant_rate,
+                    baseline_rate,
+                    variant_attempts,
+                    baseline_attempts,
+                    ..
+                } = &decision
+                {
+                    match crate::experiments::record_stop(&state_dir, &decision) {
+                        Ok(true) => {
+                            tracing::warn!(
+                                template = %template,
+                                variant = %variant,
+                                variant_rate,
+                                baseline_rate,
+                                variant_attempts,
+                                baseline_attempts,
+                                "prompt variant regressed past the margin — stopped"
+                            );
+                            let _ = self.telemetry.emit(
+                                EventKind::ExperimentStopped {
+                                    template: template.clone(),
+                                    variant: variant.clone(),
+                                    variant_rate: *variant_rate,
+                                    baseline_rate: *baseline_rate,
+                                    variant_attempts: *variant_attempts,
+                                    baseline_attempts: *baseline_attempts,
+                                },
+                                chrono::Utc::now(),
+                            );
+                        }
+                        Ok(false) => {}
+                        Err(e) => tracing::warn!(
+                            template = %template,
+                            variant = %variant,
+                            error = %e,
+                            "could not record the canary stop receipt"
+                        ),
+                    }
+                }
+            }
+        }
+    }
+
+    /// N-T18: evidence-based selection among configured candidates after
+    /// static routing. Returns the (possibly changed) adapter and rule tag.
+    fn apply_evidence_routing(
+        &self,
+        static_adapter: String,
+        matched_rule: String,
+        bead_id: Option<&BeadId>,
+    ) -> (String, String) {
+        let config = &self.config.agent.evidence_routing;
+        if !config.enabled || config.candidates.is_empty() {
+            return (static_adapter, matched_rule);
+        }
+        // One choice per attempt: a later resolution for the same bead
+        // (prompt build, then dispatch) must see what the first one chose.
+        if let Some(id) = bead_id {
+            let sticky = self
+                .evidence_choice
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some((bead, chosen, rule)) = sticky.as_ref() {
+                if bead == id {
+                    return (chosen.clone(), rule.clone());
+                }
+            }
+        }
+        let cache = self.ledger_snapshot();
+        let degraded: std::collections::HashSet<String> =
+            crate::provider_health::degraded_adapters()
+                .into_iter()
+                .map(|s| s.adapter)
+                .collect();
+        let frozen = if is_workspace_unset(&self.current_workspace) {
+            None
+        } else {
+            match crate::gate_health::is_degraded(&self.current_workspace) {
+                Ok(true) => Some("workspace_degraded"),
+                _ => None,
+            }
+        };
+        let roll = {
+            // Cheap uniform sample without a new dependency: hash of time+worker.
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            std::time::SystemTime::now().hash(&mut h);
+            self.worker_name.hash(&mut h);
+            (h.finish() % 10_000) as f64 / 10_000.0
+        };
+        let choice = crate::evidence_routing::choose(
+            &static_adapter,
+            config,
+            &cache.adapters,
+            &degraded,
+            frozen,
+            roll,
+        );
+        // Only an adapter the dispatcher can load is a real choice.
+        let chosen = if choice.adapter != static_adapter
+            && self.dispatcher.adapter(&choice.adapter).is_none()
+        {
+            tracing::warn!(
+                adapter = %choice.adapter,
+                "evidence routing chose an adapter the dispatcher cannot load — keeping the static adapter"
+            );
+            static_adapter.clone()
+        } else {
+            choice.adapter.clone()
+        };
+        if let Some(id) = bead_id {
+            let considered = choice
+                .considered
+                .iter()
+                .map(|e| {
+                    serde_json::json!({
+                        "adapter": e.adapter,
+                        "attempts": e.attempts,
+                        "judged": e.judged(),
+                        "verified": e.verified,
+                        "success_rate": e.success_rate(),
+                        "cost_per_success": e.cost_per_success(),
+                    })
+                })
+                .collect();
+            let _ = self.telemetry.emit(
+                EventKind::EvidenceRoutingDecision {
+                    bead_id: id.clone(),
+                    static_adapter: static_adapter.clone(),
+                    chosen_adapter: chosen.clone(),
+                    reason: choice.reason.clone(),
+                    explored: choice.explored,
+                    considered,
+                },
+                chrono::Utc::now(),
+            );
+        }
+        let result = if chosen != static_adapter {
+            tracing::info!(
+                static_adapter = %static_adapter,
+                chosen_adapter = %chosen,
+                reason = %choice.reason,
+                explored = choice.explored,
+                "evidence routing selected a different adapter"
+            );
+            (chosen, format!("evidence:{}", choice.reason))
+        } else {
+            (static_adapter, matched_rule)
+        };
+        if let Some(id) = bead_id {
+            *self
+                .evidence_choice
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) =
+                Some((id.clone(), result.0.clone(), result.1.clone()));
+        }
+        result
     }
 
     /// Apply routing rules to determine the final adapter.
@@ -7457,7 +7941,7 @@ mod tests {
 
     #[tokio::test]
     async fn state_machine_reaches_config_reload_check_at_cycle_boundary() {
-        let _env_lock = crate::util::test_env::isolate_env();
+        let _env_lock = crate::util::test_env::isolate_env_admitted();
         let home = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", home.path());
@@ -7514,7 +7998,7 @@ mod tests {
     fn config_reload_requested_mid_dispatch_waits_for_cycle_boundary() {
         use std::collections::HashMap;
 
-        let _env_lock = crate::util::test_env::isolate_env();
+        let _env_lock = crate::util::test_env::isolate_env_admitted();
         let home = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         // TraceCapture only writes inside a bead workspace (one with .beads/).
@@ -7624,7 +8108,15 @@ mod tests {
         let terminal_state = runtime
             .block_on(async {
                 let request_reload_during_dispatch = async {
-                    tokio::time::timeout(Duration::from_secs(60), async {
+                    // 180s, not 60s: this is a hang guard, not the property
+                    // under test (which is that a reload waits for the cycle
+                    // boundary). CI pods are guaranteed 1000m CPU and the lib
+                    // suite takes ~309s there against ~37s on a 20-core box,
+                    // so waiting for a spawned process to create a file can
+                    // exceed a minute under contention. It failed exactly that
+                    // way in needle-ci-periodic-1789280220:
+                    // "old-config dispatch did not start: Elapsed(())".
+                    tokio::time::timeout(Duration::from_secs(180), async {
                         while !dispatch_started.exists() {
                             tokio::time::sleep(Duration::from_millis(10)).await;
                         }
@@ -7698,7 +8190,7 @@ mod tests {
         use std::collections::HashMap;
         use std::sync::atomic::{AtomicBool, Ordering};
 
-        let _env_lock = crate::util::test_env::isolate_env();
+        let _env_lock = crate::util::test_env::isolate_env_admitted();
         let home = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         // TraceCapture only writes inside a bead workspace (one with .beads/).
@@ -7788,7 +8280,15 @@ mod tests {
         let result = runtime.block_on(async {
             let request_invalid_reload =
                 async {
-                    tokio::time::timeout(Duration::from_secs(60), async {
+                    // 180s, not 60s: this is a hang guard, not the property
+                    // under test (which is that a reload waits for the cycle
+                    // boundary). CI pods are guaranteed 1000m CPU and the lib
+                    // suite takes ~309s there against ~37s on a 20-core box,
+                    // so waiting for a spawned process to create a file can
+                    // exceed a minute under contention. It failed exactly that
+                    // way in needle-ci-periodic-1789280220:
+                    // "old-config dispatch did not start: Elapsed(())".
+                    tokio::time::timeout(Duration::from_secs(180), async {
                         while !dispatch_started.exists() {
                             tokio::time::sleep(Duration::from_millis(10)).await;
                         }
@@ -8939,6 +9439,7 @@ mod tests {
 
     #[tokio::test]
     async fn do_select_with_no_beads_transitions_to_exhausted() {
+        let _env_lock = crate::util::test_env::isolate_env_admitted();
         let store = Arc::new(MockStore::empty());
         let mut config = valid_test_config();
         config.self_modification.hot_reload = false;
@@ -9065,8 +9566,82 @@ mod tests {
         assert_ne!(*worker.state(), WorkerState::AdmissionBlocked);
     }
 
+    /// Every test that drives the real selection cycle must neutralize the
+    /// launch admission gate.
+    ///
+    /// `do_select` opens with `hold_for_admission`, so a test that reaches it
+    /// without `isolate_env_admitted` — or without installing its own probe —
+    /// passes or fails according to the load of the machine running it, and
+    /// can hold indefinitely rather than fail, carrying the whole run past its
+    /// max duration. That is what turned
+    /// `config_reload_requested_mid_dispatch_waits_for_cycle_boundary` red on
+    /// needle-ci-t2h44 (2026-09-13), one run after the suite had gone green,
+    /// with 3689 other unit tests passing beside it.
+    ///
+    /// The rule is mechanical, so it is checked mechanically: a new test that
+    /// reaches `do_select` cannot reintroduce the flake without failing here
+    /// first, on the machine that wrote it.
+    #[test]
+    fn state_machine_tests_neutralize_the_launch_admission_gate() {
+        const SOURCE: &str = include_str!("mod.rs");
+
+        let lines: Vec<&str> = SOURCE.lines().collect();
+        let mut unguarded: Vec<&str> = Vec::new();
+        let mut index = 0;
+        while index < lines.len() {
+            let trimmed = lines[index].trim();
+            if trimmed != "#[test]" && !trimmed.starts_with("#[tokio::test") {
+                index += 1;
+                continue;
+            }
+
+            let mut signature = index + 1;
+            while signature < lines.len() && !lines[signature].contains(" fn ") {
+                signature += 1;
+            }
+            if signature >= lines.len() {
+                break;
+            }
+
+            // A test function in this module closes on its own four-space
+            // brace; every nested block is indented further.
+            let mut end = signature;
+            while end < lines.len() && lines[end] != "    }" {
+                end += 1;
+            }
+
+            let body = lines[signature..end].join("\n");
+            let drives_selection =
+                body.contains("do_select()") || body.contains("run_state_machine()");
+            let neutralized = body.contains("isolate_env_admitted()")
+                || body.contains("NEEDLE_LAUNCH_RESOURCE_PROBE")
+                || body.contains("NEEDLE_SKIP_LAUNCH_RESOURCE_CHECK");
+            if drives_selection && !neutralized {
+                unguarded.push(
+                    lines[signature]
+                        .split(" fn ")
+                        .nth(1)
+                        .and_then(|rest| rest.split('(').next())
+                        .unwrap_or("<unnamed>"),
+                );
+            }
+
+            index = end + 1;
+        }
+
+        assert!(
+            unguarded.is_empty(),
+            "these tests reach Worker::do_select without neutralizing the launch \
+             admission gate, so host load decides whether they pass: take \
+             crate::util::test_env::isolate_env_admitted(), or install your own \
+             NEEDLE_LAUNCH_RESOURCE_PROBE if the test is about admission \
+             itself: {unguarded:?}"
+        );
+    }
+
     #[tokio::test]
     async fn shutdown_flag_causes_stop() {
+        let _env_lock = crate::util::test_env::isolate_env_admitted();
         let store = Arc::new(MockStore::empty());
         let mut config = valid_test_config();
         config.worker.idle_action = IdleAction::Exit;
@@ -9094,6 +9669,7 @@ mod tests {
 
     #[tokio::test]
     async fn do_select_with_beads_transitions_to_claiming() {
+        let _env_lock = crate::util::test_env::isolate_env_admitted();
         let bead = make_test_bead("needle-test-001");
         let store = Arc::new(MockStore::new(vec![bead]));
         let mut worker = make_worker(store);
@@ -9106,6 +9682,7 @@ mod tests {
 
     #[tokio::test]
     async fn do_select_applies_pluck_label_filters_before_claiming() {
+        let _env_lock = crate::util::test_env::isolate_env_admitted();
         let mut deferred = make_test_bead("needle-deferred");
         deferred.labels = vec!["deferred".to_string()];
         let eligible = make_test_bead("needle-eligible");
@@ -9163,6 +9740,7 @@ mod tests {
 
     #[tokio::test]
     async fn regression_2026_08_17_worker_never_holds_two_claims() {
+        let _env_lock = crate::util::test_env::isolate_env_admitted();
         // On 2026-08-17, needle-55ec0193 remained held after a nominally
         // successful dispatch and was re-claimed by the same worker in the same
         // second. A second selection cycle must not overwrite that first claim
@@ -9235,6 +9813,7 @@ mod tests {
 
     #[tokio::test]
     async fn regression_2026_08_17_exit_zero_without_close_cannot_loop() {
+        let _env_lock = crate::util::test_env::isolate_env_admitted();
         // Exact incident fixture (needle-3386daef / needle-55ec0193):
         //   02:52 claim -> 02:58 success (6m), worker needle-otlp-test
         //   04:49 claim -> 04:59 timeout (10m), worker seam-2
@@ -9298,7 +9877,7 @@ mod tests {
         let action = worker.do_handle().await;
 
         assert_eq!(worker.last_outcome.as_deref(), Some("failure"));
-        assert_eq!(action, BeadAction::Released);
+        assert!(matches!(action, BeadAction::Released(_)));
 
         // The state-machine boundary must consume the action before advancing.
         // do_handle() only DECIDES the action; apply_bead_action() performs it, so the
@@ -10698,6 +11277,7 @@ mod tests {
 
     #[tokio::test]
     async fn do_select_clears_race_lost_this_cycle_and_retry_count() {
+        let _env_lock = crate::util::test_env::isolate_env_admitted();
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut config = valid_test_config();
         config.self_modification.hot_reload = false;
@@ -12703,6 +13283,7 @@ mod tests {
 
     #[tokio::test]
     async fn exhausted_idle_clears_current_bead_to_prevent_false_heartbeat() {
+        let _env_lock = crate::util::test_env::isolate_env_admitted();
         // Regression test for bead needle-b5cd1938: verify that transitioning to
         // EXHAUSTED state clears current_bead, preventing EXHAUSTED_IDLE heartbeats
         // from incorrectly reporting the worker as still working on a bead.

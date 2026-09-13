@@ -12,6 +12,14 @@
 # A no-op edit to this file is therefore the way to force a rebuild without
 # disturbing that contract.
 # Rebuild marker (2026-09-12): replay 0.1.8 after exact-revision diffing landed.
+# Rebuild marker (2026-09-12, retry 2): the first replay was externally
+# superseded after the base tag published and before with-deps could start.
+# Rebuild marker (2026-09-12, retry 3): the dependency-stub repair push reached
+# Forgejo but its webhook event never reached the Argo Events sensor.
+# Rebuild marker (2026-09-12, retry 4): GitHub delivery resumed after the
+# webhooks-ci ingress received a hostname-valid cert-manager certificate.
+# Rebuild marker (2026-09-12, retry 5): the public Cloudflare DNS record is
+# now authoritative in addition to the tailnet-only split-DNS record.
 #
 # After triggering, confirm BOTH tags moved -- the template runs docker-build-base
 # and docker-build-with-deps as separate kaniko steps, and a run that is stopped
@@ -48,6 +56,21 @@ RUN set -eux; \
     install -m 0755 "${root}/sccache" /usr/local/bin/sccache; \
     rm -rf "/tmp/${archive}" "${root}"; \
     test "$(sccache --version)" = "sccache ${SCCACHE_VERSION}"
+
+# The P2/P3 integration fixtures invoke bead-rs at test runtime. Bake the exact
+# release binary into the builder so six parallel verification pods do not
+# each download the same executable before useful work can start. This must
+# stay in lockstep with NEEDLE's bead-rs compatibility contract.
+ARG BEAD_RS_VERSION=0.2.6
+ARG BEAD_RS_SHA256=15324894af38a8ffce8ad54da47ac067c7fd198779a7744f967bcf56a9aa3aee
+RUN set -eux; \
+    curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-all-errors \
+      "https://github.com/jedarden/bead-rs/releases/download/v${BEAD_RS_VERSION}/bead-x86_64-unknown-linux-gnu" \
+      -o /tmp/bead-dl; \
+    echo "${BEAD_RS_SHA256}  /tmp/bead-dl" | sha256sum --check --strict; \
+    install -m 0755 /tmp/bead-dl /usr/local/bin/bead; \
+    rm -f /tmp/bead-dl; \
+    test "$(bead --version | cut -d' ' -f1-2)" = "bead ${BEAD_RS_VERSION}"
 
 # Install gh CLI
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
@@ -89,5 +112,28 @@ RUN rustup toolchain install 1.95.0 \
     --target x86_64-unknown-linux-gnu \
     --target aarch64-apple-darwin \
     --target aarch64-unknown-linux-gnu
+
+# Archive one compiled test build and reuse it in low-memory runner pods. Keep
+# this addition after the expensive pinned-toolchain layer so a nextest-only
+# image change preserves the previously published toolchain cache lineage. Pin
+# both the release tarball and the extracted executable: the first protects the
+# download boundary, while the second catches an upstream asset being repacked
+# with different contents under the same filename.
+ARG CARGO_NEXTEST_VERSION=0.9.144
+ARG CARGO_NEXTEST_ARCHIVE_SHA256=20ed0a7d3d6f8dda9bb1b0bcb5838aea5784d3e2360746280868996d709dde0a
+ARG CARGO_NEXTEST_BINARY_SHA256=92e0def8d330c7bb295175a998ad73f65670dc3d216d1ae7a28f286d130ce1ad
+RUN set -eux; \
+    archive="cargo-nextest-${CARGO_NEXTEST_VERSION}-x86_64-unknown-linux-musl.tar.gz"; \
+    root="/tmp/cargo-nextest-${CARGO_NEXTEST_VERSION}"; \
+    curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-all-errors \
+      "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-${CARGO_NEXTEST_VERSION}/${archive}" \
+      -o "/tmp/${archive}"; \
+    echo "${CARGO_NEXTEST_ARCHIVE_SHA256}  /tmp/${archive}" | sha256sum --check --strict; \
+    mkdir -p "${root}"; \
+    tar -xzf "/tmp/${archive}" -C "${root}"; \
+    echo "${CARGO_NEXTEST_BINARY_SHA256}  ${root}/cargo-nextest" | sha256sum --check --strict; \
+    install -m 0755 "${root}/cargo-nextest" /usr/local/bin/cargo-nextest; \
+    cargo-nextest --version | grep -Fx "release: ${CARGO_NEXTEST_VERSION}"; \
+    rm -rf "/tmp/${archive}" "${root}"
 
 WORKDIR /workspace

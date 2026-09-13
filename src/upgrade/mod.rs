@@ -561,6 +561,85 @@ fn perform_upgrade_internal(telemetry: Option<&Telemetry>) -> Result<PathBuf> {
         .read_to_end(&mut content)
         .context("failed to read downloaded content")?;
 
+    let stable_path = stage_and_promote(&content, &check.latest_version, false)?;
+
+    // Install companion transform binaries to the same directory as needle.
+    let bin_dir = needle_home().join("bin");
+    let install_dir = bin_dir.as_path();
+    if let Ok(suffix) = get_platform_suffix() {
+        install_transform_binaries(install_dir, suffix);
+    }
+
+    if let Some(notes) = &check.release_notes {
+        println!("\nRelease notes:\n{}", notes);
+    }
+
+    Ok(stable_path)
+}
+
+/// Install a locally built `needle` binary through the same release channel
+/// a downloaded one takes: write it to `:testing`, run the canary suite when
+/// a canary workspace exists (unless `skip_canary`), then promote to
+/// `:stable`, which running workers pick up at their next bead boundary.
+///
+/// `binary` may sit next to `needle-transform-*` companions (a `cargo build
+/// --release` target directory does); those are installed alongside, each
+/// through a temp file and rename so a worker never execs a half-written
+/// transform.
+///
+/// This exists because `cp`/`mv` onto `needle-stable` while workers run
+/// disrupts sessions or stalls hot-reload permanently (see `needle upgrade
+/// --help`), and the GitHub-release path cannot carry an unreleased build.
+pub fn perform_upgrade_from_file(binary: &Path, skip_canary: bool) -> Result<PathBuf> {
+    if !binary.is_file() {
+        bail!("binary not found: {}", binary.display());
+    }
+    let content =
+        fs::read(binary).with_context(|| format!("failed to read binary {}", binary.display()))?;
+    let label = format!("local build {}", binary.display());
+    println!("Installing {label} via :testing...");
+
+    let stable_path = stage_and_promote(&content, &label, skip_canary)?;
+
+    // Companion transforms built alongside (same directory).
+    if let Some(dir) = binary.parent() {
+        let bin_dir = needle_home().join("bin");
+        for name in [
+            "needle-transform-claude",
+            "needle-transform-codex",
+            "needle-transform-opencode",
+            "needle-transform-omp",
+        ] {
+            let source = dir.join(name);
+            if !source.is_file() {
+                continue;
+            }
+            let dest = bin_dir.join(name);
+            let temp = bin_dir.join(format!(".{name}.tmp"));
+            match fs::copy(&source, &temp).and_then(|_| {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    fs::set_permissions(&temp, fs::Permissions::from_mode(0o755))?;
+                }
+                fs::rename(&temp, &dest)
+            }) {
+                Ok(()) => println!("Installed {name} to {}", dest.display()),
+                Err(e) => {
+                    let _ = fs::remove_file(&temp);
+                    eprintln!("WARNING: failed to install {name}: {e}");
+                }
+            }
+        }
+    }
+
+    Ok(stable_path)
+}
+
+/// Write `content` to `:testing`, validate it with the canary suite when a
+/// canary workspace exists (and `skip_canary` is false), and promote it to
+/// `:stable`. Returns the stable path.
+fn stage_and_promote(content: &[u8], label: &str, skip_canary: bool) -> Result<PathBuf> {
     // Write the new binary to :testing channel for canary validation.
     let home = needle_home();
     let bin_dir = home.join("bin");
@@ -568,7 +647,7 @@ fn perform_upgrade_internal(telemetry: Option<&Telemetry>) -> Result<PathBuf> {
     let testing_binary = bin_dir.join("needle-testing");
 
     // Write the new binary to :testing.
-    let mut cursor = Cursor::new(&content);
+    let mut cursor = Cursor::new(content);
     {
         let mut file =
             fs::File::create(&testing_binary).context("failed to create testing binary file")?;
@@ -583,15 +662,19 @@ fn perform_upgrade_internal(telemetry: Option<&Telemetry>) -> Result<PathBuf> {
             .context("failed to set executable permissions on testing binary")?;
     }
 
-    println!(
-        "Downloaded version {} to {}",
-        check.latest_version,
-        testing_binary.display()
-    );
+    println!("Staged {} to {}", label, testing_binary.display());
 
     // Run canary validation if canary workspace exists.
     let canary_workspace = home.join("canary");
-    if canary_workspace.exists() {
+    if skip_canary {
+        println!("Skipping canary validation as requested (--skip-canary).");
+        use crate::canary::CanaryRunner;
+        let runner = CanaryRunner::new(home.clone(), canary_workspace, 300);
+        runner
+            .promote()
+            .context("failed to promote testing binary to stable")?;
+        println!("Promoted to :stable (canary skipped)");
+    } else if canary_workspace.exists() {
         println!("Running canary validation...");
 
         use crate::canary::CanaryRunner;
@@ -658,20 +741,8 @@ fn perform_upgrade_internal(telemetry: Option<&Telemetry>) -> Result<PathBuf> {
         println!("Promoted to :stable (without canary validation)");
     }
 
-    println!("Successfully upgraded to version {}!", check.latest_version);
-
-    // Install companion transform binaries to the same directory as needle.
-    let stable_path = bin_dir.join("needle-stable");
-    let install_dir = bin_dir.as_path();
-    if let Ok(suffix) = get_platform_suffix() {
-        install_transform_binaries(install_dir, suffix);
-    }
-
-    if let Some(notes) = &check.release_notes {
-        println!("\nRelease notes:\n{}", notes);
-    }
-
-    Ok(stable_path)
+    println!("Successfully installed {label}!");
+    Ok(bin_dir.join("needle-stable"))
 }
 
 /// Get the path to the current binary.
