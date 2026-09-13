@@ -68,19 +68,14 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
 // LogGuard — RAII guard for subscriber scope
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// RAII guard that resets the tracing subscriber when dropped.
+/// RAII guard that restores the previous thread-local tracing subscriber.
 ///
-/// This ensures test isolation by automatically restoring the previous
-/// subscriber when the guard goes out of scope.
+/// `tracing::subscriber::set_default` only keeps the subscriber installed for
+/// the lifetime of the guard it returns. Keep that real guard here: replacing
+/// it with a marker (or dropping it inside `setup_log_capture`) leaves the
+/// capture buffer empty when nextest runs each test in its own process.
 pub struct LogGuard {
-    _private: (),
-}
-
-impl Drop for LogGuard {
-    fn drop(&mut self) {
-        // Reset to default subscriber (no-op if already reset)
-        let _ = tracing::subscriber::set_default(tracing::subscriber::NoSubscriber::default());
-    }
+    _default_guard: tracing::subscriber::DefaultGuard,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -135,10 +130,14 @@ pub fn setup_log_capture_with_level(level: tracing::Level) -> (CapturedLogs, Log
         .with_max_level(level)
         .finish();
 
-    // Set the subscriber as default
-    let _ = tracing::subscriber::set_default(subscriber);
+    let default_guard = tracing::subscriber::set_default(subscriber);
 
-    (captured, LogGuard { _private: () })
+    (
+        captured,
+        LogGuard {
+            _default_guard: default_guard,
+        },
+    )
 }
 
 /// Setup log capture with JSON structured output.
@@ -187,9 +186,14 @@ pub fn setup_json_log_capture_with_level(level: tracing::Level) -> (CapturedLogs
         .with_max_level(level)
         .finish();
 
-    let _ = tracing::subscriber::set_default(subscriber);
+    let default_guard = tracing::subscriber::set_default(subscriber);
 
-    (captured, LogGuard { _private: () })
+    (
+        captured,
+        LogGuard {
+            _default_guard: default_guard,
+        },
+    )
 }
 
 /// Setup log capture that also writes to stdout.
@@ -228,9 +232,14 @@ pub fn setup_log_capture_with_stdout_and_level(level: tracing::Level) -> (Captur
         .with_max_level(level)
         .finish();
 
-    let _ = tracing::subscriber::set_default(subscriber);
+    let default_guard = tracing::subscriber::set_default(subscriber);
 
-    (captured, LogGuard { _private: () })
+    (
+        captured,
+        LogGuard {
+            _default_guard: default_guard,
+        },
+    )
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

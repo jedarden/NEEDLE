@@ -42,10 +42,16 @@ use std::time::Duration;
 // Import log capture helper for verifying log messages
 use super::log_capture_helper;
 
-/// Helper to get a test heartbeat directory.
-fn test_heartbeat_dir() -> PathBuf {
+/// Own an isolated heartbeat directory for the full lifetime of one test.
+///
+/// Returning only `dir.path()` drops and deletes the `TempDir` before the test
+/// starts. Also set `health.heartbeat_dir` explicitly below: otherwise the
+/// production resolver correctly prefers `$HOME`, and these tests can touch a
+/// real worker's heartbeat directory instead of their fixture.
+fn test_heartbeat_dir() -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
-    dir.path().join("state").join("heartbeats")
+    let heartbeat_dir = dir.path().join("state").join("heartbeats");
+    (dir, heartbeat_dir)
 }
 
 /// Integration test: verify SIGTERM removes heartbeat file.
@@ -59,9 +65,9 @@ fn test_heartbeat_dir() -> PathBuf {
 #[tokio::test]
 async fn sigterm_removes_heartbeat_file() {
     // Setup log capture to verify cleanup logging
-    let (logs, _guard) = log_capture_helper::setup_log_capture();
+    let (logs, _guard) = log_capture_helper::setup_log_capture_with_level(tracing::Level::DEBUG);
 
-    let heartbeat_dir = test_heartbeat_dir();
+    let (_temp_dir, heartbeat_dir) = test_heartbeat_dir();
     let worker_id = "sigterm-test-worker";
 
     // Create a minimal config for testing
@@ -74,6 +80,8 @@ async fn sigterm_removes_heartbeat_file() {
 
     let mut config = needle::config::Config::default();
     config.workspace.home = config_dir.to_path_buf();
+    config.workspace.default = config_dir.to_path_buf();
+    config.health.heartbeat_dir = Some(heartbeat_dir.clone());
     config.health.heartbeat_interval_secs = 1;
     config.health.heartbeat_ttl_secs = 5;
 
@@ -109,7 +117,7 @@ async fn sigterm_removes_heartbeat_file() {
     );
 
     // Verify cleanup was logged
-    log_capture_helper::assert_log_contains(&logs, "cleanup");
+    log_capture_helper::assert_log_contains(&logs, "heartbeat file removed successfully");
 
     // Expected severity: INFO or DEBUG
     // Rationale: Successful cleanup is a normal operational event, not a failure.
@@ -130,13 +138,15 @@ async fn sigterm_removes_heartbeat_file() {
 #[tokio::test]
 async fn drop_trait_cleans_up_heartbeat() {
     // Setup log capture to verify Drop cleanup logging
-    let (logs, _guard) = log_capture_helper::setup_log_capture();
+    let (logs, _guard) = log_capture_helper::setup_log_capture_with_level(tracing::Level::DEBUG);
 
-    let heartbeat_dir = test_heartbeat_dir();
+    let (_temp_dir, heartbeat_dir) = test_heartbeat_dir();
     let config_dir = heartbeat_dir.parent().unwrap().parent().unwrap();
 
     let mut config = needle::config::Config::default();
     config.workspace.home = config_dir.to_path_buf();
+    config.workspace.default = config_dir.to_path_buf();
+    config.health.heartbeat_dir = Some(heartbeat_dir.clone());
     config.health.heartbeat_interval_secs = 1;
     config.health.heartbeat_ttl_secs = 5;
 
@@ -169,7 +179,7 @@ async fn drop_trait_cleans_up_heartbeat() {
     );
 
     // Verify Drop cleanup was logged
-    log_capture_helper::assert_log_contains(&logs, "drop");
+    log_capture_helper::assert_log_contains(&logs, "heartbeat file removed successfully");
 
     // Expected severity: INFO or DEBUG
     // Rationale: Drop trait cleanup is a fallback mechanism that executes normally
@@ -192,11 +202,13 @@ async fn stop_is_idempotent() {
     // Setup log capture to verify idempotent behavior
     let (logs, _guard) = log_capture_helper::setup_log_capture();
 
-    let heartbeat_dir = test_heartbeat_dir();
+    let (_temp_dir, heartbeat_dir) = test_heartbeat_dir();
     let config_dir = heartbeat_dir.parent().unwrap().parent().unwrap();
 
     let mut config = needle::config::Config::default();
     config.workspace.home = config_dir.to_path_buf();
+    config.workspace.default = config_dir.to_path_buf();
+    config.health.heartbeat_dir = Some(heartbeat_dir.clone());
     config.health.heartbeat_interval_secs = 1;
     config.health.heartbeat_ttl_secs = 5;
 
@@ -242,21 +254,25 @@ async fn stop_is_idempotent() {
 ///
 /// The test simulates the signal handling flow: signal → shutdown flag → stop() → cleanup.
 ///
-/// Log capture verifies that each signal type is properly logged during cleanup.
+/// Log capture verifies that every simulated signal reaches the same cleanup
+/// path. `HealthMonitor` sees the shared shutdown flag, not the signal number.
 #[tokio::test]
 async fn cleanup_integration_on_all_shutdown_signals() {
-    let heartbeat_dir = test_heartbeat_dir();
+    let (_temp_dir, heartbeat_dir) = test_heartbeat_dir();
     let config_dir = heartbeat_dir.parent().unwrap().parent().unwrap();
 
     let mut config = needle::config::Config::default();
     config.workspace.home = config_dir.to_path_buf();
+    config.workspace.default = config_dir.to_path_buf();
+    config.health.heartbeat_dir = Some(heartbeat_dir.clone());
     config.health.heartbeat_interval_secs = 1;
     config.health.heartbeat_ttl_secs = 5;
 
     // Test all shutdown signal types: SIGTERM, SIGINT, SIGHUP
     for signal_name in &["SIGTERM", "SIGINT", "SIGHUP"] {
         // Setup log capture for each signal type test
-        let (logs, _guard) = log_capture_helper::setup_log_capture();
+        let (logs, _guard) =
+            log_capture_helper::setup_log_capture_with_level(tracing::Level::DEBUG);
 
         let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let worker_id = format!("signal-test-{}", signal_name);
@@ -292,8 +308,10 @@ async fn cleanup_integration_on_all_shutdown_signals() {
             signal_name
         );
 
-        // Verify signal-specific logging
-        log_capture_helper::assert_log_contains(&logs, signal_name);
+        // HealthMonitor receives a shutdown flag, not the originating signal
+        // number. Assert the production cleanup event rather than a signal
+        // name that only exists in this test's local variable.
+        log_capture_helper::assert_log_contains(&logs, "heartbeat file removed successfully");
         tracing::info!(
             "✓ {} signal path validated: cleanup called, file removed, logs verified",
             signal_name
@@ -312,11 +330,13 @@ async fn stop_works_when_emitter_already_exited() {
     // Setup log capture to verify edge case handling
     let (logs, _guard) = log_capture_helper::setup_log_capture();
 
-    let heartbeat_dir = test_heartbeat_dir();
+    let (_temp_dir, heartbeat_dir) = test_heartbeat_dir();
     let config_dir = heartbeat_dir.parent().unwrap().parent().unwrap();
 
     let mut config = needle::config::Config::default();
     config.workspace.home = config_dir.to_path_buf();
+    config.workspace.default = config_dir.to_path_buf();
+    config.health.heartbeat_dir = Some(heartbeat_dir.clone());
     config.health.heartbeat_interval_secs = 1;
     config.health.heartbeat_ttl_secs = 5;
 
@@ -371,9 +391,9 @@ async fn e2e_signal_handler_cleanup_flow() {
     use std::time::Instant;
 
     // Setup log capture for end-to-end signal flow verification
-    let (logs, _guard) = log_capture_helper::setup_log_capture();
+    let (logs, _guard) = log_capture_helper::setup_log_capture_with_level(tracing::Level::DEBUG);
 
-    let heartbeat_dir = test_heartbeat_dir();
+    let (_temp_dir, heartbeat_dir) = test_heartbeat_dir();
     let config_dir = heartbeat_dir.parent().unwrap().parent().unwrap();
     fs::create_dir_all(&heartbeat_dir).unwrap();
 
@@ -407,6 +427,8 @@ heartbeat_ttl_secs = 5
 
     let mut config = needle::config::Config::default();
     config.workspace.home = config_dir.to_path_buf();
+    config.workspace.default = config_dir.to_path_buf();
+    config.health.heartbeat_dir = Some(heartbeat_dir.clone());
     config.health.heartbeat_interval_secs = 1;
     config.health.heartbeat_ttl_secs = 5;
 
@@ -446,9 +468,9 @@ heartbeat_ttl_secs = 5
         "heartbeat file must be removed after signal handler flow completes"
     );
 
-    // Verify signal flow logging
-    log_capture_helper::assert_log_contains(&logs, "signal");
-    log_capture_helper::assert_log_contains(&logs, "cleanup");
+    // The monitor observes the shared shutdown flag, not the signal number.
+    // Its observable cleanup event is the artifact this test can verify.
+    log_capture_helper::assert_log_contains(&logs, "heartbeat file removed successfully");
 
     tracing::info!(
         "✓ End-to-end signal handler cleanup flow validated in {:?} with log verification",
@@ -467,13 +489,16 @@ async fn e2e_cleanup_in_all_worker_states() {
     // Test cleanup when worker is in different states
     for (state_name, simulate_work) in [("idle", false), ("processing", true)] {
         // Setup log capture for each worker state test
-        let (logs, _guard) = log_capture_helper::setup_log_capture();
+        let (logs, _guard) =
+            log_capture_helper::setup_log_capture_with_level(tracing::Level::DEBUG);
 
-        let heartbeat_dir = test_heartbeat_dir();
+        let (_temp_dir, heartbeat_dir) = test_heartbeat_dir();
         let config_dir = heartbeat_dir.parent().unwrap().parent().unwrap();
 
         let mut config = needle::config::Config::default();
         config.workspace.home = config_dir.to_path_buf();
+        config.workspace.default = config_dir.to_path_buf();
+        config.health.heartbeat_dir = Some(heartbeat_dir.clone());
         config.health.heartbeat_interval_secs = 1;
         config.health.heartbeat_ttl_secs = 5;
 
@@ -520,7 +545,7 @@ async fn e2e_cleanup_in_all_worker_states() {
         );
 
         // Verify cleanup succeeded in this state
-        log_capture_helper::assert_log_contains(&logs, "cleanup");
+        log_capture_helper::assert_log_contains(&logs, "heartbeat file removed successfully");
         log_capture_helper::assert_log_not_contains(&logs, "ERROR");
 
         tracing::info!(
@@ -539,13 +564,15 @@ async fn e2e_cleanup_in_all_worker_states() {
 #[tokio::test]
 async fn e2e_no_stale_heartbeats_after_multiple_cycles() {
     // Setup log capture to verify multiple cycles
-    let (logs, _guard) = log_capture_helper::setup_log_capture();
+    let (logs, _guard) = log_capture_helper::setup_log_capture_with_level(tracing::Level::DEBUG);
 
-    let heartbeat_dir = test_heartbeat_dir();
+    let (_temp_dir, heartbeat_dir) = test_heartbeat_dir();
     let config_dir = heartbeat_dir.parent().unwrap().parent().unwrap();
 
     let mut config = needle::config::Config::default();
     config.workspace.home = config_dir.to_path_buf();
+    config.workspace.default = config_dir.to_path_buf();
+    config.health.heartbeat_dir = Some(heartbeat_dir.clone());
     config.health.heartbeat_interval_secs = 1;
     config.health.heartbeat_ttl_secs = 5;
 
@@ -593,7 +620,8 @@ async fn e2e_no_stale_heartbeats_after_multiple_cycles() {
     );
 
     // Verify cleanup was logged for all cycles
-    let cleanup_count = log_capture_helper::count_log_occurrences(&logs, "cleanup");
+    let cleanup_count =
+        log_capture_helper::count_log_occurrences(&logs, "heartbeat file removed successfully");
     assert!(
         cleanup_count >= 5,
         "expected at least 5 cleanup log entries, got {}",
@@ -612,13 +640,15 @@ async fn e2e_no_stale_heartbeats_after_multiple_cycles() {
 #[tokio::test]
 async fn e2e_atexit_handler_cleans_up_heartbeat() {
     // Setup log capture for atexit handler verification
-    let (logs, _guard) = log_capture_helper::setup_log_capture();
+    let (logs, _guard) = log_capture_helper::setup_log_capture_with_level(tracing::Level::DEBUG);
 
-    let heartbeat_dir = test_heartbeat_dir();
+    let (_temp_dir, heartbeat_dir) = test_heartbeat_dir();
     let config_dir = heartbeat_dir.parent().unwrap().parent().unwrap();
 
     let mut config = needle::config::Config::default();
     config.workspace.home = config_dir.to_path_buf();
+    config.workspace.default = config_dir.to_path_buf();
+    config.health.heartbeat_dir = Some(heartbeat_dir.clone());
     config.health.heartbeat_interval_secs = 1;
     config.health.heartbeat_ttl_secs = 5;
 
@@ -643,7 +673,7 @@ async fn e2e_atexit_handler_cleans_up_heartbeat() {
     assert!(!heartbeat_path.exists());
 
     // Verify atexit cleanup was logged
-    log_capture_helper::assert_log_contains(&logs, "cleanup");
+    log_capture_helper::assert_log_contains(&logs, "heartbeat file removed successfully");
     log_capture_helper::assert_log_not_contains(&logs, "ERROR");
 
     tracing::info!("✓ Atexit handler cleanup path validated with log verification");
@@ -654,18 +684,20 @@ async fn e2e_atexit_handler_cleans_up_heartbeat() {
 /// This test validates the complete signal handling flow for all three signal types
 /// (SIGTERM, SIGINT, SIGHUP) ensuring proper heartbeat cleanup in all cases.
 ///
-/// Log capture verifies that all signal types are properly logged throughout the lifecycle.
+/// Log capture verifies that every signal reaches the heartbeat cleanup path.
 #[tokio::test]
 #[cfg(unix)]
 async fn e2e_all_signals_with_full_worker_lifecycle() {
     // Setup log capture for comprehensive lifecycle verification
-    let (logs, _guard) = log_capture_helper::setup_log_capture();
+    let (logs, _guard) = log_capture_helper::setup_log_capture_with_level(tracing::Level::DEBUG);
 
-    let heartbeat_dir = test_heartbeat_dir();
+    let (_temp_dir, heartbeat_dir) = test_heartbeat_dir();
     let config_dir = heartbeat_dir.parent().unwrap().parent().unwrap();
 
     let mut config = needle::config::Config::default();
     config.workspace.home = config_dir.to_path_buf();
+    config.workspace.default = config_dir.to_path_buf();
+    config.health.heartbeat_dir = Some(heartbeat_dir.clone());
     config.health.heartbeat_interval_secs = 1;
     config.health.heartbeat_ttl_secs = 5;
 
@@ -728,10 +760,12 @@ async fn e2e_all_signals_with_full_worker_lifecycle() {
         );
     }
 
-    // Verify all signal types were logged
-    for signal_name in &["SIGTERM", "SIGINT", "SIGHUP"] {
-        log_capture_helper::assert_log_contains(&logs, signal_name);
-    }
+    // Each simulated signal must reach the same production cleanup path.
+    assert!(
+        log_capture_helper::count_log_occurrences(&logs, "heartbeat file removed successfully")
+            >= 3,
+        "each shutdown signal should remove its heartbeat"
+    );
     log_capture_helper::assert_log_not_contains(&logs, "ERROR");
 
     tracing::info!("✓ All signal types validated with full worker lifecycle and log verification");
