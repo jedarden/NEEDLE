@@ -1,13 +1,13 @@
 {
-  "timestamp": "2026-09-13T17:07:34.435223919Z",
-  "total_open_beads": 609,
+  "timestamp": "2026-09-13T18:07:38.754111021Z",
+  "total_open_beads": 614,
   "exclusion_criteria": {
     "has_assignee": 3,
     "manually_blocked": 19,
-    "has_dependencies": 451,
+    "has_dependencies": 455,
     "resource_conflicts": 6
   },
-  "final_candidate_count": 190,
+  "final_candidate_count": 191,
   "excluded_beads": [
     {
       "bead_id": "needle-6b02eb9d",
@@ -556,6 +556,17 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 4,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-dc21a48b",
+      "title": "Apply validated Resolve decisions to bead lifecycle",
+      "priority": 1,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
       "has_resource_conflicts": false,
       "conflict_count": 0
     },
@@ -4412,6 +4423,39 @@
     {
       "bead_id": "needle-974def8e",
       "title": "Add an aggregate .needle/logs/ byte budget -- per-identifier 2GiB cap gives no fleet-wide bound",
+      "priority": 2,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-754e76c0",
+      "title": "Implement complete decision execution with gate and shipped-work verification",
+      "priority": 2,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-147da84f",
+      "title": "Implement retry and blocked decision execution with failure accounting",
+      "priority": 2,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-4f66923a",
+      "title": "Implement split decision execution with Mitosis validation and dedup",
       "priority": 2,
       "assignee": null,
       "manual_blocked": false,
