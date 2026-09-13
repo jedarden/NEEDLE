@@ -159,7 +159,7 @@ nextest_assert_line="$(grep -nF 'cargo-nextest --version | grep -Fx "release: ${
 [[ "$(tr -d '\n' < "$CI_VERSION_FILE")" == "0.1.11" ]] \
   || fail 'ci/VERSION must move with the cargo-nextest image contents'
 grep -Fq 'nextest-version = { required = "0.9.144" }' "$NEXTEST_CONFIG" \
-  || fail 'nextest config must require the runner image version exactly'
+  || fail 'nextest config must set the minimum supported runner version'
 grep -Fq '[profile.ci]' "$NEXTEST_CONFIG" \
   || fail 'nextest config must declare the CI profile'
 grep -Fq 'fail-fast = false' "$NEXTEST_CONFIG" \

@@ -19,11 +19,11 @@ extracted="$(mktemp "${TMPDIR:-/tmp}/dod-modes-XXXXXX.sh")"
 test_tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/dod-modes-tmp-root-XXXXXX")"
 trap 'rm -f "$extracted"; rm -rf "$test_tmp_root"' EXIT
 
-for fn in needle_now_ms needle_duration_event reap_orphans run_check lane_tmp cleanup_lane_tmps run_slow_cargo_check run_slow_nextest_check needle_slow_targets needle_cargo_selector needle_nextest_filter needle_validate_archive_mode selected_cargo_targets needle_declared_test_harnesses needle_expected_slow_targets needle_validate_slow_target_coverage needle_affected_test_targets needle_clippy_selectors needle_run_clippy needle_gate_skips_slow_lane; do
+for fn in needle_now_ms needle_duration_event reap_orphans run_check lane_tmp cleanup_lane_tmps run_slow_cargo_check needle_validate_nextest_release run_slow_nextest_check needle_slow_targets needle_cargo_selector needle_nextest_filter needle_validate_archive_mode selected_cargo_targets needle_declared_test_harnesses needle_expected_slow_targets needle_validate_slow_target_coverage needle_affected_test_targets needle_clippy_selectors needle_run_clippy needle_gate_skips_slow_lane; do
   awk -v f="^${fn}\\\\(\\\\)" '$0 ~ f, /^}/' "$DOD" >> "$extracted"
 done
 # Every function must have been found, or the test would silently pass.
-for fn in needle_now_ms needle_duration_event reap_orphans run_check lane_tmp cleanup_lane_tmps run_slow_cargo_check run_slow_nextest_check needle_slow_targets needle_cargo_selector needle_nextest_filter needle_validate_archive_mode selected_cargo_targets needle_declared_test_harnesses needle_expected_slow_targets needle_validate_slow_target_coverage needle_affected_test_targets needle_clippy_selectors needle_run_clippy needle_gate_skips_slow_lane; do
+for fn in needle_now_ms needle_duration_event reap_orphans run_check lane_tmp cleanup_lane_tmps run_slow_cargo_check needle_validate_nextest_release run_slow_nextest_check needle_slow_targets needle_cargo_selector needle_nextest_filter needle_validate_archive_mode selected_cargo_targets needle_declared_test_harnesses needle_expected_slow_targets needle_validate_slow_target_coverage needle_affected_test_targets needle_clippy_selectors needle_run_clippy needle_gate_skips_slow_lane; do
   grep -q "^${fn}()" "$extracted" || { echo "FAIL: could not extract $fn from $DOD" >&2; exit 1; }
 done
 # shellcheck source=/dev/null
@@ -458,7 +458,46 @@ fi
 
 ARCHIVE_FILE="$test_tmp_root/needle-nextest.tar.zst"
 REPO_ROOT="$real_repo_root"
-NEXTEST_CALL="$(run_slow_nextest_check lib 'binary_id(=needle)')"
+nextest_shim_dir="$test_tmp_root/nextest-shim"
+mkdir -p "$nextest_shim_dir"
+cat > "$nextest_shim_dir/cargo-nextest" <<'SHIM'
+#!/usr/bin/env bash
+set -eu
+[[ "$#" -eq 1 && "$1" == "--version" ]] || exit 64
+case "${NEXTEST_VERSION_SHIM_MODE:-missing}" in
+  exact)
+    printf '%s\n' 'cargo-nextest 0.9.144' 'release: 0.9.144' 'commit hash: fixture'
+    ;;
+  wrong)
+    printf '%s\n' 'cargo-nextest 0.9.145' 'release: 0.9.145' 'commit hash: fixture'
+    ;;
+  multiple)
+    printf '%s\n' 'cargo-nextest 0.9.144' 'release: 0.9.144' 'release: 0.9.144'
+    ;;
+  missing)
+    printf '%s\n' 'cargo-nextest 0.9.144' 'commit hash: fixture'
+    ;;
+  *)
+    exit 65
+    ;;
+esac
+SHIM
+chmod +x "$nextest_shim_dir/cargo-nextest"
+PATH="$nextest_shim_dir:$PATH"
+export PATH NEXTEST_VERSION_SHIM_MODE
+
+for NEXTEST_VERSION_SHIM_MODE in wrong missing multiple; do
+  assert_fails "archive runner rejects $NEXTEST_VERSION_SHIM_MODE cargo-nextest release output" \
+    run_slow_nextest_check lib 'binary_id(=needle)'
+done
+
+NEXTEST_VERSION_SHIM_MODE=exact
+NEXTEST_CALL=""
+if NEXTEST_CALL="$(run_slow_nextest_check lib 'binary_id(=needle)')"; then
+  ok "archive runner accepts exactly one pinned cargo-nextest release field"
+else
+  bad "archive runner rejected the exact pinned cargo-nextest release field"
+fi
 if [[ "$NEXTEST_CALL" == run\|lib\|*"env -u CARGO_TARGET_DIR TMPDIR=$SLOW_TMPDIR timeout --kill-after=30 900 cargo-nextest nextest run"* \
   && "$NEXTEST_CALL" == *"--archive-file $ARCHIVE_FILE --extract-to $REPO_ROOT --profile ci"* \
   && "$NEXTEST_CALL" == *"--run-ignored default --ignore-default-filter --no-fail-fast --no-tests fail -E binary_id(=needle)"* ]]; then

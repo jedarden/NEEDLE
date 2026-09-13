@@ -571,6 +571,25 @@ run_slow_cargo_check() {
       "$@"
 }
 
+# nextest-version.required is a minimum-version constraint, so it cannot keep a
+# newer runner from silently changing the archive contract. Accept exactly one
+# release field from the executable's structured version output and require the
+# release baked into the CI image.
+needle_validate_nextest_release() {
+  local version_output
+  local -a release_lines=()
+
+  if ! version_output="$(env -u CARGO_TARGET_DIR cargo-nextest --version 2>&1)"; then
+    echo "Error: cargo-nextest --version failed in archive mode" >&2
+    return 1
+  fi
+  mapfile -t release_lines < <(printf '%s\n' "$version_output" | sed -n '/^release:/p')
+  if [[ "${#release_lines[@]}" -ne 1 || "${release_lines[0]:-}" != "release: 0.9.144" ]]; then
+    echo "Error: archive mode requires exactly one 'release: 0.9.144' cargo-nextest version field" >&2
+    return 1
+  fi
+}
+
 # Archive consumers retain the slow lane's isolated TMPDIR, deadline, timing,
 # log capture and orphan reaping, and explicitly remove any inherited
 # CARGO_TARGET_DIR before invoking the cargo-nextest executable directly.
@@ -579,6 +598,7 @@ run_slow_cargo_check() {
 # compile time, so extracting into an unrelated temporary directory is wrong.
 run_slow_nextest_check() {
   local target="$1" filter="$2"
+  needle_validate_nextest_release || return 1
   DOD_TIMING_PHASE=run DOD_TIMING_TARGET="$target" \
     run_check "cargo-nextest archive target $target" env -u CARGO_TARGET_DIR \
       TMPDIR="$SLOW_TMPDIR" \

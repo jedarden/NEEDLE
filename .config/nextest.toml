@@ -1,3 +1,6 @@
+# This is nextest's minimum-version compatibility guard. Archive execution also
+# checks the installed release for exact equality because archives and runner
+# behavior are intentionally pinned together.
 nextest-version = { required = "0.9.144" }
 
 [profile.ci]
