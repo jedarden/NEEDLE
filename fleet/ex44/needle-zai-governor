@@ -1,64 +1,110 @@
 #!/usr/bin/env bash
-# Scale only the four ex44 expansion workers from observed Z.ai concurrency
-# retries. The original 17-worker fleet remains fixed; this controller cannot
-# silently disable a pinned base route.
+# Scale only the ex44 expansion workers to the observed Z.ai quota boundary.
+# The original 17-worker fleet remains fixed; this controller cannot silently
+# disable a pinned base route.
 set -euo pipefail
 
 # Keep the pinned ICG route first: the floor therefore always preserves route
 # coverage, while pressure sheds general-purpose roamers before pinned work.
-ELASTIC_UNITS=(glm-icg glm-roam-18 glm-roam-19 glm-roam-20)
+ELASTIC_UNITS=(glm-icg glm-roam-18 glm-roam-19 glm-roam-20 glm-roam-21 glm-roam-22 glm-roam-23 glm-roam-24)
 FLOOR=1
 CEILING=${#ELASTIC_UNITS[@]}
-HIGH_429_COUNT=3
+INITIAL_DESIRED=4
+TOLERATED_AFFECTED_REQUESTS=1
 KCTL=(kubectl --server=http://traefik-apexalgo-iad:8001)
 
+decide_capacity() {
+    local desired=$1 retry_lines=$2 affected_requests=$3 terminal_429s=$4 completed=$5
+    local new_desired=$desired action=hold
+
+    if (( terminal_429s > 0 || affected_requests > TOLERATED_AFFECTED_REQUESTS )); then
+        if (( desired > FLOOR )); then
+            new_desired=$((desired - 1))
+            action=scale-down
+        else
+            action=hold-floor
+        fi
+    elif (( retry_lines > 0 )); then
+        # One affected request is the desired operating boundary. Also hold if
+        # this window begins after attempt 1, rather than mistaking it as clean.
+        action=hold-boundary
+    elif (( completed > 0 )); then
+        if (( desired < CEILING )); then
+            new_desired=$((desired + 1))
+            action=scale-up
+        else
+            action=hold-clean
+        fi
+    else
+        action=no-samples
+    fi
+
+    printf '%s %s\n' "$new_desired" "$action"
+}
+
+assert_decision() {
+    local expected=$1
+    shift
+    local actual
+    actual=$(decide_capacity "$@")
+    [[ "$actual" == "$expected" ]] || {
+        printf 'decision mismatch: got %q, want %q\n' "$actual" "$expected" >&2
+        return 1
+    }
+}
+
+if [[ "${1:-}" == --self-test ]]; then
+    assert_decision '5 scale-up' 4 0 0 0 12
+    assert_decision '4 hold-boundary' 4 4 1 0 12
+    assert_decision '4 hold-boundary' 4 1 0 0 0
+    assert_decision '3 scale-down' 4 6 2 0 12
+    assert_decision '3 scale-down' 4 0 0 1 12
+    assert_decision '1 hold-floor' 1 6 2 0 12
+    assert_decision '8 hold-clean' 8 0 0 0 12
+    assert_decision '4 no-samples' 4 0 0 0 0
+    echo 'zai governor decision tests passed'
+    exit 0
+elif (( $# > 0 )); then
+    echo 'usage: needle-zai-governor [--self-test]' >&2
+    exit 2
+fi
+
 STATE_DIR="$HOME/.local/state/needle-zai-governor"
-# v2 intentionally starts fresh: the retired controller's state referred to a
-# different five-unit pool and cannot be interpreted for this roster.
-STATE_FILE="$STATE_DIR/desired_count-v2"
-LOG="$STATE_DIR/governor-v2.log"
+# v3 starts at the prior four-unit ceiling, then probes the new reserve one
+# worker per clean window instead of enabling all new capacity at once.
+STATE_FILE="$STATE_DIR/desired_count-v3"
+LOG="$STATE_DIR/governor-v3.log"
 mkdir -p "$STATE_DIR"
-[[ -f "$STATE_FILE" ]] || printf '%s\n' "$CEILING" >"$STATE_FILE"
+[[ -f "$STATE_FILE" ]] || printf '%s\n' "$INITIAL_DESIRED" >"$STATE_FILE"
 desired=$(<"$STATE_FILE")
-[[ "$desired" =~ ^[0-9]+$ ]] || desired=$CEILING
-(( desired >= FLOOR && desired <= CEILING )) || desired=$CEILING
+[[ "$desired" =~ ^[0-9]+$ ]] || desired=$INITIAL_DESIRED
+(( desired >= FLOOR && desired <= CEILING )) || desired=$INITIAL_DESIRED
 
 # Read both healthy proxy replicas. A successful stream completion is the
-# denominator; upstream 429 retries are the pressure signal. The proxy already
-# retries a small amount of ordinary concurrency contention, so scale down only
-# after three observed retries in the 100-second window and scale up after a
-# completely clean window.
+# throughput signal. Count attempt 1 as one independently affected request,
+# rather than treating each retry line as a separate worker. One affected
+# request holds the boundary; multiple affected requests or any terminal 429
+# remove a worker, and a completely clean productive window adds one.
 counts=$("${KCTL[@]}" logs -n mcp -l app=zai-proxy --all-containers=true \
     --prefix --since=100s 2>/dev/null \
-    | awk '/429 .*retrying/{errors++} /Token usage \(stream/{completed++}
-           END {printf "%d %d", errors+0, completed+0}' || true)
-read -r errors completed <<<"${counts:-0 0}"
-
-new_desired=$desired
-action=hold
-if (( errors >= HIGH_429_COUNT )); then
-    if (( desired > FLOOR )); then
-        new_desired=$((desired - 1))
-        action=scale-down
-    else
-        action=hold-floor
-    fi
-elif (( completed > 0 && errors == 0 )); then
-    if (( desired < CEILING )); then
-        new_desired=$((desired + 1))
-        action=scale-up
-    else
-        action=hold-clean
-    fi
-elif (( completed == 0 && errors == 0 )); then
-    action=no-samples
-fi
+    | awk '
+        /429 .*retrying/ { retry_lines++ }
+        /429 .*retrying \(attempt 1\// { affected_requests++ }
+        /429 .*max retries exceeded|429 quota exhausted .*not retrying/ { terminal_429s++ }
+        /Token usage \(stream/ { completed++ }
+        END {printf "%d %d %d %d", retry_lines+0, affected_requests+0, terminal_429s+0, completed+0}
+    ' || true)
+read -r retry_lines affected_requests terminal_429s completed <<<"${counts:-0 0 0 0}"
+read -r new_desired action < <(
+    decide_capacity "$desired" "$retry_lines" "$affected_requests" "$terminal_429s" "$completed"
+)
 
 if (( new_desired != desired )); then
     printf '%s\n' "$new_desired" >"$STATE_FILE"
 fi
-printf '%s errors=%s completed=%s desired=%s->%s action=%s\n' \
-    "$(date -u +%FT%TZ)" "$errors" "$completed" "$desired" "$new_desired" "$action" >>"$LOG"
+printf '%s retry_lines=%s affected_requests=%s terminal_429s=%s completed=%s desired=%s->%s action=%s\n' \
+    "$(date -u +%FT%TZ)" "$retry_lines" "$affected_requests" "$terminal_429s" \
+    "$completed" "$desired" "$new_desired" "$action" >>"$LOG"
 
 for i in "${!ELASTIC_UNITS[@]}"; do
     unit="needle-worker@${ELASTIC_UNITS[$i]}.service"
@@ -73,5 +119,5 @@ for i in "${!ELASTIC_UNITS[@]}"; do
     fi
 done
 
-printf '{"event":"needle.zai_governor","errors":%s,"completed":%s,"desired":%s,"action":"%s"}\n' \
-    "$errors" "$completed" "$new_desired" "$action"
+printf '{"event":"needle.zai_governor","retry_lines":%s,"affected_requests":%s,"terminal_429s":%s,"completed":%s,"desired":%s,"action":"%s"}\n' \
+    "$retry_lines" "$affected_requests" "$terminal_429s" "$completed" "$new_desired" "$action"
