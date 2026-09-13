@@ -1470,7 +1470,8 @@ fn real_bead_rs_provider_concurrency_limit_enforced() {
                     "provider": "anthropic",
                     "started_at": Utc::now(),
                     "beads_processed": 0,
-                    "config_reload_generation": 0
+                    "config_reload_generation": 0,
+                    "state": "EXECUTING"
                 }))
                 .unwrap(),
             )
