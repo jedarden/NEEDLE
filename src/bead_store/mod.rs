@@ -1444,6 +1444,21 @@ pub trait BeadStore: Send + Sync {
         bail!("configured bead backend does not implement update_description")
     }
 
+    /// Append to a bead's notes, preserving notes written concurrently.
+    ///
+    /// The contract is the one needle-4504fee0 was filed for: agent mutations
+    /// made during a dispatch must survive the fleet's own bookkeeping. A
+    /// backend whose only notes primitive replaces the whole field must
+    /// implement this as a revision-guarded read-modify-write, and a write
+    /// that keeps losing the revision race surfaces the conflict as an error
+    /// instead of landing over whatever appeared mid-race.
+    ///
+    /// Backends that cannot honor that contract return an error — loud, never
+    /// destructive.
+    async fn append_notes(&self, _id: &BeadId, _note: &str) -> Result<()> {
+        bail!("configured bead backend does not implement append_notes")
+    }
+
     /// List all labels on a bead.
     async fn labels(&self, id: &BeadId) -> Result<Vec<String>>;
 

@@ -25,6 +25,7 @@ use crate::config::MitosisConfig;
 use crate::dispatch::Dispatcher;
 use crate::mitosis::timeout_eligibility::classify_timeout_eligibility;
 use crate::prompt::{MitosisTimeoutContext, PromptBuilder};
+use crate::resolve::ResolveDecision;
 use crate::telemetry::{EventKind, Telemetry};
 use crate::types::{AgentOutcome, Bead, BeadId};
 
@@ -138,6 +139,33 @@ pub enum MitosisResult {
     Skipped { reason: String },
     /// Bead references NEEDLE-internal configuration and is out-of-scope for target workspace.
     OutOfScope,
+}
+
+/// Outcome of applying a resolver's split proposal through
+/// [`MitosisEvaluator::apply_split_proposals`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SplitApplication {
+    /// At least one child was created (after dedup and the max-children
+    /// cap); the children now block the parent. `deduped` proposals were
+    /// already covered by existing beads.
+    Applied {
+        /// Children created.
+        created: usize,
+        /// Proposals skipped as already covered.
+        deduped: usize,
+    },
+    /// Every proposed child already exists (or duplicates another proposal)
+    /// — nothing was created.
+    FullyDeduplicated {
+        /// Number of proposals that were already covered.
+        covered: usize,
+    },
+    /// The proposal violates Mitosis policy (validation failure, refused by
+    /// the creation path) and must not reach the store.
+    Refused {
+        /// Why the proposal was refused.
+        reason: String,
+    },
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -862,6 +890,114 @@ impl MitosisEvaluator {
         Ok(MitosisResult::Split {
             children: created_ids,
         })
+    }
+
+    /// Apply a resolver's split proposal through Mitosis validation and
+    /// deduplication (plan.md HANDLING, `split`).
+    ///
+    /// This is the guarded application half of `ResolveDecision::Split`: the
+    /// proposal titles are validated by the same rules the resolver uses,
+    /// deduplicated against the parent's existing children, its whole
+    /// lineage, and each other, and the survivors are created through the
+    /// atomic [`Self::create_children`] path with its standard label, cap,
+    /// and dependency policy. A proposal is never created raw.
+    ///
+    /// Returns what happened rather than creating beads unconditionally:
+    /// [`SplitApplication::FullyDeduplicated`] means every proposal was
+    /// already covered (the caller should release the parent, not block it),
+    /// and [`SplitApplication::Refused`] means the proposal violates policy
+    /// and must not reach the store at all.
+    pub async fn apply_split_proposals(
+        &self,
+        store: &dyn BeadStore,
+        parent: &Bead,
+        child_titles: &[String],
+        evidence: &str,
+    ) -> Result<SplitApplication> {
+        // The same validation the resolver applies before a decision may be
+        // applied — re-checked here because this is the boundary where
+        // titles become beads.
+        let decision = ResolveDecision::Split {
+            evidence: evidence.to_string(),
+            parent_bead_id: parent.id.to_string(),
+            child_titles: child_titles.to_vec(),
+        };
+        if let Err(error) = decision.validate() {
+            return Ok(SplitApplication::Refused {
+                reason: error.to_string(),
+            });
+        }
+
+        // Coverage check against the same two sets `create_children` dedups
+        // against (direct children plus the whole lineage), plus the
+        // proposal itself: two identical titles are one child, not two.
+        let existing = self.get_existing_children(store, &parent.id).await?;
+        let root_label = extract_root_label(parent);
+        let lineage = self.get_lineage_beads(store, &root_label).await?;
+        let mut covered_titles: Vec<String> = existing
+            .iter()
+            .chain(lineage.iter())
+            .map(|t| t.to_lowercase())
+            .collect();
+        covered_titles.sort();
+        covered_titles.dedup();
+
+        let mut to_create: Vec<&String> = Vec::new();
+        let mut deduped = 0usize;
+        for title in child_titles {
+            let lower = title.to_lowercase();
+            if covered_titles.iter().any(|t| titles_match(t, &lower))
+                || to_create
+                    .iter()
+                    .any(|kept| titles_match(&kept.to_lowercase(), &lower))
+            {
+                deduped += 1;
+                continue;
+            }
+            to_create.push(title);
+        }
+
+        if to_create.is_empty() {
+            tracing::info!(
+                parent_id = %parent.id,
+                covered = deduped,
+                "resolve split: every proposed child is already covered"
+            );
+            return Ok(SplitApplication::FullyDeduplicated { covered: deduped });
+        }
+
+        // The resolver proposes titles only; each child still needs a body
+        // that says what it is and why it exists.
+        let proposed: Vec<ProposedChild> = to_create
+            .iter()
+            .map(|title| ProposedChild {
+                title: (*title).clone(),
+                body: format!(
+                    "Split from {} ({}).\n\nResolution evidence: {}\n\nThis child covers part \
+                     of the parent bead's scope; the parent stays blocked until its children \
+                     complete.",
+                    parent.id, parent.title, evidence
+                ),
+            })
+            .collect();
+
+        match self.create_children(store, parent, &proposed).await? {
+            MitosisResult::Split { children } => Ok(SplitApplication::Applied {
+                created: children.len(),
+                deduped,
+            }),
+            MitosisResult::NotSplittable | MitosisResult::OutOfScope => {
+                // create_children cannot produce these verdicts for a
+                // non-empty proposal; refuse rather than guess at intent.
+                Ok(SplitApplication::Refused {
+                    reason: "mitosis returned a non-split verdict for a non-empty proposal"
+                        .to_string(),
+                })
+            }
+            MitosisResult::Skipped { reason } => Ok(SplitApplication::Refused {
+                reason: format!("mitosis skipped the proposal: {reason}"),
+            }),
+        }
     }
 
     /// Read the failure count label from a bead.

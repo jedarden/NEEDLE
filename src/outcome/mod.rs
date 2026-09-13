@@ -527,7 +527,10 @@ impl OutcomeHandler {
     /// outcome handler runs, so anything still relative here never named a
     /// real workspace; running no gates beats running gates read from an
     /// arbitrary directory.
-    async fn run_verification_gates(&self, bead: &Bead) -> Result<(bool, Option<GateReport>)> {
+    pub(crate) async fn run_verification_gates(
+        &self,
+        bead: &Bead,
+    ) -> Result<(bool, Option<GateReport>)> {
         if bead.workspace.as_os_str().is_empty() || bead.workspace.is_relative() {
             tracing::debug!(
                 bead_id = %bead.id,
@@ -2653,7 +2656,11 @@ impl OutcomeHandler {
     ///
     /// All `br` calls are wrapped in timeouts to prevent indefinite hang in
     /// HANDLING state. Failures are non-fatal — we log and continue.
-    async fn increment_failure_count(&self, store: &dyn BeadStore, bead: &Bead) -> Result<u32> {
+    pub(crate) async fn increment_failure_count(
+        &self,
+        store: &dyn BeadStore,
+        bead: &Bead,
+    ) -> Result<u32> {
         // Read labels with timeout.
         let labels =
             match tokio::time::timeout(std::time::Duration::from_secs(30), store.labels(&bead.id))
@@ -2873,7 +2880,11 @@ impl OutcomeHandler {
     ///
     /// All `br` calls are wrapped in timeouts to prevent indefinite hang in
     /// HANDLING state. Failures are non-fatal — we log and continue.
-    async fn reset_failure_count(&self, store: &dyn BeadStore, bead: &Bead) -> Result<()> {
+    pub(crate) async fn reset_failure_count(
+        &self,
+        store: &dyn BeadStore,
+        bead: &Bead,
+    ) -> Result<()> {
         // Read labels with timeout.
         let labels =
             match tokio::time::timeout(std::time::Duration::from_secs(30), store.labels(&bead.id))

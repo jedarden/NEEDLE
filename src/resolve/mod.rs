@@ -22,13 +22,17 @@
 //!
 //! ## Safety Guarantees
 //!
-//! - Resolver NEVER implements changes or mutates beads
+//! - Resolver NEVER implements changes itself; the only place a validated
+//!   decision becomes bead mutations is the [`executor`] module, which
+//!   re-checks claim ownership before every mutation
 //! - Invalid JSON → fallback to Retry (safe default)
 //! - Unknown decision type → fallback to Retry
 //! - Missing required fields → fallback to Retry
 //! - Timeout → fallback to Retry
 //!
 //! Depends on: `types`, `prompt`, `config`, `telemetry`.
+
+pub mod executor;
 
 use std::fmt;
 use std::time::Duration;
