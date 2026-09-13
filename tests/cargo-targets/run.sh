@@ -149,12 +149,22 @@ nextest_extract_line="$(grep -nF 'tar -xzf "/tmp/${archive}" -C "${root}"' "$BAS
 nextest_binary_checksum_line="$(grep -nF 'echo "${CARGO_NEXTEST_BINARY_SHA256}  ${root}/cargo-nextest" | sha256sum --check --strict' "$BASE_DOCKERFILE" | cut -d: -f1)"
 nextest_install_line="$(grep -nF 'install -m 0755 "${root}/cargo-nextest" /usr/local/bin/cargo-nextest' "$BASE_DOCKERFILE" | cut -d: -f1)"
 nextest_assert_line="$(grep -nF 'cargo-nextest --version | grep -Fx "release: ${CARGO_NEXTEST_VERSION}"' "$BASE_DOCKERFILE" | cut -d: -f1)"
+toolchain_install_line="$(grep -nF 'RUN rustup toolchain install 1.95.0 \' "$BASE_DOCKERFILE" | cut -d: -f1)"
+toolchain_end_line="$(grep -nF '    --target aarch64-unknown-linux-gnu' "$BASE_DOCKERFILE" | cut -d: -f1)"
+nextest_version_line="$(grep -nF 'ARG CARGO_NEXTEST_VERSION=0.9.144' "$BASE_DOCKERFILE" | cut -d: -f1)"
+workdir_line="$(grep -nF 'WORKDIR /workspace' "$BASE_DOCKERFILE" | cut -d: -f1)"
 [[ "$nextest_download_line" -lt "$nextest_archive_checksum_line" && \
    "$nextest_archive_checksum_line" -lt "$nextest_extract_line" && \
    "$nextest_extract_line" -lt "$nextest_binary_checksum_line" && \
    "$nextest_binary_checksum_line" -lt "$nextest_install_line" && \
    "$nextest_install_line" -lt "$nextest_assert_line" ]] || fail \
   'base image must verify cargo-nextest archive and binary before installing it'
+[[ -n "$toolchain_install_line" && -n "$toolchain_end_line" && \
+   "$toolchain_install_line" -lt "$toolchain_end_line" && \
+   "$toolchain_end_line" -lt "$nextest_version_line" && \
+   "$nextest_version_line" -lt "$nextest_download_line" && \
+   "$nextest_assert_line" -lt "$workdir_line" ]] || fail \
+  'base image must add cargo-nextest after the pinned Rust toolchain layer and before WORKDIR'
 
 [[ "$(tr -d '\n' < "$CI_VERSION_FILE")" == "0.1.11" ]] \
   || fail 'ci/VERSION must move with the cargo-nextest image contents'
