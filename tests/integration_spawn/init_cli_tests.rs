@@ -84,9 +84,6 @@ fn init_creates_workspace_config_in_bead_workspace() {
 
     let _needle_config = workspace.join(".needle.yaml");
 
-    // Set HOME to temp dir to avoid writing to real config
-    std::env::set_var("HOME", temp_dir.path());
-
     // Run needle init with bead-rs backend
     let args = vec!["needle", "init", "--backend", "bead-rs"];
 
@@ -127,9 +124,6 @@ fn init_idempotent_with_existing_workspace_config() {
     let existing_content = "bead_cli:\n  backend: bead-forge\nother_config: value\n";
     fs::write(&needle_config, existing_content).expect("Failed to write existing config");
 
-    // Set HOME to temp dir
-    std::env::set_var("HOME", temp_dir.path());
-
     // Verify the file exists and contains our content
     assert!(needle_config.exists(), "Config should exist");
     let content = fs::read_to_string(&needle_config).expect("Failed to read config");
@@ -147,9 +141,6 @@ fn init_skips_workspace_config_outside_bead_workspace() {
 
     // Do NOT create .beads directory - not a bead workspace
     let _needle_config = workspace.join(".needle.yaml");
-
-    // Set HOME to temp dir
-    std::env::set_var("HOME", temp_dir.path());
 
     // Run needle init
     let args = vec!["needle", "init", "--backend", "bead-rs"];
@@ -211,9 +202,6 @@ fn init_creates_agents_md_when_missing() {
     let agents_md = workspace.join("AGENTS.md");
     assert!(!agents_md.exists(), "AGENTS.md should not exist initially");
 
-    // Set HOME to temp dir to avoid writing to real config
-    std::env::set_var("HOME", temp_dir.path());
-
     // Verify parsing works
     let args = vec!["needle", "init", "--backend", "bead-rs"];
     let result = Cli::try_parse_from(args);
@@ -245,9 +233,6 @@ fn init_skips_agents_md_with_flag() {
     // Create .beads directory to simulate a bead workspace
     let beads_dir = workspace.join(".beads");
     fs::create_dir(&beads_dir).expect("Failed to create .beads directory");
-
-    // Set HOME to temp dir
-    std::env::set_var("HOME", temp_dir.path());
 
     // Verify parsing works with --no-agents-md
     let args = vec!["needle", "init", "--backend", "bead-rs", "--no-agents-md"];
@@ -340,9 +325,6 @@ fn init_preserves_existing_agents_md_content() {
     let content = fs::read_to_string(&agents_md).expect("Failed to read AGENTS.md");
     assert_eq!(content, existing_content, "Content should be preserved");
 
-    // Set HOME to temp dir
-    std::env::set_var("HOME", temp_dir.path());
-
     // Verify parsing works
     let args = vec!["needle", "init", "--backend", "bead-rs"];
     let result = Cli::try_parse_from(args);
@@ -358,9 +340,6 @@ fn init_agents_md_injection_is_idempotent() {
     // Create .beads directory
     let beads_dir = workspace.join(".beads");
     fs::create_dir(&beads_dir).expect("Failed to create .beads directory");
-
-    // Set HOME to temp dir
-    std::env::set_var("HOME", temp_dir.path());
 
     // First run - verify parsing
     let args1 = vec!["needle", "init", "--backend", "bead-rs"];

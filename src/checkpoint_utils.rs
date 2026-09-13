@@ -64,8 +64,8 @@ impl CleanupGuard {
 
     /// Track a custom path for explicit cleanup.
     ///
-    /// Unlike TempDir, custom paths are cleaned up via explicit `fs::remove_dir_all`
-    /// rather than RAII. This is useful for directories created outside of tempfile.
+    /// Unlike TempDir, custom paths are cleaned up explicitly rather than via
+    /// RAII. Both files and directories are supported.
     pub fn track_custom_path(&mut self, path: PathBuf) {
         self.custom_paths.push(path);
     }
@@ -108,12 +108,19 @@ impl CleanupGuard {
 
     /// Clean up a single path with graceful error handling.
     ///
-    /// This function attempts to remove a directory tree. If the operation fails,
-    /// it logs the error but returns Ok(()) to allow other cleanup operations to
-    /// proceed.
+    /// This function removes a file or directory tree based on the path's own
+    /// metadata. If the operation fails, the caller logs the error and continues
+    /// cleaning the other tracked paths.
     fn cleanup_path(&self, path: &Path) -> Result<()> {
-        fs::remove_dir_all(path)
-            .with_context(|| format!("failed to remove directory at {:?}", path))
+        let metadata = fs::symlink_metadata(path)
+            .with_context(|| format!("failed to inspect cleanup path at {:?}", path))?;
+
+        if metadata.file_type().is_dir() {
+            fs::remove_dir_all(path)
+                .with_context(|| format!("failed to remove directory at {:?}", path))
+        } else {
+            fs::remove_file(path).with_context(|| format!("failed to remove file at {:?}", path))
+        }
     }
 
     /// Check if any cleanup operations failed.

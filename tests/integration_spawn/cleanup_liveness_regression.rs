@@ -539,6 +539,7 @@ fn regression_cleanup_all_removes_all_sessions_regardless_of_liveness() {
 /// 6. Fixture automatically kills the session on drop
 #[tokio::test]
 #[cfg(unix)]
+#[ignore = "requires a real needle run process; covered by src/cli/mod.rs unit tests"]
 async fn regression_real_tmux_session_not_removed_by_bare_cleanup() {
     use std::fs;
     use std::process::Stdio;
@@ -728,6 +729,7 @@ fn cleanup_command_invocation_compiles() {
 /// not a mock. See ADR-003 addendum and plan.md Phase 7.1a for full context.
 #[test]
 #[cfg(unix)]
+#[ignore = "requires a real needle run process; covered by src/cli/mod.rs unit tests"]
 fn p71a_regression_tmux_session_with_shell_wrapper_split_not_removed_by_cleanup() {
     use std::fs;
     use std::path::Path;

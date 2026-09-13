@@ -814,9 +814,10 @@ mod resource_state_cleanup_tests {
         );
 
         #[cfg(unix)]
-        {
-            // On Unix, cleanup might fail due to readonly file
-            // Fix permissions and try again
+        if readonly_file.exists() {
+            // Removing a read-only file normally succeeds on Unix because
+            // deletion is controlled by the parent directory permissions. If
+            // this platform retained it, restore permissions for teardown.
             use std::os::unix::fs::PermissionsExt;
             let mut perms = fs::metadata(&readonly_file)
                 .expect("failed to get metadata")

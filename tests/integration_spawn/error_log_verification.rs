@@ -276,24 +276,25 @@ async fn structured_error_logging_includes_all_fields() {
     let mut found_error_log = false;
     for line in log_content.lines() {
         if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
-            if json["level"] == "ERROR" && json["message"] == "heartbeat write failed" {
+            let fields = &json["fields"];
+            if json["level"] == "ERROR" && fields["message"] == "heartbeat write failed" {
                 found_error_log = true;
 
                 // Verify structured fields are present
                 assert_eq!(
-                    json["error"],
+                    fields["error"],
                     error.to_string(),
                     "error field should be present"
                 );
                 assert_eq!(
-                    json["operation"], operation,
+                    fields["operation"], operation,
                     "operation field should be present"
                 );
                 assert_eq!(
-                    json["worker_id"], worker_id,
+                    fields["worker_id"], worker_id,
                     "worker_id field should be present"
                 );
-                assert_eq!(json["path"], path, "path field should be present");
+                assert_eq!(fields["path"], path, "path field should be present");
             }
         }
     }

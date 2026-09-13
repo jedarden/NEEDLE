@@ -93,9 +93,12 @@ async fn heartbeat_refreshes_every_30_seconds() {
     let (logs, _guard) = log_capture_helper::setup_log_capture();
 
     let dir = tempfile::tempdir().unwrap();
+    let heartbeat_dir = dir.path().join("state").join("heartbeats");
 
     let mut config = needle::config::Config::default();
     config.workspace.home = dir.path().to_path_buf();
+    config.workspace.default = dir.path().to_path_buf();
+    config.health.heartbeat_dir = Some(heartbeat_dir);
     config.health.heartbeat_interval_secs = 2; // Use 2s for faster test
     config.health.heartbeat_ttl_secs = 10;
 
@@ -203,12 +206,15 @@ async fn heartbeat_contains_required_fields() {
 
 fn test_config(heartbeat_dir: &Path) -> needle::config::Config {
     let mut config = needle::config::Config::default();
-    config.workspace.home = heartbeat_dir
+    let workspace = heartbeat_dir
         .parent()
         .unwrap()
         .parent()
         .unwrap()
         .to_path_buf();
+    config.workspace.home = workspace.clone();
+    config.workspace.default = workspace;
+    config.health.heartbeat_dir = Some(heartbeat_dir.to_path_buf());
     config.health.heartbeat_interval_secs = 1;
     config.health.heartbeat_ttl_secs = 5;
     config
