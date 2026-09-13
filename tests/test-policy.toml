@@ -4,7 +4,11 @@ version = 1
 # Raise one only when a reviewer agrees that the named tier is the cheapest
 # correct home for the added behavior. Counts are literal Rust test attributes.
 [unit]
-max_tests = 3870
+# +3 for the launch-timestamp telemetry emission coverage (needle-d6864d47):
+# start_telemetry_survives_command_failure_to_start,
+# start_telemetry_timestamp_matches_outcome_record,
+# start_telemetry_is_noop_without_an_emitter.
+max_tests = 3873
 
 [tier_budget]
 push = 650
