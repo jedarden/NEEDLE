@@ -4,7 +4,7 @@ version = 1
 # Raise one only when a reviewer agrees that the named tier is the cheapest
 # correct home for the added behavior. Counts are literal Rust test attributes.
 [unit]
-max_tests = 3869
+max_tests = 3870
 
 [tier_budget]
 push = 650
