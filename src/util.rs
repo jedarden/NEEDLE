@@ -951,6 +951,42 @@ pub(crate) mod test_env {
             _lock: lock,
         }
     }
+
+    /// [`isolate_env`] plus an admission-neutral launch gate.
+    ///
+    /// `Worker::do_select` opens with `hold_for_admission`, which reads the
+    /// live host load and free memory — or whatever directory
+    /// `NEEDLE_LAUNCH_RESOURCE_PROBE` currently points at — and holds the
+    /// worker resident while the host is over policy: it never reaches the
+    /// strand waterfall, never claims, and never dispatches. A test that
+    /// drives the real selection cycle therefore passes or fails according to
+    /// the load of the machine running it.
+    ///
+    /// That is how `config_reload_requested_mid_dispatch_waits_for_cycle_boundary`
+    /// was green on an idle developer box and red on a busy CI node with
+    /// `old-config dispatch did not start: Elapsed(())` — one failure in 3689
+    /// passes on a commit whose previous run was fully green (needle-ci-t2h44,
+    /// 2026-09-13). The same exposure can also hang a run past the workflow's
+    /// max duration instead of failing it, because the hold retries forever.
+    ///
+    /// Real host load is only half of it: the hold reads
+    /// `NEEDLE_LAUNCH_RESOURCE_PROBE`, and the admission tests point that at a
+    /// *saturated* probe for the length of their bodies. Only lock holders are
+    /// isolated from each other, so a state-machine test that never took the
+    /// lock can read another test's saturated probe and hold on a completely
+    /// idle machine.
+    ///
+    /// Admission behavior itself is covered by the tests that install a probe
+    /// explicitly. Every other test that reaches `do_select` wants the gate
+    /// out of the way, and skipping is observationally identical to being
+    /// admitted on the first check: no state transition and no event.
+    pub(crate) fn isolate_env_admitted() -> EnvGuard {
+        let guard = isolate_env();
+        // A guarded variable, so its previous value — normally absent — is
+        // restored when the returned guard drops.
+        std::env::set_var("NEEDLE_SKIP_LAUNCH_RESOURCE_CHECK", "1");
+        guard
+    }
 }
 
 #[cfg(test)]

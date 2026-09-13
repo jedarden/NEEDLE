@@ -8,7 +8,10 @@ version = 1
 # start_telemetry_survives_command_failure_to_start,
 # start_telemetry_timestamp_matches_outcome_record,
 # start_telemetry_is_noop_without_an_emitter.
-max_tests = 3873
+# +1 for state_machine_tests_neutralize_the_launch_admission_gate: the unit tier
+# is the only place that can read this module's own source, and the rule it
+# enforces is what kept the lib tier intermittently red.
+max_tests = 3874
 
 [tier_budget]
 push = 650
@@ -352,9 +355,9 @@ reason = "Grandfathered unit-tier debt; replace with an injected boundary."
 [[unit_exception]]
 path = "src/util.rs"
 kind = "global-env"
-max_occurrences = 24
+max_occurrences = 25
 owner = "component:util"
-reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+reason = "24 grandfathered occurrences, plus one deliberate seam: isolate_env_admitted sets NEEDLE_SKIP_LAUNCH_RESOURCE_CHECK while holding the environment lock, which is how a test neutralizes the launch admission gate instead of letting host load decide its result."
 
 [[unit_exception]]
 path = "src/util.rs"

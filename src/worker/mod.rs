@@ -7941,7 +7941,7 @@ mod tests {
 
     #[tokio::test]
     async fn state_machine_reaches_config_reload_check_at_cycle_boundary() {
-        let _env_lock = crate::util::test_env::isolate_env();
+        let _env_lock = crate::util::test_env::isolate_env_admitted();
         let home = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         std::env::set_var("HOME", home.path());
@@ -7998,7 +7998,7 @@ mod tests {
     fn config_reload_requested_mid_dispatch_waits_for_cycle_boundary() {
         use std::collections::HashMap;
 
-        let _env_lock = crate::util::test_env::isolate_env();
+        let _env_lock = crate::util::test_env::isolate_env_admitted();
         let home = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         // TraceCapture only writes inside a bead workspace (one with .beads/).
@@ -8190,7 +8190,7 @@ mod tests {
         use std::collections::HashMap;
         use std::sync::atomic::{AtomicBool, Ordering};
 
-        let _env_lock = crate::util::test_env::isolate_env();
+        let _env_lock = crate::util::test_env::isolate_env_admitted();
         let home = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         // TraceCapture only writes inside a bead workspace (one with .beads/).
@@ -9439,6 +9439,7 @@ mod tests {
 
     #[tokio::test]
     async fn do_select_with_no_beads_transitions_to_exhausted() {
+        let _env_lock = crate::util::test_env::isolate_env_admitted();
         let store = Arc::new(MockStore::empty());
         let mut config = valid_test_config();
         config.self_modification.hot_reload = false;
@@ -9565,8 +9566,82 @@ mod tests {
         assert_ne!(*worker.state(), WorkerState::AdmissionBlocked);
     }
 
+    /// Every test that drives the real selection cycle must neutralize the
+    /// launch admission gate.
+    ///
+    /// `do_select` opens with `hold_for_admission`, so a test that reaches it
+    /// without `isolate_env_admitted` — or without installing its own probe —
+    /// passes or fails according to the load of the machine running it, and
+    /// can hold indefinitely rather than fail, carrying the whole run past its
+    /// max duration. That is what turned
+    /// `config_reload_requested_mid_dispatch_waits_for_cycle_boundary` red on
+    /// needle-ci-t2h44 (2026-09-13), one run after the suite had gone green,
+    /// with 3689 other unit tests passing beside it.
+    ///
+    /// The rule is mechanical, so it is checked mechanically: a new test that
+    /// reaches `do_select` cannot reintroduce the flake without failing here
+    /// first, on the machine that wrote it.
+    #[test]
+    fn state_machine_tests_neutralize_the_launch_admission_gate() {
+        const SOURCE: &str = include_str!("mod.rs");
+
+        let lines: Vec<&str> = SOURCE.lines().collect();
+        let mut unguarded: Vec<&str> = Vec::new();
+        let mut index = 0;
+        while index < lines.len() {
+            let trimmed = lines[index].trim();
+            if trimmed != "#[test]" && !trimmed.starts_with("#[tokio::test") {
+                index += 1;
+                continue;
+            }
+
+            let mut signature = index + 1;
+            while signature < lines.len() && !lines[signature].contains(" fn ") {
+                signature += 1;
+            }
+            if signature >= lines.len() {
+                break;
+            }
+
+            // A test function in this module closes on its own four-space
+            // brace; every nested block is indented further.
+            let mut end = signature;
+            while end < lines.len() && lines[end] != "    }" {
+                end += 1;
+            }
+
+            let body = lines[signature..end].join("\n");
+            let drives_selection =
+                body.contains("do_select()") || body.contains("run_state_machine()");
+            let neutralized = body.contains("isolate_env_admitted()")
+                || body.contains("NEEDLE_LAUNCH_RESOURCE_PROBE")
+                || body.contains("NEEDLE_SKIP_LAUNCH_RESOURCE_CHECK");
+            if drives_selection && !neutralized {
+                unguarded.push(
+                    lines[signature]
+                        .split(" fn ")
+                        .nth(1)
+                        .and_then(|rest| rest.split('(').next())
+                        .unwrap_or("<unnamed>"),
+                );
+            }
+
+            index = end + 1;
+        }
+
+        assert!(
+            unguarded.is_empty(),
+            "these tests reach Worker::do_select without neutralizing the launch \
+             admission gate, so host load decides whether they pass: take \
+             crate::util::test_env::isolate_env_admitted(), or install your own \
+             NEEDLE_LAUNCH_RESOURCE_PROBE if the test is about admission \
+             itself: {unguarded:?}"
+        );
+    }
+
     #[tokio::test]
     async fn shutdown_flag_causes_stop() {
+        let _env_lock = crate::util::test_env::isolate_env_admitted();
         let store = Arc::new(MockStore::empty());
         let mut config = valid_test_config();
         config.worker.idle_action = IdleAction::Exit;
@@ -9594,6 +9669,7 @@ mod tests {
 
     #[tokio::test]
     async fn do_select_with_beads_transitions_to_claiming() {
+        let _env_lock = crate::util::test_env::isolate_env_admitted();
         let bead = make_test_bead("needle-test-001");
         let store = Arc::new(MockStore::new(vec![bead]));
         let mut worker = make_worker(store);
@@ -9606,6 +9682,7 @@ mod tests {
 
     #[tokio::test]
     async fn do_select_applies_pluck_label_filters_before_claiming() {
+        let _env_lock = crate::util::test_env::isolate_env_admitted();
         let mut deferred = make_test_bead("needle-deferred");
         deferred.labels = vec!["deferred".to_string()];
         let eligible = make_test_bead("needle-eligible");
@@ -9663,6 +9740,7 @@ mod tests {
 
     #[tokio::test]
     async fn regression_2026_08_17_worker_never_holds_two_claims() {
+        let _env_lock = crate::util::test_env::isolate_env_admitted();
         // On 2026-08-17, needle-55ec0193 remained held after a nominally
         // successful dispatch and was re-claimed by the same worker in the same
         // second. A second selection cycle must not overwrite that first claim
@@ -9735,6 +9813,7 @@ mod tests {
 
     #[tokio::test]
     async fn regression_2026_08_17_exit_zero_without_close_cannot_loop() {
+        let _env_lock = crate::util::test_env::isolate_env_admitted();
         // Exact incident fixture (needle-3386daef / needle-55ec0193):
         //   02:52 claim -> 02:58 success (6m), worker needle-otlp-test
         //   04:49 claim -> 04:59 timeout (10m), worker seam-2
@@ -11198,6 +11277,7 @@ mod tests {
 
     #[tokio::test]
     async fn do_select_clears_race_lost_this_cycle_and_retry_count() {
+        let _env_lock = crate::util::test_env::isolate_env_admitted();
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut config = valid_test_config();
         config.self_modification.hot_reload = false;
@@ -13203,6 +13283,7 @@ mod tests {
 
     #[tokio::test]
     async fn exhausted_idle_clears_current_bead_to_prevent_false_heartbeat() {
+        let _env_lock = crate::util::test_env::isolate_env_admitted();
         // Regression test for bead needle-b5cd1938: verify that transitioning to
         // EXHAUSTED state clears current_bead, preventing EXHAUSTED_IDLE heartbeats
         // from incorrectly reporting the worker as still working on a bead.

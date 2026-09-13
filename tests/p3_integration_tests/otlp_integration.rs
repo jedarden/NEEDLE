@@ -673,6 +673,12 @@ fn make_config(workspace_home: &Path) -> Config {
 #[tokio::test]
 #[ignore = "requires Docker"]
 async fn otlp_integration_happy_path() -> Result<()> {
+    // `worker.run()` reaches the launch-admission gate, which probes real host
+    // load before every selection; a busy host would hold the worker and hang
+    // this test through no fault of the OTLP path under test. Same override as
+    // tests/p2_integration_tests/claim_cycle_span_depth_regression.rs.
+    std::env::set_var("NEEDLE_SKIP_LAUNCH_RESOURCE_CHECK", "1");
+
     // Start the OpenTelemetry Collector container using docker directly.
     let collector = CollectorContainer::start().context("failed to start collector container")?;
 
