@@ -362,7 +362,7 @@ fn make_worker_entry(id: &str, provider: Option<&str>, model: Option<&str>) -> W
         started_at: Utc::now(),
         beads_processed: 0,
         config_reload_generation: 0,
-        state: None,
+        state: Some(WorkerState::Executing),
     }
 }
 
