@@ -22,6 +22,7 @@ use crate::config::{
 };
 use crate::dispatch;
 use crate::health::{HealthMonitor, HeartbeatData};
+use crate::log_prune;
 use crate::rate_limit::RateLimiter;
 use crate::registry::{Registry, WorkerEntry};
 use crate::telemetry::{self, EventKind, Telemetry};
@@ -203,6 +204,19 @@ pub enum CliCommand {
         /// Output format.
         #[arg(long, value_enum, default_value = "table")]
         format: LogFormat,
+
+        /// Delete `.needle/logs/*` files whose owning identifier has no live
+        /// backing process, instead of querying events. Liveness is resolved
+        /// from currently running `needle run` processes (works for both
+        /// tmux-launched and directly/systemd-launched workers); a file is
+        /// also protected if it was written within the last few minutes,
+        /// regardless of identifier match. See bead needle-daab3ee2.
+        #[arg(long)]
+        prune: bool,
+
+        /// With --prune, report what would be deleted without deleting it.
+        #[arg(long)]
+        dry_run: bool,
     },
 
     /// View or inspect configuration.
@@ -545,7 +559,9 @@ pub fn run() -> Result<()> {
             since,
             until,
             format,
-        } => cmd_logs(follow, filter, since, until, format),
+            prune,
+            dry_run,
+        } => cmd_logs(follow, filter, since, until, format, prune, dry_run),
         CliCommand::ConfigCmd {
             get,
             set,
@@ -1336,6 +1352,19 @@ fn run_worker(config: Config, worker_name: String, config_sources: SourceMap) ->
     }
     let scratch_sweep_elapsed = scratch_sweep_started.elapsed();
 
+    // Best-effort: reclaim `.needle/logs/` files whose owning identifier has
+    // no live process (needle-daab3ee2). Mirrors scratch_sweep immediately
+    // above — housekeeping must never be able to fail worker boot, so a
+    // sweep error is logged and boot continues regardless.
+    match init_step("log_prune", &telemetry, || {
+        run_log_prune(&config.workspace.home.join("logs"), false)
+    }) {
+        Ok(report) => record_log_prune_outcome(&telemetry, &report),
+        Err(error) => {
+            tracing::warn!(error = %error, "log prune sweep failed; worker startup will continue");
+        }
+    }
+
     // Phase 1: open only the backend explicitly bound by this workspace.
     // Binary availability is not evidence of store ownership.
     let store = init_step("bead_store_discover", &telemetry, || {
@@ -1560,6 +1589,34 @@ fn record_scratch_sweep_outcome(
         chrono::Utc::now(),
     ) {
         tracing::warn!(error = %error, "failed to emit scratch sweep telemetry");
+    }
+}
+
+fn record_log_prune_outcome(telemetry: &Telemetry, report: &log_prune::PruneReport) {
+    let level = if report.errors.is_empty() {
+        "info"
+    } else {
+        "warn"
+    };
+    let context = serde_json::json!({
+        "status": "completed",
+        "deleted_files": report.deleted_files,
+        "deleted_bytes": report.deleted_bytes,
+        "kept_files": report.kept_files,
+        "kept_bytes": report.kept_bytes,
+        "errors": report.errors,
+    });
+
+    if let Err(error) = telemetry.emit(
+        EventKind::Log {
+            phase: "log_prune".to_string(),
+            context,
+            level: level.to_string(),
+            bead_id: None,
+        },
+        chrono::Utc::now(),
+    ) {
+        tracing::warn!(error = %error, "failed to emit log prune telemetry");
     }
 }
 
@@ -5707,12 +5764,15 @@ fn cmd_doctor(repair: bool, workspace: Option<PathBuf>, json: bool) -> Result<()
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// `needle logs` — view and query telemetry logs.
+#[allow(clippy::too_many_arguments)]
 fn cmd_logs(
     follow: bool,
     filter: Vec<String>,
     since: Option<String>,
     until: Option<String>,
     format: LogFormat,
+    prune: bool,
+    dry_run: bool,
 ) -> Result<()> {
     let config = ConfigLoader::load_global()?;
     let needle_home = config.workspace.home.clone();
@@ -5722,6 +5782,10 @@ fn cmd_logs(
         .log_dir
         .clone()
         .unwrap_or_else(|| needle_home.join("logs"));
+
+    if prune {
+        return cmd_logs_prune(&log_dir, dry_run);
+    }
 
     let filter_exprs: Vec<&str> = filter.iter().map(|s| s.as_str()).collect();
     let logs_filter = if filter_exprs.is_empty() {
@@ -5738,6 +5802,60 @@ fn cmd_logs(
     } else {
         cmd_logs_query(&log_dir, logs_filter.as_ref(), since_dt, until_dt, &format)
     }
+}
+
+/// `needle logs --prune` — delete orphaned worker log files under `log_dir`.
+///
+/// See `log_prune` for the sweep itself; this just wires it to the process
+/// scan and prints a summary.
+fn cmd_logs_prune(log_dir: &Path, dry_run: bool) -> Result<()> {
+    let report = run_log_prune(log_dir, dry_run)?;
+
+    let verb = if dry_run { "Would delete" } else { "Deleted" };
+    println!(
+        "{verb} {} file(s) ({} bytes); {} file(s) kept (live or recently written).",
+        report.deleted_files, report.deleted_bytes, report.kept_files
+    );
+    for error in &report.errors {
+        eprintln!("warning: {error}");
+    }
+
+    Ok(())
+}
+
+/// Build the set of currently-live log-filename prefixes
+/// (`needle-{agent}-{identifier}`, sanitized) from the running fleet.
+///
+/// A process discovered with no resolved `--identifier` (a bare worker using
+/// an internally-generated NATO name) cannot be mapped to a specific prefix
+/// this way and contributes nothing here; `log_prune`'s recency backstop is
+/// what protects those instead. See `log_prune`'s module docs.
+fn live_log_prefixes(processes: &[DiscoveredProcess]) -> HashSet<String> {
+    processes
+        .iter()
+        .filter_map(|p| {
+            let agent = p.agent.as_ref()?;
+            let identifier = p.identifier.as_ref()?;
+            Some(sanitize_session_name(&format!(
+                "needle-{agent}-{identifier}"
+            )))
+        })
+        .collect()
+}
+
+/// Scan the live fleet and sweep `log_dir` for orphaned log files.
+///
+/// Shared by the `needle logs --prune` subcommand and the worker boot-time
+/// sweep so both stay in sync with exactly one liveness computation.
+fn run_log_prune(log_dir: &Path, dry_run: bool) -> Result<log_prune::PruneReport> {
+    let processes = scan_needle_processes().unwrap_or_default();
+    let live_prefixes = live_log_prefixes(&processes);
+    log_prune::sweep_orphaned_logs(
+        log_dir,
+        &live_prefixes,
+        log_prune::DEFAULT_MIN_IDLE_SECS,
+        dry_run,
+    )
 }
 
 /// Non-follow mode: read all logs and print them.
