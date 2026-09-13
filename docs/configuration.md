@@ -1040,6 +1040,38 @@ workspace_health:
 
 ## Validation Configuration
 
+### Language-Default Gates (plan 4.4 step 6)
+
+A workspace whose `.needle.yaml` declares no `gates:` (or `verification:`)
+is judged by the gate its build files imply; an explicit `gates: []` opts
+out, and a declared list always wins. `needle gates --workspace PATH` prints
+the resolution. The gate is named `default_<language>` in gate reports and
+the attempt ledger.
+
+| Build file | Builtin command | Note |
+|---|---|---|
+| `Cargo.toml` | `cargo check --all-targets --quiet` | cheap, uses the shared cargo cache |
+| `go.mod` | `go vet ./...` then `go build ./...` | |
+| `pyproject.toml` / `setup.py` / `setup.cfg` / `requirements.txt` | none | set `validation.default_gates.python` |
+| `package.json` with a real `test` script | none | set `validation.default_gates.node` |
+
+Python and Node deliberately have no builtin: gates run in a clean
+extraction of committed state, which has no virtualenv and no
+`node_modules`, so `pytest` and `npm test` failed every time there on
+2026-09-12 (25 false failures, two workspaces degraded) before the builtin
+was removed. Configure a command that works in the extraction — one that
+installs dependencies first, or a byte-compile step — per host or per repo.
+
+```yaml
+validation:
+  default_gates:
+    enabled: true
+    rust: []      # empty = builtin
+    go: []
+    python: ["python3 -m compileall -q ."]
+    node: ["npm ci --silent && npm test --silent"]
+```
+
 ```yaml
 validation:
   # Timeout for gate execution in seconds (default: 50)

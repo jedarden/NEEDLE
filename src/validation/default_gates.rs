@@ -4,9 +4,12 @@
 //! used to run no verification at all, so an agent's exit 0 became
 //! `verified_success` in the ledger. On 2026-09-12 that was 74 of 79
 //! workspaces on the host. Here the workspace's own build files decide the
-//! gate: a Rust crate is checked, a Go module vetted and built, a Python
-//! project's tests run when it has any (byte-compiled otherwise), a Node
-//! package's real `test` script run.
+//! gate: a Rust crate is checked, a Go module vetted and built. Python and
+//! Node workspaces get a gate only when `validation.default_gates.python` /
+//! `.node` names a command that works in a clean extraction — one without a
+//! virtualenv or `node_modules`, where the builtin `pytest` / `npm test`
+//! failed every single time on 2026-09-12 (25 false failures in eleven
+//! hours, two workspaces degraded).
 //!
 //! The builtin commands are the cheap deterministic checks, not the full
 //! suites: gates run in a clean extraction of committed state under
@@ -67,6 +70,14 @@ pub fn detect(root: &Path, config: &DefaultGatesConfig) -> Option<DetectedGate> 
             }),
         });
     }
+    // Python and Node have no builtin: a clean extraction of committed state
+    // carries no virtualenv and no node_modules, so `pytest` and `npm test`
+    // fail there every time regardless of the work. On 2026-09-12 the
+    // builtins produced 25 false gate failures in the first eleven hours and
+    // degraded two workspaces (needle-c4b0a0d1 follow-up). A repository that
+    // wants a Python or Node default declares the command that works in its
+    // extraction via `validation.default_gates.python` / `.node` (typically
+    // one that installs its dependencies first, or a byte-compile step).
     for marker in [
         "pyproject.toml",
         "setup.py",
@@ -74,29 +85,25 @@ pub fn detect(root: &Path, config: &DefaultGatesConfig) -> Option<DetectedGate> 
         "requirements.txt",
     ] {
         if root.join(marker).is_file() {
-            let has_tests = root.join("tests").is_dir()
-                || root.join("test").is_dir()
-                || root.join("pytest.ini").is_file()
-                || root.join("conftest.py").is_file()
-                || pyproject_mentions_pytest(root);
-            let builtin = if has_tests {
-                vec!["python3 -m pytest -q -x -p no:cacheprovider".into()]
-            } else {
-                vec!["python3 -m compileall -q .".into()]
-            };
+            if config.python.is_empty() {
+                return None;
+            }
             return Some(DetectedGate {
                 language: "python",
                 evidence: marker.into(),
-                commands: pick(&config.python, || builtin),
+                commands: config.python.clone(),
             });
         }
     }
     if let Some(script) = package_json_test_script(root) {
         if !is_npm_placeholder(&script) {
+            if config.node.is_empty() {
+                return None;
+            }
             return Some(DetectedGate {
                 language: "node",
                 evidence: format!("package.json scripts.test = {script:?}"),
-                commands: pick(&config.node, || vec!["npm test --silent".into()]),
+                commands: config.node.clone(),
             });
         }
     }
@@ -109,12 +116,6 @@ fn pick(configured: &[String], builtin: impl FnOnce() -> Vec<String>) -> Vec<Str
     } else {
         configured.to_vec()
     }
-}
-
-fn pyproject_mentions_pytest(root: &Path) -> bool {
-    std::fs::read_to_string(root.join("pyproject.toml"))
-        .map(|text| text.contains("[tool.pytest") || text.contains("pytest"))
-        .unwrap_or(false)
 }
 
 fn package_json_test_script(root: &Path) -> Option<String> {
@@ -167,38 +168,48 @@ mod tests {
     }
 
     #[test]
-    fn python_with_tests_runs_pytest_and_without_byte_compiles() {
+    fn python_has_no_builtin_but_honours_a_configured_command() {
+        // A clean extraction has no virtualenv: pytest would fail every time,
+        // so nothing runs unless the operator says what works there.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("pyproject.toml"), "[project]\nname='x'\n").unwrap();
-        let gate = detect(dir.path(), &cfg()).unwrap();
-        assert_eq!(gate.language, "python");
-        assert!(
-            gate.commands[0].contains("compileall"),
-            "{:?}",
-            gate.commands
-        );
         std::fs::create_dir_all(dir.path().join("tests")).unwrap();
-        let gate = detect(dir.path(), &cfg()).unwrap();
-        assert!(gate.commands[0].contains("pytest"), "{:?}", gate.commands);
+        assert!(detect(dir.path(), &cfg()).is_none());
+        let configured = DefaultGatesConfig {
+            python: vec!["python3 -m compileall -q .".into()],
+            ..DefaultGatesConfig::default()
+        };
+        let gate = detect(dir.path(), &configured).unwrap();
+        assert_eq!(gate.language, "python");
+        assert_eq!(gate.gate_name(), "default_python");
+        assert_eq!(gate.commands, configured.python);
     }
 
     #[test]
-    fn node_needs_a_real_test_script() {
+    fn node_has_no_builtin_and_ignores_the_npm_placeholder_script() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("package.json"),
             r#"{"scripts":{"test":"echo \"Error: no test specified\" && exit 1"}}"#,
         )
         .unwrap();
-        assert!(detect(dir.path(), &cfg()).is_none());
+        let configured = DefaultGatesConfig {
+            node: vec!["npm ci --silent && npm test --silent".into()],
+            ..DefaultGatesConfig::default()
+        };
+        // Placeholder script: no gate even when a command is configured.
+        assert!(detect(dir.path(), &configured).is_none());
         std::fs::write(
             dir.path().join("package.json"),
             r#"{"scripts":{"test":"vitest run"}}"#,
         )
         .unwrap();
-        let gate = detect(dir.path(), &cfg()).unwrap();
+        // Real script, no configured command: still no builtin (no node_modules
+        // in a clean extraction).
+        assert!(detect(dir.path(), &cfg()).is_none());
+        let gate = detect(dir.path(), &configured).unwrap();
         assert_eq!(gate.language, "node");
-        assert_eq!(gate.commands, vec!["npm test --silent".to_string()]);
+        assert_eq!(gate.commands, configured.node);
     }
 
     #[test]

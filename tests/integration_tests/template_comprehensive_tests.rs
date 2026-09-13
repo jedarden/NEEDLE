@@ -796,6 +796,19 @@ fn mock_values_for_operation(operation: &str) -> HashMap<&'static str, &'static 
         "close" => [("id", "test-id"), ("reason", "Done")]
             .into_iter()
             .collect(),
+        "resolve" => [
+            ("id", "test-id"),
+            ("attempt_id", "0192-attempt"),
+            ("outcome", "work_failure"),
+            ("actor", "worker-01"),
+            ("model", "glm-5.3-flash"),
+            ("harness", "needle"),
+            ("harness_version", "0.6.1"),
+            ("resolve_reason", "gate:default_rust"),
+            ("evidence_ref", "commit:abc123"),
+        ]
+        .into_iter()
+        .collect(),
         "import" => [("mode", "import-only"), ("actor", "worker")]
             .into_iter()
             .collect(),
@@ -819,9 +832,14 @@ fn mock_values_for_operation(operation: &str) -> HashMap<&'static str, &'static 
         "ref_find" => [("namespace", "github"), ("value", "123")]
             .into_iter()
             .collect(),
-        "data_set" => [("id", "test-id"), ("key", "key"), ("value", "value")]
-            .into_iter()
-            .collect(),
+        "data_set" => [
+            ("id", "test-id"),
+            ("key", "key"),
+            ("value", "value"),
+            ("schema_ref", "urn:needle:schema:attempt-history:v1"),
+        ]
+        .into_iter()
+        .collect(),
         "data_get" | "data_list" | "data_remove" => {
             [("id", "test-id"), ("key", "key")].into_iter().collect()
         }
