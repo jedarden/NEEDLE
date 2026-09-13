@@ -7,6 +7,8 @@ MANIFEST="$REPO_ROOT/Cargo.toml"
 BASE_DOCKERFILE="$REPO_ROOT/ci/Dockerfile.ci"
 DEPS_DOCKERFILE="$REPO_ROOT/ci/Dockerfile.ci-deps"
 TOOLCHAIN_FILE="$REPO_ROOT/rust-toolchain.toml"
+NEXTEST_CONFIG="$REPO_ROOT/.config/nextest.toml"
+CI_VERSION_FILE="$REPO_ROOT/ci/VERSION"
 EXPECTED_TARGETS="$(printf '%s\n' \
   integration_spawn \
   integration_tests \
@@ -115,6 +117,60 @@ bead_assert_line="$(grep -nF 'test "$(bead --version | cut -d'\'' '\'' -f1-2)" =
    "$bead_install_line" -lt "$bead_assert_line" ]] || fail \
   'base image must verify bead-rs before installing and version-checking it'
 
+# cargo-nextest is part of the runner image contract, not something each
+# archive producer/consumer is allowed to download independently. Verify the
+# release archive and the extracted executable before installation.
+grep -Fq 'ARG CARGO_NEXTEST_VERSION=0.9.144' "$BASE_DOCKERFILE" \
+  || fail 'base image must pin cargo-nextest 0.9.144'
+grep -Fq 'ARG CARGO_NEXTEST_ARCHIVE_SHA256=20ed0a7d3d6f8dda9bb1b0bcb5838aea5784d3e2360746280868996d709dde0a' "$BASE_DOCKERFILE" \
+  || fail 'base image must pin the cargo-nextest 0.9.144 archive checksum'
+grep -Fq 'ARG CARGO_NEXTEST_BINARY_SHA256=92e0def8d330c7bb295175a998ad73f65670dc3d216d1ae7a28f286d130ce1ad' "$BASE_DOCKERFILE" \
+  || fail 'base image must pin the extracted cargo-nextest 0.9.144 checksum'
+[[ "$(grep -c '^ARG CARGO_NEXTEST_VERSION=' "$BASE_DOCKERFILE")" -eq 1 ]] \
+  || fail 'base image must declare exactly one cargo-nextest version pin'
+[[ "$(grep -c '^ARG CARGO_NEXTEST_ARCHIVE_SHA256=' "$BASE_DOCKERFILE")" -eq 1 ]] \
+  || fail 'base image must declare exactly one cargo-nextest archive checksum'
+[[ "$(grep -c '^ARG CARGO_NEXTEST_BINARY_SHA256=' "$BASE_DOCKERFILE")" -eq 1 ]] \
+  || fail 'base image must declare exactly one cargo-nextest binary checksum'
+grep -Fq '"https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-${CARGO_NEXTEST_VERSION}/${archive}"' "$BASE_DOCKERFILE" \
+  || fail 'base image must download the pinned cargo-nextest release over HTTPS'
+grep -Fq 'echo "${CARGO_NEXTEST_ARCHIVE_SHA256}  /tmp/${archive}" | sha256sum --check --strict' "$BASE_DOCKERFILE" \
+  || fail 'base image must verify the cargo-nextest archive before extraction'
+grep -Fq 'echo "${CARGO_NEXTEST_BINARY_SHA256}  ${root}/cargo-nextest" | sha256sum --check --strict' "$BASE_DOCKERFILE" \
+  || fail 'base image must verify the extracted cargo-nextest binary before installation'
+grep -Fq 'install -m 0755 "${root}/cargo-nextest" /usr/local/bin/cargo-nextest' "$BASE_DOCKERFILE" \
+  || fail 'base image must install cargo-nextest with executable permissions'
+grep -Fq 'cargo-nextest --version | grep -Fx "release: ${CARGO_NEXTEST_VERSION}"' "$BASE_DOCKERFILE" \
+  || fail 'base image must assert the installed cargo-nextest release'
+
+nextest_download_line="$(grep -nF '"https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-${CARGO_NEXTEST_VERSION}/${archive}"' "$BASE_DOCKERFILE" | cut -d: -f1)"
+nextest_archive_checksum_line="$(grep -nF 'echo "${CARGO_NEXTEST_ARCHIVE_SHA256}  /tmp/${archive}" | sha256sum --check --strict' "$BASE_DOCKERFILE" | cut -d: -f1)"
+nextest_extract_line="$(grep -nF 'tar -xzf "/tmp/${archive}" -C "${root}"' "$BASE_DOCKERFILE" | cut -d: -f1)"
+nextest_binary_checksum_line="$(grep -nF 'echo "${CARGO_NEXTEST_BINARY_SHA256}  ${root}/cargo-nextest" | sha256sum --check --strict' "$BASE_DOCKERFILE" | cut -d: -f1)"
+nextest_install_line="$(grep -nF 'install -m 0755 "${root}/cargo-nextest" /usr/local/bin/cargo-nextest' "$BASE_DOCKERFILE" | cut -d: -f1)"
+nextest_assert_line="$(grep -nF 'cargo-nextest --version | grep -Fx "release: ${CARGO_NEXTEST_VERSION}"' "$BASE_DOCKERFILE" | cut -d: -f1)"
+[[ "$nextest_download_line" -lt "$nextest_archive_checksum_line" && \
+   "$nextest_archive_checksum_line" -lt "$nextest_extract_line" && \
+   "$nextest_extract_line" -lt "$nextest_binary_checksum_line" && \
+   "$nextest_binary_checksum_line" -lt "$nextest_install_line" && \
+   "$nextest_install_line" -lt "$nextest_assert_line" ]] || fail \
+  'base image must verify cargo-nextest archive and binary before installing it'
+
+[[ "$(tr -d '\n' < "$CI_VERSION_FILE")" == "0.1.11" ]] \
+  || fail 'ci/VERSION must move with the cargo-nextest image contents'
+grep -Fq '[profile.ci]' "$NEXTEST_CONFIG" \
+  || fail 'nextest config must declare the CI profile'
+grep -Fq 'fail-fast = false' "$NEXTEST_CONFIG" \
+  || fail 'nextest CI profile must preserve aggregate failure reporting'
+grep -Fq 'test-threads = 2' "$NEXTEST_CONFIG" \
+  || fail 'nextest CI profile must retain two-way target concurrency'
+grep -Fq '[profile.ci.junit]' "$NEXTEST_CONFIG" \
+  || fail 'nextest CI profile must emit JUnit'
+grep -Fq 'path = "junit.xml"' "$NEXTEST_CONFIG" \
+  || fail 'nextest JUnit path must remain stable for artifact publication'
+grep -Fq 'report-skipped = "none"' "$NEXTEST_CONFIG" \
+  || fail 'nextest shards must not duplicate excluded tests as skipped JUnit cases'
+
 actual_targets="$(test_targets "$MANIFEST")"
 [[ "$actual_targets" == "$EXPECTED_TARGETS" ]] || fail \
   "repository test targets differ from the intended roots: $(tr '\n' ' ' <<<"$actual_targets")"
@@ -156,3 +212,6 @@ echo 'PASS: dependency-image stubs cover every declared Cargo target'
 echo 'PASS: dependency image preserves its target tree outside /workspace'
 echo "PASS: rustc release matches the source toolchain pin ($source_toolchain)"
 echo 'PASS: base image pins and verifies bead-rs 0.2.6 before installation'
+echo 'PASS: base image pins and verifies cargo-nextest 0.9.144 before installation'
+echo 'PASS: nextest CI profile emits stable, non-duplicated JUnit output'
+echo 'PASS: CI image version is 0.1.11'

@@ -19,11 +19,11 @@ extracted="$(mktemp "${TMPDIR:-/tmp}/dod-modes-XXXXXX.sh")"
 test_tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/dod-modes-tmp-root-XXXXXX")"
 trap 'rm -f "$extracted"; rm -rf "$test_tmp_root"' EXIT
 
-for fn in needle_now_ms needle_duration_event reap_orphans run_check lane_tmp cleanup_lane_tmps run_slow_cargo_check needle_slow_targets needle_cargo_selector selected_cargo_targets needle_declared_test_harnesses needle_expected_slow_targets needle_validate_slow_target_coverage needle_affected_test_targets needle_clippy_selectors needle_run_clippy needle_gate_skips_slow_lane; do
+for fn in needle_now_ms needle_duration_event reap_orphans run_check lane_tmp cleanup_lane_tmps run_slow_cargo_check run_slow_nextest_check needle_slow_targets needle_cargo_selector needle_nextest_filter needle_validate_archive_mode selected_cargo_targets needle_declared_test_harnesses needle_expected_slow_targets needle_validate_slow_target_coverage needle_affected_test_targets needle_clippy_selectors needle_run_clippy needle_gate_skips_slow_lane; do
   awk -v f="^${fn}\\\\(\\\\)" '$0 ~ f, /^}/' "$DOD" >> "$extracted"
 done
 # Every function must have been found, or the test would silently pass.
-for fn in needle_now_ms needle_duration_event reap_orphans run_check lane_tmp cleanup_lane_tmps run_slow_cargo_check needle_slow_targets needle_cargo_selector selected_cargo_targets needle_declared_test_harnesses needle_expected_slow_targets needle_validate_slow_target_coverage needle_affected_test_targets needle_clippy_selectors needle_run_clippy needle_gate_skips_slow_lane; do
+for fn in needle_now_ms needle_duration_event reap_orphans run_check lane_tmp cleanup_lane_tmps run_slow_cargo_check run_slow_nextest_check needle_slow_targets needle_cargo_selector needle_nextest_filter needle_validate_archive_mode selected_cargo_targets needle_declared_test_harnesses needle_expected_slow_targets needle_validate_slow_target_coverage needle_affected_test_targets needle_clippy_selectors needle_run_clippy needle_gate_skips_slow_lane; do
   grep -q "^${fn}()" "$extracted" || { echo "FAIL: could not extract $fn from $DOD" >&2; exit 1; }
 done
 # shellcheck source=/dev/null
@@ -48,6 +48,13 @@ assert_lines() {
 assert_selector() {
   local desc="$1" want="$2" name="$3" got
   got="$(needle_cargo_selector "$name" 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
+  if [[ "$got" == "$want" ]]; then ok "$desc"; else bad "$desc (expected '$want', got '$got')"; fi
+}
+
+# assert_nextest_filter <desc> <expected-filter> <name>
+assert_nextest_filter() {
+  local desc="$1" want="$2" name="$3" got
+  got="$(needle_nextest_filter "$name" 2>/dev/null)"
   if [[ "$got" == "$want" ]]; then ok "$desc"; else bad "$desc (expected '$want', got '$got')"; fi
 }
 
@@ -133,6 +140,16 @@ assert_selector "real_br selects its target" "--test real_br_integration_tests" 
 assert_fails "unknown target has no selector" needle_cargo_selector nope
 assert_fails "installer is not a cargo target" needle_cargo_selector installer
 
+# ── needle_nextest_filter ────────────────────────────────────────────────────
+assert_nextest_filter "lib has an exact nextest binary ID" "binary_id(=needle)" lib
+assert_nextest_filter "integration_spawn has an exact nextest binary ID" "binary_id(=needle::integration_spawn)" integration_spawn
+assert_nextest_filter "integration_tests has an exact nextest binary ID" "binary_id(=needle::integration_tests)" integration_tests
+assert_nextest_filter "p2 has an exact nextest binary ID" "binary_id(=needle::p2_integration_tests)" p2_integration_tests
+assert_nextest_filter "p3 has an exact nextest binary ID" "binary_id(=needle::p3_integration_tests)" p3_integration_tests
+assert_nextest_filter "real_br has an exact nextest binary ID" "binary_id(=needle::real_br_integration_tests)" real_br_integration_tests
+assert_fails "unknown target has no nextest filter" needle_nextest_filter nope
+assert_fails "installer has no nextest filter" needle_nextest_filter installer
+
 # ── selected_cargo_targets ───────────────────────────────────────────────────
 SLOW_TARGET=""
 assert_lines "default selection is all six cargo targets" 6 selected_cargo_targets
@@ -175,6 +192,63 @@ SLOW_TARGET="installer"
 assert_lines "--target installer selects no cargo target" 0 selected_cargo_targets
 
 SLOW_TARGET=""
+
+# ── archive-mode validation ──────────────────────────────────────────────────
+real_repo_root="$REPO_ROOT"
+archive_workspace="$test_tmp_root/archive-workspace"
+valid_archive="$test_tmp_root/needle-nextest.tar.zst"
+empty_archive="$test_tmp_root/empty.tar.zst"
+mkdir -p "$archive_workspace"
+printf 'archive fixture\n' > "$valid_archive"
+: > "$empty_archive"
+REPO_ROOT="$archive_workspace"
+
+ARCHIVE_FILE=""
+ARCHIVE_FILE_ARGUMENT_COUNT=0
+SLOW_TARGET=""
+SLOW_TARGET_ARGUMENT_COUNT=0
+if needle_validate_archive_mode; then ok "ordinary non-archive mode remains valid"
+else bad "ordinary non-archive mode was rejected"; fi
+
+ARCHIVE_FILE="$valid_archive"
+ARCHIVE_FILE_ARGUMENT_COUNT=1
+SLOW_TARGET=""
+SLOW_TARGET_ARGUMENT_COUNT=0
+assert_fails "archive mode rejects aggregate execution" needle_validate_archive_mode
+
+SLOW_TARGET="installer"
+SLOW_TARGET_ARGUMENT_COUNT=1
+assert_fails "archive mode rejects installer" needle_validate_archive_mode
+
+SLOW_TARGET="lib"
+SLOW_TARGET_ARGUMENT_COUNT=2
+assert_fails "archive mode rejects repeated --target arguments" needle_validate_archive_mode
+
+SLOW_TARGET_ARGUMENT_COUNT=1
+ARCHIVE_FILE_ARGUMENT_COUNT=2
+assert_fails "archive mode rejects repeated --archive-file arguments" needle_validate_archive_mode
+
+ARCHIVE_FILE_ARGUMENT_COUNT=1
+ARCHIVE_FILE="$empty_archive"
+assert_fails "archive mode rejects an empty archive" needle_validate_archive_mode
+
+ARCHIVE_FILE="$test_tmp_root/wrong-extension.tar.gz"
+printf 'archive fixture\n' > "$ARCHIVE_FILE"
+assert_fails "archive mode requires the tar.zst archive contract" needle_validate_archive_mode
+
+ARCHIVE_FILE="$valid_archive"
+if needle_validate_archive_mode; then ok "archive mode accepts one exact Cargo target and a nonempty archive"
+else bad "valid archive mode was rejected"; fi
+
+mkdir "$archive_workspace/target"
+assert_fails "archive mode refuses an existing extraction target" needle_validate_archive_mode
+rmdir "$archive_workspace/target"
+
+REPO_ROOT="$real_repo_root"
+ARCHIVE_FILE=""
+ARCHIVE_FILE_ARGUMENT_COUNT=0
+SLOW_TARGET=""
+SLOW_TARGET_ARGUMENT_COUNT=0
 
 # ── fast-lane Clippy target selection ────────────────────────────────────────
 WANT_HARNESSES="$(printf '%s\t%s\n' \
@@ -304,6 +378,19 @@ for form in "--target=nope" "--target nope"; do
   fi
 done
 
+for form in "--archive-file=$valid_archive" "--archive-file $valid_archive"; do
+  # shellcheck disable=SC2086 # deliberate word split for the space form
+  if OUT="$(bash "$DOD" --slow $form 2>&1)"; then
+    bad "$form should require one target, not run"
+  elif grep -q "Unknown argument" <<<"$OUT"; then
+    bad "$form must parse: 'Unknown argument' means the form was not accepted"
+  elif grep -q "requires exactly one --target" <<<"$OUT"; then
+    ok "$form parses and requires one target"
+  else
+    bad "$form failed for an unexpected reason"
+  fi
+done
+
 # ── needle_gate_skips_slow_lane ──────────────────────────────────────────────
 FAILURES=("cargo clippy: exit code 101")
 GATE=true
@@ -364,6 +451,25 @@ if [[ "$BUILD_CALL" == build\|lib\|* && "$RUN_CALL" == run\|lib\|* ]]; then
   ok "slow Cargo wrapper labels build and run timing phases"
 else
   bad "slow Cargo wrapper did not label timing phases"
+fi
+
+ARCHIVE_FILE="$test_tmp_root/needle-nextest.tar.zst"
+REPO_ROOT="$real_repo_root"
+NEXTEST_CALL="$(run_slow_nextest_check lib 'binary_id(=needle)')"
+if [[ "$NEXTEST_CALL" == run\|lib\|*"env TMPDIR=$SLOW_TMPDIR timeout --kill-after=30 900 cargo nextest run"* \
+  && "$NEXTEST_CALL" == *"--archive-file $ARCHIVE_FILE --extract-to $REPO_ROOT --profile ci"* \
+  && "$NEXTEST_CALL" == *"--run-ignored default --ignore-default-filter --no-fail-fast --no-tests fail -E binary_id(=needle)"* ]]; then
+  ok "archive runner preserves the slow-lane deadline and exact nextest filter"
+else
+  bad "archive runner command drifted (got: $NEXTEST_CALL)"
+fi
+if [[ "$NEXTEST_CALL" != *CARGO_TARGET_DIR* \
+  && "$NEXTEST_CALL" != *"cargo test"* \
+  && "$NEXTEST_CALL" != *" --lib"* \
+  && "$NEXTEST_CALL" != *" --test"* ]]; then
+  ok "archive runner cannot compile or pass conflicting Cargo target selectors"
+else
+  bad "archive runner reintroduced a build context or Cargo target selector"
 fi
 
 WANT_EVENT='NEEDLE_DOD_TIMING {"phase":"build","target":"lib","duration_ms":123,"status":"pass","exit_code":0}'
