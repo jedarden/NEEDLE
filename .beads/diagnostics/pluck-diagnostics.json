@@ -1,6 +1,6 @@
 {
-  "timestamp": "2026-09-14T15:39:08.278033549Z",
-  "total_open_beads": 618,
+  "timestamp": "2026-09-14T16:39:12.685013857Z",
+  "total_open_beads": 617,
   "exclusion_criteria": {
     "has_assignee": 0,
     "manually_blocked": 21,
@@ -637,24 +637,13 @@
       "conflict_count": 0
     },
     {
-      "bead_id": "needle-e4d0f4b9",
-      "title": "End-to-end regression suite for the escalation ladder",
-      "priority": 1,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
       "bead_id": "needle-aaa71367",
       "title": "Phase 19 rollout: release, canary → stable, then let Mend migrate the 148 quarantined beads",
       "priority": 1,
       "assignee": null,
       "manual_blocked": false,
       "has_blockers": true,
-      "blocker_count": 6,
+      "blocker_count": 5,
       "has_resource_conflicts": false,
       "conflict_count": 0
     },
