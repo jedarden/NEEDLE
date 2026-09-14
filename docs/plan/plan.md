@@ -803,7 +803,7 @@ codinghome fleet and deployed through `needle upgrade --from-file` (canary
 | N-T16/N-T23 tokens and cost from the result envelope; stats by model and workspace; adapter storms resolve as infrastructure | `78b2adce` | `needle-d8ab1d3f` |
 | every attempt recorded in bead-rs `attempt_outcomes` via `resolve --action none` | `4b72c108` | `needle-aaba338d` |
 | attempt-archive spool producer and `needle upgrade --from-file` | `138dd820` | `needle-fc3d6aa3` |
-| language-default verification gates for workspaces that declare none | `2e9f1d1c`, `2b8d2b04` | `needle-c4b0a0d1` |
+| language-default verification gates for workspaces that declare none | `2e9f1d1c`, `2b8d2b04` | none: both subjects cite `needle-c4b0a0d1`, which does not resolve in this store |
 | prior fixes retrieved from the transcript graph into retry prompts | `e39497d7` | `needle-9022f181` |
 | N-T18 evidence-based adapter selection (L1) and N-T19 prompt-variant canary auto-stop (L2) | `b1838c04`, `79bb5ba8`, `4938c633` | `needle-2c404993` |
 
