@@ -27,6 +27,8 @@
 
 #[path = "integration_spawn/binary_freshness_fix_loop_e2e.rs"]
 mod binary_freshness_fix_loop_e2e;
+#[path = "integration_spawn/cargo_test_execution.rs"]
+mod cargo_test_execution;
 #[path = "integration_spawn/cleanup_function_error_handling_tests.rs"]
 mod cleanup_function_error_handling_tests;
 #[path = "integration_spawn/cleanup_liveness_regression.rs"]

@@ -27,7 +27,9 @@ max_tests = 3916
 [tier_budget]
 push = 650
 contract = 67
-e2e = 634
+# +16 literal test attributes for Cargo execution isolation (needle-b31fcb27):
+# seven integration cases plus nine nested-Cargo fixture tests embedded in source.
+e2e = 649
 soak = 0
 fuzz = 0
 
@@ -35,7 +37,7 @@ fuzz = 0
 name = "integration_spawn"
 path = "tests/integration_spawn.rs"
 tier = "e2e"
-max_tests = 262
+max_tests = 277
 owner = "component:process-integration"
 
 [[harness]]
