@@ -31,7 +31,9 @@ version = 1
 # (needle-2f470c02).
 # -8 Pulse scanner process contracts moved to integration_spawn
 # (needle-b3a720b7); Worker/Knot/Mend state tests remain in-process.
-max_tests = 3757
+# -26 Resolve, outcome, Mitosis timeout-context, and retrieval real-process
+# cases consolidated into 15 integration_spawn contracts (needle-6a36c428).
+max_tests = 3731
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
@@ -50,7 +52,8 @@ contract = 67
 # +6 bounded Resolve evidence contracts exercise read-only Git capture here
 # instead of reintroducing subprocesses into --lib (needle-aee9e898).
 # +8 Pulse scanner process contracts (needle-b3a720b7).
-e2e = 752
+# +15 consolidated resolution lifecycle process contracts (needle-6a36c428).
+e2e = 767
 soak = 0
 fuzz = 0
 
@@ -58,7 +61,7 @@ fuzz = 0
 name = "integration_spawn"
 path = "tests/integration_spawn.rs"
 tier = "e2e"
-max_tests = 380
+max_tests = 395
 owner = "component:process-integration"
 
 [[harness]]
@@ -287,13 +290,6 @@ kind = "global-env"
 max_occurrences = 14
 owner = "component:worker"
 reason = "Twelve grandfathered occurrences plus two test-only safeguards under the repository-wide environment lock: one neutralizes the host-dependent admission probe, and one pins the historical gate-failure regression beneath a private HOME."
-
-[[unit_exception]]
-path = "src/resolve/executor.rs"
-kind = "process"
-max_occurrences = 2
-owner = "component:resolve"
-reason = "Executor unit tests drive the shipped-work gate against real git fixtures (init, commit, rev-parse) in a per-test temp directory; the store boundary cannot stand in for the fixture repository."
 
 # Files under tests/ that are not compiled into a Rust harness are still test
 # assets. Each must match a rule with a durable component owner.

@@ -891,7 +891,6 @@ mod tests {
     use crate::bead_store::Filters;
     use crate::types::{BeadId, ClaimResult};
     use std::path::PathBuf;
-    use std::process::Command;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Mutex, Mutex as StateMutex};
 
@@ -1161,21 +1160,6 @@ mod tests {
         (dir, path)
     }
 
-    /// Run `git` inside `workspace`, panicking on failure — test setup only.
-    fn git(workspace: &std::path::Path, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(workspace)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .output()
-            .expect("spawn git");
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
     fn complete_decision() -> ResolveDecision {
         ResolveDecision::Complete {
             evidence: "tests passed".to_string(),
@@ -1243,67 +1227,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn complete_releases_with_failure_count_when_a_gate_rejects() {
-        let (_dir, workspace) = temp_workspace();
-        std::fs::write(
-            workspace.join(".needle.yaml"),
-            "verification:\n  - \"false\"\n",
-        )
-        .expect("write .needle.yaml");
-        let store = RecordingStore::new(workspace).with_stored_notes("did the work");
-
-        let applied = apply(&executor(), &store, &complete_decision())
-            .await
-            .expect("gate rejection releases, does not error");
-
-        assert_eq!(applied, AppliedDecision::Released(ReleaseCause::Rejected));
-        assert!(
-            store.closes_snapshot().is_empty(),
-            "no close on gate rejection"
-        );
-        assert_eq!(store.released(), 1, "bead released");
-        assert!(
-            store
-                .labels_snapshot()
-                .iter()
-                .any(|l| l == "failure-count:1"),
-            "failure accounting incremented on a judged rejection"
-        );
-    }
-
-    #[tokio::test]
-    async fn complete_treats_a_missing_gate_command_as_a_judged_rejection() {
-        let (_dir, workspace) = temp_workspace();
-        std::fs::write(
-            workspace.join(".needle.yaml"),
-            "verification:\n  - \"/nonexistent/needle-missing-gate-cmd\"\n",
-        )
-        .expect("write .needle.yaml");
-        let store = RecordingStore::new(workspace).with_stored_notes("did the work");
-
-        let applied = apply(&executor(), &store, &complete_decision())
-            .await
-            .expect("gate rejection releases, does not error");
-
-        // Legacy verification commands run under `sh -c`, so a missing
-        // command surfaces as exit 127 — a verdict from the gate's own
-        // execution, which `run_verification_gates` deliberately defers to
-        // (it warns about the missing path at resolution time, then lets the
-        // gate run: "the verdict still belongs to the gate's execution").
-        // Only a gate whose report carries ExecutionError is unverifiable.
-        assert_eq!(applied, AppliedDecision::Released(ReleaseCause::Rejected));
-        assert!(store.closes_snapshot().is_empty());
-        assert_eq!(store.released(), 1);
-        assert!(
-            store
-                .labels_snapshot()
-                .iter()
-                .any(|l| l == "failure-count:1"),
-            "a judged rejection increments the failure count"
-        );
-    }
-
-    #[tokio::test]
     async fn complete_releases_with_failure_count_when_shipped_work_fails() {
         let (_dir, workspace) = temp_workspace();
         // Empty notes and no snapshot: the shipped-work gate finds neither a
@@ -1326,66 +1249,6 @@ mod tests {
                 .iter()
                 .any(|l| l == "failure-count:1"),
             "a false close increments the failure count"
-        );
-    }
-
-    #[tokio::test]
-    async fn complete_releases_without_penalty_when_shipped_work_cannot_run() {
-        // A real git repository with a fresh commit past the dispatch
-        // baseline but no upstream: the shipped-work gate cannot verify the
-        // push and must report an execution error, not a failure (GitHub
-        // issue #18). The baseline arrives as the dispatch's in-memory
-        // fallback, standing in for an on-disk snapshot.
-        let dir = tempfile::tempdir().expect("tempdir");
-        let workspace = dir.path().to_path_buf();
-        git(&workspace, &["init", "-q"]);
-        git(&workspace, &["config", "user.email", "t@example.com"]);
-        git(&workspace, &["config", "user.name", "t"]);
-        std::fs::write(workspace.join("base.txt"), "base\n").expect("write base");
-        git(&workspace, &["add", "."]);
-        git(&workspace, &["commit", "-q", "-m", "base"]);
-        let base_sha = std::process::Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(&workspace)
-            .output()
-            .expect("rev-parse");
-        let base_sha = String::from_utf8_lossy(&base_sha.stdout).trim().to_string();
-        std::fs::write(workspace.join("src.rs"), "fn main() {}\n").expect("write work");
-        git(&workspace, &["add", "."]);
-        git(&workspace, &["commit", "-q", "-m", "real work"]);
-
-        let fallback = predispatch::PreDispatch {
-            head_sha: Some(base_sha),
-            notes_hash: None,
-            dirty_files: Vec::new(),
-            captured_at: Some(Utc::now()),
-        };
-
-        let store = RecordingStore::new(workspace);
-        let bead = store.bead();
-        let applied = executor()
-            .apply(
-                &store,
-                &bead,
-                &complete_decision(),
-                "worker-a",
-                Some(&fallback),
-            )
-            .await
-            .expect("unverifiable shipped-work releases, does not error");
-
-        assert_eq!(
-            applied,
-            AppliedDecision::Released(ReleaseCause::Unverifiable),
-            "no upstream means the gate cannot run — released without penalty"
-        );
-        assert!(store.closes_snapshot().is_empty());
-        assert!(
-            !store
-                .labels_snapshot()
-                .iter()
-                .any(|l| l.starts_with("failure-count:")),
-            "the retry counter must not burn on unjudged work"
         );
     }
 

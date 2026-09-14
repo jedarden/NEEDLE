@@ -2453,13 +2453,14 @@ mod tests {
         assert!(parent.labels.iter().all(|label| !active_retry_label(label)));
         assert!(parent.labels.contains(&"umbrella".to_string()));
 
-        let closes = store.closed.lock().unwrap();
-        assert_eq!(closes.len(), 1);
-        assert!(closes[0].1.contains("all 5 required children closed"));
-        assert!(closes[0]
-            .1
-            .contains("split-1, split-2, split-3, split-4, split-5"));
-        drop(closes);
+        {
+            let closes = store.closed.lock().unwrap();
+            assert_eq!(closes.len(), 1);
+            assert!(closes[0].1.contains("all 5 required children closed"));
+            assert!(closes[0]
+                .1
+                .contains("split-1, split-2, split-3, split-4, split-5"));
+        }
 
         let ready = store
             .ready(&Filters {

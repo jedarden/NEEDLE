@@ -20,21 +20,28 @@ use needle::ci::{correlate_commit, CorrelationError};
 use needle::commit_hook::{inject_bead_id_trailer, validate_commit};
 use needle::config::{
     resolve_bead_cli, ArchiveCompression, AttemptArchiveConfig, Backend, BackendSource,
-    BeadBackend as ConfiguredBackend, BeadCliConfig, HookConfig,
+    BeadBackend as ConfiguredBackend, BeadCliConfig, Config, HookConfig, ResolveConfig,
+    RetrievalConfig, ValidationConfig,
 };
 use needle::dispatch::{
     cleanup_extraction, extract_clean_workspace, extract_tokens, AgentAdapter, Dispatcher,
     ExtractionConfig, TimeoutReason, TokenExtraction,
 };
 use needle::mitosis::timeout_context::capture_timeout_context;
+use needle::mitosis::timeout_context::write_timeout_context;
+use needle::mitosis::timeout_context::{clear_timeout_context, load_timeout_context};
 use needle::mitosis::timeout_eligibility::TimeoutEligibility;
 use needle::outcome::{AttemptContext, OutcomeHandler};
-use needle::prompt::BuiltPrompt;
+use needle::prompt::{BuiltPrompt, PromptBuilder};
+use needle::resolve::executor::{AppliedDecision, DecisionExecutor, ReleaseCause};
+use needle::resolve::{ResolveContext, ResolveDecision, Resolver, VerificationError};
+use needle::retrieval::{retrieve, RetrievalRequest};
 use needle::scratch_sweep::{sweep_scratch_directory_with_proc_root, SweepOutcome};
 use needle::spawn_version::spawn_version_output;
-use needle::telemetry::{HookSink, Telemetry, TelemetryEvent};
+use needle::telemetry::{EventKind, HookSink, Telemetry, TelemetryEvent};
 use needle::types::{
-    AgentOutcome, Bead, BeadAction, BeadId, BeadStatus, ClaimResult, InputMethod, Outcome,
+    AgentOutcome, Bead, BeadAction, BeadId, BeadStatus, ClaimResult, ClaimStatus, InputMethod,
+    Outcome,
 };
 use needle::util::{detect_bead_cli_backend, parse_backend_name_from_version, probe_bead_cli};
 use needle::validation::dod_bypass::check_dod_bypass;
@@ -48,9 +55,10 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
@@ -71,6 +79,31 @@ impl Drop for HomeGuard {
         match self.previous.take() {
             Some(value) => std::env::set_var("HOME", value),
             None => std::env::remove_var("HOME"),
+        }
+    }
+}
+
+struct PathGuard {
+    previous: Option<OsString>,
+}
+
+impl PathGuard {
+    fn prepend(path: &Path) -> Self {
+        let previous = std::env::var_os("PATH");
+        let mut paths = vec![path.to_path_buf()];
+        paths.extend(std::env::split_paths(
+            previous.as_deref().unwrap_or_default(),
+        ));
+        std::env::set_var("PATH", std::env::join_paths(paths).unwrap());
+        Self { previous }
+    }
+}
+
+impl Drop for PathGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
         }
     }
 }
@@ -548,6 +581,15 @@ impl TestStore {
             actions: Mutex::new(Vec::new()),
         }
     }
+
+    fn with_notes(mut self, notes: &str) -> Self {
+        self.notes = Some(notes.to_string());
+        self
+    }
+
+    fn actions(&self) -> Vec<String> {
+        self.actions.lock().unwrap().clone()
+    }
 }
 
 #[async_trait]
@@ -561,7 +603,16 @@ impl BeadStore for TestStore {
     }
 
     async fn show(&self, _id: &BeadId) -> Result<Bead> {
+        self.actions.lock().unwrap().push("show".to_string());
         Ok(self.bead.clone())
+    }
+
+    async fn claim_status(&self, _id: &BeadId) -> Result<ClaimStatus> {
+        Ok(ClaimStatus {
+            status: self.bead.status.clone(),
+            assignee: self.bead.assignee.clone(),
+            revision: None,
+        })
     }
 
     async fn notes(&self, _id: &BeadId) -> Result<Option<String>> {
@@ -598,8 +649,24 @@ impl BeadStore for TestStore {
         Ok(())
     }
 
+    async fn close(&self, id: &BeadId, reason: &str) -> Result<()> {
+        self.actions
+            .lock()
+            .unwrap()
+            .push(format!("close:{id}:{reason}"));
+        Ok(())
+    }
+
     async fn reopen(&self, id: &BeadId) -> Result<()> {
         self.actions.lock().unwrap().push(format!("reopen:{id}"));
+        Ok(())
+    }
+
+    async fn append_notes(&self, id: &BeadId, note: &str) -> Result<()> {
+        self.actions
+            .lock()
+            .unwrap()
+            .push(format!("notes:{id}:{note}"));
         Ok(())
     }
 
@@ -3070,4 +3137,683 @@ fn dispatch_telemetry_process_contracts_hook_sink_multiple_hooks_matching_same_e
     let failures = sink.dispatch(&event);
     // Both hooks match, both succeed — no failures
     assert!(failures.is_empty());
+}
+
+fn resolution_process_contracts_complete() -> ResolveDecision {
+    ResolveDecision::Complete {
+        evidence: "verified the requested change".to_string(),
+        commit_message: "fix: the thing".to_string(),
+    }
+}
+
+fn resolution_process_contracts_workspace(commands: &[String]) -> (TempDir, Bead) {
+    let workspace = TempDir::new().expect("create gate workspace");
+    let yaml = serde_yaml::to_string(&serde_json::json!({ "verification": commands }))
+        .expect("serialize gate fixture");
+    fs::write(workspace.path().join(".needle.yaml"), yaml).expect("write gate fixture");
+    let bead = test_bead(workspace.path(), BeadStatus::InProgress);
+    (workspace, bead)
+}
+
+fn resolution_process_contracts_output(exit_code: i32) -> AgentOutcome {
+    AgentOutcome {
+        exit_code,
+        stdout: String::new(),
+        stderr: String::new(),
+    }
+}
+
+fn resolution_process_contracts_handler(config: Config) -> OutcomeHandler {
+    OutcomeHandler::new(
+        config,
+        Telemetry::new("resolution-process-contracts".to_string()),
+    )
+}
+
+fn resolution_process_contracts_backend(
+    name: &str,
+    binary: &str,
+    executable: PathBuf,
+    identity_pattern: &str,
+) -> BeadBackend {
+    BeadBackend {
+        name: name.to_string(),
+        binary: binary.to_string(),
+        detect_paths: vec![executable],
+        identity_pattern: identity_pattern.to_string(),
+        version_command: vec!["--version".to_string()],
+        verified_against: format!("{binary} test fixture"),
+        verified_on: "2026-09-14".to_string(),
+        operations: HashMap::new(),
+        capabilities: Default::default(),
+        quirks: Vec::new(),
+        error_markers: Default::default(),
+    }
+}
+
+fn resolution_process_contracts_executable(root: &Path, name: &str, body: &str) -> PathBuf {
+    let executable = archive_and_status_process_contracts_executable(root, name, body);
+    for attempt in 0..8 {
+        match spawn_version_output(&executable) {
+            Ok(_) => return executable,
+            Err(error)
+                if attempt + 1 < 8
+                    && error.chain().any(|cause| {
+                        cause
+                            .downcast_ref::<std::io::Error>()
+                            .is_some_and(|source| source.raw_os_error() == Some(26))
+                    }) => {}
+            Err(error) => panic!("published executable fixture was not ready: {error:#}"),
+        }
+    }
+    unreachable!("fixture readiness loop returns or panics on its final attempt")
+}
+
+fn resolution_process_contracts_context<'a>(bead: &'a Bead) -> ResolveContext<'a> {
+    ResolveContext::new(
+        bead,
+        1,
+        "stdout".to_string(),
+        "stderr".to_string(),
+        Duration::from_secs(60),
+        Utc::now(),
+        false,
+    )
+}
+
+#[tokio::test]
+async fn resolution_process_contracts_complete_rejects_failed_and_missing_gates() {
+    for command in ["false", "/nonexistent/needle-missing-gate-cmd"] {
+        let (_workspace, bead) = resolution_process_contracts_workspace(&[command.to_string()]);
+        let store = TestStore::new(bead.clone()).with_notes("did the work");
+        let executor = DecisionExecutor::new(
+            Config::default(),
+            Telemetry::new("resolution-gate-rejection".to_string()),
+        );
+
+        let applied = executor
+            .apply(
+                &store,
+                &bead,
+                &resolution_process_contracts_complete(),
+                "test-worker",
+                None,
+            )
+            .await
+            .expect("judged gate rejection should release");
+
+        assert_eq!(applied, AppliedDecision::Released(ReleaseCause::Rejected));
+        let actions = store.actions();
+        assert!(actions.iter().any(|action| action.starts_with("release:")));
+        assert!(actions
+            .iter()
+            .any(|action| action.contains("failure-count:1")));
+        assert!(!actions.iter().any(|action| action.starts_with("close:")));
+    }
+}
+
+#[tokio::test]
+async fn resolution_process_contracts_unverifiable_shipped_work_is_not_penalized() {
+    let repo = GitRepo::new();
+    let base = repo.head();
+    repo.commit("src.rs", "fn main() {}\n", "real work");
+    let bead = test_bead(repo.path(), BeadStatus::InProgress);
+    let store = TestStore::new(bead.clone());
+    let fallback = PreDispatch {
+        head_sha: Some(base),
+        notes_hash: None,
+        dirty_files: Vec::new(),
+        captured_at: Some(Utc::now()),
+    };
+    let executor = DecisionExecutor::new(
+        Config::default(),
+        Telemetry::new("resolution-unverifiable".to_string()),
+    );
+
+    let applied = executor
+        .apply(
+            &store,
+            &bead,
+            &resolution_process_contracts_complete(),
+            "test-worker",
+            Some(&fallback),
+        )
+        .await
+        .expect("unverifiable shipped work should release");
+
+    assert_eq!(
+        applied,
+        AppliedDecision::Released(ReleaseCause::Unverifiable)
+    );
+    assert!(store
+        .actions()
+        .iter()
+        .all(|action| !action.contains("failure-count")));
+}
+
+#[serial_test::serial]
+#[tokio::test]
+async fn resolution_process_contracts_resolve_agent_timeout_is_bounded() {
+    let root = TempDir::new().expect("create resolver fixture");
+    resolution_process_contracts_executable(
+        root.path(),
+        "claude",
+        "#!/bin/sh\nsleep 5\necho unreachable\n",
+    );
+    let _path = PathGuard::prepend(root.path());
+    let resolver = Resolver::with_config(
+        PromptBuilder::new(&needle::config::PromptConfig::default()),
+        ResolveConfig {
+            timeout_secs: 1,
+            ..ResolveConfig::default()
+        },
+    );
+    let started = Instant::now();
+    let error = resolver
+        .invoke_resolve_agent("bounded timeout fixture")
+        .await
+        .expect_err("slow agent must time out");
+    assert!(error.to_string().contains("timed out"), "{error:#}");
+    assert!(started.elapsed() < Duration::from_secs(3));
+}
+
+#[serial_test::serial]
+#[tokio::test]
+async fn resolution_process_contracts_resolver_timeout_returns_safe_retry() {
+    let root = TempDir::new().expect("create resolver fixture");
+    resolution_process_contracts_executable(
+        root.path(),
+        "claude",
+        "#!/bin/sh\nsleep 5\necho unreachable\n",
+    );
+    let _path = PathGuard::prepend(root.path());
+    let bead = test_bead(root.path(), BeadStatus::InProgress);
+    let resolver = Resolver::with_config(
+        PromptBuilder::new(&needle::config::PromptConfig::default()),
+        ResolveConfig {
+            timeout_secs: 1,
+            ..ResolveConfig::default()
+        },
+    );
+
+    let decision = resolver
+        .resolve(&resolution_process_contracts_context(&bead))
+        .await;
+    match decision {
+        ResolveDecision::Retry { evidence, strategy } => {
+            assert!(evidence.contains("agent_invocation_failed"), "{evidence}");
+            assert_eq!(strategy, "same");
+        }
+        other => panic!("expected safe retry, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn resolution_process_contracts_prompt_failure_returns_safe_retry() {
+    let workspace = TempDir::new().expect("create resolver workspace");
+    let bead = test_bead(workspace.path(), BeadStatus::InProgress);
+    let resolver = Resolver::with_config(
+        PromptBuilder::new(&needle::config::PromptConfig::default()),
+        ResolveConfig {
+            use_default_template: false,
+            custom_template_path: None,
+            ..ResolveConfig::default()
+        },
+    );
+
+    let decision = resolver
+        .resolve(&resolution_process_contracts_context(&bead))
+        .await;
+    match decision {
+        ResolveDecision::Retry { evidence, .. } => {
+            assert!(evidence.contains("prompt_build_failed"), "{evidence}");
+        }
+        other => panic!("expected safe retry, got {other:?}"),
+    }
+}
+
+#[test]
+fn resolution_process_contracts_binary_identity_accepts_match_and_rejects_shims() {
+    let root = TempDir::new().expect("create identity fixtures");
+    let matching = resolution_process_contracts_executable(
+        root.path(),
+        "correct-bead",
+        "#!/bin/sh\necho 'bead 0.2.6'\n",
+    );
+    let wrong = resolution_process_contracts_executable(
+        root.path(),
+        "wrong-bead",
+        "#!/bin/sh\necho 'bf 0.4.1'\n",
+    );
+    let reverse = resolution_process_contracts_executable(
+        root.path(),
+        "wrong-bf",
+        "#!/bin/sh\necho 'bead 0.2.6'\n",
+    );
+    let alien = resolution_process_contracts_executable(
+        root.path(),
+        "alien-bead",
+        "#!/bin/sh\necho 'wrong-identity 1.0.0'\n",
+    );
+    let prompt = || PromptBuilder::new(&needle::config::PromptConfig::default());
+
+    let matching = Resolver::new(prompt()).with_backend(resolution_process_contracts_backend(
+        "bead-rs",
+        "correct-bead",
+        matching,
+        r"^bead\s",
+    ));
+    assert!(matching.verify_binary_identity_before_agent().is_ok());
+
+    let mismatched = Resolver::new(prompt()).with_backend(resolution_process_contracts_backend(
+        "bead-rs",
+        "wrong-bead",
+        wrong,
+        r"^bead\s",
+    ));
+    match mismatched.verify_binary_identity_before_agent() {
+        Err(VerificationError::VerificationFailed(message)) => {
+            assert!(message.contains("bf"), "{message}");
+            assert!(message.contains("bead-rs"), "{message}");
+            assert!(message.contains("mismatch") || message.contains("pattern"));
+        }
+        other => panic!("expected actionable identity mismatch, got {other:?}"),
+    }
+
+    let reverse = Resolver::new(prompt()).with_backend(resolution_process_contracts_backend(
+        "bead-forge",
+        "wrong-bf",
+        reverse,
+        r"^bf\s",
+    ));
+    match reverse.verify_binary_identity_before_agent() {
+        Err(VerificationError::VerificationFailed(message)) => {
+            assert!(message.contains("bead"), "{message}");
+            assert!(message.contains("bead-forge"), "{message}");
+            assert!(message.contains("mismatch") || message.contains("pattern"));
+        }
+        other => panic!("expected reverse identity mismatch, got {other:?}"),
+    }
+
+    let alien = Resolver::new(prompt()).with_backend(resolution_process_contracts_backend(
+        "bead-rs",
+        "alien-bead",
+        alien,
+        r"^bead\s",
+    ));
+    match alien.verify_binary_identity_before_agent() {
+        Err(VerificationError::VerificationFailed(message)) => {
+            assert!(message.contains("wrong-identity"), "{message}");
+            assert!(message.contains("bead-rs"), "{message}");
+            assert!(
+                message.len() > 40,
+                "diagnostic is not actionable: {message}"
+            );
+            assert!(
+                message.contains("claims")
+                    || message.contains("expected")
+                    || message.contains("normalized")
+                    || message.contains("pattern"),
+                "diagnostic is not actionable: {message}"
+            );
+        }
+        other => panic!("expected actionable wrong-identity error, got {other:?}"),
+    }
+
+    let missing = Resolver::new(prompt()).with_backend(resolution_process_contracts_backend(
+        "bead-rs",
+        "missing",
+        root.path().join("absent"),
+        r"^bead\s",
+    ));
+    assert!(matches!(
+        missing.verify_binary_identity_before_agent(),
+        Err(VerificationError::NotSupported(message)) if message.contains("not found")
+    ));
+}
+
+#[serial_test::serial]
+#[tokio::test]
+async fn resolution_process_contracts_identity_failure_precedes_agent_invocation() {
+    let root = TempDir::new().expect("create identity fixtures");
+    let marker = root.path().join("agent-ran");
+    resolution_process_contracts_executable(
+        root.path(),
+        "claude",
+        &format!("#!/bin/sh\ntouch {}\n", marker.display()),
+    );
+    fs::remove_file(&marker).expect("clear fixture-readiness marker");
+    let wrong = resolution_process_contracts_executable(
+        root.path(),
+        "wrong-bead",
+        "#!/bin/sh\necho 'bf 0.4.1'\n",
+    );
+    let _path = PathGuard::prepend(root.path());
+    let bead = test_bead(root.path(), BeadStatus::InProgress);
+    let resolver =
+        Resolver::new(PromptBuilder::new(&needle::config::PromptConfig::default())).with_backend(
+            resolution_process_contracts_backend("bead-rs", "wrong-bead", wrong, r"^bead\s"),
+        );
+
+    let decision = resolver
+        .resolve(&resolution_process_contracts_context(&bead))
+        .await;
+    assert!(matches!(decision, ResolveDecision::Retry { .. }));
+    assert!(!marker.exists(), "agent ran before identity rejection");
+}
+
+#[serial_test::serial]
+#[tokio::test]
+async fn resolution_process_contracts_outcome_rejects_and_reopens_failed_gates() {
+    let home = TempDir::new().expect("create isolated HOME");
+    let _home = HomeGuard::set(home.path());
+    for status in [BeadStatus::InProgress, BeadStatus::Done] {
+        let (_workspace, bead) = resolution_process_contracts_workspace(&["false".to_string()]);
+        let store = TestStore::new(test_bead(bead.workspace.as_path(), status.clone()));
+        let mut config = Config::default();
+        config.worker.enforce_shipped_work = false;
+        let result = resolution_process_contracts_handler(config)
+            .handle(
+                &store,
+                &bead,
+                &resolution_process_contracts_output(0),
+                false,
+            )
+            .await
+            .expect("route failed verification");
+
+        assert_eq!(result.outcome, Outcome::Failure);
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
+        assert!(!result
+            .telemetry_events
+            .iter()
+            .any(|event| matches!(event, EventKind::BeadOrphaned { .. })));
+        let actions = store.actions();
+        assert!(actions.iter().any(|action| action == "show"));
+        assert!(actions
+            .iter()
+            .any(|action| action.contains("verification-failed")));
+        assert!(actions
+            .iter()
+            .any(|action| action.contains("failure-count:1")));
+        if status == BeadStatus::Done {
+            assert!(actions.iter().any(|action| action.starts_with("reopen:")));
+        }
+    }
+}
+
+#[serial_test::serial]
+#[tokio::test]
+async fn resolution_process_contracts_outcome_short_circuits_workspace_gates() {
+    let home = TempDir::new().expect("create isolated HOME");
+    let _home = HomeGuard::set(home.path());
+    let workspace = TempDir::new().expect("create gate workspace");
+    fs::write(
+        workspace.path().join(".needle.yaml"),
+        "gates:\n  - type: command\n    run_in: workspace\n    commands:\n      - touch first-ran\n      - exit 42\n      - touch must-not-run\n",
+    )
+    .expect("write gate config");
+    let bead = test_bead(workspace.path(), BeadStatus::InProgress);
+    let store = TestStore::new(bead.clone());
+    let mut config = Config::default();
+    config.worker.enforce_shipped_work = false;
+
+    let result = resolution_process_contracts_handler(config)
+        .handle(
+            &store,
+            &bead,
+            &resolution_process_contracts_output(0),
+            false,
+        )
+        .await
+        .expect("route workspace gates");
+
+    assert!(matches!(result.bead_action, BeadAction::Released(_)));
+    assert!(workspace.path().join("first-ran").exists());
+    assert!(!workspace.path().join("must-not-run").exists());
+}
+
+#[serial_test::serial]
+#[tokio::test]
+async fn resolution_process_contracts_outcome_runs_missing_path_for_its_verdict() {
+    let home = TempDir::new().expect("create isolated HOME");
+    let _home = HomeGuard::set(home.path());
+    let workspace = TempDir::new().expect("create gate workspace");
+    fs::write(
+        workspace.path().join(".needle.yaml"),
+        "gates:\n  - type: command\n    run_in: workspace\n    commands:\n      - scripts/definition-of-done.sh --fast\n",
+    )
+    .expect("write gate config");
+    let bead = test_bead(workspace.path(), BeadStatus::InProgress);
+    let mut config = Config::default();
+    config.worker.enforce_shipped_work = false;
+
+    let store = TestStore::new(bead.clone());
+    let result = resolution_process_contracts_handler(config)
+        .handle(
+            &store,
+            &bead,
+            &resolution_process_contracts_output(0),
+            false,
+        )
+        .await
+        .expect("resolve workspace gates");
+
+    assert_eq!(result.outcome, Outcome::Failure);
+    assert!(matches!(result.bead_action, BeadAction::Released(_)));
+    assert!(store
+        .actions()
+        .iter()
+        .any(|action| action.contains("verification-failed")));
+}
+
+#[serial_test::serial]
+#[tokio::test]
+async fn resolution_process_contracts_outcome_timeout_kills_gate_child() {
+    let home = TempDir::new().expect("create isolated HOME");
+    let _home = HomeGuard::set(home.path());
+    let marker = home.path().join("late-marker");
+    let (_workspace, bead) =
+        resolution_process_contracts_workspace(&[format!("sleep 3 && touch {}", marker.display())]);
+    let mut config = Config::default();
+    config.worker.enforce_shipped_work = false;
+    config.validation = ValidationConfig {
+        outcome_timeout_seconds: 1,
+        ..ValidationConfig::default()
+    };
+    let store = TestStore::new(bead.clone());
+    let started = Instant::now();
+
+    let result = resolution_process_contracts_handler(config)
+        .handle_with_cancellation(
+            &store,
+            &bead,
+            &resolution_process_contracts_output(0),
+            false,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .expect("timeout outcome handler");
+
+    assert!(started.elapsed() < Duration::from_secs(3));
+    assert_eq!(result.bead_action, BeadAction::Errored);
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    assert!(
+        !marker.exists(),
+        "timed-out gate child survived cancellation"
+    );
+}
+
+#[serial_test::serial]
+#[tokio::test]
+async fn resolution_process_contracts_attempt_ledger_is_once_per_terminal_path() {
+    let home = TempDir::new().expect("create isolated HOME");
+    let _home = HomeGuard::set(home.path());
+    for (case, exit_code, interrupted, gates) in [
+        ("success", 0, false, Vec::<String>::new()),
+        ("failure", 1, false, Vec::<String>::new()),
+        ("interrupted", 130, true, Vec::<String>::new()),
+        ("gate-failure", 0, false, vec!["false".to_string()]),
+    ] {
+        let log_dir = home.path().join(case);
+        let telemetry = Telemetry::with_log_dir(format!("resolution-{case}"), &log_dir);
+        telemetry.start();
+        let mut config = Config::default();
+        config.worker.enforce_shipped_work = false;
+        let handler = OutcomeHandler::new(config, telemetry.clone());
+        let (_workspace, bead) = resolution_process_contracts_workspace(&gates);
+        let store_status = if exit_code == 0 && gates.is_empty() {
+            BeadStatus::Done
+        } else {
+            BeadStatus::InProgress
+        };
+        let store = TestStore::new(test_bead(&bead.workspace, store_status));
+
+        let result = handler
+            .handle(
+                &store,
+                &bead,
+                &resolution_process_contracts_output(exit_code),
+                interrupted,
+            )
+            .await
+            .expect("route terminal outcome");
+        telemetry
+            .force_flush_async(Duration::from_secs(2))
+            .await
+            .expect("flush terminal ledger");
+        let rows: Vec<_> = telemetry_events(&log_dir)
+            .into_iter()
+            .filter(|event| event.event_type == "attempt.resolved")
+            .collect();
+        assert_eq!(rows.len(), 1, "{case} emitted {} rows", rows.len());
+        assert_eq!(rows[0].data["schema_version"], 1);
+        assert_eq!(rows[0].data["provisional"], true);
+        assert!(rows[0].data["context_manifest_hash"].is_null());
+        if case == "gate-failure" {
+            assert_eq!(rows[0].data["outcome"], "work_failure");
+            assert!(rows[0].data["gate_results"]
+                .as_array()
+                .is_some_and(|results| !results.is_empty()));
+            assert_eq!(result.outcome, Outcome::Failure);
+        }
+        telemetry.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn resolution_process_contracts_mitosis_timeout_context_round_trips_and_clears() {
+    let workspace = TempDir::new().expect("create timeout context workspace");
+    let bead = test_bead(workspace.path(), BeadStatus::InProgress);
+    let context = capture_timeout_context(
+        &bead,
+        workspace.path(),
+        TimeoutEligibility::Eligible {
+            reason: "agent wall-clock timeout".to_string(),
+        },
+        3600,
+    )
+    .await
+    .expect("capture timeout context")
+    .expect("eligible timeout yields context");
+
+    write_timeout_context(workspace.path(), &bead.id, &context)
+        .await
+        .expect("write timeout context");
+    let loaded = load_timeout_context(workspace.path(), &bead.id)
+        .await
+        .expect("load timeout context");
+    assert_eq!(loaded.bead_def.bead_id, bead.id);
+    assert!(loaded.qualifies_for_mitosis);
+
+    clear_timeout_context(workspace.path(), &bead.id).await;
+    assert!(load_timeout_context(workspace.path(), &bead.id)
+        .await
+        .is_none());
+}
+
+fn resolution_process_contracts_retrieval_config(command: &str) -> RetrievalConfig {
+    RetrievalConfig {
+        enabled: true,
+        command: Some(command.to_string()),
+        timeout_secs: 5,
+        max_results: 3,
+        max_bytes: 2000,
+        min_attempt: 2,
+    }
+}
+
+fn resolution_process_contracts_retrieval_request() -> RetrievalRequest {
+    RetrievalRequest {
+        bead_id: "needle-process-contract".to_string(),
+        title: "Fix the widget".to_string(),
+        workspace: "/fixture".to_string(),
+        attempt: 2,
+        failure_summary: "mismatched types".to_string(),
+        terminal_reason: Some("gate:default_rust".to_string()),
+    }
+}
+
+#[tokio::test]
+async fn resolution_process_contracts_retrieval_parses_stdin_and_caps_results() {
+    let script = r#"read -r line
+bid=$(printf '%s' "$line" | sed -n 's/.*"bead_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+i=0
+while [ "$i" -lt 5 ]; do
+  printf '{"id":"session:%d","source":"archive","title":"fix for %s","text":"closed"}\n' "$i" "$bid"
+  i=$((i+1))
+done"#;
+    let result = retrieve(
+        &resolution_process_contracts_retrieval_config(script),
+        &resolution_process_contracts_retrieval_request(),
+    )
+    .await;
+
+    assert_eq!(result.items.len(), 3, "{:?}", result.items);
+    assert!(result.items[0].title.contains("needle-process-contract"));
+    assert_eq!(result.ids(), vec!["session:0", "session:1", "session:2"]);
+}
+
+#[tokio::test]
+async fn resolution_process_contracts_retrieval_failures_and_timeout_yield_no_hints() {
+    let request = resolution_process_contracts_retrieval_request();
+    for command in ["exit 3", "echo not-json"] {
+        assert!(retrieve(
+            &resolution_process_contracts_retrieval_config(command),
+            &request
+        )
+        .await
+        .items
+        .is_empty());
+    }
+
+    let root = TempDir::new().expect("create retrieval fixture");
+    let pid_path = root.path().join("retrieval.pid");
+    let slow = RetrievalConfig {
+        timeout_secs: 1,
+        ..resolution_process_contracts_retrieval_config(&format!(
+            "printf '%s' \"$$\" > {}; exec sleep 30",
+            pid_path.display()
+        ))
+    };
+    assert!(retrieve(&slow, &request).await.items.is_empty());
+    let pid: u32 = fs::read_to_string(&pid_path)
+        .expect("retrieval process recorded pid")
+        .parse()
+        .expect("pid is numeric");
+    assert!(
+        !Path::new(&format!("/proc/{pid}")).exists(),
+        "timed-out retrieval process {pid} was not reaped"
+    );
+
+    let disabled = RetrievalConfig {
+        enabled: false,
+        ..resolution_process_contracts_retrieval_config("echo '{\"id\":\"x\"}'")
+    };
+    assert!(retrieve(&disabled, &request).await.items.is_empty());
+    let unset = RetrievalConfig {
+        command: None,
+        ..resolution_process_contracts_retrieval_config("")
+    };
+    assert!(retrieve(&unset, &request).await.items.is_empty());
 }

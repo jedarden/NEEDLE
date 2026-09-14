@@ -541,28 +541,8 @@ pub async fn clear_timeout_context(workspace: &Path, bead_id: &BeadId) {
 mod tests {
     use super::*;
     use crate::mitosis::timeout_eligibility::TimeoutEligibility;
-    use crate::types::{Bead, BeadId, BeadStatus};
-    use chrono::Utc;
-    use std::path::PathBuf;
+    use crate::types::BeadId;
     use tempfile::TempDir;
-
-    fn test_bead() -> Bead {
-        Bead {
-            id: BeadId::from("bf-test"),
-            title: "Test bead".to_string(),
-            body: Some("Test body that is reasonably long to test truncation but not extremely long so it fits".to_string()),
-            priority: 1,
-            status: BeadStatus::InProgress,
-            assignee: Some("worker-01".to_string()),
-            labels: vec!["timeout".to_string()],
-            workspace: PathBuf::from("/tmp/test"),
-            dependencies: vec![],
-            dependents: vec![],
-            comments: vec![],
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        }
-    }
 
     #[test]
     fn timeout_context_new_eligible() {
@@ -605,65 +585,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_and_load_timeout_context() {
-        let temp_dir = TempDir::new().unwrap();
-        let workspace = temp_dir.path();
-
-        let bead = test_bead();
-        let eligibility = TimeoutEligibility::Eligible {
-            reason: "agent wall-clock timeout".to_string(),
-        };
-
-        let context = capture_timeout_context(&bead, workspace, eligibility, 3600)
-            .await
-            .unwrap()
-            .expect("context capture failed");
-
-        write_timeout_context(workspace, &bead.id, &context)
-            .await
-            .expect("write failed");
-
-        let loaded = load_timeout_context(workspace, &bead.id)
-            .await
-            .expect("load failed");
-
-        assert_eq!(loaded.bead_def.bead_id, bead.id);
-        assert_eq!(loaded.bead_def.title, bead.title);
-        assert!(loaded.qualifies_for_mitosis);
-    }
-
-    #[tokio::test]
     async fn load_missing_context_returns_none() {
         let temp_dir = TempDir::new().unwrap();
         let workspace = temp_dir.path();
         let bead_id: BeadId = "bf-missing".into();
 
         let loaded = load_timeout_context(workspace, &bead_id).await;
-        assert!(loaded.is_none());
-    }
-
-    #[tokio::test]
-    async fn clear_removes_context_file() {
-        let temp_dir = TempDir::new().unwrap();
-        let workspace = temp_dir.path();
-
-        let bead = test_bead();
-        let eligibility = TimeoutEligibility::Eligible {
-            reason: "test".to_string(),
-        };
-
-        let context = capture_timeout_context(&bead, workspace, eligibility, 100)
-            .await
-            .unwrap()
-            .expect("capture failed");
-
-        write_timeout_context(workspace, &bead.id, &context)
-            .await
-            .expect("write failed");
-
-        clear_timeout_context(workspace, &bead.id).await;
-
-        let loaded = load_timeout_context(workspace, &bead.id).await;
         assert!(loaded.is_none());
     }
 }

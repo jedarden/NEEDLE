@@ -4157,43 +4157,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_success_bead_still_open_is_failure_not_orphaned() {
-        // needle-97397df2 inverts the old leak assertion: an agent process
-        // exiting successfully is not a successful dispatch when verification fails.
-        // The old test expected Success plus BeadOrphaned and thereby locked in
-        // the leaked in_progress claim.
-        let (_guard, _home) = isolated_home();
-        let handler = test_handler();
-        let store = test_store(BeadStatus::InProgress);
-        let (_ws, bead) = bead_in_workspace_with_verification(&["false".to_string()]);
-
-        let result = handler
-            .handle(&store, &bead, &test_output(0), false)
-            .await
-            .unwrap();
-
-        assert_eq!(result.outcome, Outcome::Failure);
-        assert!(
-            matches!(result.bead_action, BeadAction::Released(_)),
-            "exit 0 without verified closure must release the claim"
-        );
-        let actions = store.actions();
-        assert!(
-            actions.iter().any(|a| matches!(a, StoreAction::Show(_))),
-            "verification failure should check whether the bead needs reopening"
-        );
-        assert!(
-            !result
-                .telemetry_events
-                .iter()
-                .any(|e| matches!(e, EventKind::BeadOrphaned { .. })),
-            "an unverified exit must never enter the success/orphan path"
-        );
-        // The handler no longer calls store.release() -- apply_bead_action() does.
-        // "must not remain in_progress" is asserted above via result.bead_action.
-    }
-
-    #[tokio::test]
     async fn handle_failure_releases_and_increments_count() {
         let handler = test_handler();
         let store = test_store(BeadStatus::InProgress);
@@ -4837,28 +4800,6 @@ mod tests {
 
     // ── verification gate tests ──
 
-    /// A test bead whose workspace is a real directory declaring the given
-    /// legacy `verification:` commands in its own `.needle.yaml`.
-    ///
-    /// Gates resolve from the bead's workspace config (needle-da77b68a), so a
-    /// gate that must RUN is declared where resolution reads it — the bead's
-    /// own `.needle.yaml`. The handler's `Config` models the worker's home
-    /// workspace, which a foreign bead is deliberately not judged by. The
-    /// directory is real because it is the gate command's cwd; drop the
-    /// returned guard to remove it.
-    fn bead_in_workspace_with_verification(commands: &[String]) -> (tempfile::TempDir, Bead) {
-        let workspace = tempfile::TempDir::new().unwrap();
-        let yaml = serde_yaml::to_string(&serde_json::json!({ "verification": commands }))
-            .expect("fixture yaml serializes");
-        std::fs::write(workspace.path().join(".needle.yaml"), yaml)
-            .expect("fixture .needle.yaml writes");
-        let bead = Bead {
-            workspace: workspace.path().to_path_buf(),
-            ..test_bead(BeadStatus::InProgress)
-        };
-        (workspace, bead)
-    }
-
     #[tokio::test]
     async fn handle_success_no_verification_default_behavior() {
         // No verification configured → normal success flow (unchanged behavior).
@@ -4917,102 +4858,6 @@ mod tests {
             .any(|e| matches!(e, EventKind::BeadCompleted { .. })));
     }
 
-    #[tokio::test]
-    async fn handle_success_verification_fails_releases_bead() {
-        // Verification fails → bead released.
-        let (_guard, _home) = isolated_home();
-        let handler = test_handler();
-        let store = test_store(BeadStatus::InProgress);
-        let (_ws, bead) = bead_in_workspace_with_verification(&["false".to_string()]);
-
-        let result = handler
-            .handle(&store, &bead, &test_output(0), false)
-            .await
-            .unwrap();
-
-        assert_eq!(result.outcome, Outcome::Failure);
-        assert!(matches!(result.bead_action, BeadAction::Released(_)));
-
-        let actions = store.actions();
-        // NOTE: the handler no longer calls store.release() -- release is applied by
-        // the worker via apply_bead_action(). The release intent is asserted above as
-        // result.bead_action; a StoreAction::Release here would now never appear.
-        assert!(
-            actions.iter().any(
-                |a| matches!(a, StoreAction::AddLabel(_, label) if label == "verification-failed")
-            ),
-            "verification failure must add verification-failed label"
-        );
-    }
-
-    #[tokio::test]
-    async fn handle_success_verification_fails_reopens_closed_bead() {
-        // Agent closed the bead, but verification fails → reopen then release.
-        let (_guard, _home) = isolated_home();
-        let handler = test_handler();
-        let store = test_store(BeadStatus::Done);
-        let (_ws, bead) = bead_in_workspace_with_verification(&["false".to_string()]);
-
-        let result = handler
-            .handle(&store, &bead, &test_output(0), false)
-            .await
-            .unwrap();
-
-        assert!(matches!(result.bead_action, BeadAction::Released(_)));
-
-        let actions = store.actions();
-        assert!(
-            actions
-                .iter()
-                .any(|a| matches!(a, StoreAction::Reopen(id) if id == "needle-test")),
-            "verification failure on closed bead must reopen it first"
-        );
-        // NOTE: the handler no longer calls store.release() -- release is applied by
-        // the worker via apply_bead_action(). The release intent is asserted above as
-        // result.bead_action; a StoreAction::Release here would now never appear.
-    }
-
-    #[tokio::test]
-    async fn handle_success_verification_fails_increments_failure_count() {
-        let (_guard, _home) = isolated_home();
-        let handler = test_handler();
-        let store = test_store(BeadStatus::InProgress);
-        let (_ws, bead) = bead_in_workspace_with_verification(&["false".to_string()]);
-
-        let _result = handler
-            .handle(&store, &bead, &test_output(0), false)
-            .await
-            .unwrap();
-
-        let actions = store.actions();
-        assert!(
-            actions.iter().any(
-                |a| matches!(a, StoreAction::AddLabel(_, label) if label == "failure-count:1")
-            ),
-            "verification failure must increment failure count"
-        );
-    }
-
-    #[tokio::test]
-    async fn handle_success_multiple_gates_first_fails() {
-        // First gate passes, second fails → should stop and release.
-        let (_guard, _home) = isolated_home();
-        let handler = test_handler();
-        let store = test_store(BeadStatus::InProgress);
-        let (_ws, bead) = bead_in_workspace_with_verification(&[
-            "true".to_string(),
-            "false".to_string(),
-            "echo should-not-run".to_string(),
-        ]);
-
-        let result = handler
-            .handle(&store, &bead, &test_output(0), false)
-            .await
-            .unwrap();
-
-        assert!(matches!(result.bead_action, BeadAction::Released(_)));
-    }
-
     // ── per-workspace gate resolution (needle-da77b68a) ──
 
     #[tokio::test]
@@ -5062,100 +4907,6 @@ mod tests {
         // dispatch would be a Failure/Released.
         assert_eq!(result.outcome, Outcome::Success);
         assert_eq!(result.bead_action, BeadAction::Closed);
-    }
-
-    #[tokio::test]
-    async fn bead_workspace_declared_gates_run_from_that_workspaces_config() {
-        // Direction 2 of needle-da77b68a: a worker homed in a workspace that
-        // declares no gates (default Config) dispatched onto a bead whose
-        // workspace declares its OWN pluggable gates must run exactly those
-        // gates, in that workspace. The first command drops a marker in its
-        // cwd — the bead workspace — and the second fails, so the test
-        // observes both that the gate ran and where.
-        let (_guard, _home) = isolated_home();
-        let handler = test_handler();
-
-        let workspace = tempfile::TempDir::new().unwrap();
-        // `run_in: workspace` because the fixture is a bare directory, not a
-        // git repo — the default clean mode would fail at `git archive`
-        // extraction before running any command, which would make this test
-        // pass for the wrong reason (and the marker assert would still
-        // catch it, but the failure would say nothing about resolution).
-        std::fs::write(
-            workspace.path().join(".needle.yaml"),
-            "gates:\n\
-             \x20 - type: command\n\
-             \x20   run_in: workspace\n\
-             \x20   commands:\n\
-             \x20     - touch gate-ran-in-this-workspace\n\
-             \x20     - exit 42\n",
-        )
-        .unwrap();
-        let bead = Bead {
-            workspace: workspace.path().to_path_buf(),
-            ..test_bead(BeadStatus::InProgress)
-        };
-        let store = test_store(BeadStatus::InProgress);
-
-        let result = handler
-            .handle(&store, &bead, &test_output(0), false)
-            .await
-            .unwrap();
-
-        assert_eq!(result.outcome, Outcome::Failure);
-        assert!(matches!(result.bead_action, BeadAction::Released(_)));
-        let actions = store.actions();
-        assert!(
-            actions.iter().any(
-                |a| matches!(a, StoreAction::AddLabel(_, label) if label == "verification-failed")
-            ),
-            "the workspace's own gate must judge this dispatch, got {actions:?}"
-        );
-        assert!(
-            workspace.path().join("gate-ran-in-this-workspace").exists(),
-            "the gate must execute with the bead's workspace as its cwd"
-        );
-    }
-
-    #[tokio::test]
-    async fn bead_workspace_gate_paths_are_validated_at_resolution_time_but_still_run() {
-        // Resolution-time counterpart of the boot-time gate path check: the
-        // boot check can only ever see the worker's home declaration, so a
-        // foreign workspace's gate naming a script that workspace does not
-        // have is validated here, where the dispatch actually resolves it —
-        // the missing path is named in a warning before the gate runs,
-        // instead of surfacing only as the gate's own exit 127 (the
-        // incident's only symptom). Resolution warns and runs; it does not
-        // fail the dispatch on the path check alone — the verdict still
-        // belongs to the gate's execution.
-        let (_guard, _home) = isolated_home();
-        let handler = test_handler();
-
-        let workspace = tempfile::TempDir::new().unwrap();
-        // `run_in: workspace` so the failure is the missing script itself and
-        // not a clean-mode `git archive` extraction on a bare directory.
-        std::fs::write(
-            workspace.path().join(".needle.yaml"),
-            "gates:\n\
-             \x20 - type: command\n\
-             \x20   run_in: workspace\n\
-             \x20   commands:\n\
-             \x20     - scripts/definition-of-done.sh --fast\n",
-        )
-        .unwrap();
-        let bead = Bead {
-            workspace: workspace.path().to_path_buf(),
-            ..test_bead(BeadStatus::InProgress)
-        };
-
-        let (all_passed, report) = handler.run_verification_gates(&bead).await.unwrap();
-
-        // Resolution completed and handed the verdict to the gate: the
-        // missing script failed in execution, exactly as it does today.
-        assert!(!all_passed);
-        let report = report.expect("the resolved gate must still run after a path warning");
-        assert!(!report.all_passed);
-        assert!(report.results.values().any(|result| !result.passed()));
     }
 
     #[tokio::test]
@@ -5636,66 +5387,6 @@ mod tests {
         assert!(result.telemetry_events.is_empty());
     }
 
-    #[tokio::test]
-    async fn handle_with_cancellation_kills_a_slow_verification_gate_command() {
-        // End-to-end version of the test above, using a real `verification:`
-        // gate command instead of a slow store call — the exact scenario
-        // GitHub issue jedarden/NEEDLE#8 is actually about, and the one that
-        // originally exposed bf-3saat (CommandGate used a blocking
-        // std::process::Command with no .await yield point, so this same
-        // setup used to run the full 3s command to completion instead of
-        // being cut off at the configured 1s timeout). Now that CommandGate
-        // uses tokio::process::Command with kill_on_drop(true)
-        // (src/validation/mod.rs), this must actually preempt and kill the
-        // gate command around the configured timeout, not just eventually
-        // report it as having taken too long.
-        let marker = tempfile::NamedTempFile::new().unwrap();
-        let marker_path = marker.path().to_path_buf();
-        std::fs::remove_file(&marker_path).ok();
-
-        // The 3s gate is declared by the bead's own workspace, where gate
-        // resolution reads it (needle-da77b68a); the handler config only
-        // carries the outcome timeout.
-        let (_ws, bead) = bead_in_workspace_with_verification(&[format!(
-            "sleep 3 && touch {}",
-            marker_path.display()
-        )]);
-        let config = Config {
-            validation: ValidationConfig {
-                outcome_timeout_seconds: 1,
-                ..Default::default()
-            },
-            ..Config::default()
-        };
-        let handler = test_handler_with_config(config);
-        let store = test_store(BeadStatus::InProgress);
-        let cancelled = Arc::new(AtomicBool::new(false));
-
-        let start = std::time::Instant::now();
-        let result = handler
-            .handle_with_cancellation(&store, &bead, &test_output(0), false, cancelled)
-            .await
-            .unwrap();
-        let elapsed = start.elapsed();
-
-        assert!(
-            elapsed.as_secs() < 3,
-            "expected the ~1s configured timeout to cut off the 3s gate command, took {:?}",
-            elapsed
-        );
-        assert_eq!(result.bead_action, BeadAction::Errored);
-        assert!(result.telemetry_events.is_empty());
-
-        // Give any straggling kill signal a moment to land, then confirm the
-        // gate command was actually killed, not left running in the
-        // background to finish on its own.
-        tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
-        assert!(
-            !marker_path.exists(),
-            "gate command was not actually killed — it ran to completion in the background"
-        );
-    }
-
     // ── Regression test for needle-6d76f548: vanished workspace directory ──
 
     #[tokio::test]
@@ -5956,43 +5647,6 @@ mod tests {
 
     // ── attempt.resolved ledger row (N-T16) ──
 
-    /// Run one dispatch cycle to a terminal outcome and return its ledger rows.
-    ///
-    /// Each call builds a fresh handler and memory sink: the row is emitted
-    /// once per dispatch, so a shared sink would count one emission across
-    /// cases instead of per case. Shipped-work enforcement is off because
-    /// none of these fixtures set up a predispatch snapshot, and HOME is
-    /// pinned because the gate paths read and write gate-health state.
-    async fn ledger_rows_for(
-        exit_code: i32,
-        interrupted: bool,
-        verification: Vec<String>,
-    ) -> Vec<crate::telemetry::TelemetryEvent> {
-        let (_guard, _home) = isolated_home();
-        let mut config = Config::default();
-        config.worker.enforce_shipped_work = false;
-        let helper = crate::telemetry::test_utils::TestHelper::new("ledger-row-test");
-        let handler = OutcomeHandler::new(config, helper.telemetry().clone());
-        let store = test_store(BeadStatus::InProgress);
-        // Any gate under test is declared by the bead's own workspace, where
-        // gate resolution reads it (needle-da77b68a).
-        let (_ws, bead) = bead_in_workspace_with_verification(&verification);
-
-        let _ = handler
-            .handle(&store, &bead, &test_output(exit_code), interrupted)
-            .await
-            .unwrap();
-        helper.sync().await;
-        let rows = helper.events_by_type("attempt.resolved");
-        for row in &rows {
-            assert_row_satisfies_v1_contract(
-                &format!("terminal path (exit {exit_code}, interrupted {interrupted})"),
-                row,
-            );
-        }
-        rows
-    }
-
     /// Every emitted row satisfies the versioned v1 fixture, and carries the
     /// two pins this audit stands guard on: `provisional: true` until N-T03
     /// resolves attempt identity, and no `context_manifest_hash` until N-T10
@@ -6016,71 +5670,6 @@ mod tests {
             "{label}: context_manifest_hash must stay absent until N-T10, got {}",
             row.data["context_manifest_hash"]
         );
-    }
-
-    /// The terminal handlers `handle` routes to must each produce one —
-    /// and only one — `attempt.resolved` ledger row.
-    #[tokio::test]
-    async fn attempt_resolved_emitted_exactly_once_on_every_terminal_path() {
-        // (label, exit code, interrupted, verification commands). The exit
-        // codes and the gate configuration each select a different
-        // sub-handler: success and gate_failure (gate ran and rejected)
-        // arrive via exit 0.
-        //
-        // The gate_error sub-handler has no entry in this loop because it is
-        // not reachable through the exit-code classifications the loop
-        // drives: an ExecutionError in a CommandGate report is flattened to
-        // a plain Fail by to_gate_result before the routing match ever sees
-        // it (whether sh exit 127 should even count as an execution error —
-        // the aa-48a6e726 incident's shape — is needle-3771863e's scope).
-        // The route that DOES reach it through handle() is handle_success's
-        // shipped-work re-route, pinned by
-        // attempt_resolved_emitted_exactly_once_on_the_gate_error_path; its
-        // sibling re-route (the shipped-work gate ran and rejected the
-        // closure) is pinned by
-        // attempt_resolved_emitted_exactly_once_when_success_reroutes_to_gate_failure.
-        // The cancelled-before-start, handler-timeout and handler-error
-        // wrapper paths each have their own test below.
-        let paths: Vec<(&str, i32, bool, Vec<String>)> = vec![
-            ("success", 0, false, vec![]),
-            ("gate_failure", 0, false, vec!["false".to_string()]),
-            ("failure", 1, false, vec![]),
-            ("timeout", 124, false, vec![]),
-            ("agent_not_found", 127, false, vec![]),
-            ("crash", -9, false, vec![]),
-            ("interrupted", 0, true, vec![]),
-        ];
-
-        for (label, exit_code, interrupted, verification) in paths {
-            let rows = ledger_rows_for(exit_code, interrupted, verification).await;
-            assert_eq!(
-                rows.len(),
-                1,
-                "terminal path {label} must emit exactly one attempt.resolved, got {rows:?}"
-            );
-        }
-    }
-
-    /// Exit 0 means nothing on its own: when verification ran and rejected
-    /// the work, the ledger must say `work_failure`, never `verified_success`.
-    #[tokio::test]
-    async fn attempt_resolved_exit_zero_with_failed_verification_is_work_failure() {
-        let rows = ledger_rows_for(0, false, vec!["false".to_string()]).await;
-        assert_eq!(rows.len(), 1);
-        assert_eq!(
-            rows[0].data["outcome"], "work_failure",
-            "a rejected gate must classify as work_failure"
-        );
-        assert_ne!(
-            rows[0].data["outcome"], "verified_success",
-            "exit 0 with failed verification must never read verified_success"
-        );
-        // The rejecting gate is named in the row so the failure is
-        // attributable without re-running it.
-        let gates = rows[0].data["gate_results"]
-            .as_array()
-            .expect("gate_results array");
-        assert!(!gates.is_empty(), "a gate ran; the row must carry it");
     }
 
     /// Every row is provisional and carries the dispatch's attempt ID until

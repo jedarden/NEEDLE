@@ -597,7 +597,8 @@ impl Resolver {
     /// Invoke the resolve agent with the given prompt.
     ///
     /// Returns the agent's raw text response or an error.
-    async fn invoke_resolve_agent(&self, prompt: &str) -> Result<String> {
+    #[doc(hidden)]
+    pub async fn invoke_resolve_agent(&self, prompt: &str) -> Result<String> {
         use std::process::Stdio;
         use tokio::process::Command as AsyncCommand;
 
@@ -785,7 +786,8 @@ impl Resolver {
     /// - `Ok(())` - Verification passed or no backend configured
     /// - `Err(VerificationError::VerificationFailed)` - Binary identity doesn't match
     /// - `Err(VerificationError::NotSupported)` - Backend not configured or binary not found
-    fn verify_binary_identity_before_agent(&self) -> Result<(), VerificationError> {
+    #[doc(hidden)]
+    pub fn verify_binary_identity_before_agent(&self) -> Result<(), VerificationError> {
         let backend = match &self.backend {
             Some(backend) => backend,
             None => {
@@ -969,7 +971,7 @@ mod tests {
     use super::*;
     use crate::types::{BeadId, BeadStatus};
     use chrono::Utc;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use std::time::Duration;
 
     fn test_bead() -> Bead {
@@ -1249,45 +1251,6 @@ mod tests {
         assert!(context.truncated_stderr().len() <= 2000);
     }
 
-    #[tokio::test]
-    async fn resolver_returns_fallback_on_prompt_build_failure() {
-        let prompt_builder =
-            crate::prompt::PromptBuilder::new(&crate::config::PromptConfig::default());
-        let resolver = Resolver::new(prompt_builder);
-
-        // Create a context that will fail to build a prompt (invalid bead)
-        let invalid_bead = Bead {
-            id: BeadId::from("needle-test"),
-            title: "Test".to_string(),
-            body: Some("Test".to_string()),
-            priority: 1,
-            status: BeadStatus::Open,
-            assignee: None,
-            labels: vec![],
-            workspace: PathBuf::from("/nonexistent"),
-            dependencies: vec![],
-            dependents: vec![],
-            comments: vec![],
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        };
-
-        let bead_ref = Box::leak(Box::new(invalid_bead));
-        let context = ResolveContext::new(
-            bead_ref,
-            0,
-            "stdout".to_string(),
-            "stderr".to_string(),
-            Duration::from_secs(60),
-            Utc::now(),
-            false,
-        );
-
-        // This should return a fallback decision, not panic
-        let decision = resolver.resolve(&context).await;
-        assert!(matches!(decision, ResolveDecision::Retry { .. }));
-    }
-
     #[test]
     fn resolver_timeout_is_configurable() {
         let prompt_builder =
@@ -1326,39 +1289,6 @@ mod tests {
     }
 
     #[test]
-    fn verify_binary_identity_before_agent_returns_error_when_binary_not_found() {
-        use std::path::PathBuf;
-        let prompt_builder =
-            crate::prompt::PromptBuilder::new(&crate::config::PromptConfig::default());
-
-        // Create a backend with non-existent detect_paths
-        let backend = BeadBackend {
-            name: "test-backend".to_string(),
-            binary: "nonexistent-binary".to_string(),
-            detect_paths: vec![PathBuf::from("/nonexistent/path/binary")],
-            identity_pattern: r"^test\s".to_string(),
-            version_command: vec!["--version".to_string()],
-            verified_against: "test 1.0.0".to_string(),
-            verified_on: "2026-08-28".to_string(),
-            operations: std::collections::HashMap::new(),
-            capabilities: Default::default(),
-            quirks: vec![],
-            error_markers: Default::default(),
-        };
-
-        let resolver = Resolver::new(prompt_builder).with_backend(backend);
-
-        let result = resolver.verify_binary_identity_before_agent();
-        assert!(result.is_err());
-        match result {
-            Err(VerificationError::NotSupported(msg)) => {
-                assert!(msg.contains("not found"));
-            }
-            _ => panic!("Expected NotSupported error"),
-        }
-    }
-
-    #[test]
     fn normalize_backend_name_maps_short_to_descriptor_names() {
         let prompt_builder =
             crate::prompt::PromptBuilder::new(&crate::config::PromptConfig::default());
@@ -1378,30 +1308,6 @@ mod tests {
 
         let error = VerificationError::NotSupported("binary type".to_string());
         assert!(error.to_string().contains("not supported"));
-    }
-
-    #[tokio::test]
-    async fn resolver_calls_verification_before_agent() {
-        let prompt_builder =
-            crate::prompt::PromptBuilder::new(&crate::config::PromptConfig::default());
-        let resolver = Resolver::new(prompt_builder);
-
-        let bead = test_bead();
-        let bead_ref = Box::leak(Box::new(bead));
-
-        let context = ResolveContext::new(
-            bead_ref,
-            0,
-            "stdout".to_string(),
-            "stderr".to_string(),
-            Duration::from_secs(60),
-            Utc::now(),
-            false,
-        );
-
-        // The resolver should call verification before the agent (even though it's a stub that passes)
-        let decision = resolver.resolve(&context).await;
-        assert!(matches!(decision, ResolveDecision::Retry { .. }));
     }
 
     #[test]
@@ -1561,39 +1467,6 @@ mod tests {
         let err = result.unwrap_err();
         let err_msg = format!("{:?}", err); // Use debug format to see full error chain
         assert!(err_msg.contains("evidence") || err_msg.contains("Complete decision missing"));
-    }
-
-    #[tokio::test]
-    async fn invoke_resolve_agent_times_out() {
-        let resolver = Resolver::new(crate::prompt::PromptBuilder::new(
-            &crate::config::PromptConfig::default(),
-        ))
-        .with_timeout(Duration::from_millis(100));
-
-        // Create a very long prompt to ensure processing takes time
-        let long_prompt = "x".repeat(100000);
-        let result = resolver.invoke_resolve_agent(&long_prompt).await;
-
-        assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
-
-        // invoke_resolve_agent() spawns the `claude` CLI. Where that binary exists the
-        // 100ms budget is what fails, and asserting on "timed out" is meaningful. CI
-        // images do not ship it, so the call fails at spawn() instead and never reaches
-        // the timeout -- this test asserted the timeout unconditionally and so passed
-        // only on machines that happen to have `claude` installed. Assert whichever
-        // failure the environment can actually produce. See needle-ab52a15a.
-        if which::which("claude").is_ok() {
-            assert!(
-                err_msg.contains("timed out"),
-                "with the claude CLI present the 100ms budget should be what fails; got: {err_msg}"
-            );
-        } else {
-            assert!(
-                err_msg.contains("failed to spawn resolve agent"),
-                "without the claude CLI the call should fail at spawn; got: {err_msg}"
-            );
-        }
     }
 
     #[test]
@@ -2502,351 +2375,6 @@ mod tests {
                 assert_eq!(strategy, "same");
             }
             _ => panic!("Fallback must return Retry decision"),
-        }
-    }
-
-    #[tokio::test]
-    async fn resolve_timeout_returns_fallback_decision() {
-        let prompt_builder =
-            crate::prompt::PromptBuilder::new(&crate::config::PromptConfig::default());
-        let resolver = Resolver::new(prompt_builder);
-
-        let bead = test_bead();
-        let bead_ref = Box::leak(Box::new(bead));
-
-        let context = ResolveContext::new(
-            bead_ref,
-            1,
-            "stdout".to_string(),
-            "stderr".to_string(),
-            Duration::from_secs(60),
-            Utc::now(),
-            false,
-        );
-
-        // Mock a prompt build failure to trigger fallback
-        // This tests the timeout fallback path without actually waiting for a timeout
-        let decision = resolver.resolve(&context).await;
-
-        // Should return a safe fallback (Retry)
-        assert!(matches!(decision, ResolveDecision::Retry { .. }));
-    }
-
-    // ──────────────────────────────────────────────────────────────────────────────
-    // Fixture Shim Tests - Binary Identity Mismatch Detection
-    // ──────────────────────────────────────────────────────────────────────────────
-
-    #[cfg(unix)]
-    fn publish_executable_fixture(path: &Path, content: &str) {
-        use std::io::Write;
-        use std::os::unix::fs::PermissionsExt;
-
-        let staged_path = path.with_extension("staged");
-        let mut staged = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&staged_path)
-            .unwrap();
-        staged.write_all(content.as_bytes()).unwrap();
-        staged.sync_all().unwrap();
-        drop(staged);
-
-        let mut permissions = std::fs::metadata(&staged_path).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&staged_path, permissions).unwrap();
-        std::fs::rename(staged_path, path).unwrap();
-
-        // Some filesystems can still report ETXTBSY briefly after a closed,
-        // atomically renamed executable becomes visible. Make fixture
-        // readiness explicit so the identity check below tests identity, not
-        // publication timing under a parallel test load.
-        for attempt in 0..8 {
-            match crate::spawn_version::spawn_version_output(path) {
-                Ok(_) => return,
-                Err(error)
-                    if attempt + 1 < 8
-                        && error.chain().any(|cause| {
-                            cause
-                                .downcast_ref::<std::io::Error>()
-                                .is_some_and(|source| source.raw_os_error() == Some(26))
-                        }) => {}
-                Err(error) => {
-                    panic!("published executable fixture did not become ready: {error:#}")
-                }
-            }
-        }
-        unreachable!("fixture readiness loop returns or panics on its final attempt");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn verify_binary_identity_before_agent_detects_shim_mismatch() {
-        let temp_dir = tempfile::tempdir().unwrap();
-
-        // Create a "bead" shim script that execs a "bf" binary (different identity)
-        // This simulates the br->bf case where a binary claims to be one thing
-        // but actually execs a different binary
-        let shim_path = temp_dir.path().join("fake-bead-shim");
-        let shim_content = r#"#!/bin/sh
-# This shim claims to be "bead" but execs "bf" (different identity)
-# This simulates a misconfigured or malicious binary
-exec echo "bf 0.4.1"
-"#;
-        publish_executable_fixture(&shim_path, shim_content);
-
-        // Create a backend descriptor expecting "bead-rs" identity
-        let backend = BeadBackend {
-            name: "bead-rs".to_string(),
-            binary: "fake-bead-shim".to_string(),
-            detect_paths: vec![shim_path.clone()],
-            identity_pattern: r"^bead\s".to_string(),
-            version_command: vec!["--version".to_string()],
-            verified_against: "bead 0.1.0".to_string(),
-            verified_on: "2026-08-28".to_string(),
-            operations: std::collections::HashMap::new(),
-            capabilities: Default::default(),
-            quirks: vec![],
-            error_markers: Default::default(),
-        };
-
-        let prompt_builder =
-            crate::prompt::PromptBuilder::new(&crate::config::PromptConfig::default());
-        let resolver = Resolver::new(prompt_builder).with_backend(backend);
-
-        // The verification should detect the mismatch
-        let result = resolver.verify_binary_identity_before_agent();
-
-        // Assert that the mismatch was detected (not silently accepted)
-        assert!(
-            result.is_err(),
-            "verify_binary_identity_before_agent should return error for mismatch"
-        );
-
-        // Assert the error is actionable and names both path and identity
-        match result {
-            Err(VerificationError::VerificationFailed(msg)) => {
-                // Error message should mention the identity mismatch - specifically:
-                // - The actual detected identity ("bf" in this case)
-                // - The expected backend ("bead-rs" in this case)
-                // - The word "mismatch" or "normalized" to explain what's wrong
-                assert!(
-                    msg.contains("bf") && msg.contains("bead-rs") &&
-                    (msg.contains("mismatch") || msg.contains("normalized") || msg.contains("claims to be")),
-                    "Error message should detail the identity mismatch (got: {}), but it didn't contain expected identifiers", msg
-                );
-
-                // Error message should be descriptive and actionable
-                assert!(
-                    msg.len() > 30,
-                    "Error message should be descriptive and actionable: {}",
-                    msg
-                );
-
-                // Verify the specific error format includes both identities
-                assert!(
-                    (msg.contains("claims to be") || msg.contains("reported"))
-                        && (msg.contains("expected backend") || msg.contains("expected pattern")),
-                    "Error message should explain the mismatch clearly: {}",
-                    msg
-                );
-            }
-            Err(VerificationError::NotSupported(msg)) => {
-                panic!("Expected VerificationFailed, got NotSupported: {}", msg);
-            }
-            Ok(()) => {
-                panic!("Expected verification to fail for mismatched identity");
-            }
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn verify_binary_identity_before_agent_detects_reverse_shim_mismatch() {
-        let temp_dir = tempfile::tempdir().unwrap();
-
-        // Create a "bf" shim script that execs a "bead" binary (reverse case)
-        let shim_path = temp_dir.path().join("fake-bf-shim");
-        let shim_content = r#"#!/bin/sh
-# This shim claims to be "bf" but execs "bead" (different identity)
-exec echo "bead 0.1.3"
-"#;
-        publish_executable_fixture(&shim_path, shim_content);
-
-        // Create a backend descriptor expecting "bead-forge" identity
-        let backend = BeadBackend {
-            name: "bead-forge".to_string(),
-            binary: "fake-bf-shim".to_string(),
-            detect_paths: vec![shim_path.clone()],
-            identity_pattern: r"^bf\s".to_string(),
-            version_command: vec!["--version".to_string()],
-            verified_against: "bf 0.4.0".to_string(),
-            verified_on: "2026-08-28".to_string(),
-            operations: std::collections::HashMap::new(),
-            capabilities: Default::default(),
-            quirks: vec![],
-            error_markers: Default::default(),
-        };
-
-        let prompt_builder =
-            crate::prompt::PromptBuilder::new(&crate::config::PromptConfig::default());
-        let resolver = Resolver::new(prompt_builder).with_backend(backend);
-
-        // The verification should detect the reverse mismatch
-        let result = resolver.verify_binary_identity_before_agent();
-
-        // Assert that the mismatch was detected
-        assert!(
-            result.is_err(),
-            "verify_binary_identity_before_agent should return error for reverse mismatch"
-        );
-
-        match result {
-            Err(VerificationError::VerificationFailed(msg)) => {
-                // Error message should mention both identities involved in the mismatch
-                assert!(
-                    msg.contains("bead")
-                        && msg.contains("bf")
-                        && (msg.contains("mismatch")
-                            || msg.contains("normalized")
-                            || msg.contains("claims to be")),
-                    "Error message should detail the identity mismatch: {}",
-                    msg
-                );
-
-                // Error message should be descriptive
-                assert!(
-                    msg.len() > 30,
-                    "Error message should be descriptive and actionable: {}",
-                    msg
-                );
-            }
-            Err(VerificationError::NotSupported(msg)) => {
-                panic!("Expected VerificationFailed, got NotSupported: {}", msg);
-            }
-            Ok(()) => {
-                panic!("Expected verification to fail for reverse mismatched identity");
-            }
-        }
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn verify_binary_identity_before_agent_passes_for_matching_identity() {
-        let temp_dir = tempfile::tempdir().unwrap();
-
-        // Create a "bead" binary that reports correct identity (no mismatch)
-        let binary_path = temp_dir.path().join("correct-bead");
-        let binary_content = r#"#!/bin/sh
-# This binary correctly reports its identity as "bead"
-echo "bead 0.1.3"
-"#;
-        publish_executable_fixture(&binary_path, binary_content);
-
-        // Create a backend descriptor expecting "bead-rs" identity
-        let backend = BeadBackend {
-            name: "bead-rs".to_string(),
-            binary: "correct-bead".to_string(),
-            detect_paths: vec![binary_path.clone()],
-            identity_pattern: r"^bead\s".to_string(),
-            version_command: vec!["--version".to_string()],
-            verified_against: "bead 0.1.0".to_string(),
-            verified_on: "2026-08-28".to_string(),
-            operations: std::collections::HashMap::new(),
-            capabilities: Default::default(),
-            quirks: vec![],
-            error_markers: Default::default(),
-        };
-
-        let prompt_builder =
-            crate::prompt::PromptBuilder::new(&crate::config::PromptConfig::default());
-        let resolver = Resolver::new(prompt_builder).with_backend(backend);
-
-        // The verification should pass for matching identity
-        let result = resolver.verify_binary_identity_before_agent();
-
-        // Assert that verification passed
-        assert!(
-            result.is_ok(),
-            "verify_binary_identity_before_agent should pass for matching identity, got: {:?}",
-            result
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn verify_binary_identity_before_agent_error_message_is_actionable() {
-        let temp_dir = tempfile::tempdir().unwrap();
-
-        // Create a shim with a mismatch
-        let shim_path = temp_dir.path().join("actionable-test-shim");
-        publish_executable_fixture(
-            &shim_path,
-            r#"#!/bin/sh
-echo "wrong-identity 1.0.0"
-"#,
-        );
-
-        let backend = BeadBackend {
-            name: "bead-rs".to_string(),
-            binary: "actionable-test-shim".to_string(),
-            detect_paths: vec![shim_path.clone()],
-            identity_pattern: r"^bead\s".to_string(),
-            version_command: vec!["--version".to_string()],
-            verified_against: "bead 0.1.0".to_string(),
-            verified_on: "2026-08-28".to_string(),
-            operations: std::collections::HashMap::new(),
-            capabilities: Default::default(),
-            quirks: vec![],
-            error_markers: Default::default(),
-        };
-
-        let prompt_builder =
-            crate::prompt::PromptBuilder::new(&crate::config::PromptConfig::default());
-        let resolver = Resolver::new(prompt_builder).with_backend(backend);
-
-        let result = resolver.verify_binary_identity_before_agent();
-
-        match result {
-            Err(VerificationError::VerificationFailed(msg)) => {
-                // Verify error message is actionable by checking it contains:
-                // 1. The actual identity found ("wrong-identity" in this case)
-                // 2. The expected identity ("bead" in this case)
-                // 3. Clear explanation of the mismatch
-                assert!(
-                    msg.contains("wrong-identity")
-                        && msg.contains("bead-rs")
-                        && (msg.contains("mismatch")
-                            || msg.contains("claims to be")
-                            || msg.contains("expected backend")),
-                    "Error should detail the identity mismatch clearly: {}",
-                    msg
-                );
-
-                // Error message should be descriptive (not a generic "failed" message)
-                assert!(
-                    msg.len() > 40,
-                    "Error message should be descriptive and actionable: {}",
-                    msg
-                );
-
-                // Error message should not be empty or whitespace-only
-                assert!(!msg.trim().is_empty(), "Error message should not be empty");
-
-                // Error message should use actionable language ("claims", "expected", "normalized")
-                assert!(
-                    msg.contains("claims")
-                        || msg.contains("expected")
-                        || msg.contains("normalized"),
-                    "Error message should use actionable, explanatory language: {}",
-                    msg
-                );
-            }
-            Err(VerificationError::NotSupported(msg)) => {
-                panic!("Expected VerificationFailed, got NotSupported: {}", msg);
-            }
-            Ok(()) => {
-                panic!("Expected verification to fail for mismatched identity");
-            }
         }
     }
 }
