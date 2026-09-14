@@ -961,17 +961,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_backend_name_from_standard_version_output() {
-        // Test parsing "bead 0.1.3" format
-        let result = BeadBackend::parse_backend_name_from_version(
-            Path::new("/nonexistent/bead"),
-            &["--version".to_string()],
-        );
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("failed to spawn"));
-    }
-
-    #[test]
     fn test_parse_backend_name_bf_format() {
         // Test "bf 0.x.y" format
         assert_eq!(BeadBackend::parse_backend_name("bf 0.1.0"), "bf");

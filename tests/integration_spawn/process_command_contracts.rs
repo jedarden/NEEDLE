@@ -10,12 +10,18 @@ use chrono::{Duration as ChronoDuration, Utc};
 use needle::attempt_archive::{
     sha256_file, spool_attempt, AttemptArchiveInput, Sidecar, SIDECAR_SCHEMA_VERSION,
 };
-use needle::bead_store::{BeadStore, Filters, RepairReport};
+use needle::bead_store::{
+    builtin_bead_backends, open_configured, BeadBackend, BeadStore, CliBeadStore, Filters,
+    RepairReport,
+};
 use needle::build_status::template_for_workspace;
 use needle::canary::CanaryRunner;
 use needle::ci::{correlate_commit, CorrelationError};
 use needle::commit_hook::{inject_bead_id_trailer, validate_commit};
-use needle::config::{ArchiveCompression, AttemptArchiveConfig};
+use needle::config::{
+    resolve_bead_cli, ArchiveCompression, AttemptArchiveConfig, Backend, BackendSource,
+    BeadBackend as ConfiguredBackend, BeadCliConfig,
+};
 use needle::dispatch::{cleanup_extraction, extract_clean_workspace, ExtractionConfig};
 use needle::mitosis::timeout_context::capture_timeout_context;
 use needle::mitosis::timeout_eligibility::TimeoutEligibility;
@@ -24,6 +30,7 @@ use needle::scratch_sweep::{sweep_scratch_directory_with_proc_root, SweepOutcome
 use needle::spawn_version::spawn_version_output;
 use needle::telemetry::{Telemetry, TelemetryEvent};
 use needle::types::{AgentOutcome, Bead, BeadAction, BeadId, BeadStatus, ClaimResult};
+use needle::util::{detect_bead_cli_backend, parse_backend_name_from_version, probe_bead_cli};
 use needle::validation::dod_bypass::check_dod_bypass;
 use needle::validation::predispatch::{self, DirtyFile, PreDispatch};
 use needle::validation::{
@@ -961,4 +968,327 @@ fn archive_and_status_process_contracts_canary_backend_projection() {
         .unwrap();
     assert_eq!(actual.final_status, "closed");
     assert_eq!(actual.labels, vec!["native"]);
+}
+
+#[tokio::test]
+async fn backend_probe_process_contracts_version_matrix() {
+    let root = TempDir::new().unwrap();
+    for (name, output, expected) in [
+        ("bf-version", "bf 0.4.1", "bf"),
+        ("bead-version", "bead 0.2.6", "bead"),
+        ("custom-version", "my-backend 2.0.0", "my-backend"),
+        ("multiline-version", "bead 0.2.6\nBuild metadata", "bead"),
+    ] {
+        let binary = archive_and_status_process_contracts_executable(
+            root.path(),
+            name,
+            &format!("#!/bin/sh\nprintf '%s\\n' '{output}'\n"),
+        );
+        assert_eq!(
+            parse_backend_name_from_version(&binary, &["--version"]).unwrap(),
+            expected
+        );
+    }
+
+    let custom = archive_and_status_process_contracts_executable(
+        root.path(),
+        "custom-args",
+        "#!/bin/sh\n[ \"$1\" = version ] || exit 2\nprintf '%s\\n' 'custom 1.0'\n",
+    );
+    assert_eq!(
+        parse_backend_name_from_version(&custom, &["version"]).unwrap(),
+        "custom"
+    );
+
+    let failing = archive_and_status_process_contracts_executable(
+        root.path(),
+        "failing-version",
+        "#!/bin/sh\nprintf '%s\\n' 'bad version' >&2\nexit 7\n",
+    );
+    assert!(parse_backend_name_from_version(&failing, &["--version"])
+        .unwrap_err()
+        .to_string()
+        .contains("exited with code 7"));
+
+    let empty = archive_and_status_process_contracts_executable(
+        root.path(),
+        "empty-version",
+        "#!/bin/sh\nexit 0\n",
+    );
+    assert!(parse_backend_name_from_version(&empty, &["--version"])
+        .unwrap_err()
+        .to_string()
+        .contains("empty"));
+
+    let stderr = archive_and_status_process_contracts_executable(
+        root.path(),
+        "stderr-version",
+        "#!/bin/sh\nprintf '%s\\n' 'bead 0.2.6' >&2\n",
+    );
+    assert_eq!(
+        needle::bead_store::parse_backend_name_from_version(&stderr, None)
+            .await
+            .unwrap(),
+        "bead"
+    );
+    assert!(BeadBackend::parse_backend_name_from_version(
+        Path::new("/nonexistent/backend-probe-binary"),
+        &["--version".to_string()],
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("failed to spawn"));
+}
+
+#[test]
+fn backend_probe_process_contracts_path_matrix_driver() {
+    if std::env::var_os("NEEDLE_BACKEND_PROBE_CHILD").is_some() {
+        return;
+    }
+    let root = TempDir::new().unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "process_command_contracts::backend_probe_process_contracts_path_child",
+            "--nocapture",
+        ])
+        .env("NEEDLE_BACKEND_PROBE_CHILD", root.path())
+        .output()
+        .expect("run isolated PATH probe matrix");
+    assert!(
+        output.status.success(),
+        "isolated PATH probe matrix failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn backend_probe_process_contracts_path_child() {
+    let Some(root) = std::env::var_os("NEEDLE_BACKEND_PROBE_CHILD") else {
+        return;
+    };
+    let root = std::path::PathBuf::from(root);
+    let home = root.join("home");
+    fs::create_dir_all(&home).unwrap();
+    std::env::set_var("HOME", &home);
+
+    let scenario = |name: &str, binaries: &[(&str, &str)]| {
+        let directory = root.join(name);
+        fs::create_dir_all(&directory).unwrap();
+        for (binary, identity) in binaries {
+            archive_and_status_process_contracts_executable(
+                &directory,
+                binary,
+                &format!("#!/bin/sh\nprintf '%s\\n' '{identity}'\n"),
+            );
+        }
+        std::env::set_var("PATH", &directory);
+        directory
+    };
+
+    let bead = scenario("bead-only", &[("bead", "bead 0.2.6")]);
+    assert_eq!(probe_bead_cli().unwrap().name, "bead");
+    let detected = detect_bead_cli_backend(ConfiguredBackend::Auto, None).unwrap();
+    assert_eq!(detected.backend, "bead-rs");
+    assert_eq!(detected.cli_path, bead.join("bead"));
+
+    scenario("bf-only", &[("bf", "bf 0.4.1")]);
+    assert_eq!(probe_bead_cli().unwrap().name, "bf");
+
+    scenario("br-only", &[("br", "br 0.4.1")]);
+    assert_eq!(probe_bead_cli().unwrap().name, "br");
+    assert_eq!(
+        detect_bead_cli_backend(ConfiguredBackend::Br, None)
+            .unwrap()
+            .backend,
+        "br"
+    );
+
+    scenario("priority", &[("bead", "bead 0.2.6"), ("bf", "bf 0.4.1")]);
+    assert_eq!(probe_bead_cli().unwrap().name, "bead");
+
+    scenario(
+        "identity-fallback",
+        &[("bead", "bf 0.4.1"), ("bf", "bf 0.4.1")],
+    );
+    assert_eq!(probe_bead_cli().unwrap().name, "bf");
+
+    let spaced = scenario("path with spaces", &[("bead", "bead 0.2.6")]);
+    assert_eq!(probe_bead_cli().unwrap().path, spaced.join("bead"));
+
+    scenario("none", &[]);
+    assert!(probe_bead_cli().is_none());
+    assert!(detect_bead_cli_backend(ConfiguredBackend::Auto, None).is_none());
+}
+
+#[test]
+fn backend_probe_process_contracts_config_resolution() {
+    let root = TempDir::new().unwrap();
+    for name in ["my-bead-cli", "bead-nightly", "custom-bead-cli"] {
+        let binary = archive_and_status_process_contracts_executable(
+            root.path(),
+            name,
+            "#!/bin/sh\nprintf '%s\\n' 'bead 0.2.6'\n",
+        );
+        let (backend, path, source) = resolve_bead_cli(&BeadCliConfig {
+            backend: ConfiguredBackend::Auto,
+            path: Some(binary.clone()),
+        })
+        .unwrap();
+        assert_eq!(backend, Backend::Bead);
+        assert_eq!(path, binary);
+        assert_eq!(source, BackendSource::ExplicitPath);
+    }
+
+    assert!(resolve_bead_cli(&BeadCliConfig {
+        backend: ConfiguredBackend::Auto,
+        path: Some(Path::new("/").to_path_buf()),
+    })
+    .is_err());
+}
+
+fn backend_probe_capability_script(version: &str, capabilities: &str) -> String {
+    format!(
+        "#!/bin/sh\ncase \"$1\" in\n  --version) printf '%s\\n' '{version}' ;;\n  capabilities) [ \"$2\" = --profile ] && [ \"$3\" = native-v1 ] || exit 9; printf '%s' '{capabilities}' ;;\n  *) exit 8 ;;\nesac\n"
+    )
+}
+
+#[test]
+fn backend_probe_process_contracts_identity_and_capabilities() {
+    const VALID: &str = r#"{"implementation":"bead-rs","atomic_claim":true,"statuses":["open","in_progress","deferred","closed"],"schemas":[{"schema_ref":"urn:bead-rs:schema:issue:native-v1"},{"schema_ref":"urn:bead-rs:schema:event:native-v1"},{"schema_ref":"urn:bead-rs:schema:field-guide:native-v1"}],"commands":["ref","data","query"]}"#;
+    let cases = [
+        ("bead 0.2.6", VALID, None),
+        ("bf 0.4.1", VALID, Some("identity mismatch")),
+        (
+            "bead 0.2.6",
+            r#"{"implementation":"bead-rs","atomic_claim":false,"statuses":["open","in_progress","deferred","closed"],"schemas":[]}"#,
+            Some("capability mismatch"),
+        ),
+        (
+            "bead 0.2.6",
+            r#"{"implementation":"bead-rs","atomic_claim":true,"statuses":["open","in_progress","deferred","closed","blocked"],"schemas":[{"schema_ref":"urn:bead-rs:schema:issue:native-v1"},{"schema_ref":"urn:bead-rs:schema:event:native-v1"},{"schema_ref":"urn:bead-rs:schema:field-guide:native-v1"}],"commands":["ref","data","query"]}"#,
+            Some("unexpected status"),
+        ),
+        (
+            "bead 0.2.6",
+            r#"{"implementation":"bead-rs","atomic_claim":true,"statuses":["open","in_progress","closed"],"schemas":[{"schema_ref":"urn:bead-rs:schema:issue:native-v1"},{"schema_ref":"urn:bead-rs:schema:event:native-v1"},{"schema_ref":"urn:bead-rs:schema:field-guide:native-v1"}],"commands":["ref","data","query"]}"#,
+            Some("deferred"),
+        ),
+        (
+            "bead 0.2.6",
+            r#"{"implementation":"bead-rs","atomic_claim":true,"statuses":["open","in_progress","deferred","closed"],"schemas":[{"schema_ref":"urn:bead-rs:schema:issue:native-v1"}],"commands":["ref","data","query"]}"#,
+            Some("schema"),
+        ),
+        (
+            "bead 0.2.6",
+            r#"{"implementation":"bead-forge","atomic_claim":true,"statuses":["open","in_progress","deferred","closed"],"schemas":[{"schema_ref":"urn:bead-rs:schema:issue:native-v1"},{"schema_ref":"urn:bead-rs:schema:event:native-v1"},{"schema_ref":"urn:bead-rs:schema:field-guide:native-v1"}],"commands":["ref","data","query"]}"#,
+            Some("backend identity mismatch"),
+        ),
+        ("bead 0.2.6", "{invalid-json}", Some("JSON")),
+    ];
+
+    for (index, (version, capabilities, expected_error)) in cases.into_iter().enumerate() {
+        let workspace = TempDir::new().unwrap();
+        let binary = archive_and_status_process_contracts_executable(
+            workspace.path(),
+            "bead",
+            &backend_probe_capability_script(version, capabilities),
+        );
+        let result = open_configured(
+            &BeadCliConfig {
+                backend: ConfiguredBackend::Bead,
+                path: Some(binary),
+            },
+            workspace.path().to_path_buf(),
+            None,
+            None,
+            None,
+        );
+        match expected_error {
+            None => assert!(result.is_ok(), "case {index} should succeed"),
+            Some(expected) => {
+                let error = result.err().expect("case should fail").to_string();
+                assert!(
+                    error.contains(expected),
+                    "case {index}: expected {expected:?}, got {error:?}"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn backend_probe_process_contracts_cli_store_commands() {
+    let workspace = TempDir::new().unwrap();
+    let binary = archive_and_status_process_contracts_executable(
+        workspace.path(),
+        "fake-bead",
+        r#"#!/bin/sh
+case "$1" in
+  list)
+    printf '%s\n' \
+      '{"id":"active","title":"active","priority":1,"status":"open","labels":["quarantine-until:2099-01-01T00:00:00Z"],"created_at":"2026-08-13T00:00:00Z"}' \
+      '{"id":"legacy-marked","title":"legacy","priority":1,"status":"open","labels":["deferred","failure-count:1","quarantine-until:2000-01-01T00:00:00Z"],"created_at":"2026-08-13T00:00:00Z"}' \
+      '{"id":"operator-deferred","title":"operator","priority":1,"status":"open","labels":["deferred"],"created_at":"2026-08-13T00:00:00Z"}'
+    ;;
+  show)
+    case "$2" in
+      good) printf '%s\n' '{"id":"good","title":"Good","priority":1,"status":"open","labels":[],"created_at":"2026-08-13T00:00:00Z"}' ;;
+      missing) printf '%s\n' '[]' ;;
+      failed) printf '%s\n' 'not found' >&2; exit 1 ;;
+      malformed) printf '%s\n' '{"id":' ;;
+    esac
+    ;;
+  init) printf '%s' incomplete > .beads/beads.db ;;
+  sync) printf '%s\n' import-failed >&2; exit 1 ;;
+  *) exit 2 ;;
+esac
+"#,
+    );
+    let descriptor = builtin_bead_backends()
+        .into_iter()
+        .find(|backend| backend.name == "bead-rs")
+        .unwrap();
+    let store = CliBeadStore::new(
+        descriptor,
+        binary,
+        workspace.path().to_path_buf(),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
+
+    let filters = Filters {
+        assignee: None,
+        exclude_labels: vec!["deferred".into(), "human".into(), "blocked".into()],
+        exclude_ids: std::collections::HashSet::new(),
+    };
+    let ready = store.ready(&filters).await.unwrap();
+    assert_eq!(
+        ready
+            .iter()
+            .map(|bead| bead.id.as_ref())
+            .collect::<Vec<_>>(),
+        ["legacy-marked"]
+    );
+
+    let bead = store.show(&BeadId::from("good")).await.unwrap();
+    assert_eq!(bead.title, "Good");
+    for id in ["missing", "failed", "malformed"] {
+        assert!(store.show(&BeadId::from(id)).await.is_err(), "{id}");
+    }
+
+    let beads = workspace.path().join(".beads");
+    fs::create_dir_all(beads.join("checkpoint")).unwrap();
+    fs::write(beads.join("checkpoint/forensic.jsonl"), "checkpoint\n").unwrap();
+    fs::write(beads.join("beads.db"), "original database").unwrap();
+    let error = store.full_rebuild().await.unwrap_err();
+    assert!(error.to_string().contains("original database restored"));
+    assert_eq!(
+        fs::read_to_string(beads.join("beads.db")).unwrap(),
+        "original database"
+    );
+    assert!(!beads.join("beads.db.needle-rebuild-backup").exists());
 }

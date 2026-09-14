@@ -1494,40 +1494,6 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_backend_from_path() {
-        let tmp_dir = tempfile::tempdir().unwrap();
-
-        // Test 1: a binary that reports a foreign identity is rejected
-        let foreign_bin = tmp_dir.path().join("bf");
-        std::fs::write(&foreign_bin, "#!/bin/sh\necho \"bf 0.4.1\"").unwrap();
-        make_executable(&foreign_bin);
-        let err = detect_backend_from_path(&foreign_bin)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("unrecognized backend 'bf'"), "got: {err}");
-
-        // Test 2: bead binary that reports "bead" identity
-        let bead_bin = tmp_dir.path().join("bead");
-        std::fs::write(&bead_bin, "#!/bin/sh\necho \"bead 0.1.3\"").unwrap();
-        make_executable(&bead_bin);
-        assert_eq!(detect_backend_from_path(&bead_bin).unwrap(), Backend::Bead);
-
-        // Test 3: custom-named bead-rs binary that reports "bead" identity
-        let custom_bin = tmp_dir.path().join("my-custom-bead");
-        std::fs::write(&custom_bin, "#!/bin/sh\necho \"bead 0.1.3\"").unwrap();
-        make_executable(&custom_bin);
-        assert_eq!(
-            detect_backend_from_path(&custom_bin).unwrap(),
-            Backend::Bead
-        );
-    }
-
-    #[test]
-    fn test_detect_backend_from_path_no_filename() {
-        assert!(detect_backend_from_path(PathBuf::from("/").as_path()).is_err());
-    }
-
-    #[test]
     fn test_resolve_bead_cli_explicit_path_bf_named_binary() {
         let tmp_dir = tempfile::tempdir().unwrap();
         let bf_bin = tmp_dir.path().join("bf");
@@ -1559,23 +1525,6 @@ mod tests {
         let (backend, path, _source) = resolve_bead_cli(&config).unwrap();
         assert_eq!(backend, Backend::Bead);
         assert_eq!(path, bead_bin);
-    }
-
-    #[test]
-    fn test_resolve_bead_cli_explicit_path_takes_precedence() {
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let custom_bin = tmp_dir.path().join("my-bead-cli");
-        std::fs::write(&custom_bin, "#!/bin/sh\necho \"bead 0.2.4\"").unwrap();
-        make_executable(&custom_bin);
-
-        let config = BeadCliConfig {
-            backend: BeadBackend::Auto,
-            path: Some(custom_bin.clone()),
-        };
-
-        let (backend, path, _source) = resolve_bead_cli(&config).unwrap();
-        assert_eq!(backend, Backend::Bead); // Detected from filename
-        assert_eq!(path, custom_bin);
     }
 
     #[test]
@@ -1707,44 +1656,6 @@ mod tests {
         // Br backend should map to Backend::Bead
         assert_eq!(backend, Backend::Bead);
         assert_eq!(path, custom_br);
-    }
-
-    #[test]
-    fn test_resolve_bead_cli_explicit_path_auto_detects_backend_from_path() {
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let renamed_binary = tmp_dir.path().join("bead-nightly");
-        std::fs::write(&renamed_binary, "#!/bin/sh\necho \"bead 0.2.4\"").unwrap();
-        make_executable(&renamed_binary);
-
-        let config = BeadCliConfig {
-            backend: BeadBackend::Auto,
-            path: Some(renamed_binary.clone()),
-        };
-
-        let (backend, path, _source) = resolve_bead_cli(&config).unwrap();
-        // Auto backend with an explicit path detects the backend from the
-        // binary's own identity, not its filename
-        assert_eq!(backend, Backend::Bead);
-        assert_eq!(path, renamed_binary);
-    }
-
-    #[test]
-    fn test_resolve_bead_cli_auto_detects_bead_backend_from_custom_filename() {
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let custom_binary = tmp_dir.path().join("custom-bead-cli");
-        // Resolution probes `--version`; the fixture must identify as bead.
-        std::fs::write(&custom_binary, "#!/bin/sh\necho \"bead 0.2.4\"").unwrap();
-        make_executable(&custom_binary);
-
-        let config = BeadCliConfig {
-            backend: BeadBackend::Auto,
-            path: Some(custom_binary.clone()),
-        };
-
-        let (backend, path, _source) = resolve_bead_cli(&config).unwrap();
-        // Auto backend should detect custom names as Bead
-        assert_eq!(backend, Backend::Bead);
-        assert_eq!(path, custom_binary);
     }
 
     #[serial]

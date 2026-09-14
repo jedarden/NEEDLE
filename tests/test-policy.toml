@@ -24,7 +24,9 @@ version = 1
 # future before advancing manual time.
 # -11 process-spawning archive/status/version/canary contracts moved to the
 # integration_spawn harness (needle-a9bdc4e1).
-max_tests = 3895
+# -81 backend identity, capability, PATH, configuration, and CLI process cases
+# consolidated into six integration_spawn contracts (needle-83163936).
+max_tests = 3814
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
@@ -37,7 +39,8 @@ contract = 67
 # +13 Git, tar, shell, and filesystem command contracts (needle-8495d35d).
 # +9 child-process and real Worker lifecycle contracts (needle-c54ad697).
 # +11 archive/status/version/canary child-process contracts (needle-a9bdc4e1).
-e2e = 683
+# +6 consolidated backend probe process contracts (needle-83163936).
+e2e = 689
 soak = 0
 fuzz = 0
 
@@ -45,7 +48,7 @@ fuzz = 0
 name = "integration_spawn"
 path = "tests/integration_spawn.rs"
 tier = "e2e"
-max_tests = 311
+max_tests = 317
 owner = "component:process-integration"
 
 [[harness]]
@@ -79,20 +82,6 @@ owner = "component:bead-rs-contract"
 # These are strict ceilings on existing debt. A new occurrence fails the fast
 # lane; deleting an occurrence makes the corresponding exception stale so the
 # policy shrinks with the implementation.
-[[unit_exception]]
-path = "src/bead_store/cli_store.rs"
-kind = "process"
-max_occurrences = 1
-owner = "component:bead-store-cli-store"
-reason = "Grandfathered unit-tier debt; replace with an injected boundary."
-
-[[unit_exception]]
-path = "src/bead_store/mod.rs"
-kind = "process"
-max_occurrences = 2
-owner = "component:bead-store"
-reason = "Grandfathered unit-tier debt; replace with an injected boundary."
-
 [[unit_exception]]
 path = "src/build_metadata.rs"
 kind = "global-env"
@@ -271,16 +260,9 @@ reason = "Grandfathered unit-tier debt; replace with an injected boundary."
 [[unit_exception]]
 path = "src/util.rs"
 kind = "global-env"
-max_occurrences = 25
+max_occurrences = 24
 owner = "component:util"
-reason = "24 grandfathered occurrences, plus one deliberate seam: isolate_env_admitted sets NEEDLE_SKIP_LAUNCH_RESOURCE_CHECK while holding the environment lock, which is how a test neutralizes the launch admission gate instead of letting host load decide its result."
-
-[[unit_exception]]
-path = "src/util.rs"
-kind = "process"
-max_occurrences = 1
-owner = "component:util"
-reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+reason = "23 grandfathered occurrences, plus one deliberate seam: isolate_env_admitted sets NEEDLE_SKIP_LAUNCH_RESOURCE_CHECK while holding the environment lock, which is how a test neutralizes the launch admission gate instead of letting host load decide its result."
 
 [[unit_exception]]
 path = "src/util.rs"
