@@ -53,7 +53,14 @@ mod tests {
     let outcome = runner.run().unwrap();
 
     // Verify compilation failure was detected
-    assert!(outcome.is_compilation_failure());
+    assert!(
+        outcome.is_compilation_failure(),
+        "cargo outcome was not classified as compilation failure: exit={:?}, timed_out={}, stderr={:?}, stdout={:?}",
+        outcome.exit_code,
+        outcome.timed_out,
+        outcome.stderr,
+        outcome.stdout,
+    );
     assert!(!outcome.is_test_failure());
     assert!(!outcome.timed_out);
 
