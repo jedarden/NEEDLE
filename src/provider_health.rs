@@ -285,9 +285,18 @@ pub fn degraded_adapters() -> Vec<ProviderHealthState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
-    /// Tests share the real `$HOME`-derived state directory, so each uses a
-    /// unique adapter name and cleans up after itself.
+    /// Pin the HOME-derived provider-health state beneath a per-test root.
+    /// The environment lock makes this safe alongside every other unit test
+    /// that swaps HOME process-globally.
+    fn isolated_home() -> (crate::util::test_env::EnvGuard, TempDir) {
+        let env_guard = crate::util::test_env::isolate_env();
+        let home = TempDir::new().unwrap();
+        std::env::set_var("HOME", home.path());
+        (env_guard, home)
+    }
+
     fn unique_adapter(tag: &str) -> String {
         format!(
             "test-adapter-{tag}-{}-{}",
@@ -308,6 +317,7 @@ mod tests {
 
     #[test]
     fn storm_across_beads_trips_and_later_same_failures_are_infra() {
+        let (_env_guard, _home) = isolated_home();
         let adapter = unique_adapter("storm");
         let config = quick_config();
         let mut last = None;
@@ -353,6 +363,7 @@ mod tests {
 
     #[test]
     fn one_bead_failing_repeatedly_does_not_trip() {
+        let (_env_guard, _home) = isolated_home();
         let adapter = unique_adapter("single");
         let config = quick_config();
         let mut last = None;
@@ -371,6 +382,7 @@ mod tests {
 
     #[test]
     fn mixed_fingerprints_never_trip() {
+        let (_env_guard, _home) = isolated_home();
         let adapter = unique_adapter("mixed");
         let config = quick_config();
         for n in 0..8 {

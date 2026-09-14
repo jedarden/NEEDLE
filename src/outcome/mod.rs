@@ -4723,7 +4723,7 @@ mod tests {
         // these four failures to a different state file, and leave the window
         // too short to trip. That is precisely how this passed locally at
         // --test-threads=4 and failed in CI at full parallelism.
-        let _env_guard = crate::util::test_env::isolate_env();
+        let (_env_guard, _home) = isolated_home();
         let adapter = format!(
             "test-storm-adapter-{}-{}",
             std::process::id(),

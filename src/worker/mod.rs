@@ -9564,6 +9564,8 @@ mod tests {
     #[tokio::test]
     async fn regression_2026_08_17_exit_zero_without_close_cannot_loop() {
         let _env_lock = crate::util::test_env::isolate_env_admitted();
+        let environment_home = crate::util::test_env::isolated_home();
+        std::env::set_var("HOME", &environment_home);
         // Exact incident fixture (needle-3386daef / needle-55ec0193):
         //   02:52 claim -> 02:58 success (6m), worker needle-otlp-test
         //   04:49 claim -> 04:59 timeout (10m), worker seam-2

@@ -303,9 +303,6 @@ pub fn state_file_path(workspace: &Path) -> Result<PathBuf> {
     base.push("state");
     base.push("gate-health");
 
-    // Create directory if it doesn't exist
-    fs::create_dir_all(&base).context("failed to create gate health state directory")?;
-
     let id = workspace_id(workspace)?;
     base.push(format!("{}.json", id));
 
@@ -333,6 +330,10 @@ pub fn load_state(workspace: &Path) -> Result<Option<GateHealthState>> {
 /// Save gate health state for a workspace.
 pub fn save_state(state: &GateHealthState) -> Result<()> {
     let path = state_file_path(&state.workspace)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("gate health state path has no parent"))?;
+    fs::create_dir_all(parent).context("failed to create gate health state directory")?;
 
     let content =
         serde_json::to_string_pretty(state).context("failed to serialize gate health state")?;
@@ -430,9 +431,16 @@ mod tests {
 
     #[test]
     fn test_state_increment_no_degradation() {
-        let (_env_guard, _home) = isolated_home();
+        let (_env_guard, home) = isolated_home();
         let temp_dir = TempDir::new().unwrap();
         let workspace = temp_dir.path();
+        let state_dir = home.path().join(".needle/state/gate-health");
+
+        assert!(load_state(workspace).unwrap().is_none());
+        assert!(
+            !state_dir.exists(),
+            "a read-only health check must not mutate inherited HOME"
+        );
 
         let (state, degraded) = record_error(
             workspace,
@@ -645,7 +653,9 @@ fatal: not a git repository (or any of the parent directories): .git";
               \"last_reason\":\"y\",\"degraded\":false}}",
             workspace.display()
         );
-        std::fs::write(state_file_path(workspace).unwrap(), legacy).unwrap();
+        let path = state_file_path(workspace).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, legacy).unwrap();
 
         let state = load_state(workspace).unwrap().expect("legacy state loads");
         assert!(state.fingerprint_window.is_empty());
