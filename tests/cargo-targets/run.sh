@@ -296,3 +296,5 @@ echo 'PASS: base image pins and verifies bead-rs 0.2.6 before installation'
 echo 'PASS: base image pins and verifies cargo-nextest 0.9.144 before installation'
 echo 'PASS: nextest CI profile emits stable, non-duplicated JUnit output'
 echo 'PASS: CI image version is 0.1.12'
+
+"$REPO_ROOT/tests/nextest-shard-plan/run.sh"

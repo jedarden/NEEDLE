@@ -317,6 +317,10 @@ pattern = "tests/cargo-targets/*"
 owner = "component:cargo-target-policy"
 
 [[artifact]]
+pattern = "tests/nextest-shard-plan/*"
+owner = "component:nextest-runners"
+
+[[artifact]]
 pattern = "tests/dod-attribution/*"
 owner = "component:definition-of-done"
 
