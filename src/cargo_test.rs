@@ -782,7 +782,8 @@ impl CargoTest {
         );
 
         // Build the cargo command
-        let mut cmd = Command::new(cargo_program());
+        let cargo_program = cargo_program();
+        let mut cmd = Command::new(&cargo_program);
         // Archive runners publish these through nextest's NEXTEST_ENV setup
         // contract so each process-per-test invocation retains its toolchain
         // even when standard Cargo variables are reconstructed or omitted.
@@ -825,8 +826,17 @@ impl CargoTest {
                 match output_result.join() {
                     Ok(Ok(output)) => break output,
                     Ok(Err(e)) => {
-                        return Err(anyhow::anyhow!("failed to execute cargo test: {}", e))
-                            .with_context(|| "failed to spawn or execute cargo test");
+                        return Err(anyhow::anyhow!(
+                            "failed to execute cargo test: {} (program={}, program_is_file={}, \
+                             workspace={}, workspace_is_dir={}, explicit_contract={})",
+                            e,
+                            cargo_program.display(),
+                            cargo_program.is_file(),
+                            self.workspace.display(),
+                            self.workspace.is_dir(),
+                            std::env::var_os("NEEDLE_CARGO_BIN").is_some(),
+                        ))
+                        .with_context(|| "failed to spawn or execute cargo test");
                     }
                     Err(_) => {
                         return Err(anyhow::anyhow!("cargo test thread panicked"));
