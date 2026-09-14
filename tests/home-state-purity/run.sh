@@ -78,6 +78,11 @@ seed_state_tree() {
     chmod 0640 "$state_tree/nested/payload.bin"
 }
 
+run_owned_target_dir() {
+    local run_root="$1"
+    printf '%s/cargo-target\n' "$run_root"
+}
+
 expect_detector_rejects() {
     local mutation="$1"
     local case_root="$scratch_root/detector-$mutation"
@@ -135,11 +140,27 @@ verify_detector_contract() {
     expect_detector_rejects delete
 }
 
+verify_target_dir_contract() {
+    local CARGO_TARGET_DIR="/shared-target-must-be-ignored"
+    local contract_root="$scratch_root/target-contract"
+    local selected
+
+    selected="$(run_owned_target_dir "$contract_root")"
+    [[ "$selected" == "$contract_root/cargo-target" ]] \
+        || die "run-owned target selection honored inherited CARGO_TARGET_DIR"
+    case "$selected" in
+        "$contract_root"/*) ;;
+        *) die "Cargo target directory escaped the verification run root" ;;
+    esac
+    printf 'PASS: Cargo target directory ignores inherited shared target\n'
+}
+
 if [[ $# -gt 1 || ( $# -eq 1 && "$1" != "--detector-contract-only" ) ]]; then
     die "usage: $0 [--detector-contract-only]"
 fi
 
 verify_detector_contract
+verify_target_dir_contract
 if [[ $# -eq 1 ]]; then
     exit 0
 fi
@@ -157,10 +178,7 @@ rustdoc_bin="$(rustup which rustdoc)"
 real_home="${HOME:?HOME must be set so the Rust cache can be preserved}"
 cargo_home="${CARGO_HOME:-$real_home/.cargo}"
 rustup_home="${RUSTUP_HOME:-$real_home/.rustup}"
-target_dir="${CARGO_TARGET_DIR:-$repo_root/target}"
-if [[ "$target_dir" != /* ]]; then
-    target_dir="$repo_root/$target_dir"
-fi
+target_dir="$(run_owned_target_dir "$scratch_root")"
 
 synthetic_home="$scratch_root/suite-home"
 state_tree="$synthetic_home/.needle/state"

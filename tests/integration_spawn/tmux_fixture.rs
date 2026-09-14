@@ -125,6 +125,11 @@ impl TmuxSession {
 
         // Build stderr log path
         let log_path = logs_dir.join(format!("{}.stderr.log", session_name));
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .context("failed to create tmux stderr log")?;
 
         // Build the shell command that mimics production launch_in_tmux()
         // This creates the pane_pid-vs-child-PID split via bash -c wrapper
