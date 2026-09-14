@@ -549,11 +549,14 @@ fn claim_cycles_keep_bead_span_depth_constant() {
         );
         let mut adapters = HashMap::new();
         adapters.insert("claude-sonnet".to_string(), stub_adapter("claude-sonnet"));
-        worker.set_dispatcher(Dispatcher::with_adapters(
-            adapters,
-            Telemetry::new("span-depth".to_string()),
-            10,
-        ));
+        // The bead store and worker id are not optional: dispatch fails
+        // closed on pre-spawn claim verification without them
+        // (docs/testing-mitosis-patterns.md, pattern 1).
+        worker.set_dispatcher(
+            Dispatcher::with_adapters(adapters, Telemetry::new("span-depth".to_string()), 10)
+                .with_bead_store(store.clone())
+                .with_worker_id("claude-sonnet-span-depth".to_string()),
+        );
 
         // Spawned, not block_on'd: the state machine must be free to migrate
         // between worker threads exactly as it does in production. This is

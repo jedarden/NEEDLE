@@ -69,6 +69,8 @@ use needle::types::{
     Bead, BeadId, BeadStatus, ClaimOutcome, ClaimResult, InputMethod, StrandResult, WorkerState,
 };
 
+const MITOSIS_WORKER_ID: &str = "mitosis-test-worker";
+
 // ═════════════════════════════════════════════════════════════════════════════
 // Shared test infrastructure
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1644,7 +1646,6 @@ async fn explore_discovers_work_in_other_workspace() {
 async fn mitosis_splits_multitask_bead_creates_children() {
     // A bash adapter that echoes a JSON response proposing 2 children.
     let json = r#"{"splittable": true, "children": [{"title": "Task A", "body": "Do task A"}, {"title": "Task B", "body": "Do task B"}]}"#;
-    let dispatcher = create_mitosis_dispatcher(json);
 
     let config = MitosisConfig {
         enabled: true,
@@ -1662,6 +1663,12 @@ async fn mitosis_splits_multitask_bead_creates_children() {
 
     let parent = make_bead("parent-split-001", 1);
     let store = Arc::new(ConcurrentMockStore::new(vec![parent.clone()]));
+    let claim = store
+        .claim(&parent.id, MITOSIS_WORKER_ID)
+        .await
+        .expect("claim parent for mitosis fixture");
+    assert!(matches!(claim, ClaimResult::Claimed(_)));
+    let dispatcher = create_mitosis_dispatcher(json, store.clone());
     let prompt_builder =
         needle::prompt::PromptBuilder::new(&needle::config::PromptConfig::default());
 
@@ -1718,10 +1725,15 @@ async fn mitosis_duplicate_split_creates_zero_new_children() {
 
     // Use a store that reflects created children in show() for dedup.
     let store = Arc::new(MitosisDedupeStore::new("parent-dedup-001", vec![]));
+    let claim = store
+        .claim(&BeadId::from("parent-dedup-001"), MITOSIS_WORKER_ID)
+        .await
+        .expect("claim parent for mitosis fixture");
+    assert!(matches!(claim, ClaimResult::Claimed(_)));
     let parent = store.show(&BeadId::from("parent-dedup-001")).await.unwrap();
 
     // First split: creates 2 children.
-    let dispatcher = create_mitosis_dispatcher(json);
+    let dispatcher = create_mitosis_dispatcher(json, store.clone());
     let evaluator1 = MitosisEvaluator::new(
         config.clone(),
         Telemetry::new("test1".to_string()),
@@ -1746,7 +1758,7 @@ async fn mitosis_duplicate_split_creates_zero_new_children() {
     assert_eq!(store.created_count(), 2);
 
     // Second split: all children already exist → Skipped.
-    let dispatcher2 = create_mitosis_dispatcher(json);
+    let dispatcher2 = create_mitosis_dispatcher(json, store.clone());
     let evaluator2 = MitosisEvaluator::new(
         config,
         Telemetry::new("test2".to_string()),
@@ -1799,6 +1811,11 @@ async fn mitosis_concurrent_workers_flock_serializes() {
     let ws_path = ws.path().to_path_buf();
 
     let store = Arc::new(MitosisDedupeStore::new("parent-flock-001", vec![]));
+    let claim = store
+        .claim(&BeadId::from("parent-flock-001"), MITOSIS_WORKER_ID)
+        .await
+        .expect("claim parent for mitosis fixture");
+    assert!(matches!(claim, ClaimResult::Claimed(_)));
     let parent = store.show(&BeadId::from("parent-flock-001")).await.unwrap();
 
     // Launch two concurrent mitosis evaluations on the same parent bead.
@@ -1811,7 +1828,7 @@ async fn mitosis_concurrent_workers_flock_serializes() {
         let config = config.clone();
 
         let handle = tokio::spawn(async move {
-            let dispatcher = create_mitosis_dispatcher(json);
+            let dispatcher = create_mitosis_dispatcher(json, store.clone());
             let prompt_builder =
                 needle::prompt::PromptBuilder::new(&needle::config::PromptConfig::default());
             let telemetry = Telemetry::new(format!("worker-{i}"));
@@ -1880,7 +1897,16 @@ fn create_test_dispatcher() -> needle::dispatch::Dispatcher {
 /// Create a dispatcher with a bash adapter that echoes a fixed JSON response.
 ///
 /// Used for mitosis tests that need a controllable agent output.
-fn create_mitosis_dispatcher(json_response: &str) -> needle::dispatch::Dispatcher {
+///
+/// `store` must be the same store whose parent bead the fixture claimed, and
+/// it is wired via `with_bead_store` because dispatch fails closed on
+/// pre-spawn claim verification — a dispatcher without a store aborts every
+/// spawn with "no bead store wired". See
+/// docs/testing-mitosis-patterns.md, pattern 1, before changing this.
+fn create_mitosis_dispatcher(
+    json_response: &str,
+    store: Arc<dyn BeadStore>,
+) -> needle::dispatch::Dispatcher {
     let mut adapters = HashMap::new();
     let adapter = needle::dispatch::AgentAdapter {
         name: "mitosis-bash".to_string(),
@@ -1903,6 +1929,8 @@ fn create_mitosis_dispatcher(json_response: &str) -> needle::dispatch::Dispatche
     adapters.insert("mitosis-bash".to_string(), adapter);
     let telemetry = Telemetry::new("mitosis-test".to_string());
     needle::dispatch::Dispatcher::with_adapters(adapters, telemetry, 10)
+        .with_bead_store(store)
+        .with_worker_id(MITOSIS_WORKER_ID.to_string())
 }
 
 /// Returns the path to the native bead-rs CLI binary.
@@ -1970,6 +1998,7 @@ fn native_bead_path() -> Option<PathBuf> {
 struct MitosisDedupeStore {
     parent_id: BeadId,
     labels: Vec<String>,
+    claimed_by: Mutex<Option<String>>,
     /// Created children: (id, title, labels), updated atomically via create_bead.
     created_children: Mutex<Vec<(String, String, Vec<String>)>>,
 }
@@ -1979,6 +2008,7 @@ impl MitosisDedupeStore {
         MitosisDedupeStore {
             parent_id: BeadId::from(parent_id),
             labels,
+            claimed_by: Mutex::new(None),
             created_children: Mutex::new(Vec::new()),
         }
     }
@@ -2018,14 +2048,22 @@ impl BeadStore for MitosisDedupeStore {
         Ok(beads)
     }
 
-    async fn show(&self, _id: &BeadId) -> Result<Bead> {
+    async fn show(&self, id: &BeadId) -> Result<Bead> {
+        if id != &self.parent_id {
+            anyhow::bail!("bead not found: {id}");
+        }
+        let claimed_by = self.claimed_by.lock().unwrap().clone();
         Ok(Bead {
             id: self.parent_id.clone(),
             title: format!("Parent {}", self.parent_id),
             body: Some("Multi-task bead for dedup testing".to_string()),
             priority: 1,
-            status: BeadStatus::Open,
-            assignee: None,
+            status: if claimed_by.is_some() {
+                BeadStatus::InProgress
+            } else {
+                BeadStatus::Open
+            },
+            assignee: claimed_by,
             labels: self.labels.clone(),
             workspace: PathBuf::from("/tmp/test"),
             dependencies: vec![],
@@ -2036,10 +2074,22 @@ impl BeadStore for MitosisDedupeStore {
         })
     }
 
-    async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<ClaimResult> {
-        Ok(ClaimResult::NotClaimable {
-            reason: "mock".to_string(),
-        })
+    async fn claim(&self, id: &BeadId, actor: &str) -> Result<ClaimResult> {
+        if id != &self.parent_id {
+            return Ok(ClaimResult::NotClaimable {
+                reason: "bead not found".to_string(),
+            });
+        }
+        {
+            let mut claimed_by = self.claimed_by.lock().unwrap();
+            if let Some(existing) = claimed_by.as_ref() {
+                return Ok(ClaimResult::RaceLost {
+                    claimed_by: existing.clone(),
+                });
+            }
+            *claimed_by = Some(actor.to_string());
+        }
+        Ok(ClaimResult::Claimed(self.show(id).await?))
     }
 
     async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {
