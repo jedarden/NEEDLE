@@ -64,6 +64,9 @@ impl Sink for MemorySink {
 pub struct TestHelper {
     /// The telemetry emitter configured with a memory sink.
     telemetry: Telemetry,
+    /// A test-only writer handle retained so `sync()` can acknowledge events
+    /// even after production shutdown has removed the emitter's sender.
+    sync_sender: tokio::sync::mpsc::UnboundedSender<super::WriterMessage>,
     /// Shared reference to the captured events.
     events: Arc<Mutex<Vec<TelemetryEvent>>>,
 }
@@ -88,7 +91,18 @@ impl TestHelper {
         let worker_id = worker_id.into();
         let (sink, events) = MemorySink::new();
         let telemetry = Telemetry::with_sink(worker_id, sink);
-        Self { telemetry, events }
+        let sync_sender = telemetry
+            .sender
+            .lock()
+            .expect("test telemetry sender lock poisoned")
+            .as_ref()
+            .expect("new test telemetry writer has no sender")
+            .clone();
+        Self {
+            telemetry,
+            sync_sender,
+            events,
+        }
     }
 
     /// Get a reference to the telemetry emitter for emitting events.
@@ -287,11 +301,14 @@ impl TestHelper {
         self.events.lock().unwrap().len()
     }
 
-    /// Allow time for events to be delivered to the sink.
+    /// Synchronize events delivered to the sink.
     ///
-    /// The telemetry system uses an async channel, so events may not be
-    /// immediately available after calling `emit()`. This method sleeps
-    /// briefly to allow the background task to process pending events.
+    /// Wait until the telemetry writer has processed every event queued before
+    /// this call.
+    ///
+    /// The flush message travels through the same ordered channel as events,
+    /// so its acknowledgement is a deterministic barrier rather than a timing
+    /// guess about when the background task might run.
     ///
     /// # Example
     ///
@@ -301,7 +318,15 @@ impl TestHelper {
     /// assert_eq!(helper.event_count(), 1);
     /// ```
     pub async fn sync(&self) {
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let (reply, acknowledged) = tokio::sync::oneshot::channel();
+        self.sync_sender
+            .send(super::WriterMessage::Flush(reply))
+            .expect("test telemetry writer stopped before sync");
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), acknowledged)
+            .await
+            .expect("test telemetry writer did not acknowledge sync within 1s")
+            .expect("test telemetry writer stopped during sync");
     }
 }
 

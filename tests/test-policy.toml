@@ -154,7 +154,7 @@ path = "src/dispatch/mod.rs"
 kind = "sleep"
 max_occurrences = 5
 owner = "component:dispatch"
-reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+reason = "These waits coordinate real child-process startup, streamed stdout/stderr activity, and process-group teardown. Tokio virtual time cannot drive an external shell clock; the process contract tests remain bounded below five seconds."
 
 [[unit_exception]]
 path = "src/gate_health.rs"
@@ -203,7 +203,7 @@ path = "src/outcome/mod.rs"
 kind = "sleep"
 max_occurrences = 3
 owner = "component:outcome"
-reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+reason = "The 35s flush and 2s store delays run under paused Tokio time and assert exact production deadlines; the 2.5s wait observes real shell-child kill-on-drop behavior, whose clock Tokio cannot virtualize."
 
 [[unit_exception]]
 path = "src/panic_capture.rs"
@@ -390,9 +390,9 @@ reason = "Grandfathered unit-tier debt; replace with an injected boundary."
 [[unit_exception]]
 path = "src/validation/mod.rs"
 kind = "sleep"
-max_occurrences = 2
+max_occurrences = 1
 owner = "component:validation"
-reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+reason = "The remaining 500ms wait verifies that a real shell child receives kill-on-drop before its delayed marker write; Tokio virtual time cannot advance or prove an external process clock."
 
 [[unit_exception]]
 path = "src/validation/predispatch.rs"

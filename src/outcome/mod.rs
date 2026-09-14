@@ -5354,7 +5354,7 @@ mod tests {
 
     // ── timeout and resilience tests ──
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn handle_failure_with_flush_timeout_preserves_bead_state() {
         // Test that flush timeout doesn't block the worker in HANDLING state.
         struct SlowFlushStore {
@@ -5446,10 +5446,12 @@ mod tests {
         });
         let bead = test_bead(BeadStatus::InProgress);
 
+        let started = tokio::time::Instant::now();
         let result = handler
             .handle(store.as_ref(), &bead, &test_output(1), false)
             .await;
 
+        assert_eq!(started.elapsed(), std::time::Duration::from_secs(30));
         assert!(result
             .unwrap_err()
             .to_string()
@@ -5682,7 +5684,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn handle_with_cancellation_respects_configured_timeout() {
         // A bead store whose `show()` genuinely sleeps (a real .await yield
         // point, unlike a blocking `std::process::Command` gate — see below)
@@ -5719,19 +5721,14 @@ mod tests {
         let bead = test_bead(BeadStatus::InProgress);
         let cancelled = Arc::new(AtomicBool::new(false));
 
-        let start = std::time::Instant::now();
+        let start = tokio::time::Instant::now();
         let result = handler
             .handle_with_cancellation(store.as_ref(), &bead, &test_output(0), false, cancelled)
             .await
             .unwrap();
         let elapsed = start.elapsed();
 
-        assert!(
-            elapsed.as_secs() < 10,
-            "expected the ~1s configured timeout to fire well before the store's \
-             2s show() or its own 30s inner timeout, took {:?}",
-            elapsed
-        );
+        assert_eq!(elapsed, std::time::Duration::from_secs(1));
         assert_eq!(result.bead_action, BeadAction::Errored);
         assert!(result.telemetry_events.is_empty());
     }
@@ -6448,7 +6445,7 @@ mod tests {
     /// A handler that is torn down by its own timeout must not leave the
     /// dispatch without a ledger row — and if the aborted `handle` had already
     /// emitted one, the fallback must not add a second.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn attempt_resolved_row_exists_when_the_handler_times_out() {
         let (_guard, _home) = isolated_home();
         let mut config = Config::default();
@@ -6638,7 +6635,7 @@ mod tests {
     /// that worker process ended with NO ledger row at all. The same pin in
     /// reverse — a wrapper-path dispatch must not double when its own row
     /// already fired — is held by the fallthrough test above.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_resolved_dispatch_does_not_silence_the_next_dispatchs_wrapper_paths() {
         let (_guard, _home) = isolated_home();
         let mut config = Config::default();

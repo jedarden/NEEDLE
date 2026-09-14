@@ -2004,10 +2004,8 @@ pub fn broken_function( -> i32 {
             }
         }
 
-        // Give the test a moment to finish preserving the directory
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        // Verify clean extraction was preserved for diagnosis
+        // The validation future has completed, so preservation is observable
+        // immediately; no scheduling delay is required here.
         let clean_dirs = std::fs::read_dir(workspace.parent().unwrap())
             .unwrap()
             .filter_map(|entry| entry.ok())
