@@ -31,6 +31,13 @@ use crate::process_guard::ProcessGroupKillGuard;
 use crate::telemetry::{EventKind, Telemetry};
 use crate::types::{BeadId, InputMethod, StrandResult};
 
+/// Keep generated prompts comfortably below model context limits after the
+/// agent adds repository instructions and other harness context of its own.
+const MAX_WEAVE_DOC_CONTEXT_BYTES: usize = 64 * 1024;
+const MAX_WEAVE_DOC_FILE_BYTES: usize = 16 * 1024;
+const MAX_WEAVE_BEAD_CONTEXT_BYTES: usize = 48 * 1024;
+const CONTEXT_TRUNCATION_MARKER: &str = "\n\n[context truncated]\n";
+
 // ─── WeaveAgent trait ────────────────────────────────────────────────────────
 
 /// Abstraction for agent invocation used by the Weave strand.
@@ -220,13 +227,18 @@ impl WeaveStrand {
         files
     }
 
-    /// Format documentation files into a string for the prompt.
+    /// Format documentation files into a bounded string for the prompt.
+    ///
+    /// `docs/**/*` can include generated reports measured in megabytes. A
+    /// creator only needs representative planning context, so cap both each
+    /// file and the aggregate instead of sending a request the model must
+    /// reject before doing useful work.
     fn format_doc_files(files: &[PathBuf], workspace: &Path) -> String {
         if files.is_empty() {
             return "(no documentation files found)".to_string();
         }
 
-        let mut sections = Vec::new();
+        let mut output = String::new();
         for file in files {
             let rel_path = file
                 .strip_prefix(workspace)
@@ -235,32 +247,62 @@ impl WeaveStrand {
                 .to_string();
             match std::fs::read_to_string(file) {
                 Ok(content) => {
-                    sections.push(format!("### {rel_path}\n\n{}", content.trim_end()));
+                    let content = bounded_context(
+                        content.trim_end(),
+                        MAX_WEAVE_DOC_FILE_BYTES,
+                        CONTEXT_TRUNCATION_MARKER,
+                    );
+                    let separator = if output.is_empty() { "" } else { "\n\n" };
+                    let section = format!("{separator}### {rel_path}\n\n{content}");
+                    let remaining = MAX_WEAVE_DOC_CONTEXT_BYTES.saturating_sub(output.len());
+                    if section.len() > remaining {
+                        output.push_str(&bounded_context(
+                            &section,
+                            remaining,
+                            CONTEXT_TRUNCATION_MARKER,
+                        ));
+                        break;
+                    }
+                    output.push_str(&section);
                 }
                 Err(_) => {
-                    sections.push(format!("### {rel_path}\n\n(failed to read)"));
+                    let separator = if output.is_empty() { "" } else { "\n\n" };
+                    let section = format!("{separator}### {rel_path}\n\n(failed to read)");
+                    if output.len() + section.len() > MAX_WEAVE_DOC_CONTEXT_BYTES {
+                        break;
+                    }
+                    output.push_str(&section);
                 }
             }
         }
-        sections.join("\n\n")
+        output
     }
 
-    /// Format existing beads into a string for the prompt.
+    /// Format existing beads into a bounded string for the prompt.
     fn format_existing_beads(beads: &[crate::types::Bead]) -> String {
         if beads.is_empty() {
             return "(no open beads)".to_string();
         }
 
-        beads
-            .iter()
-            .map(|b| {
-                let title = &b.title;
-                let id = b.id.as_ref();
-                let priority = b.priority;
-                format!("- [{id}] P{priority}: {title}")
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+        let mut output = String::new();
+        for (index, bead) in beads.iter().enumerate() {
+            let separator = if output.is_empty() { "" } else { "\n" };
+            let line = format!(
+                "{separator}- [{}] P{}: {}",
+                bead.id.as_ref(),
+                bead.priority,
+                bead.title
+            );
+            if output.len() + line.len() > MAX_WEAVE_BEAD_CONTEXT_BYTES {
+                let omitted = beads.len() - index;
+                let marker = format!("\n... {omitted} additional open beads omitted");
+                let remaining = MAX_WEAVE_BEAD_CONTEXT_BYTES.saturating_sub(output.len());
+                output.push_str(&bounded_context(&marker, remaining, ""));
+                break;
+            }
+            output.push_str(&line);
+        }
+        output
     }
 
     /// Parse the agent response into proposed beads.
@@ -329,6 +371,8 @@ impl WeaveStrand {
              Review the documentation above. Identify gaps where documented features, \
              APIs, or workflows are incomplete, missing tests, or have no corresponding \
              implementation bead.\n\n\
+             Use only the supplied context. Do not inspect files, call tools, or modify the \
+             workspace; return the answer directly.\n\n\
              For each gap found, propose a bead with:\n\
              - title: concise description of what's missing\n\
              - body: what needs to be done to close the gap\n\
@@ -338,6 +382,27 @@ impl WeaveStrand {
              If no gaps are found, respond with: NO_GAPS"
         )
     }
+}
+
+/// Truncate at a UTF-8 boundary while reserving room for an explicit marker.
+fn bounded_context(value: &str, max_bytes: usize, marker: &str) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+
+    let marker = if marker.len() <= max_bytes {
+        marker
+    } else {
+        ""
+    };
+    let mut end = max_bytes.saturating_sub(marker.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut bounded = String::with_capacity(max_bytes);
+    bounded.push_str(&value[..end]);
+    bounded.push_str(marker);
+    bounded
 }
 
 /// Extract a JSON block from markdown-fenced content.
@@ -1952,6 +2017,37 @@ timeout_secs: 5
     fn format_doc_files_empty() {
         let result = WeaveStrand::format_doc_files(&[], Path::new("/tmp"));
         assert_eq!(result, "(no documentation files found)");
+    }
+
+    #[test]
+    fn format_doc_files_enforces_file_and_total_context_budgets() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut files = Vec::new();
+        for index in 0..6 {
+            let path = dir.path().join(format!("doc-{index}.md"));
+            std::fs::write(&path, "é".repeat(MAX_WEAVE_DOC_FILE_BYTES)).unwrap();
+            files.push(path);
+        }
+
+        let result = WeaveStrand::format_doc_files(&files, dir.path());
+        assert!(result.len() <= MAX_WEAVE_DOC_CONTEXT_BYTES);
+        assert!(result.contains("[context truncated]"));
+    }
+
+    #[test]
+    fn format_existing_beads_enforces_context_budget() {
+        let beads = (0..2_000)
+            .map(|index| {
+                make_bead(
+                    &format!("nd-{index}"),
+                    &format!("Long planning title {index} {}", "x".repeat(100)),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let result = WeaveStrand::format_existing_beads(&beads);
+        assert!(result.len() <= MAX_WEAVE_BEAD_CONTEXT_BYTES);
+        assert!(result.contains("additional open beads omitted"));
     }
 
     // ── Workspace hash test ─────────────────────────────────────────────
