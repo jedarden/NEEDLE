@@ -7190,6 +7190,44 @@ pub struct Config {
 }
 
 impl Config {
+    /// Construct production defaults with Explore made harmless for an
+    /// in-process test.
+    ///
+    /// [`crate::strand::ExploreStrand`] discovers workspaces in its constructor,
+    /// before a Worker is polled. Starting from `Config::default()` and fixing
+    /// the root after `Worker::new` is therefore already too late. This helper
+    /// allocates a unique directory under a process-lifetime temporary root and
+    /// applies the isolation before the config can reach Worker or StrandRunner
+    /// construction.
+    ///
+    /// This changes no production default: real CLI configuration continues to
+    /// use [`Config::default`], where Explore is enabled with recursive discovery
+    /// under the operator's configured workspace root. The helper confines only
+    /// Explore; tests that exercise other HOME-derived state must isolate those
+    /// paths separately.
+    #[doc(hidden)]
+    pub fn isolated_for_test() -> Self {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::OnceLock;
+
+        static ROOT: OnceLock<tempfile::TempDir> = OnceLock::new();
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+
+        let root = ROOT
+            .get_or_init(|| {
+                tempfile::tempdir().expect("failed to create isolated Explore test root")
+            })
+            .path()
+            .join(format!("config-{}", NEXT.fetch_add(1, Ordering::Relaxed)));
+        std::fs::create_dir(&root).expect("failed to create unique Explore test root");
+
+        let mut config = Self::default();
+        config.strands.explore.enabled = false;
+        config.strands.explore.workspace_root = root;
+        config.strands.explore.workspaces.clear();
+        config
+    }
+
     /// Expand all tilde (~) paths to absolute paths using $HOME.
     ///
     /// This must be called after deserialization to ensure all paths

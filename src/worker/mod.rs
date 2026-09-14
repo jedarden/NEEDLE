@@ -9330,12 +9330,7 @@ mod tests {
     /// this helper instead of passing an untouched `Config::default()` to a
     /// Worker, even when they never poll the resulting worker.
     fn isolated_default_config() -> Config {
-        let mut config = Config::default();
-        let explore_root = crate::util::test_env::isolated_home();
-        config.strands.explore.enabled = false;
-        config.strands.explore.workspace_root = explore_root;
-        config.strands.explore.workspaces.clear();
-        config
+        Config::isolated_for_test()
     }
 
     /// Return a configuration whose selected adapter is one of NEEDLE's

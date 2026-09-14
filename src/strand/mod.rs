@@ -1120,9 +1120,7 @@ mod tests {
     #[tokio::test]
     async fn from_config_includes_full_waterfall() {
         let dir = tempfile::tempdir().unwrap();
-        let mut config = Config::default();
-        config.strands.explore.workspace_root = dir.path().to_path_buf();
-        config.strands.explore.workspaces.clear();
+        let config = Config::isolated_for_test();
         let registry = crate::registry::Registry::new(dir.path());
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let runner = StrandRunner::from_config(&config, "test-worker", registry, telemetry);

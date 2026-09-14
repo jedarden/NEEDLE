@@ -40,14 +40,35 @@ fn lint_in_process_worker_tests_isolate_explore() {
         offenders.is_empty(),
         "unsafe in-process test configuration can scan the operator's real HOME.\n\
          Before constructing Worker, StrandRunner, or ExploreStrand from a default config,\n\
-         set `config.strands.explore.workspace_root` to a tempfile::TempDir path, select\n\
-         explicit test workspaces, or set `config.strands.explore.enabled = false`.\n\
+         use `Config::isolated_for_test()`, set `config.strands.explore.workspace_root` to a\n\
+         tempfile::TempDir path, select explicit test workspaces, or disable Explore.\n\
          Keep the TempDir alive for the whole test. Offenders:\n{}",
         offenders.join("\n")
     );
 }
 
 fn assert_classifier_contract() {
+    let first = needle::config::Config::isolated_for_test();
+    let second = needle::config::Config::isolated_for_test();
+    assert!(!first.strands.explore.enabled);
+    assert!(first.strands.explore.workspaces.is_empty());
+    assert!(first.strands.explore.workspace_root.is_absolute());
+    assert!(first.strands.explore.workspace_root.is_dir());
+    assert_ne!(
+        first.strands.explore.workspace_root, second.strands.explore.workspace_root,
+        "concurrent tests must not share an Explore root"
+    );
+
+    let production = needle::config::Config::default();
+    assert!(
+        production.strands.explore.enabled,
+        "the test constructor must not change production defaults"
+    );
+    assert!(
+        production.strands.explore.workspaces.is_empty(),
+        "production must retain recursive workspace discovery"
+    );
+
     let unsafe_source = r#"
         async fn new_worker_test() {
             let config = Config::default();
@@ -74,6 +95,14 @@ fn assert_classifier_contract() {
         }
     "#;
     assert!(find_violations(isolated_source).is_empty());
+
+    let safe_constructor_source = r#"
+        fn isolated_worker_test() {
+            let config = Config::isolated_for_test();
+            let worker = Worker::new(config, "fixture".to_string(), store);
+        }
+    "#;
+    assert!(find_violations(safe_constructor_source).is_empty());
 
     let too_late_source = r#"
         fn late_isolation_does_not_help() {
