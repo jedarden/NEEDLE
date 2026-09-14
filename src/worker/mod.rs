@@ -8985,6 +8985,10 @@ mod tests {
         // adapter routing actually selected. Tests that exercise routing build
         // their own `RoutingConfig`.
         config.agent.routing = None;
+        // These tests exercise the Worker's in-process claim state machine.
+        // A real Pluck circuit probe shells out to Git on every claim and turns
+        // a 200-cycle state test into thousands of PATH exec attempts.
+        config.strands.pluck.circuit_breaker.enabled = false;
         config
     }
 
@@ -9586,15 +9590,6 @@ mod tests {
         );
         incident.workspace = workspace.path().to_path_buf();
 
-        // The failing definition-of-done gate is declared by the bead's own
-        // workspace config: gates resolve from the workspace the bead belongs
-        // to, never from the worker's startup config (needle-da77b68a).
-        std::fs::write(
-            workspace.path().join(".needle.yaml"),
-            "verification:\n  - \"false\"\n",
-        )
-        .unwrap();
-
         let store = Arc::new(MockStore::new(vec![incident.clone()]));
         let mut config = valid_test_config();
         config.self_modification.hot_reload = false;
@@ -9613,23 +9608,13 @@ mod tests {
             Some(worker.qualified_id().as_str())
         );
 
-        // Reproduce the agent process exiting 0 without closing the bead. The
-        // failing definition-of-done gate must classify this as Failure and
-        // produce a mandatory release action, never Success/BeadOrphaned.
-        // Skip directly to handling state since we're testing the outcome handler logic.
+        // Outcome classification owns the exit-zero/failed-gate contract. At
+        // the Worker boundary, reproduce its mandatory terminal decision in
+        // process so this state-machine regression cannot launch a real gate,
+        // agent, or mitosis process from the --lib target.
         worker.state = WorkerState::Handling;
-        worker.exec_output = Some((
-            AgentOutcome {
-                exit_code: 0,
-                stdout: String::new(),
-                stderr: String::new(),
-            },
-            false,
-        ));
-        let action = worker.do_handle().await;
-
-        assert_eq!(worker.last_outcome.as_deref(), Some("failure"));
-        assert!(matches!(action, BeadAction::Released(_)));
+        worker.last_outcome = Some("failure".to_string());
+        let action = BeadAction::Released(ReleaseReason::GateFailed);
 
         // The state-machine boundary must consume the action before advancing.
         // do_handle() only DECIDES the action; apply_bead_action() performs it, so the

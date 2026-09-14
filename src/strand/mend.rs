@@ -1962,13 +1962,13 @@ impl MendStrand {
         Ok(())
     }
 
-    /// Append a note to a bead using the bead CLI.
+    /// Append a note through the configured bead store.
     ///
     /// This is a best-effort operation - failures are logged but not treated
     /// as fatal errors since note attachment is not critical to cycle breaking.
     ///
     /// # Arguments
-    /// * `_store` - The bead store (unused but kept for interface consistency)
+    /// * `store` - The configured bead store
     /// * `bead_id` - The bead to update
     /// * `note` - The note text to append
     ///
@@ -1977,39 +1977,11 @@ impl MendStrand {
     /// * `Err(anyhow::Error)` - Note append failed
     async fn append_bead_notes(
         &self,
-        _store: &dyn BeadStore,
+        store: &dyn BeadStore,
         bead_id: &BeadId,
         note: &str,
     ) -> Result<()> {
-        use std::io::Write;
-        use std::process::Command;
-
-        // Get the workspace path from the store's context
-        // We'll need to get the current workspace directory
-        let workspace =
-            std::env::current_dir().context("failed to get current directory for bead update")?;
-
-        // Write the note to a temp file to avoid shell escaping issues
-        let mut temp_file =
-            tempfile::NamedTempFile::new().context("failed to create temp file for bead note")?;
-        writeln!(temp_file, "{}", note).context("failed to write note to temp file")?;
-
-        // Run: bead update <id> --notes @<temp_file>
-        let output = Command::new("bead")
-            .current_dir(&workspace)
-            .args(["update", bead_id, "--notes"])
-            .arg(format!("@{}", temp_file.path().display()))
-            .output()
-            .context("bead update command failed")?;
-
-        if !output.status.success() {
-            return Err(anyhow::anyhow!(
-                "bead update failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ));
-        }
-
-        Ok(())
+        store.append_notes(bead_id, note).await
     }
 
     // ── Step 6.5: Autonomous triage - orphaned split-children cleanup ──────────────
@@ -2666,6 +2638,9 @@ mod tests {
         }
         async fn create_bead(&self, _title: &str, _body: &str, _labels: &[&str]) -> Result<BeadId> {
             Ok(BeadId::from("mock-bead"))
+        }
+        async fn append_notes(&self, _id: &BeadId, _note: &str) -> Result<()> {
+            Ok(())
         }
         async fn doctor_repair(&self) -> Result<RepairReport> {
             match &self.repair_report {

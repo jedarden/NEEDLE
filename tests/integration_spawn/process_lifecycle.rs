@@ -7,16 +7,20 @@ use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use needle::bead_store::{BeadStore, Filters, RepairReport};
 use needle::cli::find_all_descendants;
-use needle::config::Config;
+use needle::config::{Config, GenerationConfig, PulseConfig, ScannerConfig};
 use needle::dispatch::{AgentAdapter, Dispatcher, TokenExtraction};
 use needle::registry::is_pid_alive;
 use needle::sanitize::Sanitizer;
+use needle::strand::pulse::{PulseState, PulseStrand};
+use needle::strand::Strand;
 #[cfg(unix)]
 use needle::supervisor::reap_exited_child;
 use needle::telemetry::{Telemetry, TelemetryEvent};
-use needle::types::{Bead, BeadId, BeadStatus, ClaimResult, IdleAction, InputMethod, WorkerState};
+use needle::types::{
+    Bead, BeadId, BeadStatus, ClaimResult, IdleAction, InputMethod, StrandResult, WorkerState,
+};
 use needle::worker::Worker;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::{Arc, Mutex};
@@ -47,12 +51,14 @@ impl Drop for EnvGuard {
 
 struct LifecycleStore {
     beads: Mutex<Vec<Bead>>,
+    created: Mutex<Vec<(String, String, Vec<String>)>>,
 }
 
 impl LifecycleStore {
     fn new(beads: Vec<Bead>) -> Self {
         Self {
             beads: Mutex::new(beads),
+            created: Mutex::new(Vec::new()),
         }
     }
 
@@ -68,6 +74,10 @@ impl LifecycleStore {
             .find(|bead| bead.id == *id)
             .expect("fixture bead exists")
             .status = BeadStatus::Closed;
+    }
+
+    fn created_beads(&self) -> Vec<(String, String, Vec<String>)> {
+        self.created.lock().unwrap().clone()
     }
 }
 
@@ -205,8 +215,14 @@ impl BeadStore for LifecycleStore {
         Ok(())
     }
 
-    async fn create_bead(&self, _title: &str, _body: &str, _labels: &[&str]) -> Result<BeadId> {
-        Err(anyhow!("empty fixture cannot create beads"))
+    async fn create_bead(&self, title: &str, body: &str, labels: &[&str]) -> Result<BeadId> {
+        let mut created = self.created.lock().unwrap();
+        created.push((
+            title.to_string(),
+            body.to_string(),
+            labels.iter().map(|label| (*label).to_string()).collect(),
+        ));
+        Ok(BeadId::from(format!("pulse-{}", created.len())))
     }
 
     async fn add_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> Result<()> {
@@ -856,4 +872,337 @@ fn event<'a>(events: &'a [TelemetryEvent], event_type: &str) -> &'a TelemetryEve
         .iter()
         .find(|event| event.event_type == event_type)
         .unwrap_or_else(|| panic!("missing {event_type}; saw {events:?}"))
+}
+
+#[tokio::test]
+async fn worker_strand_process_contracts_low_water_overrides_pulse_cooldown() {
+    let state_dir = tempfile::tempdir().unwrap();
+    let workspace_dir = tempfile::tempdir().unwrap();
+    let warmup = PulseStrand::new(
+        PulseConfig {
+            enabled: true,
+            scanners: vec![ScannerConfig {
+                name: "warmup".to_string(),
+                command: "printf 'all checks passed\\n'".to_string(),
+                severity_threshold: None,
+            }],
+            cooldown_hours: 0,
+            ..PulseConfig::default()
+        },
+        workspace_dir.path().to_path_buf(),
+        state_dir.path().to_path_buf(),
+        Telemetry::new("warmup".to_string()),
+    );
+    assert!(matches!(
+        warmup
+            .evaluate(&LifecycleStore::empty(), &HashSet::new())
+            .await,
+        StrandResult::NoWork
+    ));
+
+    let strand = PulseStrand::new(
+        PulseConfig {
+            enabled: true,
+            scanners: vec![ScannerConfig {
+                name: "echo-scanner".to_string(),
+                command: "echo 'src/foo.rs:10:1: error: unused import'".to_string(),
+                severity_threshold: None,
+            }],
+            cooldown_hours: 48,
+            severity_threshold: 5,
+            max_beads_per_run: 10,
+            ..PulseConfig::default()
+        },
+        workspace_dir.path().to_path_buf(),
+        state_dir.path().to_path_buf(),
+        Telemetry::new("worker".to_string()),
+    )
+    .with_generation(
+        GenerationConfig {
+            enabled: true,
+            low_water_reserve: 1,
+            lease_ttl_secs: 300,
+        },
+        Vec::new(),
+    );
+    let store = LifecycleStore::empty();
+    let result = strand.evaluate(&store, &HashSet::new()).await;
+
+    assert!(matches!(result, StrandResult::WorkCreated));
+    assert_eq!(store.created_beads().len(), 1);
+}
+
+#[tokio::test]
+async fn worker_strand_process_contracts_contended_pulse_lease_skips_generation() {
+    let state_dir = tempfile::tempdir().unwrap();
+    let workspace_dir = tempfile::tempdir().unwrap();
+    let scanner = || ScannerConfig {
+        name: "echo-scanner".to_string(),
+        command: "echo 'src/foo.rs:10:1: error: unused import'".to_string(),
+        severity_threshold: None,
+    };
+    let generation = GenerationConfig {
+        enabled: true,
+        low_water_reserve: 1,
+        lease_ttl_secs: 300,
+    };
+    let pulse = |worker: &str, generation: GenerationConfig| {
+        PulseStrand::new(
+            PulseConfig {
+                enabled: true,
+                scanners: vec![scanner()],
+                cooldown_hours: 0,
+                severity_threshold: 5,
+                max_beads_per_run: 10,
+                ..PulseConfig::default()
+            },
+            workspace_dir.path().to_path_buf(),
+            state_dir.path().to_path_buf(),
+            Telemetry::new(worker.to_string()),
+        )
+        .with_generation(generation, Vec::new())
+    };
+
+    let first = pulse("worker-a", generation.clone());
+    assert!(matches!(
+        first
+            .evaluate(&LifecycleStore::empty(), &HashSet::new())
+            .await,
+        StrandResult::WorkCreated
+    ));
+
+    let second = pulse("worker-b", generation);
+    let store = LifecycleStore::empty();
+    let result = second.evaluate(&store, &HashSet::new()).await;
+    assert!(store.created_beads().is_empty());
+    assert!(matches!(
+        result,
+        StrandResult::Skipped { ref reason } if reason == "generation_lease_contended"
+    ));
+}
+
+#[tokio::test]
+async fn worker_strand_process_contracts_scanner_failures_emit_creator_failure() {
+    let state_dir = tempfile::tempdir().unwrap();
+    let workspace_dir = tempfile::tempdir().unwrap();
+    let log_dir = tempfile::tempdir().unwrap();
+    let telemetry = Telemetry::with_log_dir("worker".to_string(), log_dir.path());
+    telemetry.start();
+    let telemetry_observer = telemetry.clone();
+    let strand = PulseStrand::new(
+        PulseConfig {
+            enabled: true,
+            scanners: vec![
+                ScannerConfig {
+                    name: "failing-scanner".to_string(),
+                    command: "exit 1".to_string(),
+                    severity_threshold: None,
+                },
+                ScannerConfig {
+                    name: "also-failing".to_string(),
+                    command: "exit 2".to_string(),
+                    severity_threshold: None,
+                },
+            ],
+            cooldown_hours: 0,
+            ..PulseConfig::default()
+        },
+        workspace_dir.path().to_path_buf(),
+        state_dir.path().to_path_buf(),
+        telemetry,
+    );
+    let store = LifecycleStore::empty();
+    assert!(matches!(
+        strand.evaluate(&store, &HashSet::new()).await,
+        StrandResult::NoWork
+    ));
+    assert!(store.created_beads().is_empty());
+    drop(strand);
+    telemetry_observer
+        .force_flush_async(Duration::from_secs(2))
+        .await
+        .unwrap();
+    assert_eq!(
+        read_telemetry_events(log_dir.path())
+            .iter()
+            .filter(|event| event.event_type == "generation.creator_failed")
+            .count(),
+        1
+    );
+    telemetry_observer.shutdown().await;
+}
+
+#[tokio::test]
+async fn worker_strand_process_contracts_scanner_creates_bead() {
+    let state_dir = tempfile::tempdir().unwrap();
+    let workspace_dir = tempfile::tempdir().unwrap();
+    let strand = PulseStrand::new(
+        PulseConfig {
+            enabled: true,
+            scanners: vec![ScannerConfig {
+                name: "echo-scanner".to_string(),
+                command: "echo 'src/foo.rs:10:1: error: unused import'".to_string(),
+                severity_threshold: None,
+            }],
+            cooldown_hours: 0,
+            severity_threshold: 5,
+            max_beads_per_run: 10,
+            ..PulseConfig::default()
+        },
+        workspace_dir.path().to_path_buf(),
+        state_dir.path().to_path_buf(),
+        Telemetry::new("worker".to_string()),
+    );
+    let store = LifecycleStore::empty();
+    assert!(matches!(
+        strand.evaluate(&store, &HashSet::new()).await,
+        StrandResult::WorkCreated
+    ));
+    let beads = store.created_beads();
+    assert_eq!(beads.len(), 1);
+    assert!(beads[0].0.contains("[Pulse]"));
+    assert!(beads[0].0.contains("error"));
+    assert!(beads[0].2.contains(&"pulse-finding".to_string()));
+}
+
+#[tokio::test]
+async fn worker_strand_process_contracts_pulse_deduplicates_across_scans() {
+    let state_dir = tempfile::tempdir().unwrap();
+    let workspace_dir = tempfile::tempdir().unwrap();
+    let config = PulseConfig {
+        enabled: true,
+        scanners: vec![ScannerConfig {
+            name: "echo-scanner".to_string(),
+            command: "echo 'error: same issue every time'".to_string(),
+            severity_threshold: None,
+        }],
+        cooldown_hours: 0,
+        severity_threshold: 5,
+        max_beads_per_run: 10,
+        ..PulseConfig::default()
+    };
+
+    let first = PulseStrand::new(
+        config.clone(),
+        workspace_dir.path().to_path_buf(),
+        state_dir.path().to_path_buf(),
+        Telemetry::new("worker-a".to_string()),
+    );
+    let first_store = LifecycleStore::empty();
+    assert!(matches!(
+        first.evaluate(&first_store, &HashSet::new()).await,
+        StrandResult::WorkCreated
+    ));
+
+    let second = PulseStrand::new(
+        config,
+        workspace_dir.path().to_path_buf(),
+        state_dir.path().to_path_buf(),
+        Telemetry::new("worker-b".to_string()),
+    );
+    let second_store = LifecycleStore::empty();
+    assert!(matches!(
+        second.evaluate(&second_store, &HashSet::new()).await,
+        StrandResult::NoWork
+    ));
+    assert!(second_store.created_beads().is_empty());
+}
+
+#[tokio::test]
+async fn worker_strand_process_contracts_pulse_caps_beads_per_run() {
+    let state_dir = tempfile::tempdir().unwrap();
+    let workspace_dir = tempfile::tempdir().unwrap();
+    let strand = PulseStrand::new(
+        PulseConfig {
+            enabled: true,
+            scanners: vec![ScannerConfig {
+                name: "multi-error".to_string(),
+                command: "printf 'error: issue one\\nerror: issue two\\nerror: issue three\\n'"
+                    .to_string(),
+                severity_threshold: None,
+            }],
+            cooldown_hours: 0,
+            severity_threshold: 5,
+            max_beads_per_run: 2,
+            ..PulseConfig::default()
+        },
+        workspace_dir.path().to_path_buf(),
+        state_dir.path().to_path_buf(),
+        Telemetry::new("worker".to_string()),
+    );
+    let store = LifecycleStore::empty();
+    assert!(matches!(
+        strand.evaluate(&store, &HashSet::new()).await,
+        StrandResult::WorkCreated
+    ));
+    assert_eq!(store.created_beads().len(), 2);
+}
+
+#[tokio::test]
+async fn worker_strand_process_contracts_clean_scanner_returns_no_work() {
+    let state_dir = tempfile::tempdir().unwrap();
+    let workspace_dir = tempfile::tempdir().unwrap();
+    let strand = PulseStrand::new(
+        PulseConfig {
+            enabled: true,
+            scanners: vec![ScannerConfig {
+                name: "clean-scanner".to_string(),
+                command: "echo 'all checks passed'".to_string(),
+                severity_threshold: None,
+            }],
+            cooldown_hours: 0,
+            severity_threshold: 5,
+            max_beads_per_run: 10,
+            ..PulseConfig::default()
+        },
+        workspace_dir.path().to_path_buf(),
+        state_dir.path().to_path_buf(),
+        Telemetry::new("worker".to_string()),
+    );
+    let store = LifecycleStore::empty();
+    assert!(matches!(
+        strand.evaluate(&store, &HashSet::new()).await,
+        StrandResult::NoWork
+    ));
+    assert!(store.created_beads().is_empty());
+}
+
+#[tokio::test]
+async fn worker_strand_process_contracts_pulse_persists_state() {
+    let state_dir = tempfile::tempdir().unwrap();
+    let workspace_dir = tempfile::tempdir().unwrap();
+    let strand = PulseStrand::new(
+        PulseConfig {
+            enabled: true,
+            scanners: vec![ScannerConfig {
+                name: "persist-test".to_string(),
+                command: "echo 'error: test finding'".to_string(),
+                severity_threshold: None,
+            }],
+            cooldown_hours: 0,
+            severity_threshold: 5,
+            max_beads_per_run: 10,
+            ..PulseConfig::default()
+        },
+        workspace_dir.path().to_path_buf(),
+        state_dir.path().to_path_buf(),
+        Telemetry::new("worker".to_string()),
+    );
+    strand
+        .evaluate(&LifecycleStore::empty(), &HashSet::new())
+        .await;
+
+    let state_paths: Vec<_> = std::fs::read_dir(state_dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .collect();
+    assert_eq!(state_paths.len(), 1);
+    let state: PulseState =
+        serde_json::from_str(&std::fs::read_to_string(&state_paths[0]).unwrap()).unwrap();
+    assert!(state.last_run.is_some());
+    assert!(!state.seen_fingerprints.is_empty());
 }

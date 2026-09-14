@@ -73,6 +73,9 @@ pub struct KnotStrand {
     first_starvation_detected_at: Mutex<Option<DateTime<Utc>>>,
     /// Telemetry emitter for starvation events.
     telemetry: Telemetry,
+    /// Optional cross-repository validator. Production uses the SEAM script;
+    /// deterministic state-machine tests disable this external process seam.
+    cross_repo_validation_script: Option<PathBuf>,
     /// Set by whoever owns the selection cycle once it has recorded an outcome.
     /// Knot is the last strand in a cycle, so it consults this before calling a
     /// cycle terminal: a cycle that already selected or generated work must not
@@ -95,6 +98,9 @@ impl KnotStrand {
             last_alert_at: Mutex::new(None),
             first_starvation_detected_at: Mutex::new(None),
             telemetry,
+            cross_repo_validation_script: Some(PathBuf::from(
+                "/home/coding/SEAM/tools/validate_cross_repo_preconditions.sh",
+            )),
             cycle_outcome_recorded: None,
         }
     }
@@ -325,10 +331,13 @@ impl KnotStrand {
     /// - success: whether validation ran without error
     /// - details: human-readable description of what happened
     fn run_cross_repo_validation(&self, workspace_path: &Path) -> (usize, bool, String) {
-        // Try to find the validation script
-        // First, check if SEAM workspace exists and has the script
-        let seam_path = Path::new("/home/coding/SEAM");
-        let script_path = seam_path.join("tools/validate_cross_repo_preconditions.sh");
+        let Some(script_path) = self.cross_repo_validation_script.as_deref() else {
+            return (
+                0,
+                true,
+                "Cross-repo validation disabled, skipping".to_string(),
+            );
+        };
 
         if !script_path.exists() {
             return (
@@ -339,7 +348,7 @@ impl KnotStrand {
         }
 
         // Run the validation script in the workspace directory
-        let output = match Command::new(&script_path)
+        let output = match Command::new(script_path)
             .arg("--verbose")
             .current_dir(workspace_path)
             .output()
@@ -870,7 +879,8 @@ mod tests {
     ) -> (KnotStrand, Arc<StdMutex<Vec<TelemetryEvent>>>) {
         let (sink, events) = crate::telemetry::test_utils::MemorySink::new();
         let telemetry = crate::telemetry::Telemetry::with_sink("test-worker".to_string(), sink);
-        let knot = KnotStrand::new(config, telemetry);
+        let mut knot = KnotStrand::new(config, telemetry);
+        knot.cross_repo_validation_script = None;
         (knot, events)
     }
 
@@ -889,7 +899,9 @@ mod tests {
     /// Create a KnotStrand with test defaults for telemetry (legacy, no event capture).
     fn make_test_knot(config: KnotConfig) -> KnotStrand {
         let telemetry = crate::telemetry::Telemetry::new("test-worker".to_string());
-        KnotStrand::new(config, telemetry)
+        let mut knot = KnotStrand::new(config, telemetry);
+        knot.cross_repo_validation_script = None;
+        knot
     }
 
     use super::super::Strand;

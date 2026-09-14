@@ -29,7 +29,9 @@ version = 1
 # including bounded real-ETXTBSY recovery at both version-probe boundaries.
 # -49 real adapter-shell and telemetry hook contracts moved to integration_spawn
 # (needle-2f470c02).
-max_tests = 3765
+# -8 Pulse scanner process contracts moved to integration_spawn
+# (needle-b3a720b7); Worker/Knot/Mend state tests remain in-process.
+max_tests = 3757
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
@@ -47,7 +49,8 @@ contract = 67
 # consuming the tier's existing one-test headroom.
 # +6 bounded Resolve evidence contracts exercise read-only Git capture here
 # instead of reintroducing subprocesses into --lib (needle-aee9e898).
-e2e = 744
+# +8 Pulse scanner process contracts (needle-b3a720b7).
+e2e = 752
 soak = 0
 fuzz = 0
 
@@ -55,7 +58,7 @@ fuzz = 0
 name = "integration_spawn"
 path = "tests/integration_spawn.rs"
 tier = "e2e"
-max_tests = 372
+max_tests = 380
 owner = "component:process-integration"
 
 [[harness]]
@@ -213,13 +216,6 @@ path = "src/strand/mend.rs"
 kind = "sleep"
 max_occurrences = 21
 owner = "component:strand-mend"
-reason = "Grandfathered unit-tier debt; replace with an injected boundary."
-
-[[unit_exception]]
-path = "src/strand/pulse.rs"
-kind = "sleep"
-max_occurrences = 1
-owner = "component:strand-pulse"
 reason = "Grandfathered unit-tier debt; replace with an injected boundary."
 
 [[unit_exception]]
