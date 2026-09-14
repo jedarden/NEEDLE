@@ -5231,6 +5231,60 @@ fn doctor_check_heartbeat_dir(heartbeat_dir: &Path, repair: bool) -> CheckResult
     }
 }
 
+fn doctor_check_gate_health_records(needle_home: &Path, repair: bool) -> CheckResult {
+    let report = match crate::gate_health::prune_missing_workspace_records(needle_home, repair) {
+        Ok(report) => report,
+        Err(error) => {
+            return CheckResult::warn(
+                "Gate-health records",
+                format!("cannot inspect persisted state: {error:#}"),
+            )
+        }
+    };
+
+    let mut detail = report
+        .missing_workspaces
+        .iter()
+        .take(10)
+        .map(|workspace| format!("missing workspace: {}", workspace.display()))
+        .collect::<Vec<_>>();
+    detail.extend(report.retained.iter().take(10).cloned());
+
+    if !report.retained.is_empty() {
+        return CheckResult::warn(
+            "Gate-health records",
+            format!(
+                "{} inspected, {} stale, {} removed, {} retained unverified",
+                report.scanned,
+                report.missing,
+                report.removed,
+                report.retained.len()
+            ),
+        )
+        .with_detail(detail);
+    }
+    if report.missing == 0 {
+        return CheckResult::pass(
+            "Gate-health records",
+            format!("{} inspected, all workspaces exist", report.scanned),
+        );
+    }
+    if repair && report.removed == report.missing {
+        return CheckResult::pass(
+            "Gate-health records",
+            format!("removed {} stale record(s)", report.removed),
+        )
+        .with_detail(detail);
+    }
+
+    CheckResult::warn(
+        "Gate-health records",
+        format!("{} stale record(s)", report.missing),
+    )
+    .with_detail(detail)
+    .with_fix("needle doctor --repair")
+}
+
 fn doctor_check_heartbeats(heartbeat_dir: &Path, ttl_secs: u64, repair: bool) -> CheckResult {
     if !heartbeat_dir.is_dir() {
         return CheckResult::pass("Heartbeat files", "no heartbeat directory");
@@ -5710,6 +5764,10 @@ fn cmd_doctor(repair: bool, workspace: Option<PathBuf>, json: bool) -> Result<()
         config.health.heartbeat_ttl_secs,
         repair,
     ));
+
+    // Gate-health records whose workspaces have disappeared. Repair is
+    // deliberately limited to validated missing-workspace records.
+    results.push(doctor_check_gate_health_records(&needle_home, repair));
 
     // Peer status
     results.push(doctor_check_peers(
@@ -8831,6 +8889,46 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let r = doctor_check_heartbeat_dir(tmp.path(), false);
         assert_eq!(r.status, CheckStatus::Pass);
+    }
+
+    #[test]
+    fn doctor_gate_health_repair_prunes_stale_and_preserves_existing() {
+        let home = tempfile::tempdir().unwrap();
+        let needle_home = home.path().join(".needle");
+        let state_dir = needle_home.join("state/gate-health");
+        let existing = home.path().join("existing-workspace");
+        let missing = home.path().join("missing-workspace");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::create_dir_all(&existing).unwrap();
+
+        let write_record = |workspace: &Path, command: &str| {
+            let id = crate::gate_health::workspace_id(workspace).unwrap();
+            let path = state_dir.join(format!("{id}.json"));
+            let state = serde_json::json!({
+                "workspace": workspace,
+                "consecutive_errors": 3,
+                "last_error_at": "2026-09-14T00:00:00Z",
+                "last_command": command,
+                "last_reason": "fixture",
+                "degraded": true
+            });
+            std::fs::write(&path, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
+            path
+        };
+        let existing_path = write_record(&existing, "real-gate");
+        let stale_path = write_record(&missing, "fixture-gate");
+        let existing_bytes = std::fs::read(&existing_path).unwrap();
+
+        let check = doctor_check_gate_health_records(&needle_home, false);
+        assert_eq!(check.status, CheckStatus::Warn);
+        assert!(check.message.contains("1 stale record"));
+        assert!(stale_path.exists(), "doctor without --repair is read-only");
+
+        let repaired = doctor_check_gate_health_records(&needle_home, true);
+        assert_eq!(repaired.status, CheckStatus::Pass);
+        assert!(repaired.message.contains("removed 1 stale record"));
+        assert!(!stale_path.exists());
+        assert_eq!(std::fs::read(&existing_path).unwrap(), existing_bytes);
     }
 
     #[test]

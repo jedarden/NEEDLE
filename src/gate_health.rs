@@ -23,11 +23,11 @@
 //! degraded it.
 
 use crate::verification_fingerprint::{DetectorConfig, FingerprintTracker, VerificationFailure};
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// Get the home directory, falling back to the process temp dir if HOME is not set.
 fn home_dir() -> PathBuf {
@@ -40,6 +40,29 @@ fn home_dir() -> PathBuf {
 
 /// Consecutive gate errors threshold for degradation.
 const DEGRADATION_THRESHOLD: u32 = 3;
+
+/// Outcome of inspecting persisted gate-health records for vanished workspaces.
+///
+/// Records that cannot be proved safe to remove are reported in `retained`
+/// and left untouched. `needle doctor --repair` is therefore scoped to files
+/// whose serialized workspace is missing and whose filename still matches the
+/// workspace identity.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GateHealthPruneReport {
+    /// JSON state records inspected.
+    pub scanned: usize,
+    /// Records whose workspace did not exist at inspection time.
+    pub missing: usize,
+    /// Missing-workspace records removed when repair was requested.
+    pub removed: usize,
+    /// Valid records retained because their workspace still exists.
+    pub existing: usize,
+    /// Records retained because they could not be parsed, identified, or
+    /// safely removed.
+    pub retained: Vec<String>,
+    /// Missing workspace paths, bounded by the caller when displayed.
+    pub missing_workspaces: Vec<PathBuf>,
+}
 
 /// Gate health state for a single workspace.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -220,13 +243,15 @@ pub fn record_verification_failure(
     output: &str,
     config: &DetectorConfig,
 ) -> Result<VerificationRecording> {
+    ensure_recordable_workspace(workspace)?;
+
     let failure = VerificationFailure::new(chrono::Utc::now(), bead, gate, output);
     let summary = crate::verification_fingerprint::normalize_output(output);
 
     let mut state = load_state(workspace)?.unwrap_or_else(|| {
         // First recorded signal for this workspace is a verification
         // failure, not a gate execution error.
-        GateHealthState::skeleton(workspace.to_path_buf())
+        GateHealthState::skeleton(canonical_workspace(workspace))
     });
 
     let degraded_for = state.degraded_fingerprint().map(str::to_string);
@@ -282,7 +307,7 @@ pub fn record_verification_failure(
 /// canonical workspace path. This provides collision resistance while
 /// keeping filenames short.
 pub fn workspace_id(workspace: &Path) -> Result<String> {
-    let canonical = fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+    let canonical = canonical_workspace(workspace);
     let path_str = canonical
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("workspace path is not valid UTF-8"))?;
@@ -329,6 +354,8 @@ pub fn load_state(workspace: &Path) -> Result<Option<GateHealthState>> {
 
 /// Save gate health state for a workspace.
 pub fn save_state(state: &GateHealthState) -> Result<()> {
+    ensure_recordable_workspace(&state.workspace)?;
+
     let path = state_file_path(&state.workspace)?;
     let parent = path
         .parent()
@@ -351,12 +378,14 @@ pub fn record_error(
     command: String,
     reason: String,
 ) -> Result<(Option<GateHealthState>, bool)> {
+    ensure_recordable_workspace(workspace)?;
+
     let mut state = load_state(workspace)?;
 
     let now_degraded = if let Some(ref mut s) = state {
         s.increment(command, reason)
     } else {
-        let new_state = GateHealthState::new(workspace.to_path_buf(), command, reason);
+        let new_state = GateHealthState::new(canonical_workspace(workspace), command, reason);
         let degraded = false;
         save_state(&new_state)?;
         state = Some(new_state);
@@ -396,6 +425,240 @@ pub fn clear_state(workspace: &Path) -> Result<Option<GateHealthState>> {
     Ok(previous)
 }
 
+/// Inspect gate-health state and optionally remove records for workspaces that
+/// no longer exist.
+///
+/// A candidate is deleted only when its JSON parses, its filename still
+/// matches the serialized workspace identity, its workspace is missing both
+/// during the scan and immediately before deletion, and the file contents did
+/// not change between those checks. Existing and untrusted records are always
+/// retained, preserving real degradation data while workers are active.
+pub fn prune_missing_workspace_records(
+    needle_home: &Path,
+    repair: bool,
+) -> Result<GateHealthPruneReport> {
+    let gate_health_dir = needle_home.join("state").join("gate-health");
+    if !gate_health_dir.exists() {
+        return Ok(GateHealthPruneReport::default());
+    }
+
+    struct Candidate {
+        path: PathBuf,
+        contents: Vec<u8>,
+        workspace: PathBuf,
+    }
+
+    let mut report = GateHealthPruneReport::default();
+    let mut candidates = Vec::new();
+    let entries = fs::read_dir(&gate_health_dir)
+        .with_context(|| format!("failed to read {}", gate_health_dir.display()))?;
+
+    for entry in entries {
+        let entry = entry.context("failed to read gate-health directory entry")?;
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        report.scanned += 1;
+
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) => {
+                report.retained.push(format!(
+                    "{}: cannot inspect file type: {error}",
+                    path.display()
+                ));
+                continue;
+            }
+        };
+        if !file_type.is_file() {
+            report
+                .retained
+                .push(format!("{}: not a regular file", path.display()));
+            continue;
+        }
+
+        let contents = match fs::read(&path) {
+            Ok(contents) => contents,
+            Err(error) => {
+                report
+                    .retained
+                    .push(format!("{}: cannot read state: {error}", path.display()));
+                continue;
+            }
+        };
+        let state: GateHealthState = match serde_json::from_slice(&contents) {
+            Ok(state) => state,
+            Err(error) => {
+                report
+                    .retained
+                    .push(format!("{}: cannot parse state: {error}", path.display()));
+                continue;
+            }
+        };
+
+        let expected_name = match workspace_id(&state.workspace) {
+            Ok(id) => format!("{id}.json"),
+            Err(error) => {
+                report.retained.push(format!(
+                    "{}: cannot identify workspace: {error}",
+                    path.display()
+                ));
+                continue;
+            }
+        };
+        if path.file_name().and_then(|name| name.to_str()) != Some(expected_name.as_str()) {
+            report.retained.push(format!(
+                "{}: filename does not match serialized workspace {}",
+                path.display(),
+                state.workspace.display()
+            ));
+            continue;
+        }
+
+        match state.workspace.try_exists() {
+            Ok(true) => report.existing += 1,
+            Ok(false) => {
+                report.missing += 1;
+                report.missing_workspaces.push(state.workspace.clone());
+                candidates.push(Candidate {
+                    path,
+                    contents,
+                    workspace: state.workspace,
+                });
+            }
+            Err(error) => report.retained.push(format!(
+                "{}: cannot inspect workspace {}: {error}",
+                path.display(),
+                state.workspace.display()
+            )),
+        }
+    }
+
+    if !repair {
+        return Ok(report);
+    }
+
+    for candidate in candidates {
+        let current = match fs::read(&candidate.path) {
+            Ok(current) => current,
+            Err(error) => {
+                report.retained.push(format!(
+                    "{}: state changed before repair: {error}",
+                    candidate.path.display()
+                ));
+                continue;
+            }
+        };
+        if current != candidate.contents {
+            report.retained.push(format!(
+                "{}: state changed during inspection",
+                candidate.path.display()
+            ));
+            continue;
+        }
+        match candidate.workspace.try_exists() {
+            Ok(false) => {}
+            Ok(true) => {
+                report.retained.push(format!(
+                    "{}: workspace reappeared during inspection",
+                    candidate.path.display()
+                ));
+                continue;
+            }
+            Err(error) => {
+                report.retained.push(format!(
+                    "{}: cannot recheck workspace: {error}",
+                    candidate.path.display()
+                ));
+                continue;
+            }
+        }
+        match fs::remove_file(&candidate.path) {
+            Ok(()) => report.removed += 1,
+            Err(error) => report.retained.push(format!(
+                "{}: cannot remove stale state: {error}",
+                candidate.path.display()
+            )),
+        }
+    }
+
+    Ok(report)
+}
+
+/// Refuse to persist an ephemeral workspace into a durable operator state
+/// root. Tests that deliberately use temporary workspaces remain valid only
+/// when HOME itself is isolated beneath a recognized temporary root.
+fn ensure_recordable_workspace(workspace: &Path) -> Result<()> {
+    let home = home_dir();
+    if is_recognized_temporary_path(workspace)? && !is_recognized_temporary_path(&home)? {
+        bail!(
+            "refusing to record gate health for temporary workspace {} in durable HOME {}",
+            workspace.display(),
+            home.display()
+        );
+    }
+    Ok(())
+}
+
+fn canonical_workspace(workspace: &Path) -> PathBuf {
+    fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf())
+}
+
+fn is_recognized_temporary_path(path: &Path) -> Result<bool> {
+    let lexical = lexical_absolute(path)?;
+    let canonical = fs::canonicalize(path).ok();
+    let filesystem_root = PathBuf::from(std::path::MAIN_SEPARATOR_STR);
+
+    for root in [
+        std::env::temp_dir(),
+        filesystem_root.join("tmp"),
+        filesystem_root.join("var").join("tmp"),
+    ] {
+        let lexical_root = lexical_absolute(&root)?;
+        if lexical.starts_with(&lexical_root)
+            || canonical
+                .as_ref()
+                .is_some_and(|resolved| resolved.starts_with(&lexical_root))
+        {
+            return Ok(true);
+        }
+        if let Ok(canonical_root) = fs::canonicalize(&root) {
+            if lexical.starts_with(&canonical_root)
+                || canonical
+                    .as_ref()
+                    .is_some_and(|resolved| resolved.starts_with(&canonical_root))
+            {
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(false)
+}
+
+fn lexical_absolute(path: &Path) -> Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .context("failed to resolve current directory")?
+            .join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir | Component::Normal(_) => normalized.push(component.as_os_str()),
+        }
+    }
+    Ok(normalized)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,10 +686,98 @@ mod tests {
     /// other test that swaps HOME (observed: test_is_degraded and
     /// test_state_clear failing only under parallel execution).
     fn isolated_home() -> (crate::util::test_env::EnvGuard, TempDir) {
+        isolated_home_in(&std::env::temp_dir())
+    }
+
+    fn isolated_home_in(parent: &Path) -> (crate::util::test_env::EnvGuard, TempDir) {
         let env_guard = crate::util::test_env::isolate_env();
-        let home = TempDir::new().unwrap();
+        let home = TempDir::new_in(parent).unwrap();
         std::env::set_var("HOME", home.path());
         (env_guard, home)
+    }
+
+    #[test]
+    fn durable_home_refuses_all_temporary_workspace_recording() {
+        let current_dir = std::env::current_dir().unwrap();
+        let (_env_guard, home) = isolated_home_in(&current_dir);
+        let workspace = TempDir::new().unwrap();
+
+        let gate_error = record_error(
+            workspace.path(),
+            "missing-gate".to_string(),
+            "ENOENT".to_string(),
+        )
+        .unwrap_err();
+        assert!(gate_error.to_string().contains("temporary workspace"));
+
+        let verification_error = record_verification_failure(
+            workspace.path(),
+            "bead-test",
+            "definition-of-done",
+            "failed",
+            &DetectorConfig::default(),
+        )
+        .unwrap_err();
+        assert!(verification_error
+            .to_string()
+            .contains("temporary workspace"));
+
+        let direct_save = save_state(&GateHealthState::new(
+            workspace.path().to_path_buf(),
+            "missing-gate".to_string(),
+            "ENOENT".to_string(),
+        ))
+        .unwrap_err();
+        assert!(direct_save.to_string().contains("temporary workspace"));
+        assert!(
+            !home.path().join(".needle/state/gate-health").exists(),
+            "refused recordings must not create durable state"
+        );
+    }
+
+    #[test]
+    fn prune_removes_only_proven_missing_workspace_records() {
+        let (_env_guard, home) = isolated_home();
+        let workspaces = TempDir::new().unwrap();
+        let existing = workspaces.path().join("existing");
+        let missing = workspaces.path().join("missing");
+        fs::create_dir_all(&existing).unwrap();
+        fs::create_dir_all(&missing).unwrap();
+
+        record_error(
+            &existing,
+            "real-gate".to_string(),
+            "real failure".to_string(),
+        )
+        .unwrap();
+        record_error(
+            &missing,
+            "test-gate".to_string(),
+            "fixture failure".to_string(),
+        )
+        .unwrap();
+        let existing_path = state_file_path(&existing).unwrap();
+        let missing_path = state_file_path(&missing).unwrap();
+        let existing_bytes = fs::read(&existing_path).unwrap();
+        fs::remove_dir(&missing).unwrap();
+        let gate_health_dir = home.path().join(".needle/state/gate-health");
+        let malformed_path = gate_health_dir.join("untrusted.json");
+        fs::write(&malformed_path, b"not-json").unwrap();
+
+        let inspected =
+            prune_missing_workspace_records(&home.path().join(".needle"), false).unwrap();
+        assert_eq!(inspected.scanned, 3);
+        assert_eq!(inspected.missing, 1);
+        assert_eq!(inspected.removed, 0);
+        assert_eq!(inspected.existing, 1);
+        assert_eq!(inspected.retained.len(), 1);
+        assert!(missing_path.exists(), "inspection is read-only");
+
+        let repaired = prune_missing_workspace_records(&home.path().join(".needle"), true).unwrap();
+        assert_eq!(repaired.removed, 1);
+        assert!(!missing_path.exists());
+        assert_eq!(fs::read(&existing_path).unwrap(), existing_bytes);
+        assert!(malformed_path.exists(), "untrusted records fail closed");
     }
 
     #[test]

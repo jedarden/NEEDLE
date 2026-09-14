@@ -33,7 +33,10 @@ version = 1
 # (needle-b3a720b7); Worker/Knot/Mend state tests remain in-process.
 # -26 Resolve, outcome, Mitosis timeout-context, and retrieval real-process
 # cases consolidated into 15 integration_spawn contracts (needle-6a36c428).
-max_tests = 3731
+# +3 gate-health persistence safety contracts (needle-0ed0ccd0): durable HOME
+# rejects temp-root recording, stale pruning preserves real records, and the
+# doctor repair surface remains scoped to missing workspaces.
+max_tests = 3734
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
