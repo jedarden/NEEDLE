@@ -12,7 +12,7 @@
 pub mod timeout_context;
 pub mod timeout_eligibility;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -27,7 +27,7 @@ use crate::mitosis::timeout_eligibility::classify_timeout_eligibility;
 use crate::prompt::{MitosisTimeoutContext, PromptBuilder};
 use crate::resolve::ResolveDecision;
 use crate::telemetry::{EventKind, Telemetry};
-use crate::types::{AgentOutcome, Bead, BeadId};
+use crate::types::{AgentOutcome, Bead, BeadId, ClaimResult};
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Stopwords
@@ -1559,6 +1559,256 @@ pub fn would_release_as_split_out_of_scope(bead: &Bead, split_after_failures: u3
     ) && detects_needle_internal_config(bead)
 }
 
+/// Durable provenance written by the BUILDING-phase auto-split prompt.
+///
+/// This is deliberately distinct from `umbrella`: users also author umbrella
+/// beads by hand, so that label alone must never authorize lifecycle mutation.
+pub const AUTO_SPLIT_PARENT_LABEL: &str = "auto-split-parent";
+
+const SPLIT_CHILD_LABEL: &str = "split-child";
+const UMBRELLA_LABEL: &str = "umbrella";
+const MIN_AUTO_SPLIT_CHILDREN: usize = 3;
+const MAX_AUTO_SPLIT_CHILDREN: usize = 5;
+
+/// One parent closed by [`reconcile_completed_split_parents`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletedSplitParent {
+    pub parent_id: BeadId,
+    pub child_ids: Vec<BeadId>,
+    pub provenance: &'static str,
+}
+
+fn has_label(bead: &Bead, label: &str) -> bool {
+    bead.labels.iter().any(|candidate| candidate == label)
+}
+
+fn active_retry_label(label: &str) -> bool {
+    label.starts_with("failure-count:")
+        || label.starts_with("quarantine-until:")
+        || label.starts_with("quarantine-round:")
+        || label.starts_with("quarantine:")
+        || label.starts_with("deferred:")
+        || matches!(label, "quarantined" | "cycling" | "verification-failed")
+}
+
+/// Verify the exact dependency chain created by the auto-split prompt.
+///
+/// The parent must depend on one terminal child and every child may depend on
+/// at most one preceding child. Requiring the full 3-5 node chain is the
+/// legacy provenance proof: a manually authored `umbrella` without this
+/// shape is never reconciled. New splits are stricter still: the parent and
+/// every child carry explicit, parent-scoped provenance labels.
+fn verified_completed_split(
+    parent: &Bead,
+    inventory: &HashMap<BeadId, Bead>,
+) -> Option<(Vec<BeadId>, &'static str)> {
+    if parent.status.is_done()
+        || parent.status == crate::types::BeadStatus::InProgress
+        || !has_label(parent, UMBRELLA_LABEL)
+        || parent.dependencies.len() != 1
+    {
+        return None;
+    }
+
+    let explicit = has_label(parent, AUTO_SPLIT_PARENT_LABEL);
+    if !explicit && failure_count_from_labels(&parent.labels) == 0 {
+        return None;
+    }
+
+    let parent_scope = format!("parent-{}", parent.id);
+    let mut child_ids = Vec::new();
+    let mut seen = HashSet::new();
+    let mut next = parent
+        .dependencies
+        .first()
+        .map(|dependency| dependency.id.clone());
+
+    while let Some(child_id) = next {
+        if !seen.insert(child_id.clone()) {
+            return None;
+        }
+        let child = inventory.get(&child_id)?;
+        if !child.status.is_done()
+            || !has_label(child, SPLIT_CHILD_LABEL)
+            || (explicit && !has_label(child, &parent_scope))
+            || child.dependencies.len() > 1
+        {
+            return None;
+        }
+
+        child_ids.push(child_id);
+        next = child
+            .dependencies
+            .first()
+            .map(|dependency| dependency.id.clone());
+    }
+
+    if !(MIN_AUTO_SPLIT_CHILDREN..=MAX_AUTO_SPLIT_CHILDREN).contains(&child_ids.len()) {
+        return None;
+    }
+
+    if explicit {
+        let scoped_children: HashSet<BeadId> = inventory
+            .values()
+            .filter(|bead| has_label(bead, &parent_scope))
+            .map(|bead| bead.id.clone())
+            .collect();
+        let chained_children: HashSet<BeadId> = child_ids.iter().cloned().collect();
+        if scoped_children != chained_children {
+            return None;
+        }
+    }
+
+    child_ids.sort_by(|left, right| left.as_ref().cmp(right.as_ref()));
+    Some((
+        child_ids,
+        if explicit {
+            "explicit-auto-split"
+        } else {
+            "legacy-umbrella-split-chain"
+        },
+    ))
+}
+
+/// Close completed auto-split parents before candidate selection can dispatch
+/// them again.
+///
+/// Errors are returned to the caller, which logs them and preserves ordinary
+/// strand behavior. Every candidate is re-read before mutation so a stale
+/// inventory cannot close a newly claimed parent or a rewired child graph.
+pub async fn reconcile_completed_split_parents(
+    store: &dyn BeadStore,
+    telemetry: &Telemetry,
+) -> Result<Vec<CompletedSplitParent>> {
+    let snapshot = tokio::time::timeout(Duration::from_secs(30), store.list_all())
+        .await
+        .context("timed out listing beads for completed split reconciliation")??;
+    let snapshot_by_id: HashMap<BeadId, Bead> = snapshot
+        .iter()
+        .cloned()
+        .map(|bead| (bead.id.clone(), bead))
+        .collect();
+    let candidate_ids: Vec<BeadId> = snapshot
+        .iter()
+        .filter_map(|parent| {
+            verified_completed_split(parent, &snapshot_by_id).map(|_| parent.id.clone())
+        })
+        .collect();
+
+    let mut reconciled = Vec::new();
+    for parent_id in candidate_ids {
+        let live = tokio::time::timeout(Duration::from_secs(30), store.list_all())
+            .await
+            .with_context(|| format!("timed out re-reading split parent {parent_id}"))??;
+        let live_by_id: HashMap<BeadId, Bead> = live
+            .into_iter()
+            .map(|bead| (bead.id.clone(), bead))
+            .collect();
+        let Some(parent) = live_by_id.get(&parent_id) else {
+            continue;
+        };
+        let Some((child_ids, provenance)) = verified_completed_split(parent, &live_by_id) else {
+            continue;
+        };
+
+        // Atomically own an open parent before mutating it. This closes the
+        // race where another fleet worker could claim the now-unblocked
+        // umbrella between reconciliation's read and close. Blocked/deferred
+        // parents are already outside the claimable frontier.
+        let mut owns_open_parent = false;
+        if parent.status == crate::types::BeadStatus::Open {
+            match tokio::time::timeout(
+                Duration::from_secs(30),
+                store.claim(&parent_id, "needle:split-parent-reconciler"),
+            )
+            .await
+            .with_context(|| format!("timed out claiming completed split parent {parent_id}"))??
+            {
+                ClaimResult::Claimed(_) => owns_open_parent = true,
+                ClaimResult::RaceLost { .. } | ClaimResult::NotClaimable { .. } => continue,
+                ClaimResult::ClaimError { reason } => {
+                    return Err(anyhow::anyhow!(
+                        "failed claiming completed split parent {parent_id}: {reason}"
+                    ));
+                }
+                ClaimResult::Suspect {
+                    consecutive_errors,
+                    last_error,
+                    ..
+                } => {
+                    return Err(anyhow::anyhow!(
+                        "completed split parent {parent_id} became suspect after {consecutive_errors} claim errors: {last_error}"
+                    ));
+                }
+            }
+        }
+
+        for label in parent
+            .labels
+            .iter()
+            .filter(|label| active_retry_label(label))
+        {
+            let removal = tokio::time::timeout(
+                Duration::from_secs(30),
+                store.remove_label(&parent_id, label),
+            )
+            .await
+            .with_context(|| {
+                format!("timed out clearing retry label {label} from split parent {parent_id}")
+            })?;
+            if let Err(error) = removal {
+                if owns_open_parent {
+                    let _ = store.release(&parent_id).await;
+                }
+                return Err(error).with_context(|| {
+                    format!("failed clearing retry label {label} from split parent {parent_id}")
+                });
+            }
+        }
+
+        let child_list = child_ids
+            .iter()
+            .map(AsRef::<str>::as_ref)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let reason = format!(
+            "Auto-split completed: all {} required children closed ({child_list}); parent reconciled without redispatch [provenance={provenance}]",
+            child_ids.len()
+        );
+        if let Err(error) =
+            tokio::time::timeout(Duration::from_secs(30), store.close(&parent_id, &reason))
+                .await
+                .with_context(|| format!("timed out closing completed split parent {parent_id}"))?
+        {
+            let latest = store.show(&parent_id).await?;
+            if latest.status.is_done() {
+                continue;
+            }
+            if owns_open_parent {
+                let _ = store.release(&parent_id).await;
+            }
+            return Err(error)
+                .with_context(|| format!("failed to close completed split parent {parent_id}"));
+        }
+
+        telemetry.emit(
+            EventKind::SplitParentReconciled {
+                parent_id: parent_id.clone(),
+                child_ids: child_ids.clone(),
+                provenance: provenance.to_string(),
+            },
+            chrono::Utc::now(),
+        )?;
+        reconciled.push(CompletedSplitParent {
+            parent_id,
+            child_ids,
+            provenance,
+        });
+    }
+
+    Ok(reconciled)
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Tests
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1567,7 +1817,7 @@ pub fn would_release_as_split_out_of_scope(bead: &Bead, split_after_failures: u3
 mod tests {
     use super::*;
     use crate::bead_store::{Filters, RepairReport};
-    use crate::types::{Bead, BeadId, BeadStatus, ClaimResult};
+    use crate::types::{Bead, BeadId, BeadStatus, BrDependency, ClaimResult};
     use async_trait::async_trait;
     use chrono::Utc;
     use std::path::PathBuf;
@@ -1588,6 +1838,10 @@ mod tests {
         labels: Vec<String>,
         /// Existing child beads returned by `list_all()` for dedup testing.
         existing_children: Vec<Bead>,
+        /// Mutable full inventory used by split-parent reconciliation tests.
+        reconciliation_inventory: Mutex<Option<Vec<Bead>>>,
+        closed: Mutex<Vec<(BeadId, String)>>,
+        removed_labels: Mutex<Vec<(BeadId, String)>>,
         created: Mutex<Vec<(String, String)>>,
         deps_added: Mutex<Vec<(String, String)>>,
         /// Coordination barrier for deterministic test execution
@@ -1600,6 +1854,9 @@ mod tests {
             MockStore {
                 labels: vec!["failure-count:1".to_string()],
                 existing_children: Vec::new(),
+                reconciliation_inventory: Mutex::new(None),
+                closed: Mutex::new(Vec::new()),
+                removed_labels: Mutex::new(Vec::new()),
                 created: Mutex::new(Vec::new()),
                 deps_added: Mutex::new(Vec::new()),
                 barrier: Mutex::new(None),
@@ -1614,6 +1871,11 @@ mod tests {
         /// Add existing child beads that will be returned by `list_all()`.
         fn with_existing_children(mut self, children: Vec<Bead>) -> Self {
             self.existing_children = children;
+            self
+        }
+
+        fn with_reconciliation_inventory(self, inventory: Vec<Bead>) -> Self {
+            *self.reconciliation_inventory.lock().unwrap() = Some(inventory);
             self
         }
 
@@ -1660,12 +1922,38 @@ mod tests {
     #[async_trait]
     impl BeadStore for MockStore {
         async fn list_all(&self) -> Result<Vec<Bead>> {
+            if let Some(inventory) = self.reconciliation_inventory.lock().unwrap().as_ref() {
+                return Ok(inventory.clone());
+            }
             Ok(self.existing_children.clone())
         }
         async fn ready(&self, _filters: &Filters) -> Result<Vec<Bead>> {
-            Ok(vec![])
+            let inventory = self.reconciliation_inventory.lock().unwrap();
+            let Some(inventory) = inventory.as_ref() else {
+                return Ok(vec![]);
+            };
+            Ok(inventory
+                .iter()
+                .filter(|bead| {
+                    bead.status == BeadStatus::Open
+                        && bead.dependencies.iter().all(|dependency| {
+                            inventory
+                                .iter()
+                                .find(|candidate| candidate.id == dependency.id)
+                                .is_some_and(|blocker| blocker.status.is_done())
+                        })
+                })
+                .cloned()
+                .collect())
         }
-        async fn show(&self, _id: &BeadId) -> Result<Bead> {
+        async fn show(&self, id: &BeadId) -> Result<Bead> {
+            if let Some(inventory) = self.reconciliation_inventory.lock().unwrap().as_ref() {
+                return inventory
+                    .iter()
+                    .find(|bead| &bead.id == id)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("unknown mock bead {id}"));
+            }
             Ok(Bead {
                 id: BeadId::from("parent-001"),
                 title: "Parent bead".to_string(),
@@ -1697,7 +1985,14 @@ mod tests {
         async fn release(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
-        async fn block(&self, _id: &BeadId) -> Result<()> {
+        async fn block(&self, id: &BeadId) -> Result<()> {
+            if let Some(inventory) = self.reconciliation_inventory.lock().unwrap().as_mut() {
+                let bead = inventory
+                    .iter_mut()
+                    .find(|bead| &bead.id == id)
+                    .ok_or_else(|| anyhow::anyhow!("unknown mock bead {id}"))?;
+                bead.status = BeadStatus::Blocked;
+            }
             Ok(())
         }
         async fn flush(&self) -> Result<()> {
@@ -1706,13 +2001,45 @@ mod tests {
         async fn reopen(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
-        async fn labels(&self, _id: &BeadId) -> Result<Vec<String>> {
+        async fn close(&self, id: &BeadId, reason: &str) -> Result<()> {
+            if let Some(inventory) = self.reconciliation_inventory.lock().unwrap().as_mut() {
+                let bead = inventory
+                    .iter_mut()
+                    .find(|bead| &bead.id == id)
+                    .ok_or_else(|| anyhow::anyhow!("unknown mock bead {id}"))?;
+                bead.status = BeadStatus::Closed;
+            }
+            self.closed
+                .lock()
+                .unwrap()
+                .push((id.clone(), reason.to_string()));
+            Ok(())
+        }
+        async fn labels(&self, id: &BeadId) -> Result<Vec<String>> {
+            if let Some(inventory) = self.reconciliation_inventory.lock().unwrap().as_ref() {
+                return inventory
+                    .iter()
+                    .find(|bead| &bead.id == id)
+                    .map(|bead| bead.labels.clone())
+                    .ok_or_else(|| anyhow::anyhow!("unknown mock bead {id}"));
+            }
             Ok(self.labels.clone())
         }
         async fn add_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
             Ok(())
         }
-        async fn remove_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
+        async fn remove_label(&self, id: &BeadId, label: &str) -> Result<()> {
+            if let Some(inventory) = self.reconciliation_inventory.lock().unwrap().as_mut() {
+                let bead = inventory
+                    .iter_mut()
+                    .find(|bead| &bead.id == id)
+                    .ok_or_else(|| anyhow::anyhow!("unknown mock bead {id}"))?;
+                bead.labels.retain(|candidate| candidate != label);
+            }
+            self.removed_labels
+                .lock()
+                .unwrap()
+                .push((id.clone(), label.to_string()));
             Ok(())
         }
         async fn create_bead(&self, title: &str, body: &str, _labels: &[&str]) -> Result<BeadId> {
@@ -1767,6 +2094,39 @@ mod tests {
             labels: vec!["failure-count:1".to_string()],
             workspace: PathBuf::from("/tmp/test"),
             dependencies: vec![],
+            dependents: vec![],
+            comments: vec![],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn reconciliation_bead(
+        id: &str,
+        status: BeadStatus,
+        labels: &[&str],
+        blocker: Option<&str>,
+    ) -> Bead {
+        Bead {
+            id: BeadId::from(id),
+            title: format!("fixture {id}"),
+            body: Some("completed auto-split fixture".to_string()),
+            priority: 1,
+            status,
+            assignee: None,
+            labels: labels.iter().map(|label| (*label).to_string()).collect(),
+            workspace: PathBuf::from("/tmp/test"),
+            dependencies: blocker
+                .map(|blocker| {
+                    vec![BrDependency {
+                        id: BeadId::from(blocker),
+                        title: String::new(),
+                        status: String::new(),
+                        priority: 0,
+                        dependency_type: "blocks".to_string(),
+                    }]
+                })
+                .unwrap_or_default(),
             dependents: vec![],
             comments: vec![],
             created_at: Utc::now(),
@@ -1834,20 +2194,163 @@ mod tests {
     }
 
     #[test]
-    fn zero_threshold_never_rejects() {
+    fn ordinary_bead_at_threshold_stays_eligible() {
         // Splitting disabled means the worker never reaches the skip branch,
         // so Explore must not reject the candidate either.
         assert!(!would_release_as_split_out_of_scope(&poison_bead(), 0));
-    }
 
-    #[test]
-    fn ordinary_bead_at_threshold_stays_eligible() {
         // High failure count alone is not disqualifying; only the combination
         // with NEEDLE-internal content is.
         let mut b = poison_bead();
         b.title = "Fix the retry backoff in the HTTP client".to_string();
         b.body = Some("Exponential backoff with jitter.".to_string());
         assert!(!would_release_as_split_out_of_scope(&b, 3));
+    }
+
+    #[tokio::test]
+    async fn completed_split_parent_reconciliation_closes_legacy_chain_without_redispatch() {
+        // New splits carry explicit parent and child provenance, so they do
+        // not need failure-count history as part of their proof.
+        let mut explicit = vec![reconciliation_bead(
+            "explicit-parent",
+            BeadStatus::Open,
+            &["umbrella", AUTO_SPLIT_PARENT_LABEL],
+            Some("explicit-child-3"),
+        )];
+        for index in 1..=3 {
+            let id = format!("explicit-child-{index}");
+            let blocker = (index > 1).then(|| format!("explicit-child-{}", index - 1));
+            explicit.push(reconciliation_bead(
+                &id,
+                BeadStatus::Closed,
+                &["split-child", "parent-explicit-parent"],
+                blocker.as_deref(),
+            ));
+        }
+        let explicit_by_id: HashMap<BeadId, Bead> = explicit
+            .into_iter()
+            .map(|bead| (bead.id.clone(), bead))
+            .collect();
+        assert_eq!(
+            verified_completed_split(
+                explicit_by_id
+                    .get(&BeadId::from("explicit-parent"))
+                    .unwrap(),
+                &explicit_by_id,
+            )
+            .unwrap()
+            .1,
+            "explicit-auto-split"
+        );
+
+        // Exact incident shape: a quarantined umbrella at failure-count 6,
+        // five closed sequential split children, and work blocked on the
+        // completed parent. The dependency projections deliberately contain
+        // no status, matching bead-rs lean edges.
+        let mut inventory = vec![reconciliation_bead(
+            "rmp-3fe4b765",
+            BeadStatus::Blocked,
+            &[
+                "umbrella",
+                "failure-count:6",
+                "quarantined",
+                "quarantine-round:2",
+                "quarantine-until:2099-01-01T00:00:00Z",
+                "cycling",
+            ],
+            Some("split-5"),
+        )];
+        for index in 1..=5 {
+            let id = format!("split-{index}");
+            let blocker = (index > 1).then(|| format!("split-{}", index - 1));
+            inventory.push(reconciliation_bead(
+                &id,
+                BeadStatus::Closed,
+                &["split-child"],
+                blocker.as_deref(),
+            ));
+        }
+        inventory.push(reconciliation_bead(
+            "dependent-ready-next",
+            BeadStatus::Open,
+            &[],
+            Some("rmp-3fe4b765"),
+        ));
+
+        // A manual umbrella with an otherwise similar closed child chain has
+        // neither explicit provenance nor a failure history, so it must stay
+        // open and operator-owned.
+        inventory.push(reconciliation_bead(
+            "manual-umbrella",
+            BeadStatus::Open,
+            &["umbrella"],
+            Some("manual-child-3"),
+        ));
+        for index in 1..=3 {
+            let id = format!("manual-child-{index}");
+            let blocker = (index > 1).then(|| format!("manual-child-{}", index - 1));
+            inventory.push(reconciliation_bead(
+                &id,
+                BeadStatus::Closed,
+                &["split-child"],
+                blocker.as_deref(),
+            ));
+        }
+
+        let store = MockStore::new().with_reconciliation_inventory(inventory);
+        let telemetry = Telemetry::new("split-reconciliation-test".to_string());
+        let reconciled = reconcile_completed_split_parents(&store, &telemetry)
+            .await
+            .unwrap();
+
+        assert_eq!(reconciled.len(), 1);
+        assert_eq!(reconciled[0].parent_id.as_ref(), "rmp-3fe4b765");
+        assert_eq!(reconciled[0].child_ids.len(), 5);
+        assert_eq!(reconciled[0].provenance, "legacy-umbrella-split-chain");
+
+        let parent = store.show(&BeadId::from("rmp-3fe4b765")).await.unwrap();
+        assert!(parent.status.is_done());
+        assert!(parent.labels.iter().all(|label| !active_retry_label(label)));
+        assert!(parent.labels.contains(&"umbrella".to_string()));
+
+        let closes = store.closed.lock().unwrap();
+        assert_eq!(closes.len(), 1);
+        assert!(closes[0].1.contains("all 5 required children closed"));
+        assert!(closes[0]
+            .1
+            .contains("split-1, split-2, split-3, split-4, split-5"));
+        drop(closes);
+
+        let ready = store
+            .ready(&Filters {
+                assignee: None,
+                exclude_labels: vec![],
+                exclude_ids: HashSet::new(),
+            })
+            .await
+            .unwrap();
+        assert!(ready
+            .iter()
+            .any(|bead| bead.id.as_ref() == "dependent-ready-next"));
+        assert_eq!(
+            store
+                .show(&BeadId::from("manual-umbrella"))
+                .await
+                .unwrap()
+                .status,
+            BeadStatus::Open
+        );
+
+        // Reconciliation closes through the store lifecycle primitive; it
+        // neither creates a sixth child/commit nor enters an agent dispatch or
+        // shipped-work gate path. A second pass is idempotent.
+        assert!(store.created.lock().unwrap().is_empty());
+        assert!(store.deps_added.lock().unwrap().is_empty());
+        assert!(reconcile_completed_split_parents(&store, &telemetry)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(store.closed.lock().unwrap().len(), 1);
     }
 
     #[test]

@@ -945,6 +945,13 @@ pub enum EventKind {
     MitosisOutOfScope {
         bead_id: BeadId,
     },
+    /// A prompt-driven auto-split parent reached its terminal lifecycle state
+    /// after every verified child in the split chain closed.
+    SplitParentReconciled {
+        parent_id: BeadId,
+        child_ids: Vec<BeadId>,
+        provenance: String,
+    },
 
     // ── Split (worker BUILDING phase) ──
     SplitSkipped {
@@ -1613,6 +1620,7 @@ impl EventKind {
             EventKind::MitosisSkipped { .. } => "bead.mitosis.skipped",
             EventKind::MitosisChildCountWarning { .. } => "bead.mitosis.child_count_warning",
             EventKind::MitosisOutOfScope { .. } => "bead.mitosis.out_of_scope",
+            EventKind::SplitParentReconciled { .. } => "bead.split.parent_reconciled",
             EventKind::SplitSkipped { .. } => "bead.split.skipped",
             EventKind::VerificationFailed { .. } => "verification.failed",
             EventKind::VerificationPassed { .. } => "verification.passed",
@@ -1765,7 +1773,8 @@ impl EventKind {
             | EventKind::AuditBeadDeferredOverBudget { bead_id, .. } => Some(bead_id.clone()),
             EventKind::MitosisSplit { parent_id, .. }
             | EventKind::MitosisSkipped { parent_id, .. }
-            | EventKind::MitosisChildCountWarning { parent_id, .. } => Some(parent_id.clone()),
+            | EventKind::MitosisChildCountWarning { parent_id, .. }
+            | EventKind::SplitParentReconciled { parent_id, .. } => Some(parent_id.clone()),
             EventKind::MitosisOutOfScope { bead_id } => Some(bead_id.clone()),
             EventKind::HeartbeatEmitted { bead_id, .. } => bead_id.clone(),
             EventKind::BeadStoreError { .. }
@@ -2562,6 +2571,18 @@ impl EventKind {
             EventKind::MitosisOutOfScope { bead_id } => {
                 serde_json::json!({
                     "bead_id": bead_id.as_ref(),
+                })
+            }
+            EventKind::SplitParentReconciled {
+                parent_id,
+                child_ids,
+                provenance,
+            } => {
+                let ids: Vec<&str> = child_ids.iter().map(|id| id.as_ref()).collect();
+                serde_json::json!({
+                    "parent_id": parent_id.as_ref(),
+                    "child_ids": ids,
+                    "provenance": provenance,
                 })
             }
             EventKind::SplitSkipped { bead_id, reason } => {
@@ -3730,6 +3751,7 @@ impl EventKind {
             | EventKind::MitosisSkipped { .. }
             | EventKind::MitosisChildCountWarning { .. }
             | EventKind::MitosisOutOfScope { .. }
+            | EventKind::SplitParentReconciled { .. }
             | EventKind::SplitSkipped { .. }
             | EventKind::VerificationFailed { .. }
             | EventKind::VerificationPassed { .. }

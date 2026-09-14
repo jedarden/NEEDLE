@@ -462,7 +462,7 @@ chain of focused, independently achievable tasks.
    ```bash
    {bead_cli} create --title \"Child Title\" \\
      --description \"Child description and acceptance criteria\" \\
-     --label split-child
+     --label split-child --label \"parent-{bead_id}\"
    ```
 
 2. **Each child must:**
@@ -470,7 +470,7 @@ chain of focused, independently achievable tasks.
    - Have a clear, focused scope
    - Start with a verb (e.g., \"Add\", \"Fix\", \"Implement\", \"Write\")
    - Include acceptance criteria in the body
-   - Be added with label: `split-child`
+   - Be added with both labels: `split-child` and `parent-{bead_id}`
 
 3. **Chain the children sequentially:**
    - Child 2 depends on Child 1
@@ -479,27 +479,30 @@ chain of focused, independently achievable tasks.
 
 4. **Convert this parent into an umbrella:**
    - Add a dependency: this parent depends on the LAST child
-   - Add label: `umbrella` to this parent
+   - Add both labels: `umbrella` and `auto-split-parent` to this parent
 
 5. **Verify the setup:**
    ```bash
-   {bead_cli} show {bead_id}  # Should show umbrella label and dependency on last child
-   {bead_cli} show <last-child-id>  # Should show this parent as a dependent
+   {bead_cli} show {bead_id}  # Should show both parent labels and dependency on last child
+   {bead_cli} show <last-child-id>  # Should show parent scope label and this parent as a dependent
    ```
 
    Chain and label with:
    ```bash
    {dep_add_command}
-   {bead_cli} label add <bead-id> --label split-child
+   {bead_cli} label add <child-id> --label split-child
+   {bead_cli} label add <child-id> --label \"parent-{bead_id}\"
+   {bead_cli} label add {bead_id} --label umbrella
+   {bead_cli} label add {bead_id} --label auto-split-parent
    ```
 
 ### Example
 
 If splitting \"Build authentication system with OAuth and JWT\":
-1. Create child: \"Design OAuth2 flow\" with label split-child
-2. Create child: \"Implement JWT token service\" with label split-child, depends on child 1
-3. Create child: \"Add OAuth2 login endpoint\" with label split-child, depends on child 2
-4. Parent depends on child 3 and gets umbrella label
+1. Create child: \"Design OAuth2 flow\" with split-child and parent scope labels
+2. Create child: \"Implement JWT token service\" with both labels, depends on child 1
+3. Create child: \"Add OAuth2 login endpoint\" with both labels, depends on child 2
+4. Parent depends on child 3 and gets umbrella and auto-split-parent labels
 
 ### Output Format
 
@@ -1774,6 +1777,8 @@ mod tests {
         assert!(split
             .content
             .contains("bead dep add <blocked-id> <blocker-id> --kind blocks"));
+        assert!(split.content.contains("parent-needle-abc"));
+        assert!(split.content.contains("auto-split-parent"));
         assert!(!split.content.contains("bf dep add"));
     }
 

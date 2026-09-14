@@ -1867,6 +1867,27 @@ impl super::Strand for PluckStrand {
             };
         }
 
+        // A prompt-driven split is complete when its verified child chain is
+        // complete. Reconcile those parents before querying the ready
+        // frontier, otherwise the former umbrella is redispatched through
+        // auto-split and shipped-work verification asks for a needless extra
+        // commit after the children already delivered the work.
+        match crate::mitosis::reconcile_completed_split_parents(store, &self.telemetry).await {
+            Ok(parents) if !parents.is_empty() => {
+                tracing::info!(
+                    reconciled = parents.len(),
+                    "closed completed auto-split parents before Pluck selection"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "completed split-parent reconciliation failed; preserving ordinary Pluck selection"
+                );
+            }
+        }
+
         // Check if the home workspace is gate-degraded. If so, skip ordinary dispatch.
         // Degraded workspaces are excluded from Pluck to prevent repeated gate
         // execution errors. The workspace remains claimable for manual intervention

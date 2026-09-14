@@ -1063,6 +1063,33 @@ impl super::Strand for ExploreStrand {
                 }
             };
 
+            // Reconcile terminal auto-split umbrellas before measuring this
+            // workspace's frontier. Closing a completed parent can make its
+            // dependents ready in this same scan, while also preventing the
+            // parent itself from being ranked and claimed again.
+            match crate::mitosis::reconcile_completed_split_parents(
+                remote_store.as_ref(),
+                &self.telemetry,
+            )
+            .await
+            {
+                Ok(parents) if !parents.is_empty() => {
+                    tracing::info!(
+                        workspace = %workspace.display(),
+                        reconciled = parents.len(),
+                        "closed completed auto-split parents before Explore ranking"
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        workspace = %workspace.display(),
+                        error = %error,
+                        "completed split-parent reconciliation failed; preserving ordinary Explore selection"
+                    );
+                }
+            }
+
             match remote_store.ready(&filters).await {
                 Ok(candidates) => {
                     let p0_count = candidates.iter().filter(|b| b.priority == 0).count();
