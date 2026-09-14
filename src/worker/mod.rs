@@ -10103,6 +10103,19 @@ mod tests {
                 config.strands.explore.workspaces = Vec::new();
                 let mut worker = Worker::new(config, "span-depth".to_string(), store.clone());
                 worker.boot().await.unwrap();
+                // do_claim captures the claim identity through the resolved
+                // target-store context that production do_select establishes
+                // before every claim (needle-828a425c) and fails closed
+                // without it. This fixture drives do_claim directly, so
+                // capture the same context here: the exact store instance the
+                // claimer claims through. do_select re-captures it each cycle;
+                // this handle is stable across cycles because do_claim and
+                // do_log never clear the context — only restore_home_store
+                // does, and this fixture never selects.
+                worker.target_store = Some(crate::claim::ResolvedStoreContext::new(
+                    worker.store.clone(),
+                    worker.config.workspace.default.clone(),
+                ));
 
                 for cycle in 0..CLAIM_CYCLES {
                     // Reset the in-memory bead to a claimable state for the next
@@ -10476,6 +10489,15 @@ mod tests {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::new(vec![bead]));
         let mut worker = make_worker(store);
         worker.boot().await.unwrap();
+        // do_claim captures the claim identity through the resolved
+        // target-store context that production do_select establishes before
+        // every claim (needle-828a425c) and fails closed without it. This
+        // fixture drives do_claim directly, so capture the same context here:
+        // the exact store instance this worker's claimer claims through.
+        worker.target_store = Some(crate::claim::ResolvedStoreContext::new(
+            worker.store.clone(),
+            worker.config.workspace.default.clone(),
+        ));
         worker.current_bead = Some(make_test_bead("needle-claim-ok"));
         worker.state = WorkerState::Claiming;
         worker.consecutive_race_lost = 4;
