@@ -10598,7 +10598,7 @@ mod tests {
 
     // ── do_retry tests ──
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn do_retry_below_max_transitions_to_selecting() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut worker = make_worker(store);
@@ -10606,14 +10606,16 @@ mod tests {
         worker.state = WorkerState::Retrying;
         worker.retry_count = 1; // Below default max (3)
 
+        let started = tokio::time::Instant::now();
         worker.do_retry().await.unwrap();
 
         assert_eq!(*worker.state(), WorkerState::Selecting);
+        assert_eq!(started.elapsed(), Duration::from_millis(100));
         // Retry count preserved — it's only reset when max is exceeded.
         assert_eq!(worker.retry_count, 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn do_retry_at_max_resets_and_selects() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut worker = make_worker(store);
@@ -10622,15 +10624,17 @@ mod tests {
         worker.retry_count = worker.config.worker.max_claim_retries; // At max
         worker.exclusion_set.insert(BeadId::from("some-bead"));
 
+        let started = tokio::time::Instant::now();
         worker.do_retry().await.unwrap();
 
         assert_eq!(*worker.state(), WorkerState::Selecting);
+        assert_eq!(started.elapsed(), Duration::from_millis(100));
         assert_eq!(worker.retry_count, 0);
         assert!(worker.exclusion_set.is_empty());
         assert!(worker.current_bead.is_none());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn do_retry_at_max_preserves_race_lost_exclusions() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut worker = make_worker(store);
@@ -10646,9 +10650,11 @@ mod tests {
             .push((excluded_bead.clone(), expires));
         worker.exclusion_set.insert(BeadId::from("some-other-bead"));
 
+        let started = tokio::time::Instant::now();
         worker.do_retry().await.unwrap();
 
         assert_eq!(*worker.state(), WorkerState::Selecting);
+        assert_eq!(started.elapsed(), Duration::from_millis(100));
         assert_eq!(worker.retry_count, 0);
         // Manual exclusion_set is cleared
         assert!(worker.exclusion_set.is_empty());
@@ -10657,7 +10663,7 @@ mod tests {
         assert_eq!(worker.race_lost_exclusions[0].0, excluded_bead);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn do_retry_skip_threshold_transitions_to_exhausted() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut worker = make_worker(store);
@@ -10676,7 +10682,7 @@ mod tests {
         assert!(worker.current_bead.is_none());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn do_retry_below_skip_threshold_applies_backoff() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut worker = make_worker(store);
@@ -10685,14 +10691,21 @@ mod tests {
         worker.consecutive_race_lost = 2;
         worker.retry_count = 1;
 
-        let before = std::time::Instant::now();
-        worker.do_retry().await.unwrap();
-        let elapsed = before.elapsed();
+        {
+            let retry = worker.do_retry();
+            tokio::pin!(retry);
+
+            // The 200ms exponential backoff must remain pending immediately
+            // and one millisecond before its boundary.
+            assert!(futures::poll!(&mut retry).is_pending());
+            tokio::time::advance(Duration::from_millis(199)).await;
+            assert!(futures::poll!(&mut retry).is_pending());
+            tokio::time::advance(Duration::from_millis(1)).await;
+            retry.await.unwrap();
+        }
 
         // Backoff formula: 100 * (1 << (consecutive_race_lost - 1)) ms
         // For consecutive_race_lost=2: 100 * (1 << 1) = 200ms
-        // Verify it slept (at least 100ms) and transitioned to Selecting.
-        assert!(elapsed >= std::time::Duration::from_millis(100));
         assert_eq!(*worker.state(), WorkerState::Selecting);
     }
 
@@ -11288,25 +11301,29 @@ mod tests {
         assert_eq!(result, WorkerState::Stopped);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn handle_exhausted_with_wait_returns_selecting() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut config = valid_test_config();
         config.worker.idle_action = IdleAction::Wait;
-        // The idle sleep is driven by idle_backoff_min/max (compute_jittered_backoff),
-        // NOT idle_timeout -- which defaults to 60..120s, so this test previously slept
-        // in a loop forever rather than returning. idle_timeout is kept at 0 for intent,
-        // but the backoff bounds are what actually make this terminate. See needle-ab52a15a.
+        // The idle wait is driven by idle_backoff_min/max, not idle_timeout.
+        // Keep a real, non-zero configured wait and let Tokio's paused clock
+        // drive it without weakening this into a zero-backoff state test.
         config.worker.idle_timeout = 0;
-        config.worker.idle_backoff_min = 0;
-        config.worker.idle_backoff_max = 0;
+        config.worker.idle_backoff_min = 3;
+        config.worker.idle_backoff_max = 3;
         config.self_modification.hot_reload = false;
         let mut worker = Worker::new(config, "test-exhaust-wait".to_string(), store);
         worker.boot().await.unwrap();
         worker.state = WorkerState::Exhausted;
 
+        let started = tokio::time::Instant::now();
         let result = worker.handle_exhausted().await.unwrap();
         assert_eq!(result, WorkerState::Selecting);
+        assert!(
+            started.elapsed() >= Duration::from_secs(3),
+            "the configured idle wait must elapse on Tokio's virtual clock"
+        );
     }
 
     // ── stop tests ──
