@@ -86,6 +86,9 @@ reported_count=$(jq -r '."test-count"' "$inventory")
 if [[ -n "$(cut -f1-2 "$inventory_tsv" | LC_ALL=C sort | uniq -d)" ]]; then
   fail "nextest inventory contains a duplicate binary/test identity"
 fi
+if [[ -n "$(awk -F '\t' '{ print $3 "$" $2 }' "$inventory_tsv" | LC_ALL=C sort | uniq -d)" ]]; then
+  fail "nextest inventory contains a duplicate structured-result identity"
+fi
 binary_id_pattern='^[A-Za-z0-9_.:-]+$'
 testcase_pattern='^[A-Za-z0-9_.: -]+$'
 while IFS=$'\t' read -r binary_id testcase result_prefix extra; do
