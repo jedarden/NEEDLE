@@ -1235,27 +1235,6 @@ impl ValidationGate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{Bead, BeadId, BeadStatus};
-    use chrono::Utc;
-    use tempfile::TempDir;
-
-    fn test_bead() -> Bead {
-        Bead {
-            id: BeadId::from("needle-test"),
-            title: "Test bead".to_string(),
-            body: Some("Test body".to_string()),
-            priority: 1,
-            status: BeadStatus::InProgress,
-            assignee: Some("worker-01".to_string()),
-            labels: vec![],
-            workspace: std::env::temp_dir(),
-            dependencies: vec![],
-            dependents: vec![],
-            comments: vec![],
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-        }
-    }
 
     // ── GateResult tests ──
 
