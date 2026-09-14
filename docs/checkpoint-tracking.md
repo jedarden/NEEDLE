@@ -21,11 +21,14 @@ Use `scripts/commit-checkpoint.sh` to commit checkpoint changes:
 ```
 
 The script:
-1. Flushes the checkpoint to ensure current state
+1. Reads the checkpoint state already published by `bead sync flush-only`
 2. Extracts the active root paths from `current.json` and `previous.json`
 3. Stages the pointer files and both active root objects
-4. Removes superseded objects that are tracked but no longer referenced
-5. Commits the changes atomically
+4. Stages every superseded tracked object as deleted, including objects the
+   flush already removed from the worktree
+5. Verifies that Git pairs each new root with a superseded deletion as a
+   rename whenever superseded history exists
+6. Commits the changes atomically
 
 ## Superseded Objects
 
@@ -44,6 +47,14 @@ This ensures:
 - Only two active objects exist in the working tree
 - Superseded objects remain in git history for recovery
 - The cleanup is automatic and idempotent
+
+The rename shape is part of the checkpoint contract, not cosmetic diff
+formatting. A monolithic root added without its superseded deletion makes Git
+and Forgejo treat the entire snapshot as newly introduced text, needlessly
+rescanning tens of thousands of unchanged lines. The commit helper therefore
+checks `git diff --cached -M` and refuses an unpaired root addition when a
+tracked superseded object exists. A first-ever checkpoint, which has no
+historical object to pair, remains a valid addition.
 
 ## Verification
 

@@ -20,7 +20,8 @@ if [ $# -eq 0 ]; then
 fi
 
 COMMIT_MSG="$1"
-CHECKPOINT_DIR="$(git rev-parse --show-toplevel)/.beads/checkpoint"
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+CHECKPOINT_DIR="$REPO_ROOT/.beads/checkpoint"
 # Resolve $0-relative paths BEFORE the `cd "$CHECKPOINT_DIR"` below. $0 is
 # relative to the invoking shell's cwd, so after that cd it would resolve to
 # .beads/checkpoint/scripts/ and the cleanup call near the end would fail
@@ -70,6 +71,25 @@ echo "========================"
 echo "Current active_root: $CURRENT_ROOT"
 echo "Previous active_root: $PREVIOUS_ROOT"
 
+active_repo_path() {
+    local path="$1"
+    case "$path" in
+        objects/*) printf '.beads/checkpoint/%s\n' "$path" ;;
+        *)
+            echo "Error: Active root is outside objects/: $path" >&2
+            exit 1
+            ;;
+    esac
+}
+
+CURRENT_ROOT_REPO=$(active_repo_path "$CURRENT_ROOT")
+PREVIOUS_ROOT_REPO=$(active_repo_path "$PREVIOUS_ROOT")
+
+# Capture the pre-cleanup index view. A bead-rs flush can remove superseded
+# objects from the worktree before this script runs, but they are still
+# tracked until their deletions are added to the index.
+TRACKED_OBJECTS_BEFORE=$(git -C "$REPO_ROOT" ls-files '.beads/checkpoint/objects/' || true)
+
 # Validate that active_root objects exist
 validate_object_exists() {
     local path="$1"
@@ -105,6 +125,59 @@ git add current.json previous.json forensic.jsonl
 # Stage the active root objects
 echo "Staging active root objects..."
 git add "$CURRENT_ROOT" "$PREVIOUS_ROOT"
+
+# Stage tracked-object removals even when bead-rs already deleted the files
+# from the worktree. `git rm` in the cleanup helper cannot remove a path that
+# is already absent, whereas `git add -u` records that deletion in the index.
+git -C "$REPO_ROOT" add -u -- '.beads/checkpoint/objects/'
+
+verify_checkpoint_object_shape() {
+    local superseded=""
+    local object
+    while IFS= read -r object; do
+        [ -n "$object" ] || continue
+        if [ "$object" != "$CURRENT_ROOT_REPO" ] && [ "$object" != "$PREVIOUS_ROOT_REPO" ]; then
+            superseded="${superseded}${superseded:+$'\n'}${object}"
+        fi
+    done <<< "$TRACKED_OBJECTS_BEFORE"
+
+    # Every previously tracked object outside the active pair must be staged
+    # as deleted. Use --no-renames here so a rename source is still visible as
+    # its underlying deletion.
+    while IFS= read -r object; do
+        [ -n "$object" ] || continue
+        if ! git -C "$REPO_ROOT" diff --cached --no-renames --diff-filter=D \
+            --name-only -- "$object" | grep -Fqx "$object"; then
+            echo "Error: Superseded checkpoint object removal was not staged: $object" >&2
+            exit 1
+        fi
+    done <<< "$superseded"
+
+    # When superseded history exists, every newly added active root must pair
+    # with one of those deletions under Git's normal rename detection. Without
+    # that pairing Forgejo must scan the whole monolithic snapshot as new text.
+    # A first checkpoint, or a transition with no superseded object, is a
+    # legitimate addition and has nothing it could pair with.
+    [ -n "$superseded" ] || return 0
+
+    local rename_diff
+    rename_diff=$(git -C "$REPO_ROOT" diff --cached --name-status -M -- \
+        '.beads/checkpoint/objects/')
+    for object in "$CURRENT_ROOT_REPO" "$PREVIOUS_ROOT_REPO"; do
+        if git -C "$REPO_ROOT" diff --cached --no-renames --diff-filter=A \
+            --name-only -- "$object" | grep -Fqx "$object"; then
+            if ! awk -F '\t' -v destination="$object" \
+                '$1 ~ /^R[0-9]+$/ && $3 == destination { found = 1 } END { exit !found }' \
+                <<< "$rename_diff"; then
+                echo "Error: New checkpoint root is not paired with a superseded-object rename: $object" >&2
+                echo "Refusing a whole-object addition while tracked superseded history exists." >&2
+                exit 1
+            fi
+        fi
+    done
+}
+
+verify_checkpoint_object_shape
 
 # Show what was staged
 echo ""
