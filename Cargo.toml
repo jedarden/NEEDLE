@@ -190,3 +190,7 @@ debug = "line-tables-only"
 # rebuilt NEEDLE crate and its integration harnesses cheap to compile.
 [profile.test.package."*"]
 opt-level = 2
+# Dependency symbols are not part of NEEDLE's diagnostic contract; omitting
+# their line tables removes duplicated payload while workspace tests retain
+# symbolic NEEDLE frames and source locations from profile.test above.
+debug = false
