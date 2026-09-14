@@ -216,7 +216,12 @@ fn probe_adapter() -> AgentAdapter {
         description: None,
         agent_cli: "test".to_string(),
         version_command: None,
-        input_method: needle::types::InputMethod::Stdin,
+        // This probe does not consume the prompt. Using args input keeps the
+        // spawn sentinel independent of the shared prompt-file lifecycle when
+        // the five gate cases run concurrently.
+        input_method: needle::types::InputMethod::Args {
+            flag: "--prompt".to_string(),
+        },
         // Any spawn appends to the sentinel file in the workspace — the
         // observable a zero-spawn assertion reads.
         invoke_template: "echo spawned >> {workspace}/spawned.txt".to_string(),
