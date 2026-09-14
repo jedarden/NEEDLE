@@ -16959,3 +16959,4 @@
 {"adapter":"claude-code-glm-5.3","attempt_id":"01a0a0ba-1e2c-7411-bfe1-c1972ee0dea7","bead":"needle-2919e45a","event":"dispatch","model":"glm-5.3","strand":"pluck","ts":"2026-09-14T16:22:27.116812042+00:00","worker":"glm-needle"}
 {"bead":"needle-6519f163","event":"claim","strand":"pluck","ts":"2026-09-14T16:44:07.263636518+00:00","worker":"glm-needle"}
 {"adapter":"claude-code-glm-5.3-flash","attempt_id":"01a0a0cd-f73b-75d0-bd1f-cd60d58c7a61","bead":"needle-6519f163","event":"dispatch","model":"glm-5.3-flash","strand":"pluck","ts":"2026-09-14T16:44:07.868462732+00:00","worker":"glm-needle"}
+{"bead":"needle-6519f163","duration_ms":3602931,"event":"timeout","exit_code":124,"outcome":"timeout","strand":"pluck","ts":"2026-09-14T17:44:10.840514012+00:00","worker":"glm-needle"}
