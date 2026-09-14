@@ -917,14 +917,16 @@ impl super::Strand for FleetWeaveStrand {
 #[allow(dead_code)]
 const WEAVE_AGENT_TIMEOUT_SECS: u64 = 60;
 
-/// Maximum timeout for weave strand evaluation (180 seconds).
+/// Maximum timeout for weave strand evaluation (300 seconds).
 ///
 /// This prevents a single weave strand from stalling the entire SELECTING
 /// cycle indefinitely while leaving enough time for a bounded production
-/// prompt to complete. Store enumeration has its own shorter timeout, so this
-/// remaining budget belongs to the creator agent.
+/// prompt to complete under provider pressure. Production passes have finished
+/// near the old 180-second boundary, so keep enough headroom to avoid discarding
+/// an otherwise productive creator response. Store enumeration has its own
+/// shorter timeout, so this remaining budget belongs to the creator agent.
 /// See: needle-bf-5hlhn (weave strand stall investigation).
-const WEAVE_STRAND_TIMEOUT_SECS: u64 = 180;
+const WEAVE_STRAND_TIMEOUT_SECS: u64 = 300;
 
 /// Production Weave invocation source.
 enum WeaveInvocation {
