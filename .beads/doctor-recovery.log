@@ -1,0 +1,32 @@
+
+=== Starvation Recovery Run at 2026-09-14T02:13:17Z ===
+[1/5] Running SQLite integrity checks...
+  ✓ Database integrity check passed
+[2/5] Verifying checkpoint state...
+  ✓ Checkpoint is clean and up-to-date (covered=18428, current=18428)
+[3/5] Identifying assigned-but-open beads...
+  Found 3 assigned-but-open beads
+  [RECOMMENDATION] Would clear assignees from 3 assigned-but-open beads:
+    - bead needle-260cae5d (title: Stop workspace dispatch on bead-rs checkpoint divergence and synchronize before claims, assignee: codex-root-sync-safety)
+    - bead needle-8e24cef6 (title: Land the in-flight pluck StarvationSnapshot emitter rewrite: commit, verify, ship, assignee: claude-code-glm-5.3-flash-glm-mta)
+    - bead needle-9d5f166a (title: Cross-repo gate: bead-rs BR-T12 --actor on mutating commands (beadrs-e167fde8) released and installed on the worker hosts, assignee: operator)
+    Remedy: bead update <id> --clear-assignee
+[4/5] Checking for stale in-progress beads...
+  Found 6 stale in-progress beads
+  [RECOMMENDATION] Would release 6 stale in-progress beads:
+    - bead needle-1c1974d7 (title: Reconcile completed auto-split parents before redispatch, age: 275480 seconds)
+    - bead needle-294a1077 (title: Verify NEEDLE OTLP telemetry emits correctly end-to-end (post-crash-fix), age: 555382 seconds)
+    - bead needle-5e7070fc (title: Align p2 integration test with preserve-live-agent-logs semantics (red test-p2 on main since 8a195c7f), age: 602244 seconds)
+    - bead needle-a3f686cf (title: needle-ci cancels in-flight runs on every commit, so CI throughput goes to zero as velocity rises, age: 120095 seconds)
+    - bead needle-a4b7da64 (title: needle-ci red: exit 101 (rust panic) + max duration exceeded on two runs; four runs queued concurrently, age: 114417 seconds)
+    - bead needle-daab3ee2 (title: needle logs prune: delete orphaned per-identifier log families (currently nothing ever does), age: 89922 seconds)
+    Remedy: bead release <id>
+[5/5] Flushing checkpoint to persist repairs...
+  Final event sequence: 18428
+
+Recovery Summary:
+  Total repairs performed: 2
+  - recommend_clear_stale_assignees: Recommendation: clear stale assignees from 3 assigned-but-open beads
+  - recommend_release_stale_claims: Recommendation: release 6 stale in-progress beads (no activity for >86400 seconds)
+=== End of Recovery Run ===
+
