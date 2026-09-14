@@ -154,7 +154,7 @@ fn canary_adapter_name(expected: &ExpectedOutcome) -> &'static str {
 fn canary_adapter_yaml(expected: &ExpectedOutcome) -> &'static str {
     match expected {
         ExpectedOutcome::Success { .. } => {
-            "name: canary-success\nagent_cli: bead\ninvoke_template: \"cd '{workspace}' && bead close {bead_id} --reason 'Canary success fixture completed' --no-auto-flush\"\ntimeout_secs: 30\n"
+            "name: canary-success\nagent_cli: bead\ninvoke_template: \"cd '{workspace}' && bead close {bead_id} --reason 'Canary success fixture completed' --fencing-token $NEEDLE_BEAD_FENCING_TOKEN --no-auto-flush\"\ntimeout_secs: 30\n"
         }
         ExpectedOutcome::Failure { .. } => {
             "name: canary-failure\nagent_cli: sh\ninvoke_template: \"cd '{workspace}' && exit 42\"\ntimeout_secs: 30\n"
@@ -163,7 +163,7 @@ fn canary_adapter_yaml(expected: &ExpectedOutcome) -> &'static str {
             "name: canary-timeout\nagent_cli: sh\ninvoke_template: \"cd '{workspace}' && sleep 10\"\ntimeout_secs: 0\nidle_timeout_secs: 1\nhard_timeout_secs: 3\n"
         }
         ExpectedOutcome::StateMachine { .. } => {
-            "name: canary-state-machine\nagent_cli: bead\ninvoke_template: \"cd '{workspace}' && bead close {bead_id} --reason 'Canary state-machine fixture completed' --no-auto-flush\"\ntimeout_secs: 30\n"
+            "name: canary-state-machine\nagent_cli: bead\ninvoke_template: \"cd '{workspace}' && bead close {bead_id} --reason 'Canary state-machine fixture completed' --fencing-token $NEEDLE_BEAD_FENCING_TOKEN --no-auto-flush\"\ntimeout_secs: 30\n"
         }
     }
 }
@@ -600,22 +600,33 @@ impl CanaryRunner {
 
             if bead_id == target_id {
                 match status {
-                    "closed" => self.run_bead_command(&binary, &["reopen", bead_id])?,
-                    "in_progress" => self.run_bead_command(&binary, &["release", bead_id])?,
-                    "deferred" | "blocked" => {
-                        self.run_bead_command(&binary, &["update", bead_id, "--status", "open"])?
+                    "closed" => {
+                        self.run_fenced_bead_command(&binary, &["reopen", bead_id], &projection)?
                     }
-                    "open" => {
-                        if projection["assignee"].as_str().is_some() {
-                            self.run_bead_command(
-                                &binary,
-                                &["update", bead_id, "--clear-assignee"],
-                            )?;
-                        }
+                    "in_progress" => {
+                        self.run_fenced_bead_command(&binary, &["release", bead_id], &projection)?
                     }
+                    "deferred" | "blocked" => self.run_fenced_bead_command(
+                        &binary,
+                        &["update", bead_id, "--status", "open"],
+                        &projection,
+                    )?,
+                    "open" => {}
                     other => bail!("unsupported canary fixture status '{other}' for {bead_id}"),
                 }
 
+                // Reopen and status updates can preserve an assignee. Refresh
+                // the projection, then clear it with the same fenced command
+                // path before admitting the fixture to the ready frontier.
+                let projection = self.show_bead(&binary, bead_id)?;
+                if projection["assignee"].as_str().is_some() {
+                    self.run_fenced_bead_command(
+                        &binary,
+                        &["update", bead_id, "--clear-assignee"],
+                        &projection,
+                    )?;
+                }
+                let projection = self.show_bead(&binary, bead_id)?;
                 for label in projection["labels"]
                     .as_array()
                     .into_iter()
@@ -633,14 +644,17 @@ impl CanaryRunner {
                 // orphan cleanup cannot make a different test bead claimable.
                 match status {
                     "in_progress" => {
-                        self.run_bead_command(&binary, &["release", bead_id])?;
+                        self.run_fenced_bead_command(&binary, &["release", bead_id], &projection)?;
                         self.run_bead_command(
                             &binary,
                             &["update", bead_id, "--status", "deferred"],
                         )?;
                     }
-                    "open" => self
-                        .run_bead_command(&binary, &["update", bead_id, "--status", "deferred"])?,
+                    "open" => self.run_fenced_bead_command(
+                        &binary,
+                        &["update", bead_id, "--status", "deferred"],
+                        &projection,
+                    )?,
                     "closed" | "deferred" | "blocked" => {}
                     other => bail!("unsupported canary fixture status '{other}' for {bead_id}"),
                 }
@@ -725,6 +739,29 @@ impl CanaryRunner {
             );
         }
         Ok(())
+    }
+
+    fn run_fenced_bead_command(
+        &self,
+        binary: &Path,
+        args: &[&str],
+        projection: &serde_json::Value,
+    ) -> Result<()> {
+        let Some(_assignee) = projection["assignee"]
+            .as_str()
+            .filter(|value| !value.is_empty())
+        else {
+            return self.run_bead_command(binary, args);
+        };
+        let Some(claim_epoch) = projection["claim_epoch"].as_u64() else {
+            // Legacy pre-fencing claims deliberately have no credential and
+            // remain mutable so they can be normalized by the canary reset.
+            return self.run_bead_command(binary, args);
+        };
+        let claim_epoch = claim_epoch.to_string();
+        let mut fenced_args = args.to_vec();
+        fenced_args.extend(["--fencing-token", claim_epoch.as_str()]);
+        self.run_bead_command(binary, &fenced_args)
     }
 
     /// Create a per-test HOME containing only the hermetic adapter and any
@@ -1286,6 +1323,7 @@ mod tests {
 
         assert_eq!(canary_adapter_name(&success), "canary-success");
         assert!(canary_adapter_yaml(&success).contains("bead close {bead_id}"));
+        assert!(canary_adapter_yaml(&success).contains("$NEEDLE_BEAD_FENCING_TOKEN"));
         assert!(canary_adapter_yaml(&failure).contains("exit 42"));
         assert!(canary_adapter_yaml(&timeout).contains("idle_timeout_secs: 1"));
 

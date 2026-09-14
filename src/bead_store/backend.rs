@@ -372,7 +372,8 @@ fn allowed_placeholders(operation: &str) -> &'static [&'static str] {
     match operation {
         "ready" => &["limit", "assignee"],
         "list_all" => &["limit"],
-        "show" | "release" | "block" | "clear_assignee" | "reopen" | "labels" => &["id"],
+        "show" | "labels" => &["id"],
+        "release" | "block" | "clear_assignee" | "reopen" => &["id", "fencing_token"],
         "claim" => &["id", "actor"],
         "claim_auto" => &["actor", "model", "harness", "harness_version"],
         "label_add" | "label_remove" => &["id", "label"],
@@ -386,7 +387,7 @@ fn allowed_placeholders(operation: &str) -> &'static [&'static str] {
         ],
         "dep_add" | "dep_remove" => &["blocked", "blocker"],
         "split" => &["parent", "children"],
-        "close" => &["id", "reason"],
+        "close" => &["id", "reason", "fencing_token"],
         "resolve" => &[
             "id",
             "attempt_id",
@@ -397,6 +398,7 @@ fn allowed_placeholders(operation: &str) -> &'static [&'static str] {
             "harness_version",
             "resolve_reason",
             "evidence_ref",
+            "fencing_token",
         ],
         "import" => &["input", "mode", "actor"],
         "compare" => &["id", "profile"],
@@ -604,21 +606,53 @@ fn builtin_bead_rs() -> BeadBackend {
     );
     operations.insert(
         "release".into(),
-        operation(&["release", "{id}"], None, None),
+        operation(
+            &["release", "{id}", "--fencing-token", "{fencing_token}"],
+            None,
+            None,
+        ),
     );
     operations.insert(
         "block".into(),
-        operation(&["update", "{id}", "--status", "blocked"], None, None),
+        operation(
+            &[
+                "update",
+                "{id}",
+                "--status",
+                "blocked",
+                "--fencing-token",
+                "{fencing_token}",
+            ],
+            None,
+            None,
+        ),
     );
     operations.insert(
         "clear_assignee".into(),
-        operation(&["update", "{id}", "--clear-assignee"], None, None),
+        operation(
+            &[
+                "update",
+                "{id}",
+                "--clear-assignee",
+                "--fencing-token",
+                "{fencing_token}",
+            ],
+            None,
+            None,
+        ),
     );
     operations.insert(
         "flush".into(),
         operation(&["sync", "flush-only"], None, None),
     );
-    operations.insert("reopen".into(), operation(&["reopen", "{id}"], None, None));
+    operations.insert(
+        "reopen".into(),
+        operation(
+            &["reopen", "{id}", "--fencing-token", "{fencing_token}"],
+            None,
+            None,
+        ),
+    );
     operations.insert("labels".into(), operation(&[], Some("repeated"), None));
     operations.insert(
         "label_add".into(),
@@ -655,7 +689,18 @@ fn builtin_bead_rs() -> BeadBackend {
     );
     operations.insert(
         "close".into(),
-        operation(&["close", "{id}", "--reason", "{reason}"], None, None),
+        operation(
+            &[
+                "close",
+                "{id}",
+                "--reason",
+                "{reason}",
+                "--fencing-token",
+                "{fencing_token}",
+            ],
+            None,
+            None,
+        ),
     );
     // bead-rs attempt-outcome-v1 (`bead resolve`, 0.2.6+): record one
     // attempt's outcome atomically and idempotently. NEEDLE applies the
@@ -688,6 +733,8 @@ fn builtin_bead_rs() -> BeadBackend {
                 "{resolve_reason}",
                 "--evidence-ref",
                 "{evidence_ref}",
+                "--fencing-token",
+                "{fencing_token}",
                 "--format",
                 "json",
             ],
@@ -1097,7 +1144,10 @@ mod tests {
             ][..]
         );
         assert_eq!(allowed_placeholders("dep_add"), &["blocked", "blocker"][..]);
-        assert_eq!(allowed_placeholders("close"), &["id", "reason"][..]);
+        assert_eq!(
+            allowed_placeholders("close"),
+            &["id", "reason", "fencing_token"][..]
+        );
     }
 
     #[test]

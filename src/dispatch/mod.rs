@@ -1560,6 +1560,17 @@ impl Dispatcher {
                         return Err(anyhow::anyhow!("claim verification failed: {}", reason));
                     }
 
+                    // bead-rs treats the claim epoch as the credential for
+                    // every later lifecycle mutation. Make the epoch acquired
+                    // and re-verified by NEEDLE available to the dispatched
+                    // agent without requiring it to race a second `show`.
+                    if let Some(claim_epoch) = status.claim_epoch {
+                        child_env.insert(
+                            "NEEDLE_BEAD_FENCING_TOKEN".to_string(),
+                            claim_epoch.to_string(),
+                        );
+                    }
+
                     tracing::debug!(
                         bead_id = %bead_id.as_ref(),
                         current_status = ?status.status,

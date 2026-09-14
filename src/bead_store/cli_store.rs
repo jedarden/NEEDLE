@@ -33,6 +33,11 @@ pub struct CliBeadStore {
     harness: Option<String>,
     harness_version: Option<String>,
     sync_pause: std::sync::Mutex<Option<String>>,
+    /// Claim epochs acquired by this store instance. bead-rs requires the
+    /// matching epoch on claimed-issue lifecycle mutations; retaining it here
+    /// lets the backend-neutral `BeadStore` API present only credentials this
+    /// process actually acquired.
+    claim_tokens: std::sync::Mutex<HashMap<String, String>>,
     /// Whether `bead resolve` (attempt-outcome-v1) is available.
     attempt_outcome_supported: bool,
     process_runner: std::sync::Arc<dyn ProcessRunner>,
@@ -59,6 +64,7 @@ impl CliBeadStore {
             harness,
             harness_version,
             sync_pause: std::sync::Mutex::new(None),
+            claim_tokens: std::sync::Mutex::new(HashMap::new()),
             attempt_outcome_supported: false,
             process_runner: std::sync::Arc::new(TokioProcessRunner),
         })
@@ -220,12 +226,32 @@ impl CliBeadStore {
         name: &str,
         values: &HashMap<&str, String>,
     ) -> Result<String> {
-        let args = self.render_operation(name, values)?;
+        let rendered_values = self.values_with_claim_token(values);
+        let args = self.render_operation(name, &rendered_values)?;
         let timeout_secs = self
             .operation(name)?
             .timeout_secs
             .unwrap_or(DEFAULT_TIMEOUT_SECS);
         self.run_argv(name, &args, timeout_secs).await
+    }
+
+    fn values_with_claim_token<'a>(
+        &self,
+        values: &HashMap<&'a str, String>,
+    ) -> HashMap<&'a str, String> {
+        let mut rendered_values = values.clone();
+        if let Some(id) = values.get("id") {
+            if let Some(token) = self
+                .claim_tokens
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .get(id)
+                .cloned()
+            {
+                rendered_values.insert("fencing_token", token);
+            }
+        }
+        rendered_values
     }
 
     pub(super) async fn run_argv(
@@ -425,11 +451,30 @@ impl CliBeadStore {
             .and_then(serde_json::Value::as_str)
             .filter(|id| !id.is_empty());
         match bead_id {
-            Some(id) => Ok(ClaimResult::Claimed(self.show(&BeadId::from(id)).await?)),
+            Some(id) => {
+                let bead = self.show(&BeadId::from(id)).await?;
+                self.remember_claim(&bead.id).await?;
+                Ok(ClaimResult::Claimed(bead))
+            }
             None => Ok(ClaimResult::NotClaimable {
                 reason: "no beads available".to_string(),
             }),
         }
+    }
+
+    async fn remember_claim(&self, id: &BeadId) -> Result<()> {
+        if self.backend.name != "bead-rs" {
+            return Ok(());
+        }
+        let status = self.claim_status(id).await?;
+        let Some(claim_epoch) = status.claim_epoch else {
+            return Ok(());
+        };
+        self.claim_tokens
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(id.to_string(), claim_epoch.to_string());
+        Ok(())
     }
 
     /// Add the bead-rs manual-block marker to the common bead projection.
@@ -812,7 +857,11 @@ impl BeadStore for CliBeadStore {
             self.strategy("claim")?,
             ParsedStrategy::Claim(ClaimStrategy::BatchOp)
         ) {
-            return self.claim_via_batch(id, actor).await;
+            let result = self.claim_via_batch(id, actor).await?;
+            if let ClaimResult::Claimed(bead) = &result {
+                self.remember_claim(&bead.id).await?;
+            }
+            return Ok(result);
         }
         let shown = self.show(id).await?;
         if shown.status != BeadStatus::Open {
@@ -860,7 +909,11 @@ impl BeadStore for CliBeadStore {
             revision.to_string(),
         ];
         match self.run_argv("claim", &args, DEFAULT_TIMEOUT_SECS).await {
-            Ok(_) => Ok(ClaimResult::Claimed(self.show(id).await?)),
+            Ok(_) => {
+                let bead = self.show(id).await?;
+                self.remember_claim(&bead.id).await?;
+                Ok(ClaimResult::Claimed(bead))
+            }
             Err(error) if error.to_string().contains("code 4") => {
                 let latest = self.show(id).await?;
                 match latest.assignee {
@@ -1309,7 +1362,13 @@ fn parse_doctor_output(output: &str) -> RepairReport {
 fn is_optional_placeholder(name: &str) -> bool {
     matches!(
         name,
-        "model" | "harness" | "harness_version" | "limit" | "resolve_reason" | "evidence_ref"
+        "model"
+            | "harness"
+            | "harness_version"
+            | "limit"
+            | "resolve_reason"
+            | "evidence_ref"
+            | "fencing_token"
     )
 }
 
@@ -1352,6 +1411,48 @@ mod process_runner_tests {
         assert_eq!(requests[0].program(), binary);
         assert_eq!(requests[0].arguments(), ["list", "--json"]);
         assert_eq!(requests[0].working_directory(), Some(directory.path()));
+    }
+
+    #[test]
+    fn claimed_lifecycle_operations_receive_the_acquired_fencing_token() {
+        let directory = tempfile::tempdir().unwrap();
+        let binary = directory.path().join("fixture-cli");
+        std::fs::write(&binary, "fixture").unwrap();
+        let backend = builtin_bead_backends()
+            .into_iter()
+            .find(|backend| backend.name == "bead-rs")
+            .unwrap();
+        let store = CliBeadStore::new(
+            backend,
+            binary,
+            directory.path().to_path_buf(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        store
+            .claim_tokens
+            .lock()
+            .unwrap()
+            .insert("needle-fenced".to_string(), "7".to_string());
+
+        let values = std::collections::HashMap::from([
+            ("id", "needle-fenced".to_string()),
+            ("reason", "verified".to_string()),
+        ]);
+        let values = store.values_with_claim_token(&values);
+        assert_eq!(
+            store.render_operation("close", &values).unwrap(),
+            [
+                "close",
+                "needle-fenced",
+                "--reason",
+                "verified",
+                "--fencing-token",
+                "7",
+            ]
+        );
     }
 }
 
