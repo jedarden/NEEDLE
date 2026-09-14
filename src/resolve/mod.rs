@@ -32,6 +32,7 @@
 //!
 //! Depends on: `types`, `prompt`, `config`, `telemetry`.
 
+pub mod evidence;
 pub mod executor;
 
 use std::fmt;
@@ -339,6 +340,13 @@ pub struct ResolveContext<'a> {
     pub started_at: DateTime<Utc>,
     /// Whether the operation was interrupted (SIGINT/SIGTERM).
     pub was_interrupted: bool,
+    /// Pre-captured evidence bundle.
+    ///
+    /// `None` (the default from [`Self::new`]) means [`Resolver::resolve`]
+    /// captures a fresh bundle itself; a caller that already holds one — or
+    /// wants the resolve to see a specific captured state — attaches it with
+    /// [`Self::with_evidence`].
+    pub evidence: Option<evidence::EvidenceBundle>,
 }
 
 impl<'a> ResolveContext<'a> {
@@ -360,7 +368,17 @@ impl<'a> ResolveContext<'a> {
             duration,
             started_at,
             was_interrupted,
+            evidence: None,
         }
+    }
+
+    /// Attach a pre-captured [`evidence::EvidenceBundle`].
+    ///
+    /// Without one, [`Resolver::resolve`] captures a fresh bundle from the
+    /// workspace before building the prompt.
+    pub fn with_evidence(mut self, bundle: evidence::EvidenceBundle) -> Self {
+        self.evidence = Some(bundle);
+        self
     }
 
     /// Format the duration for display in the prompt.
@@ -506,9 +524,30 @@ impl Resolver {
             };
         }
 
+        // The evidence supplied to the resolver: a bundle the caller captured,
+        // or a fresh read-only capture from the workspace. Either way it is
+        // bounded and sanitized before it reaches the prompt.
+        let evidence = match &context.evidence {
+            Some(bundle) => bundle.clone(),
+            None => {
+                evidence::capture(
+                    &context.bead.workspace,
+                    context.bead,
+                    context.exit_code,
+                    &context.stdout,
+                    &context.stderr,
+                    context.was_interrupted,
+                )
+                .await
+            }
+        };
+
         // Build the resolve prompt
         let prompt = match self.build_prompt(context) {
-            Ok(p) => p,
+            Ok(mut p) => {
+                evidence::append_evidence(&mut p, &evidence);
+                p
+            }
             Err(e) => {
                 tracing::warn!(
                     bead_id = %context.bead.id,

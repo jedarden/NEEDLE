@@ -45,7 +45,9 @@ contract = 67
 # +7 consolidated backend probe process contracts (needle-83163936).
 # +49 real adapter-shell and telemetry hook contracts (needle-2f470c02),
 # consuming the tier's existing one-test headroom.
-e2e = 738
+# +6 bounded Resolve evidence contracts exercise read-only Git capture here
+# instead of reintroducing subprocesses into --lib (needle-aee9e898).
+e2e = 744
 soak = 0
 fuzz = 0
 
@@ -53,7 +55,7 @@ fuzz = 0
 name = "integration_spawn"
 path = "tests/integration_spawn.rs"
 tier = "e2e"
-max_tests = 366
+max_tests = 372
 owner = "component:process-integration"
 
 [[harness]]

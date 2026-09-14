@@ -75,6 +75,8 @@ mod process_discovery_integration;
 mod process_lifecycle;
 #[path = "integration_spawn/process_runner_contract.rs"]
 mod process_runner_contract;
+#[path = "integration_spawn/resolve_evidence.rs"]
+mod resolve_evidence;
 #[path = "integration_spawn/sigpipe_test.rs"]
 mod sigpipe_test;
 #[path = "integration_spawn/sigterm_heartbeat_cleanup.rs"]
