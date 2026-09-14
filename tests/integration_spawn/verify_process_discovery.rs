@@ -8,6 +8,36 @@
 //! See bead bf-4lkno for full context.
 
 use super::isolation::{ChildGuard, IsolatedChildEnv};
+use std::collections::BTreeSet;
+use std::process::Stdio;
+
+fn run_list_json(fixture: &IsolatedChildEnv) -> serde_json::Value {
+    let output = fixture
+        .needle()
+        .args(["list", "--format", "json"])
+        .output()
+        .expect("run isolated needle list");
+    assert!(
+        output.status.success(),
+        "needle list failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("needle list output is valid JSON")
+}
+
+fn assert_exact_list_object_shape(value: &serde_json::Value) {
+    let object = value
+        .as_object()
+        .unwrap_or_else(|| panic!("list JSON must always be an object: {value}"));
+    let keys = object.keys().map(String::as_str).collect::<BTreeSet<_>>();
+    assert_eq!(
+        keys,
+        BTreeSet::from(["discovered", "tmux_sessions"]),
+        "list JSON has one stable top-level schema: {value}"
+    );
+    assert!(value["tmux_sessions"].is_array());
+    assert!(value["discovered"].is_array());
+}
 
 #[test]
 #[cfg(unix)]
@@ -18,28 +48,85 @@ fn test_process_table_reconciliation() {
     // Verify scan_needle_processes() can be called successfully
     // This is a unit test of the scanning functionality
     let fixture = IsolatedChildEnv::new();
-    let output = fixture
-        .needle()
-        .arg("list")
-        .arg("--format")
-        .arg("json")
-        .output()
-        .expect("run isolated needle list");
-    assert!(
-        output.status.success(),
-        "needle list failed: {}",
-        String::from_utf8_lossy(&output.stderr)
+    let empty_or_host_populated = run_list_json(&fixture);
+    assert_exact_list_object_shape(&empty_or_host_populated);
+    if empty_or_host_populated["tmux_sessions"]
+        .as_array()
+        .is_some_and(Vec::is_empty)
+        && empty_or_host_populated["discovered"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
+    {
+        assert_eq!(
+            empty_or_host_populated,
+            serde_json::json!({"tmux_sessions": [], "discovered": []}),
+            "an empty fleet still emits the complete object schema"
+        );
+    }
+
+    // Create a long-lived process with exactly the argv shape the production
+    // scanner recognizes. A copied shell reads the local `run` script and
+    // blocks on its piped stdin, so no Worker or bead store is needed and
+    // ChildGuard still owns deterministic cleanup.
+    let fake_needle = fixture.path().join("needle");
+    let shell = which::which("sh").expect("sh executable is available");
+    std::fs::copy(shell, &fake_needle).expect("copy process fixture");
+    std::fs::write(fixture.path().join("run"), "read ignored\n")
+        .expect("write blocking process fixture");
+    let child = fixture
+        .command(&fake_needle)
+        .args(["run", "--workspace"])
+        .arg(fixture.path())
+        .args([
+            "--agent",
+            "schema-test-agent",
+            "--identifier",
+            "schema-test-worker",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn populated-list process fixture");
+    let child = ChildGuard::new(child);
+
+    let populated = (0..100)
+        .find_map(|_| {
+            let value = run_list_json(&fixture);
+            assert_exact_list_object_shape(&value);
+            let entry = value["discovered"]
+                .as_array()
+                .and_then(|entries| entries.iter().find(|entry| entry["pid"] == child.id()))
+                .cloned();
+            if entry.is_none() {
+                std::thread::yield_now();
+            }
+            entry
+        })
+        .unwrap_or_else(|| panic!("fixture PID {} was not discovered", child.id()));
+    let populated_keys = populated
+        .as_object()
+        .expect("discovered entry is an object")
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        populated_keys,
+        BTreeSet::from([
+            "agent",
+            "cmdline",
+            "identifier",
+            "in_tmux",
+            "pid",
+            "workspace",
+        ]),
+        "populated entries keep their exact schema"
     );
-    let value: serde_json::Value =
-        serde_json::from_slice(&output.stdout).expect("needle list output is valid JSON");
-    assert!(
-        value["tmux_sessions"].is_array(),
-        "list JSON includes tmux_sessions array: {value}"
-    );
-    assert!(
-        value["discovered"].is_array(),
-        "list JSON includes discovered array: {value}"
-    );
+    assert_eq!(populated["pid"], child.id());
+    assert_eq!(populated["workspace"], fixture.path().display().to_string());
+    assert_eq!(populated["agent"], "schema-test-agent");
+    assert_eq!(populated["identifier"], "schema-test-worker");
+    assert_eq!(populated["in_tmux"], false);
 }
 
 #[test]
@@ -91,8 +178,6 @@ fn test_status_command_reconciliation() {
 #[cfg(unix)]
 #[ignore]
 fn regression_descendant_processes_not_discovered() {
-    use std::process::Stdio;
-
     let fixture = IsolatedChildEnv::new();
 
     // Create a fake worker process that has NEEDLE_INNER in its environment

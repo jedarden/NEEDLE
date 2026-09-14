@@ -2515,12 +2515,10 @@ fn cmd_list(format: ListFormat) -> Result<()> {
         );
     }
 
-    // Show all discovered processes, not just tmux sessions
-    if sessions.is_empty() && discovered.is_empty() {
-        match format {
-            ListFormat::Table => println!("No needle sessions running."),
-            ListFormat::Json => println!("[]"),
-        }
+    // Preserve the human-friendly empty message. JSON always falls through to
+    // the object serializer below so its schema does not depend on fleet state.
+    if sessions.is_empty() && discovered.is_empty() && matches!(&format, ListFormat::Table) {
+        println!("No needle sessions running.");
         return Ok(());
     }
 
