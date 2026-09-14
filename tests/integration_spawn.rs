@@ -67,6 +67,8 @@ mod panic_safety_verification;
 mod panic_stack_trace_capture;
 #[path = "integration_spawn/process_discovery_integration.rs"]
 mod process_discovery_integration;
+#[path = "integration_spawn/process_runner_contract.rs"]
+mod process_runner_contract;
 #[path = "integration_spawn/sigpipe_test.rs"]
 mod sigpipe_test;
 #[path = "integration_spawn/sigterm_heartbeat_cleanup.rs"]

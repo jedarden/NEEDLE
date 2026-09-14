@@ -60,6 +60,7 @@ pub mod panic_capture;
 pub mod panic_safety_tests;
 pub mod peer;
 pub mod process_guard;
+pub mod process_runner;
 pub mod prompt;
 pub mod provider_health;
 /// Quarantine-expiry re-evaluation: an expired window is a question, not a verdict.

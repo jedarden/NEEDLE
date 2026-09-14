@@ -2,7 +2,6 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -12,12 +11,15 @@ use serde::de::{self, SeqAccess, Visitor};
 use serde::Deserialize;
 use std::fmt;
 
+use crate::process_runner::{ProcessRequest, ProcessRunner, TokioProcessRunner};
 use crate::types::{Bead, BeadId, BeadStatus, ClaimResult};
 
+#[cfg(test)]
+use super::spawn_with_etxtbsy_retry_child;
 use super::{
-    execute_create_id_strategy, execute_labels_strategy, spawn_with_etxtbsy_retry_child,
-    validate_strategy_name, BeadBackend, BeadOperationSpec, BeadStore, ClaimStrategy, Filters,
-    NewChild, ParseShape, ParsedStrategy, RepairReport,
+    execute_create_id_strategy, execute_labels_strategy, validate_strategy_name, BeadBackend,
+    BeadOperationSpec, BeadStore, ClaimStrategy, Filters, NewChild, ParseShape, ParsedStrategy,
+    RepairReport,
 };
 
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
@@ -33,6 +35,7 @@ pub struct CliBeadStore {
     sync_pause: std::sync::Mutex<Option<String>>,
     /// Whether `bead resolve` (attempt-outcome-v1) is available.
     attempt_outcome_supported: bool,
+    process_runner: std::sync::Arc<dyn ProcessRunner>,
 }
 
 impl CliBeadStore {
@@ -57,7 +60,14 @@ impl CliBeadStore {
             harness_version,
             sync_pause: std::sync::Mutex::new(None),
             attempt_outcome_supported: false,
+            process_runner: std::sync::Arc::new(TokioProcessRunner),
         })
+    }
+
+    /// Replace the captured-process adapter used for bead CLI operations.
+    pub fn with_process_runner(mut self, runner: std::sync::Arc<dyn ProcessRunner>) -> Self {
+        self.process_runner = runner;
+        self
     }
 
     /// Record whether the backend advertised `attempt_outcome.supported` in
@@ -264,27 +274,40 @@ impl CliBeadStore {
         args: &[String],
         timeout_secs: u64,
     ) -> Result<String> {
-        let binary = self.binary.clone();
-        let workspace = self.workspace.clone();
-        let owned_args = args.to_vec();
-        self.run_argv_with_spawn(name, timeout_secs, move || {
-            let binary = binary.clone();
-            let workspace = workspace.clone();
-            let owned_args = owned_args.clone();
-            async move {
-                let mut command = tokio::process::Command::new(&binary);
-                command
-                    .args(&owned_args)
-                    .current_dir(&workspace)
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .kill_on_drop(true);
-                command.spawn()
-            }
-        })
-        .await
+        let request = ProcessRequest::new(self.binary.clone())
+            .args(args)
+            .current_dir(self.workspace.clone());
+        let output = self
+            .process_runner
+            .output(request, Duration::from_secs(timeout_secs))
+            .await
+            .with_context(|| {
+                format!(
+                    "backend '{}' operation '{}' failed using {}",
+                    self.backend.name,
+                    name,
+                    self.binary.display()
+                )
+            })?;
+        let stdout = String::from_utf8(output.stdout).with_context(|| {
+            format!(
+                "backend '{}' operation '{}' stdout was not UTF-8",
+                self.backend.name, name
+            )
+        })?;
+        if !output.success {
+            bail!(
+                "backend '{}' operation '{}' exited with code {}: {}",
+                self.backend.name,
+                name,
+                output.exit_code.unwrap_or(-1),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(stdout)
     }
 
+    #[cfg(test)]
     async fn run_argv_with_spawn<F, Fut>(
         &self,
         name: &str,
@@ -1282,6 +1305,48 @@ fn is_optional_placeholder(name: &str) -> bool {
         name,
         "model" | "harness" | "harness_version" | "limit" | "resolve_reason" | "evidence_ref"
     )
+}
+
+#[cfg(test)]
+mod process_runner_tests {
+    use super::{super::builtin_bead_backends, CliBeadStore};
+    use crate::process_runner::{FakeProcessRunner, ProcessOutput};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn process_runner_fake_drives_bead_adapter_without_a_child() {
+        let directory = tempfile::tempdir().unwrap();
+        let binary = directory.path().join("fixture-cli");
+        std::fs::write(&binary, "fixture").unwrap();
+        let backend = builtin_bead_backends()
+            .into_iter()
+            .find(|backend| backend.name == "bead-rs")
+            .unwrap();
+        let runner = Arc::new(FakeProcessRunner::new());
+        runner.push_output(ProcessOutput::success(b"[]\n".to_vec()));
+        let store = CliBeadStore::new(
+            backend,
+            binary.clone(),
+            directory.path().to_path_buf(),
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .with_process_runner(runner.clone());
+
+        let output = store
+            .run_argv_unchecked("ready", &["list".to_string(), "--json".to_string()], 30)
+            .await
+            .unwrap();
+
+        assert_eq!(output, "[]\n");
+        let requests = runner.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].program(), binary);
+        assert_eq!(requests[0].arguments(), ["list", "--json"]);
+        assert_eq!(requests[0].working_directory(), Some(directory.path()));
+    }
 }
 
 #[cfg(test)]

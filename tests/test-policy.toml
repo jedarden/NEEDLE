@@ -29,7 +29,8 @@ push = 650
 contract = 67
 # +16 literal test attributes for Cargo execution isolation (needle-b31fcb27):
 # seven integration cases plus nine nested-Cargo fixture tests embedded in source.
-e2e = 649
+# +1 real-adapter contract for the injectable ProcessRunner (needle-d3f191a3).
+e2e = 650
 soak = 0
 fuzz = 0
 
@@ -37,7 +38,7 @@ fuzz = 0
 name = "integration_spawn"
 path = "tests/integration_spawn.rs"
 tier = "e2e"
-max_tests = 277
+max_tests = 278
 owner = "component:process-integration"
 
 [[harness]]
