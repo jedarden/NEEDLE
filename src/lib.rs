@@ -16,6 +16,7 @@ pub mod ci;
 pub mod claim;
 pub mod claude_md_placement;
 pub mod cli;
+pub mod clock;
 pub mod commit_hook;
 pub mod config;
 pub mod cost;

@@ -35,6 +35,7 @@ use crate::build_status::BuildStatusChecker;
 use crate::canary::CanaryRunner;
 use crate::ci::{self, RegistrationResult};
 use crate::claim::{CircuitGate, Claimer};
+use crate::clock::{Clock, TokioClock};
 use crate::commit_hook;
 use crate::config::{CliOverrides, Config, ConfigLoader, ConfigSource, SourceMap};
 use crate::cost::{self, BudgetCheck, EffortData};
@@ -711,6 +712,9 @@ fn install_rebuilt_component<T>(
 
 /// The NEEDLE worker — owns and drives the full state machine.
 pub struct Worker {
+    /// Worker-policy time source. Production uses Tokio; deterministic tests
+    /// can install a manual clock without changing process-global time.
+    clock: Arc<dyn Clock>,
     config: Config,
     /// Source annotations belonging to the configuration snapshot in use.
     config_sources: SourceMap,
@@ -1184,6 +1188,7 @@ impl Worker {
         let watchdog_triggered = Arc::new(AtomicBool::new(false));
 
         let worker = Worker {
+            clock: Arc::new(TokioClock),
             config,
             config_sources,
             worker_name,
@@ -1310,6 +1315,16 @@ impl Worker {
         }
 
         worker
+    }
+
+    /// Replace the worker-policy time source.
+    ///
+    /// This is primarily useful to make policy tests advance deadlines and
+    /// backoffs explicitly. Construction-time instrumentation intentionally
+    /// remains measured against the real clock.
+    pub fn with_clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.clock = clock;
+        self
     }
 
     /// Start the watchdog thread that monitors HANDLING state duration.
@@ -1701,7 +1716,10 @@ impl Worker {
                     // Emit WorkerStopped before exiting so telemetry shows a clean shutdown.
                     // This ensures operators can distinguish "exited with error" from
                     // "killed by external agent" (e.g., SIGKILL, OOM).
-                    let uptime = self.boot_time.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+                    let uptime = self
+                        .boot_time
+                        .map(|t| self.clock.elapsed_since(t).as_secs())
+                        .unwrap_or(0);
                     let _ = self.telemetry.emit(
                         EventKind::WorkerStopped {
                             reason: format!("error: {msg}"),
@@ -1736,7 +1754,7 @@ impl Worker {
     /// capped at 60 seconds — if exceeded, the worker self-aborts with a
     /// `worker.boot.timeout` event and exits with a non-zero code.
     async fn boot(&mut self) -> Result<()> {
-        self.boot_time = Some(Instant::now());
+        self.boot_time = Some(self.clock.now());
         const BOOT_TIMEOUT_SECS: u64 = 60;
 
         // Step: Config validation
@@ -2049,7 +2067,7 @@ impl Worker {
     /// code. This is a last-resort measure when an init step hangs.
     fn check_boot_timeout(&self, timeout_secs: u64) -> Result<()> {
         if let Some(boot_start) = self.boot_time {
-            let elapsed = boot_start.elapsed();
+            let elapsed = self.clock.elapsed_since(boot_start);
             if elapsed.as_secs() > timeout_secs {
                 let elapsed_ms = elapsed.as_millis() as u64;
                 // Emit the timeout event before aborting
@@ -2206,7 +2224,9 @@ impl Worker {
         // Register atexit handler to emit worker.stopped telemetry on unexpected termination.
         // This provides diagnostic information when the worker is killed by an external
         // process (e.g., capacity governor, OOM killer, SIGKILL).
-        let start_time = self.boot_time.unwrap_or_else(Instant::now);
+        // The atexit handler runs outside async policy and deliberately owns a
+        // native wall-clock baseline rather than the injectable policy clock.
+        let start_time = Instant::now();
         let heartbeat_path = self.health.heartbeat_path().to_str().map(String::from);
         register_atexit_handler(
             self.worker_name.clone(),
@@ -2499,7 +2519,9 @@ impl Worker {
                 );
                 announced = true;
             }
-            tokio::time::sleep(Duration::from_secs(remaining.clamp(1, 60))).await;
+            self.clock
+                .sleep(Duration::from_secs(remaining.clamp(1, 60)))
+                .await;
         }
     }
 
@@ -2590,7 +2612,7 @@ impl Worker {
                             return Ok(());
                         }
                         let tick = remaining.min(Duration::from_millis(100));
-                        tokio::time::sleep(tick).await;
+                        self.clock.sleep(tick).await;
                         remaining = remaining.saturating_sub(tick);
                     }
                 }
@@ -2719,7 +2741,7 @@ impl Worker {
     /// This provides randomized delays within the configured range to prevent
     /// thundering herd when multiple workers become idle simultaneously.
     fn compute_jittered_backoff(&self) -> u64 {
-        use std::time::{SystemTime, UNIX_EPOCH};
+        use std::time::UNIX_EPOCH;
 
         let min_secs = self.config.worker.idle_backoff_min;
         let max_secs = self.config.worker.idle_backoff_max;
@@ -2732,7 +2754,9 @@ impl Worker {
         }
 
         // Use current time + worker_id as seed for deterministic jitter
-        let nanos = SystemTime::now()
+        let nanos = self
+            .clock
+            .system_time()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .subsec_nanos();
@@ -2926,7 +2950,7 @@ impl Worker {
                 self.verify_single_claim_invariant();
                 // Start effort tracking for this cycle.
                 self.last_effort = Some(EffortData {
-                    cycle_start: Instant::now(),
+                    cycle_start: self.clock.now(),
                     agent_name: String::new(),
                     model: None,
                     provider: None,
@@ -2972,7 +2996,7 @@ impl Worker {
                 claim_span.record("otel.status_code", 2u64);
                 claim_span.record("otel.status_description", "race_lost");
                 // Add to race-lost exclusions with TTL (persists across cycles)
-                let expires = Instant::now() + RACE_LOST_EXCLUSION_TTL;
+                let expires = self.clock.now() + RACE_LOST_EXCLUSION_TTL;
                 self.race_lost_exclusions.push((bead_id.clone(), expires));
                 // Also add to exclusion_set for immediate protection in the current cycle
                 self.exclusion_set.insert(bead_id.clone());
@@ -3096,7 +3120,9 @@ impl Worker {
             backoff_ms,
             "backing off before retry"
         );
-        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+        self.clock
+            .sleep(std::time::Duration::from_millis(backoff_ms))
+            .await;
 
         if self.retry_count < self.config.worker.max_claim_retries {
             self.set_state(WorkerState::Selecting)?;
@@ -3163,15 +3189,17 @@ impl Worker {
         let bead_id = bead.id.clone();
         let heartbeat_bead_id = bead_id.clone();
         let telemetry = self.telemetry.clone();
+        let heartbeat_clock = self.clock.clone();
 
         // Spawn heartbeat task that emits periodic updates during the build.
         // Heartbeat interval: every 30 seconds.
         let heartbeat_handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
-            let start = std::time::Instant::now();
+            let start = heartbeat_clock.now();
             loop {
-                interval.tick().await;
-                let elapsed_ms = start.elapsed().as_millis() as u64;
+                heartbeat_clock
+                    .sleep(std::time::Duration::from_secs(30))
+                    .await;
+                let elapsed_ms = heartbeat_clock.elapsed_since(start).as_millis() as u64;
                 let _ = telemetry.emit(
                     EventKind::BuildHeartbeat {
                         bead_id: heartbeat_bead_id.clone(),
@@ -3516,7 +3544,7 @@ impl Worker {
             )?;
 
             // Wait before retrying (5 seconds).
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            self.clock.sleep(std::time::Duration::from_secs(5)).await;
 
             // Stay in Dispatching state to retry the rate limit check.
             return Ok(());
@@ -3809,7 +3837,7 @@ impl Worker {
                     );
                 }
 
-                self.exec_started_at = Some(Instant::now());
+                self.exec_started_at = Some(self.clock.now());
                 let result = self
                     .dispatcher
                     .dispatch(&bead.id, &prompt, &adapter, dispatch_ws)
@@ -4069,10 +4097,12 @@ impl Worker {
         let telemetry_for_heartbeat = self.telemetry.clone();
         let cancelled_for_heartbeat = cancelled.clone();
         let watchdog_for_heartbeat = self.watchdog_triggered.clone();
+        let heartbeat_clock = self.clock.clone();
         let heartbeat_task = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
             loop {
-                interval.tick().await;
+                heartbeat_clock
+                    .sleep(std::time::Duration::from_secs(5))
+                    .await;
                 // Check if we've been cancelled and stop emitting if so.
                 if cancelled_for_heartbeat.load(Ordering::Relaxed) {
                     break;
@@ -4208,7 +4238,8 @@ impl Worker {
         // The watchdog thread above covers a genuinely wedged runtime. Keep the
         // 90-second async safety net cancellable so a successful handler does
         // not leave a sleeping blocking task that delays runtime shutdown.
-        let timeout = tokio::time::sleep(std::time::Duration::from_secs(90));
+        let timeout_clock = self.clock.clone();
+        let timeout = timeout_clock.sleep(std::time::Duration::from_secs(90));
         tokio::pin!(timeout);
 
         // Use tokio::select! to race between the handling future and the timeout signal.
@@ -4307,7 +4338,7 @@ impl Worker {
             let duration_ms = self
                 .exec_started_at
                 .take()
-                .map(|start| start.elapsed().as_millis() as u64);
+                .map(|start| self.clock.elapsed_since(start).as_millis() as u64);
             let outcome_str = handler_result.outcome.as_str();
             let event_name = match &handler_result.outcome {
                 crate::types::Outcome::Success => "complete",
@@ -4453,7 +4484,7 @@ impl Worker {
             let duration = self
                 .last_effort
                 .as_ref()
-                .map(|effort| effort.cycle_start.elapsed())
+                .map(|effort| self.clock.elapsed_since(effort.cycle_start))
                 .unwrap_or(std::time::Duration::from_secs(0));
 
             // Build AgentOutcome from the last execution result
@@ -5271,7 +5302,7 @@ impl Worker {
 
         // Emit effort.recorded telemetry event.
         if let (Some(ref effort), Some(ref id)) = (&self.last_effort, &bead_id) {
-            let elapsed_ms = effort.cycle_start.elapsed().as_millis() as u64;
+            let elapsed_ms = self.clock.elapsed_since(effort.cycle_start).as_millis() as u64;
             self.telemetry.emit(
                 EventKind::EffortRecorded {
                     bead_id: id.clone(),
@@ -5562,7 +5593,7 @@ impl Worker {
             return Ok(());
         }
 
-        let now = Instant::now();
+        let now = self.clock.now();
         let interval = Duration::from_secs(interval_secs);
         if let Some(last_check) = self.last_config_reload_check {
             if now.duration_since(last_check) < interval {
@@ -6202,7 +6233,7 @@ impl Worker {
             return Ok(());
         }
 
-        let now = Instant::now();
+        let now = self.clock.now();
         let interval = Duration::from_secs(interval_secs);
 
         // Check if enough time has passed since the last check
@@ -6415,7 +6446,10 @@ impl Worker {
                     EventKind::IdleSleepEntered {
                         backoff_secs: backoff,
                         beads_processed: self.beads_processed,
-                        uptime_secs: self.boot_time.map(|t| t.elapsed().as_secs()).unwrap_or(0),
+                        uptime_secs: self
+                            .boot_time
+                            .map(|t| self.clock.elapsed_since(t).as_secs())
+                            .unwrap_or(0),
                     },
                     chrono::Utc::now(),
                 ) {
@@ -6439,7 +6473,9 @@ impl Worker {
                         chrono::Utc::now().to_rfc3339(),
                         backoff,
                         self.beads_processed,
-                        self.boot_time.map(|t| t.elapsed().as_secs()).unwrap_or(0),
+                        self.boot_time
+                            .map(|t| self.clock.elapsed_since(t).as_secs())
+                            .unwrap_or(0),
                         std::process::id()
                     )
                 );
@@ -6496,8 +6532,10 @@ impl Worker {
                     // Race between sleep and shutdown flag to respond immediately to signals.
                     // This ensures that when SIGHUP is received (e.g., from cgov killing tmux session),
                     // the worker responds within milliseconds instead of waiting up to 1 second.
+                    let idle_clock = self.clock.clone();
+                    let shutdown_clock = self.clock.clone();
                     tokio::select! {
-                        _ = tokio::time::sleep(sleep_duration) => {
+                        _ = idle_clock.sleep(sleep_duration) => {
                             // Sleep completed normally, continue to shutdown check.
                         }
                         _ = async {
@@ -6506,7 +6544,9 @@ impl Worker {
                                 if self.shutdown.load(Ordering::SeqCst) {
                                     break;
                                 }
-                                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                                shutdown_clock
+                                    .sleep(std::time::Duration::from_millis(10))
+                                    .await;
                             }
                         } => {
                             // Shutdown flag was set, exit immediately.
@@ -6675,7 +6715,9 @@ impl Worker {
                         elapsed,
                         shutdown_check_count,
                         self.beads_processed,
-                        self.boot_time.map(|t| t.elapsed().as_secs()).unwrap_or(0),
+                        self.boot_time
+                            .map(|t| self.clock.elapsed_since(t).as_secs())
+                            .unwrap_or(0),
                         std::process::id()
                     )
                 );
@@ -6758,7 +6800,10 @@ impl Worker {
 
     /// Graceful stop: emit telemetry, deregister, and return terminal state.
     async fn stop(&mut self, reason: &str) -> Result<WorkerState> {
-        let uptime = self.boot_time.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+        let uptime = self
+            .boot_time
+            .map(|t| self.clock.elapsed_since(t).as_secs())
+            .unwrap_or(0);
 
         // Set worker.session span attributes before closing.
         // Record attributes on the current span (which is the worker.session span).
@@ -6902,7 +6947,7 @@ impl Worker {
     /// expired entries and returns the union of race-lost exclusions and
     /// the manual exclusion set.
     fn current_exclusions(&mut self) -> HashSet<BeadId> {
-        let now = Instant::now();
+        let now = self.clock.now();
         // Prune expired entries in-place
         self.race_lost_exclusions
             .retain(|(_, expires)| expires > &now);
@@ -7177,7 +7222,7 @@ impl Worker {
             .max(30);
         let mut guard = self.ledger_cache.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(cache) = guard.as_ref() {
-            if cache.computed_at.elapsed() < Duration::from_secs(refresh) {
+            if self.clock.elapsed_since(cache.computed_at) < Duration::from_secs(refresh) {
                 return cache.clone();
             }
         }
@@ -7219,7 +7264,7 @@ impl Worker {
         }
         let variants = crate::experiments::variant_outcomes(&rows);
         let cache = LedgerCache {
-            computed_at: Instant::now(),
+            computed_at: self.clock.now(),
             adapters,
             variants,
         };
@@ -10597,6 +10642,25 @@ mod tests {
     }
 
     // ── do_retry tests ──
+
+    #[tokio::test]
+    async fn do_retry_advances_only_when_injected_clock_reaches_deadline() {
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let clock = Arc::new(crate::clock::ManualClock::new());
+        let mut worker = make_worker(store).with_clock(clock.clone());
+        worker.state = WorkerState::Retrying;
+        worker.retry_count = 1;
+
+        let mut retry = Box::pin(worker.do_retry());
+        assert!(futures::poll!(retry.as_mut()).is_pending());
+
+        clock.advance(Duration::from_millis(99));
+        assert!(futures::poll!(retry.as_mut()).is_pending());
+
+        clock.advance(Duration::from_millis(1));
+        retry.await.unwrap();
+        assert_eq!(*worker.state(), WorkerState::Selecting);
+    }
 
     #[tokio::test(start_paused = true)]
     async fn do_retry_below_max_transitions_to_selecting() {

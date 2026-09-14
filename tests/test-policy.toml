@@ -18,7 +18,11 @@ version = 1
 # two fixture stores in one process, plus two Worker::resolve_target_store tests
 # (context identity and the missing-context refusal) that read the Worker's own
 # private field.
-max_tests = 3912
+# +4 for the injectable worker clock boundary (needle-93ec59e8): three focused
+# clock contracts plus one Worker retry-policy test. These belong in the unit
+# tier because the seam is process-local and the proof must inspect a pending
+# future before advancing manual time.
+max_tests = 3916
 
 [tier_budget]
 push = 650
