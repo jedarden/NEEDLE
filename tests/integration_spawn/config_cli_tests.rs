@@ -595,7 +595,7 @@ fn config_set_flag_help_text_subprocess_verification() {
     let temp_dir = TempDir::new().expect("failed to create temp dir for test isolation");
 
     // Spawn the needle binary with config --help
-    let result = std::process::Command::new(env!("CARGO_BIN_EXE_needle"))
+    let result = std::process::Command::new(crate::isolation::needle_binary_path())
         .arg("config")
         .arg("--help")
         .env("HOME", temp_dir.path()) // Isolate from real bead workspaces

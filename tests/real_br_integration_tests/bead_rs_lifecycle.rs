@@ -134,7 +134,7 @@ fn needle_claims_closes_and_restores_a_bead_rs_workspace() {
     )
     .unwrap();
 
-    let needle = PathBuf::from(env!("CARGO_BIN_EXE_needle"));
+    let needle = super::needle_binary_path();
     let started = Instant::now();
     let output = run(Command::new(&needle)
         .args([

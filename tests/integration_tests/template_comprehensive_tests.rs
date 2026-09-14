@@ -769,8 +769,11 @@ fn mock_values_for_operation(operation: &str) -> HashMap<&'static str, &'static 
     match operation {
         "ready" => [("limit", "10")].into_iter().collect(),
         "list_all" => [("limit", "100")].into_iter().collect(),
-        "show" | "release" | "block" | "clear_assignee" | "reopen" | "labels" | "why" => {
-            [("id", "test-id")].into_iter().collect()
+        "show" | "labels" | "why" => [("id", "test-id")].into_iter().collect(),
+        "release" | "block" | "clear_assignee" | "reopen" => {
+            [("id", "test-id"), ("fencing_token", "7")]
+                .into_iter()
+                .collect()
         }
         "claim" => [("id", "test-id"), ("actor", "worker-01")]
             .into_iter()
@@ -793,9 +796,13 @@ fn mock_values_for_operation(operation: &str) -> HashMap<&'static str, &'static 
         "split" => [("parent", "parent"), ("children", "child1,child2")]
             .into_iter()
             .collect(),
-        "close" => [("id", "test-id"), ("reason", "Done")]
-            .into_iter()
-            .collect(),
+        "close" => [
+            ("id", "test-id"),
+            ("reason", "Done"),
+            ("fencing_token", "7"),
+        ]
+        .into_iter()
+        .collect(),
         "resolve" => [
             ("id", "test-id"),
             ("attempt_id", "0192-attempt"),
@@ -806,6 +813,7 @@ fn mock_values_for_operation(operation: &str) -> HashMap<&'static str, &'static 
             ("harness_version", "0.6.1"),
             ("resolve_reason", "gate:default_rust"),
             ("evidence_ref", "commit:abc123"),
+            ("fencing_token", "7"),
         ]
         .into_iter()
         .collect(),

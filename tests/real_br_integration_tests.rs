@@ -46,6 +46,13 @@ use needle::strand::{ExploreStrand, MendStrand, Strand, StrandRunner};
 use needle::telemetry::Telemetry;
 use needle::types::{BeadId, BeadStatus, ClaimOutcome, ClaimResult, StrandResult};
 
+/// Runtime-relocatable NEEDLE binary path for nextest archive execution.
+fn needle_binary_path() -> PathBuf {
+    std::env::var_os("NEXTEST_BIN_EXE_needle")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_needle")))
+}
+
 // ═════════════════════════════════════════════════════════════════════════════
 // Test infrastructure
 // ═════════════════════════════════════════════════════════════════════════════
@@ -256,7 +263,11 @@ struct FencingToken(NonZeroU64);
 #[derive(Clone, Debug)]
 struct FencedClaim {
     id: BeadId,
-    token: FencingToken,
+    /// Released bead-rs 0.2.6 omits the epoch for a revision-guarded direct
+    /// claim; newer compatible builds report one. Exercise the credential
+    /// whenever the backend supplies it without making the compatibility
+    /// floor pretend every claim is leased.
+    token: Option<FencingToken>,
 }
 
 fn read_fenced_claim(workspace: &Path, id: &BeadId, actor: &str) -> Result<FencedClaim> {
@@ -289,14 +300,14 @@ fn read_fenced_claim(workspace: &Path, id: &BeadId, actor: &str) -> Result<Fence
         object.get("assignee").and_then(serde_json::Value::as_str) == Some(actor),
         "bead show returned a different assignee after claim"
     );
-    let epoch = object
+    let token = object
         .get("claim_epoch")
         .and_then(serde_json::Value::as_u64)
         .and_then(NonZeroU64::new)
-        .context("bead show omitted a nonzero claim_epoch")?;
+        .map(FencingToken);
     Ok(FencedClaim {
         id: id.clone(),
-        token: FencingToken(epoch),
+        token,
     })
 }
 
@@ -313,21 +324,18 @@ async fn claim_fenced(
 }
 
 fn close_claimed(workspace: &Path, claim: &FencedClaim, reason: &str) -> Result<()> {
-    let token = claim.token.0.get().to_string();
-    let output = bead_command(workspace)
-        .args([
-            "close",
-            claim.id.as_ref(),
-            "--reason",
-            reason,
-            "--fencing-token",
-            &token,
-        ])
+    let mut command = bead_command(workspace);
+    command.args(["close", claim.id.as_ref(), "--reason", reason]);
+    let token = claim.token.map(|token| token.0.get().to_string());
+    if let Some(token) = token.as_deref() {
+        command.args(["--fencing-token", token]);
+    }
+    let output = command
         .output()
-        .context("failed to run fenced bead close")?;
+        .context("failed to run claimed bead close")?;
     if !output.status.success() {
         anyhow::bail!(
-            "fenced bead close failed: {}",
+            "claimed bead close failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
@@ -335,14 +343,18 @@ fn close_claimed(workspace: &Path, claim: &FencedClaim, reason: &str) -> Result<
 }
 
 fn reopen_claimed(workspace: &Path, claim: &FencedClaim) -> Result<()> {
-    let token = claim.token.0.get().to_string();
-    let output = bead_command(workspace)
-        .args(["reopen", claim.id.as_ref(), "--fencing-token", &token])
+    let mut command = bead_command(workspace);
+    command.args(["reopen", claim.id.as_ref()]);
+    let token = claim.token.map(|token| token.0.get().to_string());
+    if let Some(token) = token.as_deref() {
+        command.args(["--fencing-token", token]);
+    }
+    let output = command
         .output()
-        .context("failed to run fenced bead reopen")?;
+        .context("failed to run claimed bead reopen")?;
     if !output.status.success() {
         anyhow::bail!(
-            "fenced bead reopen failed: {}",
+            "claimed bead reopen failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
     }
@@ -2493,7 +2505,7 @@ fn saturated_host_worker_stays_resident_until_load_clears() -> Result<()> {
     let stdout_log = root.path().join("worker-stdout.log");
     let stderr_log = root.path().join("worker-stderr.log");
 
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_needle"))
+    let mut child = std::process::Command::new(needle_binary_path())
         .args([
             "run",
             "--workspace",

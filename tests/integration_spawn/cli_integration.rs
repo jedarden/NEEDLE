@@ -8,7 +8,7 @@ use tempfile::TempDir;
 
 /// Helper to create a Command for the needle binary with isolated HOME.
 fn needle_command(home: &TempDir) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_needle"));
+    let mut cmd = Command::new(crate::isolation::needle_binary_path());
     cmd.env("HOME", home.path());
     cmd
 }

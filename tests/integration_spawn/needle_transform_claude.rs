@@ -8,12 +8,9 @@ use std::process::{Command, Stdio};
 
 use needle::agent_event::{AgentEvent, EventPayload, MessageRole};
 
-// Path to the compiled binary, set by Cargo for integration tests.
-const BINARY: &str = env!("CARGO_BIN_EXE_needle-transform-claude");
-
 /// Feed `input` to the binary via stdin, return all output lines.
 fn run(input: &str) -> Vec<String> {
-    let mut child = Command::new(BINARY)
+    let mut child = Command::new(crate::isolation::needle_transform_claude_binary_path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null()) // suppress warnings in test output

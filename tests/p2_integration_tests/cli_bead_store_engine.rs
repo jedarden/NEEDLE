@@ -34,7 +34,7 @@ fn store(root: &Path, backend_name: &str) -> CliBeadStore {
 #[cfg(unix)]
 fn batch_backend() -> needle::bead_store::BeadBackend {
     let mut backend = builtin_bead_backends().into_iter().next().unwrap();
-    backend.name = "bead-rs".to_string();
+    backend.name = "bead-forge-fixture".to_string();
     backend.operations.get_mut("claim").unwrap().strategy = Some("batch_op".to_string());
     backend
 }
@@ -278,7 +278,7 @@ fi
         .unwrap();
     assert!(matches!(result, ClaimResult::Claimed(_)));
     let invocations = fs::read_to_string(root.path().join("invocations.log")).unwrap();
-    assert_eq!(invocations.matches("show\n").count(), 3);
+    assert_eq!(invocations.matches("show\n").count(), 4);
     assert!(invocations.contains(
         "update\nbead-1\n--status\nin_progress\n--assignee\nworker-a\n--if-revision\n7\n"
     ));

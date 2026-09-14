@@ -698,7 +698,7 @@ const FLEET_CONFIG: &str = "# fleet config under test — must survive every ini
 
 /// Run `needle init` with `args` against a sandbox `home`, in `cwd`.
 fn init_in_sandbox(home: &Path, cwd: &Path, args: &[&str]) -> std::process::Output {
-    std::process::Command::new(env!("CARGO_BIN_EXE_needle"))
+    std::process::Command::new(crate::isolation::needle_binary_path())
         .arg("init")
         .args(args)
         .env("HOME", home)

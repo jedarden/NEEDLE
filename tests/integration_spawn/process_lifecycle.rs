@@ -317,7 +317,7 @@ impl<T> Drop for ThreadGuard<T> {
 #[test]
 fn needle_binary_runs_with_the_inner_process_marker() {
     let home = tempfile::tempdir().expect("create isolated HOME");
-    let child = Command::new(env!("CARGO_BIN_EXE_needle"))
+    let child = Command::new(crate::isolation::needle_binary_path())
         .arg("version")
         .env("HOME", home.path())
         .env("NEEDLE_INNER", "1")
@@ -390,15 +390,19 @@ async fn worker_processes_a_bead_through_the_real_dispatch_lifecycle() {
     let bead = fixture_bead("needle-process-lifecycle", workspace.path());
     let bead_id = bead.id.clone();
     let store = Arc::new(LifecycleStore::new(vec![bead]));
+    let worker_id = format!("{}-full-cycle", config.agent.default);
     let mut worker = Worker::new(config, "full-cycle".to_string(), store.clone());
     let dispatch_started = workspace.path().join("dispatch-started");
     let release_dispatch = workspace.path().join("release-dispatch");
     let adapter = blocking_adapter("echo-test", &dispatch_started, &release_dispatch, "done");
-    worker.set_dispatcher(Dispatcher::with_adapters(
+    let dispatcher = Dispatcher::with_adapters(
         HashMap::from([(adapter.name.clone(), adapter)]),
         Telemetry::new("process-lifecycle-dispatch".to_string()),
         5,
-    ));
+    )
+    .with_bead_store(store.clone())
+    .with_worker_id(worker_id);
+    worker.set_dispatcher(dispatcher);
 
     let closer = ThreadGuard::new(std::thread::spawn(move || {
         let started = wait_until(Duration::from_secs(5), || dispatch_started.exists());
@@ -440,6 +444,7 @@ async fn worker_applies_a_config_change_only_after_the_adapter_child_exits() {
     let store = Arc::new(LifecycleStore::new(vec![bead]));
     let log_dir = home.path().join("telemetry");
     let telemetry = Telemetry::with_log_dir("reload-boundary".to_string(), &log_dir);
+    let worker_id = format!("{}-reload-boundary", config.agent.default);
     let mut worker = Worker::new_with_telemetry(
         config.clone(),
         "reload-boundary".to_string(),
@@ -456,14 +461,17 @@ async fn worker_applies_a_config_change_only_after_the_adapter_child_exits() {
         "old-config",
     );
     let new_adapter = immediate_adapter("new-agent", "new-config");
-    worker.set_dispatcher(Dispatcher::with_adapters(
+    let dispatcher = Dispatcher::with_adapters(
         HashMap::from([
             (old_adapter.name.clone(), old_adapter),
             (new_adapter.name.clone(), new_adapter),
         ]),
         telemetry,
         config.agent.timeout,
-    ));
+    )
+    .with_bead_store(store.clone())
+    .with_worker_id(worker_id);
+    worker.set_dispatcher(dispatcher);
 
     let mut candidate = config;
     candidate.agent.default = "new-agent".to_string();
@@ -530,6 +538,7 @@ async fn worker_rejects_an_invalid_reload_without_failing_its_lifecycle() {
     let store = Arc::new(LifecycleStore::new(vec![bead]));
     let log_dir = home.path().join("telemetry");
     let telemetry = Telemetry::with_log_dir("invalid-reload".to_string(), &log_dir);
+    let worker_id = format!("{}-invalid-reload", config.agent.default);
     let mut worker = Worker::new_with_telemetry(
         config.clone(),
         "invalid-reload".to_string(),
@@ -544,11 +553,14 @@ async fn worker_rejects_an_invalid_reload_without_failing_its_lifecycle() {
         &release_dispatch,
         "old-config",
     );
-    worker.set_dispatcher(Dispatcher::with_adapters(
+    let dispatcher = Dispatcher::with_adapters(
         HashMap::from([(adapter.name.clone(), adapter)]),
         telemetry,
         config.agent.timeout,
-    ));
+    )
+    .with_bead_store(store.clone())
+    .with_worker_id(worker_id);
+    worker.set_dispatcher(dispatcher);
 
     let watcher = ThreadGuard::new(std::thread::spawn(move || {
         let started = wait_until(Duration::from_secs(5), || dispatch_started.exists());

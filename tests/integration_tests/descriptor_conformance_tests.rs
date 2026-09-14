@@ -218,7 +218,10 @@ async fn bead_rs_release_uses_native_release_subcommand() {
         .unwrap();
     let release = backend.operations.get("release").unwrap();
 
-    assert_eq!(release.argv, ["release", "{id}"]);
+    assert_eq!(
+        release.argv,
+        ["release", "{id}", "--fencing-token", "{fencing_token}"]
+    );
     assert!(release.strategy.is_none());
 }
 

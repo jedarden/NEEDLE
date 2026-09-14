@@ -36,7 +36,7 @@ impl IsolatedHome {
 
     /// Run the compiled `needle` binary with `HOME` isolated to this temp dir.
     fn run(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_needle"))
+        Command::new(crate::isolation::needle_binary_path())
             .args(args)
             .env("HOME", self.0.path())
             .output()

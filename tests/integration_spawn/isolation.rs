@@ -11,6 +11,21 @@ use std::process::{Child, Command, ExitStatus};
 
 use tempfile::TempDir;
 
+/// Resolve a compiled binary at runtime so archived nextest runs remain
+/// relocatable. Cargo's compile-time path points at the archive producer's
+/// target directory, while nextest remaps this variable to each extraction
+/// directory used by the runner.
+pub fn needle_binary_path() -> std::ffi::OsString {
+    std::env::var_os("NEXTEST_BIN_EXE_needle")
+        .unwrap_or_else(|| std::ffi::OsString::from(env!("CARGO_BIN_EXE_needle")))
+}
+
+/// Runtime-relocatable path for the Claude event transformer binary.
+pub fn needle_transform_claude_binary_path() -> std::ffi::OsString {
+    std::env::var_os("NEXTEST_BIN_EXE_needle_transform_claude")
+        .unwrap_or_else(|| std::ffi::OsString::from(env!("CARGO_BIN_EXE_needle-transform-claude")))
+}
+
 /// One isolated filesystem namespace for commands spawned by a test.
 pub struct IsolatedChildEnv {
     root: TempDir,
@@ -34,7 +49,7 @@ impl IsolatedChildEnv {
 
     /// Construct the compiled NEEDLE binary with the isolated environment.
     pub fn needle(&self) -> Command {
-        self.command(env!("CARGO_BIN_EXE_needle"))
+        self.command(needle_binary_path())
     }
 
     /// Construct any child command with the same isolated environment.
