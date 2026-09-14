@@ -2,9 +2,9 @@
 
 > **N**avigates **E**very **E**nqueued **D**eliverable, **L**ogs **E**ffort
 
-Plan revision: 33
+Plan revision: 34
 
-As of: 2026-09-12
+As of: 2026-09-13
 
 Status owner: NEEDLE maintainers
 
@@ -43,6 +43,16 @@ consumers to terminal conformance leaves; and adds a root graph-reconciliation
 gate. It also turns the previously unnumbered meta-agent harness concept into a
 separate, manually held follow-on epic. That work remains unauthorized until
 Gate D evidence is complete and ADR-029 is accepted.
+Revision 34 records the measured result of the ledger-first wires shipped
+2026-09-12..14 (section 4.9), accepts ADR-030 so that decomposition, killed
+attempts and red baselines are classified rather than credited, and accepts
+ADR-029, which defines the autonomous improvement loop the operator asked for
+(section 4.10): proposals generated from ledger evidence, admitted through
+N-T07, implemented as ordinary beads, and kept or withdrawn on measured
+verified-closure yield and cost. N-T45–N-T56 are the next wires; each is one
+single-behavior bead, and the two tracking parents are manually held. The
+META harness epic now waits on the loop's first live receipts instead of on
+an unwritten ADR.
 
 ## 0. How to read this plan
 
@@ -66,6 +76,8 @@ This re-baseline accepts:
 - [ADR-026: Reflection produces evidence-gated lessons and derived memory](../adr/026-evidence-gated-reflection-and-derived-memory.md)
 - [ADR-027: Policy has explicit authority and every attempt records its context](../adr/027-policy-authority-and-context-manifests.md)
 - [ADR-028: Carry a renewable fenced claim handle through every attempt](../adr/028-renewable-fenced-claim-handle.md)
+- [ADR-029: Improvements are proposed from ledger evidence and kept only by measured impact](../adr/029-measured-autonomous-improvement-loop.md)
+- [ADR-030: Attempt accounting is complete: decomposition, killed attempts and red baselines are classified, never credited](../adr/030-complete-attempt-accounting.md)
 
 Revision 21 locates the evaluation, reflection, replay, competence, memory,
 experiment, and promotion logic in a dependency-isolated learning kernel inside
@@ -762,9 +774,12 @@ existed.
 The future meta-agent harness is planning epic `needle-31ed0db2`, with eight
 single-behavior leaves ending at `needle-0843f7c1`. Its first leaf requires
 both the existing combined factory release/canary (`needle-e7a6a0b8`) and the
-opt-in operational learning-loop pilot (`needle-10fc7f48`), then requires an
-accepted ADR-029 before any runner or edit authority is implemented. The epic
-is manually held and therefore cannot be mistaken for ready implementation.
+opt-in operational learning-loop pilot (`needle-10fc7f48`). ADR-029 was
+accepted at revision 34 as the design of the improvement loop (section 4.10);
+the epic additionally waits on that loop's tracking parent `needle-48867e1b`,
+so no runner or edit authority is implemented before proposals, admission and
+impact receipts have live evidence. The epic is manually held and therefore
+cannot be mistaken for ready implementation.
 
 Root epic `needle-989c6c59` now waits on graph-reconciliation bead
 `needle-28df4f01`. That bead waits on the existing N-T31–44 rollups, the
@@ -774,6 +789,158 @@ must prove that every numbered transition remains on the root completion path,
 each planning parent tracks its terminal leaf, and no planning parent is
 claimable. Graph creation is planning evidence only; it does not satisfy any
 implementation, gate, canary, or release criterion.
+
+### 4.9 Measured results of the ledger-first wires (revision 34, 2026-09-13)
+
+Between 2026-09-12 and 2026-09-14 the section 4.4 order was executed on the
+codinghome fleet and deployed through `needle upgrade --from-file` (canary
+4/4 each time; `:stable` 0.6.1 at `4938c633`). What shipped, by commit:
+
+| Wire | Commit | Bead |
+| --- | --- | --- |
+| N-T15 legacy Reflect injection, reinforcement and CLAUDE.md placement off | `bc216abf` | `needle-7bd1abc2` |
+| R3 previous attempts' failures in the retry prompt (attempt journal plus the bead-rs `needle-attempts` data mirror) | `b1a64be4` | `needle-60163eac` |
+| N-T16/N-T23 tokens and cost from the result envelope; stats by model and workspace; adapter storms resolve as infrastructure | `78b2adce` | `needle-d8ab1d3f` |
+| every attempt recorded in bead-rs `attempt_outcomes` via `resolve --action none` | `4b72c108` | `needle-aaba338d` |
+| attempt-archive spool producer and `needle upgrade --from-file` | `138dd820` | `needle-fc3d6aa3` |
+| language-default verification gates for workspaces that declare none | `2e9f1d1c`, `2b8d2b04` | `needle-c4b0a0d1` |
+| prior fixes retrieved from the transcript graph into retry prompts | `e39497d7` | `needle-9022f181` |
+| N-T18 evidence-based adapter selection (L1) and N-T19 prompt-variant canary auto-stop (L2) | `b1838c04`, `79bb5ba8`, `4938c633` | `needle-2c404993` |
+
+Measured on the ledger with fixture rows excluded (852 attempts,
+2026-09-12T00:00Z to 2026-09-14T02:00Z; the pre-change baseline is the
+2026-09-11 window read on 2026-09-12):
+
+| Measure | Before | After |
+| --- | --- | --- |
+| verified-closure yield per attempt | 38% | 55% |
+| cost per verified closure | $5.64 | $3.07 |
+| share of spend on unverified attempts | not measurable | 44% (a floor; see timeouts) |
+| timed-out attempts | not measurable | 15%, every one booked at $0 |
+| attempts carrying cost | none | 629 of 852; codex, opencode and omp report none |
+| verified yield by attempt tier (1 / 2 / 3 / 4 / 5+) | not measurable | 54% / 46% / 52% / 86% / 97% |
+| beads with three or more identical consecutive failures | not measurable | 18 (21 attempts past the second repeat) |
+| retrieval recall on 25 replayed real failures | none | 1 |
+| best adapter by workspace | not measurable | differs: codex 33/34 vs flash 9/24 (reddit-media-player); flash 11/15 vs glm-5.3 4/48 (pdftract) |
+
+Three readings of that table are decisions, not observations:
+
+1. The tier-4 and tier-5 yields are the auto-split template counting a
+   decomposition as success. The retry-history wire cannot be judged until
+   that is separated (ADR-030 decision 1; N-T46).
+2. Cost per verified closure is understated because killed attempts cost
+   nothing and three adapters report no usage (ADR-030 decision 2; N-T47,
+   N-T51).
+3. Retrieval cannot pay while 171 of 385 failures say only `exit_code` and
+   124 say only `timeout` (N-T45; archive `ata-bbafa4b7`).
+
+Two regressions shipped and were caught by the same ledger within hours,
+which is the operating evidence behind ADR-029:
+
+- Python and Node default gates ran in a clean extraction with no
+  dependencies and failed 25 times, degrading two workspaces and filing
+  gate-broken beads, before one fingerprint shared across workspaces exposed
+  them (`2b8d2b04`: builtin defaults exist only where the toolchain is
+  self-contained).
+- Evidence routing scored an adapter with no evidence as zero rather than
+  unknown and moved 75 beads off codex (`4938c633`: absence of evidence is
+  unknown, and the floor applies to the incumbent too).
+
+The next wires, ranked by measured leverage. Items with an existing owner
+are listed so the graph is not duplicated:
+
+| Wire | Owner |
+| --- | --- |
+| N-T45 failure evidence capture; retrieval request from evidence | `needle-ab3601e5`, `needle-58c1e59c` |
+| stop unchanged retries | existing R1/R2 `needle-d6c5397a`, `needle-7b9718bc` |
+| N-T46 `decomposed` resolution class | `needle-16657d72` |
+| N-T47 killed-attempt cost; per-attempt spend cap | `needle-ec41ceba`, `needle-c0003de3` |
+| N-T48 workspace-scoped routing evidence | `needle-f84c01a4` |
+| N-T49 baseline gate run, `workspace_red` | `needle-c2fc81d6` |
+| mature outcomes correct closes; operator overrides as evidence | existing `needle-198eaf08`, `needle-9a94c2f8` (N-T20) |
+| N-T50 candidate lessons from failing-then-succeeding pairs | `needle-75368add` |
+| N-T51 codex/opencode/omp usage capture; gateway-keyed provider health | `needle-f2b97407`, `needle-17a7f6a0` |
+| N-T52 env-scoped state directory (fixture rows out of the live ledger) | `needle-e8f408e1` |
+
+Ecosystem work the wires depend on or feed, each in its owning repository:
+
+| Component | Change | Bead |
+| --- | --- | --- |
+| bead-rs | `show`/`list --json` expose attempt count, consecutive failures and last outcomes | `beadrs-36fca79d` |
+| bead-rs | ready-frontier ordering by native attempt evidence (flagged) | `beadrs-cbd03d0e` |
+| bead-rs | `--actor` on mutations (BR-T12) | existing `beadrs-e167fde8`; gate `needle-9d5f166a` |
+| agent-transcript-archive | ingest attempt bundles into graph.db (attempt to session join) | `ata-af79044b` |
+| agent-transcript-archive | index compiler and test diagnostics as signatures | `ata-bbafa4b7` |
+| agent-transcript-archive | prior-fixes by signature with the fixing commit and diff | `ata-e32eb768` |
+| declarative-config | transcript receiver accepts bundles above 1 MB (HTTP 502 today) | `declarat-0a77c8a9` (fix for `ata-04301df1`) |
+| declarative-config | needle-ci stops cancelling in-flight runs per commit | existing `needle-a3f686cf`, `declarat-f385c9d0` |
+| declarative-config | factory ledger joined to CI runs and bead events | existing `declarat-4b1b8e64` |
+| FABRIC | factory panel from ledger events, persisted across restarts | `fabric-9bcccd53` |
+| claude-governor | cost per verified closure per adapter as governor input; scale-down ordering | `claudego-bba5584b`, `claudego-f80857a2` |
+
+Tracking parent for N-T45–N-T52: `needle-0e387d0c` (manually held). The
+graph-reconciliation bead `needle-28df4f01` now waits on it.
+
+### 4.10 Autonomous improvement loop (revision 34, ADR-029)
+
+The operator's objective, stated 2026-09-13: improvements should be produced
+without human curation, and they must lead to legitimately more impact and
+productivity. This section defines both halves so neither can be satisfied by
+activity.
+
+**Impact** is section 10's verified-closure yield per attempt and per dollar,
+target-fingerprint recurrence, false-close/reopen rate, and accepted
+deliverables per human hour, measured over a declared horizon against the
+cohort's own baseline. A change that does not move its acceptance measure is
+withdrawn whatever its author reports. **Curation-free** means no human
+writes the proposal, picks the bead, or judges the result; the human reads
+receipts, accepts Gate D, widens authority, and answers guardrail
+escalations.
+
+The loop, with owners:
+
+1. **Observe.** The attempt ledger (N-T16) with ADR-030 classifications,
+   mature outcomes (`needle-198eaf08`), operator overrides
+   (`needle-9a94c2f8`), and candidate lessons (N-T50).
+2. **Propose** (N-T53, `needle-908c1f25`). A pure generator emits
+   `ImprovementProposal` records in the N-T07 envelope (`needle-2b0a309b`)
+   for these evidence classes: repeated identical failures, per-workspace
+   adapter regret, unverified spend concentration, red-baseline or
+   gate-broken workspaces, recurring fingerprints with a known fix, and
+   canary results. Every proposal names evidence refs, the intended change,
+   its authority level (5.7), expected benefit, acceptance measure with
+   horizon, and rollback. A proposal whose acceptance measure cannot be
+   computed from the ledger is refused at construction.
+3. **Admit** (N-T54, `needle-e830524d`) through the N-T07 admission
+   controller (`needle-43c0d818`, `needle-f754b4cb`): deduplicate by
+   evidence signature against existing beads and plan leaves, apply the
+   generated-work budget, record the decision. L1–L3 proposals are applied
+   by the controller that owns the envelope (routing, experiments, numeric
+   bounds). L4 proposals become ordinary implementation beads in the owning
+   repository, with provenance references, worked by the fleet through the
+   normal factory path. L5 proposals are refused until Gate D.
+4. **Deliver.** Shared checkout, precise staging, Definition of Done,
+   needle-ci, canary, `needle upgrade`; the audited delivery controller
+   (`needle-99e8c972`) for anything that would otherwise need a human push.
+5. **Measure** (N-T55, `needle-c4e6424a`). An impact receipt per admitted
+   proposal: cohort, baseline, horizon measures, promote or withdraw.
+   Withdrawal is a revert proposal through the same admission and delivery
+   path. A contaminated cohort holds rather than decides.
+6. **Report** (N-T56, `needle-65e66131`). `needle improvements` is the
+   read-only view of proposals, admitted beads, receipts and the fleet trend.
+
+Guardrails that hold throughout: section 5.7 authority levels and ADR-027
+are unchanged; no proposal can weaken a gate, raise a budget, change an
+authority level, or edit this plan, an ADR or a policy file; proposals about
+the loop itself, including harness and model pairing, are the META epic
+(`needle-31ed0db2`) and remain held until the loop has live receipts and
+Gate D holds; every proposal, bead and receipt is evidence-addressed.
+
+Activation order: N-T46, N-T47, N-T49 and N-T52 first (honest numbers);
+N-T53 in shadow, proposals visible but none admitted; N-T54 at one admitted
+L4 proposal per day; N-T55 receipts on those; the budget rises only after
+two consecutive horizons with net-positive receipts. Tracking parent:
+`needle-48867e1b` (manually held); ADR contract test `needle-73c1958b`.
 
 ## 5. In-process learning kernel
 
@@ -1044,15 +1211,15 @@ generated conformance report.
 | N-T12 | `crates/needle-learning` outcome contracts, evaluator, competence, replay, experiments, drift, curriculum and promotion modules plus effect/delivery-controller adapters | Add reviewed OutcomeContracts/EvalCases, mature outcome evaluation, calibrated competence, shadow replay plans, experiments, bounded adaptation, audited reversible commit/push, rollback and promotion receipts | pure-kernel/no-side-effect conformance, scoped-index/push/revert tests, holdout/replay coverage and canary improvement without guardrail regression | six tracking parents are manually blocked; 30 leaves own implementation across outcomes, replay, competence, curriculum, delivery, and experiments (4.8.9) |
 | N-T13 | historical telemetry/learnings | Mark legacy events non-authoritative; import learnings only as candidates | deterministic migration report with no invented attempts | blocked by N-T02, N-T08; `needle-62e80c13` |
 | N-T14 | combined consumer conformance | Exercise bead-rs atomic attempt resolution with fallback for older capabilities | pinned old/new bead-rs matrix, crash/replay tests | blocked by bead-rs BR-T18 and exact-release blockers |
-| N-T15 | `src/config/mod.rs`, `src/prompt/mod.rs`, `src/claude_md_placement.rs`, `src/strand/reflect.rs` | Default legacy learnings injection, reinforcement and CLAUDE.md placement off; files stay as candidate input | `PromptBuilder::with_workspace` emits no learnings section by default; placement removes its marker section when disabled; fixture test | transition (first; 4.4 step 0) |
-| N-T16 | `src/telemetry/`, `src/outcome/` | Emit one `attempt.resolved` ledger event per dispatch with a provisional attempt ID until N-T03 | versioned schema fixture; exactly one event per dispatch in the file sink across success/failure/timeout/crash | transition (4.4 step 1) |
+| N-T15 | `src/config/mod.rs`, `src/prompt/mod.rs`, `src/claude_md_placement.rs`, `src/strand/reflect.rs` | Default legacy learnings injection, reinforcement and CLAUDE.md placement off; files stay as candidate input | `PromptBuilder::with_workspace` emits no learnings section by default; placement removes its marker section when disabled; fixture test | verified 2026-09-12; `bc216abf`; `needle-7bd1abc2`; Reflect's global state file and dead `with_global()` path remain (4.9) |
+| N-T16 | `src/telemetry/`, `src/outcome/` | Emit one `attempt.resolved` ledger event per dispatch with a provisional attempt ID until N-T03 | versioned schema fixture; exactly one event per dispatch in the file sink across success/failure/timeout/crash | transition; worker-side event live since `78b2adce` with tokens, cost and provider (4.9); off-host sink still `declarat-399b667a`; ADR-030 classifications pending N-T46/N-T47 |
 | N-T17 | `src/bead_store/backend.rs`, `src/bead_store/cli_store.rs` | Pass worker identity as actor on every mutation when the backend advertises it | forensic events carry the worker actor; graceful fallback on older bead-rs | blocked by bead-rs BR-T12 |
-| N-T18 | `src/routing.rs`, `src/dispatch/mod.rs`, `src/stats/mod.rs` | Evidence-based selection among configured adapters with evidence floor, exploration share and static fallback | replay test: selection changes only with sufficient evidence; regex fallback when insufficient | blocked by N-T16 |
-| N-T19 | `src/prompt/` variants, experiment controller | Template canary: bounded exposure, verified-success metric, automatic stop, receipt | experiment fixture covering promote, stop and rollback | blocked by N-T16 |
+| N-T18 | `src/routing.rs`, `src/dispatch/mod.rs`, `src/stats/mod.rs` | Evidence-based selection among configured adapters with evidence floor, exploration share and static fallback | replay test: selection changes only with sufficient evidence; regex fallback when insufficient | live on codinghome since 2026-09-13 (`b1838c04`, `79bb5ba8`, `4938c633`; `needle-2c404993`); workspace scope is N-T48 |
+| N-T19 | `src/prompt/` variants, experiment controller | Template canary: bounded exposure, verified-success metric, automatic stop, receipt | experiment fixture covering promote, stop and rollback | shipped `b1838c04` (auto-stop receipts under the experiments state directory); no variants configured yet |
 | N-T20 | override detector, telemetry | Record operator reopen, revert and interrupt as attempt evidence and reflection trigger | detector tests against forensic and git fixtures; no false positives on fleet-internal reopen | blocked by N-T16 |
-| N-T21 | workspace health, learning consumers | Freeze adaptation, experiments and promotion while a workspace is gate-degraded | degraded workspace produces no exposure change in tests | blocked by N-T18, ADR-023 wiring |
+| N-T21 | workspace health, learning consumers | Freeze adaptation, experiments and promotion while a workspace is gate-degraded | degraded workspace produces no exposure change in tests | partial: routing and canaries freeze while a provider is degraded (`78b2adce`) or a workspace is gate-degraded; promotion freeze awaits N-T12 |
 | N-T22 | workspace-health controller | Verification-failure fingerprint shared across beads trips gate-degraded and files one infra bead | replay of 2026-09-01/02 JSONL trips within 5 failures; mixed fingerprints never trip | blocked by needle-0abc120d |
-| N-T23 | stream transform, telemetry | Per-attempt provider error counts and max response gap; provider.degraded/restored state | 2026-09-02 transcript replays to 15 errors / 613 s gap; hysteresis tests | blocked by N-T16 |
+| N-T23 | stream transform, telemetry | Per-attempt provider error counts and max response gap; provider.degraded/restored state | 2026-09-02 transcript replays to 15 errors / 613 s gap; hysteresis tests | shipped `78b2adce`: adapter-failure storms resolve `infrastructure_failure`, `provider.degraded/restored`, 300 s claim hold; gateway keying is N-T51 (`needle-17a7f6a0`) |
 | N-T24 | `src/outcome/` timeout/crash/interrupt paths | Capture the attempt's own diff to trace + named stash before release; redispatch prompt names it | patch re-applies; unrelated dirty files excluded | transition |
 | N-T25 | prompt templates, outcome | Deadline stated in prompt; checkpoint-commit request at 75%; commits_before_deadline recorded | template snapshot; counter present | transition |
 | N-T26 | `src/outcome/` handle_timeout, Pluck exclusion | Expiring `deferred:<expiry>` instead of bare label; doctor lists bare ones | timed-out fixture claimable after expiry | blocked by needle-40c6c60e |
@@ -1074,6 +1241,18 @@ generated conformance report.
 | N-T42 | lesson-to-check proposal adapter and admission integration | Turn evaluated runbooks into ordinary deduplicated preflight/invariant/regression-check work with provenance (4.8.5) | concurrent admission creates one fully linked bead; budget/authority refusal and verified-check handoff | tracking parent; manually blocked; P1–P3 own implementation (4.8.8); `needle-590a556a` |
 | N-T43 | read-only learning operational view and diagnostics | Expose episode lag, incomplete evidence, controller budgets, lesson/exposure/correction and rollback state (4.8.6) | schema, redaction, restart continuity and degraded-learning fixtures; no state mutation | tracking parent; manually blocked; O1–O3 own implementation (4.8.8); `needle-8e5db2e6` |
 | N-T44 | opt-in operational learning-loop pilot and integration fixture | Connect one failure class to recovery, evaluated guidance, later exposure and mature feedback (4.8.7) | nonempty queue, replay, restart, harmful-guidance withdrawal and receipt-backed pilot report | one integration task; depends directly on child work and F1, never on held parents (4.8.8); Gates A–C before live activation; `needle-10fc7f48` |
+| N-T45 | `src/attempt_history.rs`, `src/outcome/`, `src/retrieval.rs` | Capture final message, last tool errors and gate diagnostics as bounded failure evidence; build the retrieval request from it and record recall | evidence fixture incl. timeout partial transcript; request carries signatures/excerpts; recall in `prompt.memory_retrieved` | transition (4.9); `needle-ab3601e5`, `needle-58c1e59c` |
+| N-T46 | `src/outcome/`, `src/telemetry/`, `src/stats/`, `src/evidence_routing.rs` | `decomposed` resolution class excluded from every verified-credit consumer (ADR-030) | split fixture earns no verified credit; stats column; schema fixture | transition (4.9); `needle-16657d72` |
+| N-T47 | `src/dispatch/`, `src/trace/`, `src/outcome/`, `src/config/` | Streamed usage accounting so killed attempts are charged; `costed` flag; per-attempt spend cap resolving `budget_exhausted` (ADR-030) | killed-transcript replay carries cost; envelope reconciles; cap stops within one event with no failure count | transition (4.9); `needle-ec41ceba`, `needle-c0003de3` |
+| N-T48 | `src/evidence_routing.rs`, `src/worker/` | Workspace-scoped evidence with fleet fallback and recorded deciding scope; poor-workspace signal (ADR-030) | ledger-shaped replay routes reddit-media-player to codex and pdftract to flash; scope in receipt | blocked by N-T46; `needle-f84c01a4` |
+| N-T49 | `src/outcome/`, `src/validation/default_gates.rs`, `src/strand/workspace_health.rs`, `src/gate_health.rs` | Baseline gate run per revision; matching failure resolves `workspace_red` as infrastructure-class (ADR-023/030) | red-HEAD fixture: no failure count, no adapter penalty, one infra bead; green baseline unchanged | blocked by N-T46; `needle-c2fc81d6` |
+| N-T50 | `src/attempt_history.rs`, `src/learning/` | CandidateLesson from a failing-then-succeeding pair keyed by failure signature; retrieval candidate only (ADR-026) | pair fixture yields one lesson; success-only and decomposed yield none; replay idempotent | blocked by N-T45, N-T46; `needle-75368add` |
+| N-T51 | `src/dispatch/`, `src/trace/`, `src/provider_health.rs` | Usage extractors for codex/opencode/omp; provider health keyed by gateway | per-adapter fixtures costed; storm on one GLM adapter degrades its zai-proxy siblings, not codex | blocked by N-T47 (extractors); `needle-f2b97407`, `needle-17a7f6a0` |
+| N-T52 | `src/config/`, every state writer | One configured state directory; spawned tests fail without isolation; consumers skip fixture rows (ADR-030) | read-only fake home receives no write; unisolated spawn fails fast | transition (4.9); `needle-e8f408e1`; relates to `needle-595e2622` |
+| N-T53 | `src/learning/` | Pure `ImprovementProposal` generator over ledger evidence classes in the N-T07 envelope; shadow mode (ADR-029) | 2026-09-12..14-shaped fixture yields the unchanged-retry, workspace-regret and unverified-spend proposals; no side effects | blocked by N-T46, N-T47, `needle-2b0a309b`; `needle-908c1f25` |
+| N-T54 | admission adapter | Proposals admitted through N-T07 into provenance-linked beads; dedup against existing owners; budget; L5 refused (ADR-029) | unchanged-retry proposal resolves to R1/R2 and creates nothing; one bead across concurrent submissions | blocked by N-T53, `needle-43c0d818`, `needle-f754b4cb`; `needle-e830524d` |
+| N-T55 | receipts store | Impact receipt per admitted proposal; promote/withdraw on cohort measures; withdrawal is a revert proposal; contaminated cohort holds (ADR-029) | improved/unchanged/contaminated fixtures decide promote/withdraw/hold; receipts append-only | blocked by N-T54; `needle-c4e6424a` |
+| N-T56 | `src/cli/` | `needle improvements` read-only view of proposals, beads, receipts and trend | deterministic JSON/human output; no write | blocked by N-T55; `needle-65e66131` |
 
 ## 9. Transition gates and order
 
@@ -1151,10 +1330,19 @@ generated conformance report.
   guidance and returning attributable mature evidence, with busy-queue progress,
   crash recovery, and harmful-guidance withdrawal. Its fixture/configuration
   delivery is distinct from evidence that a live canary improved outcomes.
+- Improvement proposals are generated only from ledger evidence, admitted
+  only through the N-T07 controller, and carry impact receipts; the first
+  withdrawal has exercised the revert path end to end (ADR-029, section
+  4.10).
+- Verified-closure yield and cost per verified closure exclude decomposed,
+  uncosted and fixture rows (ADR-030) before any receipt is trusted.
 
 Implementation order is A, then the correctness portion of B, then C, then D.
 Within A, N-T15 ships first and the ledger sink (N-T16 plus the
 `declarative-config` sink) precedes every consumer in C (section 4.4).
+Within revision 34, N-T46–N-T49 and N-T52 precede N-T53, N-T53 runs in
+shadow before N-T54 admits anything, and N-T54's budget rises only on
+receipts from N-T55 (section 4.10).
 Backlog generation may continue only under an explicit fixed budget and cannot
 be used as evidence that the factory is improving.
 
@@ -1183,7 +1371,13 @@ The combined factory reports at least:
 - intended versus actual guidance exposure and comparable eligible recurrence;
 - accepted deliverables per human hour, with explicit observation horizon and
   available intervention-time evidence; missing human-time data stays unknown;
-- bypass, rollback, and policy-conflict rates.
+- bypass, rollback, and policy-conflict rates;
+- improvement proposals generated, admitted, refused, promoted and withdrawn,
+  with each receipt's measured delta against its cohort baseline;
+- verified closures per dollar and share of spend on unverified attempts,
+  computed only from costed rows and excluding decomposed resolutions;
+- operator curation: proposals a human had to write or select, which ADR-029
+  drives toward zero.
 
 Tool calls, commits, notes, generated beads, reflection documents, and worker
 loops remain diagnostic dimensions. None is a productivity objective by
