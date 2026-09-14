@@ -22,7 +22,7 @@ run_plan() {
 }
 
 printf '%s\n' '{
-  "test-count": 10,
+  "test-count": 12,
   "rust-suites": {
     "suite-a": {
       "package-name": "needle",
@@ -134,7 +134,7 @@ if run_plan "$TMP_ROOT/bad-history.json" "$TMP_ROOT/bad-history-output" >/dev/nu
   fail 'malformed duration history was accepted'
 fi
 
-jq '."test-count" = 11' "$TMP_ROOT/inventory.json" > "$TMP_ROOT/bad-count.json"
+jq '."test-count" = 13' "$TMP_ROOT/inventory.json" > "$TMP_ROOT/bad-count.json"
 if "$PLANNER" --inventory "$TMP_ROOT/bad-count.json" --history "$TMP_ROOT/history.json" \
     --output-dir "$TMP_ROOT/bad-count-output" --shards 5 >/dev/null 2>&1; then
   fail 'inventory with a lying test-count was accepted'

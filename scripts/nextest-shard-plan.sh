@@ -78,8 +78,10 @@ jq -r '
 
 inventory_count=$(wc -l < "$inventory_tsv" | tr -d '[:space:]')
 reported_count=$(jq -r '."test-count"' "$inventory")
-[[ "$inventory_count" =~ ^[0-9]+$ && "$inventory_count" == "$reported_count" ]] ||
-  fail "listed inventory count $inventory_count differs from nextest test-count $reported_count"
+listed_count=$(jq '[."rust-suites" | to_entries[] |
+  select(.value.status == "listed") | .value.testcases | length] | add // 0' "$inventory")
+[[ "$listed_count" =~ ^[0-9]+$ && "$listed_count" == "$reported_count" ]] ||
+  fail "listed testcase count $listed_count differs from nextest test-count $reported_count"
 ((inventory_count >= shard_count)) ||
   fail "inventory has $inventory_count tests but $shard_count nonempty shards are required"
 
