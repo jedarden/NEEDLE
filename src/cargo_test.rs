@@ -58,10 +58,16 @@ pub const MAX_OUTPUT_BYTES: usize = 65536;
 fn cargo_program() -> PathBuf {
     std::env::var_os("CARGO")
         .map(PathBuf::from)
+        // Nextest archives preserve Cargo's build-time `CARGO` value. That
+        // absolute path can name the archive producer's filesystem and be
+        // absent in the isolated shard that executes the test. Do not let a
+        // stale hint mask the shard's valid CARGO_HOME/PATH toolchain.
+        .filter(|path| path.is_file())
         .or_else(|| {
             std::env::var_os("CARGO_HOME")
                 .map(PathBuf::from)
                 .map(|home| home.join("bin/cargo"))
+                .filter(|path| path.is_file())
         })
         .unwrap_or_else(|| PathBuf::from("cargo"))
 }
