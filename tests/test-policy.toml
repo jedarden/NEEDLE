@@ -334,6 +334,10 @@ pattern = "tests/install_sh/*"
 owner = "component:installer"
 
 [[artifact]]
+pattern = "tests/lib-process-purity/*"
+owner = "component:lib-process-purity"
+
+[[artifact]]
 pattern = "tests/installer/*"
 owner = "component:installer"
 
