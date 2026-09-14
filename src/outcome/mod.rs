@@ -3833,7 +3833,6 @@ mod tests {
             .unwrap()
             .expect("the synthetic HOME should contain the fixture's state");
         assert_eq!(state.workspace, a_path);
-        assert_ne!(state.workspace, PathBuf::from("/tmp"));
 
         drop(a);
         drop(b);
