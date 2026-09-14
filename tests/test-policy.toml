@@ -25,7 +25,9 @@ version = 1
 max_tests = 3916
 
 [tier_budget]
-push = 650
+# +1 source-level guard for in-process Worker/Explore isolation
+# (needle-3e6b4ef0).
+push = 651
 contract = 67
 # +16 literal test attributes for Cargo execution isolation (needle-b31fcb27):
 # seven integration cases plus nine nested-Cargo fixture tests embedded in source.
@@ -46,7 +48,7 @@ owner = "component:process-integration"
 name = "integration_tests"
 path = "tests/integration_tests.rs"
 tier = "push"
-max_tests = 545
+max_tests = 546
 owner = "component:core-integration"
 
 [[harness]]

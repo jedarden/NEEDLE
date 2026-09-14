@@ -9322,11 +9322,27 @@ mod tests {
         Worker::new(config, "test-worker".to_string(), store)
     }
 
+    /// Return production defaults with Explore disabled and rooted in a
+    /// process-lifetime temporary directory.
+    ///
+    /// `Worker::new` constructs `ExploreStrand`, whose constructor performs
+    /// auto-discovery immediately when `workspaces` is empty. Tests must use
+    /// this helper instead of passing an untouched `Config::default()` to a
+    /// Worker, even when they never poll the resulting worker.
+    fn isolated_default_config() -> Config {
+        let mut config = Config::default();
+        let explore_root = crate::util::test_env::isolated_home();
+        config.strands.explore.enabled = false;
+        config.strands.explore.workspace_root = explore_root;
+        config.strands.explore.workspaces.clear();
+        config
+    }
+
     /// Return a configuration whose selected adapter is one of NEEDLE's
     /// built-ins. `Config::default()` intentionally names the legacy
     /// operator-provided `claude` adapter, which is absent in isolated CI.
     fn valid_test_config() -> Config {
-        let mut config = Config::default();
+        let mut config = isolated_default_config();
         config.agent.default = "claude-sonnet".to_string();
         // Isolate operator state. `workspace.home` defaults to the real
         // `~/.needle`, whose `state/workers.json` is the live fleet's worker
@@ -11407,7 +11423,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_provider_returns_none_for_missing_adapter() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
-        let mut config = Config::default();
+        let mut config = isolated_default_config();
         config.agent.default = "nonexistent-adapter".to_string();
         config.self_modification.hot_reload = false;
         let worker = Worker::new(config, "test-provider".to_string(), store);
@@ -11640,7 +11656,7 @@ mod tests {
     async fn apply_routing_rules_strict_true_no_match_returns_err() {
         use crate::config::{RoutingConfig, RoutingRule};
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
-        let mut config = Config::default();
+        let mut config = isolated_default_config();
         config.self_modification.hot_reload = false;
         // Enable strict mode with a rule that won't match.
         config.agent.routing = Some(RoutingConfig {
@@ -11691,7 +11707,7 @@ mod tests {
     async fn apply_routing_rules_strict_false_no_match_returns_default() {
         use crate::config::{RoutingConfig, RoutingRule};
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
-        let mut config = Config::default();
+        let mut config = isolated_default_config();
         config.self_modification.hot_reload = false;
         // Disable strict mode with a rule that won't match.
         config.agent.routing = Some(RoutingConfig {
@@ -11734,7 +11750,7 @@ mod tests {
     async fn apply_routing_rules_strict_true_match_returns_ok() {
         use crate::config::{RoutingConfig, RoutingRule};
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
-        let mut config = Config::default();
+        let mut config = isolated_default_config();
         config.self_modification.hot_reload = false;
         // Enable strict mode with a rule that will match.
         config.agent.routing = Some(RoutingConfig {
@@ -11777,7 +11793,7 @@ mod tests {
     async fn apply_routing_rules_strict_false_uses_default_adapter() {
         use crate::config::{RoutingConfig, RoutingRule};
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
-        let mut config = Config::default();
+        let mut config = isolated_default_config();
         config.self_modification.hot_reload = false;
         // Disable strict mode with default_adapter set.
         config.agent.routing = Some(RoutingConfig {
@@ -11820,7 +11836,7 @@ mod tests {
     fn default_routing_rules_anthropic_subscription_models() {
         // Verify that default routing rules route Anthropic subscription models to claude.
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
-        let mut config = Config::default();
+        let mut config = isolated_default_config();
         config.self_modification.hot_reload = false;
 
         // Use the default routing rules from AgentConfig::default_routing().
@@ -11964,7 +11980,7 @@ mod tests {
         // Test that when multiple rules match the same model, the first rule wins.
         use crate::config::{RoutingConfig, RoutingRule};
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
-        let mut config = Config::default();
+        let mut config = isolated_default_config();
         config.self_modification.hot_reload = false;
 
         // Configure two rules that both match "claude-sonnet-4-6":
@@ -12030,7 +12046,7 @@ mod tests {
         // and verify the second rule now wins.
         use crate::config::{RoutingConfig, RoutingRule};
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
-        let mut config = Config::default();
+        let mut config = isolated_default_config();
         config.self_modification.hot_reload = false;
 
         // Same two patterns as previous test, but in REVERSED order:
@@ -12103,7 +12119,7 @@ mod tests {
         /// to the same adapter, the first matching rule is reported.
         use crate::config::{RoutingConfig, RoutingRule};
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
-        let mut config = Config::default();
+        let mut config = isolated_default_config();
         config.self_modification.hot_reload = false;
 
         // Configure two rules that both match "claude-sonnet-4-6" AND route to
@@ -12177,7 +12193,7 @@ mod tests {
         /// also match.
         use crate::config::{RoutingConfig, RoutingRule};
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
-        let mut config = Config::default();
+        let mut config = isolated_default_config();
         config.self_modification.hot_reload = false;
 
         // Configure three rules that all match "claude-sonnet-4-6":
@@ -12259,7 +12275,7 @@ mod tests {
         /// the first valid matching pattern determines the adapter.
         use crate::config::{RoutingConfig, RoutingRule};
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
-        let mut config = Config::default();
+        let mut config = isolated_default_config();
         config.self_modification.hot_reload = false;
 
         // Configure rules with invalid pattern in the middle:
@@ -12344,7 +12360,7 @@ mod tests {
         /// whether all rules are checked or only the first match.
         use crate::config::{RoutingConfig, RoutingRule};
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
-        let mut config = Config::default();
+        let mut config = isolated_default_config();
         config.self_modification.hot_reload = false;
 
         // Configure rules where first match should stop evaluation:
@@ -12423,7 +12439,7 @@ mod tests {
     #[test]
     fn found_but_all_excluded_returns_false_when_no_evaluations() {
         let _temp_dir = tempfile::tempdir().unwrap();
-        let config = Config::default();
+        let config = isolated_default_config();
         let store = Arc::new(MockStore::empty());
         let worker = Worker::new(config, "test-worker".to_string(), store);
 
@@ -12434,7 +12450,7 @@ mod tests {
     #[test]
     fn found_but_all_excluded_returns_false_when_no_beads_found() {
         let _temp_dir = tempfile::tempdir().unwrap();
-        let config = Config::default();
+        let config = isolated_default_config();
         let store = Arc::new(MockStore::empty());
         let mut worker = Worker::new(config, "test-worker".to_string(), store);
 
@@ -12450,7 +12466,7 @@ mod tests {
     #[test]
     fn found_but_all_excluded_returns_true_when_explore_found_beads() {
         let _temp_dir = tempfile::tempdir().unwrap();
-        let config = Config::default();
+        let config = isolated_default_config();
         let store = Arc::new(MockStore::empty());
         let mut worker = Worker::new(config, "test-worker".to_string(), store);
 
@@ -12469,7 +12485,7 @@ mod tests {
     #[test]
     fn found_but_all_excluded_returns_true_when_pluck_found_candidates() {
         let _temp_dir = tempfile::tempdir().unwrap();
-        let config = Config::default();
+        let config = isolated_default_config();
         let store = Arc::new(MockStore::empty());
         let mut worker = Worker::new(config, "test-worker".to_string(), store);
 
@@ -12488,7 +12504,7 @@ mod tests {
     #[test]
     fn found_but_all_excluded_returns_false_when_bead_was_claimed() {
         let _temp_dir = tempfile::tempdir().unwrap();
-        let config = Config::default();
+        let config = isolated_default_config();
         let store = Arc::new(MockStore::empty());
         let mut worker = Worker::new(config, "test-worker".to_string(), store);
 
@@ -12501,7 +12517,7 @@ mod tests {
     #[test]
     fn jittered_backoff_is_within_configured_range() {
         let _temp_dir = tempfile::tempdir().unwrap();
-        let mut config = Config::default();
+        let mut config = isolated_default_config();
         config.worker.idle_backoff_min = 60;
         config.worker.idle_backoff_max = 120;
         let store = Arc::new(MockStore::empty());
@@ -12530,7 +12546,7 @@ mod tests {
     #[test]
     fn jittered_backoff_returns_min_when_min_equals_max() {
         let _temp_dir = tempfile::tempdir().unwrap();
-        let mut config = Config::default();
+        let mut config = isolated_default_config();
         config.worker.idle_backoff_min = 90;
         config.worker.idle_backoff_max = 90;
         let store = Arc::new(MockStore::empty());
@@ -12546,7 +12562,7 @@ mod tests {
     #[test]
     fn check_workspace_mtimes_returns_most_recent_mtime() {
         let temp_root = tempfile::tempdir().unwrap();
-        let config = Config::default();
+        let config = isolated_default_config();
         let store = Arc::new(MockStore::empty());
         let mut worker = Worker::new(config, "test-worker".to_string(), store);
 
@@ -12593,7 +12609,7 @@ mod tests {
     #[test]
     fn check_workspace_mtimes_returns_none_when_no_files_exist() {
         let temp_dir = tempfile::tempdir().unwrap();
-        let config = Config::default();
+        let config = isolated_default_config();
         let store = Arc::new(MockStore::empty());
         let mut worker = Worker::new(config, "test-worker".to_string(), store);
 
@@ -12614,7 +12630,7 @@ mod tests {
     #[test]
     fn short_retry_backoff_used_when_found_but_excluded() {
         let _temp_dir = tempfile::tempdir().unwrap();
-        let mut config = Config::default();
+        let mut config = isolated_default_config();
         config.worker.short_retry_backoff = 5;
         config.worker.idle_backoff_min = 60;
         config.worker.idle_backoff_max = 120;
@@ -12647,7 +12663,7 @@ mod tests {
     #[test]
     fn jittered_idle_backoff_used_when_no_candidates_found() {
         let _temp_dir = tempfile::tempdir().unwrap();
-        let mut config = Config::default();
+        let mut config = isolated_default_config();
         config.worker.short_retry_backoff = 5;
         config.worker.idle_backoff_min = 60;
         config.worker.idle_backoff_max = 120;
@@ -12673,7 +12689,7 @@ mod tests {
     #[test]
     fn found_but_excluded_flag_set_from_explore_strand() {
         let _temp_dir = tempfile::tempdir().unwrap();
-        let config = Config::default();
+        let config = isolated_default_config();
         let store = Arc::new(MockStore::empty());
         let mut worker = Worker::new(config, "test-worker".to_string(), store);
 
@@ -12700,7 +12716,7 @@ mod tests {
     #[test]
     fn found_but_excluded_flag_set_from_pluck_strand() {
         let _temp_dir = tempfile::tempdir().unwrap();
-        let config = Config::default();
+        let config = isolated_default_config();
         let store = Arc::new(MockStore::empty());
         let mut worker = Worker::new(config, "test-worker".to_string(), store);
 
@@ -12727,7 +12743,7 @@ mod tests {
     #[test]
     fn found_but_excluded_flag_false_when_truly_no_work() {
         let _temp_dir = tempfile::tempdir().unwrap();
-        let config = Config::default();
+        let config = isolated_default_config();
         let store = Arc::new(MockStore::empty());
         let mut worker = Worker::new(config, "test-worker".to_string(), store);
 
@@ -12755,7 +12771,7 @@ mod tests {
     #[test]
     fn retry_path_decision_uses_correct_backoff_values() {
         let _temp_dir = tempfile::tempdir().unwrap();
-        let mut config = Config::default();
+        let mut config = isolated_default_config();
 
         // Set distinct backoff values to verify correct selection
         config.worker.short_retry_backoff = 3;
@@ -12790,7 +12806,7 @@ mod tests {
     #[test]
     fn found_but_excluded_detects_explore_candidates_with_exclusion() {
         let _temp_dir = tempfile::tempdir().unwrap();
-        let config = Config::default();
+        let config = isolated_default_config();
         let store = Arc::new(MockStore::empty());
         let mut worker = Worker::new(config, "test-worker".to_string(), store);
 

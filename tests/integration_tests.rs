@@ -68,6 +68,8 @@ mod strand_tilde_expansion_tests;
 mod template_comprehensive_tests;
 #[path = "integration_tests/template_rendering_tests.rs"]
 mod template_rendering_tests;
+#[path = "integration_tests/test_in_process_workspace_isolation.rs"]
+mod test_in_process_workspace_isolation;
 #[path = "integration_tests/test_llms_drift.rs"]
 mod test_llms_drift;
 #[path = "integration_tests/test_no_tmp_in_fixtures.rs"]
