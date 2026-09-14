@@ -810,14 +810,20 @@ fn archive_and_status_process_contracts_executable(
     body: &str,
 ) -> std::path::PathBuf {
     let path = root.join(name);
-    let mut file = fs::File::create(&path).expect("create executable fixture");
+    let staged = root.join(format!(".{name}.staged"));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged)
+        .expect("create staged executable fixture");
     file.write_all(body.as_bytes())
         .expect("write executable fixture");
     file.sync_all().expect("sync executable fixture");
     drop(file);
-    let mut permissions = fs::metadata(&path).unwrap().permissions();
+    let mut permissions = fs::metadata(&staged).unwrap().permissions();
     permissions.set_mode(0o755);
-    fs::set_permissions(&path, permissions).unwrap();
+    fs::set_permissions(&staged, permissions).unwrap();
+    fs::rename(&staged, &path).expect("publish closed executable fixture atomically");
     path
 }
 
