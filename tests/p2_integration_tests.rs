@@ -1515,17 +1515,12 @@ async fn explore_discovers_work_in_other_workspace() {
     // fixture workspace. This keeps bead-rs from reading operator state even
     // after the initial setup commands have completed.
     let bead = bead_path();
-    let canonical_bead = std::fs::canonicalize(&bead).unwrap_or_else(|_| bead.clone());
-    let native_bead = which::which_all("bead")
-        .expect("PATH should contain the installed bead CLI")
-        .map(|candidate| std::fs::canonicalize(&candidate).unwrap_or(candidate))
-        .find(|candidate| candidate != &canonical_bead)
-        // Only an operator workstation has a queue-fence wrapper first on
-        // PATH with a native bead behind it. CI installs exactly one pinned
-        // bead-rs and no wrapper, so there is nothing "behind" it -- that one
-        // IS the native binary. Requiring a second entry asserted the
-        // developer's PATH layout, not the behaviour under test.
-        .unwrap_or_else(|| canonical_bead.clone());
+    let Some(native_bead) = native_bead_path() else {
+        eprintln!(
+            "skipping explore_discovers_work_in_other_workspace: PATH has no bead-rs CLI that can initialize a workspace with an isolated HOME"
+        );
+        return;
+    };
 
     // The host's `bead` command may be a queue-fence wrapper. Give the
     // isolated HOME a complete, test-local policy that routes this unrelated
@@ -1907,6 +1902,54 @@ fn create_mitosis_dispatcher(json_response: &str) -> needle::dispatch::Dispatche
 /// Returns the path to the native bead-rs CLI binary.
 fn bead_path() -> PathBuf {
     which::which("bead").expect("bead CLI must be installed for p2 integration tests")
+}
+
+/// Find a bead-rs CLI that works without operator HOME state.
+///
+/// The first `bead` on a developer PATH may be a queue-fence wrapper. A single
+/// candidate in CI, on the other hand, is normally the native binary itself,
+/// so path position cannot identify either case. Probe each distinct candidate
+/// against a disposable workspace and HOME and skip the one real-CLI test only
+/// when none can satisfy that behavioral precondition.
+fn native_bead_path() -> Option<PathBuf> {
+    let candidates = which::which_all("bead").ok()?;
+    let mut seen = HashSet::new();
+
+    for candidate in candidates {
+        let identity = std::fs::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
+        if !seen.insert(identity.clone()) || !identity.is_file() {
+            continue;
+        }
+
+        let Ok(probe) = tempfile::tempdir() else {
+            continue;
+        };
+        let workspace = probe.path().join("workspace");
+        let home = probe.path().join("home");
+        if std::fs::create_dir_all(&workspace).is_err() || std::fs::create_dir_all(&home).is_err() {
+            continue;
+        }
+
+        let usable = std::process::Command::new(&identity)
+            .current_dir(&workspace)
+            .env("HOME", &home)
+            .args([
+                "init",
+                "--prefix",
+                "probe",
+                "--skip-foreign-workspace",
+                "--no-auto-flush",
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        if usable {
+            return Some(identity);
+        }
+    }
+
+    None
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
