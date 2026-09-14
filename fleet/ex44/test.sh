@@ -19,6 +19,7 @@ grep -q '^  backend: bead-rs$' "$SRC_DIR/roam-home.yaml"
 grep -qx '/home/coding/FABRIC' "$SRC_DIR/required-explore-workspaces.txt"
 
 grep -qx 'NEEDLE_STRANDS__GENERATION__LOW_WATER_RESERVE=6' "$SRC_DIR/fleet-policy.env"
+! grep -q 'NEEDLE_STRANDS__GENERATION__ENABLED' "$SRC_DIR/apply-ex44-fleet.sh"
 grep -qx 'NEEDLE_STRANDS__MITOSIS__TIMEOUT_TRIGGERED__AGENT_WALLCLOCK_TIMEOUT=true' "$SRC_DIR/fleet-policy.env"
 grep -qx 'NEEDLE_WORKER__MAX_WORKERS=25' "$SRC_DIR/fleet-policy.env"
 grep -qx 'FLEET_ELIGIBLE_TARGET=100' "$SRC_DIR/backlog-policy.env"

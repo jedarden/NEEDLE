@@ -71,7 +71,7 @@ pub use pulse::PulseStrand;
 pub use reflect::{CliReflectAgent, ReflectAgent, ReflectStrand};
 pub use splice::SpliceStrand;
 pub use unravel::{UnravelAgent, UnravelStrand};
-pub use weave::{CliWeaveAgent, WeaveAgent, WeaveStrand};
+pub use weave::{CliWeaveAgent, FleetWeaveStrand, WeaveAgent, WeaveStrand};
 
 /// A single selection strategy in the waterfall.
 #[async_trait::async_trait]
@@ -222,17 +222,43 @@ impl StrandRunner {
             telemetry.clone(),
         );
 
-        let weave = WeaveStrand::new(
-            config.strands.weave.clone(),
-            config.workspace.default.clone(),
-            state_base.join("weave"),
-            Box::new(CliWeaveAgent::new(config.agent.default.clone())),
-            telemetry.clone(),
-        )
-        .with_generation(
-            config.strands.generation.clone(),
-            config.strands.pluck.exclude_labels.clone(),
-        );
+        let weave_agent = match CliWeaveAgent::from_config(config) {
+            Ok(agent) => agent,
+            Err(error) => {
+                tracing::warn!(
+                    adapter = %config.agent.default,
+                    error = %error,
+                    "failed to resolve Weave adapter; generation will report creator failure"
+                );
+                CliWeaveAgent::unavailable(error.to_string())
+            }
+        };
+        let weave: Box<dyn Strand> = if config.strands.explore.enabled {
+            Box::new(FleetWeaveStrand::new(
+                config.strands.weave.clone(),
+                config.strands.explore.clone(),
+                state_base.join("weave"),
+                Box::new(weave_agent),
+                telemetry.clone(),
+                config.strands.generation.clone(),
+                config.strands.pluck.exclude_labels.clone(),
+                worker_id.to_string(),
+            ))
+        } else {
+            Box::new(
+                WeaveStrand::new(
+                    config.strands.weave.clone(),
+                    config.workspace.default.clone(),
+                    state_base.join("weave"),
+                    Box::new(weave_agent),
+                    telemetry.clone(),
+                )
+                .with_generation(
+                    config.strands.generation.clone(),
+                    config.strands.pluck.exclude_labels.clone(),
+                ),
+            )
+        };
 
         let unravel = UnravelStrand::new(
             config.strands.unravel.clone(),
@@ -319,7 +345,7 @@ impl StrandRunner {
                 Box::new(pluck),
                 Box::new(mend),
                 Box::new(explore),
-                Box::new(weave),
+                weave,
                 Box::new(unravel),
                 Box::new(analyze),
                 Box::new(pulse),

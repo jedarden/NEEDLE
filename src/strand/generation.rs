@@ -312,6 +312,65 @@ impl GeneratorGate {
         FileExt::unlock(&lock_file).context("failed to unlock generator lease")?;
         Ok(Some(fencing_token))
     }
+
+    /// Shorten a won lease after the creator itself fails to launch or return.
+    ///
+    /// Keeping a brief failure lease prevents every exhausted worker from
+    /// retrying the same broken provider immediately, while avoiding the full
+    /// successful/no-gap cooldown after a failure that created no work. The
+    /// fencing token makes a stale worker unable to shorten a newer owner's
+    /// lease.
+    pub(super) fn mark_creator_failed(&self, strand_name: &str, fencing_token: &str) {
+        if let Err(error) = self.shorten_failed_lease(strand_name, fencing_token) {
+            tracing::warn!(
+                strand = strand_name,
+                workspace = %self.workspace.display(),
+                error = %error,
+                "failed to shorten generation lease after creator failure"
+            );
+        }
+    }
+
+    fn shorten_failed_lease(&self, strand_name: &str, fencing_token: &str) -> Result<()> {
+        let (lock_path, lease_path) = self.lease_paths(strand_name);
+        let lock_file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .with_context(|| {
+                format!(
+                    "failed to open generator lease lock: {}",
+                    lock_path.display()
+                )
+            })?;
+        lock_file
+            .lock_exclusive()
+            .with_context(|| format!("failed to lock generator lease: {}", lock_path.display()))?;
+
+        let Some(mut record) = read_lease(&lease_path)? else {
+            FileExt::unlock(&lock_file).context("failed to unlock generator lease")?;
+            return Ok(());
+        };
+        if record.fencing_token == fencing_token {
+            let failure_retry_secs = self.config.lease_ttl_secs.clamp(1, 30);
+            record.expires_at_unix = Utc::now()
+                .timestamp()
+                .saturating_add(failure_retry_secs as i64);
+            let encoded =
+                serde_json::to_vec(&record).context("failed to encode generator lease")?;
+            std::fs::write(&lease_path, encoded).with_context(|| {
+                format!(
+                    "failed to persist shortened generator lease: {}",
+                    lease_path.display()
+                )
+            })?;
+        }
+
+        FileExt::unlock(&lock_file).context("failed to unlock generator lease")?;
+        Ok(())
+    }
 }
 
 fn read_lease(path: &Path) -> Result<Option<LeaseRecord>> {
@@ -538,6 +597,36 @@ mod tests {
 
         let permit = second.prepare("weave", &store, &HashSet::new()).await;
         assert!(matches!(permit, GeneratorPermit::LowWater { .. }));
+    }
+
+    #[tokio::test]
+    async fn creator_failure_shortens_only_the_matching_lease() {
+        let dir = tempfile::tempdir().unwrap();
+        let gate = gate(dir.path(), 300, "worker-a");
+        let store = GateStore::healthy(Vec::new());
+
+        let GeneratorPermit::LowWater { fencing_token } =
+            gate.prepare("weave", &store, &HashSet::new()).await
+        else {
+            panic!("empty frontier should acquire the generation lease");
+        };
+        let (_, lease_path) = gate.lease_paths("weave");
+        let original = read_lease(&lease_path).unwrap().unwrap();
+
+        gate.mark_creator_failed("weave", "stale-token");
+        assert_eq!(
+            read_lease(&lease_path).unwrap().unwrap().expires_at_unix,
+            original.expires_at_unix,
+            "a stale creator must not alter the current lease"
+        );
+
+        gate.mark_creator_failed("weave", &fencing_token);
+        let shortened = read_lease(&lease_path).unwrap().unwrap();
+        let remaining = shortened.expires_at_unix - Utc::now().timestamp();
+        assert!(
+            (1..=30).contains(&remaining),
+            "failed creator should retain only the short retry lease; remaining={remaining}"
+        );
     }
 
     #[tokio::test]

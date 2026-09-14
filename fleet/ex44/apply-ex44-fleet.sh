@@ -157,10 +157,8 @@ install_if_changed 644 "$SRC_DIR/backlog-policy.env" "$NEEDLE_CONFIG_DIR/backlog
 
 while IFS=$'\t' read -r id workspace agent delay explore; do
     target="$WORKERS_DIR/$id.env"
-    generation=true
-    [[ "$explore" == false ]] || generation=false
-    expected=$(printf 'NEEDLE_WS=%s\nNEEDLE_AGENT=%s\nNEEDLE_START_DELAY=%s\nNEEDLE_STRANDS__EXPLORE__ENABLED=%s\nNEEDLE_STRANDS__GENERATION__ENABLED=%s' \
-        "$workspace" "$agent" "$delay" "$explore" "$generation")
+    expected=$(printf 'NEEDLE_WS=%s\nNEEDLE_AGENT=%s\nNEEDLE_START_DELAY=%s\nNEEDLE_STRANDS__EXPLORE__ENABLED=%s' \
+        "$workspace" "$agent" "$delay" "$explore")
     if [[ -f "$target" && "$(<"$target")" == "$expected" ]]; then
         echo "- $id.env already current"
         continue

@@ -432,7 +432,7 @@ impl ExploreStrand {
     ///
     /// A workspace is any directory containing a `.beads/` subdirectory.
     /// Returns an empty vector if the root doesn't exist or cannot be read.
-    fn discover_workspaces(root: &Path) -> Vec<PathBuf> {
+    pub(super) fn discover_workspaces(root: &Path) -> Vec<PathBuf> {
         let mut discovered = Vec::new();
 
         // If root doesn't exist, return empty (not an error).

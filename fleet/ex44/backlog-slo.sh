@@ -37,8 +37,10 @@ eligible_counts() {
         | sub("[+]00:00$"; "Z")
         | fromdateiso8601? // 0;
       def timed_hold_active:
-        ((startswith("deferred:")) or (startswith("quarantine-until:")))
-        and ((timestamp) > now);
+        . as $raw
+        | (($raw | ascii_downcase | startswith("deferred:"))
+           or ($raw | ascii_downcase | startswith("quarantine-until:")))
+        and (($raw | timestamp) > now);
       def expired_quarantine_marking($bead):
         (($bead.labels // []) | any(. == "deferred"))
         and (($bead.labels // []) | any(startswith("failure-count:")))
@@ -59,8 +61,8 @@ eligible_counts() {
                  or ($label | startswith("human:"))
                  or $label == "human-owned"
                  or $label == "owner:human"
-                 or (($label | startswith("deferred:")) and ($label | timed_hold_active))
-                 or (($label | startswith("quarantine-until:")) and ($label | timed_hold_active))
+                 or (($label | startswith("deferred:")) and ($raw | timed_hold_active))
+                 or (($label | startswith("quarantine-until:")) and ($raw | timed_hold_active))
                  or ($label == "deferred" and (expired_quarantine_marking($bead) | not))));
       map(if type == "array" then .[] else . end) as $beads
       | {
@@ -77,9 +79,10 @@ if [[ "$SELF_TEST" == 1 ]]; then
             '{"labels":["human"]}' \
             '{"labels":["deferred","failure-count:1","quarantine-until:2020-01-01T00:00:00Z"]}' \
             '{"labels":["deferred"]}' \
+            '{"labels":["deferred:2999-01-01T00:00:00Z"]}' \
         | eligible_counts
     )
-    [[ "$(jq -r '.raw_ready' <<<"$actual")" -eq 4 ]]
+    [[ "$(jq -r '.raw_ready' <<<"$actual")" -eq 5 ]]
     [[ "$(jq -r '.eligible_ready' <<<"$actual")" -eq 2 ]]
     echo "backlog-slo self-test passed"
     exit 0
@@ -102,12 +105,26 @@ trap 'rm -f "$rows" "$paths" "$roam_paths" "$pinned_routes"' EXIT
       in_list && /^      - \/home\/coding\// { print $2; next }
       in_list && !/^    #/ && !/^      - / { exit }
     ' "$CONFIG"
-    awk -F'\t' '$1 !~ /^#/ && NF == 5 && $5 == "true" {print $2}' "$MANIFEST"
 } | sort -u >"$roam_paths"
+
+# Empty Explore lists mean auto-discovery. Mirror Explore's immediate-child
+# scope without treating a worker's virtual roam-only home as a repository.
+if [[ ! -s "$roam_paths" ]]; then
+    workspace_root=$(awk '
+      /^  explore:/ { in_explore=1; next }
+      in_explore && /^    workspace_root:/ { print $2; exit }
+      in_explore && /^  [^ ]/ { exit }
+    ' "$CONFIG")
+    if [[ -n "$workspace_root" && -d "$workspace_root" ]]; then
+        find "$workspace_root" -mindepth 3 -maxdepth 3 -type f \
+            -path '*/.beads/config.json' -printf '%h\n' \
+            | sed 's#/.beads$##' | sort -u >"$roam_paths"
+    fi
+fi
 
 {
     cat "$roam_paths"
-    awk -F'\t' '$1 !~ /^#/ && NF == 5 {print $2}' "$MANIFEST"
+    awk -F'\t' '$1 !~ /^#/ && NF == 5 && $5 == "false" {print $2}' "$MANIFEST"
 } | sort -u >"$paths"
 
 awk -F'\t' '$1 !~ /^#/ && NF == 5 && $5 == "false" {print $2}' "$MANIFEST" \
@@ -117,7 +134,33 @@ awk -F'\t' '$1 !~ /^#/ && NF == 5 && $5 == "false" {print $2}' "$MANIFEST" \
             '{workspace:$workspace, workers:$workers}'
     done >"$pinned_routes"
 
+manifest_workers=$(awk -F'\t' '$1 !~ /^#/ && NF == 5 {n++} END {print n+0}' "$MANIFEST")
 roaming_workers=$(awk -F'\t' '$1 !~ /^#/ && NF == 5 && $5 == "true" {n++} END {print n+0}' "$MANIFEST")
+
+# Count fresh heartbeats as deployed capacity, including temporary workers
+# outside the source-controlled roster. The SLO must cover the fleet that is
+# actually consuming work, not only the desired steady-state manifest.
+heartbeat_dir="$NEEDLE_HOST_HOME/.needle/state/heartbeats"
+heartbeat_freshness_secs=${FLEET_HEARTBEAT_FRESHNESS_SECS:-120}
+observed_live_workers=0
+if [[ -d "$heartbeat_dir" ]]; then
+    now_epoch=$(date +%s)
+    while IFS= read -r heartbeat; do
+        modified=$(stat -c %Y "$heartbeat" 2>/dev/null || echo 0)
+        if (( now_epoch - modified <= heartbeat_freshness_secs )); then
+            observed_live_workers=$((observed_live_workers + 1))
+        fi
+    done < <(find "$heartbeat_dir" -maxdepth 1 -type f -name '*.json' -print)
+fi
+
+worker_target=$FLEET_WORKER_TARGET
+(( manifest_workers > worker_target )) && worker_target=$manifest_workers
+if (( observed_live_workers > worker_target )); then
+    roaming_workers=$((roaming_workers + observed_live_workers - worker_target))
+    worker_target=$observed_live_workers
+fi
+eligible_target=$((worker_target * ELIGIBLE_TARGET_PER_WORKER))
+eligible_minimum=$((worker_target * ELIGIBLE_MINIMUM_PER_WORKER))
 
 while IFS= read -r workspace; do
     [[ -n "$workspace" ]] || continue
@@ -141,10 +184,12 @@ done <"$paths"
 report=$(jq -sc \
     --slurpfile routes "$pinned_routes" \
     --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    --argjson workers "$FLEET_WORKER_TARGET" \
+    --argjson workers "$worker_target" \
+    --argjson manifest_workers "$manifest_workers" \
+    --argjson observed_live_workers "$observed_live_workers" \
     --argjson roaming_workers "$roaming_workers" \
-    --argjson target "$FLEET_ELIGIBLE_TARGET" \
-    --argjson minimum "$FLEET_ELIGIBLE_MINIMUM" \
+    --argjson target "$eligible_target" \
+    --argjson minimum "$eligible_minimum" \
     --argjson target_per "$ELIGIBLE_TARGET_PER_WORKER" \
     --argjson minimum_per "$ELIGIBLE_MINIMUM_PER_WORKER" \
     --argjson reserve "$WORKSPACE_ELIGIBLE_RESERVE" '
@@ -180,6 +225,8 @@ report=$(jq -sc \
           timestamp: $timestamp,
           status: $status,
           worker_target: $workers,
+          manifest_workers: $manifest_workers,
+          observed_live_workers: $observed_live_workers,
           eligible_target: $target,
           eligible_minimum: $minimum,
           eligible_target_per_worker: $target_per,

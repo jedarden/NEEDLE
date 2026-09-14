@@ -12,8 +12,11 @@
 //! - **Workspace exclusion.** Configurable list of forbidden workspaces.
 //! - **Weave-generated label.** All created beads are labeled for filtering.
 
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -22,10 +25,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::bead_store::BeadStore;
-use crate::config::WeaveConfig;
+use crate::config::{Config, ExploreConfig, GenerationConfig, WeaveConfig};
+use crate::dispatch::AgentAdapter;
 use crate::process_guard::ProcessGroupKillGuard;
 use crate::telemetry::{EventKind, Telemetry};
-use crate::types::{BeadId, StrandResult};
+use crate::types::{BeadId, InputMethod, StrandResult};
 
 // ─── WeaveAgent trait ────────────────────────────────────────────────────────
 
@@ -112,12 +116,16 @@ pub struct WeaveStrand {
     config: WeaveConfig,
     workspace: PathBuf,
     state_dir: PathBuf,
-    agent: Box<dyn WeaveAgent>,
+    agent: Arc<dyn WeaveAgent>,
     telemetry: Telemetry,
     /// Low-water backlog policy. `None` keeps the strand's ordinary cooldown
     /// behaviour, which is what the default constructor gives tests and
     /// callers that do not opt into generation.
     generation: Option<super::generation::GeneratorGate>,
+    /// Fleet-targeted Weave only runs under a low-water permit. This prevents
+    /// a roaming worker from applying the ordinary per-workspace cooldown to
+    /// every repository it can reach after Explore finds no work.
+    low_water_only: bool,
 }
 
 impl WeaveStrand {
@@ -132,6 +140,16 @@ impl WeaveStrand {
         agent: Box<dyn WeaveAgent>,
         telemetry: Telemetry,
     ) -> Self {
+        Self::new_shared(config, workspace, state_dir, Arc::from(agent), telemetry)
+    }
+
+    fn new_shared(
+        config: WeaveConfig,
+        workspace: PathBuf,
+        state_dir: PathBuf,
+        agent: Arc<dyn WeaveAgent>,
+        telemetry: Telemetry,
+    ) -> Self {
         WeaveStrand {
             config,
             workspace,
@@ -139,6 +157,7 @@ impl WeaveStrand {
             agent,
             telemetry,
             generation: None,
+            low_water_only: false,
         }
     }
 
@@ -159,6 +178,12 @@ impl WeaveStrand {
             exclude_labels,
             self.telemetry.clone(),
         ));
+        self
+    }
+
+    /// Require a low-water permit before doing any analysis.
+    fn low_water_only(mut self) -> Self {
+        self.low_water_only = true;
         self
     }
 
@@ -417,6 +442,17 @@ impl WeaveStrand {
             };
         }
 
+        if self.low_water_only
+            && !matches!(
+                generation_permit,
+                Some(super::generation::GeneratorPermit::LowWater { .. })
+            )
+        {
+            return StrandResult::Skipped {
+                reason: "generation_not_low_water".to_string(),
+            };
+        }
+
         let state_path = self.state_file_path();
         let mut state = match WeaveState::load(&state_path) {
             Ok(s) => s,
@@ -492,6 +528,13 @@ impl WeaveStrand {
             Err(e) => {
                 tracing::warn!(error = %e, "weave strand: agent dispatch failed");
                 self.emit_creator_failed(&e.to_string());
+                if let (
+                    Some(gate),
+                    Some(super::generation::GeneratorPermit::LowWater { fencing_token }),
+                ) = (&self.generation, &generation_permit)
+                {
+                    gate.mark_creator_failed("weave", fencing_token);
+                }
                 return StrandResult::Error(crate::types::StrandError::StoreError(e));
             }
         };
@@ -667,6 +710,144 @@ impl super::Strand for WeaveStrand {
 
 // ─── CLI agent implementation ────────────────────────────────────────────────
 
+/// Workspace-aware Weave for workers that can roam through Explore.
+///
+/// Explore owns selection across the configured workspace set. When that set
+/// is empty, this strand walks the same approved targets and lets the
+/// per-workspace generation gate choose one low-water repository to replenish.
+/// A worker invokes the agent at most once per selection cycle; healthy and
+/// contended targets are skipped without consuming model capacity.
+pub struct FleetWeaveStrand {
+    config: WeaveConfig,
+    explore: ExploreConfig,
+    state_dir: PathBuf,
+    agent: Arc<dyn WeaveAgent>,
+    telemetry: Telemetry,
+    generation: GenerationConfig,
+    exclude_labels: Vec<String>,
+    qualified_id: String,
+}
+
+impl FleetWeaveStrand {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        config: WeaveConfig,
+        explore: ExploreConfig,
+        state_dir: PathBuf,
+        agent: Box<dyn WeaveAgent>,
+        telemetry: Telemetry,
+        generation: GenerationConfig,
+        exclude_labels: Vec<String>,
+        qualified_id: String,
+    ) -> Self {
+        Self {
+            config,
+            explore,
+            state_dir,
+            agent: Arc::from(agent),
+            telemetry,
+            generation,
+            exclude_labels,
+            qualified_id,
+        }
+    }
+
+    /// Return the same workspace scope Explore is allowed to scan, reduced to
+    /// structurally healthy, unique repositories and rotated per worker. The
+    /// rotation spreads simultaneous empty workers across different targets;
+    /// the durable generation lease remains the final duplicate-work guard.
+    fn targets(&self) -> Vec<PathBuf> {
+        let candidates = if self.explore.workspaces.is_empty() {
+            super::ExploreStrand::discover_workspaces(&self.explore.workspace_root)
+        } else {
+            self.explore.workspaces.clone()
+        };
+
+        let healthy = candidates
+            .into_iter()
+            .filter(|workspace| {
+                super::workspace_health::validate_workspace(workspace)
+                    .quarantine_reason()
+                    .is_none()
+            })
+            .collect::<Vec<_>>();
+        let (mut targets, _duplicates) = super::workspace_health::resolve_duplicates(&healthy);
+        targets.sort();
+
+        if !targets.is_empty() {
+            let mut hasher = DefaultHasher::new();
+            self.qualified_id.hash(&mut hasher);
+            let offset = (hasher.finish() as usize) % targets.len();
+            targets.rotate_left(offset);
+        }
+        targets
+    }
+}
+
+#[async_trait::async_trait]
+impl super::Strand for FleetWeaveStrand {
+    fn name(&self) -> &str {
+        "weave"
+    }
+
+    fn is_generator(&self) -> bool {
+        true
+    }
+
+    async fn evaluate(&self, _store: &dyn BeadStore, exclusions: &HashSet<BeadId>) -> StrandResult {
+        if !self.config.enabled || !self.generation.enabled || !self.explore.enabled {
+            return StrandResult::NoWork;
+        }
+
+        for workspace in self.targets() {
+            let store = match crate::bead_store::discover_default(
+                workspace.clone(),
+                None,
+                Some("needle".to_string()),
+                Some(env!("CARGO_PKG_VERSION").to_string()),
+            ) {
+                Ok(store) => store,
+                Err(error) => {
+                    tracing::warn!(
+                        workspace = %workspace.display(),
+                        error = %error,
+                        "workspace-aware Weave could not open target store"
+                    );
+                    continue;
+                }
+            };
+
+            let target = WeaveStrand::new_shared(
+                self.config.clone(),
+                workspace,
+                self.state_dir.clone(),
+                self.agent.clone(),
+                self.telemetry.clone(),
+            )
+            .with_generation(self.generation.clone(), self.exclude_labels.clone())
+            .low_water_only();
+
+            match target.evaluate(store.as_ref(), exclusions).await {
+                // These results mean no model invocation occurred, so this
+                // worker can safely try the next approved repository.
+                StrandResult::Skipped { reason }
+                    if reason == "generation_not_low_water"
+                        || reason == "generation_lease_contended"
+                        || reason == "no_home_store" =>
+                {
+                    continue;
+                }
+                // Every other result follows an acquired low-water lease. Stop
+                // after it so one worker performs at most one creative pass per
+                // cycle, even if the model reports NO_GAPS.
+                result => return result,
+            }
+        }
+
+        StrandResult::NoWork
+    }
+}
+
 /// Default timeout for weave agent calls (60 seconds).
 #[allow(dead_code)]
 const WEAVE_AGENT_TIMEOUT_SECS: u64 = 60;
@@ -680,42 +861,181 @@ const WEAVE_AGENT_TIMEOUT_SECS: u64 = 60;
 /// See: needle-bf-5hlhn (weave strand stall investigation).
 const WEAVE_STRAND_TIMEOUT_SECS: u64 = 120;
 
-/// Production `WeaveAgent` that shells out to a CLI agent (e.g., `claude`).
-///
-/// The agent is invoked in `--print` mode so it emits its analysis as plain
-/// text on stdout without tool-use side-effects. The prompt is written to a
-/// temp file and fed via stdin redirection.
+/// Production Weave invocation source.
+enum WeaveInvocation {
+    /// Compatibility path for callers that explicitly provide a CLI command.
+    LegacyCli(String),
+    /// The resolved NEEDLE adapter, including its invocation template, model,
+    /// environment, and timeout policy.
+    Adapter {
+        adapter: Box<AgentAdapter>,
+        global_timeout_secs: u64,
+    },
+    /// Deferred construction error. Strand construction is infallible, so an
+    /// invalid runtime adapter becomes an observable creator failure.
+    Unavailable(String),
+}
+
+/// Production `WeaveAgent` that invokes NEEDLE's resolved agent adapter.
 pub struct CliWeaveAgent {
-    /// Agent binary name or path (e.g., `"claude"`).
-    agent_cmd: String,
+    invocation: WeaveInvocation,
 }
 
 impl CliWeaveAgent {
-    /// Create a new `CliWeaveAgent`.
-    ///
-    /// `agent_cmd` is the binary used for analysis (typically taken from
-    /// `config.agent.default`).
+    /// Create a compatibility agent from an explicit executable command.
+    /// Production waterfall construction uses [`Self::from_config`] instead.
     pub fn new(agent_cmd: String) -> Self {
-        CliWeaveAgent { agent_cmd }
+        Self {
+            invocation: WeaveInvocation::LegacyCli(agent_cmd),
+        }
     }
+
+    /// Resolve the configured adapter exactly as the ordinary dispatcher does.
+    pub fn from_config(config: &Config) -> Result<Self> {
+        let adapters = crate::dispatch::load_adapters(
+            &config.agent.adapters_dir,
+            &crate::dispatch::builtin_adapters(),
+        )?;
+        let adapter = adapters
+            .get(&config.agent.default)
+            .cloned()
+            .with_context(|| {
+                format!(
+                    "configured Weave adapter '{}' was not found in {}",
+                    config.agent.default,
+                    config.agent.adapters_dir.display()
+                )
+            })?;
+        Ok(Self {
+            invocation: WeaveInvocation::Adapter {
+                adapter: Box::new(adapter),
+                global_timeout_secs: config.agent.timeout,
+            },
+        })
+    }
+
+    /// Preserve the waterfall's infallible construction while retaining the
+    /// exact adapter resolution error for creator-failure telemetry.
+    pub(crate) fn unavailable(error: impl Into<String>) -> Self {
+        Self {
+            invocation: WeaveInvocation::Unavailable(error.into()),
+        }
+    }
+}
+
+fn render_adapter_template(adapter: &AgentAdapter, workspace: &Path, prompt_file: &Path) -> String {
+    adapter
+        .invoke_template
+        .replace("{workspace}", &workspace.display().to_string())
+        .replace("{prompt_file}", &prompt_file.display().to_string())
+        .replace("{bead_id}", "needle-weave")
+        .replace("{model}", adapter.model.as_deref().unwrap_or("default"))
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// Extract the assistant's final text from common structured CLI streams.
+/// Plain-text adapters pass through unchanged.
+fn extract_agent_text(stdout: &str) -> Result<String> {
+    if let Some(envelope) = crate::trace::parse_result_envelope(stdout) {
+        if envelope.indicates_failure() {
+            anyhow::bail!(
+                "weave adapter reported terminal failure ({})",
+                envelope.terminal_reason.as_deref().unwrap_or("is_error")
+            );
+        }
+    }
+
+    for line in stdout.lines().rev() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if value.get("type").and_then(|value| value.as_str()) == Some("result") {
+            if let Some(result) = value.get("result").and_then(|value| value.as_str()) {
+                return Ok(result.to_string());
+            }
+        }
+        if value.get("type").and_then(|value| value.as_str()) == Some("item.completed")
+            && value
+                .get("item")
+                .and_then(|item| item.get("type"))
+                .and_then(|value| value.as_str())
+                == Some("agent_message")
+        {
+            if let Some(text) = value
+                .get("item")
+                .and_then(|item| item.get("text"))
+                .and_then(|value| value.as_str())
+            {
+                return Ok(text.to_string());
+            }
+        }
+    }
+
+    Ok(stdout.to_string())
 }
 
 #[async_trait::async_trait]
 impl WeaveAgent for CliWeaveAgent {
     async fn analyze_gaps(&self, prompt: &str, workspace: &Path) -> Result<String> {
+        if let WeaveInvocation::Unavailable(error) = &self.invocation {
+            anyhow::bail!("{error}");
+        }
+
         // Write the prompt to a temp file.
         let tmp_dir = std::env::temp_dir().join("needle");
         std::fs::create_dir_all(&tmp_dir).context("failed to create needle temp dir for weave")?;
-        let tmp_file = tmp_dir.join(format!("weave-{}.md", std::process::id()));
+        let tmp_file = tmp_dir.join(format!(
+            "weave-{}-{}.md",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
         std::fs::write(&tmp_file, prompt).context("failed to write weave prompt to temp file")?;
 
-        // Build the shell command: cd into workspace, pipe prompt to agent.
-        let cmd = format!(
-            "cd {} && {} --print < {}",
-            workspace.display(),
-            self.agent_cmd,
-            tmp_file.display(),
-        );
+        let (cmd, child_env, stdin_from_prompt, invocation_name, timeout_secs) =
+            match &self.invocation {
+                WeaveInvocation::LegacyCli(agent_cmd) => (
+                    format!(
+                        "cd {} && {} --print < {}",
+                        shell_quote(&workspace.display().to_string()),
+                        agent_cmd,
+                        shell_quote(&tmp_file.display().to_string()),
+                    ),
+                    std::collections::HashMap::new(),
+                    false,
+                    agent_cmd.clone(),
+                    WEAVE_AGENT_TIMEOUT_SECS,
+                ),
+                WeaveInvocation::Adapter {
+                    adapter,
+                    global_timeout_secs,
+                } => {
+                    let timeout = if adapter.hard_timeout_secs > 0 {
+                        adapter.hard_timeout_secs
+                    } else {
+                        adapter.effective_timeout(*global_timeout_secs).as_secs()
+                    };
+                    (
+                        render_adapter_template(adapter, workspace, &tmp_file),
+                        adapter.environment.clone(),
+                        matches!(adapter.input_method, InputMethod::Stdin),
+                        adapter.name.clone(),
+                        timeout,
+                    )
+                }
+                WeaveInvocation::Unavailable(_) => unreachable!("handled above"),
+            };
+
+        let prompt_stdin = if stdin_from_prompt {
+            Some(
+                std::fs::File::open(&tmp_file)
+                    .context("failed to open weave prompt for adapter stdin")?,
+            )
+        } else {
+            None
+        };
 
         // Own process group (setpgid) so the kill guard below can target this
         // child and anything *it* forks (e.g. the CLI agent process, if the
@@ -726,26 +1046,59 @@ impl WeaveAgent for CliWeaveAgent {
         // WEAVE_STRAND_TIMEOUT_SECS timeout; if that fires while the agent is
         // still running, dropping this future must not silently orphan it.
         // See bf-653n7.
-        let child = unsafe {
-            tokio::process::Command::new("bash")
+        let child_result = unsafe {
+            let mut command = tokio::process::Command::new("bash");
+            command
                 .arg("-c")
                 .arg(&cmd)
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
+                .envs(&child_env);
+            if let Some(stdin) = prompt_stdin {
+                command.stdin(std::process::Stdio::from(stdin));
+            }
+            command
                 .pre_exec(|| {
                     libc::setpgid(0, 0);
                     Ok(())
                 })
                 .spawn()
-                .with_context(|| format!("failed to spawn weave agent: {}", self.agent_cmd))?
+                .with_context(|| format!("failed to spawn weave adapter: {invocation_name}"))
+        };
+        let child = match child_result {
+            Ok(child) => child,
+            Err(error) => {
+                let _ = std::fs::remove_file(&tmp_file);
+                return Err(error);
+            }
         };
         let pid = child.id().unwrap_or(0);
         let mut kill_guard = ProcessGroupKillGuard::new(pid);
 
-        let output = child
-            .wait_with_output()
-            .await
-            .with_context(|| format!("failed to wait for weave agent: {}", self.agent_cmd))?;
+        let wait = child.wait_with_output();
+        let output_result = if timeout_secs == 0 {
+            wait.await
+                .with_context(|| format!("failed to wait for weave adapter: {invocation_name}"))
+        } else {
+            match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), wait).await {
+                Ok(result) => result.with_context(|| {
+                    format!("failed to wait for weave adapter: {invocation_name}")
+                }),
+                Err(_) => Err(anyhow::anyhow!(
+                    "weave adapter '{}' timed out after {}s",
+                    invocation_name,
+                    timeout_secs
+                )),
+            }
+        };
+
+        let output = match output_result {
+            Ok(output) => output,
+            Err(error) => {
+                let _ = std::fs::remove_file(&tmp_file);
+                return Err(error);
+            }
+        };
         kill_guard.disarm();
 
         // Always clean up the temp file.
@@ -753,12 +1106,13 @@ impl WeaveAgent for CliWeaveAgent {
 
         if !output.status.success() {
             anyhow::bail!(
-                "weave agent exited with code {}",
+                "weave adapter '{}' exited with code {}",
+                invocation_name,
                 output.status.code().unwrap_or(-1)
             );
         }
 
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        extract_agent_text(&String::from_utf8_lossy(&output.stdout))
     }
 }
 
@@ -949,6 +1303,18 @@ mod tests {
         }
     }
 
+    fn make_structural_workspace(root: &Path, name: &str, origin: &str) -> PathBuf {
+        let workspace = root.join(name);
+        std::fs::create_dir_all(workspace.join(".beads")).unwrap();
+        std::fs::create_dir_all(workspace.join(".git")).unwrap();
+        std::fs::write(
+            workspace.join(".git/config"),
+            format!("[remote \"origin\"]\n  url = {origin}\n"),
+        )
+        .unwrap();
+        workspace
+    }
+
     use super::super::Strand;
 
     #[allow(dead_code)]
@@ -970,6 +1336,76 @@ mod tests {
             telemetry,
         );
         assert_eq!(strand.name(), "weave");
+    }
+
+    #[tokio::test]
+    async fn configured_adapter_uses_its_template_instead_of_its_name_as_a_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        let adapters_dir = dir.path().join("adapters");
+        std::fs::create_dir_all(&adapters_dir).unwrap();
+        std::fs::write(
+            adapters_dir.join("creator.yaml"),
+            r#"name: creator-that-is-not-an-executable
+agent_cli: definitely-not-a-real-binary
+input_method:
+  method: file
+  path_template: "{prompt_file}"
+invoke_template: "printf NO_GAPS"
+timeout_secs: 5
+"#,
+        )
+        .unwrap();
+
+        let mut config = Config::default();
+        config.agent.default = "creator-that-is-not-an-executable".to_string();
+        config.agent.adapters_dir = adapters_dir;
+        let agent = CliWeaveAgent::from_config(&config).unwrap();
+
+        let response = agent.analyze_gaps("NO_GAPS", dir.path()).await.unwrap();
+        assert_eq!(response, "NO_GAPS");
+    }
+
+    #[test]
+    fn structured_agent_stream_yields_final_assistant_text() {
+        let stream = concat!(
+            "{\"type\":\"assistant\",\"message\":{}}\n",
+            "{\"type\":\"result\",\"is_error\":false,\"result\":\"NO_GAPS\"}\n"
+        );
+        assert_eq!(extract_agent_text(stream).unwrap(), "NO_GAPS");
+    }
+
+    #[test]
+    fn fleet_targets_match_explore_scope_and_exclude_invalid_homes() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = make_structural_workspace(
+            dir.path(),
+            "first",
+            "https://example.invalid/owner/first.git",
+        );
+        let second = make_structural_workspace(
+            dir.path(),
+            "second",
+            "https://example.invalid/owner/second.git",
+        );
+        let virtual_home = dir.path().join("roam-only");
+        std::fs::create_dir_all(&virtual_home).unwrap();
+
+        let mut explore = ExploreConfig::default();
+        explore.workspaces = vec![first.clone(), virtual_home, second.clone()];
+        let strand = FleetWeaveStrand::new(
+            make_enabled_config(),
+            explore,
+            dir.path().join("state"),
+            Box::new(MockAgent::new("NO_GAPS")),
+            Telemetry::new("worker-a".to_string()),
+            GenerationConfig::default(),
+            Vec::new(),
+            "worker-a".to_string(),
+        );
+
+        let mut actual = strand.targets();
+        actual.sort();
+        assert_eq!(actual, vec![first, second]);
     }
 
     #[tokio::test]
@@ -1078,6 +1514,39 @@ mod tests {
             result
         );
         assert_eq!(store.created_beads().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fleet_target_does_not_generate_when_workspace_reserve_is_healthy() {
+        let (_dir, workspace) = make_test_workspace();
+        let state_dir = tempfile::tempdir().unwrap();
+        let strand = WeaveStrand::new(
+            make_enabled_config(),
+            workspace,
+            state_dir.path().to_path_buf(),
+            Box::new(MockAgent::new(
+                r#"[{"title":"Should not exist","body":"body","priority":2}]"#,
+            )),
+            Telemetry::new("worker-a".to_string()),
+        )
+        .with_generation(
+            GenerationConfig {
+                enabled: true,
+                low_water_reserve: 1,
+                lease_ttl_secs: 300,
+            },
+            Vec::new(),
+        )
+        .low_water_only();
+
+        let store = MockStore::new(vec![make_bead("ready", "Existing work")]);
+        let result = strand.evaluate(&store, &HashSet::new()).await;
+
+        assert!(matches!(
+            result,
+            StrandResult::Skipped { ref reason } if reason == "generation_not_low_water"
+        ));
+        assert!(store.created_beads().is_empty());
     }
 
     #[tokio::test]
