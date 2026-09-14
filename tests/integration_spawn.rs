@@ -65,6 +65,8 @@ mod needle_transform_claude;
 mod panic_safety_verification;
 #[path = "integration_spawn/panic_stack_trace_capture.rs"]
 mod panic_stack_trace_capture;
+#[path = "integration_spawn/process_command_contracts.rs"]
+mod process_command_contracts;
 #[path = "integration_spawn/process_discovery_integration.rs"]
 mod process_discovery_integration;
 #[path = "integration_spawn/process_runner_contract.rs"]

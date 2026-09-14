@@ -296,8 +296,6 @@ pub async fn cleanup_extraction(extraction_dir: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use std::io::Write;
 
     #[test]
     fn test_sanitize_filename() {
@@ -333,90 +331,5 @@ mod tests {
             dir_name.starts_with("needle-test-worker-test-bead-"),
             "unexpected extraction directory name: {dir_name}"
         );
-    }
-
-    /// Run a git fixture command, naming the command on a spawn failure.
-    ///
-    /// A blind `.unwrap()` on `Command::output()` is why the 2026-09-05
-    /// needle-ci-skr7d failure of [`test_extract_clean_workspace`] reported a
-    /// bare `Os { code: 2, kind: NotFound }` naming neither the command nor
-    /// the cause. The cause was not a missing fixture path: a concurrently
-    /// running test had set `PATH=""` under `#[serial]`'s lock while this
-    /// test's `git` spawn resolved `PATH` through `isolate_env()`'s lock, so
-    /// the `git` binary was momentarily unresolvable. Every test that
-    /// mutates `HOME`/`PATH` now holds the same `isolate_env()` lock this
-    /// test holds for its whole body, which excludes that overlap; this
-    /// helper remains so that any future spawn failure says which command
-    /// and why instead of panicking with a bare errno. These unwraps are
-    /// test-only (`#[cfg(test)]`) — a panic here fails the test, it cannot
-    /// reach a worker.
-    fn git_output(repo_path: &Path, args: &[&str]) -> std::process::Output {
-        Command::new("git")
-            .args(args)
-            .current_dir(repo_path)
-            .output()
-            .unwrap_or_else(|e| panic!("git {args:?}: spawn failed: {e}"))
-    }
-
-    /// Run a git fixture command and require it to succeed.
-    fn assert_git_ok(repo_path: &Path, args: &[&str]) {
-        let output = git_output(repo_path, args);
-        assert!(
-            output.status.success(),
-            "git {args:?} failed (status {:?}):\nstdout: {}\nstderr: {}",
-            output.status.code(),
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
-        );
-    }
-
-    #[tokio::test]
-    async fn test_extract_clean_workspace() {
-        let _env = crate::util::test_env::isolate_env();
-        // Create a temporary git repository
-        let temp_repo = tempfile::tempdir().unwrap();
-        let repo_path = temp_repo.path();
-
-        // Initialize git repo
-        assert_git_ok(repo_path, &["init"]);
-
-        // Configure git
-        assert_git_ok(repo_path, &["config", "user.email", "test@example.com"]);
-        assert_git_ok(repo_path, &["config", "user.name", "Test User"]);
-
-        // Create a test file and commit
-        let test_file = repo_path.join("test.txt");
-        let mut file = fs::File::create(&test_file).unwrap();
-        file.write_all(b"test content").unwrap();
-
-        assert_git_ok(repo_path, &["add", "test.txt"]);
-        assert_git_ok(repo_path, &["commit", "-m", "Initial commit"]);
-
-        // Create extraction config
-        let temp_scratch = tempfile::tempdir().unwrap();
-        let config = ExtractionConfig {
-            worker_id: "test-worker".to_string(),
-            bead_id: "test-bead".to_string(),
-            pre_dispatch_head: None,
-            scratch_base: Some(temp_scratch.path().to_path_buf()),
-        };
-
-        // Extract clean workspace
-        let result = extract_clean_workspace(repo_path, config).await.unwrap();
-
-        // Verify extraction
-        assert!(result.extraction_path.exists());
-        assert!(!result.included_dispatch_commits);
-
-        let extracted_file = result.extraction_path.join("test.txt");
-        assert!(extracted_file.exists());
-
-        // Verify content
-        let content = fs::read_to_string(&extracted_file).unwrap();
-        assert_eq!(content, "test content");
-
-        // Cleanup
-        cleanup_extraction(&result.extraction_path).await.unwrap();
-        assert!(!result.extraction_path.exists());
     }
 }

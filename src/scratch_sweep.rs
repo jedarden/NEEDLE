@@ -73,6 +73,34 @@ pub fn sweep_home_scratch(config: &ScratchSweepConfig) -> Result<SweepOutcome> {
     )
 }
 
+/// Sweep an explicitly selected scratch directory with production safety
+/// checks. This keeps callers that already own an isolated root independent
+/// from process-wide `HOME` while preserving the same process and Git audits.
+pub fn sweep_scratch_directory(scratch_root: &Path, ttl_hours: u64) -> Result<SweepOutcome> {
+    sweep_scratch_directory_with_proc_root(scratch_root, ttl_hours, Path::new("/proc"))
+}
+
+/// Sweep an explicitly selected scratch directory while reading process state
+/// from an explicitly selected procfs root.
+///
+/// Production callers should use [`sweep_scratch_directory`]. This variant
+/// keeps the destructive process gate intact while letting integration tests
+/// exercise it against an isolated procfs fixture rather than the host's
+/// concurrently changing process table.
+pub fn sweep_scratch_directory_with_proc_root(
+    scratch_root: &Path,
+    ttl_hours: u64,
+    proc_root: &Path,
+) -> Result<SweepOutcome> {
+    sweep_scratch_root(
+        scratch_root,
+        ttl_hours,
+        &ProcProcessInspector::new(proc_root.to_path_buf()),
+        &GitCheckoutAuditor,
+        SystemTime::now(),
+    )
+}
+
 fn sweep_scratch_root(
     scratch_root: &Path,
     ttl_hours: u64,
@@ -618,7 +646,6 @@ mod tests {
     use std::cell::Cell;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::process::Command;
     use std::time::{Duration, SystemTime};
 
     use filetime::{set_file_mtime, FileTime};
@@ -884,97 +911,5 @@ mod tests {
             inspector.inspect(&candidate),
             ProcessUse::Busy { pid: 202, .. }
         ));
-    }
-
-    fn git(path: &Path, args: &[&str]) {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(path)
-            .args(args)
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    fn clone_repo(remote: &Path, destination: &Path) {
-        let output = Command::new("git")
-            .arg("clone")
-            .arg(remote)
-            .arg(destination)
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "git clone failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    #[test]
-    fn git_audit_removes_clean_clone_but_preserves_unpushed_commits_and_stash() {
-        let temp = TempDir::new().unwrap();
-        let root = temp.path();
-        let remote = root.join("origin.git");
-        let seed = root.join("seed");
-
-        fs::create_dir(&remote).unwrap();
-        git(&remote, &["init", "--bare"]);
-        fs::create_dir(&seed).unwrap();
-        git(&seed, &["init"]);
-        git(&seed, &["config", "user.name", "Needle Test"]);
-        git(
-            &seed,
-            &["config", "user.email", "needle-test@example.invalid"],
-        );
-        fs::write(seed.join("tracked.txt"), b"seed\n").unwrap();
-        git(&seed, &["add", "tracked.txt"]);
-        git(&seed, &["commit", "-m", "seed"]);
-        let remote_arg = remote.to_string_lossy();
-        git(&seed, &["remote", "add", "origin", remote_arg.as_ref()]);
-        git(&seed, &["push", "-u", "origin", "HEAD"]);
-
-        let clean = root.join("needle-clean.abc123");
-        let unpushed = root.join("seam-unpushed.abc123");
-        let stashed = root.join("claude-print-stashed.abc123");
-        clone_repo(&remote, &clean);
-        clone_repo(&remote, &unpushed);
-        clone_repo(&remote, &stashed);
-
-        // Untracked diagnostic fixtures are intentionally allowed: the TTL is
-        // the retention window for failed-run investigation.
-        fs::write(clean.join("test-fixture.txt"), b"diagnostic fixture\n").unwrap();
-
-        git(&unpushed, &["config", "user.name", "Needle Test"]);
-        git(
-            &unpushed,
-            &["config", "user.email", "needle-test@example.invalid"],
-        );
-        fs::write(unpushed.join("local-commit.txt"), b"local\n").unwrap();
-        git(&unpushed, &["add", "local-commit.txt"]);
-        git(&unpushed, &["commit", "-m", "not pushed"]);
-
-        fs::write(stashed.join("tracked.txt"), b"stashed change\n").unwrap();
-        git(&stashed, &["stash", "push", "-m", "preserve me"]);
-
-        let now = SystemTime::now();
-        for checkout in [&clean, &unpushed, &stashed] {
-            make_old(checkout, now);
-        }
-
-        let report = completed(
-            sweep_scratch_root(root, 48, &ClearProcesses, &GitCheckoutAuditor, now).unwrap(),
-        );
-
-        assert!(!clean.exists());
-        assert!(unpushed.exists());
-        assert!(stashed.exists());
-        assert_eq!(report.removed.len(), 1);
-        assert_eq!(report.skipped_safety, 2);
     }
 }

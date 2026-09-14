@@ -1549,68 +1549,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn commit_correlation_requires_one_unambiguous_trailer() {
-        let dir = tempfile::tempdir().unwrap();
-        let run = |args: &[&str]| {
-            std::process::Command::new("git")
-                .args(args)
-                .current_dir(dir.path())
-                .output()
-                .unwrap()
-        };
-        assert!(run(&["init", "-q"]).status.success());
-        assert!(run(&["config", "user.email", "test@example.com"])
-            .status
-            .success());
-        assert!(run(&["config", "user.name", "test"]).status.success());
-
-        std::fs::write(dir.path().join("README.md"), "one\n").unwrap();
-        assert!(run(&["add", "README.md"]).status.success());
-        assert!(run(&["commit", "-q", "-m", "feat: one\n\nBead-Id: parent"])
-            .status
-            .success());
-        let sha = String::from_utf8(run(&["rev-parse", "HEAD"]).stdout)
-            .unwrap()
-            .trim()
-            .to_string();
-        assert_eq!(
-            correlate_commit(dir.path(), &sha).await.unwrap(),
-            BeadId::from("parent")
-        );
-
-        std::fs::write(dir.path().join("README.md"), "two\n").unwrap();
-        assert!(run(&["add", "README.md"]).status.success());
-        assert!(run(&[
-            "commit",
-            "-q",
-            "-m",
-            "feat: two\n\nBead-Id: first\nBead-Id: second",
-        ])
-        .status
-        .success());
-        let ambiguous = String::from_utf8(run(&["rev-parse", "HEAD"]).stdout)
-            .unwrap()
-            .trim()
-            .to_string();
-        assert!(matches!(
-            correlate_commit(dir.path(), &ambiguous).await,
-            Err(CorrelationError::AmbiguousTrailers { .. })
-        ));
-
-        std::fs::write(dir.path().join("README.md"), "three\n").unwrap();
-        assert!(run(&["add", "README.md"]).status.success());
-        assert!(run(&["commit", "-q", "-m", "feat: three"]).status.success());
-        let missing = String::from_utf8(run(&["rev-parse", "HEAD"]).stdout)
-            .unwrap()
-            .trim()
-            .to_string();
-        assert!(matches!(
-            correlate_commit(dir.path(), &missing).await,
-            Err(CorrelationError::MissingTrailer { .. })
-        ));
-    }
-
-    #[tokio::test]
     async fn check_is_idempotent_and_dependency_direction_blocks_parent() {
         let dir = tempfile::tempdir().unwrap();
         let store = MockStore::new(BeadStatus::Closed);
