@@ -1,13 +1,13 @@
 {
-  "timestamp": "2026-09-14T08:38:37.639601092Z",
-  "total_open_beads": 633,
+  "timestamp": "2026-09-14T10:38:46.532778174Z",
+  "total_open_beads": 627,
   "exclusion_criteria": {
     "has_assignee": 0,
     "manually_blocked": 21,
-    "has_dependencies": 434,
-    "resource_conflicts": 9
+    "has_dependencies": 432,
+    "resource_conflicts": 12
   },
-  "final_candidate_count": 205,
+  "final_candidate_count": 201,
   "excluded_beads": [
     {
       "bead_id": "needle-6b02eb9d",
@@ -291,7 +291,7 @@
       "assignee": null,
       "manual_blocked": false,
       "has_blockers": true,
-      "blocker_count": 10,
+      "blocker_count": 9,
       "has_resource_conflicts": false,
       "conflict_count": 0
     },
@@ -1106,8 +1106,8 @@
       "manual_blocked": true,
       "has_blockers": true,
       "blocker_count": 10,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
+      "has_resource_conflicts": true,
+      "conflict_count": 1
     },
     {
       "bead_id": "needle-fe42db64",
@@ -1117,8 +1117,8 @@
       "manual_blocked": true,
       "has_blockers": true,
       "blocker_count": 16,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
+      "has_resource_conflicts": true,
+      "conflict_count": 1
     },
     {
       "bead_id": "needle-5dda045b",
@@ -1128,8 +1128,8 @@
       "manual_blocked": true,
       "has_blockers": true,
       "blocker_count": 19,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
+      "has_resource_conflicts": true,
+      "conflict_count": 1
     },
     {
       "bead_id": "needle-c1ae2730",
@@ -1227,8 +1227,8 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 2,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
+      "has_resource_conflicts": true,
+      "conflict_count": 1
     },
     {
       "bead_id": "needle-272252f9",
@@ -1304,8 +1304,8 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 7,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
+      "has_resource_conflicts": true,
+      "conflict_count": 1
     },
     {
       "bead_id": "needle-a6ff59c4",
@@ -1315,8 +1315,8 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 2,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
+      "has_resource_conflicts": true,
+      "conflict_count": 1
     },
     {
       "bead_id": "needle-03e7645a",
@@ -1348,8 +1348,8 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 7,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
+      "has_resource_conflicts": true,
+      "conflict_count": 1
     },
     {
       "bead_id": "needle-e820851a",
@@ -2012,17 +2012,6 @@
       "conflict_count": 0
     },
     {
-      "bead_id": "needle-40ca2f6e",
-      "title": "Make dispatch fail closed on every claim-verification error",
-      "priority": 1,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
       "bead_id": "needle-805b5ba2",
       "title": "Release unverifiable claims only through the held claim credential against the target store",
       "priority": 1,
@@ -2045,17 +2034,6 @@
       "conflict_count": 0
     },
     {
-      "bead_id": "needle-18690d39",
-      "title": "Remove the per-run Cinder workspace PVC from needle-ci",
-      "priority": 1,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 1,
-      "has_resource_conflicts": true,
-      "conflict_count": 1
-    },
-    {
       "bead_id": "needle-f84c01a4",
       "title": "N-T48: choose adapters from workspace-scoped evidence with fleet fallback and record the deciding scope [cargo test --test nt48_workspace_routing]",
       "priority": 1,
@@ -2063,8 +2041,8 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
+      "has_resource_conflicts": true,
+      "conflict_count": 1
     },
     {
       "bead_id": "needle-c2fc81d6",
@@ -2074,8 +2052,8 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 1,
-      "has_resource_conflicts": true,
-      "conflict_count": 1
+      "has_resource_conflicts": false,
+      "conflict_count": 0
     },
     {
       "bead_id": "needle-f2b97407",
@@ -2153,17 +2131,6 @@
       "blocker_count": 1,
       "has_resource_conflicts": false,
       "conflict_count": 0
-    },
-    {
-      "bead_id": "needle-9c74be71",
-      "title": "Keep needle list --format json schema stable when no workers exist",
-      "priority": 1,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 1,
-      "has_resource_conflicts": true,
-      "conflict_count": 1
     },
     {
       "bead_id": "needle-4cf72365",
@@ -3955,8 +3922,8 @@
       "manual_blocked": true,
       "has_blockers": true,
       "blocker_count": 17,
-      "has_resource_conflicts": true,
-      "conflict_count": 1
+      "has_resource_conflicts": false,
+      "conflict_count": 0
     },
     {
       "bead_id": "needle-10fc7f48",
@@ -4087,8 +4054,8 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 2,
-      "has_resource_conflicts": true,
-      "conflict_count": 1
+      "has_resource_conflicts": false,
+      "conflict_count": 0
     },
     {
       "bead_id": "needle-8e82200b",
@@ -4483,8 +4450,8 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 1,
-      "has_resource_conflicts": true,
-      "conflict_count": 1
+      "has_resource_conflicts": false,
+      "conflict_count": 0
     },
     {
       "bead_id": "needle-e7f01949",
@@ -4518,6 +4485,17 @@
       "blocker_count": 1,
       "has_resource_conflicts": false,
       "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-6b39799f",
+      "title": "Promote exact CI builder digests through a fenced GitOps handoff",
+      "priority": 2,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": true,
+      "conflict_count": 1
     },
     {
       "bead_id": "needle-bc4ac726",
