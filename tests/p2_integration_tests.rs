@@ -1483,7 +1483,11 @@ fn pid_liveness_check_works() {
 async fn strand_waterfall_pluck_mend_explore_knot() {
     // Verify the default waterfall contains all 4 strands in correct order.
     let dir = tempfile::tempdir().unwrap();
-    let config = needle::config::Config::default();
+    let explore_root = dir.path().join("explore-root");
+    std::fs::create_dir(&explore_root).unwrap();
+    let mut config = needle::config::Config::default();
+    config.strands.explore.workspace_root = explore_root;
+    config.strands.explore.workspaces.clear();
     let registry = Registry::new(dir.path());
     let telemetry = Telemetry::new("test".to_string());
 
