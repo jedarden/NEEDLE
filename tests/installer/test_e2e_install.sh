@@ -50,12 +50,36 @@ TRANSFORMS=("needle-transform-claude" "needle-transform-codex")
 TRANSFORM_ASSETS=()
 for _t in "${TRANSFORMS[@]}"; do TRANSFORM_ASSETS+=("${_t}-${PLATFORM_SUFFIX}"); done
 
-# Every run_installer passes `env -i` an explicit PATH, and hardcoding
-# `/usr/bin:/bin` after the mock dir breaks on hosts that keep bash and the
-# coreutils somewhere else (NixOS: /run/current-system/sw/bin) — every test
-# then died with 127 from env before install.sh even started. Resolve the
-# running bash's directory once and put it on the child's PATH everywhere.
-BASH_BIN_DIR="$(cd "$(dirname "$(command -v bash)")" && pwd)"
+# Every run_installer passes `env -i` an explicit PATH. Build that PATH from
+# the actual host tools instead of assuming an FHS layout: NixOS has neither
+# `/bin/bash` nor `/usr/bin/bash`, and its core utilities may live in separate
+# immutable store directories. Keep the mock directory first so the suite
+# never reaches the network.
+BASH_BIN="$(type -P bash)"
+if [[ -z "$BASH_BIN" || "$BASH_BIN" != /* ]]; then
+    echo "installer harness: could not resolve an absolute bash executable" >&2
+    exit 2
+fi
+
+HOST_TOOL_PATH=""
+for _tool in bash awk grep sed cat cp basename uname mktemp chmod mv mkdir dirname rm \
+    sha256sum shasum openssl gpg; do
+    _tool_path="$(type -P "$_tool" 2>/dev/null || true)"
+    [[ -n "$_tool_path" && "$_tool_path" == /* ]] || continue
+    _tool_dir="${_tool_path%/*}"
+    case ":$HOST_TOOL_PATH:" in
+        *":${_tool_dir}:"*) ;;
+        *) HOST_TOOL_PATH="${HOST_TOOL_PATH:+$HOST_TOOL_PATH:}${_tool_dir}" ;;
+    esac
+done
+if [[ -z "$HOST_TOOL_PATH" ]]; then
+    echo "installer harness: no host tool directories resolved" >&2
+    exit 2
+fi
+
+# Test-only override used by the broken-harness acceptance control. Production
+# runs leave it unset and execute the absolute interpreter resolved above.
+INSTALLER_TEST_BASH="${NEEDLE_INSTALLER_TEST_BASH:-$BASH_BIN}"
 
 setup() {
     # Fresh, unique fixture root + fake curl + isolated home per test.
@@ -68,8 +92,8 @@ setup() {
     # fixture root; a missing file behaves like `curl -f` on a 404 (exit 22).
     # The fixture root travels via $MOCK_ROOT, which run_installer passes
     # through the empty environment.
-    cat > "$BASE_DIR/bin/curl" <<'MOCKEOF'
-#!/bin/bash
+    printf '#!%s\n' "$BASH_BIN" > "$BASE_DIR/bin/curl"
+    cat >> "$BASE_DIR/bin/curl" <<'MOCKEOF'
 # Mock curl for install.sh e2e tests. Serves from $MOCK_ROOT.
 out=""
 url=""
@@ -106,7 +130,7 @@ MOCKEOF
     chmod +x "$BASE_DIR/bin/curl"
 
     # Mock needle binary: must answer --version with exit 0.
-    printf '#!/bin/sh\necho "needle 0.1.0-mock"\n' > "$MOCK_ROOT/files/$ASSET_NAME"
+    printf '#!%s\necho "needle 0.1.0-mock"\n' "$BASH_BIN" > "$MOCK_ROOT/files/$ASSET_NAME"
     chmod +x "$MOCK_ROOT/files/$ASSET_NAME"
 
     # Mock transform binaries: downloaded, checksum-verified and moved into
@@ -114,7 +138,7 @@ MOCKEOF
     # them (test_transform_absent_from_release_is_nonfatal).
     local transform
     for transform in "${TRANSFORM_ASSETS[@]}"; do
-        printf '#!/bin/sh\necho "%s 0.1.0-mock"\n' "$transform" > "$MOCK_ROOT/files/$transform"
+        printf '#!%s\necho "%s 0.1.0-mock"\n' "$BASH_BIN" "$transform" > "$MOCK_ROOT/files/$transform"
         chmod +x "$MOCK_ROOT/files/$transform"
     done
 
@@ -123,7 +147,7 @@ MOCKEOF
     # bead-rs release fixtures: a mock `bead` binary, its release document and
     # a correct checksums.txt. install.sh bundles bead next to needle.
     mkdir -p "$MOCK_ROOT/beadrs/files"
-    printf '#!/bin/sh\necho "bead 0.2.2-mock"\n' > "$MOCK_ROOT/beadrs/files/$BEAD_ASSET_NAME"
+    printf '#!%s\necho "bead 0.2.2-mock"\n' "$BASH_BIN" > "$MOCK_ROOT/beadrs/files/$BEAD_ASSET_NAME"
     chmod +x "$MOCK_ROOT/beadrs/files/$BEAD_ASSET_NAME"
     printf '{"tag_name": "v0.2.2", "assets": [{"name": "%s"}, {"name": "checksums.txt"}]}\n' \
         "$BEAD_ASSET_NAME" > "$MOCK_ROOT/beadrs/api.json"
@@ -227,12 +251,12 @@ run_installer() {
     local install_path="$MOCK_HOME/bin/needle"
     local rc=0
     env -i \
-        PATH="$BASE_DIR/bin:$BASH_BIN_DIR:/usr/bin:/bin" \
+        PATH="$BASE_DIR/bin:$HOST_TOOL_PATH" \
         HOME="$MOCK_HOME" \
         NEEDLE_INSTALL_PATH="$install_path" \
         MOCK_ROOT="$MOCK_ROOT" \
         "${env_pairs[@]}" \
-        bash "$INSTALL_SH" "${args[@]}" </dev/null \
+        "$INSTALLER_TEST_BASH" "$INSTALL_SH" "${args[@]}" </dev/null \
         >"$LAST_OUT" 2>"$LAST_ERR" || rc=$?
     LAST_RC=$rc
 }
@@ -259,9 +283,10 @@ assert_rc_zero() {
     record $? "exit code 0 (got $LAST_RC)"
 }
 
-assert_rc_nonzero() {
-    [[ "$LAST_RC" != "0" ]]
-    record $? "exit code nonzero (got $LAST_RC)"
+assert_rc() {
+    local expected="$1"
+    [[ "$LAST_RC" == "$expected" ]]
+    record $? "exit code $expected (got $LAST_RC)"
 }
 
 assert_installed() {
@@ -321,7 +346,7 @@ test_checksum_mismatch_aborts() {
     setup
     write_checksums 0000000000000000000000000000000000000000000000000000000000000000
     run_installer
-    assert_rc_nonzero
+    assert_rc 1
     assert_not_installed
     assert_output_contains "mismatch reported" "Checksum mismatch"
     teardown
@@ -332,7 +357,7 @@ test_mismatch_never_skippable() {
     setup
     write_checksums 0000000000000000000000000000000000000000000000000000000000000000
     run_installer --skip-checksum
-    assert_rc_nonzero
+    assert_rc 1
     assert_not_installed
     assert_output_contains "mismatch reported" "Checksum mismatch"
     teardown
@@ -343,7 +368,7 @@ test_missing_checksums_file_aborts() {
     setup
     write_checksums missing
     run_installer
-    assert_rc_nonzero
+    assert_rc 1
     assert_not_installed
     assert_output_contains "legible abort reason" "Could not download checksums.txt"
     teardown
@@ -379,7 +404,7 @@ test_missing_asset_entry_aborts() {
     setup
     write_checksums absent
     run_installer
-    assert_rc_nonzero
+    assert_rc 1
     assert_not_installed
     assert_output_contains "legible abort reason" "Could not find checksum for"
     teardown
@@ -411,8 +436,8 @@ test_no_hash_tool_aborts() {
     for tool in bash awk grep sed cat cp basename uname mktemp chmod mv mkdir dirname rm; do
         # bash is in the list: on hosts where it is not under /usr/bin:/bin
         # (NixOS) the child's PATH is this directory alone, so without its own
-        # symlink the installer never starts and the rc=0 assertion passes
-        # vacuously on the 127.
+        # symlink the installer never starts; the exact rc assertion below
+        # rejects that 127 as a harness failure.
         local path
         path=$(type -P "$tool" 2>/dev/null) || true
         [[ -n "$path" ]] && ln -s "$path" "$restricted/$tool"
@@ -425,11 +450,11 @@ test_no_hash_tool_aborts() {
         HOME="$MOCK_HOME" \
         NEEDLE_INSTALL_PATH="$MOCK_HOME/bin/needle" \
         MOCK_ROOT="$MOCK_ROOT" \
-        bash "$INSTALL_SH" </dev/null \
+        "$INSTALLER_TEST_BASH" "$INSTALL_SH" </dev/null \
         >"$LAST_OUT" 2>"$LAST_ERR" || rc=$?
     LAST_RC=$rc
 
-    assert_rc_nonzero
+    assert_rc 1
     assert_not_installed
     assert_output_contains "legible abort reason" "aborted for security reasons"
     teardown
@@ -441,8 +466,10 @@ test_binary_download_failure_aborts() {
     rm -f "$MOCK_ROOT/files/$ASSET_NAME"
     write_checksums missing
     run_installer
-    assert_rc_nonzero
+    assert_rc 22
     assert_not_installed
+    assert_output_contains "download failure reported by the exercised mock" \
+        "requested URL returned error: 404 (mock)"
     teardown
 }
 
@@ -451,7 +478,7 @@ test_api_fetch_failure_aborts() {
     setup
     rm -f "$MOCK_ROOT/api.json"
     run_installer
-    assert_rc_nonzero
+    assert_rc 1
     assert_not_installed
     assert_output_contains "legible abort reason" "Could not reach the GitHub API"
     teardown
@@ -501,7 +528,7 @@ test_unknown_option_rejected() {
     echo "TEST: unknown option rejected"
     setup
     run_installer --definitely-not-a-flag
-    assert_rc_nonzero
+    assert_rc 1
     assert_not_installed
     assert_output_contains "usage hint" "--help"
     teardown
@@ -515,8 +542,8 @@ test_unsupported_architecture_fails_early() {
 
     # Create a mock uname that reports arm64
     local mock_uname="$BASE_DIR/bin/uname"
-    cat > "$mock_uname" <<'EOF'
-#!/bin/bash
+    printf '#!%s\n' "$BASH_BIN" > "$mock_uname"
+    cat >> "$mock_uname" <<'EOF'
 # Mock uname that reports arm64 to simulate unsupported architecture
 case "$1" in
     -m) echo "aarch64" ;;
@@ -540,15 +567,15 @@ EOF
     # Restricted PATH with our mock uname first
     local rc=0
     env -i \
-        PATH="$BASE_DIR/bin:$BASH_BIN_DIR:/usr/bin:/bin" \
+        PATH="$BASE_DIR/bin:$HOST_TOOL_PATH" \
         HOME="$MOCK_HOME" \
         NEEDLE_INSTALL_PATH="$MOCK_HOME/bin/needle" \
         MOCK_ROOT="$MOCK_ROOT" \
-        bash "$INSTALL_SH" </dev/null \
+        "$INSTALLER_TEST_BASH" "$INSTALL_SH" </dev/null \
         >"$LAST_OUT" 2>"$LAST_ERR" || rc=$?
     LAST_RC=$rc
 
-    assert_rc_nonzero
+    assert_rc 1
     assert_not_installed
     assert_output_contains "architecture error message" "No prebuilt binary for needle-aarch64-unknown-linux-gnu"
     assert_output_contains "build from source message" "cargo install --git https://github.com/jedarden/NEEDLE"
@@ -591,7 +618,7 @@ test_transform_checksum_mismatch_aborts() {
     setup
     write_checksums transform-mismatch
     run_installer
-    assert_rc_nonzero
+    assert_rc 1
     assert_not_installed
     local transform
     for transform in "${TRANSFORMS[@]}"; do
@@ -607,7 +634,7 @@ test_transform_mismatch_never_skippable() {
     setup
     write_checksums transform-mismatch
     run_installer --skip-checksum
-    assert_rc_nonzero
+    assert_rc 1
     assert_not_installed
     assert_output_contains "mismatch reported" "Checksum mismatch for"
     teardown
@@ -618,7 +645,7 @@ test_transform_missing_manifest_entry_aborts() {
     setup
     write_checksums transform-absent
     run_installer
-    assert_rc_nonzero
+    assert_rc 1
     assert_not_installed
     assert_output_contains "legible abort reason" "Could not find checksum for"
     teardown
@@ -680,7 +707,7 @@ test_bead_checksum_tamper_aborts() {
     write_checksums correct
     write_bead_checksums "0000000000000000000000000000000000000000000000000000000000000000"
     run_installer
-    assert_rc_nonzero
+    assert_rc 1
     record "$( ! bead_installed; echo $? )" "bead NOT moved into place"
     assert_output_contains "bead mismatch reported" "Checksum mismatch for $BEAD_ASSET_NAME"
     teardown
@@ -713,7 +740,7 @@ test_existing_newer_bead_retained() {
     echo "TEST: an existing bead at or above the release version is kept"
     setup
     write_checksums correct
-    printf '#!/bin/sh\necho "bead 9.9.9 (local)"\n' > "$BASE_DIR/bin/bead"
+    printf '#!%s\necho "bead 9.9.9 (local)"\n' "$BASH_BIN" > "$BASE_DIR/bin/bead"
     chmod +x "$BASE_DIR/bin/bead"
     run_installer
     assert_rc_zero
@@ -728,7 +755,7 @@ test_existing_older_bead_replaced() {
     echo "TEST: an existing bead below the release version is replaced"
     setup
     write_checksums correct
-    printf '#!/bin/sh\necho "bead 0.1.3 (old)"\n' > "$BASE_DIR/bin/bead"
+    printf '#!%s\necho "bead 0.1.3 (old)"\n' "$BASH_BIN" > "$BASE_DIR/bin/bead"
     chmod +x "$BASE_DIR/bin/bead"
     run_installer
     assert_rc_zero
@@ -771,35 +798,49 @@ main() {
     echo "========================================="
     echo ""
 
-    test_valid_checksum_installs
-    test_checksum_mismatch_aborts
-    test_mismatch_never_skippable
-    test_missing_checksums_file_aborts
-    test_skip_flag_installs_with_warning
-    test_skip_env_var_installs_with_warning
-    test_missing_asset_entry_aborts
-    test_missing_asset_entry_skippable
-    test_no_hash_tool_aborts
-    test_binary_download_failure_aborts
-    test_api_fetch_failure_aborts
-    test_version_discovery_large_payload
-    test_help_documents_security_tradeoff
-    test_unknown_option_rejected
-    test_unsupported_architecture_fails_early
-    test_transforms_install_alongside_needle
-    test_transform_checksum_mismatch_aborts
-    test_transform_mismatch_never_skippable
-    test_transform_missing_manifest_entry_aborts
-    test_transform_missing_entry_skippable
-    test_transform_absent_from_release_is_nonfatal
-    test_bead_installed_alongside_needle
-    test_bead_checksum_tamper_aborts
-    test_skip_bead_flag_leaves_bead_absent
-    test_skip_bead_env_leaves_bead_absent
-    test_existing_newer_bead_retained
-    test_existing_older_bead_replaced
-    test_bead_release_unreachable_is_nonfatal
-    test_bead_no_platform_asset_is_nonfatal
+    case "${NEEDLE_INSTALLER_E2E_ONLY:-all}" in
+        all)
+            test_valid_checksum_installs
+            test_checksum_mismatch_aborts
+            test_mismatch_never_skippable
+            test_missing_checksums_file_aborts
+            test_skip_flag_installs_with_warning
+            test_skip_env_var_installs_with_warning
+            test_missing_asset_entry_aborts
+            test_missing_asset_entry_skippable
+            test_no_hash_tool_aborts
+            test_binary_download_failure_aborts
+            test_api_fetch_failure_aborts
+            test_version_discovery_large_payload
+            test_help_documents_security_tradeoff
+            test_unknown_option_rejected
+            test_unsupported_architecture_fails_early
+            test_transforms_install_alongside_needle
+            test_transform_checksum_mismatch_aborts
+            test_transform_mismatch_never_skippable
+            test_transform_missing_manifest_entry_aborts
+            test_transform_missing_entry_skippable
+            test_transform_absent_from_release_is_nonfatal
+            test_bead_installed_alongside_needle
+            test_bead_checksum_tamper_aborts
+            test_skip_bead_flag_leaves_bead_absent
+            test_skip_bead_env_leaves_bead_absent
+            test_existing_newer_bead_retained
+            test_existing_older_bead_replaced
+            test_bead_release_unreachable_is_nonfatal
+            test_bead_no_platform_asset_is_nonfatal
+            ;;
+        checksum-mismatch)
+            # Narrow entry point for the broken-harness acceptance control.
+            # This is a security-negative case: rc 127 must fail its exact
+            # rc/message oracle instead of masquerading as a valid rejection.
+            test_checksum_mismatch_aborts
+            ;;
+        *)
+            echo "unknown NEEDLE_INSTALLER_E2E_ONLY case: $NEEDLE_INSTALLER_E2E_ONLY" >&2
+            return 2
+            ;;
+    esac
 
     echo ""
     echo "========================================="
