@@ -855,12 +855,13 @@ pub(crate) mod test_env {
     /// seams (plan revision 24 §4.6): admission tests point the resource probe
     /// at a mock directory or resize the hold's backoff, and a leaked value
     /// would silently put every later test's worker into an admission hold.
-    const GUARDED_VARS: [&str; 10] = [
+    const GUARDED_VARS: [&str; 11] = [
         "HOME",
         "PATH",
         "NEEDLE_HOME",
         "NEEDLE_EVENTS",
         "NEEDLE_HEARTBEATS",
+        "NEEDLE_SUPERVISOR_SOCKET",
         "NEEDLE_LAUNCH_RESOURCE_PROBE",
         "NEEDLE_SKIP_LAUNCH_RESOURCE_CHECK",
         "NEEDLE_ADMISSION_BACKOFF_BASE_MS",

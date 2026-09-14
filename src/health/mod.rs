@@ -1664,22 +1664,11 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    /// Serialises the tests that mutate `NEEDLE_SUPERVISOR_SOCKET`.
-    ///
-    /// `std::env::set_var`/`remove_var` mutate process-global state while the
-    /// test harness runs tests on parallel threads, so one test's `remove_var`
-    /// could land between another's `set_var` and its assertion. Five tests
-    /// share this variable — and `check_supervisor_socket_default_path`
-    /// additionally requires it to be *unset* — which made
-    /// `check_supervisor_socket_exists_returns_true` fail intermittently.
-    static SUPERVISOR_SOCKET_ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    /// Take the env lock, tolerating poisoning so one panicking test does not
-    /// cascade into failures in every other test that touches the variable.
-    fn lock_supervisor_socket_env() -> std::sync::MutexGuard<'static, ()> {
-        SUPERVISOR_SOCKET_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    /// Serialise `NEEDLE_SUPERVISOR_SOCKET` with every other test that mutates
+    /// process-global environment. The shared guard also restores the inherited
+    /// value before releasing its lock, including after a panic.
+    fn lock_supervisor_socket_env() -> crate::util::test_env::EnvGuard {
+        crate::util::test_env::isolate_env()
     }
 
     /// Isolates the test's HOME directory to a temp directory, preventing tests

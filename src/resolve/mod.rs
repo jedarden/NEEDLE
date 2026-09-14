@@ -969,7 +969,7 @@ mod tests {
     use super::*;
     use crate::types::{BeadId, BeadStatus};
     use chrono::Utc;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::time::Duration;
 
     fn test_bead() -> Bead {
@@ -2537,10 +2537,29 @@ mod tests {
     // ──────────────────────────────────────────────────────────────────────────────
 
     #[cfg(unix)]
-    #[test]
-    fn verify_binary_identity_before_agent_detects_shim_mismatch() {
+    fn publish_executable_fixture(path: &Path, content: &str) {
+        use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
 
+        let staged_path = path.with_extension("staged");
+        let mut staged = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staged_path)
+            .unwrap();
+        staged.write_all(content.as_bytes()).unwrap();
+        staged.sync_all().unwrap();
+        drop(staged);
+
+        let mut permissions = std::fs::metadata(&staged_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&staged_path, permissions).unwrap();
+        std::fs::rename(staged_path, path).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_binary_identity_before_agent_detects_shim_mismatch() {
         let temp_dir = tempfile::tempdir().unwrap();
 
         // Create a "bead" shim script that execs a "bf" binary (different identity)
@@ -2552,10 +2571,7 @@ mod tests {
 # This simulates a misconfigured or malicious binary
 exec echo "bf 0.4.1"
 "#;
-        std::fs::write(&shim_path, shim_content).unwrap();
-        let mut permissions = std::fs::metadata(&shim_path).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&shim_path, permissions).unwrap();
+        publish_executable_fixture(&shim_path, shim_content);
 
         // Create a backend descriptor expecting "bead-rs" identity
         let backend = BeadBackend {
@@ -2625,8 +2641,6 @@ exec echo "bf 0.4.1"
     #[cfg(unix)]
     #[test]
     fn verify_binary_identity_before_agent_detects_reverse_shim_mismatch() {
-        use std::os::unix::fs::PermissionsExt;
-
         let temp_dir = tempfile::tempdir().unwrap();
 
         // Create a "bf" shim script that execs a "bead" binary (reverse case)
@@ -2635,10 +2649,7 @@ exec echo "bf 0.4.1"
 # This shim claims to be "bf" but execs "bead" (different identity)
 exec echo "bead 0.1.3"
 "#;
-        std::fs::write(&shim_path, shim_content).unwrap();
-        let mut permissions = std::fs::metadata(&shim_path).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&shim_path, permissions).unwrap();
+        publish_executable_fixture(&shim_path, shim_content);
 
         // Create a backend descriptor expecting "bead-forge" identity
         let backend = BeadBackend {
@@ -2700,8 +2711,6 @@ exec echo "bead 0.1.3"
     #[cfg(unix)]
     #[test]
     fn verify_binary_identity_before_agent_passes_for_matching_identity() {
-        use std::os::unix::fs::PermissionsExt;
-
         let temp_dir = tempfile::tempdir().unwrap();
 
         // Create a "bead" binary that reports correct identity (no mismatch)
@@ -2710,10 +2719,7 @@ exec echo "bead 0.1.3"
 # This binary correctly reports its identity as "bead"
 echo "bead 0.1.3"
 "#;
-        std::fs::write(&binary_path, binary_content).unwrap();
-        let mut permissions = std::fs::metadata(&binary_path).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&binary_path, permissions).unwrap();
+        publish_executable_fixture(&binary_path, binary_content);
 
         // Create a backend descriptor expecting "bead-rs" identity
         let backend = BeadBackend {
@@ -2748,22 +2754,16 @@ echo "bead 0.1.3"
     #[cfg(unix)]
     #[test]
     fn verify_binary_identity_before_agent_error_message_is_actionable() {
-        use std::os::unix::fs::PermissionsExt;
-
         let temp_dir = tempfile::tempdir().unwrap();
 
         // Create a shim with a mismatch
         let shim_path = temp_dir.path().join("actionable-test-shim");
-        std::fs::write(
+        publish_executable_fixture(
             &shim_path,
             r#"#!/bin/sh
 echo "wrong-identity 1.0.0"
 "#,
-        )
-        .unwrap();
-        let mut permissions = std::fs::metadata(&shim_path).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&shim_path, permissions).unwrap();
+        );
 
         let backend = BeadBackend {
             name: "bead-rs".to_string(),
