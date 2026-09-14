@@ -244,3 +244,4 @@ See ADR-006, ADR-015, and the testing isolation policy in CLAUDE.md for full pos
 - `tests/workspace_fixtures.rs` - Workspace management utilities
 - `docs/adr/006-testing-isolation-policy.md` - ADR on testing isolation
 - `docs/adr/015-concurrent-same-repo-worker-isolation.md` - ADR on worker isolation
+- `docs/testing-mitosis-patterns.md` - Mitosis test interaction patterns and workarounds

@@ -18,3 +18,11 @@ The following tests may exhibit different behavior on local development machines
 **Status:** Not a code bug - these tests validate legitimate functionality (uncommitted dependency detection). The tests pass correctly on CI. The difference is purely environmental due to the cargo wrapper on ex44.
 
 **Action:** When running tests locally, be aware that these tests may fail or produce unexpected results due to the cargo shim. This is expected and does not indicate a problem with the codebase.
+
+## Mitosis Tests
+
+The mitosis test family (unit, P2 integration, and E2E tiers) has its own
+known interaction patterns and workarounds — fixture store wiring, tempdir
+ownership, failure-count gate precedence, and the E2E scripts' blocked `br`
+dependency. See `docs/testing-mitosis-patterns.md` before writing or
+debugging one.
