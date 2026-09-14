@@ -783,6 +783,9 @@ impl CargoTest {
 
         // Build the cargo command
         let mut cmd = Command::new(cargo_program());
+        // Archive runners publish these through nextest's NEXTEST_ENV setup
+        // contract so each process-per-test invocation retains its toolchain
+        // even when standard Cargo variables are reconstructed or omitted.
         for (contract, child_variable) in [
             ("NEEDLE_CARGO_HOME", "CARGO_HOME"),
             ("NEEDLE_RUSTUP_HOME", "RUSTUP_HOME"),
