@@ -9,8 +9,48 @@
 //! - `needle status` shows degraded workspaces
 
 use needle::bead_store::BeadStore;
+use std::ffi::OsString;
 use std::path::PathBuf;
+use std::sync::{Mutex, MutexGuard};
 use tempfile::TempDir;
+
+/// Pins gate-health state beneath a private HOME for the lifetime of a test.
+///
+/// HOME is process-global, so the lock must remain held until the previous
+/// value has been restored. Keep the guard alive for every test that calls a
+/// gate-health operation which reads or writes its on-disk state.
+pub(super) struct IsolatedHome {
+    previous_home: Option<OsString>,
+    _home: TempDir,
+    _lock: MutexGuard<'static, ()>,
+}
+
+impl Drop for IsolatedHome {
+    fn drop(&mut self) {
+        match self.previous_home.take() {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+}
+
+/// Create a private HOME while serializing this module's stateful tests.
+pub(super) fn isolated_home() -> IsolatedHome {
+    static HOME_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    let lock = HOME_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let home = TempDir::new().expect("failed to create isolated gate-health HOME");
+    let previous_home = std::env::var_os("HOME");
+    std::env::set_var("HOME", home.path());
+
+    IsolatedHome {
+        previous_home,
+        _home: home,
+        _lock: lock,
+    }
+}
 
 // ============================================================================
 // Test helper: Mock BeadStore for gate health testing
@@ -241,7 +281,9 @@ impl needle::bead_store::BeadStore for MockBeadStore {
 // ============================================================================
 
 #[tokio::test]
+#[serial_test::serial]
 async fn gate_health_degradation_creates_one_alert_bead() {
+    let _home = isolated_home();
     let workspace_dir = TempDir::new().unwrap();
     let workspace = workspace_dir.path();
 
@@ -270,7 +312,9 @@ async fn gate_health_degradation_creates_one_alert_bead() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn gate_health_state_persists_across_calls() {
+    let _home = isolated_home();
     let workspace_dir = TempDir::new().unwrap();
     let workspace = workspace_dir.path();
 
@@ -305,7 +349,9 @@ async fn gate_health_state_persists_across_calls() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn gate_health_clear_restores_workspace() {
+    let _home = isolated_home();
     let workspace_dir = TempDir::new().unwrap();
     let workspace = workspace_dir.path();
 
@@ -347,7 +393,9 @@ async fn gate_health_workspace_id_is_stable() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
 async fn gate_health_threshold_is_three() {
+    let _home = isolated_home();
     let workspace_dir = TempDir::new().unwrap();
     let workspace = workspace_dir.path();
 
@@ -371,9 +419,11 @@ async fn gate_health_threshold_is_three() {
 // ============================================================================
 
 #[tokio::test]
+#[serial_test::serial]
 async fn gate_error_tracks_state_without_failure_increment() {
     use needle::gate_health;
 
+    let _home = isolated_home();
     let workspace_dir = TempDir::new().unwrap();
     let workspace = workspace_dir.path();
 
@@ -409,6 +459,7 @@ async fn gate_error_tracks_state_without_failure_increment() {
 // ============================================================================
 
 #[tokio::test]
+#[serial_test::serial]
 async fn gate_health_full_workflow_degradation_and_restoration() {
     use needle::config::Config;
     use needle::gate_health;
@@ -417,6 +468,7 @@ async fn gate_health_full_workflow_degradation_and_restoration() {
     use needle::types::{Bead, BeadId, BeadStatus};
     use needle::validation::GateConfig;
 
+    let _home = isolated_home();
     let workspace_dir = TempDir::new().unwrap();
     let workspace = workspace_dir.path();
 

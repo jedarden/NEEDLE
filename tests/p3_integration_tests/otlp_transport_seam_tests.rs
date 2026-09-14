@@ -380,6 +380,7 @@ impl Drop for RunningOtlpWorker {
 }
 
 #[test]
+#[serial_test::serial]
 fn http_provider_path_hands_resource_to_transport_exporters() {
     let isolated = IsolatedTest::new();
     isolated.assert_explore_isolated();
@@ -411,6 +412,7 @@ fn http_provider_path_hands_resource_to_transport_exporters() {
 }
 
 #[test]
+#[serial_test::serial]
 fn grpc_provider_path_hands_resource_to_transport_exporters() {
     let isolated = IsolatedTest::new();
     isolated.assert_explore_isolated();
@@ -445,6 +447,7 @@ fn grpc_provider_path_hands_resource_to_transport_exporters() {
 /// two resilient wrappers before handing the provider resource to them, so all
 /// four wrapper/resource edges are exercised here.
 #[test]
+#[serial_test::serial]
 fn all_four_resilient_wrappers_forward_provider_resource() {
     let isolated = IsolatedTest::new();
     isolated.assert_explore_isolated();
@@ -497,6 +500,7 @@ fn all_four_resilient_wrappers_forward_provider_resource() {
 /// or replacement resource to the transport. Both enabled observations are
 /// made by the capturing exporters, after the resilient-wrapper hop.
 #[test]
+#[serial_test::serial]
 fn running_worker_toggles_otlp_both_directions_at_transport_seam() {
     let isolated = IsolatedTest::new();
     isolated.assert_explore_isolated();
@@ -546,6 +550,7 @@ fn running_worker_toggles_otlp_both_directions_at_transport_seam() {
 /// environment variable must reject only that candidate, not tear down the
 /// provider that is already serving the worker.
 #[test]
+#[serial_test::serial]
 fn running_worker_preserves_otlp_on_missing_env_header_rebuild() {
     let isolated = IsolatedTest::new();
     isolated.assert_explore_isolated();
