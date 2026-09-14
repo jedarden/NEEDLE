@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -122,6 +123,21 @@ struct SharedHeartbeatState {
     adapter: Option<String>,
 }
 
+/// Control messages for the native heartbeat thread.
+///
+/// Production uses `Shutdown` to interrupt the thread's bounded wait without
+/// polling for a full heartbeat interval. Unit tests additionally advance the
+/// same wait state explicitly, so they exercise the real emitter and file
+/// writer without sleeping on wall-clock time.
+enum EmitterCommand {
+    Shutdown,
+    #[cfg(test)]
+    Advance {
+        duration: Duration,
+        completed: Sender<bool>,
+    },
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // HealthMonitor
 // ──────────────────────────────────────────────────────────────────────────────
@@ -143,6 +159,9 @@ pub struct HealthMonitor {
     shared_state: Arc<Mutex<SharedHeartbeatState>>,
     shutdown: Arc<AtomicBool>,
     emitter_handle: Option<std::thread::JoinHandle<()>>,
+    emitter_control: Option<Sender<EmitterCommand>>,
+    #[cfg(test)]
+    emitter_uses_manual_time: bool,
     /// Path to this worker's heartbeat file (computed during construction).
     heartbeat_path: PathBuf,
 }
@@ -227,6 +246,9 @@ impl HealthMonitor {
             })),
             shutdown: shutdown.unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
             emitter_handle: None,
+            emitter_control: None,
+            #[cfg(test)]
+            emitter_uses_manual_time: false,
             heartbeat_path,
         }
     }
@@ -287,6 +309,11 @@ impl HealthMonitor {
         let workspace = self.workspace.clone();
         let started_at = self.started_at;
         let interval = self.heartbeat_interval;
+        let (emitter_control, emitter_commands) = mpsc::channel();
+        #[cfg(test)]
+        let emitter_uses_manual_time = self.emitter_uses_manual_time;
+        #[cfg(not(test))]
+        let emitter_uses_manual_time = false;
 
         let handle = std::thread::Builder::new()
             .name(format!("heartbeat-{}", self.worker_id))
@@ -301,11 +328,14 @@ impl HealthMonitor {
                     started_at,
                     interval,
                     10,
+                    emitter_commands,
+                    emitter_uses_manual_time,
                 );
             })
             .context("failed to spawn heartbeat emitter thread")?;
 
         self.emitter_handle = Some(handle);
+        self.emitter_control = Some(emitter_control);
         tracing::info!(
             worker = %self.worker_id,
             interval_secs = self.heartbeat_interval.as_secs(),
@@ -406,6 +436,9 @@ impl HealthMonitor {
     pub fn stop(&mut self) {
         // Signal the emitter thread to exit.
         self.shutdown.store(true, Ordering::SeqCst);
+        if let Some(control) = self.emitter_control.take() {
+            let _ = control.send(EmitterCommand::Shutdown);
+        }
 
         // Join the emitter thread (with a timeout to avoid hanging).
         if let Some(handle) = self.emitter_handle.take() {
@@ -420,6 +453,37 @@ impl HealthMonitor {
                 "failed to remove heartbeat file on shutdown"
             );
         }
+    }
+
+    /// Switch the native emitter to explicit time advancement for a unit test.
+    #[cfg(test)]
+    fn use_manual_emitter_time(&mut self) {
+        assert!(
+            self.emitter_handle.is_none(),
+            "manual emitter time must be selected before start_emitter"
+        );
+        self.emitter_uses_manual_time = true;
+    }
+
+    /// Advance the native emitter's interval accumulator and wait until that
+    /// command has either caused a real heartbeat write or been consumed as a
+    /// partial interval.
+    #[cfg(test)]
+    fn advance_emitter(&self, duration: Duration) -> Result<bool> {
+        let control = self
+            .emitter_control
+            .as_ref()
+            .context("heartbeat emitter is not running")?;
+        let (completed, completion) = mpsc::channel();
+        control
+            .send(EmitterCommand::Advance {
+                duration,
+                completed,
+            })
+            .context("heartbeat emitter stopped before time could advance")?;
+        completion
+            .recv()
+            .context("heartbeat emitter stopped before acknowledging time advancement")
     }
 
     /// Path to this worker's heartbeat file.
@@ -1410,6 +1474,8 @@ fn emitter_loop(
     started_at: DateTime<Utc>,
     interval: Duration,
     max_consecutive_failures: u32,
+    commands: Receiver<EmitterCommand>,
+    uses_manual_time: bool,
 ) {
     // Ensure the heartbeat directory exists before entering the write loop so
     // that workers self-recover if ~/.needle/state/heartbeats/ is deleted.
@@ -1430,14 +1496,42 @@ fn emitter_loop(
         // sleeping for the full interval. This ensures the emitter responds
         // to shutdown signals quickly, giving the atexit handler a chance to
         // emit worker.stopped telemetry even if the process is killed.
+        let mut advance_completion: Option<Sender<bool>> = None;
         while elapsed < current_sleep {
             if shutdown.load(Ordering::SeqCst) {
                 tracing::debug!(worker = %worker_id, "heartbeat emitter shutting down");
                 return;
             }
             let sleep_dur = std::cmp::min(INTERRUPTIBLE_SLEEP_INTERVAL, current_sleep - elapsed);
-            std::thread::sleep(sleep_dur);
-            elapsed += sleep_dur;
+            let command = if uses_manual_time {
+                match commands.recv() {
+                    Ok(command) => Some(command),
+                    Err(_) => return,
+                }
+            } else {
+                match commands.recv_timeout(sleep_dur) {
+                    Ok(command) => Some(command),
+                    Err(RecvTimeoutError::Timeout) => None,
+                    Err(RecvTimeoutError::Disconnected) => return,
+                }
+            };
+
+            match command {
+                Some(EmitterCommand::Shutdown) => return,
+                #[cfg(test)]
+                Some(EmitterCommand::Advance {
+                    duration,
+                    completed,
+                }) => {
+                    elapsed = elapsed.saturating_add(duration);
+                    if elapsed < current_sleep {
+                        let _ = completed.send(false);
+                    } else {
+                        advance_completion = Some(completed);
+                    }
+                }
+                None => elapsed += sleep_dur,
+            }
         }
         elapsed = Duration::ZERO;
 
@@ -1546,11 +1640,17 @@ fn emitter_loop(
                         ),
                     );
                     shutdown.store(true, Ordering::SeqCst);
+                    if let Some(completed) = advance_completion.take() {
+                        let _ = completed.send(true);
+                    }
                     return;
                 }
                 // Exponential backoff to reduce log spam before the circuit breaker fires.
                 current_sleep = current_sleep.saturating_mul(2).min(MAX_HEARTBEAT_BACKOFF);
             }
+        }
+        if let Some(completed) = advance_completion.take() {
+            let _ = completed.send(true);
         }
     }
 }
@@ -1668,8 +1768,8 @@ mod tests {
         monitor.stop();
     }
 
-    #[tokio::test]
-    async fn heartbeat_updates_with_shared_state() {
+    #[test]
+    fn heartbeat_updates_with_shared_state() {
         let _home_guard = isolate_test_home();
         let dir = tempfile::tempdir().unwrap();
         let hb_dir = dir.path().join("state").join("heartbeats");
@@ -1681,6 +1781,7 @@ mod tests {
             None,
         );
 
+        monitor.use_manual_emitter_time();
         monitor.start_emitter().unwrap();
 
         // Update shared state.
@@ -1691,10 +1792,7 @@ mod tests {
         );
         monitor.update_beads_processed(5);
 
-        // The emitter runs in a native thread using std::thread::sleep, so we must
-        // wait for real wall-clock time for it to write the next heartbeat.
-        // Use tokio::time::sleep for consistency with async test framework.
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(monitor.advance_emitter(Duration::from_secs(1)).unwrap());
 
         let content = std::fs::read_to_string(monitor.heartbeat_path()).unwrap();
         let data: HeartbeatData = serde_json::from_str(&content).unwrap();
@@ -1966,8 +2064,8 @@ mod tests {
         assert!(!HealthMonitor::check_pid_alive(99_999_999));
     }
 
-    #[tokio::test]
-    async fn atomic_write_never_produces_partial() {
+    #[test]
+    fn atomic_write_never_produces_partial() {
         let _home_guard = isolate_test_home();
         let dir = tempfile::tempdir().unwrap();
         let hb_dir = dir.path().join("state").join("heartbeats");
@@ -1979,11 +2077,14 @@ mod tests {
             None,
         );
 
+        monitor.use_manual_emitter_time();
         monitor.start_emitter().unwrap();
 
-        // Read the heartbeat file multiple times while it's being updated.
-        // The emitter runs in a native thread, so we wait for real time between reads.
-        for _ in 0..10 {
+        // Drive ten real emitter writes and verify each atomic replacement is
+        // immediately parseable.
+        for count in 1..=10 {
+            monitor.update_beads_processed(count);
+            assert!(monitor.advance_emitter(Duration::from_secs(1)).unwrap());
             let path = monitor.heartbeat_path();
             if path.exists() {
                 let content = std::fs::read_to_string(&path).unwrap();
@@ -1995,7 +2096,6 @@ mod tests {
                     content
                 );
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
         monitor.stop();
@@ -2110,8 +2210,10 @@ mod tests {
         let shutdown_clone = shutdown.clone();
         let shared_state_clone = shared_state.clone();
         let hb_dir_clone = hb_dir.clone();
+        let (emitter_control, emitter_commands) = mpsc::channel();
 
-        // Use a tiny interval and a low failure threshold so the test completes quickly.
+        // Advance the native emitter deterministically through its 1/2/4ms
+        // backoff schedule; every step still performs the real failing write.
         let handle = std::thread::spawn(move || {
             emitter_loop(
                 shared_state_clone,
@@ -2123,8 +2225,21 @@ mod tests {
                 Utc::now(),
                 Duration::from_millis(1),
                 3, // trip after 3 consecutive failures
+                emitter_commands,
+                true,
             );
         });
+
+        for duration in [1, 2, 4].map(Duration::from_millis) {
+            let (completed, completion) = mpsc::channel();
+            emitter_control
+                .send(EmitterCommand::Advance {
+                    duration,
+                    completed,
+                })
+                .unwrap();
+            assert!(completion.recv().unwrap());
+        }
 
         handle.join().expect("emitter thread panicked");
 
@@ -2189,8 +2304,8 @@ mod tests {
         assert_eq!(monitor2.qualified_id(), "claude-code-glm-4_7-foxtrot");
     }
 
-    #[tokio::test]
-    async fn heartbeat_files_dont_collide_across_adapter_pools() {
+    #[test]
+    fn heartbeat_files_dont_collide_across_adapter_pools() {
         let _home_guard = isolate_test_home();
         let dir = tempfile::tempdir().unwrap();
         let hb_dir = dir.path().join("state").join("heartbeats");
@@ -2216,6 +2331,8 @@ mod tests {
             None,
         );
 
+        monitor1.use_manual_emitter_time();
+        monitor2.use_manual_emitter_time();
         monitor1.start_emitter().unwrap();
         monitor2.start_emitter().unwrap();
 
@@ -2245,9 +2362,8 @@ mod tests {
         monitor1.update_beads_processed(100);
         monitor2.update_beads_processed(200);
 
-        // Wait for emitter to write (uses tokio::time::sleep for async framework consistency,
-        // but emitter threads use std::thread::sleep so this still requires wall-clock time).
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(monitor1.advance_emitter(Duration::from_secs(1)).unwrap());
+        assert!(monitor2.advance_emitter(Duration::from_secs(1)).unwrap());
 
         let content1_updated = std::fs::read_to_string(&path1).unwrap();
         let data1_updated: HeartbeatData = serde_json::from_str(&content1_updated).unwrap();
@@ -2261,8 +2377,8 @@ mod tests {
         monitor2.stop();
     }
 
-    #[tokio::test]
-    async fn heartbeat_uses_cross_workspace_bead_workspace() {
+    #[test]
+    fn heartbeat_uses_cross_workspace_bead_workspace() {
         let _home_guard = isolate_test_home();
         let dir = tempfile::tempdir().unwrap();
         let hb_dir = dir.path().join("state").join("heartbeats");
@@ -2279,6 +2395,7 @@ mod tests {
             None,
         );
 
+        monitor.use_manual_emitter_time();
         monitor.start_emitter().unwrap();
 
         // Simulate processing a bead from a different workspace
@@ -2288,9 +2405,7 @@ mod tests {
             Some(remote_workspace.as_path()),
         );
 
-        // Wait for the emitter to write a new heartbeat (uses tokio::time::sleep for
-        // consistency with async framework, but emitter thread uses std::thread::sleep).
-        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(monitor.advance_emitter(Duration::from_secs(1)).unwrap());
 
         let content = std::fs::read_to_string(monitor.heartbeat_path()).unwrap();
         let data: HeartbeatData = serde_json::from_str(&content).unwrap();
@@ -2309,149 +2424,77 @@ mod tests {
     /// 2. Heartbeat file is refreshed every heartbeat_interval_secs
     /// 3. File contains worker ID and last refresh timestamp
     ///
-    /// Uses tokio virtual time to test 30-second refresh intervals without
-    /// waiting for real wall-clock time.
-    ///
-    /// NOTE: This test uses virtual time to simulate heartbeat intervals.
-    /// The actual emitter runs in a native thread, so we simulate the heartbeat
-    /// writes manually using virtual time to avoid waiting for real wall-clock time.
-    #[tokio::test(start_paused = true)]
-    async fn heartbeat_creates_and_refreshes_every_30_seconds() {
-        let _home_guard = isolate_test_home();
+    /// The emitter is a native thread, so Tokio's paused clock cannot drive it.
+    /// Its manual-time channel advances the real scheduling loop and waits for
+    /// the real atomic file writer to finish.
+    #[test]
+    fn heartbeat_creates_and_refreshes_every_30_seconds() {
         let dir = tempfile::tempdir().unwrap();
-        let _hb_dir = dir.path().join("state").join("heartbeats");
+        let _home_guard = isolate_test_home_at(dir.path());
+        let hb_dir = dir.path().join("state").join("heartbeats");
 
-        let mut config = Config::default();
-        config.workspace.home = dir.path().to_path_buf();
-        config.health.heartbeat_interval_secs = 1;
+        let mut config = test_config(&hb_dir);
+        config.health.heartbeat_interval_secs = 30;
         config.health.heartbeat_ttl_secs = 300;
 
-        let monitor = HealthMonitor::new(
+        let mut monitor = HealthMonitor::new(
             config,
             "validate-worker".to_string(),
             Telemetry::new("test".to_string()),
             None,
         );
-
+        monitor.use_manual_emitter_time();
+        monitor.start_emitter().unwrap();
         let path = monitor.heartbeat_path();
-
-        // Ensure heartbeat directory exists
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
-        }
-
-        // ACCEPTANCE CRITERION 1: Worker creates heartbeat file on startup
-        // Write initial heartbeat manually (simulating emitter behavior)
-        let initial_data = HeartbeatData {
-            worker_id: "validate-worker".to_string(),
-            qualified_id: monitor.qualified_id().to_string(),
-            pid: std::process::id(),
-            state: WorkerState::Selecting,
-            current_bead: None,
-            workspace: dir.path().to_path_buf(),
-            last_heartbeat: Utc::now(),
-            started_at: Utc::now(),
-            beads_processed: 0,
-            session: "validate-worker".to_string(),
-            is_idle: false,
-            current_task: None,
-            model: monitor
-                .qualified_id()
-                .split('-')
-                .next()
-                .unwrap_or("unknown")
-                .to_string(),
-            heartbeat_file: None,
-        };
-
-        let json = serde_json::to_string_pretty(&initial_data).unwrap();
-        std::fs::write(&path, json).unwrap();
 
         assert!(
             path.exists(),
             "heartbeat file must be created immediately on startup"
         );
 
-        // Verify initial heartbeat contains required fields
         let content = std::fs::read_to_string(&path).unwrap();
         let data: HeartbeatData = serde_json::from_str(&content).unwrap();
-
-        // ACCEPTANCE CRITERION 3a: File contains worker ID
         assert_eq!(data.worker_id, "validate-worker");
         assert!(!data.qualified_id.is_empty());
-
-        // ACCEPTANCE CRITERION 3b: File contains last refresh timestamp
-        let initial_timestamp = data.last_heartbeat;
-        let age = (Utc::now() - initial_timestamp).num_seconds().abs();
+        let age = (Utc::now() - data.last_heartbeat).num_seconds().abs();
         assert!(
             age < 2,
             "initial heartbeat timestamp must be within 2 seconds of now, got {} seconds difference",
             age
         );
-
-        // Verify PID is included
         assert_eq!(data.pid, std::process::id());
-
-        // Verify started_at timestamp
         assert!(!data.started_at.timestamp().is_negative());
 
-        // ACCEPTANCE CRITERION 2: File updates every ~30 seconds
-        // Simulate 3 refresh cycles using virtual time
+        // Twenty-nine virtual seconds do not reach the configured boundary.
+        monitor.update_beads_processed(1);
+        assert!(!monitor.advance_emitter(Duration::from_secs(29)).unwrap());
+        let unchanged: HeartbeatData =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(unchanged.beads_processed, 0);
+
+        // The thirtieth second, and every full interval after it, drives the
+        // real emitter and exposes the latest shared state in the file.
+        assert!(monitor.advance_emitter(Duration::from_secs(1)).unwrap());
+        let first_refresh: HeartbeatData =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(first_refresh.beads_processed, 1);
+
         for cycle in 1..=3 {
-            tracing::info!("simulating heartbeat refresh cycle {} of 3", cycle);
-
-            // Record the timestamp before advancing time
-            let before_content = std::fs::read_to_string(&path).unwrap();
-            let before_data: HeartbeatData = serde_json::from_str(&before_content).unwrap();
-            let before_timestamp = before_data.last_heartbeat;
-
-            // Advance virtual time by one heartbeat interval (1 second)
-            tokio::time::advance(Duration::from_secs(1)).await;
-
-            // Simulate heartbeat refresh by updating the file
-            let updated_data = HeartbeatData {
-                last_heartbeat: before_timestamp + chrono::Duration::seconds(1),
-                beads_processed: cycle as u64,
-                ..before_data.clone()
-            };
-
-            let json = serde_json::to_string_pretty(&updated_data).unwrap();
-            std::fs::write(&path, json).unwrap();
-
-            // Verify the file has been updated
-            let after_content = std::fs::read_to_string(&path).unwrap();
-            let after_data: HeartbeatData = serde_json::from_str(&after_content).unwrap();
-            let after_timestamp = after_data.last_heartbeat;
-
-            let time_diff = (after_timestamp - before_timestamp).num_seconds();
-
-            // The timestamp should have advanced by exactly 1 second (virtual time)
-            assert_eq!(
-                time_diff, 1,
-                "heartbeat should refresh every 1 second in virtual time, got {} seconds difference (cycle {})",
-                time_diff,
-                cycle
-            );
-
-            // Verify the timestamp continues to advance monotonically
-            assert!(
-                after_timestamp > before_timestamp,
-                "last_heartbeat timestamp must monotonically increase"
-            );
+            let expected_count = cycle + 1;
+            monitor.update_beads_processed(expected_count);
+            assert!(monitor.advance_emitter(Duration::from_secs(30)).unwrap());
+            let refreshed: HeartbeatData =
+                serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            assert_eq!(refreshed.beads_processed, expected_count);
         }
 
-        // Final verification: heartbeat file still contains valid data
         let final_content = std::fs::read_to_string(&path).unwrap();
         let final_data: HeartbeatData = serde_json::from_str(&final_content).unwrap();
-
         assert_eq!(final_data.worker_id, "validate-worker");
         assert!(!final_data.qualified_id.is_empty());
         assert_eq!(final_data.pid, std::process::id());
 
-        // Cleanup: remove heartbeat file (simulating stop())
-        std::fs::remove_file(&path).unwrap();
-
-        // Verify file is removed after cleanup
+        monitor.stop();
         assert!(
             !path.exists(),
             "heartbeat file must be removed when worker stops"
@@ -5293,8 +5336,8 @@ mod tests {
     /// 2. Verify worker is detected as alive via heartbeat freshness
     /// 3. Kill the worker and verify it's detected as dead/stale
     /// 4. Uses proper test isolation (temp HOME, heartbeat dir)
-    #[tokio::test]
-    async fn worker_liveness_detection_integration() {
+    #[test]
+    fn worker_liveness_detection_integration() {
         let _home_guard = isolate_test_home();
         let dir = tempfile::tempdir().unwrap();
         let hb_dir = dir.path().join("state").join("heartbeats");
@@ -5314,7 +5357,8 @@ mod tests {
         let qualified_id = monitor.qualified_id().to_string();
         let heartbeat_path = monitor.heartbeat_path();
 
-        // Start the emitter
+        // Start the emitter with deterministic native-thread time.
+        monitor.use_manual_emitter_time();
         monitor.start_emitter().unwrap();
 
         // Verify initial heartbeat file was created
@@ -5338,8 +5382,7 @@ mod tests {
             "verify_heartbeat should return true for fresh heartbeat"
         );
 
-        // Wait for one heartbeat refresh interval to ensure freshness detection works
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(monitor.advance_emitter(Duration::from_secs(1)).unwrap());
 
         // Worker should still be detected as alive after one interval
         let is_alive_after_interval = monitor.check_worker_alive(&qualified_id).unwrap();

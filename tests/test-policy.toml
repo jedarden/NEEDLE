@@ -171,13 +171,6 @@ owner = "component:health"
 reason = "Grandfathered unit-tier debt; replace with an injected boundary."
 
 [[unit_exception]]
-path = "src/health/mod.rs"
-kind = "sleep"
-max_occurrences = 5
-owner = "component:health"
-reason = "Grandfathered unit-tier debt; replace with an injected boundary."
-
-[[unit_exception]]
 path = "src/hoop_hooks.rs"
 kind = "global-env"
 max_occurrences = 8
