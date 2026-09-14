@@ -1,11 +1,11 @@
 {
-  "timestamp": "2026-09-14T10:38:46.532778174Z",
-  "total_open_beads": 627,
+  "timestamp": "2026-09-14T11:38:52.400460459Z",
+  "total_open_beads": 624,
   "exclusion_criteria": {
     "has_assignee": 0,
     "manually_blocked": 21,
-    "has_dependencies": 432,
-    "resource_conflicts": 12
+    "has_dependencies": 429,
+    "resource_conflicts": 4
   },
   "final_candidate_count": 201,
   "excluded_beads": [
@@ -1106,8 +1106,8 @@
       "manual_blocked": true,
       "has_blockers": true,
       "blocker_count": 10,
-      "has_resource_conflicts": true,
-      "conflict_count": 1
+      "has_resource_conflicts": false,
+      "conflict_count": 0
     },
     {
       "bead_id": "needle-fe42db64",
@@ -1117,8 +1117,8 @@
       "manual_blocked": true,
       "has_blockers": true,
       "blocker_count": 16,
-      "has_resource_conflicts": true,
-      "conflict_count": 1
+      "has_resource_conflicts": false,
+      "conflict_count": 0
     },
     {
       "bead_id": "needle-5dda045b",
@@ -1128,8 +1128,8 @@
       "manual_blocked": true,
       "has_blockers": true,
       "blocker_count": 19,
-      "has_resource_conflicts": true,
-      "conflict_count": 1
+      "has_resource_conflicts": false,
+      "conflict_count": 0
     },
     {
       "bead_id": "needle-c1ae2730",
@@ -1227,8 +1227,8 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 2,
-      "has_resource_conflicts": true,
-      "conflict_count": 1
+      "has_resource_conflicts": false,
+      "conflict_count": 0
     },
     {
       "bead_id": "needle-272252f9",
@@ -1304,8 +1304,8 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 7,
-      "has_resource_conflicts": true,
-      "conflict_count": 1
+      "has_resource_conflicts": false,
+      "conflict_count": 0
     },
     {
       "bead_id": "needle-a6ff59c4",
@@ -1315,8 +1315,8 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 2,
-      "has_resource_conflicts": true,
-      "conflict_count": 1
+      "has_resource_conflicts": false,
+      "conflict_count": 0
     },
     {
       "bead_id": "needle-03e7645a",
@@ -1348,8 +1348,8 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 7,
-      "has_resource_conflicts": true,
-      "conflict_count": 1
+      "has_resource_conflicts": false,
+      "conflict_count": 0
     },
     {
       "bead_id": "needle-e820851a",
@@ -1403,17 +1403,6 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
-      "bead_id": "needle-8e24cef6",
-      "title": "Land the in-flight pluck StarvationSnapshot emitter rewrite: commit, verify, ship",
-      "priority": 1,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 2,
       "has_resource_conflicts": false,
       "conflict_count": 0
     },
@@ -2041,8 +2030,8 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 1,
-      "has_resource_conflicts": true,
-      "conflict_count": 1
+      "has_resource_conflicts": false,
+      "conflict_count": 0
     },
     {
       "bead_id": "needle-c2fc81d6",
@@ -4445,28 +4434,6 @@
     {
       "bead_id": "needle-65e66131",
       "title": "N-T56: `needle improvements` read-only view of proposals, admitted beads, receipts and the fleet trend of verified closures per dollar [cargo test --test nt56_improvements_cli]",
-      "priority": 2,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
-      "bead_id": "needle-e7f01949",
-      "title": "Capture test execution start timestamp before command spawn",
-      "priority": 2,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
-      "bead_id": "needle-9f44a31a",
-      "title": "Emit start timestamp via telemetry and outcome records",
       "priority": 2,
       "assignee": null,
       "manual_blocked": false,

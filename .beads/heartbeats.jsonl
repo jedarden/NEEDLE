@@ -6690,3 +6690,4 @@
 {"last_strand":null,"state":"idle","ts":"2026-09-14T10:38:09.133687821+00:00","worker":"test-worker"}
 {"last_strand":null,"state":"idle","ts":"2026-09-14T10:38:09.281370338+00:00","worker":"test-worker"}
 {"last_strand":null,"state":"idle","ts":"2026-09-14T10:38:10.332774617+00:00","worker":"test-zero-budget"}
+{"last_strand":null,"state":"idle","ts":"2026-09-14T11:31:55.074196457+00:00","worker":"glm-needle"}
