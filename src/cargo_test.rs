@@ -50,6 +50,22 @@ pub const DEFAULT_TEST_TIMEOUT_SECS: u64 = 600;
 /// Maximum bytes of stdout/stderr to capture per test run.
 pub const MAX_OUTPUT_BYTES: usize = 65536;
 
+/// Resolve Cargo without assuming the caller's HOME-derived PATH survives.
+///
+/// Archived nextest runners deliberately isolate HOME per shard. Prefer the
+/// explicit Cargo contract when supplied, then the standard CARGO_HOME layout,
+/// and retain PATH lookup as the normal interactive fallback.
+fn cargo_program() -> PathBuf {
+    std::env::var_os("CARGO")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("CARGO_HOME")
+                .map(PathBuf::from)
+                .map(|home| home.join("bin/cargo"))
+        })
+        .unwrap_or_else(|| PathBuf::from("cargo"))
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Test Arguments
 // ──────────────────────────────────────────────────────────────────────────────
@@ -740,7 +756,7 @@ impl CargoTest {
         );
 
         // Build the cargo command
-        let mut cmd = Command::new("cargo");
+        let mut cmd = Command::new(cargo_program());
         cmd.args(&args);
         cmd.current_dir(&self.workspace);
         cmd.stdout(Stdio::piped());
