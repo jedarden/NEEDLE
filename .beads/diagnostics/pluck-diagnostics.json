@@ -1,10 +1,10 @@
 {
-  "timestamp": "2026-09-14T13:39:00.351137482Z",
-  "total_open_beads": 621,
+  "timestamp": "2026-09-14T14:39:04.141876827Z",
+  "total_open_beads": 619,
   "exclusion_criteria": {
     "has_assignee": 0,
     "manually_blocked": 21,
-    "has_dependencies": 428,
+    "has_dependencies": 426,
     "resource_conflicts": 1
   },
   "final_candidate_count": 203,
@@ -3167,17 +3167,6 @@
       "conflict_count": 0
     },
     {
-      "bead_id": "needle-6729ce69",
-      "title": "Update mitosis test documentation with known patterns and workarounds",
-      "priority": 2,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
       "bead_id": "needle-a585ccc6",
       "title": "needle doctor detects + repairs orphaned claims",
       "priority": 2,
@@ -3477,17 +3466,6 @@
     {
       "bead_id": "needle-849d3e92",
       "title": "Run clippy and fix warnings",
-      "priority": 2,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
-      "bead_id": "needle-ed937f7e",
-      "title": "Fix and document any mitosis test interaction issues",
       "priority": 2,
       "assignee": null,
       "manual_blocked": false,
