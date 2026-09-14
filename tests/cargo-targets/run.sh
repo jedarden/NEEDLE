@@ -57,6 +57,8 @@ grep -Eq '^autotests[[:space:]]*=[[:space:]]*false([[:space:]]*(#.*)?)?$' "$MANI
 # is removed from the image layer after warm-up.
 grep -Fq 'COPY Cargo.toml Cargo.lock rust-toolchain.toml ./' "$DEPS_DOCKERFILE" \
   || fail 'dependency image must copy rust-toolchain.toml before warming Cargo'
+grep -Fq 'COPY .config/nextest.toml ./.config/nextest.toml' "$DEPS_DOCKERFILE" \
+  || fail 'dependency image must copy the nextest profile used by the archive producer'
 grep -Fq 'ln -s /opt/needle-ci-target /workspace/target' "$DEPS_DOCKERFILE" \
   || fail 'dependency image must warm through the workflow target symlink'
 grep -Fq "printf '%s\\n' \"\$actual_toolchain\" > /opt/needle-ci-toolchain-version" "$DEPS_DOCKERFILE" \
@@ -65,20 +67,75 @@ grep -Fq 'test "$source_toolchain" = "$actual_toolchain"' "$DEPS_DOCKERFILE" \
   || fail 'dependency image must verify source/compiler toolchain parity'
 grep -Fq 'test -d /opt/needle-ci-target/debug/deps' "$DEPS_DOCKERFILE" \
   || fail 'dependency image must verify warmed dependency artifacts exist'
+grep -Fq 'test -s /opt/needle-ci-nextest-cache-contract' "$DEPS_DOCKERFILE" \
+  || fail 'dependency image must publish a non-empty nextest cache contract marker'
 grep -Fq 'rm /workspace/target' "$DEPS_DOCKERFILE" \
   || fail 'dependency image must remove only its warm-up target symlink'
 if grep -Eq 'rm[[:space:]].*(/opt/needle-ci-target|(-r|-f|--recursive)[^;]*(/workspace/)?target)' "$DEPS_DOCKERFILE"; then
   fail 'dependency image must preserve /opt/needle-ci-target after warm-up'
 fi
+if grep -Eq '^COPY[[:space:]]+src/' "$DEPS_DOCKERFILE"; then
+  fail 'dependency image must not COPY volatile NEEDLE source into the warm layer'
+fi
+
+[[ "$(grep -cF 'CARGO_BUILD_JOBS=2 cargo-nextest nextest archive \' "$DEPS_DOCKERFILE")" -eq 1 ]] \
+  || fail 'dependency image must invoke the exact nextest archive warm-up once'
+grep -Fq -- '--archive-file /tmp/needle-nextest-dependency-warm.tar.zst' "$DEPS_DOCKERFILE" \
+  || fail 'dependency warm-up must write its disposable nextest archive outside the image target'
+grep -Fq -- '--profile ci' "$DEPS_DOCKERFILE" \
+  || fail 'dependency warm-up must use the producer nextest profile'
+grep -Fq -- '--locked' "$DEPS_DOCKERFILE" \
+  || fail 'dependency warm-up must lock dependency resolution'
+grep -Fq -- '--lib' "$DEPS_DOCKERFILE" \
+  || fail 'dependency warm-up must include the library test binary'
+for target in $EXPECTED_TARGETS; do
+  [[ "$(grep -cF -- "--test $target" "$DEPS_DOCKERFILE")" -eq 1 ]] \
+    || fail "dependency warm-up must include declared test target $target exactly once"
+done
+if grep -Eq -- '--(tests|all-targets|bins|examples|benches)([[:space:]]|$)' "$DEPS_DOCKERFILE"; then
+  fail 'dependency warm-up must not silently broaden the producer target set'
+fi
+if grep -Eq '^[[:space:]]*cargo build([[:space:]]|$)' "$DEPS_DOCKERFILE"; then
+  fail 'dependency image must not warm the incompatible Cargo dev profile'
+fi
+grep -Fq 'rm -f /tmp/needle-nextest-dependency-warm.tar.zst' "$DEPS_DOCKERFILE" \
+  || fail 'dependency image must remove its disposable warm-up archive in the same layer'
+
+for marker_fragment in \
+  'schema=needle-nextest-dependency-cache/v1' \
+  'cargo_toml_sha256=' \
+  'cargo_lock_sha256=' \
+  'rust_toolchain_sha256=' \
+  'nextest_config_sha256=' \
+  'rust_release=' \
+  'nextest_release=' \
+  'nextest_binary_sha256=' \
+  'cargo_profile=test' \
+  'nextest_profile=ci' \
+  'features=default' \
+  'target_triple=' \
+  'target_set=lib,integration_spawn,integration_tests,p2_integration_tests,p3_integration_tests,real_br_integration_tests' \
+  'workspace_root=/workspace' \
+  'target_dir=/opt/needle-ci-target' \
+  'cargo_build_jobs=2'; do
+  grep -Fq "$marker_fragment" "$DEPS_DOCKERFILE" \
+    || fail "dependency cache marker is missing $marker_fragment"
+done
 
 copy_line="$(grep -nF 'COPY Cargo.toml Cargo.lock rust-toolchain.toml ./' "$DEPS_DOCKERFILE" | cut -d: -f1)"
-build_line="$(grep -nF '    cargo build && \' "$DEPS_DOCKERFILE" | cut -d: -f1)"
+config_copy_line="$(grep -nF 'COPY .config/nextest.toml ./.config/nextest.toml' "$DEPS_DOCKERFILE" | cut -d: -f1)"
+build_line="$(grep -nF 'CARGO_BUILD_JOBS=2 cargo-nextest nextest archive \' "$DEPS_DOCKERFILE" | cut -d: -f1)"
+archive_remove_line="$(grep -nF 'rm -f /tmp/needle-nextest-dependency-warm.tar.zst' "$DEPS_DOCKERFILE" | cut -d: -f1)"
 deps_line="$(grep -nF 'test -d /opt/needle-ci-target/debug/deps' "$DEPS_DOCKERFILE" | cut -d: -f1)"
+marker_line="$(grep -nF '} > /opt/needle-ci-nextest-cache-contract' "$DEPS_DOCKERFILE" | cut -d: -f1)"
 unlink_line="$(grep -nF 'rm /workspace/target' "$DEPS_DOCKERFILE" | cut -d: -f1)"
-[[ -n "$copy_line" && -n "$build_line" && "$copy_line" -lt "$build_line" ]] || fail \
-  'dependency image must copy rust-toolchain.toml before the first Cargo build'
-[[ -n "$deps_line" && -n "$unlink_line" && "$build_line" -lt "$deps_line" && "$deps_line" -lt "$unlink_line" ]] || fail \
-  'dependency image must verify warmed artifacts before removing the target symlink'
+[[ -n "$copy_line" && -n "$config_copy_line" && -n "$build_line" && \
+   "$copy_line" -lt "$build_line" && "$config_copy_line" -lt "$build_line" ]] || fail \
+  'dependency image must copy every profile input before the nextest warm-up'
+[[ -n "$archive_remove_line" && -n "$deps_line" && -n "$marker_line" && -n "$unlink_line" && \
+   "$build_line" -lt "$archive_remove_line" && "$archive_remove_line" -lt "$deps_line" && \
+   "$deps_line" -lt "$marker_line" && "$marker_line" -lt "$unlink_line" ]] || fail \
+  'dependency image must remove the archive, verify artifacts, record the marker, then unlink target'
 
 source_toolchain="$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$TOOLCHAIN_FILE")"
 actual_toolchain="$(rustc -vV | sed -n 's/^release: //p')"
@@ -166,8 +223,8 @@ workdir_line="$(grep -nF 'WORKDIR /workspace' "$BASE_DOCKERFILE" | cut -d: -f1)"
    "$nextest_assert_line" -lt "$workdir_line" ]] || fail \
   'base image must add cargo-nextest after the pinned Rust toolchain layer and before WORKDIR'
 
-[[ "$(tr -d '\n' < "$CI_VERSION_FILE")" == "0.1.11" ]] \
-  || fail 'ci/VERSION must move with the cargo-nextest image contents'
+[[ "$(tr -d '\n' < "$CI_VERSION_FILE")" == "0.1.12" ]] \
+  || fail 'ci/VERSION must move with the exact-profile dependency image contents'
 grep -Fq 'nextest-version = { required = "0.9.144" }' "$NEXTEST_CONFIG" \
   || fail 'nextest config must set the minimum supported runner version'
 grep -Fq '[profile.ci]' "$NEXTEST_CONFIG" \
@@ -238,4 +295,4 @@ echo "PASS: rustc release matches the source toolchain pin ($source_toolchain)"
 echo 'PASS: base image pins and verifies bead-rs 0.2.6 before installation'
 echo 'PASS: base image pins and verifies cargo-nextest 0.9.144 before installation'
 echo 'PASS: nextest CI profile emits stable, non-duplicated JUnit output'
-echo 'PASS: CI image version is 0.1.11'
+echo 'PASS: CI image version is 0.1.12'

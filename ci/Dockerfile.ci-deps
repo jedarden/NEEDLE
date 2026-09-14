@@ -12,6 +12,7 @@ FROM ${BASE_IMAGE}
 # incompatible target tree.
 WORKDIR /workspace
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY .config/nextest.toml ./.config/nextest.toml
 RUN set -eux; \
     source_toolchain="$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml)"; \
     actual_toolchain="$(rustc -vV | sed -n 's/^release: //p')"; \
@@ -29,15 +30,16 @@ RUN set -eux; \
 # [[test]] entries -- cargo fails to load the manifest if a declared target's
 # source file is missing: "can't find `sanitize` bench at `benches/sanitize.rs`"
 # (confirmed live 2026-08-12), "can't find integration-test `integration_spawn`
-# at path `tests/integration_spawn.rs`" (confirmed live 2026-09-06, target added
-# by 3bec5897 on 2026-08-17; it made every docker-build-with-deps run fail with
-# cargo's exit 101). Plain `cargo build` does NOT catch a missing [[test]] stub
-# -- only `cargo build --tests`, which is why it is the second command here.
-COPY src/bin/needle_transform_claude.rs ./src/bin/needle_transform_claude.rs
-COPY src/bin/needle_transform_codex.rs ./src/bin/needle_transform_codex.rs
-COPY src/bin/needle_transform_opencode.rs ./src/bin/needle_transform_opencode.rs
-COPY src/bin/needle_transform_omp.rs ./src/bin/needle_transform_omp.rs
-RUN mkdir -p src benches tests && \
+# at path `tests/integration_spawn.rs`" (confirmed live 2026-09-06). Create all
+# stubs inside this layer rather than COPYing volatile NEEDLE source into the
+# dependency cache.
+#
+# `cargo build --tests` still uses Cargo's dev profile. The archive producer is
+# driven by nextest, whose build command uses the test profile; those profile
+# hashes are intentionally distinct. Warm with the producer's exact nextest
+# command, feature set and six-target inventory so only NEEDLE workspace
+# targets need recompilation after the real source checkout replaces the stubs.
+RUN mkdir -p src/bin benches tests && \
     echo "fn main() {}" > build.rs && \
     echo "pub fn _dummy() {}" > src/lib.rs && \
     echo "fn main() {}" > src/main.rs && \
@@ -51,9 +53,43 @@ RUN mkdir -p src benches tests && \
     echo "fn main() {}" > tests/p2_integration_tests.rs && \
     echo "fn main() {}" > tests/p3_integration_tests.rs && \
     echo "fn main() {}" > tests/real_br_integration_tests.rs && \
-    cargo build && \
-    cargo build --tests && \
+    CARGO_BUILD_JOBS=2 cargo-nextest nextest archive \
+      --archive-file /tmp/needle-nextest-dependency-warm.tar.zst \
+      --profile ci \
+      --locked \
+      --lib \
+      --test integration_spawn \
+      --test integration_tests \
+      --test p2_integration_tests \
+      --test p3_integration_tests \
+      --test real_br_integration_tests && \
+    rm -f /tmp/needle-nextest-dependency-warm.tar.zst && \
     test -d /opt/needle-ci-target/debug/deps && \
+    actual_toolchain="$(rustc -vV | sed -n 's/^release: //p')" && \
+    nextest_release="$(cargo-nextest --version | sed -n 's/^release: //p')" && \
+    nextest_binary="$(command -v cargo-nextest)" && \
+    nextest_binary_sha256="$(sha256sum "$nextest_binary" | awk '{print $1}')" && \
+    target_triple="$(rustc -vV | sed -n 's/^host: //p')" && \
+    test "$target_triple" = x86_64-unknown-linux-gnu && \
+    { \
+      printf '%s\n' 'schema=needle-nextest-dependency-cache/v1'; \
+      printf 'cargo_toml_sha256=%s\n' "$(sha256sum Cargo.toml | awk '{print $1}')"; \
+      printf 'cargo_lock_sha256=%s\n' "$(sha256sum Cargo.lock | awk '{print $1}')"; \
+      printf 'rust_toolchain_sha256=%s\n' "$(sha256sum rust-toolchain.toml | awk '{print $1}')"; \
+      printf 'nextest_config_sha256=%s\n' "$(sha256sum .config/nextest.toml | awk '{print $1}')"; \
+      printf 'rust_release=%s\n' "$actual_toolchain"; \
+      printf 'nextest_release=%s\n' "$nextest_release"; \
+      printf 'nextest_binary_sha256=%s\n' "$nextest_binary_sha256"; \
+      printf '%s\n' 'cargo_profile=test'; \
+      printf '%s\n' 'nextest_profile=ci'; \
+      printf '%s\n' 'features=default'; \
+      printf 'target_triple=%s\n' "$target_triple"; \
+      printf '%s\n' 'target_set=lib,integration_spawn,integration_tests,p2_integration_tests,p3_integration_tests,real_br_integration_tests'; \
+      printf '%s\n' 'workspace_root=/workspace'; \
+      printf '%s\n' 'target_dir=/opt/needle-ci-target'; \
+      printf '%s\n' 'cargo_build_jobs=2'; \
+    } > /opt/needle-ci-nextest-cache-contract && \
+    test -s /opt/needle-ci-nextest-cache-contract && \
     rm /workspace/target && \
     rm -rf src benches tests
 
