@@ -54,7 +54,8 @@ pub const MAX_OUTPUT_BYTES: usize = 65536;
 ///
 /// Archived nextest runners deliberately isolate HOME per shard. Prefer the
 /// explicit Cargo contract when supplied, then the standard CARGO_HOME layout,
-/// and retain PATH lookup as the normal interactive fallback.
+/// and retain PATH lookup as the normal interactive fallback. The archive
+/// launcher must also make the configured path traversable by its test user.
 fn cargo_program() -> PathBuf {
     std::env::var_os("NEEDLE_CARGO_BIN")
         .map(PathBuf::from)
