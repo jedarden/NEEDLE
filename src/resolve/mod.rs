@@ -2555,6 +2555,27 @@ mod tests {
         permissions.set_mode(0o755);
         std::fs::set_permissions(&staged_path, permissions).unwrap();
         std::fs::rename(staged_path, path).unwrap();
+
+        // Some filesystems can still report ETXTBSY briefly after a closed,
+        // atomically renamed executable becomes visible. Make fixture
+        // readiness explicit so the identity check below tests identity, not
+        // publication timing under a parallel test load.
+        for attempt in 0..8 {
+            match crate::spawn_version::spawn_version_output(path) {
+                Ok(_) => return,
+                Err(error)
+                    if attempt + 1 < 8
+                        && error.chain().any(|cause| {
+                            cause
+                                .downcast_ref::<std::io::Error>()
+                                .is_some_and(|source| source.raw_os_error() == Some(26))
+                        }) => {}
+                Err(error) => {
+                    panic!("published executable fixture did not become ready: {error:#}")
+                }
+            }
+        }
+        unreachable!("fixture readiness loop returns or panics on its final attempt");
     }
 
     #[cfg(unix)]
