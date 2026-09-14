@@ -32,7 +32,8 @@ pub use gate_path_validation::{
     validate_gate_command_paths, GatePathValidationError, GatePathValidationResult, PathType,
 };
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
@@ -131,13 +132,29 @@ impl GateReport {
         if self.all_passed {
             GateResult::Pass
         } else {
-            // Get the first failure reason
-            let reason = self
+            // An executed rejection is attributable to the work, while an
+            // execution error means the gate never produced a verdict. Do
+            // not collapse the latter into a generic Fail while aggregating
+            // a command gate's report (ADR-023).
+            if let Some(reason) = self
                 .results
                 .values()
                 .find_map(|r| r.failure_reason().map(|s| s.to_string()))
-                .unwrap_or_else(|| "verification gate failed".to_string());
-            GateResult::Fail(reason)
+            {
+                return GateResult::Fail(reason);
+            }
+            if let Some(error) = self.results.values().find_map(|result| match result {
+                GateResult::ExecutionError { command, reason } => {
+                    Some(GateResult::ExecutionError {
+                        command: command.clone(),
+                        reason: reason.clone(),
+                    })
+                }
+                _ => None,
+            }) {
+                return error;
+            }
+            GateResult::Fail("verification gate failed".to_string())
         }
     }
 }
@@ -146,7 +163,7 @@ impl GateReport {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum RunIn {
-    /// Run in a clean extraction of committed state (git archive HEAD).
+    /// Run in a clean extraction of an exact captured commit.
     #[default]
     Clean,
     /// Run in the shared workspace checkout (may contain uncommitted changes).
@@ -168,8 +185,8 @@ pub enum GateConfig {
         #[serde(default)]
         stderr_cap_bytes: Option<usize>,
         /// Whether to run commands in a clean extraction of committed state or
-        /// in the shared workspace checkout. `clean` (default) extracts HEAD
-        /// via `git archive` to a temp directory and runs there; `workspace`
+        /// in the shared workspace checkout. `clean` (default) resolves HEAD
+        /// once, archives that exact commit to a temp directory, and runs there; `workspace`
         /// runs directly in the shared checkout. Use `workspace` only for
         /// gates that must see uncommitted state (e.g., testing a build cache).
         /// See ADR-020 for the full rationale.
@@ -227,6 +244,241 @@ pub struct ValidationRunResult {
     pub failures: Vec<GateFailure>,
 }
 
+// ------------------------------------------------------------------------------
+// Immutable execution subject and environment
+// ------------------------------------------------------------------------------
+
+/// Version of the explicit environment inherited by command gates.
+///
+/// Receipt fingerprinting can name this schema later. Bumping the allowlist or
+/// changing an injected variable's meaning requires a new version.
+pub const COMMAND_GATE_ENVIRONMENT_SCHEMA: &str = "needle-command-gate-env/v1";
+
+/// Environment variables whose values may affect ordinary build/test tools
+/// without carrying credentials. Everything else is deliberately absent from
+/// a command gate's child environment.
+///
+/// The list is fixed rather than prefix-based: `CARGO_*`, `AWS_*`, `GIT_*`, and
+/// proxy families can contain registry or repository credentials. A new build
+/// input must be reviewed and added by exact name.
+const COMMAND_GATE_ENV_ALLOWLIST: &[&str] = &[
+    "AR",
+    "CARGO_BUILD_JOBS",
+    "CARGO_HOME",
+    "CARGO_INCREMENTAL",
+    "CARGO_NET_OFFLINE",
+    "CARGO_TARGET_DIR",
+    "CARGO_TERM_COLOR",
+    "CC",
+    "CFLAGS",
+    "CI",
+    "CXX",
+    "CXXFLAGS",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LD_LIBRARY_PATH",
+    "LDFLAGS",
+    "LIBCLANG_PATH",
+    "LOGNAME",
+    "NO_COLOR",
+    "OPENSSL_DIR",
+    "OPENSSL_INCLUDE_DIR",
+    "OPENSSL_LIB_DIR",
+    "PATH",
+    "PKG_CONFIG_LIBDIR",
+    "PKG_CONFIG_PATH",
+    "PKG_CONFIG_SYSROOT_DIR",
+    "PROTOC",
+    "RANLIB",
+    "RUST_BACKTRACE",
+    "RUSTDOCFLAGS",
+    "RUSTFLAGS",
+    "RUSTUP_HOME",
+    "RUSTUP_TOOLCHAIN",
+    "RUST_TEST_THREADS",
+    "SHELL",
+    "SOURCE_DATE_EPOCH",
+    "TERM",
+    "TMPDIR",
+    "TZ",
+    "USER",
+];
+
+/// The immutable Git object a clean command gate judges.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateSubject {
+    revision: String,
+    tree: String,
+}
+
+impl GateSubject {
+    /// Full commit object ID captured before any gate starts.
+    pub fn revision(&self) -> &str {
+        &self.revision
+    }
+
+    /// Tree object ID resolved from [`Self::revision`].
+    pub fn tree(&self) -> &str {
+        &self.tree
+    }
+
+    async fn capture(workspace: &Path) -> Result<Self> {
+        let revision = git_stdout(workspace, &["rev-parse", "--verify", "HEAD^{commit}"]).await?;
+        validate_git_oid("commit", &revision)?;
+        let tree_expression = format!("{revision}^{{tree}}");
+        let tree = git_stdout(
+            workspace,
+            &["rev-parse", "--verify", tree_expression.as_str()],
+        )
+        .await?;
+        validate_git_oid("tree", &tree)?;
+        Ok(Self { revision, tree })
+    }
+
+    /// Verify both that the captured commit still names the captured tree and
+    /// that the workspace still points at that commit. Git objects are
+    /// immutable, but HEAD in a shared checkout is not.
+    async fn verify_current(&self, workspace: &Path) -> Result<()> {
+        let tree_expression = format!("{}^{{tree}}", self.revision);
+        let resolved_tree = git_stdout(
+            workspace,
+            &["rev-parse", "--verify", tree_expression.as_str()],
+        )
+        .await?;
+        if resolved_tree != self.tree {
+            anyhow::bail!(
+                "captured commit {} now resolves to tree {}, expected {}",
+                self.revision,
+                resolved_tree,
+                self.tree
+            );
+        }
+
+        let current = git_stdout(workspace, &["rev-parse", "--verify", "HEAD^{commit}"]).await?;
+        if current != self.revision {
+            anyhow::bail!(
+                "workspace HEAD changed from captured revision {} to {} while verification ran",
+                self.revision,
+                current
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Explicit child environment captured once for a complete validation run.
+#[derive(Debug, Clone)]
+pub struct GateEnvironment {
+    values: BTreeMap<OsString, OsString>,
+}
+
+impl GateEnvironment {
+    fn capture() -> Self {
+        let values = COMMAND_GATE_ENV_ALLOWLIST
+            .iter()
+            .filter_map(|name| std::env::var_os(name).map(|value| (OsString::from(name), value)))
+            .collect();
+        Self { values }
+    }
+
+    /// Environment schema used by this captured value set.
+    pub fn schema(&self) -> &'static str {
+        COMMAND_GATE_ENVIRONMENT_SCHEMA
+    }
+
+    /// Whether an exact allowlisted variable was captured.
+    pub fn contains(&self, name: &str) -> bool {
+        self.values.contains_key(OsStr::new(name))
+    }
+
+    fn apply(&self, command: &mut tokio::process::Command) {
+        command.env_clear();
+        command.envs(self.values.iter());
+    }
+}
+
+/// One immutable context shared by every gate in a validation run.
+#[derive(Debug, Clone)]
+pub struct GateExecutionContext {
+    subject: Option<GateSubject>,
+    environment: GateEnvironment,
+}
+
+impl GateExecutionContext {
+    async fn capture(workspace: &Path, require_subject: bool) -> Result<Self> {
+        let subject = if require_subject {
+            Some(GateSubject::capture(workspace).await?)
+        } else {
+            None
+        };
+        Ok(Self {
+            subject,
+            environment: GateEnvironment::capture(),
+        })
+    }
+
+    /// Exact committed subject, present when at least one clean gate runs.
+    pub fn subject(&self) -> Option<&GateSubject> {
+        self.subject.as_ref()
+    }
+
+    /// Sanitized environment inherited by command gates.
+    pub fn environment(&self) -> &GateEnvironment {
+        &self.environment
+    }
+}
+
+/// Whether a later receipt layer may reuse this gate without executing it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GateCacheability {
+    /// The gate has a complete, hermetic input contract.
+    Cacheable,
+    /// The gate can execute, but its inputs are not complete enough to reuse.
+    NonCacheable { reason: &'static str },
+}
+
+async fn git_stdout(workspace: &Path, args: &[&str]) -> Result<String> {
+    let output = tokio::process::Command::new("git")
+        .args(args)
+        .current_dir(workspace)
+        .kill_on_drop(true)
+        .output()
+        .await
+        .with_context(|| format!("failed to execute git {}", args.join(" ")))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git {} failed: {}",
+            args.join(" "),
+            truncate_output(String::from_utf8_lossy(&output.stderr).trim(), 4096)
+        );
+    }
+    Ok(String::from_utf8(output.stdout)
+        .context("git returned a non-UTF-8 object ID")?
+        .trim()
+        .to_string())
+}
+
+fn validate_git_oid(kind: &str, oid: &str) -> Result<()> {
+    if !matches!(oid.len(), 40 | 64)
+        || !oid
+            .as_bytes()
+            .iter()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        anyhow::bail!("git returned a non-canonical {kind} object ID: {oid:?}");
+    }
+    Ok(())
+}
+
+fn subject_execution_error(error: impl std::fmt::Display) -> GateResult {
+    GateResult::ExecutionError {
+        command: "git verify command-gate subject".to_string(),
+        reason: error.to_string(),
+    }
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Gate Trait
 // ──────────────────────────────────────────────────────────────────────────────
@@ -250,6 +502,31 @@ pub trait Gate: Send + Sync {
     /// Returns `GateResult::Pass` if validation succeeds, or `GateResult::Fail`
     /// with a human-readable reason if it fails.
     async fn validate(&self, bead: &crate::types::Bead, workspace: &Path) -> Result<GateResult>;
+
+    /// Validate using the immutable subject/environment captured for the
+    /// complete [`ValidationGate`] run. Custom gates retain their existing
+    /// behavior until they explicitly consume this contract.
+    async fn validate_with_context(
+        &self,
+        bead: &crate::types::Bead,
+        workspace: &Path,
+        _context: &GateExecutionContext,
+    ) -> Result<GateResult> {
+        self.validate(bead, workspace).await
+    }
+
+    /// Whether this gate needs an exact committed Git subject.
+    fn requires_exact_subject(&self) -> bool {
+        false
+    }
+
+    /// Receipt eligibility. Unknown/custom gates remain executable but cannot
+    /// be reused until they declare a complete hermetic contract.
+    fn cacheability(&self) -> GateCacheability {
+        GateCacheability::NonCacheable {
+            reason: "gate does not declare a hermetic input contract",
+        }
+    }
 
     /// Gate type name for telemetry and configuration (e.g., "command", "custom").
     fn gate_type(&self) -> &str;
@@ -385,10 +662,14 @@ impl CommandGate {
 
 /// Extract committed state from a workspace to a temporary directory.
 ///
-/// This creates a clean copy of the workspace's committed state (git HEAD)
-/// to a temporary directory using `git archive`. This is used for running
-/// gates in isolation from uncommitted changes.
-async fn extract_committed_state(workspace: &Path, bead_id: &str) -> Result<PathBuf> {
+/// This creates a clean copy of the captured commit in a temporary directory
+/// using `git archive`. This is used for running gates in isolation from
+/// uncommitted changes and from a concurrently moving workspace HEAD.
+async fn extract_committed_state(
+    workspace: &Path,
+    bead_id: &str,
+    subject: &GateSubject,
+) -> Result<PathBuf> {
     use std::process::Command;
 
     // Name the extraction after the bead. A failing clean gate leaves this
@@ -405,9 +686,26 @@ async fn extract_committed_state(workspace: &Path, bead_id: &str) -> Result<Path
 
     let extract_dir = temp_dir.path();
 
-    // Extract git HEAD to the temporary directory using git archive
+    // Verify the commit-to-tree binding immediately before extraction. HEAD
+    // itself may move after capture; the archived commit object may not.
+    let tree_expression = format!("{}^{{tree}}", subject.revision());
+    let resolved_tree = git_stdout(
+        workspace,
+        &["rev-parse", "--verify", tree_expression.as_str()],
+    )
+    .await?;
+    if resolved_tree != subject.tree() {
+        anyhow::bail!(
+            "captured revision {} resolves to tree {}, expected {}",
+            subject.revision(),
+            resolved_tree,
+            subject.tree()
+        );
+    }
+
+    // Extract the captured revision, never the moving HEAD reference.
     let output = Command::new("git")
-        .args(["archive", "--format=tar", "HEAD"])
+        .args(["archive", "--format=tar", subject.revision()])
         .current_dir(workspace)
         .output()
         .context("failed to run git archive")?;
@@ -465,11 +763,30 @@ async fn extract_committed_state(workspace: &Path, bead_id: &str) -> Result<Path
 #[async_trait::async_trait]
 impl Gate for CommandGate {
     async fn validate(&self, bead: &crate::types::Bead, workspace: &Path) -> Result<GateResult> {
+        let context =
+            match GateExecutionContext::capture(workspace, self.run_in == RunIn::Clean).await {
+                Ok(context) => context,
+                Err(error) => return Ok(subject_execution_error(error)),
+            };
+        self.validate_with_context(bead, workspace, &context).await
+    }
+
+    async fn validate_with_context(
+        &self,
+        bead: &crate::types::Bead,
+        workspace: &Path,
+        context: &GateExecutionContext,
+    ) -> Result<GateResult> {
         // Try running in clean mode first (if configured)
         // Returns: (result, clean_directory_path_if_any)
         let clean_attempt = if self.run_in == RunIn::Clean {
+            let Some(subject) = context.subject() else {
+                return Ok(subject_execution_error(
+                    "clean command gate has no captured Git subject",
+                ));
+            };
             // Extract committed state to a temporary directory
-            match extract_committed_state(workspace, &bead.id).await {
+            match extract_committed_state(workspace, &bead.id, subject).await {
                 Ok(dir) => {
                     tracing::info!(
                         workspace = %workspace.display(),
@@ -477,7 +794,7 @@ impl Gate for CommandGate {
                         "extracted committed state for clean gate execution"
                     );
                     // Run commands in the clean extraction
-                    let result = self.run_commands_in_dir(bead, &dir, true).await;
+                    let result = self.run_commands_in_dir(bead, &dir, true, context).await;
 
                     // Clean up extraction on success (preserve on failure for diagnosis)
                     if result.all_passed {
@@ -503,15 +820,11 @@ impl Gate for CommandGate {
                         error = %e,
                         "failed to extract committed state for clean gate execution"
                     );
-                    // Extraction failure counts as a failure in clean mode
-                    let failure = GateReport {
-                        all_passed: false,
-                        results: self.make_failure_map(
-                            "extraction",
-                            format!("failed to extract committed state: {}", e).to_string(),
-                        ),
-                    };
-                    (Some(failure), None)
+                    // Extraction/captured-subject failures mean no gate
+                    // verdict exists. Preserve ADR-023's infrastructure route.
+                    return Ok(subject_execution_error(format!(
+                        "failed to extract captured revision: {e}"
+                    )));
                 }
             }
         } else {
@@ -529,7 +842,15 @@ impl Gate for CommandGate {
                 );
 
                 // Try running in workspace mode
-                let workspace_result = self.run_commands_in_dir(bead, workspace, false).await;
+                let workspace_result = self
+                    .run_commands_in_dir(bead, workspace, false, context)
+                    .await;
+
+                if let Some(subject) = context.subject() {
+                    if let Err(error) = subject.verify_current(workspace).await {
+                        return Ok(subject_execution_error(error));
+                    }
+                }
 
                 if workspace_result.all_passed {
                     // Clean failed but workspace passed: uncommitted dependency detected
@@ -567,13 +888,30 @@ impl Gate for CommandGate {
                     return Ok(self.to_gate_result(clean_result));
                 }
             }
+            if let Some(subject) = context.subject() {
+                if let Err(error) = subject.verify_current(workspace).await {
+                    return Ok(subject_execution_error(error));
+                }
+            }
             // Clean mode passed, return success
             return Ok(self.to_gate_result(clean_result));
         }
 
         // Not running in clean mode, or clean wasn't attempted - run directly in workspace
-        let result = self.run_commands_in_dir(bead, workspace, false).await;
+        let result = self
+            .run_commands_in_dir(bead, workspace, false, context)
+            .await;
         Ok(self.to_gate_result(result))
+    }
+
+    fn requires_exact_subject(&self) -> bool {
+        self.run_in == RunIn::Clean
+    }
+
+    fn cacheability(&self) -> GateCacheability {
+        GateCacheability::NonCacheable {
+            reason: "arbitrary shell commands have no declared hermetic input manifest",
+        }
     }
 
     fn gate_type(&self) -> &str {
@@ -588,6 +926,7 @@ impl CommandGate {
         bead: &crate::types::Bead,
         dir: &Path,
         is_clean: bool,
+        context: &GateExecutionContext,
     ) -> GateReport {
         let mut results = HashMap::new();
 
@@ -600,7 +939,7 @@ impl CommandGate {
                 "running command gate"
             );
 
-            match self.run_command(cmd, bead, dir).await {
+            match self.run_command(cmd, bead, dir, context).await {
                 Ok(()) => {
                     tracing::info!(command = %cmd, "command gate passed");
                     results.insert(cmd.clone(), GateResult::Pass);
@@ -662,24 +1001,7 @@ impl CommandGate {
 
     /// Convert a GateReport to GateResult (for backwards compatibility).
     fn to_gate_result(&self, report: GateReport) -> GateResult {
-        if report.all_passed {
-            GateResult::Pass
-        } else {
-            // Get the first failure reason
-            let reason = report
-                .results
-                .values()
-                .find_map(|r| r.failure_reason().map(|s| s.to_string()))
-                .unwrap_or_else(|| "verification gate failed".to_string());
-            GateResult::Fail(reason)
-        }
-    }
-
-    /// Create a failure map for a single failure.
-    fn make_failure_map(&self, command: &str, reason: String) -> HashMap<String, GateResult> {
-        let mut results = HashMap::new();
-        results.insert(command.to_string(), GateResult::Fail(reason));
-        results
+        report.to_gate_result()
     }
 }
 
@@ -704,8 +1026,11 @@ impl CommandGate {
         cmd: &str,
         bead: &crate::types::Bead,
         workspace: &Path,
+        context: &GateExecutionContext,
     ) -> std::result::Result<(), GateFailure> {
-        let result = tokio::process::Command::new("sh")
+        let mut command = tokio::process::Command::new("sh");
+        context.environment().apply(&mut command);
+        let result = command
             .arg("-c")
             .arg(cmd)
             .current_dir(workspace)
@@ -860,8 +1185,32 @@ impl ValidationGate {
     pub async fn run(&self, bead: &crate::types::Bead) -> Result<GateReport> {
         let mut results = HashMap::new();
 
+        // Capture one environment and, when needed, one exact Git subject for
+        // the complete run. Without this, two configured clean gates can judge
+        // different commits when another worker advances shared HEAD between
+        // them.
+        let requires_subject = self
+            .gates
+            .iter()
+            .any(|(_, gate)| gate.requires_exact_subject());
+        let context = match GateExecutionContext::capture(&self.workspace, requires_subject).await {
+            Ok(context) => context,
+            Err(error) => {
+                let name = self
+                    .gates
+                    .iter()
+                    .find(|(_, gate)| gate.requires_exact_subject())
+                    .map(|(name, _)| name.clone())
+                    .unwrap_or_else(|| "execution_context".to_string());
+                results.insert(name, subject_execution_error(error));
+                return Ok(GateReport::new(results));
+            }
+        };
+
         for (name, gate) in &self.gates {
-            let result = gate.validate(bead, &self.workspace).await?;
+            let result = gate
+                .validate_with_context(bead, &self.workspace, &context)
+                .await?;
             results.insert(name.clone(), result);
 
             // Stop on first failure.
@@ -1028,69 +1377,164 @@ mod tests {
     // ── CommandGate tests ──
 
     #[tokio::test]
-    async fn command_gate_passes_on_true() {
-        let gate = CommandGate::new(vec!["true".to_string()]);
-        let bead = test_bead();
-        let result = gate.validate(&bead, Path::new("/tmp")).await.unwrap();
-        assert!(result.passed());
+    async fn command_gate_exact_subject_environment_does_not_leak_host_values() {
+        assert!(std::env::var_os("HOME").is_some());
+        let context = GateExecutionContext {
+            subject: None,
+            environment: GateEnvironment {
+                values: BTreeMap::from([(
+                    OsString::from("PATH"),
+                    std::env::var_os("PATH").unwrap(),
+                )]),
+            },
+        };
+        let gate = CommandGate::new(vec![r#"[ -z "${HOME+x}" ]"#.to_string()]);
+
+        let result = gate
+            .validate_with_context(&test_bead(), Path::new("/tmp"), &context)
+            .await
+            .unwrap();
+
+        assert!(
+            result.passed(),
+            "host HOME leaked into the gate: {result:?}"
+        );
     }
 
     #[tokio::test]
-    async fn command_gate_fails_on_false() {
-        let gate = CommandGate::new(vec!["false".to_string()]);
-        let bead = test_bead();
-        let result = gate.validate(&bead, Path::new("/tmp")).await.unwrap();
-        assert!(!result.passed());
-        assert!(result.failure_reason().unwrap().contains("failed"));
-    }
-
-    #[tokio::test]
-    async fn command_gate_stops_at_first_failure() {
+    async fn command_gate_exact_subject_preserves_failure_and_execution_error_routing() {
         let gate = CommandGate::new(vec![
             "true".to_string(),
             "false".to_string(),
             "echo should-not-run".to_string(),
         ]);
-        let bead = test_bead();
-        let result = gate.validate(&bead, Path::new("/tmp")).await.unwrap();
-        assert!(!result.passed());
-        // Should be the false command that failed
-        assert!(result.failure_reason().unwrap().contains("false"));
+        let failed = gate
+            .validate(&test_bead(), Path::new("/tmp"))
+            .await
+            .unwrap();
+        assert!(matches!(failed, GateResult::Fail(_)));
+        assert!(failed.failure_reason().unwrap().contains("false"));
+
+        let execution_error =
+            CommandGate::with_options(vec!["true".to_string()], 4096, RunIn::Clean)
+                .validate(&test_bead(), Path::new("/tmp"))
+                .await
+                .unwrap();
+        assert!(matches!(execution_error, GateResult::ExecutionError { .. }));
     }
 
     #[test]
-    fn command_gate_type() {
-        let gate = CommandGate::new(vec!["true".to_string()]);
+    fn command_gate_exact_subject_marks_arbitrary_external_gate_non_cacheable() {
+        let gate = CommandGate::new(vec!["external-validator".to_string()]);
         assert_eq!(gate.gate_type(), "command");
+        assert_eq!(
+            gate.cacheability(),
+            GateCacheability::NonCacheable {
+                reason: "arbitrary shell commands have no declared hermetic input manifest",
+            }
+        );
     }
 
     #[tokio::test]
-    async fn command_gate_exposes_bead_id_and_workspace_env() {
+    async fn command_gate_exact_subject_preserves_allowlisted_and_needle_environment() {
         // GitHub issue jedarden/NEEDLE#7: gate commands had no way to identify
         // the bead they were judging. The command below fails (non-zero exit)
         // unless both env vars are present with the expected values, so a
         // passing gate result is proof the env was actually set.
+        let context = GateExecutionContext::capture(Path::new("/tmp"), false)
+            .await
+            .unwrap();
+        assert!(context.environment().contains("PATH"));
+        assert_eq!(
+            context.environment().schema(),
+            COMMAND_GATE_ENVIRONMENT_SCHEMA
+        );
         let gate = CommandGate::new(vec![
-            r#"[ "$NEEDLE_BEAD_ID" = "needle-test" ] && [ "$NEEDLE_WORKSPACE" = "/tmp" ]"#
+            r#"[ -n "$PATH" ] && [ "$NEEDLE_BEAD_ID" = "needle-test" ] && [ "$NEEDLE_WORKSPACE" = "/tmp" ]"#
                 .to_string(),
         ]);
-        let bead = test_bead();
-        let result = gate.validate(&bead, Path::new("/tmp")).await.unwrap();
+        let result = gate
+            .validate_with_context(&test_bead(), Path::new("/tmp"), &context)
+            .await
+            .unwrap();
         assert!(
             result.passed(),
             "expected gate to see NEEDLE_BEAD_ID=needle-test and NEEDLE_WORKSPACE=/tmp: {:?}",
             result.failure_reason()
         );
+
+        let missing = CommandGate::new(vec![r#"[ "$NEEDLE_BEAD_ID" = "wrong-id" ]"#.to_string()])
+            .validate_with_context(&test_bead(), Path::new("/tmp"), &context)
+            .await
+            .unwrap();
+        assert!(!missing.passed());
     }
 
     #[tokio::test]
-    async fn command_gate_missing_env_fails_the_assertion() {
-        // Sanity check for the test above: an unexpected bead ID must fail,
-        // proving the assertion isn't vacuously true.
-        let gate = CommandGate::new(vec![r#"[ "$NEEDLE_BEAD_ID" = "wrong-id" ]"#.to_string()]);
-        let bead = test_bead();
-        let result = gate.validate(&bead, Path::new("/tmp")).await.unwrap();
-        assert!(!result.passed());
+    async fn command_gate_exact_subject_detects_concurrent_head_movement() {
+        let repo = tempfile::tempdir().unwrap();
+        git_init(repo.path());
+        std::fs::write(repo.path().join("subject.txt"), "captured\n").unwrap();
+        git_add(repo.path(), "subject.txt");
+        git_commit(repo.path(), "capture subject");
+
+        let context = GateExecutionContext::capture(repo.path(), true)
+            .await
+            .unwrap();
+        let subject = context.subject().unwrap();
+        assert!(matches!(subject.revision().len(), 40 | 64));
+        assert!(matches!(subject.tree().len(), 40 | 64));
+        assert_ne!(subject.revision(), subject.tree());
+        let captured_revision = subject.revision().to_string();
+        let command = format!(
+            "test \"$(cat subject.txt)\" = captured && git -C {} commit --allow-empty -m moved >/dev/null",
+            repo.path().display()
+        );
+        let gate = CommandGate::with_options(vec![command], 4096, RunIn::Clean);
+
+        let result = gate
+            .validate_with_context(&test_bead(), repo.path(), &context)
+            .await
+            .unwrap();
+
+        match result {
+            GateResult::ExecutionError { reason, .. } => {
+                assert!(reason.contains("workspace HEAD changed"), "{reason}");
+            }
+            other => panic!("expected changed HEAD to invalidate the pass, got {other:?}"),
+        }
+        let current_revision = git_stdout(repo.path(), &["rev-parse", "HEAD"])
+            .await
+            .unwrap();
+        assert_ne!(captured_revision, current_revision);
+    }
+
+    #[tokio::test]
+    async fn command_gate_exact_subject_rejects_sha_tree_mismatch_as_execution_error() {
+        let repo = tempfile::tempdir().unwrap();
+        git_init(repo.path());
+        std::fs::write(repo.path().join("subject.txt"), "captured\n").unwrap();
+        git_add(repo.path(), "subject.txt");
+        git_commit(repo.path(), "capture subject");
+
+        let mut context = GateExecutionContext::capture(repo.path(), true)
+            .await
+            .unwrap();
+        let subject = context.subject.as_mut().unwrap();
+        subject.tree = "0".repeat(subject.tree.len());
+        let gate = CommandGate::with_options(vec!["true".to_string()], 4096, RunIn::Clean);
+
+        let result = gate
+            .validate_with_context(&test_bead(), repo.path(), &context)
+            .await
+            .unwrap();
+
+        match result {
+            GateResult::ExecutionError { reason, .. } => {
+                assert!(reason.contains("expected 000000"), "{reason}");
+            }
+            other => panic!("expected tree mismatch execution error, got {other:?}"),
+        }
     }
 
     // ── configurable stderr cap tests (GitHub issue jedarden/NEEDLE#9) ──
@@ -1171,7 +1615,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn command_gate_slow_command_is_killed_when_dropped_mid_flight() {
+    async fn command_gate_exact_subject_slow_command_is_killed_when_dropped_mid_flight() {
         // GitHub issue jedarden/NEEDLE#8 follow-up (bf-3saat): the gate command
         // must be a genuine .await yield point so a wrapping tokio::time::timeout
         // can actually cancel and kill it, not just observe it after the fact.
