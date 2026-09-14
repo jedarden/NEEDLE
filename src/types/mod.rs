@@ -484,6 +484,35 @@ impl Outcome {
             Outcome::GateUnsatisfiable => "gate_unsatisfiable",
         }
     }
+
+    /// Whether the attempt's failure is attributable to the work itself.
+    ///
+    /// True for [`Outcome::Failure`] alone: the agent ran, something judged
+    /// the work, and the work did not pass. Every other variant books as
+    /// `infrastructure_failure`, `indeterminate`, or `cancelled` in the
+    /// attempt ledger (`outcome::semantic_outcome`) — the agent never ran,
+    /// the process died without a verdict, the worker was interrupted, or a
+    /// gate could not run / could never pass. None of those say anything
+    /// about the size of the task.
+    ///
+    /// Decomposition (mitosis) gates on this instead of a bare `Failure`
+    /// discriminant check: with `first_failure_only: true`, a single
+    /// non-attributable failure that leaked into the evaluator would split
+    /// the bead while the real fault stays put. The exhaustive match is
+    /// deliberate — a new outcome variant must be attributed here before it
+    /// can reach the evaluator, in either direction.
+    pub fn is_work_attributable(&self) -> bool {
+        match self {
+            Outcome::Failure => true,
+            Outcome::Success
+            | Outcome::Timeout
+            | Outcome::AgentNotFound
+            | Outcome::Interrupted
+            | Outcome::Crash(_)
+            | Outcome::GateError
+            | Outcome::GateUnsatisfiable => false,
+        }
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1546,6 +1575,22 @@ mod tests {
         assert_eq!(Outcome::AgentNotFound.as_str(), "agent_not_found");
         assert_eq!(Outcome::Interrupted.as_str(), "interrupted");
         assert_eq!(Outcome::Crash(137).as_str(), "crash");
+    }
+
+    #[test]
+    fn outcome_is_work_attributable_exclusive_to_failure() {
+        // Failure is the only work-attributable outcome — the one the
+        // attempt ledger books as `work_failure`. Everything else is
+        // infrastructure, indeterminate, or cancellation, and must never
+        // reach the mitosis evaluator as evidence the bead is too large.
+        assert!(Outcome::Failure.is_work_attributable());
+        assert!(!Outcome::Success.is_work_attributable());
+        assert!(!Outcome::Timeout.is_work_attributable());
+        assert!(!Outcome::AgentNotFound.is_work_attributable());
+        assert!(!Outcome::Interrupted.is_work_attributable());
+        assert!(!Outcome::Crash(-1).is_work_attributable());
+        assert!(!Outcome::GateError.is_work_attributable());
+        assert!(!Outcome::GateUnsatisfiable.is_work_attributable());
     }
 
     #[test]

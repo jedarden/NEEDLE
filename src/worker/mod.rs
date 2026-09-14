@@ -4473,7 +4473,13 @@ impl Worker {
 
         // Evaluate for mitosis after failure — the bead has already been
         // released and failure count incremented by the outcome handler.
-        if handler_result.outcome == Outcome::Failure {
+        // Only a failure attributable to the work is evidence the bead is too
+        // large. Environment faults (AgentNotFound, Crash, GateError), a gate
+        // whose precondition can never pass, timeouts, and interruptions must
+        // never reach the evaluator: with `first_failure_only: true` a single
+        // leaked non-attributable failure splits the bead while the real
+        // fault stays put (needle-6519f163, parent needle-0be52050).
+        if handler_result.outcome.is_work_attributable() {
             let workspace = if is_workspace_unset(&bead.workspace) {
                 self.config.workspace.default.clone()
             } else {
