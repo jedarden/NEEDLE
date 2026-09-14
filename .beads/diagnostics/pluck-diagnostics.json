@@ -1,13 +1,13 @@
 {
-  "timestamp": "2026-09-14T05:08:24.723663872Z",
-  "total_open_beads": 638,
+  "timestamp": "2026-09-14T06:40:17.118240751Z",
+  "total_open_beads": 636,
   "exclusion_criteria": {
     "has_assignee": 0,
     "manually_blocked": 21,
-    "has_dependencies": 436,
-    "resource_conflicts": 18
+    "has_dependencies": 434,
+    "resource_conflicts": 23
   },
-  "final_candidate_count": 207,
+  "final_candidate_count": 204,
   "excluded_beads": [
     {
       "bead_id": "needle-6b02eb9d",
@@ -291,7 +291,7 @@
       "assignee": null,
       "manual_blocked": false,
       "has_blockers": true,
-      "blocker_count": 16,
+      "blocker_count": 13,
       "has_resource_conflicts": false,
       "conflict_count": 0
     },
@@ -303,28 +303,6 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 2,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
-      "bead_id": "needle-ce27379d",
-      "title": "bf_cli_bead_store_list_all_passes_explicit_limit is flaky under parallel load",
-      "priority": 1,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
-      "bead_id": "needle-d32859e6",
-      "title": "Retry ETXTBSY on every bead_store spawn path, and stop discarding spawn errors in tests",
-      "priority": 1,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 1,
       "has_resource_conflicts": false,
       "conflict_count": 0
     },
@@ -1150,8 +1128,8 @@
       "manual_blocked": true,
       "has_blockers": true,
       "blocker_count": 16,
-      "has_resource_conflicts": true,
-      "conflict_count": 1
+      "has_resource_conflicts": false,
+      "conflict_count": 0
     },
     {
       "bead_id": "needle-5dda045b",
@@ -1260,8 +1238,8 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 2,
-      "has_resource_conflicts": true,
-      "conflict_count": 1
+      "has_resource_conflicts": false,
+      "conflict_count": 0
     },
     {
       "bead_id": "needle-272252f9",
@@ -1282,8 +1260,8 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 2,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
+      "has_resource_conflicts": true,
+      "conflict_count": 1
     },
     {
       "bead_id": "needle-3b539e70",
@@ -1293,8 +1271,8 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 4,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
+      "has_resource_conflicts": true,
+      "conflict_count": 1
     },
     {
       "bead_id": "needle-6109ee91",
@@ -1315,8 +1293,8 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 4,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
+      "has_resource_conflicts": true,
+      "conflict_count": 1
     },
     {
       "bead_id": "needle-08f14897",
@@ -1337,8 +1315,8 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 7,
-      "has_resource_conflicts": true,
-      "conflict_count": 1
+      "has_resource_conflicts": false,
+      "conflict_count": 0
     },
     {
       "bead_id": "needle-a6ff59c4",
@@ -1348,8 +1326,8 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 2,
-      "has_resource_conflicts": true,
-      "conflict_count": 1
+      "has_resource_conflicts": false,
+      "conflict_count": 0
     },
     {
       "bead_id": "needle-03e7645a",
@@ -1392,8 +1370,8 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 5,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
+      "has_resource_conflicts": true,
+      "conflict_count": 1
     },
     {
       "bead_id": "needle-a6ee296f",
@@ -2095,7 +2073,7 @@
       "assignee": null,
       "manual_blocked": false,
       "has_blockers": true,
-      "blocker_count": 2,
+      "blocker_count": 1,
       "has_resource_conflicts": true,
       "conflict_count": 1
     },
@@ -2111,13 +2089,35 @@
       "conflict_count": 1
     },
     {
-      "bead_id": "needle-0d0ef2ce",
-      "title": "Reserve a quota lane for priority NEEDLE CI pods",
+      "bead_id": "needle-ab3601e5",
+      "title": "N-T45: capture the agent's final message, last tool errors and gate diagnostics as bounded attempt failure evidence [cargo test --test nt45_failure_evidence_capture]",
       "priority": 1,
       "assignee": null,
       "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 1,
+      "has_blockers": false,
+      "blocker_count": 0,
+      "has_resource_conflicts": true,
+      "conflict_count": 1
+    },
+    {
+      "bead_id": "needle-16657d72",
+      "title": "N-T46: resolve a split as `decomposed`, never as verified success, and exclude it from every verified-credit consumer [cargo test --test nt46_decomposed_resolution]",
+      "priority": 1,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": false,
+      "blocker_count": 0,
+      "has_resource_conflicts": true,
+      "conflict_count": 1
+    },
+    {
+      "bead_id": "needle-ec41ceba",
+      "title": "N-T47: accumulate tokens and estimated cost from streamed usage events so timed-out, crashed and interrupted attempts are charged [cargo test --test nt47_killed_attempt_cost]",
+      "priority": 1,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": false,
+      "blocker_count": 0,
       "has_resource_conflicts": true,
       "conflict_count": 1
     },
@@ -2129,8 +2129,8 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 1,
-      "has_resource_conflicts": true,
-      "conflict_count": 1
+      "has_resource_conflicts": false,
+      "conflict_count": 0
     },
     {
       "bead_id": "needle-c2fc81d6",
@@ -2140,8 +2140,8 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
+      "has_resource_conflicts": true,
+      "conflict_count": 1
     },
     {
       "bead_id": "needle-f2b97407",
@@ -2153,6 +2153,17 @@
       "blocker_count": 1,
       "has_resource_conflicts": false,
       "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-e8f408e1",
+      "title": "N-T52: resolve every state writer from one configured state directory and fail a spawned test that lacks an isolated one [cargo test --test nt52_state_dir_isolation]",
+      "priority": 1,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": false,
+      "blocker_count": 0,
+      "has_resource_conflicts": true,
+      "conflict_count": 1
     },
     {
       "bead_id": "needle-908c1f25",
@@ -2210,8 +2221,8 @@
       "conflict_count": 0
     },
     {
-      "bead_id": "needle-b4a9299e",
-      "title": "Route every integration_spawn NEEDLE child through one isolated HOME helper",
+      "bead_id": "needle-ee44125a",
+      "title": "Shrink and bound the nextest archive transfer critical path",
       "priority": 1,
       "assignee": null,
       "manual_blocked": false,
@@ -2437,17 +2448,6 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
-      "bead_id": "needle-594ed9bb",
-      "title": "Verify needle-ci starts during concurrent kaniko load",
-      "priority": 2,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 2,
       "has_resource_conflicts": false,
       "conflict_count": 0
     },
@@ -3143,17 +3143,6 @@
       "blocker_count": 1,
       "has_resource_conflicts": false,
       "conflict_count": 0
-    },
-    {
-      "bead_id": "needle-52673937",
-      "title": "Add scheduling priority protection for needle-ci",
-      "priority": 2,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 1,
-      "has_resource_conflicts": true,
-      "conflict_count": 1
     },
     {
       "bead_id": "needle-47b36f6b",
@@ -4010,8 +3999,8 @@
       "manual_blocked": true,
       "has_blockers": true,
       "blocker_count": 8,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
+      "has_resource_conflicts": true,
+      "conflict_count": 1
     },
     {
       "bead_id": "needle-8e5db2e6",
@@ -4021,8 +4010,8 @@
       "manual_blocked": true,
       "has_blockers": true,
       "blocker_count": 17,
-      "has_resource_conflicts": true,
-      "conflict_count": 1
+      "has_resource_conflicts": false,
+      "conflict_count": 0
     },
     {
       "bead_id": "needle-10fc7f48",
@@ -4120,8 +4109,8 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 4,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
+      "has_resource_conflicts": true,
+      "conflict_count": 1
     },
     {
       "bead_id": "needle-fbd3c5f2",
@@ -4153,8 +4142,8 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 2,
-      "has_resource_conflicts": true,
-      "conflict_count": 1
+      "has_resource_conflicts": false,
+      "conflict_count": 0
     },
     {
       "bead_id": "needle-8e82200b",
@@ -4516,8 +4505,8 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
+      "has_resource_conflicts": true,
+      "conflict_count": 1
     },
     {
       "bead_id": "needle-75368add",
@@ -4531,6 +4520,17 @@
       "conflict_count": 0
     },
     {
+      "bead_id": "needle-17a7f6a0",
+      "title": "N-T51: key provider health by the adapter's gateway so every adapter behind one provider shares degradation and recovery [cargo test --test nt51_gateway_health]",
+      "priority": 2,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": false,
+      "blocker_count": 0,
+      "has_resource_conflicts": true,
+      "conflict_count": 2
+    },
+    {
       "bead_id": "needle-65e66131",
       "title": "N-T56: `needle improvements` read-only view of proposals, admitted beads, receipts and the fleet trend of verified closures per dollar [cargo test --test nt56_improvements_cli]",
       "priority": 2,
@@ -4538,19 +4538,30 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-b3a720b7",
+      "title": "Move residual Worker and strand process lifecycles out of --lib",
+      "priority": 2,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": false,
+      "blocker_count": 0,
       "has_resource_conflicts": true,
       "conflict_count": 1
     },
     {
-      "bead_id": "needle-914baad7",
-      "title": "Enforce zero child execs from the --lib test target",
+      "bead_id": "needle-6a36c428",
+      "title": "Move resolution evidence and outcome process contracts out of --lib",
       "priority": 2,
       "assignee": null,
       "manual_blocked": false,
       "has_blockers": true,
-      "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
+      "blocker_count": 2,
+      "has_resource_conflicts": true,
+      "conflict_count": 3
     },
     {
       "bead_id": "needle-bc4ac726",
