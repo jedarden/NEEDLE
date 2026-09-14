@@ -137,7 +137,7 @@ impl StrandRunner {
     /// Build the default strand waterfall from config.
     ///
     /// The waterfall order is:
-    /// Pluck → Mend → Explore → Weave → Unravel → Pulse → Reflect → Splice → Knot.
+    /// Pluck → Mend → Explore → Weave → Unravel → Analyze → Pulse → Reflect → Splice → Knot.
     pub fn from_config(
         config: &Config,
         worker_id: &str,
@@ -207,9 +207,14 @@ impl StrandRunner {
         // are (needle-ee024ae4).
         .with_split_after_failures(config.strands.pluck.split_after_failures);
 
-        // Constructed to validate its configuration and state directory; the
-        // waterfall wires it in when the analyze strand's dispatch path lands.
-        let _analyze = AnalyzeStrand::new(
+        // Rung 4 of the escalation ladder (Phase 19 §19.2, ADR-022 decision 3):
+        // settles a bead whose round-3 quarantine expired — the bead Pluck
+        // parked rather than re-dispatched. It sits after Unravel, whose prompt
+        // machinery it reuses and to which it hands rung 5 (the `human` label)
+        // back, and ahead of the observation strands so a concluded re-scope
+        // returns `WorkCreated` and restarts the waterfall from Pluck, making
+        // the fresh child claimable the same cycle.
+        let analyze = AnalyzeStrand::new(
             config.strands.analyze.clone(),
             config.workspace.default.clone(),
             state_base.join("analyze"),
@@ -316,6 +321,7 @@ impl StrandRunner {
                 Box::new(explore),
                 Box::new(weave),
                 Box::new(unravel),
+                Box::new(analyze),
                 Box::new(pulse),
                 Box::new(reflect),
                 Box::new(splice),
@@ -1124,11 +1130,15 @@ mod tests {
         let registry = crate::registry::Registry::new(dir.path());
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
         let runner = StrandRunner::from_config(&config, "test-worker", registry, telemetry);
+        // `analyze` must actually be IN the waterfall: the strand once existed
+        // — logic, prompt, tests, everything — while `from_config` constructed
+        // it into `let _analyze` and dropped it, leaving every expired round-3
+        // bead parked forever with nothing to settle it.
         assert_eq!(
             runner.strand_names(),
             vec![
-                "pluck", "mend", "explore", "weave", "unravel", "pulse", "reflect", "splice",
-                "knot"
+                "pluck", "mend", "explore", "weave", "unravel", "analyze", "pulse", "reflect",
+                "splice", "knot"
             ]
         );
     }

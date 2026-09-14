@@ -97,7 +97,7 @@ let explore = ExploreStrand::new(
 
 **Waterfall Position**: 3rd strand
 ```
-Pluck → Mend → Explore → Weave → Unravel → Pulse → Reflect → Splice → Knot
+Pluck → Mend → Explore → Weave → Unravel → Analyze → Pulse → Reflect → Splice → Knot
 ```
 
 Explore only runs if both Pluck and Mend return `NoWork`.

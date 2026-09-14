@@ -1218,7 +1218,10 @@ async fn real_bead_rs_strand_waterfall_ordering() {
 
     assert_eq!(
         runner.strand_names(),
-        vec!["pluck", "mend", "explore", "weave", "unravel", "pulse", "reflect", "splice", "knot"],
+        vec![
+            "pluck", "mend", "explore", "weave", "unravel", "analyze", "pulse", "reflect",
+            "splice", "knot"
+        ],
         "waterfall should include every configured strand in order"
     );
 }
@@ -1269,7 +1272,8 @@ async fn real_bead_rs_strand_waterfall_exhaustion() {
 
     // Verify strand evaluations contain all strands in correct order.
     let expected_order = vec![
-        "pluck", "mend", "explore", "weave", "unravel", "pulse", "reflect", "splice", "knot",
+        "pluck", "mend", "explore", "weave", "unravel", "analyze", "pulse", "reflect", "splice",
+        "knot",
     ];
     let actual_order: Vec<&str> = outcome
         .strand_evaluations
@@ -1428,7 +1432,8 @@ async fn real_bead_rs_strand_waterfall_exhaustion_with_telemetry_jsonl() {
 
     // Verify we have strand.evaluated events for all expected strands.
     let expected_strands = vec![
-        "pluck", "mend", "explore", "weave", "unravel", "pulse", "reflect", "splice", "knot",
+        "pluck", "mend", "explore", "weave", "unravel", "analyze", "pulse", "reflect", "splice",
+        "knot",
     ];
 
     assert_eq!(
