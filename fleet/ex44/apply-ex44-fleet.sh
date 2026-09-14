@@ -12,6 +12,8 @@ WORKERS_DIR="$NEEDLE_CONFIG_DIR/workers"
 MANIFEST="$SRC_DIR/workers.tsv"
 REQUIRED_EXPLORE="$SRC_DIR/required-explore-workspaces.txt"
 GLOBAL_CONFIG="$NEEDLE_CONFIG_DIR/config.yaml"
+ROAM_HOME="$NEEDLE_HOST_HOME/.needle/roam-only"
+ROAM_HOME_CONFIG="$SRC_DIR/roam-home.yaml"
 
 DRY_RUN=0
 START_NEW=0
@@ -53,6 +55,23 @@ worker_count=$(manifest_ids | wc -l)
     exit 1
 }
 
+if manifest_rows | awk -F'\t' -v home="$ROAM_HOME" '$2 == home { found=1 } END { exit !found }'; then
+    [[ -r "$ROAM_HOME_CONFIG" ]] || {
+        echo "roam-only home config is not readable: $ROAM_HOME_CONFIG" >&2
+        exit 1
+    }
+    run mkdir -p "$ROAM_HOME"
+    if ! cmp -s "$ROAM_HOME_CONFIG" "$ROAM_HOME/.needle.yaml" 2>/dev/null; then
+        echo "- installing $ROAM_HOME/.needle.yaml"
+        if [[ -f "$ROAM_HOME/.needle.yaml" && "$DRY_RUN" != 1 ]]; then
+            cp "$ROAM_HOME/.needle.yaml" "$ROAM_HOME/.needle.yaml.bak-$(date -u +%Y%m%dT%H%M%SZ)"
+        fi
+        run install -m 644 "$ROAM_HOME_CONFIG" "$ROAM_HOME/.needle.yaml"
+    else
+        echo "- roam-only home config already current"
+    fi
+fi
+
 [[ -r "$GLOBAL_CONFIG" ]] || {
     echo "global NEEDLE config is not readable: $GLOBAL_CONFIG" >&2
     exit 1
@@ -63,7 +82,7 @@ while IFS=$'\t' read -r id workspace agent delay explore; do
         echo "invalid worker identifier: $id" >&2
         exit 1
     }
-    [[ -d "$workspace" ]] || {
+    [[ -d "$workspace" || ( "$DRY_RUN" == 1 && "$workspace" == "$ROAM_HOME" ) ]] || {
         echo "$id workspace does not exist: $workspace" >&2
         exit 1
     }

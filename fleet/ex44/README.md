@@ -1,9 +1,9 @@
 # ex44 NEEDLE fleet policy
 
 This directory makes the codinghome/ex44 worker capacity and backlog policy
-reproducible. It targets up to 25 workers against the shared Z.ai proxy: 18
-pinned workers for the busiest or highest-leverage repositories and 7 roaming
-workers for the maintained-workspace frontier. Nine workers use GLM-5.3 and up
+reproducible. It targets up to 25 workers against the shared Z.ai proxy: 11
+home-only workers and 14 workers allowed to roam across the maintained-workspace
+frontier. Nine workers use GLM-5.3 and up
 to sixteen use GLM-5.3-Flash, with live-session concurrency enforced separately
 from the number of registered workers.
 
@@ -35,6 +35,10 @@ from the number of registered workers.
    90% of the configured timeout has elapsed. New beads should describe one
    bounded deliverable, name an executable acceptance check, and use dependency
    edges for work that touches the same file or function.
+7. **Recover stuck routes.** Workers whose home queues repeatedly fail before
+   Explore use the managed `~/.needle/roam-only` home. It has an explicit bead
+   backend binding and no bead store, so home strands skip cleanly and Explore
+   selects work from the maintained-workspace allowlist.
 
 The backlog audit intentionally counts selection eligibility rather than raw
 open beads. It excludes active timed holds, manual/human work, and ordinary

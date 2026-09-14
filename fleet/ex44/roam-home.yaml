@@ -1,0 +1,4 @@
+# Minimal workspace binding for workers that should skip home strands and roam.
+# The deployed directory deliberately has no .beads/ store.
+bead_cli:
+  backend: bead-rs
