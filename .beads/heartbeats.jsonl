@@ -6761,3 +6761,10 @@
 {"last_strand":null,"state":"idle","ts":"2026-09-14T21:24:58.615658718+00:00","worker":"glm-needle"}
 {"last_strand":null,"state":"idle","ts":"2026-09-14T21:32:04.169054350+00:00","worker":"glm-needle"}
 {"last_strand":null,"state":"idle","ts":"2026-09-14T21:41:19.820983970+00:00","worker":"glm-needle"}
+{"last_strand":null,"state":"idle","ts":"2026-09-14T22:41:35.591932867+00:00","worker":"glm-needle"}
+{"last_strand":null,"state":"idle","ts":"2026-09-14T23:26:39.559701966+00:00","worker":"luna-needle"}
+{"last_strand":null,"state":"idle","ts":"2026-09-14T23:29:18.041934918+00:00","worker":"glm-needle"}
+{"last_strand":null,"state":"idle","ts":"2026-09-14T23:37:16.871660033+00:00","worker":"test-worker"}
+{"last_strand":null,"state":"idle","ts":"2026-09-14T23:37:16.901629374+00:00","worker":"test-worker"}
+{"last_strand":null,"state":"idle","ts":"2026-09-14T23:37:16.944351253+00:00","worker":"test-worker"}
+{"last_strand":null,"state":"idle","ts":"2026-09-14T23:37:16.978660430+00:00","worker":"luna-needle"}
