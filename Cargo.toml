@@ -180,6 +180,11 @@ codegen-units = 1
 
 [profile.test]
 opt-level = 0
+# Keep symbolic function names and source line tables for panic backtraces
+# without embedding full type- and variable-level DWARF in every test binary.
+# The nextest archive carries eleven binaries, so full debug data is repeated
+# across the transient artifact and dominates its transfer critical path.
+debug = "line-tables-only"
 
 # Keep the stable dependency graph optimized while making the frequently
 # rebuilt NEEDLE crate and its integration harnesses cheap to compile.
