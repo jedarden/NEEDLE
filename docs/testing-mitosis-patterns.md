@@ -5,7 +5,8 @@
 **Verification lineage:** needle-6522fcf4 → needle-12609517 → needle-ad7bd937 →
 needle-2cf1bff9 / needle-899bac1d / needle-a3112b51 → needle-771aeb12 /
 needle-21383ec6 / needle-62f9ef8e → needle-ec1d8479 / needle-12609517 →
-needle-23d823ab
+needle-23d823ab → needle-ed937f7e (fixture rework landed as `9ef58ab0`; both
+tiers re-verified green)
 
 ---
 
@@ -27,8 +28,8 @@ have each produced a real multi-day debugging cycle.
 | Tier | Where | What it covers | State 2026-09-14 |
 |---|---|---|---|
 | Unit | `src/mitosis/mod.rs` `#[cfg(test)]` (+ `src/resolve::executor` split test) | Evaluation gates, dedup, caps (`max_children`/`max_depth`), depth labels, quarantine interplay, child creation | 111/111 pass (`cargo test --lib mitosis`) |
-| P2 integration | `tests/p2_integration_tests.rs`, tests 12–14 + skip paths | `MitosisEvaluator` against mock stores through the real `Dispatcher` | 6/6 pass with the fixture rework; 3/6 at HEAD (see [Current state](#current-state)) |
-| Span-depth regression | `tests/p2_integration_tests/claim_cycle_span_depth_regression.rs` | Claim cycles keep bead span depth constant (shares the dispatcher fixture) | Same split as above |
+| P2 integration | `tests/p2_integration_tests.rs`, tests 12–14 + skip paths | `MitosisEvaluator` against mock stores through the real `Dispatcher` | 6/6 pass at HEAD (fixture rework landed as `9ef58ab0`, 2026-09-14 — see [Current state](#current-state)) |
+| Span-depth regression | `tests/p2_integration_tests/claim_cycle_span_depth_regression.rs` | Claim cycles keep bead span depth constant (shares the dispatcher fixture) | Passes at HEAD (same fix) |
 | Timeout-path policy | `tests/integration_tests/timeout_config_integration*.rs` | `mitosis.timeout_triggered` policy parsing and defaults (disabled by default) | Pass |
 | E2E shell | `tests/e2e/{auto_split,forced_mitosis,failure_counter,failure_counter_persistence}.sh` | Full worker loop through a real workspace | **Blocked — not runnable** (see [Limitations](#remaining-limitations)) |
 
@@ -47,10 +48,13 @@ Two facts must be read together; they were both verified on 2026-09-14.
    day failed).
 
 2. **With the fixture rework applied, all of them pass** — 6/6 P2 mitosis +
-   2/2 span-depth + 111/111 unit, in under a second combined. The rework
-   (claim the parent in the fixture, wire the store into the dispatcher) was
-   in flight in the shared worktree when this was written and is exactly the
-   pattern described in the next section.
+   2/2 span-depth + 111/111 unit. The rework (claim the parent in the
+   fixture, wire the store into the dispatcher) **landed as `9ef58ab0` on
+   2026-09-14** — needle-9b451ffe's fixture work, published by
+   needle-ed937f7e after re-running both tiers green on that date
+   (`cargo test --lib mitosis` 111/111; `cargo test --test
+   p2_integration_tests` 111/111). It is exactly the pattern described in
+   the next section.
 
 Root cause of the HEAD failures: commit `30d8f9c4` ("make dispatch fail closed
 on every claim-verification error", needle-40ca2f6e) turned the pre-spawn
@@ -200,6 +204,33 @@ mitosis commit in sight. When attributing a local result to a commit:
 The 30d8f9c4 regression documented above was found this way: the fixtures'
 fix landed as another worker's WIP while the committed tree stayed red.
 
+### 9. Publishing another bead's staged work without sweeping the worktree
+
+This happened for real on 2026-09-14: the fixture rework (needle-9b451ffe)
+sat staged-but-uncommitted for hours while its worker waited out a push
+hold, and the worktree kept moving underneath it — an unrelated
+`Heartbeat.activity` change added unstaged `activity: None,` lines to two of
+the *same* test files. Those lines only compile against that worker's dirty
+`src/`; against HEAD's `Heartbeat` they are a "no field `activity`" error,
+so a commit that swept them in would fail CI on an otherwise-good fix.
+
+When landing work that someone else staged on the shared checkout:
+
+- `git commit <paths>` (required by the commit hook) commits the
+  **working-tree** state of those paths — unstaged foreign hunks included.
+  Do not use it for a file carrying another worker's unstaged edits.
+- Build the exact content the commit should carry, write it as a blob
+  (`git hash-object -w`), put it in the index
+  (`git update-index --cacheinfo 100644,<sha>,<path>`), and confirm
+  `git diff --cached --stat` lists nothing else. Then create the commit with
+  `git write-tree` → `git commit-tree -F <msg>` and move `main` with
+  `git update-ref refs/heads/main <new> <expected-old>` — the CAS fails
+  loudly if the harness's periodic beads-sync commit moved HEAD mid-flight
+  (it does move; this is not hypothetical).
+- Re-run the owning tier before publishing, and say in the commit body
+  which bead produced the work and which dispatch verified it.
+- Leave the staging state of every file you did not touch byte-identical.
+
 ---
 
 ## Workarounds implemented (commit index)
@@ -210,7 +241,7 @@ fix landed as another worker's WIP while the committed tree stayed red.
 | `871f3c69` | needle-a3112b51 | E2E `forced_mitosis.sh` timeout 60 s → 180 s (3 failure cycles ≈ 90 s + evaluation ≈ 20 s + child claim ≈ 10 s + margin) | [4](#4-the-failure-count-gate-is-a-precedence-chain-not-three-switches), [Limitations](#remaining-limitations) |
 | `66790ee5` | needle-899bac1d | Telemetry flush wait, `sync --flush-only`, 3× retry on store reads, exit code 0-or-1 accepted | [7](#7-e2e-assertions-need-explicit-flush--retry-and-a-tolerant-exit-code) |
 | `ebc9b72a` | needle-29f5d663 | Cached `qualified_id` on `Worker`; dispatcher uses it instead of raw `worker_name` — worker-name inconsistency was failing claim verification | [1](#1-dispatching-fixtures-must-claim-the-parent-and-wire-the-store) |
-| (in flight at doc time) | needle-40ca2f6e follow-up | Fixture rework: claim parent + `create_mitosis_dispatcher(json, store)` | [1](#1-dispatching-fixtures-must-claim-the-parent-and-wire-the-store), [Current state](#current-state) |
+| `9ef58ab0` | needle-9b451ffe | Fixture rework: claim parent + `create_mitosis_dispatcher(json, store)` | [1](#1-dispatching-fixtures-must-claim-the-parent-and-wire-the-store), [Current state](#current-state) |
 | `6656e902` / `6f84ebc3` | needle-37aedffe | `max_children` (8) / `max_depth` (2) caps — bounds the blast radius a mitosis test can create | [5](#5-skip-path-labels-silently-suppress-evaluation) |
 
 ---
@@ -277,10 +308,11 @@ and a `#[tokio::test]`-native timeout on that test is the tripwire, not a fix.
    port**: `force_failure_threshold: 3` vs the default quarantine threshold
    of 5 (pattern 4). A port that preserves the config verbatim will still
    time out at exit 124.
-3. **At HEAD `6cb82d41` the committed tree is red** for the four
-   store-wired tests until the fixture rework lands; do not attribute new
-   failures on top of it without checking [Current state](#current-state)
-   first.
+3. **RESOLVED 2026-09-14:** the committed tree at `6cb82d41` was red for the
+   four store-wired tests; the fixture rework landed as `9ef58ab0` and all
+   tiers pass at HEAD. Kept here because any future Dispatcher behavior
+   change can re-break fixtures the same way — check
+   [Current state](#current-state) before attributing a new failure.
 4. **A handful of lib-suite tests fail deterministically in this box's
    environment** (~31, unrelated to mitosis — cargo-shim and env-dependent).
    Diff your failure list against that known set before attributing a local
