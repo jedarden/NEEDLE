@@ -2693,14 +2693,13 @@ impl OutcomeHandler {
             .await
             .context("failed to list beads while restoring degraded workspace")?;
 
-        // Find Gate broken beads in this workspace
+        // `store` is already scoped to `workspace_path`. Do not use the
+        // record's `workspace` field as a second ownership check: bead-rs
+        // stores workspace-native issues with a NULL `source_repo`, which the
+        // CLI omits and `Bead` represents as an empty path.
         let gate_broken_beads: Vec<&Bead> = all_beads
             .iter()
-            .filter(|b| {
-                b.workspace == workspace_path
-                    && b.title.starts_with("Gate broken:")
-                    && b.status != BeadStatus::Closed
-            })
+            .filter(|b| b.title.starts_with("Gate broken:") && b.status != BeadStatus::Closed)
             .collect();
 
         // Close each Gate broken bead found
@@ -2725,17 +2724,21 @@ impl OutcomeHandler {
             .await
             .map_err(|_| anyhow::anyhow!("close timed out after 30s during workspace restoration"))?
             .context("failed to close Gate broken bead during workspace restoration")?;
-
-            // Emit restoration telemetry
-            self.telemetry.emit(
-                EventKind::WorkspaceGateRestored {
-                    workspace: workspace.clone(),
-                    bead_id: bead.id.clone(),
-                    degraded_duration_secs,
-                },
-                Utc::now(),
-            )?;
         }
+
+        // Restoration is a workspace-level outcome, not one event per alert
+        // bead. Emit exactly once after every matching alert is closed. The
+        // successful bead identifies the gate run that proved recovery, and
+        // the event remains observable when the scoped store had no matching
+        // alert bead at all.
+        self.telemetry.emit(
+            EventKind::WorkspaceGateRestored {
+                workspace: workspace.clone(),
+                bead_id: success_bead_id.clone(),
+                degraded_duration_secs,
+            },
+            Utc::now(),
+        )?;
 
         tracing::info!(
             workspace = %workspace,
@@ -2749,10 +2752,7 @@ impl OutcomeHandler {
         // work. Undo them before the workspace re-enters rotation so a
         // penalised bead does not come back one failure from quarantine on
         // counts the broken gate gave it.
-        match self
-            .undo_degraded_window_penalties(store, workspace_path)
-            .await
-        {
+        match self.undo_degraded_window_penalties(store).await {
             Ok(undone) if undone > 0 => {
                 tracing::info!(
                     workspace = %workspace,
@@ -2784,23 +2784,20 @@ impl OutcomeHandler {
     /// with them. Penalties from before the window are left alone.
     ///
     /// Returns how many beads were reset.
-    async fn undo_degraded_window_penalties(
-        &self,
-        store: &dyn BeadStore,
-        workspace_path: &std::path::Path,
-    ) -> Result<usize> {
+    async fn undo_degraded_window_penalties(&self, store: &dyn BeadStore) -> Result<usize> {
         let all_beads = store
             .list_all()
             .await
             .context("failed to list beads while undoing degraded-window penalties")?;
 
+        // Like alert lookup above, this store is already workspace-scoped and
+        // workspace-native bead-rs records may have no `source_repo` value.
         let marked: Vec<&Bead> = all_beads
             .iter()
             .filter(|b| {
-                b.workspace == workspace_path
-                    && b.labels
-                        .iter()
-                        .any(|l| l.starts_with(DEGRADED_WINDOW_MARKER_PREFIX))
+                b.labels
+                    .iter()
+                    .any(|l| l.starts_with(DEGRADED_WINDOW_MARKER_PREFIX))
             })
             .collect();
 
@@ -3737,6 +3734,8 @@ mod tests {
         /// the gate fetches them through the store; with no predispatch snapshot
         /// a non-empty note is what makes the gate Pass.
         notes: Option<String>,
+        /// Workspace-scoped records returned by `list_all()`.
+        all_beads: Vec<Bead>,
         fail_flush: bool,
     }
 
@@ -3749,6 +3748,7 @@ mod tests {
                 workspace: tempfile::TempDir::new().unwrap(),
                 dependencies: Vec::new(),
                 notes: None,
+                all_beads: Vec::new(),
                 fail_flush: false,
             }
         }
@@ -3760,6 +3760,11 @@ mod tests {
 
         fn with_labels(mut self, labels: Vec<String>) -> Self {
             self.labels = labels;
+            self
+        }
+
+        fn with_all_beads(mut self, all_beads: Vec<Bead>) -> Self {
+            self.all_beads = all_beads;
             self
         }
 
@@ -3861,7 +3866,7 @@ mod tests {
         }
 
         async fn list_all(&self) -> Result<Vec<Bead>> {
-            Ok(vec![])
+            Ok(self.all_beads.clone())
         }
         async fn ready(&self, _filters: &Filters) -> Result<Vec<Bead>> {
             Ok(vec![])
@@ -4006,6 +4011,81 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn restore_degraded_workspace_closes_bead_rs_null_source_repo_alert() {
+        let (_guard, _home) = isolated_home();
+        let workspace = tempfile::TempDir::new().unwrap();
+
+        // bead-rs persists workspace-native issues with source_repo IS NULL;
+        // its CLI omits that null field, so Bead's serde default is an empty
+        // path. Store scoping, rather than this provenance field, establishes
+        // that the alert belongs to `workspace`.
+        let mut alert = bead_in_workspace(BeadStatus::Open, std::path::Path::new(""));
+        alert.id = BeadId::from("needle-gate-broken");
+        alert.title = "Gate broken: cargo test — command failed".to_string();
+        assert!(alert.workspace.as_os_str().is_empty());
+
+        let store = MockBeadStore::new(BeadStatus::Done).with_all_beads(vec![alert]);
+        let helper = crate::telemetry::test_utils::TestHelper::new("gate-restore-test");
+        let handler = OutcomeHandler::new(Config::default(), helper.telemetry().clone());
+        let success_bead_id = BeadId::from("needle-success");
+
+        handler
+            .restore_degraded_workspace(&store, workspace.path(), &success_bead_id)
+            .await
+            .unwrap();
+        helper.sync().await;
+
+        let actions = store.actions();
+        assert!(actions.iter().any(|action| {
+            matches!(
+                action,
+                StoreAction::Close(id, reason)
+                    if id == "needle-gate-broken" && reason.contains("needle-success")
+            )
+        }));
+
+        let restored = helper.events_by_type("workspace.gate_restored");
+        assert_eq!(restored.len(), 1, "restoration emits one aggregate event");
+        assert_eq!(restored[0].bead_id.as_ref(), Some(&success_bead_id));
+        assert_eq!(
+            restored[0].data["workspace"],
+            workspace.path().to_string_lossy().as_ref()
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_degraded_workspace_emits_aggregate_event_with_no_alert_bead() {
+        let (_guard, _home) = isolated_home();
+        let workspace = tempfile::TempDir::new().unwrap();
+        let store = MockBeadStore::new(BeadStatus::Done);
+        let helper = crate::telemetry::test_utils::TestHelper::new("gate-restore-empty-test");
+        let handler = OutcomeHandler::new(Config::default(), helper.telemetry().clone());
+        let success_bead_id = BeadId::from("needle-success-without-alert");
+
+        handler
+            .restore_degraded_workspace(&store, workspace.path(), &success_bead_id)
+            .await
+            .unwrap();
+        helper.sync().await;
+
+        assert!(
+            store
+                .actions()
+                .iter()
+                .all(|action| !matches!(action, StoreAction::Close(_, _))),
+            "an empty scoped store has no alert bead to close"
+        );
+        let restored = helper.events_by_type("workspace.gate_restored");
+        assert_eq!(
+            restored.len(),
+            1,
+            "restoration must remain observable when zero alert beads match"
+        );
+        assert_eq!(restored[0].bead_id.as_ref(), Some(&success_bead_id));
+        assert_eq!(restored[0].data["degraded_duration_secs"], 0);
     }
 
     // ── classify tests ──
