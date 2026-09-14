@@ -1378,6 +1378,11 @@ pub enum EventKind {
     },
 
     // ── Cargo testing ──
+    /// A test command is about to be spawned.
+    TestExecutionStarted {
+        /// ISO 8601 UTC timestamp captured before the spawn attempt.
+        start_timestamp: String,
+    },
     CargoTestStarted {
         test_name: String,
     },
@@ -1777,6 +1782,7 @@ impl EventKind {
             EventKind::CanaryRejected { .. } => "canary.rejected",
             EventKind::GenerationRatio { .. } => "generation_ratio",
             EventKind::SpawnPathModifiedInPlace { .. } => "spawn_path.modified_in_place",
+            EventKind::TestExecutionStarted { .. } => "test_execution.started",
             EventKind::CargoTestStarted { .. } => "cargo_test.started",
             EventKind::CargoTestCompleted { .. } => "cargo_test.completed",
             EventKind::OutputTransformSpawned { .. } => "agent.transform.spawned",
@@ -1967,6 +1973,7 @@ impl EventKind {
             | EventKind::CanaryPromoted { .. }
             | EventKind::CanaryRejected { .. }
             | EventKind::GenerationRatio { .. }
+            | EventKind::TestExecutionStarted { .. }
             | EventKind::CargoTestStarted { .. }
             | EventKind::CargoTestCompleted { .. }
             | EventKind::ClaimRaceLostSkipped { .. }
@@ -3161,6 +3168,9 @@ impl EventKind {
             EventKind::CanaryRejected { reason } => {
                 serde_json::json!({ "reason": reason })
             }
+            EventKind::TestExecutionStarted { start_timestamp } => {
+                serde_json::json!({ "start_timestamp": start_timestamp })
+            }
             EventKind::CargoTestStarted { test_name } => {
                 serde_json::json!({ "test_name": test_name })
             }
@@ -3919,6 +3929,7 @@ impl EventKind {
             | EventKind::CanaryPromoted { .. }
             | EventKind::CanaryRejected { .. }
             | EventKind::GenerationRatio { .. }
+            | EventKind::TestExecutionStarted { .. }
             | EventKind::CargoTestStarted { .. }
             | EventKind::OutputTransformSpawned { .. }
             | EventKind::OutputTransformExited { .. }
@@ -6509,6 +6520,28 @@ mod tests {
             .event_type(),
             "outcome.handled"
         );
+    }
+
+    #[test]
+    fn test_execution_started_serializes_start_timestamp() {
+        let start_timestamp = "2026-09-14T10:30:00.123Z";
+        let kind = EventKind::TestExecutionStarted {
+            start_timestamp: start_timestamp.to_string(),
+        };
+
+        assert_eq!(kind.event_type(), "test_execution.started");
+        assert_eq!(
+            kind.to_data(),
+            serde_json::json!({ "start_timestamp": start_timestamp })
+        );
+
+        let telemetry = Telemetry::new("needle-test".to_string());
+        let event = telemetry.make_event(&kind, Utc::now());
+        let serialized = serde_json::to_value(event).expect("serialize telemetry event");
+
+        assert_eq!(serialized["event_type"], "test_execution.started");
+        assert_eq!(serialized["data"]["start_timestamp"], start_timestamp);
+        assert!(serialized.get("duration_ms").is_none());
     }
 
     #[test]
