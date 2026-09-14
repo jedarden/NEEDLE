@@ -179,6 +179,127 @@ struct ProposedChild {
     body: String,
 }
 
+/// True only for an execution/evidence step that cannot ship an independent
+/// product change. Test implementation remains real work: "Add regression
+/// tests" and "Implement a test harness" deliberately do not match.
+fn is_verification_only_child(child: &ProposedChild) -> bool {
+    let title = child
+        .title
+        .to_lowercase()
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() {
+                character
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let padded = format!(" {title} ");
+
+    let implements_test_behavior = [
+        " add ",
+        " build ",
+        " create ",
+        " fix ",
+        " implement ",
+        " introduce ",
+        " refactor ",
+        " update ",
+        " write ",
+        " harness ",
+        " framework ",
+        " fixture ",
+        " infrastructure ",
+        " parser ",
+        " support ",
+    ]
+    .iter()
+    .any(|signal| padded.contains(signal));
+    if implements_test_behavior {
+        return false;
+    }
+
+    let starts_with = |verbs: &[&str]| {
+        title
+            .split_whitespace()
+            .next()
+            .is_some_and(|first| verbs.contains(&first))
+    };
+    let mentions_test_execution = [" test ", " tests ", " check ", " checks ", " verification "]
+        .iter()
+        .any(|signal| padded.contains(signal));
+    let mentions_evidence = [
+        " output ",
+        " outputs ",
+        " log ",
+        " logs ",
+        " result ",
+        " results ",
+        " evidence ",
+    ]
+    .iter()
+    .any(|signal| padded.contains(signal));
+
+    (starts_with(&["run", "rerun", "execute"]) && mentions_test_execution)
+        || (starts_with(&["capture", "collect", "record"])
+            && (mentions_evidence || mentions_test_execution))
+        || (starts_with(&["document", "summarize", "report"])
+            && mentions_test_execution
+            && mentions_evidence)
+}
+
+/// Fold execution-only proposals into the nearest preceding implementation
+/// child (or the first implementation child when evidence was proposed
+/// first). This keeps acceptance evidence attached to shipped work instead of
+/// putting test invocations and copied output on the claimable frontier.
+fn fold_verification_only_children(proposed: &[ProposedChild]) -> (Vec<ProposedChild>, usize) {
+    let mut owners = Vec::new();
+    let mut owner_by_input = HashMap::new();
+    for (input_index, child) in proposed.iter().enumerate() {
+        if !is_verification_only_child(child) {
+            owner_by_input.insert(input_index, owners.len());
+            owners.push(child.clone());
+        }
+    }
+
+    if owners.is_empty() {
+        return (Vec::new(), proposed.len());
+    }
+
+    let first_owner = 0usize;
+    let mut folded = 0usize;
+    for (input_index, child) in proposed.iter().enumerate() {
+        if !is_verification_only_child(child) {
+            continue;
+        }
+        let owner_index = owner_by_input
+            .iter()
+            .filter(|(owner_input, _)| **owner_input < input_index)
+            .max_by_key(|(owner_input, _)| **owner_input)
+            .map(|(_, owner_index)| *owner_index)
+            .unwrap_or(first_owner);
+        let owner = &mut owners[owner_index];
+        if !owner
+            .body
+            .contains("Acceptance evidence folded from Mitosis:")
+        {
+            owner
+                .body
+                .push_str("\n\nAcceptance evidence folded from Mitosis:");
+        }
+        owner
+            .body
+            .push_str(&format!("\n- {}: {}", child.title, child.body));
+        folded += 1;
+    }
+
+    (owners, folded)
+}
+
 /// Agent's mitosis analysis response.
 #[derive(Debug, serde::Deserialize)]
 struct MitosisResponse {
@@ -744,6 +865,25 @@ impl MitosisEvaluator {
         parent: &Bead,
         proposed: &[ProposedChild],
     ) -> Result<MitosisResult> {
+        let (proposed, folded_verification) = fold_verification_only_children(proposed);
+        if proposed.is_empty() {
+            tracing::info!(
+                parent_id = %parent.id,
+                folded_verification,
+                "mitosis proposal contained only verification evidence; keeping the implementation parent unsplit"
+            );
+            self.telemetry.emit(
+                EventKind::MitosisSkipped {
+                    parent_id: parent.id.clone(),
+                    existing_children: 0,
+                },
+                chrono::Utc::now(),
+            )?;
+            return Ok(MitosisResult::Skipped {
+                reason: "proposal contained only verification evidence".to_string(),
+            });
+        }
+
         // Extract the root label from the parent for lineage tracking.
         // If the parent has a root-* label, propagate it to children.
         // Otherwise, this parent is the root of the lineage.
@@ -783,8 +923,8 @@ impl MitosisEvaluator {
 
         // Dedup first, then build the list of children to create.
         let mut to_create: Vec<NewChild> = Vec::new();
-        let mut skipped = 0u32;
-        for child in proposed {
+        let mut skipped = folded_verification as u32;
+        for child in &proposed {
             // Dedup: does an existing child cover this task?
             if existing_titles
                 .iter()
@@ -2683,21 +2823,14 @@ End of response."#;
     }
 
     #[test]
-    fn jaccard_both_empty() {
-        let set1: HashSet<String> = HashSet::new();
-        let set2: HashSet<String> = HashSet::new();
-
-        // Two empty sets are defined as identical
-        assert_eq!(jaccard_similarity(&set1, &set2), 1.0);
-    }
-
-    #[test]
     fn jaccard_one_empty() {
         let set1: HashSet<String> = ["a", "b", "c"].iter().map(|s| s.to_string()).collect();
         let set2: HashSet<String> = HashSet::new();
 
         // One empty, one non-empty should have 0.0 similarity
         assert_eq!(jaccard_similarity(&set1, &set2), 0.0);
+        // Two empty sets are defined as identical.
+        assert_eq!(jaccard_similarity(&set2, &HashSet::new()), 1.0);
     }
 
     #[test]
@@ -2927,6 +3060,67 @@ End of response."#;
             sanitize_path_component("/home/user/test"),
             "_home_user_test"
         );
+    }
+
+    #[tokio::test]
+    async fn verification_only_mitosis_output_is_folded_into_implementation_owner() {
+        let proposed = vec![
+            ProposedChild {
+                title: "Capture command output".to_string(),
+                body: "Preserve the exact baseline output.".to_string(),
+            },
+            ProposedChild {
+                title: "Implement bounded retry policy".to_string(),
+                body: "Add the production retry state machine.".to_string(),
+            },
+            ProposedChild {
+                title: "Run tests only".to_string(),
+                body: "Run cargo test --lib retry.".to_string(),
+            },
+            ProposedChild {
+                title: "Document test results".to_string(),
+                body: "Record the passing cases and timings.".to_string(),
+            },
+            ProposedChild {
+                title: "Add retry regression tests".to_string(),
+                body: "Write new executable coverage for retry exhaustion.".to_string(),
+            },
+            ProposedChild {
+                title: "Collect verification logs".to_string(),
+                body: "Attach the final test log.".to_string(),
+            },
+        ];
+
+        let (folded, evidence_count) = fold_verification_only_children(&proposed);
+
+        assert_eq!(evidence_count, 4);
+        assert_eq!(folded.len(), 2);
+        assert_eq!(folded[0].title, "Implement bounded retry policy");
+        assert!(folded[0].body.contains("Capture command output"));
+        assert!(folded[0].body.contains("Run tests only"));
+        assert!(folded[0].body.contains("Document test results"));
+        assert_eq!(folded[1].title, "Add retry regression tests");
+        assert!(folded[1].body.contains("Collect verification logs"));
+        assert!(folded[1]
+            .body
+            .contains("Acceptance evidence folded from Mitosis:"));
+
+        let store = MockStore::new();
+        let temp = tempfile::tempdir().unwrap();
+        let evaluator = MitosisEvaluator::new(
+            MitosisConfig::default(),
+            Telemetry::new("verification-fold-test".to_string()),
+            temp.path().to_path_buf(),
+        );
+        let result = evaluator
+            .create_children(&store, &test_bead(), &proposed)
+            .await
+            .unwrap();
+        assert!(matches!(result, MitosisResult::Split { children } if children.len() == 2));
+        let created = store.created.lock().unwrap();
+        assert_eq!(created.len(), 2, "evidence steps must not become beads");
+        assert!(created[0].1.contains("Capture command output"));
+        assert!(created[1].1.contains("Collect verification logs"));
     }
 
     // ── MitosisEvaluator precondition tests ──
