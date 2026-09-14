@@ -430,16 +430,16 @@ async fn idle_timeout_shorter_than_hard_timeout_fires_first() {
 
 #[tokio::test]
 async fn hard_timeout_very_short_deadline_fires_immediately() {
-    // Create an adapter with a 0.5 second hard timeout
-    // Process tries to produce output at 1 second
-    // Hard timeout should fire at 0.5 seconds before any output
+    // Keep the payload comfortably beyond the one-second hard deadline. Using
+    // the same one-second boundary for both made the stdout assertion depend on
+    // which timer won while the full integration target was under load.
     let adapter = AgentAdapter {
         name: "test-hard-very-short".to_string(),
         description: None,
         agent_cli: "sh".to_string(),
         version_command: None,
         input_method: InputMethod::Stdin,
-        invoke_template: "sleep 1; echo 'too late'".to_string(),
+        invoke_template: "sleep 10; echo 'too late'".to_string(),
         environment: HashMap::new(),
         timeout_secs: 0,
         idle_timeout_secs: 0,

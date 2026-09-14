@@ -130,25 +130,36 @@ impl TmuxSession {
         // This creates the pane_pid-vs-child-PID split via bash -c wrapper
         let shell_cmd = format!("NEEDLE_INNER=1 sleep 3600 2>> {}", log_path.display());
 
-        // Spawn the tmux session
-        let status = tmux()
-            .args(["new-session", "-d", "-s", &session_name, &shell_cmd])
-            .status()
+        // Ask new-session to return metadata for the pane it created. Capturing
+        // it atomically avoids a sleep-and-query timing assumption while other
+        // tests are concurrently creating sessions on this socket.
+        let output = tmux()
+            .args([
+                "new-session",
+                "-d",
+                "-P",
+                "-F",
+                "#{pane_pid}",
+                "-s",
+                &session_name,
+                &shell_cmd,
+            ])
+            .output()
             .context("failed to launch tmux — is tmux installed?")?;
 
-        if !status.success() {
+        if !output.status.success() {
             anyhow::bail!(
                 "tmux new-session exited with status {} for session '{}'",
-                status,
+                output.status,
                 session_name
             );
         }
 
-        // Give tmux a moment to create the session
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        // Capture the pane_pid from tmux list-panes
-        let pane_pid = Self::capture_pane_pid(&session_name)?;
+        let pane_str = String::from_utf8_lossy(&output.stdout);
+        let pane_pid: u32 = pane_str
+            .trim()
+            .parse()
+            .with_context(|| format!("failed to parse pane_pid from: {pane_str}"))?;
 
         Ok(TmuxSession {
             session_name,
@@ -156,29 +167,6 @@ impl TmuxSession {
             log_path,
             spawned_at: Instant::now(),
         })
-    }
-
-    /// Capture the pane_pid from tmux list-panes.
-    ///
-    /// This runs `tmux list-panes -t <session> -F "#{pane_pid}"` and parses
-    /// the output to extract the pane PID.
-    fn capture_pane_pid(session_name: &str) -> Result<u32> {
-        let output = tmux()
-            .args(["list-panes", "-t", session_name, "-F", "#{pane_pid}"])
-            .output()
-            .context("failed to list tmux panes")?;
-
-        if !output.status.success() {
-            anyhow::bail!("tmux list-panes exited with status {}", output.status);
-        }
-
-        let pane_str = String::from_utf8_lossy(&output.stdout);
-        let pane_pid: u32 = pane_str
-            .trim()
-            .parse()
-            .context(format!("failed to parse pane_pid from: {}", pane_str))?;
-
-        Ok(pane_pid)
     }
 
     /// Check if the tmux session is still alive.
