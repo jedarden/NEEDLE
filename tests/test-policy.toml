@@ -33,7 +33,7 @@ max_tests = 3765
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
 # (needle-3e6b4ef0).
-push = 651
+push = 652
 contract = 67
 # +16 literal test attributes for Cargo execution isolation (needle-b31fcb27):
 # seven integration cases plus nine nested-Cargo fixture tests embedded in source.
@@ -66,7 +66,7 @@ owner = "component:core-integration"
 name = "p2_integration_tests"
 path = "tests/p2_integration_tests.rs"
 tier = "push"
-max_tests = 105
+max_tests = 106
 owner = "component:pluck-mend-explore"
 
 [[harness]]

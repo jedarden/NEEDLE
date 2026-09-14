@@ -1,10 +1,12 @@
 use needle::bead_store::{builtin_bead_backends, BeadStore, CliBeadStore};
+use needle::process_runner::{ProcessRequest, ProcessRunner, TokioProcessRunner};
 use needle::types::{BeadId, ClaimResult};
 use std::collections::HashMap;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 #[cfg(unix)]
 fn executable(path: &Path, body: &str) {
@@ -66,8 +68,28 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for TraceCapture {
 }
 
 #[cfg(unix)]
+fn trace_capture() -> (TraceCapture, tracing::subscriber::DefaultGuard) {
+    let capture = TraceCapture(Arc::new(Mutex::new(Vec::new())));
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(capture.clone())
+        .with_ansi(false)
+        .without_time()
+        .with_max_level(tracing::Level::DEBUG)
+        .finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+    (capture, guard)
+}
+
+#[cfg(unix)]
 fn captured_trace(capture: &TraceCapture) -> String {
     String::from_utf8(capture.0.lock().unwrap().clone()).unwrap()
+}
+
+#[cfg(unix)]
+fn etxtbsy_fixture(directory: &Path) -> std::path::PathBuf {
+    let binary = directory.join("etxtbsy-fixture");
+    executable(&binary, "#!/bin/sh\nprintf 'ready\\n'\n");
+    binary
 }
 
 #[test]
@@ -336,7 +358,7 @@ async fn bead_rs_split_uses_sequential_create_and_dependency_commands() {
 
 #[tokio::test(flavor = "current_thread")]
 #[cfg(unix)]
-async fn bead_forge_batch_retries_transient_etxtbsy_and_completes() {
+async fn bead_forge_batch_claim_completes_without_a_scheduler_race() {
     let root = tempfile::tempdir().unwrap();
     let binary = root.path().join("fixture-cli");
     executable(
@@ -347,9 +369,6 @@ if [ "$1" = show ]; then
   if [ -e batch-seen ]; then
     printf '%s\n' '[{"id":"bead-1","title":"fixture","description":null,"priority":2,"status":"in_progress","assignee":"worker-a","labels":[],"source_repo":"","dependencies":[],"dependents":[],"comments":[],"created_at":"2026-08-12T00:00:00Z","updated_at":"2026-08-12T00:00:00Z"}]'
   else
-    touch show-seen
-    (exec 9>>"$0"; touch busy-started; sleep 0.05) >/dev/null 2>&1 &
-    while [ ! -e busy-started ]; do sleep 0.001; done
     printf '%s\n' '[{"id":"bead-1","title":"fixture","description":null,"priority":2,"status":"open","assignee":null,"labels":[],"source_repo":"","dependencies":[],"dependents":[],"comments":[],"created_at":"2026-08-12T00:00:00Z","updated_at":"2026-08-12T00:00:00Z"}]'
   fi
 elif [ "$1" = batch ]; then
@@ -367,17 +386,7 @@ fi
     )
     .unwrap();
 
-    let capture = TraceCapture(Arc::new(Mutex::new(Vec::new())));
-    let subscriber = tracing_subscriber::fmt()
-        .with_writer(capture.clone())
-        .with_ansi(false)
-        .without_time()
-        .with_max_level(tracing::Level::DEBUG)
-        .finish();
-    let subscriber_guard = tracing::subscriber::set_default(subscriber);
-
     let result = store.claim(&BeadId::from("bead-1"), "worker-a").await;
-    drop(subscriber_guard);
 
     let claimed = result.unwrap();
     assert!(matches!(claimed, ClaimResult::Claimed(_)));
@@ -388,14 +397,66 @@ fi
     assert!(invocations.contains(
         r#"[{"assignee":"worker-a","id":"bead-1","op":"update","status":"in_progress"}]"#
     ));
+}
 
+#[tokio::test(flavor = "current_thread")]
+#[cfg(unix)]
+async fn captured_process_retry_is_deterministic_bounded_and_observable() {
+    let root = tempfile::tempdir().unwrap();
+    let binary = etxtbsy_fixture(root.path());
+    let write_guard = OpenOptions::new().write(true).open(&binary).unwrap();
+    let release = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        drop(write_guard);
+    });
+    let (capture, subscriber_guard) = trace_capture();
+
+    let output = TokioProcessRunner
+        .output(ProcessRequest::new(&binary), Duration::from_secs(1))
+        .await
+        .unwrap();
+    release.await.unwrap();
+    drop(subscriber_guard);
+
+    assert!(output.success);
+    assert_eq!(output.stdout, b"ready\n");
     let logs = captured_trace(&capture);
-    assert!(
-        logs.contains("Retry attempt 1/5") && logs.contains("ETXTBSY"),
-        "batch retry should emit an ETXTBSY attempt event: {logs}"
+    assert_eq!(logs.matches("Retrying captured process spawn").count(), 1);
+    assert!(logs.contains("Captured process spawn succeeded after ETXTBSY retry"));
+
+    let persistent_guard = OpenOptions::new().write(true).open(&binary).unwrap();
+    let (capture, subscriber_guard) = trace_capture();
+    let error = TokioProcessRunner
+        .output(ProcessRequest::new(&binary), Duration::from_secs(1))
+        .await
+        .unwrap_err();
+    drop(subscriber_guard);
+    drop(persistent_guard);
+
+    assert!(error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io_error| io_error.raw_os_error() == Some(26))
+    }));
+    assert_eq!(
+        captured_trace(&capture)
+            .matches("Retrying captured process spawn")
+            .count(),
+        4
     );
-    assert!(
-        logs.contains("Retry succeeded for spawn_with_etxtbsy_retry after"),
-        "successful batch retry should emit a completion event: {logs}"
-    );
+
+    let missing = root.path().join("missing-cli");
+    let (capture, subscriber_guard) = trace_capture();
+    let error = TokioProcessRunner
+        .output(ProcessRequest::new(&missing), Duration::from_secs(1))
+        .await
+        .unwrap_err();
+    drop(subscriber_guard);
+
+    assert!(error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io_error| io_error.kind() == std::io::ErrorKind::NotFound)
+    }));
+    assert!(!captured_trace(&capture).contains("Retrying captured process spawn"));
 }

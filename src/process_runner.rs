@@ -128,8 +128,22 @@ impl ProcessRunner for TokioProcessRunner {
             command.envs(request.env.iter().cloned());
 
             match command.spawn() {
-                Ok(child) => break child,
+                Ok(child) => {
+                    if attempts > 1 {
+                        tracing::debug!(
+                            attempts,
+                            max_attempts = MAX_SPAWN_ATTEMPTS,
+                            "Captured process spawn succeeded after ETXTBSY retry"
+                        );
+                    }
+                    break child;
+                }
                 Err(error) if error.raw_os_error() == Some(26) && attempts < MAX_SPAWN_ATTEMPTS => {
+                    tracing::warn!(
+                        attempt = attempts,
+                        max_attempts = MAX_SPAWN_ATTEMPTS,
+                        "Retrying captured process spawn after ETXTBSY"
+                    );
                     tokio::time::sleep(ETXTBSY_BACKOFF).await;
                 }
                 Err(error) => {
