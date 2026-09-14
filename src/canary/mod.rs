@@ -941,8 +941,12 @@ impl CanaryRunner {
         }
     }
 
-    /// Get the actual outcome for a test bead by querying the bead store.
-    fn get_actual_outcome(
+    /// Get the actual outcome for a test bead by querying the configured bead store.
+    ///
+    /// This is public so process-boundary integration tests can exercise the
+    /// backend projection without putting a real child process in `cargo test
+    /// --lib`.
+    pub fn get_actual_outcome(
         &self,
         bead_id: &str,
         worker_exit_code: Option<i32>,
@@ -1265,42 +1269,6 @@ pub struct ChannelStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[cfg(unix)]
-    #[test]
-    fn actual_outcome_uses_bead_rs_backend_and_show_shape() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let backend = "bead-rs";
-        let projection = r#"[{"status":"closed","labels":["native"]}]"#;
-
-        let root = tempfile::tempdir().unwrap();
-        let binary = root.path().join("bound-backend");
-        std::fs::write(
-            &binary,
-            format!("#!/bin/sh\nprintf '%s\\n' '{projection}'\n"),
-        )
-        .unwrap();
-        let mut permissions = std::fs::metadata(&binary).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&binary, permissions).unwrap();
-        std::fs::write(
-            root.path().join(".needle.yaml"),
-            format!(
-                "bead_cli:\n  backend: {backend}\n  path: {}\n",
-                binary.display()
-            ),
-        )
-        .unwrap();
-
-        let runner = CanaryRunner::new(root.path().join("needle"), root.path().into(), 30);
-        let isolated_home = tempfile::tempdir().unwrap();
-        let actual = runner
-            .get_actual_outcome("example-1", Some(0), isolated_home.path())
-            .unwrap();
-        assert_eq!(actual.final_status, "closed");
-        assert_eq!(actual.labels, vec!["native"]);
-    }
 
     #[test]
     fn canary_scenarios_use_hermetic_adapters() {

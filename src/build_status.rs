@@ -653,13 +653,4 @@ mod tests {
         assert_eq!(template_for_repo("AgentScribe"), "agentscribe-ci");
         assert_eq!(template_for_repo("needle.git"), "needle-ci");
     }
-
-    #[tokio::test]
-    async fn workspace_template_resolution_names_the_repo_template() {
-        // This repository is the canonical example: its remote names NEEDLE.
-        let template = template_for_workspace(Path::new(env!("CARGO_MANIFEST_DIR")))
-            .await
-            .expect("the manifest dir is a git checkout with a remote");
-        assert_eq!(template, "needle-ci");
-    }
 }

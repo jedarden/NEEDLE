@@ -22,7 +22,9 @@ version = 1
 # clock contracts plus one Worker retry-policy test. These belong in the unit
 # tier because the seam is process-local and the proof must inspect a pending
 # future before advancing manual time.
-max_tests = 3906
+# -11 process-spawning archive/status/version/canary contracts moved to the
+# integration_spawn harness (needle-a9bdc4e1).
+max_tests = 3895
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
@@ -34,7 +36,8 @@ contract = 67
 # +1 real-adapter contract for the injectable ProcessRunner (needle-d3f191a3).
 # +13 Git, tar, shell, and filesystem command contracts (needle-8495d35d).
 # +9 child-process and real Worker lifecycle contracts (needle-c54ad697).
-e2e = 672
+# +11 archive/status/version/canary child-process contracts (needle-a9bdc4e1).
+e2e = 683
 soak = 0
 fuzz = 0
 
@@ -42,7 +45,7 @@ fuzz = 0
 name = "integration_spawn"
 path = "tests/integration_spawn.rs"
 tier = "e2e"
-max_tests = 300
+max_tests = 311
 owner = "component:process-integration"
 
 [[harness]]
@@ -76,13 +79,6 @@ owner = "component:bead-rs-contract"
 # These are strict ceilings on existing debt. A new occurrence fails the fast
 # lane; deleting an occurrence makes the corresponding exception stale so the
 # policy shrinks with the implementation.
-[[unit_exception]]
-path = "src/attempt_archive.rs"
-kind = "process"
-max_occurrences = 2
-owner = "component:attempt-archive"
-reason = "Grandfathered unit-tier debt; replace with an injected boundary."
-
 [[unit_exception]]
 path = "src/bead_store/cli_store.rs"
 kind = "process"

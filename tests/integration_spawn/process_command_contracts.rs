@@ -7,14 +7,21 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{Duration as ChronoDuration, Utc};
+use needle::attempt_archive::{
+    sha256_file, spool_attempt, AttemptArchiveInput, Sidecar, SIDECAR_SCHEMA_VERSION,
+};
 use needle::bead_store::{BeadStore, Filters, RepairReport};
+use needle::build_status::template_for_workspace;
+use needle::canary::CanaryRunner;
 use needle::ci::{correlate_commit, CorrelationError};
 use needle::commit_hook::{inject_bead_id_trailer, validate_commit};
+use needle::config::{ArchiveCompression, AttemptArchiveConfig};
 use needle::dispatch::{cleanup_extraction, extract_clean_workspace, ExtractionConfig};
 use needle::mitosis::timeout_context::capture_timeout_context;
 use needle::mitosis::timeout_eligibility::TimeoutEligibility;
 use needle::outcome::{AttemptContext, OutcomeHandler};
 use needle::scratch_sweep::{sweep_scratch_directory_with_proc_root, SweepOutcome};
+use needle::spawn_version::spawn_version_output;
 use needle::telemetry::{Telemetry, TelemetryEvent};
 use needle::types::{AgentOutcome, Bead, BeadAction, BeadId, BeadStatus, ClaimResult};
 use needle::validation::dod_bypass::check_dod_bypass;
@@ -25,6 +32,8 @@ use needle::validation::{
 };
 use std::ffi::OsString;
 use std::fs;
+use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output};
 use std::sync::Mutex;
@@ -711,4 +720,245 @@ async fn outcome_routes_an_unjudgeable_shipped_work_gate_without_penalty() {
         .iter()
         .any(|action| action.contains("failure-count")));
     telemetry.shutdown().await;
+}
+
+fn archive_and_status_process_contracts_input() -> AttemptArchiveInput {
+    AttemptArchiveInput {
+        attempt_id: "0192-attempt-1".into(),
+        bead_id: "needle-abc".into(),
+        workspace: "/ws".into(),
+        worker: "needle-alpha".into(),
+        adapter: "claude-code-glm-5.3-flash".into(),
+        model: Some("glm-5.3-flash".into()),
+        outcome: "work_failure".into(),
+        terminal_reason: Some("gate:dod".into()),
+        recorded_at: "2026-09-12T15:00:00.000Z".into(),
+    }
+}
+
+fn archive_and_status_process_contracts_executable(
+    root: &Path,
+    name: &str,
+    body: &str,
+) -> std::path::PathBuf {
+    let path = root.join(name);
+    let mut file = fs::File::create(&path).expect("create executable fixture");
+    file.write_all(body.as_bytes())
+        .expect("write executable fixture");
+    file.sync_all().expect("sync executable fixture");
+    drop(file);
+    let mut permissions = fs::metadata(&path).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&path, permissions).unwrap();
+    path
+}
+
+#[test]
+fn archive_and_status_process_contracts_spool_a_bundle_and_sidecar() {
+    let spool = TempDir::new().unwrap();
+    let trace = TempDir::new().unwrap();
+    fs::write(trace.path().join("metadata.json"), "{\"exit_code\":0}").unwrap();
+    fs::write(trace.path().join("stdout.txt"), "hello").unwrap();
+    fs::write(trace.path().join("attempts.jsonl"), "{}\n").unwrap();
+    let config = AttemptArchiveConfig {
+        enabled: true,
+        spool_dir: spool.path().to_path_buf(),
+        ..AttemptArchiveConfig::default()
+    };
+    let input = archive_and_status_process_contracts_input();
+
+    let receipt = spool_attempt(&config, &input, Some(trace.path()))
+        .unwrap()
+        .expect("spooled");
+    assert!(receipt.bundle.is_file());
+    assert!(receipt.sidecar.is_file());
+    assert!(receipt.bundle_bytes > 0);
+    let relative = receipt.sidecar.strip_prefix(spool.path()).unwrap();
+    let parts: Vec<_> = relative.components().collect();
+    assert_eq!(parts.len(), 3, "{relative:?}");
+    assert_eq!(parts[1].as_os_str(), "2026-09-12");
+    assert!(relative
+        .to_string_lossy()
+        .ends_with("needle-abc-0192-attempt-1.json"));
+
+    let sidecar: Sidecar =
+        serde_json::from_str(&fs::read_to_string(&receipt.sidecar).unwrap()).unwrap();
+    assert_eq!(sidecar.schema_version, SIDECAR_SCHEMA_VERSION);
+    let bundle = spool.path().join(&sidecar.bundle_path);
+    assert_eq!(bundle, receipt.bundle);
+    let (digest, size) = sha256_file(&bundle).unwrap();
+    assert_eq!(digest, sidecar.bundle_sha256);
+    assert_eq!(size, sidecar.bundle_bytes);
+    assert_eq!(sidecar.attempt, input);
+    assert!(sidecar.files.contains(&"attempt.json".to_string()));
+    assert!(sidecar.files.contains(&"stdout.txt".to_string()));
+    assert!(sidecar.files.contains(&"attempts.jsonl".to_string()));
+    assert!(!spool
+        .path()
+        .join(".staging/needle-abc-0192-attempt-1")
+        .exists());
+
+    let listing = if bundle
+        .extension()
+        .is_some_and(|extension| extension == "zst")
+    {
+        Command::new("tar")
+            .args(["--zstd", "-tf"])
+            .arg(&bundle)
+            .output()
+            .unwrap()
+    } else {
+        Command::new("tar")
+            .arg("-tf")
+            .arg(&bundle)
+            .output()
+            .unwrap()
+    };
+    let listing = String::from_utf8_lossy(&listing.stdout);
+    assert!(listing.contains("attempt.json"), "{listing}");
+    assert!(listing.contains("stdout.txt"), "{listing}");
+}
+
+#[test]
+fn archive_and_status_process_contracts_archive_missing_trace_facts() {
+    let spool = TempDir::new().unwrap();
+    let config = AttemptArchiveConfig {
+        enabled: true,
+        spool_dir: spool.path().to_path_buf(),
+        compression: ArchiveCompression::None,
+        ..AttemptArchiveConfig::default()
+    };
+    let receipt = spool_attempt(
+        &config,
+        &archive_and_status_process_contracts_input(),
+        Some(Path::new("/nonexistent/trace")),
+    )
+    .unwrap()
+    .expect("spooled");
+    assert!(receipt.bundle.to_string_lossy().ends_with(".tar"));
+    let sidecar: Sidecar =
+        serde_json::from_str(&fs::read_to_string(&receipt.sidecar).unwrap()).unwrap();
+    assert_eq!(sidecar.files, vec!["attempt.json".to_string()]);
+}
+
+#[test]
+fn archive_and_status_process_contracts_version_stdout() {
+    let root = TempDir::new().unwrap();
+    let executable = archive_and_status_process_contracts_executable(
+        root.path(),
+        "fake-binary",
+        "#!/bin/sh\necho 'fake-binary 1.0.0'\n",
+    );
+    assert_eq!(
+        spawn_version_output(&executable).unwrap().trim(),
+        "fake-binary 1.0.0"
+    );
+}
+
+#[test]
+fn archive_and_status_process_contracts_version_nonzero_exit() {
+    let root = TempDir::new().unwrap();
+    let executable = archive_and_status_process_contracts_executable(
+        root.path(),
+        "failing-binary",
+        "#!/bin/sh\necho 'Error: something went wrong' >&2\nexit 1\n",
+    );
+    let error = spawn_version_output(&executable).unwrap_err().to_string();
+    assert!(error.contains("exited with code"));
+}
+
+#[test]
+fn archive_and_status_process_contracts_version_empty_output() {
+    let root = TempDir::new().unwrap();
+    let executable = archive_and_status_process_contracts_executable(
+        root.path(),
+        "empty-binary",
+        "#!/bin/sh\n# intentionally empty\n",
+    );
+    assert!(spawn_version_output(&executable).unwrap().trim().is_empty());
+}
+
+#[test]
+fn archive_and_status_process_contracts_version_multiline_output() {
+    let root = TempDir::new().unwrap();
+    let executable = archive_and_status_process_contracts_executable(
+        root.path(),
+        "multiline-binary",
+        "#!/bin/sh\necho 'my-tool 2.0.0'\necho 'Build metadata: some info'\necho 'Copyright 2026'\n",
+    );
+    let output = spawn_version_output(&executable).unwrap();
+    assert!(output.contains("my-tool 2.0.0"));
+    assert!(output.contains("Build metadata"));
+    assert!(output.contains("Copyright"));
+}
+
+#[test]
+fn archive_and_status_process_contracts_version_preserves_raw_output() {
+    let root = TempDir::new().unwrap();
+    let executable = archive_and_status_process_contracts_executable(
+        root.path(),
+        "raw-binary",
+        "#!/bin/sh\necho '  tool-with-spacing   1.2.3  '\n",
+    );
+    assert!(spawn_version_output(&executable)
+        .unwrap()
+        .contains("  tool-with-spacing   1.2.3  "));
+}
+
+#[test]
+fn archive_and_status_process_contracts_version_returns_string() {
+    let root = TempDir::new().unwrap();
+    let executable = archive_and_status_process_contracts_executable(
+        root.path(),
+        "string-binary",
+        "#!/bin/sh\necho 'test output'\n",
+    );
+    let output: String = spawn_version_output(&executable).unwrap();
+    assert_eq!(output.trim(), "test output");
+}
+
+#[test]
+fn archive_and_status_process_contracts_version_basic_spawn() {
+    let root = TempDir::new().unwrap();
+    let executable = archive_and_status_process_contracts_executable(
+        root.path(),
+        "basic-binary",
+        "#!/bin/sh\necho 'basic 1.0'\n",
+    );
+    assert!(spawn_version_output(&executable).is_ok());
+}
+
+#[tokio::test]
+async fn archive_and_status_process_contracts_workspace_template() {
+    let template = template_for_workspace(Path::new(env!("CARGO_MANIFEST_DIR")))
+        .await
+        .expect("manifest directory has a Git remote");
+    assert_eq!(template, "needle-ci");
+}
+
+#[test]
+fn archive_and_status_process_contracts_canary_backend_projection() {
+    let projection = r#"[{"status":"closed","labels":["native"]}]"#;
+    let root = TempDir::new().unwrap();
+    let binary = archive_and_status_process_contracts_executable(
+        root.path(),
+        "bound-backend",
+        &format!("#!/bin/sh\nprintf '%s\\n' '{projection}'\n"),
+    );
+    fs::write(
+        root.path().join(".needle.yaml"),
+        format!(
+            "bead_cli:\n  backend: bead-rs\n  path: {}\n",
+            binary.display()
+        ),
+    )
+    .unwrap();
+
+    let runner = CanaryRunner::new(root.path().join("needle"), root.path().into(), 30);
+    let isolated_home = TempDir::new().unwrap();
+    let actual = runner
+        .get_actual_outcome("example-1", Some(0), isolated_home.path())
+        .unwrap();
+    assert_eq!(actual.final_status, "closed");
+    assert_eq!(actual.labels, vec!["native"]);
 }

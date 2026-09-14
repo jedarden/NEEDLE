@@ -187,23 +187,7 @@ pub fn spawn_version_output(binary_path: &Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
-
-    /// Create a fake executable binary in a temp directory.
-    fn create_fake_binary(tmp_dir: &Path, name: &str, content: &str) -> PathBuf {
-        let binary_path = tmp_dir.join(name);
-        fs::write(&binary_path, content).expect("failed to write fake binary");
-
-        let mut perms = fs::metadata(&binary_path)
-            .expect("failed to get metadata")
-            .permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&binary_path, perms).expect("failed to set permissions");
-
-        binary_path
-    }
 
     // ──────────────────────────────────────────────────────────────────────────────
     // parse_backend_name tests
@@ -302,23 +286,6 @@ mod tests {
     }
 
     #[test]
-    fn spawn_version_output_captures_stdout() {
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let fake_binary = create_fake_binary(
-            tmp_dir.path(),
-            "fake-binary",
-            r#"#!/bin/sh
-echo "fake-binary 1.0.0"
-"#,
-        );
-
-        let output =
-            spawn_version_output(&fake_binary).expect("should successfully capture stdout");
-
-        assert_eq!(output.trim(), "fake-binary 1.0.0");
-    }
-
-    #[test]
     fn spawn_version_output_handles_nonexistent_binary() {
         let nonexistent = PathBuf::from("/nonexistent/path/to/binary");
         let result = spawn_version_output(&nonexistent);
@@ -326,117 +293,5 @@ echo "fake-binary 1.0.0"
         assert!(result.is_err(), "should fail for nonexistent binary");
         let error_msg = result.unwrap_err().to_string();
         assert!(error_msg.contains("binary not found") || error_msg.contains("not found"));
-    }
-
-    #[test]
-    fn spawn_version_output_handles_nonzero_exit_code() {
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let failing_binary = create_fake_binary(
-            tmp_dir.path(),
-            "failing-binary",
-            r#"#!/bin/sh
-echo "Error: something went wrong" >&2
-exit 1
-"#,
-        );
-
-        let result = spawn_version_output(&failing_binary);
-
-        assert!(
-            result.is_err(),
-            "should fail when binary exits with non-zero code"
-        );
-        let error_msg = result.unwrap_err().to_string();
-        assert!(error_msg.contains("exited with code"));
-    }
-
-    #[test]
-    fn spawn_version_output_handles_empty_output() {
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let empty_binary = create_fake_binary(
-            tmp_dir.path(),
-            "empty-binary",
-            r#"#!/bin/sh
-# Output nothing
-"#,
-        );
-
-        let output =
-            spawn_version_output(&empty_binary).expect("should successfully capture empty stdout");
-
-        assert_eq!(output.trim(), "");
-    }
-
-    #[test]
-    fn spawn_version_output_handles_multiline_output() {
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let multiline_binary = create_fake_binary(
-            tmp_dir.path(),
-            "multiline-binary",
-            r#"#!/bin/sh
-echo "my-tool 2.0.0"
-echo "Build metadata: some info"
-echo "Copyright 2026"
-"#,
-        );
-
-        let output = spawn_version_output(&multiline_binary)
-            .expect("should successfully capture multiline stdout");
-
-        assert!(output.contains("my-tool 2.0.0"));
-        assert!(output.contains("Build metadata"));
-        assert!(output.contains("Copyright"));
-    }
-
-    #[test]
-    fn spawn_version_output_preserves_raw_output() {
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let raw_binary = create_fake_binary(
-            tmp_dir.path(),
-            "raw-binary",
-            r#"#!/bin/sh
-echo "  tool-with-spacing   1.2.3  "
-"#,
-        );
-
-        let output = spawn_version_output(&raw_binary)
-            .expect("should successfully capture stdout with original spacing");
-
-        // Output should be raw, not trimmed
-        assert!(output.contains("  tool-with-spacing   1.2.3  "));
-    }
-
-    #[test]
-    fn spawn_version_output_returns_string_type() {
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let fake_binary = create_fake_binary(
-            tmp_dir.path(),
-            "fake-binary",
-            r#"#!/bin/sh
-echo "test output"
-"#,
-        );
-
-        let output: String = spawn_version_output(&fake_binary).expect("should return String type");
-
-        assert_eq!(output.trim(), "test output");
-    }
-
-    #[test]
-    fn spawn_version_output_basic_spawn_infrastructure() {
-        // This test verifies the basic spawning infrastructure works
-        let tmp_dir = tempfile::tempdir().unwrap();
-        let basic_binary = create_fake_binary(
-            tmp_dir.path(),
-            "basic-binary",
-            r#"#!/bin/sh
-echo "basic 1.0"
-"#,
-        );
-
-        let result = spawn_version_output(&basic_binary);
-
-        // Just verify the spawn succeeds - detailed checks are in other tests
-        assert!(result.is_ok(), "basic spawn should succeed");
     }
 }
