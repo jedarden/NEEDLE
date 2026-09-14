@@ -20,13 +20,14 @@
 //! - a non-zero exit, a timeout, or malformed output yields no hints and
 //!   never fails the dispatch.
 
-use std::io::Write;
 use std::process::Stdio;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::config::RetrievalConfig;
+use crate::process_guard::ProcessGroupKillGuard;
 
 /// What the retrieval command is asked about.
 #[derive(Debug, Clone, Serialize)]
@@ -89,46 +90,102 @@ pub async fn retrieve(config: &RetrievalConfig, request: &RetrievalRequest) -> R
     let max_bytes = config.max_bytes;
     let bead_id = request.bead_id.clone();
 
-    let work = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<RetrievedItem>> {
-        let mut child = std::process::Command::new("sh")
-            .arg("-c")
-            .arg(&command)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        if let Some(mut stdin) = child.stdin.take() {
-            // A command that ignores stdin closes its end early; that is fine.
-            let _ = stdin.write_all(&payload);
+    let mut child_command = tokio::process::Command::new("sh");
+    child_command
+        .arg("-c")
+        .arg(&command)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    // Give the shell and every command it forks a private process group. The
+    // guard below then makes both the configured timeout and cancellation by
+    // an outer caller kill the whole retrieval tree, not only the shell.
+    let mut child = match unsafe {
+        child_command
+            .pre_exec(|| {
+                libc::setpgid(0, 0);
+                Ok(())
+            })
+            .spawn()
+    } {
+        Ok(child) => child,
+        Err(error) => {
+            tracing::info!(bead_id = %bead_id, %error, "retrieval: command failed to start; no hints");
+            return Retrieval::default();
         }
-        let output = child.wait_with_output()?;
-        if !output.status.success() {
-            anyhow::bail!(
-                "retrieval command exited {}: {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-        }
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        Ok(stdout
-            .lines()
-            .filter_map(|l| serde_json::from_str::<RetrievedItem>(l.trim()).ok())
-            .filter(|i| !i.id.is_empty())
-            .take(max_results)
-            .collect())
-    });
+    };
+    let pid = child.id().unwrap_or(0);
+    let mut kill_guard = ProcessGroupKillGuard::new(pid);
+
+    let mut stdin = child.stdin.take();
+    let mut stdout = child.stdout.take().expect("retrieval stdout was piped");
+    let mut stderr = child.stderr.take().expect("retrieval stderr was piped");
+    let mut stdout_bytes = Vec::new();
+    let mut stderr_bytes = Vec::new();
+    let work = async {
+        tokio::join!(
+            async {
+                if let Some(mut stdin) = stdin.take() {
+                    // A command that ignores stdin may close its end early;
+                    // that is fine.
+                    let _ = stdin.write_all(&payload).await;
+                }
+            },
+            stdout.read_to_end(&mut stdout_bytes),
+            stderr.read_to_end(&mut stderr_bytes),
+            child.wait(),
+        )
+    };
 
     let items = match tokio::time::timeout(timeout, work).await {
-        Ok(Ok(Ok(items))) => items,
-        Ok(Ok(Err(e))) => {
-            tracing::info!(bead_id = %bead_id, error = %e, "retrieval: command failed; no hints");
-            Vec::new()
-        }
-        Ok(Err(e)) => {
-            tracing::info!(bead_id = %bead_id, error = %e, "retrieval: task failed; no hints");
-            Vec::new()
+        Ok(((), stdout_result, stderr_result, status_result)) => {
+            if status_result.is_ok() {
+                kill_guard.disarm();
+            }
+            match (stdout_result, stderr_result, status_result) {
+                (Ok(_), Ok(_), Ok(status)) if status.success() => {
+                    String::from_utf8_lossy(&stdout_bytes)
+                        .lines()
+                        .filter_map(|line| serde_json::from_str::<RetrievedItem>(line.trim()).ok())
+                        .filter(|item| !item.id.is_empty())
+                        .take(max_results)
+                        .collect()
+                }
+                (Ok(_), Ok(_), Ok(status)) => {
+                    tracing::info!(
+                        bead_id = %bead_id,
+                        %status,
+                        stderr = %String::from_utf8_lossy(&stderr_bytes).trim(),
+                        "retrieval: command failed; no hints"
+                    );
+                    Vec::new()
+                }
+                (stdout_result, stderr_result, status_result) => {
+                    tracing::info!(
+                        bead_id = %bead_id,
+                        stdout_error = ?stdout_result.err(),
+                        stderr_error = ?stderr_result.err(),
+                        wait_error = ?status_result.err(),
+                        "retrieval: command I/O failed; no hints"
+                    );
+                    Vec::new()
+                }
+            }
         }
         Err(_) => {
+            // Kill descendants first, then explicitly reap the direct child.
+            // Dropping a spawn_blocking JoinHandle (the former implementation)
+            // did neither, so the runtime waited for the original command long
+            // after retrieval had reported its timeout.
+            if pid > 0 {
+                unsafe {
+                    libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+                }
+            }
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            kill_guard.disarm();
             tracing::info!(
                 bead_id = %bead_id,
                 timeout_secs = timeout.as_secs(),
@@ -233,11 +290,25 @@ done"#;
             .await
             .items
             .is_empty());
+        let pid_file = tempfile::NamedTempFile::new().unwrap();
+        let pid_path = pid_file.path().to_path_buf();
+        std::fs::remove_file(&pid_path).unwrap();
         let slow = RetrievalConfig {
             timeout_secs: 1,
-            ..cfg("sleep 5; echo '{\"id\":\"late\"}'")
+            ..cfg(&format!(
+                "printf '%s' \"$$\" > {}; exec sleep 30",
+                pid_path.display()
+            ))
         };
         assert!(retrieve(&slow, &req()).await.items.is_empty());
+        let pid: u32 = std::fs::read_to_string(&pid_path)
+            .expect("retrieval command did not record its pid before the timeout")
+            .parse()
+            .unwrap();
+        assert!(
+            !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+            "timed-out retrieval process {pid} was not reaped"
+        );
         let off = RetrievalConfig {
             enabled: false,
             ..cfg("echo '{\"id\":\"x\"}'")
