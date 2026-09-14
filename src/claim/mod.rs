@@ -954,6 +954,23 @@ impl Claimer {
                     error = %e,
                     "atomic claim verification at dispatch encountered store error"
                 );
+                // The verification could not complete, so the live claim is
+                // unknown — a different situation from `ClaimVerifyFailed`
+                // above (which means the store answered and the identity did
+                // not match). Emitting here keeps one emission per failed
+                // verification: the caller aborts on the returned `Err` and
+                // must not emit a second event for the same attempt.
+                let category = crate::telemetry::ClaimVerifyErrorCategory::classify(&e);
+                let _ = self.telemetry.emit(
+                    EventKind::ClaimVerifyError {
+                        bead_id: bead_id.clone(),
+                        expected_actor: expected.actor.clone(),
+                        stage: "dispatch_time".to_string(),
+                        category,
+                        detail: format!("{e:#}"),
+                    },
+                    chrono::Utc::now(),
+                );
                 Err(e)
             }
         }
@@ -1149,6 +1166,9 @@ mod tests {
         /// Claim status served by `claim_status` when set; derived from the
         /// bead (with no revision/epoch) otherwise.
         claim_status: Mutex<Option<ClaimStatus>>,
+        /// Error served by `claim_status` when set; simulates a store that
+        /// cannot answer (issue not found, malformed response, timeout, …).
+        claim_status_error: Mutex<Option<String>>,
     }
 
     impl MockBeadStore {
@@ -1160,6 +1180,7 @@ mod tests {
                 claim_event_count: Mutex::new(None),
                 blocked_beads: Mutex::new(Vec::new()),
                 claim_status: Mutex::new(None),
+                claim_status_error: Mutex::new(None),
             }
         }
 
@@ -1180,6 +1201,11 @@ mod tests {
 
         fn with_claim_status(self, status: ClaimStatus) -> Self {
             *self.claim_status.lock().unwrap() = Some(status);
+            self
+        }
+
+        fn with_claim_status_error(self, message: &str) -> Self {
+            *self.claim_status_error.lock().unwrap() = Some(message.to_string());
             self
         }
     }
@@ -1209,6 +1235,9 @@ mod tests {
         }
 
         async fn claim_status(&self, id: &BeadId) -> Result<ClaimStatus> {
+            if let Some(error) = self.claim_status_error.lock().unwrap().clone() {
+                return Err(anyhow::anyhow!(error));
+            }
             if let Some(status) = self.claim_status.lock().unwrap().clone() {
                 return Ok(status);
             }
@@ -2562,6 +2591,109 @@ mod tests {
             verify_success.data["claim_epoch"], 4,
             "success telemetry must carry the verified claim epoch"
         );
+    }
+
+    #[tokio::test]
+    async fn verify_claim_at_dispatch_store_error_fails_closed_with_verify_error() {
+        // A store that cannot answer (issue not found, malformed response,
+        // timeout, unavailable CLI) must abort dispatch — the live claim is
+        // unknown, so proceeding would be an unverified dispatch. The failure
+        // emits exactly one `bead.claim.verify_error` naming the category and
+        // never a `bead.claim.verify_failed` (the claim identity was never
+        // compared, so counting a mismatch would be a lie).
+        let bead = make_bead("needle-err-lookup", "/tmp/ws");
+        let store = Arc::new(
+            MockBeadStore::new(vec![bead.clone()])
+                .with_claim_status_error("bead not found: needle-err-lookup"),
+        );
+        let (sink, events) = crate::telemetry::test_utils::MemorySink::new();
+        let telemetry = Telemetry::with_sink("test-worker".to_string(), sink);
+        let claimer = Claimer::new(store.clone(), std::env::temp_dir(), 5, 10, telemetry);
+        let target = target_context(&store, "/tmp/ws");
+
+        let result = claimer
+            .verify_claim_at_dispatch(&target, &bead.id, &plain_identity("worker-1"))
+            .await;
+
+        assert!(
+            result.is_err(),
+            "a failed verification lookup must return Err (fail closed), not Ok(_)"
+        );
+
+        drop(claimer);
+        // Give telemetry writer time to flush
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let captured = events.lock().unwrap();
+        let errors: Vec<_> = captured
+            .iter()
+            .filter(|event| event.event_type == "bead.claim.verify_error")
+            .collect();
+        assert_eq!(
+            errors.len(),
+            1,
+            "exactly one verify_error emission per failed verification, got {}",
+            errors.len()
+        );
+        assert_eq!(errors[0].bead_id, Some(bead.id.clone()));
+        assert_eq!(errors[0].data["expected_actor"], "worker-1");
+        assert_eq!(errors[0].data["stage"], "dispatch_time");
+        assert_eq!(
+            errors[0].data["category"], "lookup",
+            "a missing issue must classify as lookup"
+        );
+        assert!(
+            errors[0].data["detail"]
+                .as_str()
+                .unwrap()
+                .contains("bead not found"),
+            "detail must carry the error chain for grep-ability"
+        );
+
+        assert!(
+            !captured
+                .iter()
+                .any(|event| event.event_type == "bead.claim.verify_failed"),
+            "a verification that never compared identity must not emit ClaimVerifyFailed"
+        );
+    }
+
+    #[test]
+    fn verify_error_categories_classify_by_error_text() {
+        use crate::telemetry::ClaimVerifyErrorCategory;
+
+        let cases = [
+            (
+                anyhow::anyhow!("bead not found: needle-x"),
+                ClaimVerifyErrorCategory::Lookup,
+            ),
+            (
+                anyhow::anyhow!("backend 'bead' operation 'show' timed out after 30s"),
+                ClaimVerifyErrorCategory::Timeout,
+            ),
+            (
+                anyhow::anyhow!("failed to parse status: 'bananas'"),
+                ClaimVerifyErrorCategory::Parse,
+            ),
+            (
+                anyhow::anyhow!(
+                    "backend 'bead' operation 'show' failed using /usr/bin/bead: \
+                     No such file or directory (os error 2)"
+                ),
+                ClaimVerifyErrorCategory::Capability,
+            ),
+            (
+                anyhow::anyhow!("store shuffled its indexes inexplicably"),
+                ClaimVerifyErrorCategory::Backend,
+            ),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(
+                ClaimVerifyErrorCategory::classify(&error),
+                expected,
+                "error {error:#} should classify as {expected:?}"
+            );
+        }
     }
 
     #[tokio::test]

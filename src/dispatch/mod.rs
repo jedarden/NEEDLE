@@ -1473,10 +1473,52 @@ impl Dispatcher {
         // and dispatch action. This is the ONLY verification that truly prevents race
         // conditions because it's the last check before the actual spawn.
         let worker_id_for_verify = self.worker_id.clone();
-        if let (Some(ref store), Some(ref verify_worker_id)) =
-            (&self.bead_store, &worker_id_for_verify)
+        // Fail closed: a missing verifier is a failed precondition, not a
+        // reason to spawn unverified. The previous `if let (Some, Some)` form
+        // silently skipped this check — and with it the last gate before the
+        // spawn — whenever no store or no worker identity was wired in.
+        let (verify_store, verify_worker_id) =
+            match (&self.bead_store, worker_id_for_verify.as_ref()) {
+                (Some(store), Some(worker_id)) => (store, worker_id),
+                (None, _) => {
+                    let error = anyhow::anyhow!(
+                        "no bead store wired for pre-spawn claim verification — \
+                         refusing to spawn bead {} unverified",
+                        bead_id
+                    );
+                    let _ = self.telemetry.emit(
+                        crate::telemetry::EventKind::ClaimVerifyError {
+                            bead_id: bead_id.clone(),
+                            expected_actor: "(unset)".to_string(),
+                            stage: "pre_spawn".to_string(),
+                            category: crate::telemetry::ClaimVerifyErrorCategory::Capability,
+                            detail: format!("{error:#}"),
+                        },
+                        chrono::Utc::now(),
+                    );
+                    return Err(error);
+                }
+                (Some(_), None) => {
+                    let error = anyhow::anyhow!(
+                        "no worker identity wired for pre-spawn claim verification — \
+                         refusing to spawn bead {} unverified",
+                        bead_id
+                    );
+                    let _ = self.telemetry.emit(
+                        crate::telemetry::EventKind::ClaimVerifyError {
+                            bead_id: bead_id.clone(),
+                            expected_actor: "(unset)".to_string(),
+                            stage: "pre_spawn".to_string(),
+                            category: crate::telemetry::ClaimVerifyErrorCategory::Identity,
+                            detail: format!("{error:#}"),
+                        },
+                        chrono::Utc::now(),
+                    );
+                    return Err(error);
+                }
+            };
         {
-            match store.claim_status(bead_id).await {
+            match verify_store.claim_status(bead_id).await {
                 Ok(status) => {
                     let is_valid_claim = status.status == crate::types::BeadStatus::InProgress
                         && status.assignee.as_deref() == Some(verify_worker_id);
@@ -1545,6 +1587,16 @@ impl Dispatcher {
                         bead_id = %bead_id.as_ref(),
                         error = %e,
                         "atomic claim verification query failed — aborting process spawn"
+                    );
+                    let _ = self.telemetry.emit(
+                        crate::telemetry::EventKind::ClaimVerifyError {
+                            bead_id: bead_id.clone(),
+                            expected_actor: verify_worker_id.clone(),
+                            stage: "pre_spawn".to_string(),
+                            category: crate::telemetry::ClaimVerifyErrorCategory::classify(&e),
+                            detail: format!("{e:#}"),
+                        },
+                        chrono::Utc::now(),
                     );
                     return Err(anyhow::anyhow!(
                         "claim verification query failed for bead {}: {}",

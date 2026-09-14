@@ -36,12 +36,15 @@ version = 1
 # +3 gate-health persistence safety contracts (needle-0ed0ccd0): durable HOME
 # rejects temp-root recording, stale pruning preserves real records, and the
 # doctor repair surface remains scoped to missing workspaces.
-max_tests = 3734
+# +2 fail-closed claim verification (needle-40ca2f6e): store-error abort with
+# category telemetry, and the error-text category classifier.
+max_tests = 3736
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
 # (needle-3e6b4ef0).
-push = 652
+# +5 fail-closed pre-spawn claim verification gate (needle-40ca2f6e).
+push = 657
 contract = 67
 # +16 literal test attributes for Cargo execution isolation (needle-b31fcb27):
 # seven integration cases plus nine nested-Cargo fixture tests embedded in source.
@@ -78,7 +81,10 @@ owner = "component:core-integration"
 name = "p2_integration_tests"
 path = "tests/p2_integration_tests.rs"
 tier = "push"
-max_tests = 106
+# +5 fail-closed pre-spawn claim verification gate (needle-40ca2f6e): four
+# injected-failure zero-spawn cases plus the sentinel control, beside the
+# existing atomic_spawn_verification suites.
+max_tests = 111
 owner = "component:pluck-mend-explore"
 
 [[harness]]
@@ -115,7 +121,9 @@ reason = "Grandfathered unit-tier debt; replace with an injected boundary."
 [[unit_exception]]
 path = "src/claim/mod.rs"
 kind = "sleep"
-max_occurrences = 9
+# +1 fail-closed store-error test flushes telemetry like its siblings
+# (needle-40ca2f6e).
+max_occurrences = 10
 owner = "component:claim"
 reason = "Grandfathered unit-tier debt; replace with an injected boundary."
 

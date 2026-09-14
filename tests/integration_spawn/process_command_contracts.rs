@@ -243,7 +243,14 @@ fn process_contract_prompt(content: &str) -> BuiltPrompt {
 
 fn process_contract_dispatcher(adapters: HashMap<String, AgentAdapter>) -> Dispatcher {
     let telemetry = Telemetry::new("process-contract-worker".to_string());
+    // The dispatcher refuses to spawn unless its pre-spawn claim verification
+    // passes, so contract tests wire a permissive store matching the worker
+    // id. Verification-specific behavior lives in the fail-closed tests.
     Dispatcher::with_adapters(adapters, telemetry, 3600)
+        .with_bead_store(std::sync::Arc::new(
+            crate::pre_spawn_pass_store::AlwaysClaimedStore::new("process-contract-worker"),
+        ))
+        .with_worker_id("process-contract-worker".to_string())
 }
 
 fn process_contract_event(event_type: &str) -> TelemetryEvent {

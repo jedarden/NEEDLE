@@ -285,6 +285,75 @@ impl TryFrom<String> for AttemptOutcome {
     }
 }
 
+/// Why a claim verification could not complete.
+///
+/// Every category is a failed precondition: dispatch aborts before child
+/// process creation regardless of which one fired. The category names the
+/// failure so telemetry can distinguish "the store said the claim moved"
+/// ([`EventKind::ClaimVerifyFailed`]) from "we could not ask the store"
+/// ([`EventKind::ClaimVerifyError`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimVerifyErrorCategory {
+    /// The bead could not be found in the queried store.
+    Lookup,
+    /// The store's response could not be parsed.
+    Parse,
+    /// The claim identity or the store to verify against could not be
+    /// resolved (no claim-time identity, no resolved target store, no
+    /// worker identity to compare against).
+    Identity,
+    /// The verifier itself was unavailable: no store wired into the
+    /// dispatcher, or the bead CLI binary is missing or not executable.
+    Capability,
+    /// The verification query timed out.
+    Timeout,
+    /// Any other backend error.
+    Backend,
+}
+
+impl ClaimVerifyErrorCategory {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ClaimVerifyErrorCategory::Lookup => "lookup",
+            ClaimVerifyErrorCategory::Parse => "parse",
+            ClaimVerifyErrorCategory::Identity => "identity",
+            ClaimVerifyErrorCategory::Capability => "capability",
+            ClaimVerifyErrorCategory::Timeout => "timeout",
+            ClaimVerifyErrorCategory::Backend => "backend",
+        }
+    }
+
+    /// Classify a verification failure by its error chain.
+    ///
+    /// Classification is best-effort on the flattened error text; anything
+    /// unrecognised is [`ClaimVerifyErrorCategory::Backend`], never a reason
+    /// to proceed.
+    pub fn classify(error: &anyhow::Error) -> Self {
+        let text = format!("{error:#}").to_lowercase();
+        if text.contains("timed out") || text.contains("timeout") {
+            ClaimVerifyErrorCategory::Timeout
+        } else if text.contains("not found") || text.contains("no such bead") {
+            ClaimVerifyErrorCategory::Lookup
+        } else if text.contains("no such file or directory")
+            || text.contains("failed to spawn")
+            || text.contains("failed to execute")
+            || text.contains("command not found")
+            || text.contains("permission denied")
+        {
+            ClaimVerifyErrorCategory::Capability
+        } else if text.contains("parse")
+            || text.contains("expected value")
+            || text.contains("serde")
+            || text.contains("malformed")
+            || text.contains("eof while")
+        {
+            ClaimVerifyErrorCategory::Parse
+        } else {
+            ClaimVerifyErrorCategory::Backend
+        }
+    }
+}
+
 /// Typed event variants emitted by all NEEDLE components.
 ///
 /// Every variant maps to a a `TelemetryEvent` with `event_type` matching
@@ -604,6 +673,27 @@ pub enum EventKind {
         stage: String,
         actual_status: String,
         actual_assignee: String,
+    },
+    /// A claim verification could not complete: the store could not be
+    /// queried, or the verifier itself was unavailable.
+    ///
+    /// Distinct from [`EventKind::ClaimVerifyFailed`], which records a
+    /// verification that *ran* and found the live claim did not match the
+    /// captured identity. Here the live state is unknown — lookup, parse,
+    /// identity, capability, timeout, or backend failure — and dispatch must
+    /// abort before child process creation. One emission per failed
+    /// verification; never emitted alongside `ClaimVerifyFailed` for the same
+    /// verification attempt.
+    ClaimVerifyError {
+        bead_id: BeadId,
+        expected_actor: String,
+        /// Pipeline stage that ran the verification (`dispatching`,
+        /// `dispatch_time`, `pre_spawn`).
+        stage: String,
+        /// Why the verification could not complete.
+        category: ClaimVerifyErrorCategory,
+        /// The error chain, flattened for grep-ability.
+        detail: String,
     },
 
     // ── Version verification ──
@@ -1570,6 +1660,7 @@ impl EventKind {
             EventKind::ClaimVerifyFailed { .. } => "bead.claim.verify_failed",
             EventKind::ClaimRecheckSucceeded { .. } => "bead.claim.recheck_succeeded",
             EventKind::ClaimRecheckFailed { .. } => "bead.claim.recheck_failed",
+            EventKind::ClaimVerifyError { .. } => "bead.claim.verify_error",
             EventKind::VersionVerifyStarted { .. } => "version.verify.started",
             EventKind::VersionVerifySuccess { .. } => "version.verify.success",
             EventKind::VersionVerifyFailed { .. } => "version.verify.failed",
@@ -1735,6 +1826,7 @@ impl EventKind {
             | EventKind::ClaimVerifyFailed { bead_id, .. }
             | EventKind::ClaimRecheckSucceeded { bead_id, .. }
             | EventKind::ClaimRecheckFailed { bead_id, .. }
+            | EventKind::ClaimVerifyError { bead_id, .. }
             | EventKind::BeadReleased { bead_id, .. }
             | EventKind::BeadReleaseFailed { bead_id, .. }
             | EventKind::BeadCompleted { bead_id, .. }
@@ -3410,6 +3502,19 @@ impl EventKind {
                 "bead_id": bead_id,
                 "expected_actor": expected_actor,
             }),
+            EventKind::ClaimVerifyError {
+                bead_id,
+                expected_actor,
+                stage,
+                category,
+                detail,
+            } => serde_json::json!({
+                "bead_id": bead_id,
+                "expected_actor": expected_actor,
+                "stage": stage,
+                "category": category.as_str(),
+                "detail": detail,
+            }),
             EventKind::ClaimVerifySuccess {
                 bead_id,
                 expected_actor,
@@ -3872,6 +3977,7 @@ impl EventKind {
             | EventKind::ClaimVerifyFailed { .. }
             | EventKind::ClaimRecheckSucceeded { .. }
             | EventKind::ClaimRecheckFailed { .. }
+            | EventKind::ClaimVerifyError { .. }
             | EventKind::VersionVerifyStarted { .. }
             | EventKind::VersionVerifySuccess { .. }
             | EventKind::VersionVerifyFailed { .. }

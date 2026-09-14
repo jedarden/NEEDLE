@@ -14,6 +14,23 @@ use needle::prompt::BuiltPrompt;
 use needle::telemetry::Telemetry;
 use needle::types::{BeadId, InputMethod};
 
+use crate::pre_spawn_pass_store::AlwaysClaimedStore;
+
+/// Build a dispatcher whose pre-spawn claim verification passes.
+///
+/// The dispatcher fails closed when no bead store is wired, so tests that
+/// exercise timeout mechanics (not claim verification) wire a permissive
+/// store plus a matching worker identity.
+fn wired_dispatcher(
+    adapters: HashMap<String, AgentAdapter>,
+    telemetry: Telemetry,
+    global_timeout_secs: u64,
+) -> Dispatcher {
+    Dispatcher::with_adapters(adapters, telemetry, global_timeout_secs)
+        .with_bead_store(std::sync::Arc::new(AlwaysClaimedStore::new("test-worker")))
+        .with_worker_id("test-worker".to_string())
+}
+
 fn test_adapter_with_idle_timeout(
     name: &str,
     template: &str,
@@ -62,7 +79,7 @@ async fn idle_timeout_fires_when_no_activity_occurs() {
     let mut adapters = HashMap::new();
     adapters.insert("test-idle".to_string(), adapter);
 
-    let dispatcher = Dispatcher::with_adapters(adapters, telemetry, 3600);
+    let dispatcher = wired_dispatcher(adapters, telemetry, 3600);
     let bead_id = BeadId::from("needle-test");
     let workspace = Path::new("/tmp");
 
@@ -165,7 +182,7 @@ async fn idle_deadline_resets_on_activity_prevents_timeout() {
     let mut adapters = HashMap::new();
     adapters.insert("test-activity".to_string(), adapter);
 
-    let dispatcher = Dispatcher::with_adapters(adapters, telemetry, 3600);
+    let dispatcher = wired_dispatcher(adapters, telemetry, 3600);
     let bead_id = BeadId::from("needle-activity");
     let workspace = Path::new("/tmp");
 
@@ -221,7 +238,7 @@ async fn idle_timeout_disabled_when_config_is_zero() {
     let mut adapters = HashMap::new();
     adapters.insert("test-disabled".to_string(), adapter);
 
-    let dispatcher = Dispatcher::with_adapters(adapters, telemetry, 3600);
+    let dispatcher = wired_dispatcher(adapters, telemetry, 3600);
     let bead_id = BeadId::from("needle-disabled");
     let workspace = Path::new("/tmp");
 
@@ -281,7 +298,7 @@ async fn idle_timeout_with_config_none_falls_back_to_global() {
 
     // Create dispatcher with global timeout of 1 hour
     let global_timeout = 3600;
-    let dispatcher = Dispatcher::with_adapters(adapters, telemetry, global_timeout);
+    let dispatcher = wired_dispatcher(adapters, telemetry, global_timeout);
     let bead_id = BeadId::from("needle-fallback");
     let workspace = Path::new("/tmp");
 
@@ -325,7 +342,7 @@ async fn idle_timeout_very_short_deadline_fires_immediately() {
     let mut adapters = HashMap::new();
     adapters.insert("test-short".to_string(), adapter);
 
-    let dispatcher = Dispatcher::with_adapters(adapters, telemetry, 3600);
+    let dispatcher = wired_dispatcher(adapters, telemetry, 3600);
     let bead_id = BeadId::from("needle-short");
     let workspace = Path::new("/tmp");
 
@@ -384,7 +401,7 @@ async fn idle_timeout_mixed_activity_pattern() {
     let mut adapters = HashMap::new();
     adapters.insert("test-mixed".to_string(), adapter);
 
-    let dispatcher = Dispatcher::with_adapters(adapters, telemetry, 3600);
+    let dispatcher = wired_dispatcher(adapters, telemetry, 3600);
     let bead_id = BeadId::from("needle-mixed");
     let workspace = Path::new("/tmp");
 

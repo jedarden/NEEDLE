@@ -1957,7 +1957,7 @@ pub async fn reconcile_completed_split_parents(
 mod tests {
     use super::*;
     use crate::bead_store::{Filters, RepairReport};
-    use crate::types::{Bead, BeadId, BeadStatus, BrDependency, ClaimResult};
+    use crate::types::{Bead, BeadId, BeadStatus, BrDependency, ClaimResult, ClaimStatus};
     use async_trait::async_trait;
     use chrono::Utc;
     use std::path::PathBuf;
@@ -1984,6 +1984,10 @@ mod tests {
         removed_labels: Mutex<Vec<(BeadId, String)>>,
         created: Mutex<Vec<(String, String)>>,
         deps_added: Mutex<Vec<(String, String)>>,
+        /// Served by `claim_status` when set; derived from `show` otherwise.
+        /// Dispatch-time verification must pass for the dispatcher to spawn,
+        /// so dispatch tests set an `in_progress` claim for the wired worker.
+        claim_status: Mutex<Option<ClaimStatus>>,
         /// Coordination barrier for deterministic test execution
         #[allow(dead_code)]
         barrier: Mutex<Option<(std::sync::Arc<tokio::sync::Barrier>, usize)>>,
@@ -1999,8 +2003,22 @@ mod tests {
                 removed_labels: Mutex::new(Vec::new()),
                 created: Mutex::new(Vec::new()),
                 deps_added: Mutex::new(Vec::new()),
+                claim_status: Mutex::new(None),
                 barrier: Mutex::new(None),
             }
+        }
+
+        /// Serve `claim_status` with an `in_progress` claim owned by
+        /// `worker_id`, so a dispatcher wired with this store and identity
+        /// passes its pre-spawn verification.
+        fn with_claim_status(self, worker_id: &str) -> Self {
+            *self.claim_status.lock().unwrap() = Some(ClaimStatus {
+                status: BeadStatus::InProgress,
+                assignee: Some(worker_id.to_string()),
+                revision: None,
+                claim_epoch: None,
+            });
+            self
         }
 
         fn with_labels(mut self, labels: Vec<String>) -> Self {
@@ -2061,6 +2079,18 @@ mod tests {
 
     #[async_trait]
     impl BeadStore for MockStore {
+        async fn claim_status(&self, id: &BeadId) -> Result<ClaimStatus> {
+            if let Some(status) = self.claim_status.lock().unwrap().clone() {
+                return Ok(status);
+            }
+            let bead = self.show(id).await?;
+            Ok(ClaimStatus {
+                status: bead.status,
+                assignee: bead.assignee,
+                revision: None,
+                claim_epoch: None,
+            })
+        }
         async fn list_all(&self) -> Result<Vec<Bead>> {
             if let Some(inventory) = self.reconciliation_inventory.lock().unwrap().as_ref() {
                 return Ok(inventory.clone());
@@ -3373,7 +3403,14 @@ End of response."#;
         use std::collections::HashMap;
         let adapters: HashMap<String, crate::dispatch::AgentAdapter> = HashMap::new();
         let telemetry = crate::telemetry::Telemetry::new("test".to_string());
+        // The dispatcher refuses to spawn unless its pre-spawn claim
+        // verification passes, so wire a store that answers with an
+        // in_progress claim owned by the wired worker identity.
         Dispatcher::with_adapters(adapters, telemetry, 60)
+            .with_bead_store(std::sync::Arc::new(
+                MockStore::new().with_claim_status("test"),
+            ))
+            .with_worker_id("test".to_string())
     }
 
     // ── repeat_interval tests ──

@@ -3686,6 +3686,20 @@ impl Worker {
                             error = %e,
                             "failed to verify claim status against live store — aborting dispatch"
                         );
+                        // The query failed, so the live claim is unknown —
+                        // fail closed before any child process can be
+                        // created. One emission per failed verification; the
+                        // canonical check later in the pipeline will not run.
+                        let _ = self.telemetry.emit(
+                            EventKind::ClaimVerifyError {
+                                bead_id: bead_id.clone(),
+                                expected_actor: worker_id.clone(),
+                                stage: "dispatching".to_string(),
+                                category: crate::telemetry::ClaimVerifyErrorCategory::classify(&e),
+                                detail: format!("{e:#}"),
+                            },
+                            chrono::Utc::now(),
+                        );
                         bail!(
                             "claim verification query failed for bead {}: {}",
                             bead_id,
@@ -3777,7 +3791,26 @@ impl Worker {
             // collide with the mutable use of self.exec_started_at (E0500). A field
             // access like self.worker_name is a disjoint capture and does not, but
             // worker_name is the WRONG actor -- the claim is made with qualified_id().
-            let claim_identity = Self::resolve_claim_identity(&self.claim_identity, &bead.id)?;
+            let claim_identity = match Self::resolve_claim_identity(&self.claim_identity, &bead.id)
+            {
+                Ok(identity) => identity,
+                Err(e) => {
+                    // Failed precondition: without the claim-time identity the
+                    // dispatch cannot verify anything, so abort before any
+                    // child process is created (fail closed).
+                    let _ = self.telemetry.emit(
+                        EventKind::ClaimVerifyError {
+                            bead_id: bead.id.clone(),
+                            expected_actor: self.qualified_id(),
+                            stage: "dispatch_time".to_string(),
+                            category: crate::telemetry::ClaimVerifyErrorCategory::Identity,
+                            detail: format!("{e:#}"),
+                        },
+                        chrono::Utc::now(),
+                    );
+                    return Err(e);
+                }
+            };
             let (result, exec_tokens, token) = async {
                 // Snapshot workspace HEAD + the bead's notes before the agent
                 // runs, so the shipped-work gate has a baseline to judge the
@@ -3820,12 +3853,31 @@ impl Worker {
                 // a missing context aborts rather than downgrading to the home
                 // store (needle-828a425c).
                 let target_store =
-                    Self::resolve_target_store(&self.target_store, &bead.id).with_context(|| {
-                        format!(
-                            "dispatch-time claim verification failed for bead {}",
-                            bead.id
-                        )
-                    })?;
+                    match Self::resolve_target_store(&self.target_store, &bead.id) {
+                        Ok(target_store) => target_store,
+                        Err(e) => {
+                            // Failed precondition: the claim cannot be
+                            // verified through the store it was made against,
+                            // so abort before any child process is created
+                            // (fail closed — never a downgrade to the home
+                            // store, needle-828a425c).
+                            let _ = self.telemetry.emit(
+                                EventKind::ClaimVerifyError {
+                                    bead_id: bead.id.clone(),
+                                    expected_actor: claim_identity.actor.clone(),
+                                    stage: "dispatch_time".to_string(),
+                                    category:
+                                        crate::telemetry::ClaimVerifyErrorCategory::Identity,
+                                    detail: format!("{e:#}"),
+                                },
+                                chrono::Utc::now(),
+                            );
+                            return Err(e.context(format!(
+                                "dispatch-time claim verification failed for bead {}",
+                                bead.id
+                            )));
+                        }
+                    };
                 let is_valid = self
                     .claimer
                     .verify_claim_at_dispatch(target_store, &bead.id, &claim_identity)

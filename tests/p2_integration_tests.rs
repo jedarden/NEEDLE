@@ -28,6 +28,8 @@ mod claim_strategies;
 mod cli_bead_store_engine;
 #[path = "p2_integration_tests/double_dispatch_prevention.rs"]
 mod double_dispatch_prevention;
+#[path = "p2_integration_tests/fail_closed_verification.rs"]
+mod fail_closed_verification;
 #[path = "p2_integration_tests/label_import_strategies.rs"]
 mod label_import_strategies;
 #[path = "p2_integration_tests/mend_multi_claim_staleness.rs"]

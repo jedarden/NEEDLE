@@ -15,6 +15,23 @@ use needle::prompt::BuiltPrompt;
 use needle::telemetry::Telemetry;
 use needle::types::{BeadId, InputMethod};
 
+use crate::pre_spawn_pass_store::AlwaysClaimedStore;
+
+/// Build a dispatcher whose pre-spawn claim verification passes.
+///
+/// The dispatcher fails closed when no bead store is wired, so tests that
+/// exercise timeout mechanics (not claim verification) wire a permissive
+/// store plus a matching worker identity.
+fn wired_dispatcher(
+    adapters: HashMap<String, AgentAdapter>,
+    telemetry: Telemetry,
+    global_timeout_secs: u64,
+) -> Dispatcher {
+    Dispatcher::with_adapters(adapters, telemetry, global_timeout_secs)
+        .with_bead_store(std::sync::Arc::new(AlwaysClaimedStore::new("test-worker")))
+        .with_worker_id("test-worker".to_string())
+}
+
 fn test_adapter_with_hard_timeout(
     name: &str,
     template: &str,
@@ -108,7 +125,7 @@ async fn hard_timeout_fires_regardless_of_activity() {
     let mut adapters = HashMap::new();
     adapters.insert("test-hard-activity".to_string(), adapter);
 
-    let dispatcher = Dispatcher::with_adapters(adapters, telemetry, 3600);
+    let dispatcher = wired_dispatcher(adapters, telemetry, 3600);
     let bead_id = BeadId::from("needle-hard-activity");
     let workspace = Path::new("/tmp");
 
@@ -196,7 +213,7 @@ async fn hard_deadline_never_resets_on_activity() {
     let mut adapters = HashMap::new();
     adapters.insert("test-hard-noreseat".to_string(), adapter);
 
-    let dispatcher = Dispatcher::with_adapters(adapters, telemetry, 3600);
+    let dispatcher = wired_dispatcher(adapters, telemetry, 3600);
     let bead_id = BeadId::from("needle-hard-noreseat");
     let workspace = Path::new("/tmp");
 
@@ -251,7 +268,7 @@ async fn hard_timeout_disabled_when_config_is_zero() {
     let mut adapters = HashMap::new();
     adapters.insert("test-hard-disabled".to_string(), adapter);
 
-    let dispatcher = Dispatcher::with_adapters(adapters, telemetry, 3600);
+    let dispatcher = wired_dispatcher(adapters, telemetry, 3600);
     let bead_id = BeadId::from("needle-hard-disabled");
     let workspace = Path::new("/tmp");
 
@@ -303,7 +320,7 @@ async fn hard_timeout_shorter_than_idle_timeout_fires_first() {
     let mut adapters = HashMap::new();
     adapters.insert("test-hard-shorter".to_string(), adapter);
 
-    let dispatcher = Dispatcher::with_adapters(adapters, telemetry, 3600);
+    let dispatcher = wired_dispatcher(adapters, telemetry, 3600);
     let bead_id = BeadId::from("needle-hard-shorter");
     let workspace = Path::new("/tmp");
 
@@ -371,7 +388,7 @@ async fn idle_timeout_shorter_than_hard_timeout_fires_first() {
     let mut adapters = HashMap::new();
     adapters.insert("test-idle-shorter".to_string(), adapter);
 
-    let dispatcher = Dispatcher::with_adapters(adapters, telemetry, 3600);
+    let dispatcher = wired_dispatcher(adapters, telemetry, 3600);
     let bead_id = BeadId::from("needle-idle-shorter");
     let workspace = Path::new("/tmp");
 
@@ -456,7 +473,7 @@ async fn hard_timeout_very_short_deadline_fires_immediately() {
     let mut adapters = HashMap::new();
     adapters.insert("test-hard-very-short".to_string(), adapter);
 
-    let dispatcher = Dispatcher::with_adapters(adapters, telemetry, 3600);
+    let dispatcher = wired_dispatcher(adapters, telemetry, 3600);
     let bead_id = BeadId::from("needle-hard-very-short");
     let workspace = Path::new("/tmp");
 
@@ -519,7 +536,7 @@ async fn hard_timeout_with_silent_process() {
     let mut adapters = HashMap::new();
     adapters.insert("test-hard-silent".to_string(), adapter);
 
-    let dispatcher = Dispatcher::with_adapters(adapters, telemetry, 3600);
+    let dispatcher = wired_dispatcher(adapters, telemetry, 3600);
     let bead_id = BeadId::from("needle-hard-silent");
     let workspace = Path::new("/tmp");
 
