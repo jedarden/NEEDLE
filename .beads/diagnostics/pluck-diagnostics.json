@@ -1,13 +1,13 @@
 {
-  "timestamp": "2026-09-14T11:38:52.400460459Z",
-  "total_open_beads": 624,
+  "timestamp": "2026-09-14T12:38:56.17269776Z",
+  "total_open_beads": 622,
   "exclusion_criteria": {
     "has_assignee": 0,
     "manually_blocked": 21,
-    "has_dependencies": 429,
-    "resource_conflicts": 4
+    "has_dependencies": 428,
+    "resource_conflicts": 3
   },
-  "final_candidate_count": 201,
+  "final_candidate_count": 200,
   "excluded_beads": [
     {
       "bead_id": "needle-6b02eb9d",
@@ -291,7 +291,7 @@
       "assignee": null,
       "manual_blocked": false,
       "has_blockers": true,
-      "blocker_count": 9,
+      "blocker_count": 8,
       "has_resource_conflicts": false,
       "conflict_count": 0
     },
@@ -1427,17 +1427,6 @@
       "blocker_count": 1,
       "has_resource_conflicts": false,
       "conflict_count": 0
-    },
-    {
-      "bead_id": "needle-8cb8dfba",
-      "title": "Run duration-balanced nextest archive shards in low-memory pods",
-      "priority": 1,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 1,
-      "has_resource_conflicts": true,
-      "conflict_count": 1
     },
     {
       "bead_id": "needle-7fc5f895",
@@ -4459,8 +4448,8 @@
       "priority": 2,
       "assignee": null,
       "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 1,
+      "has_blockers": false,
+      "blocker_count": 0,
       "has_resource_conflicts": true,
       "conflict_count": 1
     },
