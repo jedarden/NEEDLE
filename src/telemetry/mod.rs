@@ -3892,6 +3892,8 @@ pub trait Sink: Send + Sync {
     fn flush(&self, deadline: std::time::Duration) -> Result<()>;
 }
 
+const SINK_FLUSH_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Blanket impl for Arc-wrapped sinks.
 /// This enables Arc<Sink> to be used wherever Sink is required.
 impl<T: Sink + ?Sized> Sink for Arc<T> {
@@ -5412,6 +5414,15 @@ impl Telemetry {
     /// Call this at every terminal path in the worker before the tokio
     /// Runtime is dropped, or the BufWriter flush will be cancelled.
     pub async fn shutdown(&self) {
+        self.shutdown_writer();
+    }
+
+    /// Synchronous core of [`Self::shutdown`].
+    ///
+    /// Keeping the join in one native boundary lets tests coordinate a
+    /// deliberately blocking sink without sleeping or blocking their Tokio
+    /// executor thread.
+    fn shutdown_writer(&self) {
         // Drop the sender to signal EOF to the writer thread.
         *self.sender.lock().unwrap() = None;
         // Join the writer thread so the flush completes before we return.
@@ -5498,7 +5509,7 @@ impl Telemetry {
                 }
                 eprintln!("NEEDLE telemetry writer thread: ready, waiting for events...");
 
-                let deadline = std::time::Duration::from_secs(5);
+                let deadline = SINK_FLUSH_DEADLINE;
                 let mut event_count = 0u64;
                 let mut sinks = sinks;
                 if sinks.is_empty() {
@@ -8803,40 +8814,65 @@ mod tests {
         );
     }
 
-    /// A blocking fake sink whose `flush` sleeps longer than its deadline must
-    /// return an error rather than hanging indefinitely. The bus must not block
-    /// past the deadline.
-    #[tokio::test]
-    async fn shutdown_does_not_hang_when_flush_exceeds_deadline() {
-        struct SlowFlusher;
-        impl Sink for SlowFlusher {
+    /// A blocking sink is responsible for respecting the advisory deadline.
+    /// Once it returns an error, shutdown must finish without deadlocking.
+    #[test]
+    fn shutdown_does_not_hang_when_flush_exceeds_deadline() {
+        struct ControlledFlusher {
+            entered: std::sync::mpsc::Sender<std::time::Duration>,
+            release: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+        }
+        impl Sink for ControlledFlusher {
             fn accept(&self, _: &TelemetryEvent) -> Result<()> {
                 Ok(())
             }
             fn flush(&self, deadline: std::time::Duration) -> Result<()> {
-                // Sleep twice the deadline, then report timeout.
-                std::thread::sleep(deadline * 2);
+                self.entered.send(deadline).unwrap();
+                let (released, wake) = &*self.release;
+                let released = wake
+                    .wait_while(released.lock().unwrap(), |released| !*released)
+                    .unwrap();
+                assert!(*released);
                 anyhow::bail!("flush timed out (deliberate in test)")
             }
         }
 
-        let telemetry =
-            Telemetry::with_boxed_sinks("test-slow-flush".to_string(), vec![Box::new(SlowFlusher)]);
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let telemetry = Telemetry::with_boxed_sinks(
+            "test-controlled-flush".to_string(),
+            vec![Box::new(ControlledFlusher {
+                entered: entered_tx,
+                release: release.clone(),
+            })],
+        );
         telemetry.start();
         telemetry.emit(EventKind::QueueEmpty, Utc::now()).unwrap();
 
-        // shutdown() must complete in a reasonable wall-clock window even though
-        // SlowFlusher sleeps past its own deadline.
-        let start = std::time::Instant::now();
-        telemetry.shutdown().await;
-        let elapsed = start.elapsed();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let shutdown = std::thread::spawn(move || {
+            telemetry.shutdown_writer();
+            done_tx.send(()).unwrap();
+        });
 
-        // The bus deadline is 5 s; SlowFlusher sleeps 10 s but must not be
-        // awaited indefinitely — 30 s is a generous upper bound.
-        assert!(
-            elapsed < std::time::Duration::from_secs(30),
-            "shutdown must not hang: elapsed={elapsed:?}"
+        let deadline = entered_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("writer did not enter sink flush");
+        assert_eq!(deadline, SINK_FLUSH_DEADLINE);
+        assert_eq!(
+            done_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty),
+            "shutdown returned before the sink finished flushing"
         );
+
+        let (released, wake) = &*release;
+        *released.lock().unwrap() = true;
+        wake.notify_one();
+
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("shutdown did not finish after the sink returned its error");
+        shutdown.join().unwrap();
     }
 
     /// Verify that `trace_id` and `span_id` are captured from the current OTel span.

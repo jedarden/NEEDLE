@@ -324,7 +324,7 @@ reason = "Grandfathered unit-tier debt; replace with an injected boundary."
 [[unit_exception]]
 path = "src/telemetry/mod.rs"
 kind = "sleep"
-max_occurrences = 18
+max_occurrences = 17
 owner = "component:telemetry"
 reason = "Grandfathered unit-tier debt; replace with an injected boundary."
 
