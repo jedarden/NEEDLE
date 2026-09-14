@@ -1215,6 +1215,39 @@ fn backend_probe_process_contracts_config_resolution() {
     .is_err());
 }
 
+#[test]
+fn backend_probe_process_contracts_retry_real_etxtbsy() {
+    fn release_write_guard(path: &Path) -> std::thread::JoinHandle<()> {
+        let guard = fs::OpenOptions::new().write(true).open(path).unwrap();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(5));
+            drop(guard);
+        })
+    }
+
+    let root = TempDir::new().unwrap();
+    let binary = archive_and_status_process_contracts_executable(
+        root.path(),
+        "busy-bead",
+        "#!/bin/sh\nprintf '%s\\n' 'bead 0.2.6'\n",
+    );
+
+    let release = release_write_guard(&binary);
+    assert_eq!(spawn_version_output(&binary).unwrap(), "bead 0.2.6\n");
+    release.join().unwrap();
+
+    let release = release_write_guard(&binary);
+    let resolved = resolve_bead_cli(&BeadCliConfig {
+        backend: ConfiguredBackend::Auto,
+        path: Some(binary.clone()),
+    })
+    .unwrap();
+    release.join().unwrap();
+    assert_eq!(resolved.0, Backend::Bead);
+    assert_eq!(resolved.1, binary);
+    assert_eq!(resolved.2, BackendSource::ExplicitPath);
+}
+
 fn backend_probe_capability_script(version: &str, capabilities: &str) -> String {
     format!(
         "#!/bin/sh\ncase \"$1\" in\n  --version) printf '%s\\n' '{version}' ;;\n  capabilities) [ \"$2\" = --profile ] && [ \"$3\" = native-v1 ] || exit 9; printf '%s' '{capabilities}' ;;\n  *) exit 8 ;;\nesac\n"

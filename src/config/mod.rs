@@ -1069,12 +1069,18 @@ fn detect_backend_from_path(path: &Path) -> Result<Backend> {
     let expected_from_filename = Backend::Bead;
 
     // Run the binary to get its actual identity
-    let output = std::process::Command::new(path)
-        .arg("--version")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .with_context(|| format!("failed to run {} --version", path.display()))?;
+    let output = crate::bead_store::spawn_with_etxtbsy_retry_sync(
+        || {
+            std::process::Command::new(path)
+                .arg("--version")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+        },
+        5,
+        20,
+    )
+    .with_context(|| format!("failed to run {} --version", path.display()))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);

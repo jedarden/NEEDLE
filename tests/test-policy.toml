@@ -25,7 +25,8 @@ version = 1
 # -11 process-spawning archive/status/version/canary contracts moved to the
 # integration_spawn harness (needle-a9bdc4e1).
 # -81 backend identity, capability, PATH, configuration, and CLI process cases
-# consolidated into six integration_spawn contracts (needle-83163936).
+# consolidated into seven integration_spawn contracts (needle-83163936),
+# including bounded real-ETXTBSY recovery at both version-probe boundaries.
 # -49 real adapter-shell and telemetry hook contracts moved to integration_spawn
 # (needle-2f470c02).
 max_tests = 3765
@@ -41,10 +42,10 @@ contract = 67
 # +13 Git, tar, shell, and filesystem command contracts (needle-8495d35d).
 # +9 child-process and real Worker lifecycle contracts (needle-c54ad697).
 # +11 archive/status/version/canary child-process contracts (needle-a9bdc4e1).
-# +6 consolidated backend probe process contracts (needle-83163936).
+# +7 consolidated backend probe process contracts (needle-83163936).
 # +49 real adapter-shell and telemetry hook contracts (needle-2f470c02),
 # consuming the tier's existing one-test headroom.
-e2e = 737
+e2e = 738
 soak = 0
 fuzz = 0
 
@@ -52,7 +53,7 @@ fuzz = 0
 name = "integration_spawn"
 path = "tests/integration_spawn.rs"
 tier = "e2e"
-max_tests = 365
+max_tests = 366
 owner = "component:process-integration"
 
 [[harness]]

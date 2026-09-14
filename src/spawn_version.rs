@@ -28,6 +28,7 @@
 //! # }
 //! ```
 
+use crate::bead_store::spawn_with_etxtbsy_retry_sync;
 use anyhow::{Context, Result};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -150,17 +151,23 @@ pub fn spawn_version_output(binary_path: &Path) -> Result<String> {
     );
 
     // Spawn the binary with --version flag
-    let output = Command::new(binary_path)
-        .arg("--version")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .with_context(|| {
-            format!(
-                "failed to execute binary '{}' with --version",
-                binary_path.display()
-            )
-        })?;
+    let output = spawn_with_etxtbsy_retry_sync(
+        || {
+            Command::new(binary_path)
+                .arg("--version")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output()
+        },
+        5,
+        20,
+    )
+    .with_context(|| {
+        format!(
+            "failed to execute binary '{}' with --version",
+            binary_path.display()
+        )
+    })?;
 
     // Check exit status - non-zero exits are errors
     if !output.status.success() {
