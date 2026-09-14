@@ -28,6 +28,7 @@ mod checkpoint_roundtrip_fidelity;
 mod workspace_equality_tests;
 
 use std::collections::HashSet;
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -43,7 +44,7 @@ use needle::mitosis::{MitosisEvaluator, MitosisResult};
 use needle::registry::Registry;
 use needle::strand::{ExploreStrand, MendStrand, Strand, StrandRunner};
 use needle::telemetry::Telemetry;
-use needle::types::{BeadId, BeadStatus, ClaimOutcome, StrandResult};
+use needle::types::{BeadId, BeadStatus, ClaimOutcome, ClaimResult, StrandResult};
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Test infrastructure
@@ -246,6 +247,105 @@ fn add_dependency(workspace: &Path, issue_id: &BeadId, dep_id: &BeadId) -> Resul
         );
     }
 
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FencingToken(NonZeroU64);
+
+#[derive(Clone, Debug)]
+struct FencedClaim {
+    id: BeadId,
+    token: FencingToken,
+}
+
+fn read_fenced_claim(workspace: &Path, id: &BeadId, actor: &str) -> Result<FencedClaim> {
+    let output = bead_command(workspace)
+        .args(["show", id.as_ref(), "--json"])
+        .output()
+        .context("failed to read bead claim epoch")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "bead show failed while reading claim epoch: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .context("bead show did not return valid JSON for claim epoch")?;
+    let object = value
+        .as_array()
+        .and_then(|items| items.first())
+        .unwrap_or(&value);
+    anyhow::ensure!(
+        object.get("id").and_then(serde_json::Value::as_str) == Some(id.as_ref()),
+        "bead show returned the wrong id"
+    );
+    anyhow::ensure!(
+        object.get("status").and_then(serde_json::Value::as_str) == Some("in_progress"),
+        "bead is not in progress while reading its claim epoch"
+    );
+    anyhow::ensure!(
+        object.get("assignee").and_then(serde_json::Value::as_str) == Some(actor),
+        "bead show returned a different assignee after claim"
+    );
+    let epoch = object
+        .get("claim_epoch")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(NonZeroU64::new)
+        .context("bead show omitted a nonzero claim_epoch")?;
+    Ok(FencedClaim {
+        id: id.clone(),
+        token: FencingToken(epoch),
+    })
+}
+
+async fn claim_fenced(
+    store: &CliBeadStore,
+    workspace: &Path,
+    id: &BeadId,
+    actor: &str,
+) -> Result<FencedClaim> {
+    match store.claim(id, actor).await? {
+        ClaimResult::Claimed(_) => read_fenced_claim(workspace, id, actor),
+        outcome => anyhow::bail!("fixture claim was not acquired: {outcome:?}"),
+    }
+}
+
+fn close_claimed(workspace: &Path, claim: &FencedClaim, reason: &str) -> Result<()> {
+    let token = claim.token.0.get().to_string();
+    let output = bead_command(workspace)
+        .args([
+            "close",
+            claim.id.as_ref(),
+            "--reason",
+            reason,
+            "--fencing-token",
+            &token,
+        ])
+        .output()
+        .context("failed to run fenced bead close")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "fenced bead close failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(())
+}
+
+fn reopen_claimed(workspace: &Path, claim: &FencedClaim) -> Result<()> {
+    let token = claim.token.0.get().to_string();
+    let output = bead_command(workspace)
+        .args(["reopen", claim.id.as_ref(), "--fencing-token", &token])
+        .output()
+        .context("failed to run fenced bead reopen")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "fenced bead reopen failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
     Ok(())
 }
 
@@ -1786,8 +1886,8 @@ fn bead_rs_split_fixture_is_correctly_gated_without_transactional_batch() {
 // Test 12: Bead reopen behavior — assignee clearing and ready frontier
 // ═════════════════════════════════════════════════════════════════════════════
 
-/// Close a bead in the test workspace.
-fn close_bead(workspace: &Path, bead_id: &BeadId, reason: &str) -> Result<()> {
+/// Close a bead that has never been claimed, so no fencing credential exists.
+fn close_unclaimed_bead(workspace: &Path, bead_id: &BeadId, reason: &str) -> Result<()> {
     let output = bead_command(workspace)
         .args(["close", bead_id.as_ref(), "--reason", reason])
         .output()
@@ -1835,8 +1935,7 @@ async fn real_bead_rs_reopen_clears_assignee() {
 
     // Create and claim a bead.
     let bead_id = create_bead(workspace.path(), "reopen-test-bead", 1).unwrap();
-    store
-        .claim(&bead_id, "test-worker")
+    let claim = claim_fenced(store.as_ref(), workspace.path(), &bead_id, "test-worker")
         .await
         .expect("claim should succeed");
 
@@ -1849,7 +1948,7 @@ async fn real_bead_rs_reopen_clears_assignee() {
     );
 
     // Close the bead.
-    close_bead(workspace.path(), &bead_id, "Test complete").expect("close should succeed");
+    close_claimed(workspace.path(), &claim, "Test complete").expect("close should succeed");
 
     // Verify bead is closed and assignee is preserved for historical record.
     let bead = store.show(&bead_id).await.unwrap();
@@ -1865,7 +1964,7 @@ async fn real_bead_rs_reopen_clears_assignee() {
     );
 
     // Reopen the bead — this MUST clear the assignee per ADR-018.
-    reopen_bead(workspace.path(), &bead_id).expect("reopen should succeed");
+    reopen_claimed(workspace.path(), &claim).expect("reopen should succeed");
 
     // Verify bead is open and assignee is CLEARED (the fix for the bug).
     let bead = store.show(&bead_id).await.unwrap();
@@ -1893,12 +1992,11 @@ async fn real_bead_rs_reopen_appears_in_ready_frontier() {
 
     // Create, claim, and close a bead.
     let bead_id = create_bead(workspace.path(), "frontier-test-bead", 1).unwrap();
-    store
-        .claim(&bead_id, "test-worker")
+    let claim = claim_fenced(store.as_ref(), workspace.path(), &bead_id, "test-worker")
         .await
         .expect("claim should succeed");
 
-    close_bead(workspace.path(), &bead_id, "Test complete").expect("close should succeed");
+    close_claimed(workspace.path(), &claim, "Test complete").expect("close should succeed");
 
     // Verify closed bead does NOT appear in ready frontier.
     let ready_beads = store.ready(&Filters::default()).await.unwrap();
@@ -1908,7 +2006,7 @@ async fn real_bead_rs_reopen_appears_in_ready_frontier() {
     );
 
     // Reopen the bead.
-    reopen_bead(workspace.path(), &bead_id).expect("reopen should succeed");
+    reopen_claimed(workspace.path(), &claim).expect("reopen should succeed");
 
     // Verify reopened bead DOES appear in ready frontier.
     let ready_beads = store.ready(&Filters::default()).await.unwrap();
@@ -1961,15 +2059,14 @@ async fn real_bead_rs_reopen_allows_any_worker_to_claim() {
 
     // Worker A: create, claim, close.
     let bead_id = create_bead(workspace.path(), "any-worker-test", 1).unwrap();
-    store
-        .claim(&bead_id, "worker-A")
+    let claim = claim_fenced(store.as_ref(), workspace.path(), &bead_id, "worker-A")
         .await
         .expect("worker A claim should succeed");
 
-    close_bead(workspace.path(), &bead_id, "Worker A complete").expect("close should succeed");
+    close_claimed(workspace.path(), &claim, "Worker A complete").expect("close should succeed");
 
     // Reopen the bead.
-    reopen_bead(workspace.path(), &bead_id).expect("reopen should succeed");
+    reopen_claimed(workspace.path(), &claim).expect("reopen should succeed");
 
     // Verify reopened bead has no assignee.
     let bead = store.show(&bead_id).await.unwrap();
@@ -2007,7 +2104,8 @@ async fn real_bead_rs_reopen_handles_already_open_bead() {
 
     // Create and close a bead.
     let bead_id = create_bead(workspace.path(), "re-reopen-test", 1).unwrap();
-    close_bead(workspace.path(), &bead_id, "First close").expect("first close should succeed");
+    close_unclaimed_bead(workspace.path(), &bead_id, "First close")
+        .expect("first close should succeed");
 
     // First reopen.
     reopen_bead(workspace.path(), &bead_id).expect("first reopen should succeed");
@@ -2081,14 +2179,13 @@ async fn real_bead_rs_reopen_with_dependencies() {
     );
 
     // Claim and close the parent bead.
-    store
-        .claim(&parent_id, "test-worker")
+    let claim = claim_fenced(store.as_ref(), workspace.path(), &parent_id, "test-worker")
         .await
         .expect("claim should succeed");
-    close_bead(workspace.path(), &parent_id, "Parent complete").expect("close should succeed");
+    close_claimed(workspace.path(), &claim, "Parent complete").expect("close should succeed");
 
     // Reopen the parent bead.
-    reopen_bead(workspace.path(), &parent_id).expect("reopen should succeed");
+    reopen_claimed(workspace.path(), &claim).expect("reopen should succeed");
 
     // Verify reopened parent has no assignee but still has dependencies.
     let parent = store.show(&parent_id).await.unwrap();
@@ -2132,18 +2229,17 @@ async fn real_bead_rs_regression_silent_starvation_bug_fixed() {
     let bead_id = create_bead(workspace.path(), "starvation-test", 1).unwrap();
 
     // Claim it as "worker-A".
-    store
-        .claim(&bead_id, "worker-A")
+    let claim = claim_fenced(store.as_ref(), workspace.path(), &bead_id, "worker-A")
         .await
         .expect("claim should succeed");
 
     // Close it.
-    close_bead(workspace.path(), &bead_id, "Work complete").expect("close should succeed");
+    close_claimed(workspace.path(), &claim, "Work complete").expect("close should succeed");
 
     // Reopen it — this is where the bug would occur.
     // Bug: reopen retains assignee="worker-A", making bead unclaimable.
     // Fix: reopen clears assignee, making bead immediately claimable.
-    reopen_bead(workspace.path(), &bead_id).expect("reopen should succeed");
+    reopen_claimed(workspace.path(), &claim).expect("reopen should succeed");
 
     // Verify the fix: bead should be claimable by any worker.
     let ready_beads = store.ready(&Filters::default()).await.unwrap();
@@ -2182,13 +2278,17 @@ async fn real_bead_rs_close_preserves_assignee_for_historical_record() {
 
     // Create and claim a bead.
     let bead_id = create_bead(workspace.path(), "history-test", 1).unwrap();
-    store
-        .claim(&bead_id, "original-worker")
-        .await
-        .expect("claim should succeed");
+    let claim = claim_fenced(
+        store.as_ref(),
+        workspace.path(),
+        &bead_id,
+        "original-worker",
+    )
+    .await
+    .expect("claim should succeed");
 
     // Close the bead.
-    close_bead(workspace.path(), &bead_id, "Work complete").expect("close should succeed");
+    close_claimed(workspace.path(), &claim, "Work complete").expect("close should succeed");
 
     // Verify assignee is preserved for historical record.
     let bead = store.show(&bead_id).await.unwrap();
@@ -2234,7 +2334,8 @@ async fn real_bead_rs_reopen_unclaimed_bead_stays_unclaimed() {
     assert!(bead.assignee.is_none(), "new bead should have no assignee");
 
     // Close the bead (unclaimed close).
-    close_bead(workspace.path(), &bead_id, "Test complete").expect("close should succeed");
+    close_unclaimed_bead(workspace.path(), &bead_id, "Test complete")
+        .expect("close should succeed");
 
     // Verify bead is closed and still has no assignee.
     let bead = store.show(&bead_id).await.unwrap();
