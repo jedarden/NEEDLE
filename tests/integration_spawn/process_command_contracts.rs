@@ -20,16 +20,22 @@ use needle::ci::{correlate_commit, CorrelationError};
 use needle::commit_hook::{inject_bead_id_trailer, validate_commit};
 use needle::config::{
     resolve_bead_cli, ArchiveCompression, AttemptArchiveConfig, Backend, BackendSource,
-    BeadBackend as ConfiguredBackend, BeadCliConfig,
+    BeadBackend as ConfiguredBackend, BeadCliConfig, HookConfig,
 };
-use needle::dispatch::{cleanup_extraction, extract_clean_workspace, ExtractionConfig};
+use needle::dispatch::{
+    cleanup_extraction, extract_clean_workspace, extract_tokens, AgentAdapter, Dispatcher,
+    ExtractionConfig, TimeoutReason, TokenExtraction,
+};
 use needle::mitosis::timeout_context::capture_timeout_context;
 use needle::mitosis::timeout_eligibility::TimeoutEligibility;
 use needle::outcome::{AttemptContext, OutcomeHandler};
+use needle::prompt::BuiltPrompt;
 use needle::scratch_sweep::{sweep_scratch_directory_with_proc_root, SweepOutcome};
 use needle::spawn_version::spawn_version_output;
-use needle::telemetry::{Telemetry, TelemetryEvent};
-use needle::types::{AgentOutcome, Bead, BeadAction, BeadId, BeadStatus, ClaimResult};
+use needle::telemetry::{HookSink, Telemetry, TelemetryEvent};
+use needle::types::{
+    AgentOutcome, Bead, BeadAction, BeadId, BeadStatus, ClaimResult, InputMethod, Outcome,
+};
 use needle::util::{detect_bead_cli_backend, parse_backend_name_from_version, probe_bead_cli};
 use needle::validation::dod_bypass::check_dod_bypass;
 use needle::validation::predispatch::{self, DirtyFile, PreDispatch};
@@ -37,6 +43,7 @@ use needle::validation::{
     upstream_status, verify_shipped_work, CommandGate, Gate, GateResult, RunIn, UpstreamStatus,
     ValidationGate,
 };
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs;
 use std::io::Write;
@@ -44,6 +51,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output};
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
 struct HomeGuard {
@@ -167,6 +175,59 @@ fn telemetry_events(log_dir: &Path) -> Vec<TelemetryEvent> {
                 .collect::<Vec<_>>()
         })
         .collect()
+}
+
+fn process_contract_adapter(name: &str, template: &str) -> AgentAdapter {
+    AgentAdapter {
+        name: name.to_string(),
+        description: None,
+        agent_cli: "test".to_string(),
+        version_command: None,
+        input_method: InputMethod::Stdin,
+        invoke_template: template.to_string(),
+        environment: HashMap::new(),
+        timeout_secs: 10,
+        idle_timeout_secs: 0,
+        hard_timeout_secs: 0,
+        provider: None,
+        model: None,
+        token_extraction: TokenExtraction::None,
+        output_transform: None,
+        harness: None,
+        harness_version: None,
+    }
+}
+
+fn process_contract_prompt(content: &str) -> BuiltPrompt {
+    BuiltPrompt {
+        content: content.to_string(),
+        hash: "testhash".to_string(),
+        token_estimate: content.len() as u64 / 4,
+        template_name: "pluck".to_string(),
+        template_version: "pluck-default".to_string(),
+    }
+}
+
+fn process_contract_dispatcher(adapters: HashMap<String, AgentAdapter>) -> Dispatcher {
+    let telemetry = Telemetry::new("process-contract-worker".to_string());
+    Dispatcher::with_adapters(adapters, telemetry, 3600)
+}
+
+fn process_contract_event(event_type: &str) -> TelemetryEvent {
+    TelemetryEvent {
+        timestamp: Utc::now(),
+        event_type: event_type.to_string(),
+        worker_id: "alpha".to_string(),
+        session_id: "test0000".to_string(),
+        sequence: 0,
+        bead_id: None,
+        workspace: None,
+        data: serde_json::json!({"test": true}),
+        duration_ms: None,
+        trace_id: None,
+        span_id: None,
+        attempt_id: None,
+    }
 }
 
 #[tokio::test]
@@ -1291,4 +1352,1683 @@ esac
         "original database"
     );
     assert!(!beads.join("beads.db.needle-rebuild-backup").exists());
+}
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_e2e_all_template_variables_substituted() {
+    // Verify that {workspace}, {prompt_file}, {bead_id}, and {model} are
+    // all rendered into the command the agent receives.
+    let mut adapter = process_contract_adapter(
+        "vars",
+        "echo ws={workspace} pf={prompt_file} bid={bead_id} m={model}",
+    );
+    adapter.model = Some("test-model-v1".to_string());
+
+    let mut adapters = HashMap::new();
+    adapters.insert("vars".to_string(), adapter);
+    let dispatcher = process_contract_dispatcher(adapters);
+    let adapter = dispatcher.adapter("vars").unwrap().clone();
+
+    let workspace = std::env::temp_dir().join("needle-e2e-vars");
+    let _ = std::fs::create_dir_all(&workspace);
+
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("needle-tmpl"),
+            &process_contract_prompt("irrelevant"),
+            &adapter,
+            &workspace,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.exit_code, 0);
+    let out = result.stdout.trim();
+    assert!(
+        out.contains(&format!("ws={}", workspace.display())),
+        "workspace not substituted: {out}"
+    );
+    assert!(
+        out.contains("bid=needle-tmpl"),
+        "bead_id not substituted: {out}"
+    );
+    assert!(
+        out.contains("m=test-model-v1"),
+        "model not substituted: {out}"
+    );
+    // prompt_file is a temp path — just verify it was substituted (not literal)
+    assert!(
+        !out.contains("{prompt_file}"),
+        "prompt_file placeholder not replaced: {out}"
+    );
+    assert!(
+        out.contains("pf=/"),
+        "prompt_file should be an absolute path: {out}"
+    );
+
+    let _ = std::fs::remove_dir_all(&workspace);
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_e2e_adapter_with_custom_env_and_base_url() {
+    // Simulate an adapter with ANTHROPIC_BASE_URL and custom env vars,
+    // verifying they're all available to the child process.
+    let mut adapter = process_contract_adapter(
+        "custom-env",
+        "echo base=$ANTHROPIC_BASE_URL custom=$CUSTOM_FLAG",
+    );
+    adapter.environment.insert(
+        "ANTHROPIC_BASE_URL".to_string(),
+        "https://api.example.com".to_string(),
+    );
+    adapter
+        .environment
+        .insert("CUSTOM_FLAG".to_string(), "enabled".to_string());
+
+    let mut adapters = HashMap::new();
+    adapters.insert("custom-env".to_string(), adapter);
+    let dispatcher = process_contract_dispatcher(adapters);
+    let adapter = dispatcher.adapter("custom-env").unwrap().clone();
+
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-baseurl"),
+            &process_contract_prompt("t"),
+            &adapter,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.exit_code, 0);
+    assert!(
+        result.stdout.contains("base=https://api.example.com"),
+        "ANTHROPIC_BASE_URL not set: {}",
+        result.stdout
+    );
+    assert!(
+        result.stdout.contains("custom=enabled"),
+        "CUSTOM_FLAG not set: {}",
+        result.stdout
+    );
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_activity_detection_on_rapid_output() {
+    // Test that activity detection handles rapid output without missing bytes
+    let adapter = process_contract_adapter(
+        "rapid-test",
+        "for i in $(seq 1 100); do echo \"rapid $i\"; done",
+    );
+    let mut adapters = HashMap::new();
+    adapters.insert("rapid-test".to_string(), adapter);
+    let dispatcher = process_contract_dispatcher(adapters);
+
+    let adapter_ref = dispatcher.adapter("rapid-test").unwrap().clone();
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-rapid-test"),
+            &process_contract_prompt("test"),
+            &adapter_ref,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+
+    // Should complete successfully
+    assert_eq!(result.exit_code, 0);
+    // All rapid lines should be captured
+    assert!(result.stdout.contains("rapid 1"));
+    assert!(result.stdout.contains("rapid 100"));
+    // Count the lines to verify none were missed
+    let line_count = result.stdout.lines().count();
+    assert!(
+        line_count >= 100,
+        "Expected at least 100 lines, got {}",
+        line_count
+    );
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_activity_detection_on_normal_stdout_output() {
+    // Test that activity detection works for normal stdout output
+    let adapter = process_contract_adapter("echo-test", "echo 'hello world'");
+    let mut adapters = HashMap::new();
+    adapters.insert("echo-test".to_string(), adapter);
+    let dispatcher = process_contract_dispatcher(adapters);
+
+    let adapter_ref = dispatcher.adapter("echo-test").unwrap().clone();
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-echo-test"),
+            &process_contract_prompt("test"),
+            &adapter_ref,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+
+    // Should complete successfully
+    assert_eq!(result.exit_code, 0);
+    assert!(result.stdout.contains("hello world"));
+    // Activity was detected (process completed without timeout)
+    assert!(result.elapsed < Duration::from_secs(10));
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_activity_detection_during_transforms() {
+    // Test that activity detection works when output_transform is configured
+    let mut adapter = process_contract_adapter("transform-test", "echo 'test output'");
+    adapter.output_transform = Some("cat".to_string()); // Use cat as simple transform
+    let mut adapters = HashMap::new();
+    adapters.insert("transform-test".to_string(), adapter);
+    let dispatcher = process_contract_dispatcher(adapters);
+
+    let adapter_ref = dispatcher.adapter("transform-test").unwrap().clone();
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-transform-test"),
+            &process_contract_prompt("test"),
+            &adapter_ref,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+
+    // Should complete successfully with transform
+    assert_eq!(result.exit_code, 0);
+    assert!(result.stdout.contains("test output"));
+    // Activity was detected even with transform active
+    assert!(result.elapsed < Duration::from_secs(10));
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_hard_timeout_kills_entire_process_group_active() {
+    // Test that hard timeout kills the entire process group, even when agent is active.
+    let pid_file = std::env::temp_dir().join(format!("needle-hard-pg-{}.pid", std::process::id()));
+    let pid_file_str = pid_file.display().to_string();
+
+    let cmd = format!(
+        "sleep 1000 & echo $! > {pid_file_str}; while true; do echo 'active'; sleep 0.05; done"
+    );
+
+    let adapter = process_contract_adapter("hard-pgkill", &cmd);
+    let mut adapters = HashMap::new();
+
+    let mut adapter_with_hard = adapter.clone();
+    adapter_with_hard.timeout_secs = 0;
+    adapter_with_hard.idle_timeout_secs = 0;
+    adapter_with_hard.hard_timeout_secs = 2;
+
+    adapters.insert("hard-pgkill".to_string(), adapter_with_hard);
+    let dispatcher = process_contract_dispatcher(adapters);
+    let adapter_ref = dispatcher.adapter("hard-pgkill").unwrap().clone();
+
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-hard-pgkill"),
+            &process_contract_prompt("test"),
+            &adapter_ref,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.exit_code, 124);
+    assert!(matches!(
+        result.timeout_reason,
+        Some(TimeoutReason::Hard { .. })
+    ));
+
+    let pid_str =
+        std::fs::read_to_string(&pid_file).expect("grandchild PID file should have been written");
+    let grandchild_pid: libc::pid_t = pid_str
+        .trim()
+        .parse()
+        .expect("PID file should contain a valid integer PID");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let dead = loop {
+        let alive = unsafe { libc::kill(grandchild_pid, 0) == 0 };
+        if !alive {
+            break true;
+        }
+        if std::time::Instant::now() >= deadline {
+            break false;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert!(dead);
+
+    let _ = std::fs::remove_file(&pid_file);
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_e2e_workspace_directory_is_correct() {
+    // Verify the agent process can see the workspace directory.
+    let workspace = std::env::temp_dir().join("needle-e2e-wsdir");
+    let _ = std::fs::create_dir_all(&workspace);
+
+    let mut adapters = HashMap::new();
+    adapters.insert(
+        "pwd".to_string(),
+        process_contract_adapter("pwd", "cd {workspace} && pwd"),
+    );
+    let dispatcher = process_contract_dispatcher(adapters);
+    let adapter = dispatcher.adapter("pwd").unwrap().clone();
+
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-wsdir"),
+            &process_contract_prompt("t"),
+            &adapter,
+            &workspace,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.exit_code, 0);
+    // Canonicalize both to handle symlinks (e.g., /tmp -> /private/tmp on macOS)
+    let expected = std::fs::canonicalize(&workspace)
+        .unwrap_or_else(|_| workspace.clone())
+        .display()
+        .to_string();
+    let actual = result.stdout.trim().to_string();
+    let actual_canonical = std::fs::canonicalize(&actual)
+        .map(|p| p.display().to_string())
+        .unwrap_or(actual);
+    assert_eq!(actual_canonical, expected);
+
+    let _ = std::fs::remove_dir_all(&workspace);
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_e2e_exit_code_137_is_crash() {
+    let mut adapters = HashMap::new();
+    adapters.insert(
+        "crash".to_string(),
+        process_contract_adapter("crash", "exit 137"),
+    );
+    let dispatcher = process_contract_dispatcher(adapters);
+    let adapter = dispatcher.adapter("crash").unwrap().clone();
+
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-exit137"),
+            &process_contract_prompt("t"),
+            &adapter,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.exit_code, 137);
+    assert_eq!(
+        Outcome::classify(result.exit_code, false),
+        Outcome::Crash(137)
+    );
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_dispatch_template_renders_bead_id() {
+    let mut adapters = HashMap::new();
+    adapters.insert(
+        "id".to_string(),
+        process_contract_adapter("id", "echo bead={bead_id}"),
+    );
+    let dispatcher = process_contract_dispatcher(adapters);
+    let adapter = dispatcher.adapter("id").unwrap().clone();
+
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("needle-xyz"),
+            &process_contract_prompt("test"),
+            &adapter,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(result.stdout.trim(), "bead=needle-xyz");
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_dispatch_stdin_redirect_from_prompt_file() {
+    let mut adapters = HashMap::new();
+    adapters.insert(
+        "cat".to_string(),
+        process_contract_adapter("cat", "cat < {prompt_file}"),
+    );
+    let dispatcher = process_contract_dispatcher(adapters);
+    let adapter = dispatcher.adapter("cat").unwrap().clone();
+
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-stdin"),
+            &process_contract_prompt("prompt-content-here"),
+            &adapter,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(result.stdout.trim(), "prompt-content-here");
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_dispatch_captures_stderr() {
+    let mut adapters = HashMap::new();
+    adapters.insert(
+        "err".to_string(),
+        process_contract_adapter("err", "echo error-output >&2"),
+    );
+    let dispatcher = process_contract_dispatcher(adapters);
+    let adapter = dispatcher.adapter("err").unwrap().clone();
+
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-stderr"),
+            &process_contract_prompt("test"),
+            &adapter,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(result.stderr.trim(), "error-output");
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_e2e_prompt_with_newlines_preserved() {
+    let multiline = "line one\nline two\nline three";
+
+    let mut adapters = HashMap::new();
+    adapters.insert(
+        "wc".to_string(),
+        process_contract_adapter("wc", "wc -l < {prompt_file}"),
+    );
+    let dispatcher = process_contract_dispatcher(adapters);
+    let adapter = dispatcher.adapter("wc").unwrap().clone();
+
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-newlines"),
+            &process_contract_prompt(multiline),
+            &adapter,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.exit_code, 0);
+    let line_count: i32 = result.stdout.trim().parse().unwrap_or(-1);
+    // wc -l counts newline characters; "line one\nline two\nline three"
+    // has 2 newlines, so wc -l reports 2.
+    assert_eq!(line_count, 2, "prompt should have 2 newlines (3 lines)");
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_activity_detection_on_binary_data() {
+    // Verify that binary/non-text byte sequences are detected as activity.
+    // Use printf to emit raw bytes including non-printable characters.
+    let mut adapter = process_contract_adapter(
+        "binary-output",
+        // Emit binary bytes: 0x00 0x01 0x02 ... 0x09, then newline, repeat
+        "for i in $(seq 1 20); do printf '\\x00\\x01\\x02\\x03\\x04\\x05\\x06\\x07\\x08\\x09\\n'; sleep 0.15; done",
+    );
+    adapter.idle_timeout_secs = 1;
+    adapter.hard_timeout_secs = 10;
+
+    let mut adapters = HashMap::new();
+    adapters.insert("binary-output".to_string(), adapter);
+    let dispatcher = process_contract_dispatcher(adapters);
+    let adapter = dispatcher.adapter("binary-output").unwrap().clone();
+
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-activity-binary"),
+            &process_contract_prompt("t"),
+            &adapter,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result.exit_code, 0,
+        "binary output should prevent idle timeout"
+    );
+    // Should run ~3s (20 * 0.15s), well past idle deadline
+    assert!(
+        result.elapsed >= Duration::from_millis(2800),
+        "should run full duration with binary output"
+    );
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_activity_detection_large_output_burst() {
+    // Verify that a large burst of output (multiple chunks) is detected as activity.
+    let mut adapter = process_contract_adapter(
+        "large-burst",
+        // Emit 50KB of data in one go
+        "dd if=/dev/zero bs=1024 count=50 2>/dev/null; sleep 0.5; echo done",
+    );
+    adapter.idle_timeout_secs = 1;
+    adapter.hard_timeout_secs = 10;
+
+    let mut adapters = HashMap::new();
+    adapters.insert("large-burst".to_string(), adapter);
+    let dispatcher = process_contract_dispatcher(adapters);
+    let adapter = dispatcher.adapter("large-burst").unwrap().clone();
+
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-activity-burst"),
+            &process_contract_prompt("t"),
+            &adapter,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result.exit_code, 0,
+        "large output burst should be detected as activity"
+    );
+    // 50KB read time + 0.5s sleep
+    assert!(result.elapsed >= Duration::from_millis(400));
+    assert!(result.stdout.contains("done"));
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_activity_detection_on_stdout_resets_idle_timeout() {
+    // Verify that ongoing stdout output prevents idle timeout from firing.
+    // A process that outputs continuously should not be killed by idle deadline.
+    let mut adapter = process_contract_adapter(
+        "chatty-stdout",
+        // Output a dot every 200ms, then sleep 100 at the end.
+        "for i in $(seq 1 10); do echo -n .; sleep 0.2; done; sleep 0.1",
+    );
+    adapter.idle_timeout_secs = 1; // 1 second idle timeout
+    adapter.hard_timeout_secs = 10; // 10 second hard timeout (should not fire)
+
+    let mut adapters = HashMap::new();
+    adapters.insert("chatty-stdout".to_string(), adapter);
+    let dispatcher = process_contract_dispatcher(adapters);
+    let adapter = dispatcher.adapter("chatty-stdout").unwrap().clone();
+
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-activity-stdout"),
+            &process_contract_prompt("t"),
+            &adapter,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+
+    // Should succeed, not be killed by idle timeout
+    assert_eq!(
+        result.exit_code, 0,
+        "process with continuous output should not idle timeout"
+    );
+    // The loop runs for ~2.1s (10 * 0.2s + 0.1s), well past the 1s idle deadline
+    assert!(
+        result.elapsed >= Duration::from_millis(1900),
+        "should run full duration"
+    );
+    assert!(
+        result.stdout.contains(".........."),
+        "should capture all output"
+    );
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_activity_detection_on_multiline_output() {
+    // Test that activity detection works for multiline output
+    let adapter = process_contract_adapter(
+        "multiline-test",
+        "for i in 1 2 3 4 5; do echo \"line $i\"; sleep 0.1; done",
+    );
+    let mut adapters = HashMap::new();
+    adapters.insert("multiline-test".to_string(), adapter);
+    let dispatcher = process_contract_dispatcher(adapters);
+
+    let adapter_ref = dispatcher.adapter("multiline-test").unwrap().clone();
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-multiline-test"),
+            &process_contract_prompt("test"),
+            &adapter_ref,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+
+    // Should complete successfully
+    assert_eq!(result.exit_code, 0);
+    // All lines should be captured
+    assert!(result.stdout.contains("line 1"));
+    assert!(result.stdout.contains("line 5"));
+    // Activity was detected continuously (prevents idle timeout)
+    assert!(result.elapsed < Duration::from_secs(10));
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_e2e_multiple_environment_variables() {
+    // Verify that all adapter environment variables are set in the child.
+    let mut adapter = process_contract_adapter("multienv", "echo $NDL_A $NDL_B $NDL_C");
+    adapter
+        .environment
+        .insert("NDL_A".to_string(), "alpha".to_string());
+    adapter
+        .environment
+        .insert("NDL_B".to_string(), "beta".to_string());
+    adapter
+        .environment
+        .insert("NDL_C".to_string(), "gamma".to_string());
+
+    let mut adapters = HashMap::new();
+    adapters.insert("multienv".to_string(), adapter);
+    let dispatcher = process_contract_dispatcher(adapters);
+    let adapter = dispatcher.adapter("multienv").unwrap().clone();
+
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-env-multi"),
+            &process_contract_prompt("test"),
+            &adapter,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(result.stdout.trim(), "alpha beta gamma");
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_e2e_json_output_capture_and_token_extraction() {
+    // Simulate a claude-like JSON output and verify token extraction works
+    // on real process output.
+    let json = r#"{"type":"result","result":"done","cost_usd":0.001,"usage":{"input_tokens":1500,"output_tokens":750}}"#;
+    let cmd = format!("echo '{json}'");
+
+    let mut adapter = process_contract_adapter("json-agent", &cmd);
+    adapter.token_extraction = TokenExtraction::JsonField {
+        input_path: "usage.input_tokens".to_string(),
+        output_path: "usage.output_tokens".to_string(),
+    };
+
+    let mut adapters = HashMap::new();
+    adapters.insert("json-agent".to_string(), adapter);
+    let dispatcher = process_contract_dispatcher(adapters);
+    let adapter = dispatcher.adapter("json-agent").unwrap().clone();
+
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-json"),
+            &process_contract_prompt("t"),
+            &adapter,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.exit_code, 0);
+
+    // Parse the captured stdout with the token extraction logic.
+    let usage = extract_tokens(&adapter.token_extraction, &result.stdout, &result.stderr);
+    assert_eq!(usage.input_tokens, Some(1500));
+    assert_eq!(usage.output_tokens, Some(750));
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_e2e_exit_code_2_is_failure() {
+    let mut adapters = HashMap::new();
+    adapters.insert("f2".to_string(), process_contract_adapter("f2", "exit 2"));
+    let dispatcher = process_contract_dispatcher(adapters);
+    let adapter = dispatcher.adapter("f2").unwrap().clone();
+
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-exit2"),
+            &process_contract_prompt("t"),
+            &adapter,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.exit_code, 2);
+    assert_eq!(Outcome::classify(result.exit_code, false), Outcome::Failure);
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_e2e_exit_code_1_is_failure() {
+    let mut adapters = HashMap::new();
+    adapters.insert("f1".to_string(), process_contract_adapter("f1", "exit 1"));
+    let dispatcher = process_contract_dispatcher(adapters);
+    let adapter = dispatcher.adapter("f1").unwrap().clone();
+
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-exit1"),
+            &process_contract_prompt("t"),
+            &adapter,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.exit_code, 1);
+    assert_eq!(Outcome::classify(result.exit_code, false), Outcome::Failure);
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_dispatch_stdin_input_method_delivers_prompt_without_template_redirect(
+) {
+    let mut adapters = HashMap::new();
+    adapters.insert("cat".to_string(), process_contract_adapter("cat", "cat"));
+    let dispatcher = process_contract_dispatcher(adapters);
+    let adapter = dispatcher.adapter("cat").unwrap().clone();
+    let prompt = "prompt delivered through configured stdin";
+
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-stdin-method"),
+            &process_contract_prompt(prompt),
+            &adapter,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(result.stdout, prompt);
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_hard_timeout_kills_active_agent() {
+    // Test that hard deadline kills the process even when agent is actively producing output.
+    // This is the key differentiator from idle timeout - hard timeout is absolute and
+    // cannot be reset by activity.
+    let adapter = process_contract_adapter(
+        "hard-timeout-active",
+        // Echo continuously with very short sleep to generate activity
+        "while true; do echo 'active output'; sleep 0.05; done",
+    );
+    let mut adapters = HashMap::new();
+
+    // Configure hard timeout only (no idle timeout)
+    let mut adapter_with_hard = adapter.clone();
+    adapter_with_hard.timeout_secs = 0; // Disable legacy timeout
+    adapter_with_hard.idle_timeout_secs = 0; // No idle timeout
+    adapter_with_hard.hard_timeout_secs = 1; // 1 second hard deadline
+
+    adapters.insert("hard-timeout-active".to_string(), adapter_with_hard);
+    let dispatcher = process_contract_dispatcher(adapters);
+    let adapter_ref = dispatcher.adapter("hard-timeout-active").unwrap().clone();
+
+    let start = Instant::now();
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-hard-timeout-active"),
+            &process_contract_prompt("test"),
+            &adapter_ref,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+    let wall = start.elapsed();
+
+    // Should be killed by hard timeout
+    assert_eq!(result.exit_code, 124, "hard timeout should yield exit 124");
+
+    // Should have a Hard timeout reason
+    assert!(
+        matches!(result.timeout_reason, Some(TimeoutReason::Hard { .. })),
+        "expected Hard timeout reason, got {:?}",
+        result.timeout_reason
+    );
+
+    // Should have been killed after ~1 second (the hard deadline)
+    assert!(
+        wall < Duration::from_secs(3),
+        "should have been killed by hard deadline after ~1s, took {:?}",
+        wall
+    );
+    assert!(
+        wall >= Duration::from_millis(900),
+        "should have waited at least ~1s for hard deadline"
+    );
+
+    // Should have captured output before being killed (proving activity was happening)
+    assert!(result.stdout.contains("active output"));
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_hard_timeout_disabled_when_zero() {
+    let adapter = process_contract_adapter("hard-disabled", "sleep 0.5");
+    let mut adapters = HashMap::new();
+
+    let mut adapter_idle_only = adapter.clone();
+    adapter_idle_only.timeout_secs = 0;
+    adapter_idle_only.idle_timeout_secs = 10;
+    adapter_idle_only.hard_timeout_secs = 0;
+
+    adapters.insert("hard-disabled".to_string(), adapter_idle_only);
+    let dispatcher = process_contract_dispatcher(adapters);
+    let adapter_ref = dispatcher.adapter("hard-disabled").unwrap().clone();
+
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-hard-disabled"),
+            &process_contract_prompt("test"),
+            &adapter_ref,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.exit_code, 0);
+    assert!(result.timeout_reason.is_none());
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_dispatch_timeout_returns_124() {
+    let mut adapters = HashMap::new();
+    let mut adapter = process_contract_adapter("slow", "sleep 100");
+    adapter.timeout_secs = 1;
+    adapters.insert("slow".to_string(), adapter);
+
+    let dispatcher = process_contract_dispatcher(adapters);
+    let adapter = dispatcher.adapter("slow").unwrap().clone();
+
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-timeout"),
+            &process_contract_prompt("test"),
+            &adapter,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.exit_code, 124);
+    assert!(result.elapsed >= Duration::from_millis(900));
+    assert!(result.elapsed < Duration::from_secs(5));
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_idle_timeout_resets_on_activity_hard_does_not() {
+    // Unit test: idle deadline resets, hard deadline does not.
+    let adapter = process_contract_adapter(
+        "idle-resets-hard-does-not",
+        "for i in $(seq 1 10); do echo \"output $i\"; sleep 0.5; done",
+    );
+    let mut adapters = HashMap::new();
+
+    let mut adapter_with_both = adapter.clone();
+    adapter_with_both.timeout_secs = 0;
+    adapter_with_both.idle_timeout_secs = 1;
+    adapter_with_both.hard_timeout_secs = 2;
+
+    adapters.insert("idle-resets-hard-does-not".to_string(), adapter_with_both);
+    let dispatcher = process_contract_dispatcher(adapters);
+    let adapter_ref = dispatcher
+        .adapter("idle-resets-hard-does-not")
+        .unwrap()
+        .clone();
+
+    let start = Instant::now();
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-idle-resets-hard-does-not"),
+            &process_contract_prompt("test"),
+            &adapter_ref,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+    let wall = start.elapsed();
+
+    assert_eq!(result.exit_code, 124);
+
+    match &result.timeout_reason {
+        Some(TimeoutReason::Hard { timeout_secs }) => {
+            assert_eq!(*timeout_secs, 2);
+        }
+        other => panic!("expected Hard timeout reason, got {:?}", other),
+    }
+
+    assert!(wall >= Duration::from_millis(1900) && wall < Duration::from_secs(4));
+    assert!(result.stdout.contains("output"));
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_e2e_outer_cancellation_still_kills_process_group() {
+    // Regression test for bf-653n7 (the mitosis-evaluation-timeout leak).
+    //
+    // Worker's mitosis-evaluation step wraps the *entire* dispatch() call
+    // in its own, much shorter, `tokio::time::timeout` — separate from
+    // and unrelated to the agent's own configured timeout exercised by
+    // `e2e_timeout_kills_entire_process_group` above. Before
+    // ProcessGroupKillGuard, that outer timeout firing dropped the
+    // in-flight dispatch() future before its *internal* timeout-kill
+    // match ever ran, silently orphaning the agent process and any
+    // process-group children it had spawned — indefinitely, since
+    // nothing ever reaped them.
+    //
+    // Here the adapter's own timeout is set effectively unreachable
+    // within the test's window, so the only thing that can kill the
+    // process is the guard reacting to the *outer* future being dropped.
+    let pid_file =
+        std::env::temp_dir().join(format!("needle-outercancel-{}.pid", std::process::id()));
+    let pid_file_str = pid_file.display().to_string();
+
+    let cmd = format!("sleep 1000 & echo $! > {pid_file_str}; sleep 1000");
+    let mut adapter = process_contract_adapter("outercancel", &cmd);
+    adapter.timeout_secs = 3600;
+
+    let mut adapters = HashMap::new();
+    adapters.insert("outercancel".to_string(), adapter);
+    let dispatcher = process_contract_dispatcher(adapters);
+    let adapter = dispatcher.adapter("outercancel").unwrap().clone();
+
+    // Mimic Worker's mitosis-evaluation wrapper: an outer timeout, far
+    // shorter than the agent's own, wrapping the whole dispatch call.
+    let outer = tokio::time::timeout(
+        Duration::from_millis(500),
+        dispatcher.dispatch(
+            &BeadId::from("nd-outercancel"),
+            &process_contract_prompt("t"),
+            &adapter,
+            Path::new("/tmp"),
+        ),
+    )
+    .await;
+    assert!(
+        outer.is_err(),
+        "outer timeout should fire well before the adapter's own 3600s timeout"
+    );
+
+    let pid_str = std::fs::read_to_string(&pid_file)
+        .expect("grandchild PID file should have been written before the outer timeout fired");
+    let grandchild_pid: libc::pid_t = pid_str
+        .trim()
+        .parse()
+        .expect("PID file should contain a valid integer PID");
+
+    // Poll until the grandchild is dead or we give up waiting.
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let dead = loop {
+        let alive = unsafe { libc::kill(grandchild_pid, 0) == 0 };
+        if !alive {
+            break true;
+        }
+        if std::time::Instant::now() >= deadline {
+            break false;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert!(
+        dead,
+        "grandchild sleep (pid {grandchild_pid}) should be dead within 3s of the *outer* \
+         future being dropped, even though dispatch()'s own internal timeout never fired \
+         — this is what ProcessGroupKillGuard exists to guarantee"
+    );
+
+    let _ = std::fs::remove_file(&pid_file);
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_dispatch_environment_variables() {
+    let mut adapter = process_contract_adapter("env", "echo $NEEDLE_TEST_VAR");
+    adapter.environment.insert(
+        "NEEDLE_TEST_VAR".to_string(),
+        "hello-from-needle".to_string(),
+    );
+    let mut adapters = HashMap::new();
+    adapters.insert("env".to_string(), adapter);
+
+    let dispatcher = process_contract_dispatcher(adapters);
+    let adapter = dispatcher.adapter("env").unwrap().clone();
+
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-env"),
+            &process_contract_prompt("test"),
+            &adapter,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(result.stdout.trim(), "hello-from-needle");
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_activity_detection_timestamps_before_parsing() {
+    // Test that activity timestamps are recorded before newline parsing
+    // This test verifies the structural requirement from the acceptance criteria
+    let adapter =
+        process_contract_adapter("timestamp-order-test", "printf 'line1\\nline2\\nline3'");
+    let mut adapters = HashMap::new();
+    adapters.insert("timestamp-order-test".to_string(), adapter);
+    let dispatcher = process_contract_dispatcher(adapters);
+
+    let adapter_ref = dispatcher.adapter("timestamp-order-test").unwrap().clone();
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-timestamp-order-test"),
+            &process_contract_prompt("test"),
+            &adapter_ref,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+
+    // Should complete successfully
+    assert_eq!(result.exit_code, 0);
+    // All lines captured (proving parsing happened after activity detection)
+    assert!(result.stdout.contains("line1"));
+    assert!(result.stdout.contains("line2"));
+    assert!(result.stdout.contains("line3"));
+    // Fast completion proves activity was detected continuously
+    assert!(result.elapsed < Duration::from_secs(1));
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_activity_detection_on_partial_chunks() {
+    // Verify that partial reads (chunks < 8192 bytes) still register activity.
+    // The real reader reads in chunks; we verify small chunks are detected.
+    let mut adapter = process_contract_adapter(
+        "small-chunks",
+        // Emit small amounts of output with delays
+        "for i in $(seq 1 15); do echo -n x; sleep 0.12; done; echo",
+    );
+    adapter.idle_timeout_secs = 1;
+    adapter.hard_timeout_secs = 10;
+
+    let mut adapters = HashMap::new();
+    adapters.insert("small-chunks".to_string(), adapter);
+    let dispatcher = process_contract_dispatcher(adapters);
+    let adapter = dispatcher.adapter("small-chunks").unwrap().clone();
+
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-activity-chunks"),
+            &process_contract_prompt("t"),
+            &adapter,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result.exit_code, 0,
+        "small chunk writes should prevent idle timeout"
+    );
+    // 15 iterations * 0.12s = 1.8s
+    assert!(result.elapsed >= Duration::from_millis(1700));
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_e2e_timeout_kills_agent_returns_124() {
+    let mut adapter = process_contract_adapter("sleeper", "sleep 100");
+    adapter.timeout_secs = 1;
+
+    let mut adapters = HashMap::new();
+    adapters.insert("sleeper".to_string(), adapter);
+    let dispatcher = process_contract_dispatcher(adapters);
+    let adapter = dispatcher.adapter("sleeper").unwrap().clone();
+
+    let start = Instant::now();
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-timeout"),
+            &process_contract_prompt("t"),
+            &adapter,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+    let wall = start.elapsed();
+
+    assert_eq!(result.exit_code, 124, "timeout should yield exit 124");
+    assert!(
+        wall < Duration::from_secs(5),
+        "should have been killed after ~1s, took {:?}",
+        wall
+    );
+    assert!(
+        result.elapsed >= Duration::from_millis(900),
+        "should have waited at least ~1s"
+    );
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_dispatch_cleans_up_temp_file() {
+    let bead_id = BeadId::from("nd-cleanup");
+    let mut adapters = HashMap::new();
+    adapters.insert("true".to_string(), process_contract_adapter("true", "true"));
+    let dispatcher = process_contract_dispatcher(adapters);
+    let adapter = dispatcher.adapter("true").unwrap().clone();
+
+    let _ = dispatcher
+        .dispatch(
+            &bead_id,
+            &process_contract_prompt("cleanup test"),
+            &adapter,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+
+    // Verify the temp file was cleaned up.
+    let expected_path = std::env::temp_dir().join("needle").join(format!(
+        "prompt-{}-{}.md",
+        bead_id,
+        std::process::id()
+    ));
+    assert!(!expected_path.exists(), "temp file should be cleaned up");
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_activity_timestamp_tracked_per_process() {
+    // Verify that activity tracking is isolated per process execution.
+    // Two sequential dispatches should have independent activity timestamps.
+    let mut adapter = process_contract_adapter("timestamped", "echo output-$(date +%s%N)");
+    adapter.idle_timeout_secs = 1;
+
+    let mut adapters = HashMap::new();
+    adapters.insert("timestamped".to_string(), adapter);
+    let dispatcher = process_contract_dispatcher(adapters);
+
+    // First dispatch
+    let adapter1 = dispatcher.adapter("timestamped").unwrap().clone();
+    let result1 = dispatcher
+        .dispatch(
+            &BeadId::from("nd-timestamp-1"),
+            &process_contract_prompt("t"),
+            &adapter1,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result1.exit_code, 0);
+
+    // Small delay to ensure different timestamp
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Second dispatch
+    let adapter2 = dispatcher.adapter("timestamped").unwrap().clone();
+    let result2 = dispatcher
+        .dispatch(
+            &BeadId::from("nd-timestamp-2"),
+            &process_contract_prompt("t"),
+            &adapter2,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result2.exit_code, 0);
+    // Both should succeed independently
+    assert!(result1.stdout.contains("output-"));
+    assert!(result2.stdout.contains("output-"));
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_activity_detection_on_stderr_output() {
+    // Test that activity detection works for stderr output
+    let adapter = process_contract_adapter("stderr-test", "echo 'error message' >&2");
+    let mut adapters = HashMap::new();
+    adapters.insert("stderr-test".to_string(), adapter);
+    let dispatcher = process_contract_dispatcher(adapters);
+
+    let adapter_ref = dispatcher.adapter("stderr-test").unwrap().clone();
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-stderr-test"),
+            &process_contract_prompt("test"),
+            &adapter_ref,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+
+    // Should complete successfully
+    assert_eq!(result.exit_code, 0);
+    assert!(result.stderr.contains("error message"));
+    // Activity was detected on stderr
+    assert!(result.elapsed < Duration::from_secs(10));
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_activity_detection_on_chunked_output() {
+    // Test that activity detection works when output comes in chunks
+    let adapter = process_contract_adapter(
+        "chunked-test",
+        "echo 'chunk1'; sleep 0.2; echo 'chunk2'; sleep 0.2; echo 'chunk3'",
+    );
+    let mut adapters = HashMap::new();
+    adapters.insert("chunked-test".to_string(), adapter);
+    let dispatcher = process_contract_dispatcher(adapters);
+
+    let adapter_ref = dispatcher.adapter("chunked-test").unwrap().clone();
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-chunked-test"),
+            &process_contract_prompt("test"),
+            &adapter_ref,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+
+    // Should complete successfully
+    assert_eq!(result.exit_code, 0);
+    assert!(result.stdout.contains("chunk1"));
+    assert!(result.stdout.contains("chunk2"));
+    assert!(result.stdout.contains("chunk3"));
+    // Activity was detected on each chunk
+    assert!(result.elapsed < Duration::from_secs(10));
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_e2e_prompt_with_shell_metacharacters() {
+    // Verify that shell metacharacters in the prompt body are safely
+    // delivered via the temp file without shell injection or corruption.
+    let dangerous_prompt =
+        "Hello $USER\nLine with `backticks`\nQuotes: 'single' \"double\"\nBackslash: \\\nDollar: $(echo injected)";
+
+    let mut adapters = HashMap::new();
+    adapters.insert(
+        "catprompt".to_string(),
+        process_contract_adapter("catprompt", "cat {prompt_file}"),
+    );
+    let dispatcher = process_contract_dispatcher(adapters);
+    let adapter = dispatcher.adapter("catprompt").unwrap().clone();
+
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-meta"),
+            &process_contract_prompt(dangerous_prompt),
+            &adapter,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.exit_code, 0);
+    // The prompt file content should be the exact string, not shell-expanded.
+    assert!(
+        result.stdout.contains("$USER"),
+        "shell variable should be literal, not expanded"
+    );
+    assert!(
+        result.stdout.contains("`backticks`"),
+        "backticks should be preserved"
+    );
+    assert!(
+        result.stdout.contains("$(echo injected)"),
+        "command substitution should be literal"
+    );
+    assert!(
+        result.stdout.contains("'single'"),
+        "single quotes should be preserved"
+    );
+    assert!(
+        result.stdout.contains("\"double\""),
+        "double quotes should be preserved"
+    );
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_activity_detection_on_stderr_resets_idle_timeout() {
+    // Verify that ongoing stderr output also prevents idle timeout.
+    let mut adapter = process_contract_adapter(
+        "chatty-stderr",
+        "for i in $(seq 1 10); do echo -n . >&2; sleep 0.2; done; sleep 0.1",
+    );
+    adapter.idle_timeout_secs = 1;
+    adapter.hard_timeout_secs = 10;
+
+    let mut adapters = HashMap::new();
+    adapters.insert("chatty-stderr".to_string(), adapter);
+    let dispatcher = process_contract_dispatcher(adapters);
+    let adapter = dispatcher.adapter("chatty-stderr").unwrap().clone();
+
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-activity-stderr"),
+            &process_contract_prompt("t"),
+            &adapter,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result.exit_code, 0,
+        "process with continuous stderr should not idle timeout"
+    );
+    assert!(result.elapsed >= Duration::from_millis(1900));
+    assert!(
+        result.stderr.contains(".........."),
+        "should capture all stderr output"
+    );
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_idle_timeout_fires_when_no_activity() {
+    // Verify that idle timeout DOES fire when there's no output.
+    // This is the negative case proving activity detection works.
+    let mut adapter = process_contract_adapter(
+        "silent-process",
+        // Sleep for 5 seconds without any output
+        "sleep 5",
+    );
+    adapter.timeout_secs = 0; // Use new timeout mode, not legacy
+    adapter.idle_timeout_secs = 1; // Should fire after 1s of silence
+
+    let mut adapters = HashMap::new();
+    adapters.insert("silent-process".to_string(), adapter);
+    let dispatcher = process_contract_dispatcher(adapters);
+    let adapter = dispatcher.adapter("silent-process").unwrap().clone();
+
+    let start = Instant::now();
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-idle-timeout"),
+            &process_contract_prompt("t"),
+            &adapter,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+    let elapsed = start.elapsed();
+
+    assert_eq!(
+        result.exit_code, 124,
+        "idle timeout should return exit code 124"
+    );
+    assert!(
+        result.timeout_reason.is_some(),
+        "should have timeout reason"
+    );
+    match result.timeout_reason {
+        Some(TimeoutReason::Idle { timeout_secs, .. }) => {
+            assert_eq!(timeout_secs, 1);
+        }
+        _ => panic!(
+            "expected Idle timeout reason, got {:?}",
+            result.timeout_reason
+        ),
+    }
+    // Should fire around 1s (allowing for scheduling overhead)
+    assert!(elapsed >= Duration::from_millis(900));
+    assert!(elapsed < Duration::from_secs(3));
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_hard_timeout_shorter_than_idle_timeout() {
+    // Integration test: hard timeout fires before idle timeout even when agent is active.
+    let adapter = process_contract_adapter(
+        "hard-before-idle",
+        "while true; do echo 'continuous activity'; sleep 0.1; done",
+    );
+    let mut adapters = HashMap::new();
+
+    let mut adapter_with_both = adapter.clone();
+    adapter_with_both.timeout_secs = 0;
+    adapter_with_both.idle_timeout_secs = 5;
+    adapter_with_both.hard_timeout_secs = 1;
+
+    adapters.insert("hard-before-idle".to_string(), adapter_with_both);
+    let dispatcher = process_contract_dispatcher(adapters);
+    let adapter_ref = dispatcher.adapter("hard-before-idle").unwrap().clone();
+
+    let start = Instant::now();
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-hard-before-idle"),
+            &process_contract_prompt("test"),
+            &adapter_ref,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+    let wall = start.elapsed();
+
+    assert_eq!(result.exit_code, 124);
+
+    match &result.timeout_reason {
+        Some(TimeoutReason::Hard { timeout_secs }) => {
+            assert_eq!(*timeout_secs, 1);
+        }
+        other => panic!("expected Hard timeout reason, got {:?}", other),
+    }
+
+    assert!(wall < Duration::from_secs(3));
+    assert!(result.stdout.contains("continuous activity"));
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_e2e_timeout_kills_entire_process_group() {
+    // Verify that on timeout the entire process group (not just the direct
+    // bash child) is killed.  The agent starts a background sleep and writes
+    // its PID to a temp file before blocking.  After timeout we assert the
+    // grandchild is gone.
+    let pid_file = std::env::temp_dir().join(format!("needle-pgkill-{}.pid", std::process::id()));
+    let pid_file_str = pid_file.display().to_string();
+
+    // Start a background sleep, capture its PID, then sleep (will time out).
+    let cmd = format!("sleep 1000 & echo $! > {pid_file_str}; sleep 1000");
+
+    let mut adapter = process_contract_adapter("pgkill", &cmd);
+    adapter.timeout_secs = 2;
+
+    let mut adapters = HashMap::new();
+    adapters.insert("pgkill".to_string(), adapter);
+    let dispatcher = process_contract_dispatcher(adapters);
+    let adapter = dispatcher.adapter("pgkill").unwrap().clone();
+
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-pgkill"),
+            &process_contract_prompt("t"),
+            &adapter,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.exit_code, 124, "timeout should yield 124");
+
+    // The grandchild PID file must exist — echo runs in milliseconds, well
+    // within the 2-second timeout window.
+    let pid_str = std::fs::read_to_string(&pid_file)
+        .expect("grandchild PID file should have been written before timeout fired");
+    let grandchild_pid: libc::pid_t = pid_str
+        .trim()
+        .parse()
+        .expect("PID file should contain a valid integer PID");
+
+    // Poll until the grandchild is dead or we time out waiting.  SIGKILL
+    // delivery and OS reaping can be slow in container environments.
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    let dead = loop {
+        let alive = unsafe { libc::kill(grandchild_pid, 0) == 0 };
+        if !alive {
+            break true;
+        }
+        if std::time::Instant::now() >= deadline {
+            break false;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    assert!(
+        dead,
+        "grandchild sleep (pid {grandchild_pid}) should be dead within 3s after killpg"
+    );
+
+    let _ = std::fs::remove_file(&pid_file);
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_dispatch_echo_captures_stdout() {
+    let mut adapters = HashMap::new();
+    adapters.insert(
+        "echo".to_string(),
+        process_contract_adapter("echo", "echo hello-needle"),
+    );
+    let dispatcher = process_contract_dispatcher(adapters);
+    let adapter = dispatcher.adapter("echo").unwrap().clone();
+
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-echo"),
+            &process_contract_prompt("test"),
+            &adapter,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(result.stdout.trim(), "hello-needle");
+    assert!(result.pid > 0);
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_activity_detection_with_mixed_stdout_stderr() {
+    // Verify that both stdout and stderr activity reset the idle timer.
+    let mut adapter = process_contract_adapter(
+        "mixed-streams",
+        // Alternate between stdout and stderr output
+        "for i in $(seq 1 8); do echo -n out >&1; echo -n err >&2; sleep 0.18; done; echo done",
+    );
+    adapter.idle_timeout_secs = 1;
+    adapter.hard_timeout_secs = 10;
+
+    let mut adapters = HashMap::new();
+    adapters.insert("mixed-streams".to_string(), adapter);
+    let dispatcher = process_contract_dispatcher(adapters);
+    let adapter = dispatcher.adapter("mixed-streams").unwrap().clone();
+
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-activity-mixed"),
+            &process_contract_prompt("t"),
+            &adapter,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result.exit_code, 0,
+        "mixed stdout/stderr should prevent idle timeout"
+    );
+    // 8 iterations * 0.18s ≈ 1.44s, plus overhead
+    assert!(result.elapsed >= Duration::from_millis(1300));
+    assert!(result.stdout.contains("outoutoutoutoutoutoutout"));
+    assert!(result.stderr.contains("errerrerrerrerrerrerrerr"));
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_activity_detection_happens_before_newline_parsing() {
+    // Verify that activity is detected on every byte read, before newline parsing.
+    // Output many bytes without newlines, then a newline at the end.
+    let mut adapter = process_contract_adapter(
+        "no-newlines",
+        // Emit 1000 characters without newlines, sleep 200ms between chunks
+        "printf '%0.s#' {1..1000}; sleep 0.2; echo done",
+    );
+    adapter.idle_timeout_secs = 1;
+    adapter.hard_timeout_secs = 10;
+
+    let mut adapters = HashMap::new();
+    adapters.insert("no-newlines".to_string(), adapter);
+    let dispatcher = process_contract_dispatcher(adapters);
+    let adapter = dispatcher.adapter("no-newlines").unwrap().clone();
+
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-activity-nonewline"),
+            &process_contract_prompt("t"),
+            &adapter,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        result.exit_code, 0,
+        "output without newlines should still reset idle timer"
+    );
+    // The initial printf is fast, but the 200ms sleep should extend execution
+    assert!(result.elapsed >= Duration::from_millis(150));
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_dispatch_captures_exit_code() {
+    let mut adapters = HashMap::new();
+    adapters.insert(
+        "fail".to_string(),
+        process_contract_adapter("fail", "exit 42"),
+    );
+    let dispatcher = process_contract_dispatcher(adapters);
+    let adapter = dispatcher.adapter("fail").unwrap().clone();
+
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-exit"),
+            &process_contract_prompt("test"),
+            &adapter,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.exit_code, 42);
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_e2e_exit_code_0_is_success() {
+    let mut adapters = HashMap::new();
+    adapters.insert("ok".to_string(), process_contract_adapter("ok", "exit 0"));
+    let dispatcher = process_contract_dispatcher(adapters);
+    let adapter = dispatcher.adapter("ok").unwrap().clone();
+
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-exit0"),
+            &process_contract_prompt("t"),
+            &adapter,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(Outcome::classify(result.exit_code, false), Outcome::Success);
+}
+
+#[tokio::test]
+async fn dispatch_telemetry_process_contracts_dispatch_missing_binary_returns_127() {
+    let mut adapters = HashMap::new();
+    adapters.insert(
+        "missing".to_string(),
+        process_contract_adapter("missing", "nonexistent-binary-xyz-12345"),
+    );
+    let dispatcher = process_contract_dispatcher(adapters);
+    let adapter = dispatcher.adapter("missing").unwrap().clone();
+
+    let result = dispatcher
+        .dispatch(
+            &BeadId::from("nd-missing"),
+            &process_contract_prompt("test"),
+            &adapter,
+            Path::new("/tmp"),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(result.exit_code, 127);
+}
+
+#[test]
+fn dispatch_telemetry_process_contracts_hook_sink_dispatches_json_to_stdin() {
+    let tmp = std::env::temp_dir().join("needle-hook-test-stdin");
+    let _ = std::fs::remove_file(&tmp);
+
+    let cmd = format!("cat > {}", tmp.display());
+    let configs = vec![HookConfig {
+        event_filter: "worker.*".to_string(),
+        command: cmd,
+        url: None,
+    }];
+    let sink = HookSink::new(&configs).unwrap();
+
+    let event = process_contract_event("worker.started");
+    let failures = sink.dispatch(&event);
+    assert!(failures.is_empty());
+
+    // Give the child process a moment to write
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    let content = std::fs::read_to_string(&tmp).unwrap_or_default();
+    assert!(
+        !content.is_empty(),
+        "hook should have received JSON on stdin"
+    );
+    // Verify it's valid JSON containing the event type
+    let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+    assert_eq!(parsed["event_type"], "worker.started");
+
+    let _ = std::fs::remove_file(&tmp);
+}
+
+#[test]
+fn dispatch_telemetry_process_contracts_hook_sink_dispatch_captures_failure() {
+    let configs = vec![HookConfig {
+        event_filter: "bead.*".to_string(),
+        command: "/nonexistent/command/that/does/not/exist".to_string(),
+        url: None,
+    }];
+    let sink = HookSink::new(&configs).unwrap();
+
+    let event = process_contract_event("bead.completed");
+    let failures = sink.dispatch(&event);
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].event_type, "telemetry.sink_error");
+    assert!(failures[0].data["hook_command"]
+        .as_str()
+        .unwrap()
+        .contains("nonexistent"));
+}
+
+#[test]
+fn dispatch_telemetry_process_contracts_hook_sink_dispatch_matches_filter() {
+    let configs = vec![HookConfig {
+        event_filter: "outcome.*".to_string(),
+        command: "true".to_string(), // always succeeds
+        url: None,
+    }];
+    let sink = HookSink::new(&configs).unwrap();
+
+    // Matching event — should dispatch (no failures expected)
+    let event = process_contract_event("outcome.handled");
+    let failures = sink.dispatch(&event);
+    assert!(failures.is_empty());
+}
+
+#[test]
+fn dispatch_telemetry_process_contracts_hook_sink_multiple_hooks_matching_same_event() {
+    let configs = vec![
+        HookConfig {
+            event_filter: "outcome.*".to_string(),
+            command: "true".to_string(),
+            url: None,
+        },
+        HookConfig {
+            event_filter: "outcome.handled".to_string(),
+            command: "true".to_string(),
+            url: None,
+        },
+    ];
+    let sink = HookSink::new(&configs).unwrap();
+
+    let event = process_contract_event("outcome.handled");
+    let failures = sink.dispatch(&event);
+    // Both hooks match, both succeed — no failures
+    assert!(failures.is_empty());
 }

@@ -26,7 +26,9 @@ version = 1
 # integration_spawn harness (needle-a9bdc4e1).
 # -81 backend identity, capability, PATH, configuration, and CLI process cases
 # consolidated into six integration_spawn contracts (needle-83163936).
-max_tests = 3814
+# -49 real adapter-shell and telemetry hook contracts moved to integration_spawn
+# (needle-2f470c02).
+max_tests = 3765
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
@@ -40,7 +42,9 @@ contract = 67
 # +9 child-process and real Worker lifecycle contracts (needle-c54ad697).
 # +11 archive/status/version/canary child-process contracts (needle-a9bdc4e1).
 # +6 consolidated backend probe process contracts (needle-83163936).
-e2e = 689
+# +49 real adapter-shell and telemetry hook contracts (needle-2f470c02),
+# consuming the tier's existing one-test headroom.
+e2e = 737
 soak = 0
 fuzz = 0
 
@@ -48,7 +52,7 @@ fuzz = 0
 name = "integration_spawn"
 path = "tests/integration_spawn.rs"
 tier = "e2e"
-max_tests = 317
+max_tests = 365
 owner = "component:process-integration"
 
 [[harness]]
@@ -113,9 +117,9 @@ reason = "Grandfathered unit-tier debt; replace with an injected boundary."
 [[unit_exception]]
 path = "src/dispatch/mod.rs"
 kind = "sleep"
-max_occurrences = 5
+max_occurrences = 1
 owner = "component:dispatch"
-reason = "These waits coordinate real child-process startup, streamed stdout/stderr activity, and process-group teardown. Tokio virtual time cannot drive an external shell clock; the process contract tests remain bounded below five seconds."
+reason = "The remaining wait proves a deadline timer's observed remaining duration decreases with real time; all external-shell timing contracts live in integration_spawn."
 
 [[unit_exception]]
 path = "src/gate_health.rs"
@@ -239,7 +243,7 @@ reason = "Grandfathered unit-tier debt; replace with an injected boundary."
 [[unit_exception]]
 path = "src/telemetry/mod.rs"
 kind = "sleep"
-max_occurrences = 17
+max_occurrences = 16
 owner = "component:telemetry"
 reason = "Grandfathered unit-tier debt; replace with an injected boundary."
 

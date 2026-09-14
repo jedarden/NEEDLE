@@ -8394,21 +8394,6 @@ mod tests {
     }
 
     #[test]
-    fn hook_sink_dispatch_matches_filter() {
-        let configs = vec![HookConfig {
-            event_filter: "outcome.*".to_string(),
-            command: "true".to_string(), // always succeeds
-            url: None,
-        }];
-        let sink = HookSink::new(&configs).unwrap();
-
-        // Matching event — should dispatch (no failures expected)
-        let event = make_test_event("outcome.handled");
-        let failures = sink.dispatch(&event);
-        assert!(failures.is_empty());
-    }
-
-    #[test]
     fn hook_sink_dispatch_skips_non_matching() {
         let configs = vec![HookConfig {
             event_filter: "outcome.*".to_string(),
@@ -8437,79 +8422,6 @@ mod tests {
         let event = make_test_event("telemetry.sink_error");
         let failures = sink.dispatch(&event);
         assert!(failures.is_empty());
-    }
-
-    #[test]
-    fn hook_sink_dispatch_captures_failure() {
-        let configs = vec![HookConfig {
-            event_filter: "bead.*".to_string(),
-            command: "/nonexistent/command/that/does/not/exist".to_string(),
-            url: None,
-        }];
-        let sink = HookSink::new(&configs).unwrap();
-
-        let event = make_test_event("bead.completed");
-        let failures = sink.dispatch(&event);
-        assert_eq!(failures.len(), 1);
-        assert_eq!(failures[0].event_type, "telemetry.sink_error");
-        assert!(failures[0].data["hook_command"]
-            .as_str()
-            .unwrap()
-            .contains("nonexistent"));
-    }
-
-    #[test]
-    fn hook_sink_multiple_hooks_matching_same_event() {
-        let configs = vec![
-            HookConfig {
-                event_filter: "outcome.*".to_string(),
-                command: "true".to_string(),
-                url: None,
-            },
-            HookConfig {
-                event_filter: "outcome.handled".to_string(),
-                command: "true".to_string(),
-                url: None,
-            },
-        ];
-        let sink = HookSink::new(&configs).unwrap();
-
-        let event = make_test_event("outcome.handled");
-        let failures = sink.dispatch(&event);
-        // Both hooks match, both succeed — no failures
-        assert!(failures.is_empty());
-    }
-
-    #[test]
-    fn hook_sink_dispatches_json_to_stdin() {
-        let tmp = std::env::temp_dir().join("needle-hook-test-stdin");
-        let _ = std::fs::remove_file(&tmp);
-
-        let cmd = format!("cat > {}", tmp.display());
-        let configs = vec![HookConfig {
-            event_filter: "worker.*".to_string(),
-            command: cmd,
-            url: None,
-        }];
-        let sink = HookSink::new(&configs).unwrap();
-
-        let event = make_test_event("worker.started");
-        let failures = sink.dispatch(&event);
-        assert!(failures.is_empty());
-
-        // Give the child process a moment to write
-        std::thread::sleep(std::time::Duration::from_millis(200));
-
-        let content = std::fs::read_to_string(&tmp).unwrap_or_default();
-        assert!(
-            !content.is_empty(),
-            "hook should have received JSON on stdin"
-        );
-        // Verify it's valid JSON containing the event type
-        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert_eq!(parsed["event_type"], "worker.started");
-
-        let _ = std::fs::remove_file(&tmp);
     }
 
     // Regression test for needle-xeh: Telemetry construction must not require
