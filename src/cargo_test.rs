@@ -57,9 +57,12 @@ pub const MAX_OUTPUT_BYTES: usize = 65536;
 /// and retain PATH lookup as the normal interactive fallback. The archive
 /// launcher must also make the configured path traversable by its test user.
 fn cargo_program() -> PathBuf {
+    // NEEDLE_CARGO_BIN is an explicit launcher contract, not a discovery
+    // hint. Do not silently discard it when a sandbox makes a metadata probe
+    // disagree with the later exec boundary: executing the configured path
+    // either succeeds or produces an actionable error naming that path.
     std::env::var_os("NEEDLE_CARGO_BIN")
         .map(PathBuf::from)
-        .filter(|path| path.is_file())
         .or_else(|| {
             std::env::var_os("CARGO")
                 .map(PathBuf::from)
