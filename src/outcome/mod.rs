@@ -3658,8 +3658,8 @@ mod tests {
     use crate::types::{BeadId, ClaimResult};
     use async_trait::async_trait;
     use chrono::Utc;
+    use std::ops::{Deref, DerefMut};
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
     // ── Test environment isolation ──
@@ -3670,8 +3670,8 @@ mod tests {
     /// `$HOME/.needle/state`, so a test whose flow reaches
     /// `handle_gate_failure` or `handle_gate_error` reads and writes the
     /// *fleet's* state files unless HOME is private — the same failure that
-    /// accumulated `degraded: true` on the real `/tmp` workspace (see
-    /// [`test_workspace`]). The guard serializes with every other test that
+    /// accumulated `degraded: true` on the former shared `/tmp` fixture. The
+    /// guard serializes with every other test that
     /// swaps HOME; hold it for the whole body.
     fn isolated_home() -> (crate::util::test_env::EnvGuard, tempfile::TempDir) {
         let guard = crate::util::test_env::isolate_env();
@@ -3680,27 +3680,29 @@ mod tests {
         (guard, home)
     }
 
-    /// A unique, never-existing workspace path for each test bead.
+    /// A bead fixture that owns its workspace for the fixture's full lifetime.
     ///
-    /// This used to be `std::env::temp_dir()` — the literal shared `/tmp`, a
-    /// real path whose gate-health state file
-    /// (`$HOME/.needle/state/gate-health/<sha256("/tmp")[..12]>.json`) is a
-    /// single stable key shared by every test run, every concurrent test, and
-    /// any real fleet worker running in `/tmp`. Both `handle_gate_error` and
-    /// `handle_gate_failure` write that state, so tests piled
-    /// `degraded: true` onto the fleet's real `/tmp` entry and raced each
-    /// other on it (observed 2026-09-09: `e9671acd2448.json` at
-    /// `consecutive_errors: 7`). Each bead now carries its own path, so a
-    /// test that forgets [`isolated_home`] above still only ever collides
-    /// with itself — and can no longer masquerade as a workspace the fleet
-    /// might actually use.
-    fn test_workspace() -> PathBuf {
-        static NEXT: AtomicUsize = AtomicUsize::new(0);
-        std::env::temp_dir().join(format!(
-            "needle-outcome-test-{}-{}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ))
+    /// Keeping the [`tempfile::TempDir`] here is important: returning only its
+    /// path would remove the directory before the outcome handler used it,
+    /// while constructing a synthetic name below `/tmp` would leak it and
+    /// would not establish per-test ownership.
+    struct TestBead {
+        bead: Bead,
+        _workspace: tempfile::TempDir,
+    }
+
+    impl Deref for TestBead {
+        type Target = Bead;
+
+        fn deref(&self) -> &Self::Target {
+            &self.bead
+        }
+    }
+
+    impl DerefMut for TestBead {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.bead
+        }
     }
 
     // ── Mock BeadStore ──
@@ -3723,6 +3725,9 @@ mod tests {
         actions: Mutex<Vec<StoreAction>>,
         show_status: BeadStatus,
         labels: Vec<String>,
+        /// Owns the workspace returned by `show()` for as long as the store
+        /// can return beads that name it.
+        workspace: tempfile::TempDir,
         /// Dependencies `show()` should report. Needed by any test whose
         /// behaviour depends on the POST-dispatch bead rather than the one
         /// passed in: the handler re-reads state through `show()`, so a bead
@@ -3741,6 +3746,7 @@ mod tests {
                 actions: Mutex::new(Vec::new()),
                 show_status,
                 labels: Vec::new(),
+                workspace: tempfile::TempDir::new().unwrap(),
                 dependencies: Vec::new(),
                 notes: None,
                 fail_flush: false,
@@ -3762,7 +3768,7 @@ mod tests {
         }
     }
 
-    fn test_bead(status: BeadStatus) -> Bead {
+    fn bead_in_workspace(status: BeadStatus, workspace: &std::path::Path) -> Bead {
         Bead {
             id: BeadId::from("needle-test"),
             title: "Test bead".to_string(),
@@ -3771,12 +3777,21 @@ mod tests {
             status,
             assignee: Some("worker-01".to_string()),
             labels: vec![],
-            workspace: test_workspace(),
+            workspace: workspace.to_path_buf(),
             dependencies: vec![],
             dependents: vec![],
             comments: vec![],
             created_at: Utc::now(),
             updated_at: Utc::now(),
+        }
+    }
+
+    fn test_bead(status: BeadStatus) -> TestBead {
+        let workspace = tempfile::TempDir::new().unwrap();
+        let bead = bead_in_workspace(status, workspace.path());
+        TestBead {
+            bead,
+            _workspace: workspace,
         }
     }
 
@@ -3790,13 +3805,45 @@ mod tests {
     /// would give every test run — and the fleet — one colliding state file.
     #[test]
     fn test_bead_workspaces_are_unique_and_never_a_shared_real_path() {
-        let a = test_bead(BeadStatus::Open).workspace;
-        let b = test_bead(BeadStatus::Open).workspace;
-        assert_ne!(a, b, "each test bead needs its own gate-health state key");
+        let (_guard, _home) = isolated_home();
+        let a = test_bead(BeadStatus::Open);
+        let b = test_bead(BeadStatus::Open);
+        let a_path = a.workspace.clone();
+        let b_path = b.workspace.clone();
+
+        assert!(a_path.is_dir(), "the fixture must own a live workspace");
+        assert!(b_path.is_dir(), "the fixture must own a live workspace");
         assert_ne!(
-            a,
+            a_path, b_path,
+            "each test bead needs its own gate-health state key"
+        );
+        assert_ne!(
+            a_path,
             std::env::temp_dir(),
             "the temp root itself is a real path with a fleet-visible state key"
+        );
+
+        crate::gate_health::record_error(
+            &a.workspace,
+            "fixture-command".to_string(),
+            "fixture-error".to_string(),
+        )
+        .unwrap();
+        let state = crate::gate_health::load_state(&a.workspace)
+            .unwrap()
+            .expect("the synthetic HOME should contain the fixture's state");
+        assert_eq!(state.workspace, a_path);
+        assert_ne!(state.workspace, PathBuf::from("/tmp"));
+
+        drop(a);
+        drop(b);
+        assert!(
+            !a_path.exists(),
+            "dropping the fixture removes its workspace"
+        );
+        assert!(
+            !b_path.exists(),
+            "dropping the fixture removes its workspace"
         );
     }
 
@@ -3825,7 +3872,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(StoreAction::Show(id.to_string()));
-            let mut bead = test_bead(self.show_status.clone());
+            let mut bead = bead_in_workspace(self.show_status.clone(), self.workspace.path());
             bead.labels = self.labels.clone();
             bead.dependencies = self.dependencies.clone();
             Ok(bead)
@@ -4892,10 +4939,8 @@ mod tests {
             "bead_cli:\n  backend: bead-rs\n",
         )
         .unwrap();
-        let bead = Bead {
-            workspace: workspace.path().to_path_buf(),
-            ..test_bead(BeadStatus::InProgress)
-        };
+        let mut bead = test_bead(BeadStatus::InProgress);
+        bead.workspace = workspace.path().to_path_buf();
         let store = test_store(BeadStatus::Done);
 
         let result = handler
@@ -4940,10 +4985,8 @@ mod tests {
             PathBuf::from("."),
             PathBuf::from("some/relative/path"),
         ] {
-            let bead = Bead {
-                workspace,
-                ..test_bead(BeadStatus::InProgress)
-            };
+            let mut bead = test_bead(BeadStatus::InProgress);
+            bead.workspace = workspace;
             let store = test_store(BeadStatus::Done);
 
             let result = handler
@@ -4987,10 +5030,8 @@ mod tests {
         let handler = test_handler_with_config(config);
 
         let workspace = tempfile::TempDir::new().unwrap();
-        let bead = Bead {
-            workspace: workspace.path().to_path_buf(),
-            ..test_bead(BeadStatus::InProgress)
-        };
+        let mut bead = test_bead(BeadStatus::InProgress);
+        bead.workspace = workspace.path().to_path_buf();
         let store = test_store(BeadStatus::Done);
 
         let result = handler
