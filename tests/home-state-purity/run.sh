@@ -9,7 +9,17 @@ export LC_ALL=C
 umask 077
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-scratch_root="$(mktemp -d "${TMPDIR:-/tmp}/needle-home-state-purity.XXXXXX")"
+operator_home="${HOME:?HOME must be set}"
+# Keep the lexical path short enough for Unix-domain socket fixtures. Do not
+# inherit a caller's potentially deeply nested TMPDIR: this directory is
+# unique to the verifier, removed by its EXIT trap, and outside operator HOME.
+scratch_root="$(mktemp -d /tmp/needle-hsp.XXXXXX)"
+case "$scratch_root/" in
+    "$operator_home/"*)
+        printf 'FAIL: verifier scratch root is beneath operator HOME\n' >&2
+        exit 1
+        ;;
+esac
 
 cleanup() {
     if [[ -d "$scratch_root" ]]; then
@@ -81,6 +91,11 @@ seed_state_tree() {
 run_owned_target_dir() {
     local run_root="$1"
     printf '%s/cargo-target\n' "$run_root"
+}
+
+run_owned_tmp_dir() {
+    local run_root="$1"
+    printf '%s/t\n' "$run_root"
 }
 
 expect_detector_rejects() {
@@ -155,12 +170,32 @@ verify_target_dir_contract() {
     printf 'PASS: Cargo target directory ignores inherited shared target\n'
 }
 
+verify_tmp_dir_contract() {
+    local contract_root="$scratch_root/tmp-contract"
+    local selected
+
+    selected="$(run_owned_tmp_dir "$contract_root")"
+    case "$selected" in
+        "$contract_root"/*) ;;
+        *) die "temporary directory escaped the verification run root" ;;
+    esac
+    case "$selected/" in
+        "$operator_home/"*) die "temporary directory is beneath operator HOME" ;;
+    esac
+    # Leave ample room below the 108-byte sockaddr_un limit for tempfile's
+    # generated directory plus a fixture's socket filename.
+    [[ "${#selected}" -le 64 ]] \
+        || die "run-owned temporary directory is too long for socket fixtures"
+    printf 'PASS: temporary directory is short, run-owned, and outside operator HOME\n'
+}
+
 if [[ $# -gt 1 || ( $# -eq 1 && "$1" != "--detector-contract-only" ) ]]; then
     die "usage: $0 [--detector-contract-only]"
 fi
 
 verify_detector_contract
 verify_target_dir_contract
+verify_tmp_dir_contract
 if [[ $# -eq 1 ]]; then
     exit 0
 fi
@@ -175,10 +210,11 @@ rustdoc_bin="$(rustup which rustdoc)"
 [[ -x "$rustc_bin" ]] || die "rustup did not resolve an executable rustc"
 [[ -x "$rustdoc_bin" ]] || die "rustup did not resolve an executable rustdoc"
 
-real_home="${HOME:?HOME must be set so the Rust cache can be preserved}"
+real_home="$operator_home"
 cargo_home="${CARGO_HOME:-$real_home/.cargo}"
 rustup_home="${RUSTUP_HOME:-$real_home/.rustup}"
 target_dir="$(run_owned_target_dir "$scratch_root")"
+suite_tmp="$(run_owned_tmp_dir "$scratch_root")"
 
 synthetic_home="$scratch_root/suite-home"
 state_tree="$synthetic_home/.needle/state"
@@ -190,8 +226,8 @@ mkdir -p \
     "$synthetic_home/.cache" \
     "$synthetic_home/.config" \
     "$synthetic_home/.local/state" \
-    "$synthetic_home/tmp" \
     "$synthetic_home/workspaces"
+mkdir -p "$suite_tmp"
 seed_state_tree "$state_tree"
 mkdir -p "$before_tree"
 cp -a "$state_tree/." "$before_tree/"
@@ -216,7 +252,7 @@ set +e
         XDG_CACHE_HOME="$synthetic_home/.cache" \
         XDG_CONFIG_HOME="$synthetic_home/.config" \
         XDG_STATE_HOME="$synthetic_home/.local/state" \
-        TMPDIR="$synthetic_home/tmp" \
+        TMPDIR="$suite_tmp" \
         CARGO_HOME="$cargo_home" \
         RUSTUP_HOME="$rustup_home" \
         CARGO_TARGET_DIR="$target_dir" \
