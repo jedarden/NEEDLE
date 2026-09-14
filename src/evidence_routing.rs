@@ -192,8 +192,25 @@ pub fn choose(
             considered,
         };
     }
-    let default_rate = evidence
-        .get(default)
+    // The floor protects the default too: an adapter with too few judged
+    // attempts in the window has an unknown rate, not a rate of zero. Without
+    // this, codex workers whose adapter had no ledger rows yet had 75 beads
+    // routed onto GLM flash on 2026-09-13 "on evidence" — away from the
+    // fleet's best-performing adapter (100 % verified on the beads it kept).
+    let default_evidence = evidence.get(default);
+    let default_judged = default_evidence.map(|e| e.judged()).unwrap_or(0);
+    if !degraded_adapters.contains(default) && default_judged < config.min_attempts {
+        return Choice {
+            adapter: default.to_string(),
+            reason: format!(
+                "insufficient_evidence_for_default:{}<{}",
+                default_judged, config.min_attempts
+            ),
+            explored: false,
+            considered,
+        };
+    }
+    let default_rate = default_evidence
         .and_then(|e| e.success_rate())
         .unwrap_or(0.0);
     let best_rate = best.success_rate().unwrap_or(0.0);
@@ -359,6 +376,27 @@ mod tests {
         assert!(c.reason.starts_with("insufficient_evidence"));
         assert!(!c.explored);
         assert_eq!(c.considered.len(), 2);
+
+        // The floor protects the default too: no ledger rows (or too few)
+        // means an unknown rate, not zero, so a candidate with evidence must
+        // not pull work away from it. On 2026-09-13 this moved 75 codex
+        // beads onto GLM flash before the guard existed.
+        let evidence = map(vec![ev("b", 40, 30, 30.0)]);
+        let c = choose("codex", &cfg(), &evidence, &HashSet::new(), None, 0.5);
+        assert_eq!(c.adapter, "codex");
+        assert!(
+            c.reason
+                .starts_with("insufficient_evidence_for_default:0<20"),
+            "{}",
+            c.reason
+        );
+        let thin = map(vec![ev("codex", 5, 5, 0.0), ev("b", 40, 30, 30.0)]);
+        let c = choose("codex", &cfg(), &thin, &HashSet::new(), None, 0.5);
+        assert_eq!(c.adapter, "codex");
+        // A degraded default still yields to an eligible candidate.
+        let degraded: HashSet<String> = ["codex".to_string()].into_iter().collect();
+        let c = choose("codex", &cfg(), &evidence, &degraded, None, 0.5);
+        assert_eq!(c.adapter, "b");
     }
 
     #[test]
