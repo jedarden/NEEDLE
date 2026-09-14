@@ -783,6 +783,14 @@ impl CargoTest {
 
         // Build the cargo command
         let mut cmd = Command::new(cargo_program());
+        for (contract, child_variable) in [
+            ("NEEDLE_CARGO_HOME", "CARGO_HOME"),
+            ("NEEDLE_RUSTUP_HOME", "RUSTUP_HOME"),
+        ] {
+            if let Some(value) = std::env::var_os(contract) {
+                cmd.env(child_variable, value);
+            }
+        }
         cmd.args(&args);
         cmd.current_dir(&self.workspace);
         cmd.stdout(Stdio::piped());
