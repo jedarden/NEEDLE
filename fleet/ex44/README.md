@@ -74,6 +74,9 @@ pinned ICG route is first in the pool and is therefore preserved by the
 one-worker floor; pressure sheds roamers first. A productive window with no
 recoverable 429 adds one worker. One independently affected request holds the
 quota boundary; multiple affected requests or any terminal 429 remove one.
-The separate 17-worker base fleet is never disabled by this controller. A v3
-state file starts at the prior four-worker expansion ceiling, so the four new
-roamers are probed one per clean window rather than enabled together.
+The separate 17-worker base fleet is never disabled by this controller.
+Scale-down disables the excess unit immediately but stops it only after NEEDLE
+reports `EXHAUSTED` with no current bead; selectors and executors drain instead
+of abandoning an epoch-fenced claim. A v3 state file starts at the prior
+four-worker expansion ceiling, so the four new roamers are probed one per clean
+window rather than enabled together.

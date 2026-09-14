@@ -29,6 +29,7 @@ grep -qx 'ELIGIBLE_MINIMUM_PER_WORKER=2' "$SRC_DIR/backlog-policy.env"
 grep -q 'Environment=PATH=.*/home/coding/.local/bin' "$SRC_DIR/needle-backlog-slo.service"
 grep -qx 'ELASTIC_UNITS=(glm-icg glm-roam-18 glm-roam-19 glm-roam-20 glm-roam-21 glm-roam-22 glm-roam-23 glm-roam-24)' "$SRC_DIR/needle-zai-governor"
 grep -qx 'TOLERATED_AFFECTED_REQUESTS=1' "$SRC_DIR/needle-zai-governor"
+grep -q 'stop_is_safe "$state" "$bead_id"' "$SRC_DIR/needle-zai-governor"
 
 fleet_policy_line=$(grep -n 'EnvironmentFile=%h/.config/needle/fleet-policy.env' "$SRC_DIR/needle-worker@.service" | cut -d: -f1)
 instance_policy_line=$(grep -n 'EnvironmentFile=%h/.config/needle/workers/%i.env' "$SRC_DIR/needle-worker@.service" | cut -d: -f1)

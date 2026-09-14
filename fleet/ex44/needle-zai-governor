@@ -12,6 +12,12 @@ CEILING=${#ELASTIC_UNITS[@]}
 INITIAL_DESIRED=4
 TOLERATED_AFFECTED_REQUESTS=1
 KCTL=(kubectl --server=http://traefik-apexalgo-iad:8001)
+NEEDLE_BIN="${NEEDLE_BIN:-$HOME/.needle/bin/needle}"
+
+stop_is_safe() {
+    local state=$1 bead_id=$2
+    [[ "$state" == EXHAUSTED && ( -z "$bead_id" || "$bead_id" == - ) ]]
+}
 
 decide_capacity() {
     local desired=$1 retry_lines=$2 affected_requests=$3 terminal_429s=$4 completed=$5
@@ -62,6 +68,10 @@ if [[ "${1:-}" == --self-test ]]; then
     assert_decision '1 hold-floor' 1 6 2 0 12
     assert_decision '8 hold-clean' 8 0 0 0 12
     assert_decision '4 no-samples' 4 0 0 0 0
+    stop_is_safe EXHAUSTED -
+    ! stop_is_safe SELECTING -
+    ! stop_is_safe EXECUTING bead-123
+    ! stop_is_safe HANDLING bead-123
     echo 'zai governor decision tests passed'
     exit 0
 elif (( $# > 0 )); then
@@ -106,6 +116,10 @@ printf '%s retry_lines=%s affected_requests=%s terminal_429s=%s completed=%s des
     "$(date -u +%FT%TZ)" "$retry_lines" "$affected_requests" "$terminal_429s" \
     "$completed" "$desired" "$new_desired" "$action" >>"$LOG"
 
+worker_status_json=$(
+    "$NEEDLE_BIN" status --format json 2>/dev/null || printf '{"workers":[]}'
+)
+deferred_stops=()
 for i in "${!ELASTIC_UNITS[@]}"; do
     unit="needle-worker@${ELASTIC_UNITS[$i]}.service"
     if (( i < new_desired )); then
@@ -114,10 +128,28 @@ for i in "${!ELASTIC_UNITS[@]}"; do
     else
         systemctl --user is-enabled -q "$unit" 2>/dev/null && systemctl --user disable "$unit"
         if systemctl --user is-active -q "$unit"; then
-            systemctl --user stop --no-block "$unit"
+            pid=$(systemctl --user show "$unit" -p MainPID --value 2>/dev/null || true)
+            snapshot=""
+            if [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
+                snapshot=$(jq -r --argjson pid "$pid" \
+                    '.workers[]? | select(.pid == $pid) | [.state, (.current_bead // "-")] | @tsv' \
+                    <<<"$worker_status_json" | head -1)
+            fi
+            state=${snapshot%%$'\t'*}
+            bead_id=${snapshot#*$'\t'}
+            if [[ -n "$snapshot" ]] && stop_is_safe "$state" "$bead_id"; then
+                systemctl --user stop --no-block "$unit"
+            else
+                # Disabling prevents a future boot, but a live selector or
+                # executor drains before the next audit may stop it. Quota
+                # pressure must not abandon an epoch-fenced claim.
+                deferred_stops+=("${ELASTIC_UNITS[$i]}:${state:-unknown}:${bead_id:--}")
+            fi
         fi
     fi
 done
 
-printf '{"event":"needle.zai_governor","retry_lines":%s,"affected_requests":%s,"terminal_429s":%s,"completed":%s,"desired":%s,"action":"%s"}\n' \
-    "$retry_lines" "$affected_requests" "$terminal_429s" "$completed" "$new_desired" "$action"
+deferred_json=$(printf '%s\n' "${deferred_stops[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')
+printf '{"event":"needle.zai_governor","retry_lines":%s,"affected_requests":%s,"terminal_429s":%s,"completed":%s,"desired":%s,"action":"%s","deferred_stops":%s}\n' \
+    "$retry_lines" "$affected_requests" "$terminal_429s" "$completed" "$new_desired" "$action" \
+    "$deferred_json"
