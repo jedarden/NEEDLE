@@ -10,6 +10,7 @@
 //! 4. Worker B attempts to dispatch the same bead (should fail verification)
 //! 5. Verify Worker A succeeds, Worker B fails, and bead remains owned by Worker A
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
@@ -17,7 +18,7 @@ use tokio::sync::Barrier;
 use tokio::time::{sleep, Instant};
 
 use needle::bead_store::{BeadStore, Filters};
-use needle::claim::Claimer;
+use needle::claim::{Claimer, ResolvedStoreContext};
 use needle::telemetry::Telemetry;
 use needle::types::{Bead, BeadId, BeadStatus, ClaimResult};
 
@@ -230,6 +231,9 @@ async fn double_dispatch_prevention_blocks_second_worker() {
     // Create a mock store with a single bead
     let test_bead = create_test_bead("test-double-dispatch-1");
     let store: Arc<dyn BeadStore> = Arc::new(MockStore::new(vec![test_bead.clone()]));
+    // Dispatch-time verification reads only through this resolved store
+    // context — the same store the claims below land in.
+    let target = ResolvedStoreContext::new(store.clone(), PathBuf::from("/test-workspace"));
 
     // Create claimers for two workers
     let lock_dir = TempDir::new().expect("create temp dir");
@@ -277,7 +281,7 @@ async fn double_dispatch_prevention_blocks_second_worker() {
 
     // Step 2: Worker A's dispatch-time verification should succeed
     let verification_a = claimer_a
-        .verify_claim_at_dispatch(&bead_id, worker_a)
+        .verify_claim_at_dispatch(&target, &bead_id, worker_a)
         .await
         .expect("worker a verification succeeds");
 
@@ -288,7 +292,7 @@ async fn double_dispatch_prevention_blocks_second_worker() {
 
     // Step 3: Worker B attempts to dispatch the same bead (should fail)
     let verification_b = claimer_b
-        .verify_claim_at_dispatch(&bead_id, worker_b)
+        .verify_claim_at_dispatch(&target, &bead_id, worker_b)
         .await
         .expect("worker b verification completes");
 
@@ -315,6 +319,9 @@ async fn double_dispatch_prevention_with_concurrent_dispatch_attempts() {
     // Create a mock store with a single bead
     let test_bead = create_test_bead("test-concurrent-dispatch-2");
     let store: Arc<dyn BeadStore> = Arc::new(MockStore::new(vec![test_bead.clone()]));
+    // Dispatch-time verification reads only through this resolved store
+    // context — the same store the claims below land in.
+    let target = ResolvedStoreContext::new(store.clone(), PathBuf::from("/test-workspace"));
 
     let lock_dir = TempDir::new().expect("create temp dir");
     let telemetry_a = Telemetry::new("worker-a".to_string());
@@ -358,12 +365,14 @@ async fn double_dispatch_prevention_with_concurrent_dispatch_attempts() {
     let _store_clone = store.clone();
     let bead_id_clone_a = bead_id.clone();
     let bead_id_clone_b = bead_id.clone();
+    let target_clone_a = target.clone();
+    let target_clone_b = target.clone();
 
     // Worker A's dispatch attempt
     let handle_a = tokio::spawn(async move {
         barrier_clone.wait().await; // Wait for both workers to be ready
         let verification = claimer_a
-            .verify_claim_at_dispatch(&bead_id_clone_a, worker_a)
+            .verify_claim_at_dispatch(&target_clone_a, &bead_id_clone_a, worker_a)
             .await
             .expect("worker a verification completes");
 
@@ -381,7 +390,7 @@ async fn double_dispatch_prevention_with_concurrent_dispatch_attempts() {
         sleep(Duration::from_millis(5)).await;
 
         let verification = claimer_b
-            .verify_claim_at_dispatch(&bead_id_clone_b, worker_b)
+            .verify_claim_at_dispatch(&target_clone_b, &bead_id_clone_b, worker_b)
             .await
             .expect("worker b verification completes");
 
@@ -424,6 +433,9 @@ async fn double_dispatch_prevention_after_bead_reassignment() {
     // Create a mock store with a single bead
     let test_bead = create_test_bead("test-reassignment-dispatch-3");
     let store: Arc<dyn BeadStore> = Arc::new(MockStore::new(vec![test_bead.clone()]));
+    // Dispatch-time verification reads only through this resolved store
+    // context — the same store the claims below land in.
+    let target = ResolvedStoreContext::new(store.clone(), PathBuf::from("/test-workspace"));
 
     let lock_dir = TempDir::new().expect("create temp dir");
     let telemetry_a = Telemetry::new("worker-a".to_string());
@@ -462,7 +474,7 @@ async fn double_dispatch_prevention_after_bead_reassignment() {
 
     // Worker A's initial verification should succeed
     let verification_a_initial = claimer_a
-        .verify_claim_at_dispatch(&bead_id, worker_a)
+        .verify_claim_at_dispatch(&target, &bead_id, worker_a)
         .await
         .expect("worker a initial verification succeeds");
 
@@ -489,7 +501,7 @@ async fn double_dispatch_prevention_after_bead_reassignment() {
 
     // Worker A's subsequent dispatch attempt should now fail (bead reassigned to B)
     let verification_a_subsequent = claimer_a
-        .verify_claim_at_dispatch(&bead_id, worker_a)
+        .verify_claim_at_dispatch(&target, &bead_id, worker_a)
         .await
         .expect("worker a subsequent verification completes");
 
@@ -500,7 +512,7 @@ async fn double_dispatch_prevention_after_bead_reassignment() {
 
     // Worker B's verification should succeed
     let verification_b = claimer_b
-        .verify_claim_at_dispatch(&bead_id, worker_b)
+        .verify_claim_at_dispatch(&target, &bead_id, worker_b)
         .await
         .expect("worker b verification succeeds");
 
@@ -527,6 +539,9 @@ async fn double_dispatch_prevention_performance_under_load() {
     // Create a mock store with a single bead
     let test_bead = create_test_bead("test-load-dispatch-4");
     let store: Arc<dyn BeadStore> = Arc::new(MockStore::new(vec![test_bead.clone()]));
+    // Dispatch-time verification reads only through this resolved store
+    // context — the same store the claims below land in.
+    let target = ResolvedStoreContext::new(store.clone(), PathBuf::from("/test-workspace"));
 
     let lock_dir = TempDir::new().expect("create temp dir");
     let telemetry_a = Telemetry::new("worker-a".to_string());
@@ -558,7 +573,7 @@ async fn double_dispatch_prevention_performance_under_load() {
 
     for _ in 0..iterations {
         let verification = claimer_a
-            .verify_claim_at_dispatch(&bead_id, worker_a)
+            .verify_claim_at_dispatch(&target, &bead_id, worker_a)
             .await
             .expect("verification succeeds");
 

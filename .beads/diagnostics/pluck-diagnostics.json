@@ -1,13 +1,13 @@
 {
-  "timestamp": "2026-09-14T00:38:06.011185999Z",
-  "total_open_beads": 622,
+  "timestamp": "2026-09-14T01:38:10.592343041Z",
+  "total_open_beads": 625,
   "exclusion_criteria": {
-    "has_assignee": 4,
+    "has_assignee": 3,
     "manually_blocked": 19,
-    "has_dependencies": 461,
-    "resource_conflicts": 2
+    "has_dependencies": 462,
+    "resource_conflicts": 5
   },
-  "final_candidate_count": 193,
+  "final_candidate_count": 195,
   "excluded_beads": [
     {
       "bead_id": "needle-6b02eb9d",
@@ -302,7 +302,7 @@
       "assignee": null,
       "manual_blocked": false,
       "has_blockers": true,
-      "blocker_count": 16,
+      "blocker_count": 17,
       "has_resource_conflicts": false,
       "conflict_count": 0
     },
@@ -1512,7 +1512,7 @@
       "assignee": null,
       "manual_blocked": false,
       "has_blockers": true,
-      "blocker_count": 1,
+      "blocker_count": 2,
       "has_resource_conflicts": true,
       "conflict_count": 1
     },
@@ -2155,15 +2155,26 @@
       "conflict_count": 0
     },
     {
-      "bead_id": "needle-75b1b035",
-      "title": "Remove the null-health sync-wave stall from iad-ci workflow GitOps",
+      "bead_id": "needle-e811ae1e",
+      "title": "Overlap fast verification with nextest archive production",
       "priority": 1,
-      "assignee": "codex-argocd-wave",
+      "assignee": null,
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
+      "has_resource_conflicts": true,
+      "conflict_count": 1
+    },
+    {
+      "bead_id": "needle-18690d39",
+      "title": "Remove the per-run Cinder workspace PVC from needle-ci",
+      "priority": 1,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": true,
+      "conflict_count": 1
     },
     {
       "bead_id": "needle-4cf72365",
@@ -4527,8 +4538,8 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
+      "has_resource_conflicts": true,
+      "conflict_count": 1
     },
     {
       "bead_id": "needle-bc4ac726",

@@ -721,6 +721,14 @@ pub struct Worker {
     store: Arc<dyn BeadStore>,
     /// Home workspace store — kept for restore after processing a remote bead.
     home_store: Arc<dyn BeadStore>,
+    /// The resolved target-workspace store context for the bead in flight,
+    /// captured when selection resolves and opens the store a claim will land
+    /// in and threaded unchanged into the dispatch-time claim verification.
+    /// Bead IDs are only unique per store, so dispatch must verify against
+    /// this exact store — never the claimer's current store, never a store
+    /// reconstructed from a path, and never the home store as a fallback.
+    /// `None` outside a resolved cycle; verification aborts when absent.
+    target_store: Option<crate::claim::ResolvedStoreContext>,
     telemetry: Telemetry,
     strands: StrandRunner,
     claimer: Claimer,
@@ -1179,6 +1187,7 @@ impl Worker {
             qualified_id, // Cache the qualified ID at construction time
             home_store: store.clone(),
             store,
+            target_store: None,
             telemetry,
             strands,
             claimer,
@@ -2367,6 +2376,16 @@ impl Worker {
                         "bead is from remote workspace, switching store"
                     );
                     self.switch_store_to(&bead_ws)?;
+                } else {
+                    // Local bead: the claim below runs through the home store.
+                    // Capture it as this cycle's resolved store context so
+                    // dispatch-time verification reads the same store the
+                    // claim lands in (needle-828a425c). The remote branch
+                    // captures its own context inside switch_store_to.
+                    self.target_store = Some(crate::claim::ResolvedStoreContext::new(
+                        self.store.clone(),
+                        self.config.workspace.default.clone(),
+                    ));
                 }
 
                 // Always update current_workspace to reflect the bead's workspace.
@@ -2608,6 +2627,13 @@ impl Worker {
             Some(env!("CARGO_PKG_VERSION").to_string()),
         )
         .context("failed to create bead store for remote workspace")?;
+        // Capture the resolved target-workspace store context now that the
+        // store is open. Dispatch-time claim verification reads this exact
+        // store, unchanged, for the rest of the cycle (needle-828a425c).
+        self.target_store = Some(crate::claim::ResolvedStoreContext::new(
+            remote_store.clone(),
+            workspace.to_path_buf(),
+        ));
         self.store = remote_store.clone();
         self.current_workspace = workspace.to_path_buf();
         self.dispatcher.set_bead_store(remote_store.clone());
@@ -2630,6 +2656,9 @@ impl Worker {
 
     /// Restore the home workspace store if it was swapped for a remote bead.
     fn restore_home_store(&mut self) {
+        // The resolved store context belongs to the cycle being torn down;
+        // the next selection captures a fresh one.
+        self.target_store = None;
         if !Arc::ptr_eq(&self.store, &self.home_store) {
             tracing::debug!("restoring home workspace store");
             self.store = self.home_store.clone();
@@ -2650,6 +2679,30 @@ impl Worker {
                 tracing::warn!(error = %e, "failed to update registry workspace");
             }
         }
+    }
+
+    /// Resolve the dispatch-time verification target: the resolved
+    /// target-workspace store context captured at selection
+    /// ([`Self::switch_store_to`] and the local-bead branch of the selection
+    /// flow).
+    ///
+    /// Bead IDs are only unique per store: a remote-workspace bead can collide
+    /// with an unrelated bead in the home store, so verification must read the
+    /// exact store the claim was made through — never the claimer's current
+    /// store, never a store reconstructed from a path. A missing context is an
+    /// error, not a downgrade to the home store (needle-828a425c).
+    fn resolve_target_store<'a>(
+        target_store: &'a Option<crate::claim::ResolvedStoreContext>,
+        bead_id: &BeadId,
+    ) -> Result<&'a crate::claim::ResolvedStoreContext> {
+        target_store.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "no resolved store context for bead {} — cannot verify the claim \
+                 through the store it was made against; refusing to fall back to \
+                 the home store",
+                bead_id
+            )
+        })
     }
 
     /// Compute a jittered backoff duration between idle_backoff_min and idle_backoff_max.
@@ -3683,9 +3736,21 @@ impl Worker {
                 // ensure the bead is still in_progress and assigned to this worker.
                 // If another worker has reassigned the bead or the bead has been
                 // released, we abort the dispatch.
+                // Verify through the resolved target-workspace store context
+                // captured at selection time. Bead IDs are only unique per
+                // store, so the check must read the store the claim landed in —
+                // a missing context aborts rather than downgrading to the home
+                // store (needle-828a425c).
+                let target_store =
+                    Self::resolve_target_store(&self.target_store, &bead.id).with_context(|| {
+                        format!(
+                            "dispatch-time claim verification failed for bead {}",
+                            bead.id
+                        )
+                    })?;
                 let is_valid = self
                     .claimer
-                    .verify_claim_at_dispatch(&bead.id, &qualified_actor)
+                    .verify_claim_at_dispatch(target_store, &bead.id, &qualified_actor)
                     .await
                     .with_context(|| {
                         format!(
@@ -9128,6 +9193,52 @@ mod tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }
+    }
+
+    // ── Tests for resolve_target_store (needle-828a425c) ──
+
+    #[test]
+    fn resolve_target_store_returns_the_captured_context_unchanged() {
+        // The context captured at selection must come back with the exact
+        // store handle it was built with — pointer-identical, never
+        // reconstructed from a path and never swapped for the home store.
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        let context =
+            crate::claim::ResolvedStoreContext::new(store.clone(), PathBuf::from("/target-ws"));
+        let captured = Some(context);
+
+        let bead = make_test_bead("needle-context");
+        let resolved =
+            Worker::resolve_target_store(&captured, &bead.id).expect("a present context resolves");
+
+        assert!(
+            Arc::ptr_eq(&resolved.store(), &store),
+            "resolved store must be the exact handle captured at selection"
+        );
+        assert_eq!(resolved.workspace(), Path::new("/target-ws"));
+    }
+
+    #[test]
+    fn resolve_target_store_rejects_a_missing_context_instead_of_falling_back() {
+        // A missing context must abort with a clear error naming the refusal —
+        // verification never downgrades to the home store, where a colliding
+        // bead ID could answer for the target bead.
+        let bead = make_test_bead("needle-no-context");
+
+        let err = match Worker::resolve_target_store(&None, &bead.id) {
+            Ok(_) => panic!("a missing context is an error, not a home-store fallback"),
+            Err(err) => err,
+        };
+
+        let message = err.to_string();
+        assert!(
+            message.contains("no resolved store context"),
+            "error must name the missing context, got: {message}"
+        );
+        assert!(
+            message.contains("home store"),
+            "error must state the home-store fallback was refused, got: {message}"
+        );
     }
 
     fn make_worker(store: Arc<dyn BeadStore>) -> Worker {

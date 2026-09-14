@@ -13,7 +13,12 @@ version = 1
 # enforces is what kept the lib tier intermittently red.
 # +23 for the Resolve DecisionExecutor ownership-guard suite (needle-f0fd0685).
 # +10 for the log-prune unit suite (needle-daab3ee2).
-max_tests = 3907
+# +5 for dispatch-time verification through the resolved target-workspace store
+# (needle-828a425c): three collision/routing suites in src/claim/mod.rs that need
+# two fixture stores in one process, plus two Worker::resolve_target_store tests
+# (context identity and the missing-context refusal) that read the Worker's own
+# private field.
+max_tests = 3912
 
 [tier_budget]
 push = 650

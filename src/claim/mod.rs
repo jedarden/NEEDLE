@@ -201,6 +201,41 @@ fn workspace_is_unset(path: &Path) -> bool {
     path.as_os_str().is_empty() || path == std::path::Path::new(".")
 }
 
+/// The resolved target-workspace bead store for a bead in flight.
+///
+/// Captured once at selection/claim time — when the worker resolves and opens
+/// the store a claim will land in — and threaded unchanged into the
+/// dispatch-time claim verification. Bead IDs are only unique per store, so a
+/// remote-workspace bead's ID can collide with an unrelated bead in the
+/// worker's home store; verifying against anything but the store the claim was
+/// made through can therefore answer "still claimed" about a different bead.
+///
+/// The store is carried as an owned handle precisely so it is never
+/// reconstructed from a path and never silently downgraded to the home store:
+/// a caller without a context must abort, not fall back.
+#[derive(Clone)]
+pub struct ResolvedStoreContext {
+    store: Arc<dyn BeadStore>,
+    workspace: PathBuf,
+}
+
+impl ResolvedStoreContext {
+    /// Bind a resolved store to the workspace it was opened for.
+    pub fn new(store: Arc<dyn BeadStore>, workspace: PathBuf) -> Self {
+        ResolvedStoreContext { store, workspace }
+    }
+
+    /// The store the claim was resolved against.
+    pub fn store(&self) -> Arc<dyn BeadStore> {
+        Arc::clone(&self.store)
+    }
+
+    /// The workspace this store was resolved for (telemetry/diagnostic use).
+    pub fn workspace(&self) -> &Path {
+        &self.workspace
+    }
+}
+
 /// Atomic bead claimer with workspace-level flock serialization.
 pub struct Claimer {
     store: Arc<dyn BeadStore>,
@@ -733,6 +768,12 @@ impl Claimer {
     /// before agent execution. If another worker has reassigned the bead or the
     /// bead has been released, the dispatch should be aborted.
     ///
+    /// Verification reads only through [`target`]'s store — the
+    /// [`ResolvedStoreContext`] captured when selection resolved and opened the
+    /// store the claim landed in. It never queries the claimer's own (possibly
+    /// home) store, so a colliding bead ID elsewhere cannot answer for the
+    /// target bead.
+    ///
     /// This uses the `claim_status` method which queries the live database directly
     /// and includes revision information for optimistic concurrency control. The verification
     /// happens within the dispatch transaction window - immediately before the agent
@@ -744,6 +785,7 @@ impl Claimer {
     /// - `Err(e)`: store error
     pub async fn verify_claim_at_dispatch(
         &self,
+        target: &ResolvedStoreContext,
         bead_id: &BeadId,
         expected_actor: &str,
     ) -> Result<bool> {
@@ -756,14 +798,16 @@ impl Claimer {
             chrono::Utc::now(),
         )?;
 
-        // Use claim_status to query the live store with revision information
-        match self.store.claim_status(bead_id).await {
+        // Use claim_status to query the resolved target store with revision
+        // information
+        match target.store().claim_status(bead_id).await {
             Ok(claim_status) => {
                 let is_valid = claim_status.status == BeadStatus::InProgress
                     && claim_status.assignee.as_deref() == Some(expected_actor);
                 if !is_valid {
                     tracing::warn!(
                         bead_id = %bead_id,
+                        target_workspace = %target.workspace().display(),
                         expected_actor = %expected_actor,
                         actual_status = ?claim_status.status,
                         actual_assignee = ?claim_status.assignee,
@@ -785,6 +829,7 @@ impl Claimer {
                 } else {
                     tracing::debug!(
                         bead_id = %bead_id,
+                        target_workspace = %target.workspace().display(),
                         expected_actor = %expected_actor,
                         revision = ?claim_status.revision,
                         "atomic claim verification at dispatch passed"
@@ -1152,6 +1197,19 @@ mod tests {
             5,
             10, // short backoff for tests
             Telemetry::new("test-worker".to_string()),
+        )
+    }
+
+    /// Wrap a resolved store context around `store` for dispatch-time
+    /// verification tests. Verification reads only the context's store — the
+    /// claimer's own store is deliberately irrelevant to the query.
+    fn target_context<S: BeadStore + 'static>(
+        store: &Arc<S>,
+        workspace: &str,
+    ) -> ResolvedStoreContext {
+        ResolvedStoreContext::new(
+            Arc::clone(store) as Arc<dyn BeadStore>,
+            PathBuf::from(workspace),
         )
     }
 
@@ -1913,10 +1971,11 @@ mod tests {
         bead_claimed.assignee = Some("worker-1".to_string());
 
         let store = Arc::new(MockBeadStore::new(vec![bead_claimed]));
-        let claimer = make_claimer(store);
+        let claimer = make_claimer(store.clone());
+        let target = target_context(&store, "/tmp/ws");
 
         let result = claimer
-            .verify_claim_at_dispatch(&bead.id, "worker-1")
+            .verify_claim_at_dispatch(&target, &bead.id, "worker-1")
             .await
             .unwrap();
 
@@ -1932,10 +1991,11 @@ mod tests {
         bead_claimed.assignee = Some("worker-2".to_string());
 
         let store = Arc::new(MockBeadStore::new(vec![bead_claimed]));
-        let claimer = make_claimer(store);
+        let claimer = make_claimer(store.clone());
+        let target = target_context(&store, "/tmp/ws");
 
         let result = claimer
-            .verify_claim_at_dispatch(&bead.id, "worker-1")
+            .verify_claim_at_dispatch(&target, &bead.id, "worker-1")
             .await
             .unwrap();
 
@@ -1951,10 +2011,11 @@ mod tests {
         bead_open.assignee = Some("worker-1".to_string());
 
         let store = Arc::new(MockBeadStore::new(vec![bead_open]));
-        let claimer = make_claimer(store);
+        let claimer = make_claimer(store.clone());
+        let target = target_context(&store, "/tmp/ws");
 
         let result = claimer
-            .verify_claim_at_dispatch(&bead.id, "worker-1")
+            .verify_claim_at_dispatch(&target, &bead.id, "worker-1")
             .await
             .unwrap();
 
@@ -1970,14 +2031,122 @@ mod tests {
         bead_unassigned.assignee = None;
 
         let store = Arc::new(MockBeadStore::new(vec![bead_unassigned]));
-        let claimer = make_claimer(store);
+        let claimer = make_claimer(store.clone());
+        let target = target_context(&store, "/tmp/ws");
 
         let result = claimer
-            .verify_claim_at_dispatch(&bead.id, "worker-1")
+            .verify_claim_at_dispatch(&target, &bead.id, "worker-1")
             .await
             .unwrap();
 
         assert!(!result, "expected verification to fail for unassigned bead");
+    }
+
+    #[tokio::test]
+    async fn verify_claim_at_dispatch_reads_only_the_resolved_target_store() {
+        // Two fixture stores hold beads with the SAME ID (bead IDs are only
+        // unique per store). The home store's colliding bead is held by a
+        // different worker; the target store's bead is held by us. Verification
+        // through the resolved target context must judge the claim by the
+        // target store's state — reading the home store would answer a
+        // question the target store never asked and fail a valid dispatch.
+        let mut home_bead = make_bead("needle-collide", "/tmp/home-ws");
+        home_bead.status = BeadStatus::InProgress;
+        home_bead.assignee = Some("worker-elsewhere".to_string());
+
+        let mut target_bead = make_bead("needle-collide", "/tmp/target-ws");
+        target_bead.status = BeadStatus::InProgress;
+        target_bead.assignee = Some("worker-1".to_string());
+
+        let home = Arc::new(MockBeadStore::new(vec![home_bead]));
+        let target = Arc::new(MockBeadStore::new(vec![target_bead]));
+
+        // The claimer itself is left holding the home store — exactly the
+        // mutable state a home-store fallback would consult.
+        let claimer = make_claimer(home.clone());
+        let target_ctx = target_context(&target, "/tmp/target-ws");
+
+        let result = claimer
+            .verify_claim_at_dispatch(&target_ctx, &BeadId::from("needle-collide"), "worker-1")
+            .await
+            .unwrap();
+
+        assert!(
+            result,
+            "verification must pass on the target store's claim even though \
+             the home store's colliding bead names a different assignee"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_claim_at_dispatch_ignores_home_store_on_target_mismatch() {
+        // Mirror of the collision test: the target store's colliding bead is
+        // held by someone else while the home store's would have passed. A
+        // home-store fallback would dispatch; the target store must abort it.
+        let mut home_bead = make_bead("needle-collide-2", "/tmp/home-ws");
+        home_bead.status = BeadStatus::InProgress;
+        home_bead.assignee = Some("worker-1".to_string());
+
+        let mut target_bead = make_bead("needle-collide-2", "/tmp/target-ws");
+        target_bead.status = BeadStatus::InProgress;
+        target_bead.assignee = Some("worker-elsewhere".to_string());
+
+        let home = Arc::new(MockBeadStore::new(vec![home_bead]));
+        let target = Arc::new(MockBeadStore::new(vec![target_bead]));
+
+        let claimer = make_claimer(home.clone());
+        let target_ctx = target_context(&target, "/tmp/target-ws");
+
+        let result = claimer
+            .verify_claim_at_dispatch(&target_ctx, &BeadId::from("needle-collide-2"), "worker-1")
+            .await
+            .unwrap();
+
+        assert!(
+            !result,
+            "verification must fail on the target store's state even though \
+             the home store's colliding bead is assigned to this worker"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_claim_at_dispatch_routes_to_the_target_store_not_the_home_store() {
+        // Non-colliding pair: the bead exists only in the target store, and a
+        // second bead exists only in the home store. Verifying the target-only
+        // bead must succeed, and verifying the home-only bead through the
+        // target context must fail with a store lookup error — proof the query
+        // was routed to the target store, which has never heard of it.
+        let mut target_only = make_bead("needle-target-only", "/tmp/target-ws");
+        target_only.status = BeadStatus::InProgress;
+        target_only.assignee = Some("worker-1".to_string());
+        let home_only = make_bead("needle-home-only", "/tmp/home-ws");
+
+        let home = Arc::new(MockBeadStore::new(vec![home_only]));
+        let target = Arc::new(MockBeadStore::new(vec![target_only.clone()]));
+
+        let claimer = make_claimer(home.clone());
+        let target_ctx = target_context(&target, "/tmp/target-ws");
+
+        let routed = claimer
+            .verify_claim_at_dispatch(&target_ctx, &target_only.id, "worker-1")
+            .await
+            .unwrap();
+        assert!(
+            routed,
+            "the target-only bead verifies through the target store"
+        );
+
+        let home_only_in_target = claimer
+            .verify_claim_at_dispatch(&target_ctx, &BeadId::from("needle-home-only"), "worker-1")
+            .await
+            .expect_err(
+                "the home-only bead must not be visible through the target context — \
+                 a store lookup error proves the target store was queried",
+            );
+        assert!(
+            home_only_in_target.to_string().contains("bead not found"),
+            "expected a target-store lookup miss, got: {home_only_in_target}"
+        );
     }
 
     #[tokio::test]
@@ -1991,10 +2160,11 @@ mod tests {
         let store = Arc::new(MockBeadStore::new(vec![bead_wrong_worker]));
         let (sink, events) = crate::telemetry::test_utils::MemorySink::new();
         let telemetry = Telemetry::with_sink("test-worker".to_string(), sink);
-        let claimer = Claimer::new(store, std::env::temp_dir(), 5, 10, telemetry);
+        let claimer = Claimer::new(store.clone(), std::env::temp_dir(), 5, 10, telemetry);
+        let target = target_context(&store, "/tmp/ws");
 
         let _ = claimer
-            .verify_claim_at_dispatch(&bead.id, "worker-1")
+            .verify_claim_at_dispatch(&target, &bead.id, "worker-1")
             .await
             .unwrap();
 
@@ -2027,10 +2197,11 @@ mod tests {
         let store = Arc::new(MockBeadStore::new(vec![bead_claimed]));
         let (sink, events) = crate::telemetry::test_utils::MemorySink::new();
         let telemetry = Telemetry::with_sink("test-worker".to_string(), sink);
-        let claimer = Claimer::new(store, std::env::temp_dir(), 5, 10, telemetry);
+        let claimer = Claimer::new(store.clone(), std::env::temp_dir(), 5, 10, telemetry);
+        let target = target_context(&store, "/tmp/ws");
 
         let _ = claimer
-            .verify_claim_at_dispatch(&bead.id, "worker-1")
+            .verify_claim_at_dispatch(&target, &bead.id, "worker-1")
             .await
             .unwrap();
 
@@ -2059,10 +2230,11 @@ mod tests {
         let store = Arc::new(MockBeadStore::new(vec![bead_claimed]));
         let (sink, events) = crate::telemetry::test_utils::MemorySink::new();
         let telemetry = Telemetry::with_sink("test-worker".to_string(), sink);
-        let claimer = Claimer::new(store, std::env::temp_dir(), 5, 10, telemetry);
+        let claimer = Claimer::new(store.clone(), std::env::temp_dir(), 5, 10, telemetry);
+        let target = target_context(&store, "/tmp/ws");
 
         let _ = claimer
-            .verify_claim_at_dispatch(&bead.id, "worker-1")
+            .verify_claim_at_dispatch(&target, &bead.id, "worker-1")
             .await
             .unwrap();
 
@@ -2097,12 +2269,13 @@ mod tests {
         let store = Arc::new(MockBeadStore::new(vec![bead_claimed]));
         let (sink, events) = crate::telemetry::test_utils::MemorySink::new();
         let telemetry = Telemetry::with_sink("test-worker".to_string(), sink);
-        let claimer = Claimer::new(store, std::env::temp_dir(), 5, 10, telemetry);
+        let claimer = Claimer::new(store.clone(), std::env::temp_dir(), 5, 10, telemetry);
+        let target = target_context(&store, "/tmp/ws");
 
         const ROUNDS: usize = 3;
         for _ in 0..ROUNDS {
             let verified = claimer
-                .verify_claim_at_dispatch(&bead.id, "worker-1")
+                .verify_claim_at_dispatch(&target, &bead.id, "worker-1")
                 .await
                 .unwrap();
             assert!(verified, "expected each verification to pass");

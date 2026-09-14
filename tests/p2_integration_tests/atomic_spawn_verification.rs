@@ -10,11 +10,12 @@
 //! 4. Verify that Worker A's spawn fails due to atomic verification
 //! 5. Verify the verification and spawn happen in the same atomic operation
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::TempDir;
 
 use needle::bead_store::{BeadStore, Filters};
-use needle::claim::Claimer;
+use needle::claim::{Claimer, ResolvedStoreContext};
 use needle::telemetry::Telemetry;
 use needle::types::{Bead, BeadId, BeadStatus, ClaimResult};
 
@@ -235,6 +236,9 @@ async fn atomic_verification_prevents_race_condition_at_spawn() {
     // Create a mock store with a single bead
     let test_bead = create_test_bead("test-atomic-spawn-1");
     let store = Arc::new(RaceConditionStore::new(vec![test_bead.clone()]));
+    // Dispatch-time verification reads only through this resolved store
+    // context — the same store the claims below land in.
+    let target = ResolvedStoreContext::new(store.clone(), PathBuf::from("/test-workspace"));
     let bead_id = BeadId::from("test-atomic-spawn-1");
     let worker_a = "worker-a";
     let worker_b = "worker-b";
@@ -271,7 +275,7 @@ async fn atomic_verification_prevents_race_condition_at_spawn() {
 
     // Step 2: Worker A's dispatch-time verification should succeed
     let verification_a = claimer_a
-        .verify_claim_at_dispatch(&bead_id, worker_a)
+        .verify_claim_at_dispatch(&target, &bead_id, worker_a)
         .await
         .expect("worker a verification succeeds");
 
@@ -298,7 +302,7 @@ async fn atomic_verification_prevents_race_condition_at_spawn() {
     // Step 5: Worker A's verification would now fail (preventing spawn)
     // This demonstrates that the atomic verification at spawn time would catch this
     let verification_a_after_race = claimer_a
-        .verify_claim_at_dispatch(&bead_id, worker_a)
+        .verify_claim_at_dispatch(&target, &bead_id, worker_a)
         .await
         .expect("worker a verification after race completes");
 
@@ -327,6 +331,9 @@ async fn atomic_verification_no_gap_between_check_and_spawn() {
     // Create a mock store with a single bead
     let test_bead = create_test_bead("test-no-gap-verification");
     let store = Arc::new(RaceConditionStore::new(vec![test_bead.clone()]));
+    // Dispatch-time verification reads only through this resolved store
+    // context — the same store the claims below land in.
+    let target = ResolvedStoreContext::new(store.clone(), PathBuf::from("/test-workspace"));
     let bead_id = BeadId::from("test-no-gap-verification");
     let worker_a = "worker-a";
 
@@ -354,7 +361,7 @@ async fn atomic_verification_no_gap_between_check_and_spawn() {
 
     // Verify dispatch-time verification works
     let verification = claimer_a
-        .verify_claim_at_dispatch(&bead_id, worker_a)
+        .verify_claim_at_dispatch(&target, &bead_id, worker_a)
         .await
         .expect("verification succeeds");
 
