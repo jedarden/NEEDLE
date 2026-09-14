@@ -1235,6 +1235,16 @@ fn reap_zombie_children() {
 #[cfg(not(unix))]
 fn reap_zombie_children() {}
 
+/// Reap one exited direct child without waiting for a running child.
+///
+/// This exposes the same scoped `waitpid(WNOHANG)` operation used by the
+/// supervisor's all-child sweep so isolated process tests do not have to reap
+/// unrelated children from their integration-test process.
+#[cfg(unix)]
+pub fn reap_exited_child(pid: u32) {
+    reap_children_matching(pid as libc::pid_t);
+}
+
 /// Shared implementation of the `WNOHANG` reap loop, parameterized by which
 /// PID to wait on (`-1` in production, meaning "any direct child" — see
 /// `reap_zombie_children`). Split out so tests can exercise the exact same
@@ -1902,62 +1912,6 @@ poll_interval_secs = 12
 
     // ── reap_zombie_children tests (ADR-010 / GitHub issue jedarden/NEEDLE#12) ──
 
-    #[cfg(unix)]
-    #[test]
-    fn reap_zombie_children_reaps_an_exited_child() {
-        // Exercises reap_children_matching (the exact loop reap_zombie_children
-        // wraps) scoped to a PID we spawned ourselves — NOT the real
-        // reap_zombie_children()'s `-1` (any child) target. Unit tests across
-        // the whole crate share one process/many threads under `cargo test
-        // --lib`; calling the `-1` sweep here could reap an unrelated,
-        // concurrently-running test's own child out from under it. Scoping to
-        // our own PID exercises the identical waitpid/WNOHANG logic with none
-        // of that collision risk.
-        //
-        // Spawn a real short-lived child directly (no setsid/detach — this
-        // test process is its real parent).
-        let child = std::process::Command::new("true")
-            .spawn()
-            .expect("failed to spawn `true`");
-        let pid = child.id();
-
-        // Wait for it to actually exit (without reaping it — do not call
-        // child.wait() here, that would reap it ourselves and defeat the test).
-        let stat_path = format!("/proc/{pid}/stat");
-        let mut became_zombie = false;
-        for _ in 0..200 {
-            if let Ok(stat) = std::fs::read_to_string(&stat_path) {
-                if let Some(after_comm) = stat.rfind(')') {
-                    if stat[after_comm + 1..].trim_start().starts_with('Z') {
-                        became_zombie = true;
-                        break;
-                    }
-                }
-            } else {
-                // Already reaped by something else, or /proc entry gone —
-                // can't validate the pre-condition; skip rather than false-fail.
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        assert!(
-            became_zombie,
-            "child did not reach zombie state before timeout — test precondition not met"
-        );
-
-        reap_children_matching(pid as libc::pid_t);
-
-        // After reaping, /proc/<pid> should no longer exist.
-        assert!(
-            !std::path::Path::new(&stat_path).exists(),
-            "child was not reaped: {stat_path} still exists"
-        );
-
-        // Prevent a double-wait/drop warning: the child is already reaped by
-        // our sweep, so explicitly forget rather than calling child.wait().
-        std::mem::forget(child);
-    }
-
     // ── Supervisor startup resolved path logging test (bf-5hnpy) ──
 
     #[tokio::test]
@@ -2067,8 +2021,10 @@ poll_interval_secs = 12
         // Verify the event was emitted successfully
         assert!(emit_result.is_ok(), "telemetry emit should succeed");
 
-        // Wait for event to propagate through the telemetry channel
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        telemetry
+            .force_flush_async(std::time::Duration::from_secs(1))
+            .await
+            .unwrap();
 
         // Verify the captured event
         let events = capture_sink.events();
@@ -2173,8 +2129,10 @@ poll_interval_secs = 12
 
         assert!(emit_result.is_ok(), "telemetry emit should succeed");
 
-        // Wait for event propagation
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        telemetry
+            .force_flush_async(std::time::Duration::from_secs(1))
+            .await
+            .unwrap();
 
         // Verify captured event
         let events = capture_sink.events();
@@ -2266,8 +2224,10 @@ poll_interval_secs = 12
 
         assert!(emit_result.is_ok());
 
-        // Wait for event propagation
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        telemetry
+            .force_flush_async(std::time::Duration::from_secs(1))
+            .await
+            .unwrap();
 
         // Verify captured event
         let events = capture_sink.events();
@@ -2400,8 +2360,10 @@ poll_interval_secs = 12
 
             assert!(emit_result.is_ok());
 
-            // Wait for event propagation
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            telemetry
+                .force_flush_async(std::time::Duration::from_secs(1))
+                .await
+                .unwrap();
 
             let events = capture_sink.events();
             assert_eq!(events.len(), 1);

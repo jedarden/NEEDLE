@@ -69,6 +69,8 @@ mod panic_stack_trace_capture;
 mod process_command_contracts;
 #[path = "integration_spawn/process_discovery_integration.rs"]
 mod process_discovery_integration;
+#[path = "integration_spawn/process_lifecycle.rs"]
+mod process_lifecycle;
 #[path = "integration_spawn/process_runner_contract.rs"]
 mod process_runner_contract;
 #[path = "integration_spawn/sigpipe_test.rs"]

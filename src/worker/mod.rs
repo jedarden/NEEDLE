@@ -8022,7 +8022,7 @@ mod tests {
             helper.telemetry(),
             vec!["workspace.home".to_string(), "bead_cli.backend".to_string()],
         );
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        helper.sync().await;
 
         let events = helper.events_by_type("config.reload.restart_required");
         assert_eq!(events.len(), 1);
@@ -8118,377 +8118,6 @@ mod tests {
     }
 
     #[test]
-    fn config_reload_requested_mid_dispatch_waits_for_cycle_boundary() {
-        use std::collections::HashMap;
-
-        let _env_lock = crate::util::test_env::isolate_env_admitted();
-        let home = tempfile::tempdir().unwrap();
-        let workspace = tempfile::tempdir().unwrap();
-        // TraceCapture only writes inside a bead workspace (one with .beads/).
-        std::fs::create_dir_all(workspace.path().join(".beads")).unwrap();
-        std::env::set_var("HOME", home.path());
-
-        let config_path = home.path().join(".config/needle/config.yaml");
-        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-
-        let mut config = valid_test_config();
-        config.agent.default = "old-agent".to_string();
-        config.agent.routing = None;
-        config.agent.adapters_dir = home.path().join("adapters");
-        config.worker.config_reload_check_interval_secs = 1;
-        config.worker.idle_action = IdleAction::Exit;
-        // Opt in to Exit: boot() downgrades it to Wait without a supervisor.
-        // See needle-ab52a15a.
-        config.worker.allow_exit_without_supervisor = true;
-        config.worker.enforce_shipped_work = false;
-        config.workspace.home = home.path().join(".needle");
-        config.workspace.default = workspace.path().to_path_buf();
-        config.self_modification.hot_reload = false;
-        config.strands.explore.enabled = false;
-        config.strands.explore.workspace_root = workspace.path().to_path_buf();
-        config.strands.explore.workspaces = Vec::new();
-
-        std::fs::write(&config_path, serde_yaml::to_string(&config).unwrap()).unwrap();
-
-        let mut bead = make_test_bead("needle-reload-boundary");
-        bead.workspace = workspace.path().to_path_buf();
-        let store = Arc::new(MockStore::new(vec![bead.clone()]));
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let (helper, mut worker) = runtime.block_on(async {
-            let helper = crate::telemetry::test_utils::TestHelper::new("reload-boundary-test");
-            let worker = Worker::new_with_telemetry(
-                config.clone(),
-                "reload-boundary".to_string(),
-                store.clone(),
-                helper.telemetry().clone(),
-            );
-            (helper, worker)
-        });
-
-        let dispatch_started = workspace.path().join("dispatch-started");
-        let release_dispatch = workspace.path().join("release-dispatch");
-        let mut old_environment = HashMap::new();
-        old_environment.insert(
-            "NEEDLE_TEST_DISPATCH_STARTED".to_string(),
-            dispatch_started.display().to_string(),
-        );
-        old_environment.insert(
-            "NEEDLE_TEST_RELEASE_DISPATCH".to_string(),
-            release_dispatch.display().to_string(),
-        );
-        let old_adapter = crate::dispatch::AgentAdapter {
-            name: "old-agent".to_string(),
-            description: None,
-            agent_cli: "bash".to_string(),
-            version_command: None,
-            input_method: crate::types::InputMethod::Stdin,
-            invoke_template: concat!(
-                "touch \"$NEEDLE_TEST_DISPATCH_STARTED\"; ",
-                "while [ ! -e \"$NEEDLE_TEST_RELEASE_DISPATCH\" ]; do sleep 0.01; done; ",
-                "printf old-config"
-            )
-            .to_string(),
-            environment: old_environment,
-            timeout_secs: 10,
-            idle_timeout_secs: 0,
-            hard_timeout_secs: 0,
-            provider: None,
-            model: None,
-            token_extraction: crate::dispatch::TokenExtraction::None,
-            output_transform: None,
-            harness: None,
-            harness_version: None,
-        };
-        let new_adapter = crate::dispatch::AgentAdapter {
-            name: "new-agent".to_string(),
-            description: None,
-            agent_cli: "bash".to_string(),
-            version_command: None,
-            input_method: crate::types::InputMethod::Stdin,
-            invoke_template: "printf new-config".to_string(),
-            environment: HashMap::new(),
-            timeout_secs: 10,
-            idle_timeout_secs: 0,
-            hard_timeout_secs: 0,
-            provider: None,
-            model: None,
-            token_extraction: crate::dispatch::TokenExtraction::None,
-            output_transform: None,
-            harness: None,
-            harness_version: None,
-        };
-        let mut adapters = HashMap::new();
-        adapters.insert(old_adapter.name.clone(), old_adapter);
-        adapters.insert(new_adapter.name.clone(), new_adapter);
-        worker.dispatcher =
-            Dispatcher::with_adapters(adapters, helper.telemetry().clone(), config.agent.timeout);
-        runtime.block_on(worker.boot()).unwrap();
-
-        let mut candidate = config;
-        candidate.agent.default = "new-agent".to_string();
-        let candidate_yaml = serde_yaml::to_string(&candidate).unwrap();
-
-        let terminal_state = runtime
-            .block_on(async {
-                let request_reload_during_dispatch = async {
-                    // 180s, not 60s: this is a hang guard, not the property
-                    // under test (which is that a reload waits for the cycle
-                    // boundary). CI pods are guaranteed 1000m CPU and the lib
-                    // suite takes ~309s there against ~37s on a 20-core box,
-                    // so waiting for a spawned process to create a file can
-                    // exceed a minute under contention. It failed exactly that
-                    // way in needle-ci-periodic-1789280220:
-                    // "old-config dispatch did not start: Elapsed(())".
-                    tokio::time::timeout(Duration::from_secs(180), async {
-                        while !dispatch_started.exists() {
-                            tokio::time::sleep(Duration::from_millis(10)).await;
-                        }
-                    })
-                    .await
-                    .expect("old-config dispatch did not start");
-
-                    std::fs::write(&config_path, candidate_yaml).unwrap();
-                    helper.sync().await;
-
-                    assert_eq!(helper.events_by_type("agent.dispatched").len(), 1);
-                    helper.assert_event_not_emitted("config.reload.detected");
-                    helper.assert_event_not_emitted("config.reload.applied");
-
-                    {
-                        let mut beads = store.beads.lock().unwrap();
-                        let claimed = beads
-                            .iter_mut()
-                            .find(|stored| stored.id == bead.id)
-                            .expect("claimed test bead should remain in the mock store");
-                        claimed.status = BeadStatus::Closed;
-                    }
-
-                    std::fs::write(&release_dispatch, b"").unwrap();
-                };
-
-                let (state, ()) =
-                    tokio::join!(worker.run_state_machine(), request_reload_during_dispatch);
-                state
-            })
-            .unwrap();
-        runtime.block_on(helper.sync());
-
-        assert_eq!(terminal_state, WorkerState::Stopped);
-        assert_eq!(worker.config.agent.default, "new-agent");
-
-        let trace_stdout = std::fs::read_to_string(
-            workspace
-                .path()
-                .join(".beads/traces/needle-reload-boundary/stdout.txt"),
-        )
-        .unwrap();
-        assert_eq!(trace_stdout, "old-config");
-
-        let events = helper.all_events();
-        let dispatch_completed = events
-            .iter()
-            .find(|event| event.event_type == "agent.completed")
-            .expect("old-config dispatch should complete");
-        assert_eq!(dispatch_completed.data["agent"], "old-agent");
-        let reload_detected = events
-            .iter()
-            .find(|event| event.event_type == "config.reload.detected")
-            .expect("changed config should be detected at the cycle boundary");
-        let reload_applied = events
-            .iter()
-            .find(|event| event.event_type == "config.reload.applied")
-            .expect("changed config should be applied at the cycle boundary");
-
-        assert!(dispatch_completed.sequence < reload_detected.sequence);
-        assert!(reload_detected.sequence < reload_applied.sequence);
-        assert!(reload_applied.data["changed_keys"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|key| key == "agent.default"));
-    }
-
-    #[test]
-    fn invalid_config_reload_keeps_worker_running_and_emits_rejection() {
-        use std::collections::HashMap;
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        let _env_lock = crate::util::test_env::isolate_env_admitted();
-        let home = tempfile::tempdir().unwrap();
-        let workspace = tempfile::tempdir().unwrap();
-        // TraceCapture only writes inside a bead workspace (one with .beads/).
-        std::fs::create_dir_all(workspace.path().join(".beads")).unwrap();
-        std::env::set_var("HOME", home.path());
-
-        let config_path = home.path().join(".config/needle/config.yaml");
-        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-
-        let mut config = valid_test_config();
-        config.agent.default = "old-agent".to_string();
-        config.agent.adapters_dir = home.path().join("adapters");
-        config.worker.config_reload_check_interval_secs = 1;
-        config.worker.idle_action = IdleAction::Wait;
-        config.worker.idle_backoff_min = 1;
-        config.worker.idle_backoff_max = 1;
-        config.worker.enforce_shipped_work = false;
-        config.workspace.home = home.path().join(".needle");
-        config.workspace.default = workspace.path().to_path_buf();
-        config.self_modification.hot_reload = false;
-        config.strands.explore.enabled = false;
-        config.strands.explore.workspace_root = workspace.path().to_path_buf();
-        config.strands.explore.workspaces = Vec::new();
-
-        std::fs::write(&config_path, serde_yaml::to_string(&config).unwrap()).unwrap();
-
-        let dispatch_started = workspace.path().join("dispatch-started");
-        let release_dispatch = workspace.path().join("release-dispatch");
-        let mut environment = HashMap::new();
-        environment.insert(
-            "NEEDLE_TEST_DISPATCH_STARTED".to_string(),
-            dispatch_started.display().to_string(),
-        );
-        environment.insert(
-            "NEEDLE_TEST_RELEASE_DISPATCH".to_string(),
-            release_dispatch.display().to_string(),
-        );
-        let adapter = crate::dispatch::AgentAdapter {
-            name: "old-agent".to_string(),
-            description: None,
-            agent_cli: "bash".to_string(),
-            version_command: None,
-            input_method: crate::types::InputMethod::Stdin,
-            invoke_template: concat!(
-                "touch \"$NEEDLE_TEST_DISPATCH_STARTED\"; ",
-                "while [ ! -e \"$NEEDLE_TEST_RELEASE_DISPATCH\" ]; do sleep 0.01; done; ",
-                "printf old-config"
-            )
-            .to_string(),
-            environment,
-            timeout_secs: 10,
-            idle_timeout_secs: 0,
-            hard_timeout_secs: 0,
-            provider: None,
-            model: None,
-            token_extraction: crate::dispatch::TokenExtraction::None,
-            output_transform: None,
-            harness: None,
-            harness_version: None,
-        };
-        let mut adapters = HashMap::new();
-        adapters.insert(adapter.name.clone(), adapter);
-
-        let mut bead = make_test_bead("needle-invalid-reload");
-        bead.workspace = workspace.path().to_path_buf();
-        let store = Arc::new(MockStore::new(vec![bead.clone()]));
-        let runtime = tokio::runtime::Runtime::new().unwrap();
-        let (helper, mut worker) = runtime.block_on(async {
-            let helper = crate::telemetry::test_utils::TestHelper::new("invalid-reload-test");
-            let worker = Worker::new_with_telemetry(
-                config.clone(),
-                "invalid-reload".to_string(),
-                store.clone(),
-                helper.telemetry().clone(),
-            );
-            (helper, worker)
-        });
-        worker.dispatcher =
-            Dispatcher::with_adapters(adapters, helper.telemetry().clone(), config.agent.timeout);
-        runtime.block_on(worker.boot()).unwrap();
-
-        let running_max_workers = worker.config.worker.max_workers;
-        let shutdown = worker.shutdown.clone();
-        let worker_finished = Arc::new(AtomicBool::new(false));
-        let worker_finished_for_run = worker_finished.clone();
-
-        let result = runtime.block_on(async {
-            let request_invalid_reload =
-                async {
-                    // 180s, not 60s: this is a hang guard, not the property
-                    // under test (which is that a reload waits for the cycle
-                    // boundary). CI pods are guaranteed 1000m CPU and the lib
-                    // suite takes ~309s there against ~37s on a 20-core box,
-                    // so waiting for a spawned process to create a file can
-                    // exceed a minute under contention. It failed exactly that
-                    // way in needle-ci-periodic-1789280220:
-                    // "old-config dispatch did not start: Elapsed(())".
-                    tokio::time::timeout(Duration::from_secs(180), async {
-                        while !dispatch_started.exists() {
-                            tokio::time::sleep(Duration::from_millis(10)).await;
-                        }
-                    })
-                    .await
-                    .expect("old-config dispatch did not start");
-
-                    std::fs::write(&config_path, "worker:\n  max_workers: 0\n").unwrap();
-                    helper.sync().await;
-
-                    assert_eq!(helper.events_by_type("agent.dispatched").len(), 1);
-                    helper.assert_event_not_emitted("config.reload.rejected");
-
-                    {
-                        let mut beads = store.beads.lock().unwrap();
-                        let claimed = beads
-                            .iter_mut()
-                            .find(|stored| stored.id == bead.id)
-                            .expect("claimed test bead should remain in the mock store");
-                        claimed.status = BeadStatus::Closed;
-                    }
-
-                    std::fs::write(&release_dispatch, b"").unwrap();
-
-                    tokio::time::timeout(Duration::from_secs(60), async {
-                        while helper.events_by_type("config.reload.rejected").is_empty() {
-                            tokio::time::sleep(Duration::from_millis(10)).await;
-                        }
-                    })
-                    .await
-                    .unwrap_or_else(|_| {
-                        panic!(
-                    "invalid candidate was not rejected; HOME={:?} watched={:?} events={:?}",
-                    std::env::var("HOME"),
-                    global_config_path(),
-                    helper.all_events().iter().map(|e| e.event_type.clone()).collect::<Vec<_>>()
-                )
-                    });
-
-                    assert!(
-                        !worker_finished.load(Ordering::SeqCst),
-                        "invalid config reload must not terminate the worker"
-                    );
-                    shutdown.store(true, Ordering::SeqCst);
-                };
-
-            let run_worker = async {
-                let result = worker.run_state_machine().await;
-                worker_finished_for_run.store(true, Ordering::SeqCst);
-                result
-            };
-
-            tokio::join!(run_worker, request_invalid_reload).0
-        });
-        let terminal_state =
-            result.expect("invalid config reload must not stop the worker with an error");
-        runtime.block_on(helper.sync());
-
-        assert_eq!(terminal_state, WorkerState::Stopped);
-        assert_eq!(worker.config.worker.max_workers, running_max_workers);
-        helper.assert_event_count("config.reload.rejected", 1);
-        helper.assert_event_not_emitted("config.reload.applied");
-        helper.assert_event_not_emitted("worker.errored");
-
-        let rejected = helper
-            .events_by_type("config.reload.rejected")
-            .into_iter()
-            .next()
-            .expect("rejection event should be emitted");
-        assert!(rejected.data["validation_errors"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|error| error.as_str().unwrap().contains("max_workers")));
-    }
-
-    #[test]
     fn tier_c_config_reload_emits_restart_required_event() {
         let _env_lock = crate::util::test_env::isolate_env();
         let home = tempfile::tempdir().unwrap();
@@ -8517,7 +8146,7 @@ mod tests {
         worker.last_config_reload_check = None;
         runtime.block_on(async {
             worker.check_config_reload().await.unwrap();
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            helper.sync().await;
         });
 
         let events = helper.events_by_type("config.reload.restart_required");
@@ -8548,7 +8177,7 @@ mod tests {
             Arc::new(MockStore::empty()),
             helper.telemetry().clone(),
         );
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        helper.sync().await;
 
         let events = helper.events_by_type("config.reload.restart_required");
         assert_eq!(events.len(), 1);
@@ -9532,30 +9161,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_with_empty_store_returns_exhausted_or_stopped() {
-        let store = Arc::new(MockStore::empty());
-        let mut config = valid_test_config();
-        config.worker.idle_action = IdleAction::Exit;
-        // Opt in to Exit: boot() downgrades it to Wait without a supervisor.
-        // See needle-ab52a15a.
-        config.worker.allow_exit_without_supervisor = true;
-        config.self_modification.hot_reload = false;
-        config.strands.explore.enabled = false;
-        // Pin workspace_root to prevent Explore strand from scanning real home
-        let temp_dir = tempfile::tempdir().unwrap();
-        config.strands.explore.workspace_root = temp_dir.path().to_path_buf();
-        config.strands.explore.workspaces = Vec::new();
-        let mut worker = Worker::new(config, "test-worker".to_string(), store);
-
-        let result = worker.run().await.unwrap();
-        assert!(
-            result == WorkerState::Stopped || result == WorkerState::Exhausted,
-            "expected Stopped or Exhausted, got {:?}",
-            result
-        );
-    }
-
-    #[tokio::test]
     async fn resolve_adapter_returns_builtin() {
         let store = Arc::new(MockStore::empty());
         let worker = make_worker(store);
@@ -9605,7 +9210,7 @@ mod tests {
     async fn beads_processed_starts_at_zero() {
         let store = Arc::new(MockStore::empty());
         // Use an isolated workspace home so the registry doesn't pick up
-        // entries left by other tests (e.g., full_cycle_with_echo_agent).
+        // entries left by other tests.
         let dir = tempfile::tempdir().unwrap();
         let mut config = Config::default();
         config.self_modification.hot_reload = false;
@@ -9690,41 +9295,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn admission_hold_ends_admitted_and_selection_resumes_after_load_clears() {
-        let _env_lock = crate::util::test_env::isolate_env();
-        let probe_dir = tempfile::tempdir().unwrap();
-        write_saturated_probe(probe_dir.path());
-        std::env::set_var("NEEDLE_LAUNCH_RESOURCE_PROBE", probe_dir.path());
-        std::env::set_var("NEEDLE_ADMISSION_BACKOFF_BASE_MS", "150");
-        std::env::set_var("NEEDLE_ADMISSION_BACKOFF_CAP_MS", "150");
-
-        // Clear the load while the hold is sleeping between checks, well
-        // inside the first backoff window so the second check reads admitted.
-        // Spawned only after boot so the hold's first check reliably sees the
-        // saturated probe first.
-        let temp_dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(MockStore::empty());
-        let config = admission_test_config(&temp_dir);
-        let mut worker = Worker::new(config, "adm-test".to_string(), store);
-        worker.boot().await.unwrap();
-
-        let flip_probe = probe_dir.path().to_path_buf();
-        let flipper = std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            std::fs::write(flip_probe.join("loadavg"), "0.10 0.10 0.10 1/123 456\n").unwrap();
-        });
-
-        worker.do_select().await.unwrap();
-        flipper.join().unwrap();
-
-        // The hold ended admitted — ADMISSION_BLOCKED was left behind for
-        // SELECTING before selection ran, and the selection pass then ran to
-        // its normal end on an empty store.
-        assert_eq!(*worker.state(), WorkerState::Exhausted);
-        assert!(worker.current_bead.is_none());
-    }
-
-    #[tokio::test]
     async fn skip_launch_resource_check_bypasses_the_admission_hold() {
         let _env_lock = crate::util::test_env::isolate_env();
         let probe_dir = tempfile::tempdir().unwrap();
@@ -9753,10 +9323,10 @@ mod tests {
     /// without `isolate_env_admitted` — or without installing its own probe —
     /// passes or fails according to the load of the machine running it, and
     /// can hold indefinitely rather than fail, carrying the whole run past its
-    /// max duration. That is what turned
-    /// `config_reload_requested_mid_dispatch_waits_for_cycle_boundary` red on
+    /// max duration. A process-lifecycle regression did exactly that on
     /// needle-ci-t2h44 (2026-09-13), one run after the suite had gone green,
-    /// with 3689 other unit tests passing beside it.
+    /// with 3689 other unit tests passing beside it; those lifecycle tests now
+    /// run in the isolated integration harness.
     ///
     /// The rule is mechanical, so it is checked mechanically: a new test that
     /// reaches `do_select` cannot reintroduce the flake without failing here
@@ -11516,83 +11086,6 @@ mod tests {
 
     // ── full cycle test ──
 
-    #[tokio::test(start_paused = true)]
-    async fn full_cycle_with_echo_agent() {
-        use std::collections::HashMap;
-
-        // Test a full cycle: select → claim → build → dispatch → execute → handle → log
-        let bead = make_test_bead("needle-echo");
-        let store: Arc<dyn BeadStore> = Arc::new(MockStore::new(vec![bead]));
-        let mut config = Config::default();
-        config.worker.idle_action = IdleAction::Exit;
-        // Opt in to Exit: boot() downgrades it to Wait without a supervisor.
-        // See needle-ab52a15a.
-        config.worker.allow_exit_without_supervisor = true;
-        // Disable hot-reload in tests — it would re-exec into a different binary.
-        config.self_modification.hot_reload = false;
-        // Use a simple echo adapter so the test finishes quickly.
-        config.agent.default = "echo-test".to_string();
-        config.agent.routing = None; // test dispatcher only has echo-test; disable model-based routing
-        config.agent.timeout = 5;
-        // Set workspace.default to match the bead's workspace so the remote
-        // store switch logic doesn't fire.
-        config.workspace.default = std::path::PathBuf::from(".");
-        // Isolate workspace.home. It otherwise defaults to the REAL ~/.needle, and
-        // two things follow from that: the heartbeat emitter writes into the live
-        // fleet's ~/.needle/state/heartbeats/, and check_hot_reload() compares this
-        // test binary against the operator's ~/.needle/bin/needle-stable, finds a
-        // different hash, and calls std::process::exit(72) -- killing the whole test
-        // harness mid-run. (self_modification.hot_reload = false does NOT prevent
-        // this: the flag is never read at the call site.) An isolated home has no
-        // bin/needle-stable, so the check returns Skipped. See needle-ab52a15a.
-        config.workspace.home = crate::util::test_env::isolated_home();
-        // Disable Explore: once the MockStore's one bead is processed and
-        // `run()` loops again, Pluck/Mend return NoWork and the waterfall
-        // previously fell through to a real Explore scan of $HOME, claiming
-        // and mutating real beads in unrelated repos on this server via the
-        // real bf/br CLI. See bf-2unnq's contamination addendum.
-        config.strands.explore.enabled = false;
-
-        let mut worker = Worker::new(config, "test-worker".to_string(), store);
-
-        // Replace the dispatcher with one that has a simple echo adapter.
-        let echo_adapter = crate::dispatch::AgentAdapter {
-            name: "echo-test".to_string(),
-            description: None,
-            agent_cli: "echo".to_string(),
-            version_command: None,
-            input_method: crate::types::InputMethod::Stdin,
-            invoke_template: "echo done".to_string(),
-            environment: HashMap::new(),
-            timeout_secs: 5,
-            idle_timeout_secs: 0,
-            hard_timeout_secs: 0,
-            provider: None,
-            model: None,
-            token_extraction: crate::dispatch::TokenExtraction::None,
-            output_transform: None,
-            harness: None,
-            harness_version: None,
-        };
-        let mut adapters = HashMap::new();
-        adapters.insert("echo-test".to_string(), echo_adapter);
-        worker.dispatcher =
-            Dispatcher::with_adapters(adapters, Telemetry::new("test-worker".to_string()), 5);
-
-        let result = worker.run().await.unwrap();
-        assert!(
-            result == WorkerState::Stopped || result == WorkerState::Exhausted,
-            "expected terminal state, got {:?}",
-            result
-        );
-        // At least one bead was processed through the pipeline.
-        assert!(
-            worker.beads_processed() >= 1,
-            "expected at least 1 bead processed, got {}",
-            worker.beads_processed()
-        );
-    }
-
     // ── check_auto_canary tests ──
 
     #[tokio::test]
@@ -12577,9 +12070,6 @@ mod tests {
         worker.config.workspace.default = ws1.clone();
         worker.config.strands.explore.workspaces = vec![ws2.clone()];
 
-        // Force a small delay to ensure different mtimes
-        std::thread::sleep(std::time::Duration::from_millis(10));
-
         // Touch the second file to make it newer
         fs::write(&issues2, "[{\"updated\": true}]").unwrap();
 
@@ -13424,9 +12914,9 @@ mod tests {
         // Take the process-wide env lock: HOME is global, and this test used
         // to set it with no lock and then "restore" it by reading HOME back
         // (already its own temp path) and setting it to itself — leaving every
-        // later test pointed at a deleted directory. That is what made
-        // invalid_config_reload_keeps_worker_running_and_emits_rejection watch
-        // the wrong config file and time out whenever the two ran together.
+        // later test pointed at a deleted directory. That made a worker reload
+        // lifecycle test watch the wrong config file and time out whenever the
+        // two ran together; that lifecycle test now runs in integration_spawn.
         let _env_guard = crate::util::test_env::isolate_env();
 
         let temp = tempfile::tempdir().unwrap();

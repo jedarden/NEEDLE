@@ -22,7 +22,7 @@ version = 1
 # clock contracts plus one Worker retry-policy test. These belong in the unit
 # tier because the seam is process-local and the proof must inspect a pending
 # future before advancing manual time.
-max_tests = 3916
+max_tests = 3906
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
@@ -33,7 +33,8 @@ contract = 67
 # seven integration cases plus nine nested-Cargo fixture tests embedded in source.
 # +1 real-adapter contract for the injectable ProcessRunner (needle-d3f191a3).
 # +13 Git, tar, shell, and filesystem command contracts (needle-8495d35d).
-e2e = 663
+# +9 child-process and real Worker lifecycle contracts (needle-c54ad697).
+e2e = 672
 soak = 0
 fuzz = 0
 
@@ -41,7 +42,7 @@ fuzz = 0
 name = "integration_spawn"
 path = "tests/integration_spawn.rs"
 tier = "e2e"
-max_tests = 291
+max_tests = 300
 owner = "component:process-integration"
 
 [[harness]]
@@ -107,20 +108,6 @@ reason = "Grandfathered unit-tier debt; replace with an injected boundary."
 path = "src/cli/mod.rs"
 kind = "global-env"
 max_occurrences = 6
-owner = "component:cli"
-reason = "Grandfathered unit-tier debt; replace with an injected boundary."
-
-[[unit_exception]]
-path = "src/cli/mod.rs"
-kind = "process"
-max_occurrences = 2
-owner = "component:cli"
-reason = "Grandfathered unit-tier debt; replace with an injected boundary."
-
-[[unit_exception]]
-path = "src/cli/mod.rs"
-kind = "sleep"
-max_occurrences = 1
 owner = "component:cli"
 reason = "Grandfathered unit-tier debt; replace with an injected boundary."
 
@@ -209,27 +196,6 @@ owner = "component:rate-limit"
 reason = "Grandfathered unit-tier debt; replace with an injected boundary."
 
 [[unit_exception]]
-path = "src/registry/mod.rs"
-kind = "process"
-max_occurrences = 1
-owner = "component:registry"
-reason = "Grandfathered unit-tier debt; replace with an injected boundary."
-
-[[unit_exception]]
-path = "src/registry/mod.rs"
-kind = "sleep"
-max_occurrences = 1
-owner = "component:registry"
-reason = "Grandfathered unit-tier debt; replace with an injected boundary."
-
-[[unit_exception]]
-path = "src/sanitize/mod.rs"
-kind = "process"
-max_occurrences = 1
-owner = "component:sanitize"
-reason = "Grandfathered unit-tier debt; replace with an injected boundary."
-
-[[unit_exception]]
 path = "src/spawn_path/mod.rs"
 kind = "sleep"
 max_occurrences = 2
@@ -262,20 +228,6 @@ path = "src/strand/unravel.rs"
 kind = "sleep"
 max_occurrences = 1
 owner = "component:strand-unravel"
-reason = "Grandfathered unit-tier debt; replace with an injected boundary."
-
-[[unit_exception]]
-path = "src/supervisor/mod.rs"
-kind = "process"
-max_occurrences = 1
-owner = "component:supervisor"
-reason = "Grandfathered unit-tier debt; replace with an injected boundary."
-
-[[unit_exception]]
-path = "src/supervisor/mod.rs"
-kind = "sleep"
-max_occurrences = 5
-owner = "component:supervisor"
 reason = "Grandfathered unit-tier debt; replace with an injected boundary."
 
 [[unit_exception]]
@@ -344,7 +296,7 @@ reason = "Grandfathered unit-tier debt; replace with an injected boundary."
 [[unit_exception]]
 path = "src/worker/mod.rs"
 kind = "global-env"
-max_occurrences = 18
+max_occurrences = 13
 owner = "component:worker"
 reason = "Grandfathered unit-tier debt; replace with an injected boundary."
 
@@ -354,13 +306,6 @@ kind = "process"
 max_occurrences = 2
 owner = "component:resolve"
 reason = "Executor unit tests drive the shipped-work gate against real git fixtures (init, commit, rev-parse) in a per-test temp directory; the store boundary cannot stand in for the fixture repository."
-
-[[unit_exception]]
-path = "src/worker/mod.rs"
-kind = "sleep"
-max_occurrences = 8
-owner = "component:worker"
-reason = "Grandfathered unit-tier debt; replace with an injected boundary."
 
 # Files under tests/ that are not compiled into a Rust harness are still test
 # assets. Each must match a rule with a durable component owner.

@@ -17,9 +17,6 @@ use chrono::{DateTime, Utc};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 
-#[allow(unused_imports)]
-use crate::process_guard::ProcessGuardSync;
-
 // ──────────────────────────────────────────────────────────────────────────────
 // PID liveness checking (platform-specific)
 // ──────────────────────────────────────────────────────────────────────────────
@@ -881,38 +878,6 @@ mod tests {
     // process — these tests confirm is_pid_alive additionally treats a
     // zombie (state Z) as not-alive on Linux, rather than inheriting that
     // false positive.
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn is_pid_alive_returns_false_for_a_zombie() {
-        let child = std::process::Command::new("true")
-            .spawn()
-            .expect("failed to spawn `true`");
-        let guard = ProcessGuardSync::new(child);
-        let pid = guard.id();
-
-        let mut became_zombie = false;
-        for _ in 0..200 {
-            if let Some(true) = is_zombie_linux(pid) {
-                became_zombie = true;
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        assert!(
-            became_zombie,
-            "child did not reach zombie state before timeout — test precondition not met"
-        );
-
-        // kill(pid, 0) alone would say "alive" here — the whole point of the fix.
-        assert!(
-            !is_pid_alive(pid),
-            "zombie PID must be treated as not-alive, not just kill(0)-reachable"
-        );
-
-        // Clean up: reap for real so we don't leak a zombie from the test run.
-        let _ = guard.wait();
-    }
 
     #[test]
     fn is_zombie_linux_returns_none_for_nonexistent_pid() {

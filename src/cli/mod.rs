@@ -1910,7 +1910,7 @@ fn kill_process_tree(pid: u32) -> Result<TreeKillOutcome> {
 ///
 /// Reads /proc to build a process tree and returns all descendant PIDs.
 /// This handles the case where agents create new process groups with setpgid(0,0).
-fn find_all_descendants(root_pid: u32) -> Vec<u32> {
+pub fn find_all_descendants(root_pid: u32) -> Vec<u32> {
     use std::fs;
 
     let proc_dir = Path::new("/proc");
@@ -7334,7 +7334,6 @@ fn cmd_update_rules(output: Option<PathBuf>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bead_store::spawn_with_etxtbsy_retry;
 
     #[test]
     fn nato_alphabet_has_26_entries() {
@@ -7525,35 +7524,6 @@ mod tests {
         // We cannot unset env vars reliably in a parallel test suite, so we
         // only assert the call succeeds without panicking.
         let _ = is_needle_inner();
-    }
-
-    #[tokio::test]
-    async fn is_needle_inner_true_when_env_set() {
-        // Temporarily set NEEDLE_INNER=1 and verify detection.
-        // Use a sub-process approach via std::process to avoid mutating the
-        // test process's env and racing with parallel tests.
-        let exe_path = std::env::current_exe().unwrap();
-        let output = spawn_with_etxtbsy_retry(
-            || async {
-                tokio::process::Command::new(&exe_path)
-                    .env("NEEDLE_INNER", "1")
-                    .args(["--help"])
-                    .output()
-                    .await
-            },
-            5,  // max_attempts
-            20, // backoff_ms
-        )
-        .await;
-        // We can't call is_needle_inner() with a controlled env from here
-        // without unsafe env mutation, so we verify the env var logic directly.
-        assert!(
-            std::env::var("NEEDLE_INNER")
-                .map(|v| v == "1")
-                .unwrap_or(false)
-                || output.is_ok(),
-            "env var logic should work"
-        );
     }
 
     #[test]
@@ -9059,39 +9029,6 @@ mod tests {
         // Should find 2, then stop when it encounters 1 again (already visited)
         assert_eq!(descendants.len(), 1);
         assert!(descendants.contains(&2));
-    }
-
-    #[test]
-    #[cfg(target_os = "linux")]
-    fn find_all_descendants_reads_linux_ppid_field() {
-        use std::process::{Command, Stdio};
-        use std::time::{Duration, Instant};
-
-        let mut child = Command::new("sleep")
-            .arg("30")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("sleep should spawn");
-        let child_pid = child.id();
-
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let discovered = loop {
-            if find_all_descendants(std::process::id()).contains(&child_pid) {
-                break true;
-            }
-            if Instant::now() >= deadline {
-                break false;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        };
-
-        let _ = child.kill();
-        let _ = child.wait();
-        assert!(
-            discovered,
-            "a direct child must be discoverable through /proc/PID/status PPid"
-        );
     }
 
     #[test]

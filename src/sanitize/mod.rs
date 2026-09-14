@@ -750,53 +750,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn sanitizer_memory_budget() {
-        // Run alone in a child test process so parallel tests and allocator
-        // reuse cannot hide the startup peak. This never starts a worker.
-        const PROBE: &str = "NEEDLE_SANITIZER_MEMORY_PROBE";
-        if std::env::var_os(PROBE).is_none() {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "sanitize::tests::sanitizer_memory_budget",
-                    "--nocapture",
-                ])
-                .env(PROBE, "1")
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "memory probe failed:\n{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-            return;
-        }
-        let peak_kib = || {
-            std::fs::read_to_string("/proc/self/status")
-                .unwrap()
-                .lines()
-                .find_map(|line| line.strip_prefix("VmHWM:"))
-                .unwrap()
-                .split_whitespace()
-                .next()
-                .unwrap()
-                .parse::<usize>()
-                .unwrap()
-        };
-        let before = peak_kib();
-        let s = make_sanitizer();
-        let after = peak_kib();
-        assert!(s.rule_count() >= 200);
-        assert!(
-            after.saturating_sub(before) < 64 * 1024,
-            "sanitizer startup grew peak RSS by {} KiB; budget is 64 MiB",
-            after.saturating_sub(before)
-        );
-    }
-
     #[test]
     fn sanitizer_redacts_anthropic_api_key() {
         let s = make_sanitizer();
