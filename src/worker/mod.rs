@@ -802,6 +802,9 @@ pub struct Worker {
     /// Handle to the watchdog thread for cleanup on worker drop.
     #[allow(dead_code)]
     watchdog_handle: Option<std::thread::JoinHandle<()>>,
+    /// Wakes the native watchdog immediately during shutdown instead of
+    /// making worker teardown wait for the next polling interval.
+    watchdog_control: Option<std::sync::mpsc::Sender<()>>,
     /// Timestamp when the last freshness check was performed.
     /// Used to enforce the freshness_check_interval_secs configured interval.
     last_freshness_check: Option<Instant>,
@@ -1226,6 +1229,7 @@ impl Worker {
             handling_state_entered_at: None,
             watchdog_triggered: watchdog_triggered.clone(),
             watchdog_handle: None,
+            watchdog_control: None,
             bead_lifecycle_span: None,
             last_outcome: None,
             last_workspace_mtime: None,
@@ -1319,10 +1323,14 @@ impl Worker {
         let watchdog_triggered = self.watchdog_triggered.clone();
         let handling_state_entered_at_ptr =
             &self.handling_state_entered_at as *const Option<Instant> as usize;
+        let (watchdog_control, watchdog_commands) = std::sync::mpsc::channel();
 
         let handle = std::thread::spawn(move || {
             loop {
-                std::thread::sleep(Duration::from_secs(5));
+                match watchdog_commands.recv_timeout(Duration::from_secs(5)) {
+                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                }
                 if watchdog_triggered.load(Ordering::Relaxed) {
                     // Watchdog has already triggered, exit the thread.
                     break;
@@ -1351,6 +1359,7 @@ impl Worker {
         });
 
         self.watchdog_handle = Some(handle);
+        self.watchdog_control = Some(watchdog_control);
     }
 
     /// Run the worker loop until exhausted, stopped, or errored.
@@ -7687,9 +7696,13 @@ impl Drop for Worker {
         // Join the watchdog thread if it was started.
         // Set the trigger flag to signal the thread to exit.
         self.watchdog_triggered.store(true, Ordering::Release);
+        if let Some(control) = self.watchdog_control.take() {
+            let _ = control.send(());
+        }
         if let Some(handle) = self.watchdog_handle.take() {
-            // Don't block indefinitely joining the thread during drop.
-            // If it doesn't exit within 1 second, we'll still continue.
+            // The control message above interrupts the watchdog's timed wait,
+            // so joining does not add its five-second polling interval to
+            // every worker cycle or test teardown.
             let _ = handle.join();
         }
     }
@@ -11411,7 +11424,7 @@ mod tests {
 
     // ── full cycle test ──
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn full_cycle_with_echo_agent() {
         use std::collections::HashMap;
 
@@ -11722,8 +11735,8 @@ mod tests {
         assert_eq!(matched_rule, "routing-default");
     }
 
-    #[tokio::test]
-    async fn default_routing_rules_anthropic_subscription_models() {
+    #[test]
+    fn default_routing_rules_anthropic_subscription_models() {
         // Verify that default routing rules route Anthropic subscription models to claude.
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut config = Config::default();
@@ -11771,12 +11784,12 @@ mod tests {
             "haiku",
         ];
 
+        // Routing is synchronous and stateless. Reuse one Worker so this
+        // table does not repeatedly rebuild unrelated dispatch and telemetry
+        // state.
+        let worker = Worker::new(config, "test-default-routing".to_string(), store);
+
         for model_name in anthropic_models {
-            let worker = Worker::new(
-                config.clone(),
-                format!("test-routing-{}", model_name),
-                Arc::clone(&store),
-            );
             let adapter = crate::dispatch::AgentAdapter {
                 name: "claude".to_string(),
                 description: None,
@@ -11825,11 +11838,6 @@ mod tests {
         ];
 
         for model_name in non_anthropic_models {
-            let worker = Worker::new(
-                config.clone(),
-                format!("test-routing-{}", model_name),
-                Arc::clone(&store),
-            );
             let adapter = crate::dispatch::AgentAdapter {
                 name: "claude".to_string(),
                 description: None,
