@@ -171,7 +171,11 @@ needle_append_bypass_event() {
 # bypass — counting every line reports roughly 8x the real figure.
 needle_bypass_counts() {
     local log
-    log="$(git rev-parse --show-toplevel 2>/dev/null)/.beads/bypasses.jsonl"
+    if [[ -n "${NEEDLE_BYPASS_LOG:-}" ]]; then
+        log="$NEEDLE_BYPASS_LOG"
+    else
+        log="$(git rev-parse --show-toplevel 2>/dev/null)/.beads/bypasses.jsonl"
+    fi
     [[ -f "$log" ]] || { printf '0 0'; return 0; }
     local total today_count today
     today="$(date -u +%Y-%m-%d)"
@@ -207,8 +211,18 @@ needle_git_state_dir() {
 needle_index_state_path() {
     local tree_sha
     local parent
-    tree_sha="$(git write-tree 2>/dev/null)" || return 1
-    parent="$(git rev-parse --verify HEAD 2>/dev/null)" || parent=''
+    if [[ -n "${NEEDLE_VERIFICATION_PARENT:-}" || -n "${NEEDLE_VERIFICATION_TREE:-}" ]]; then
+        [[ -n "${NEEDLE_VERIFICATION_PARENT:-}" && -n "${NEEDLE_VERIFICATION_TREE:-}" ]] \
+            || return 1
+        [[ "$NEEDLE_VERIFICATION_PARENT" == root \
+            || "$NEEDLE_VERIFICATION_PARENT" =~ ^[0-9a-f]{40,64}$ ]] || return 1
+        [[ "$NEEDLE_VERIFICATION_TREE" =~ ^[0-9a-f]{40,64}$ ]] || return 1
+        parent="$NEEDLE_VERIFICATION_PARENT"
+        tree_sha="$NEEDLE_VERIFICATION_TREE"
+    else
+        tree_sha="$(git write-tree 2>/dev/null)" || return 1
+        parent="$(git rev-parse --verify HEAD 2>/dev/null)" || parent=''
+    fi
     printf '%s/%s-%s' "$(needle_git_state_dir)" "${parent:-root}" "$tree_sha"
 }
 

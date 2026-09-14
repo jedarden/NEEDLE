@@ -487,5 +487,9 @@ pattern = "tests/pending/*"
 owner = "component:test-debt"
 
 [[artifact]]
+pattern = "tests/precommit-staged-tree/*"
+owner = "component:precommit-staged-tree"
+
+[[artifact]]
 pattern = "tests/test-policy/*"
 owner = "component:test-policy"

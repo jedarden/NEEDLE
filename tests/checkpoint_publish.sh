@@ -10,17 +10,15 @@ trap 'rm -rf "$tmp_dir"' EXIT
 mkdir -p "$tmp_dir/repo/scripts" "$tmp_dir/repo/config" "$tmp_dir/repo/.githooks" \
     "$tmp_dir/repo/.beads/checkpoint/objects"
 cp "$repo_root/scripts/checkpoint-publish.sh" "$tmp_dir/repo/scripts/"
+cp "$repo_root/scripts/bypass-detection.sh" "$tmp_dir/repo/scripts/"
 cp "$repo_root/scripts/secret-scan.sh" "$tmp_dir/repo/scripts/"
 cp "$repo_root/config/gitleaks.toml" "$tmp_dir/repo/config/"
 cp "$repo_root/.githooks/pre-commit" "$tmp_dir/repo/.githooks/"
-cat > "$tmp_dir/repo/scripts/bypass-detection.sh" <<'EOF'
-needle_clear_index_state() {
-    :
-}
-EOF
 cat > "$tmp_dir/repo/scripts/definition-of-done.sh" <<'EOF'
 #!/usr/bin/env bash
-exit 0
+set -euo pipefail
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/bypass-detection.sh"
+needle_mark_verified fast
 EOF
 cat > "$tmp_dir/repo/scripts/fake-gitleaks" <<'EOF'
 #!/usr/bin/env bash

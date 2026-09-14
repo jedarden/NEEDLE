@@ -31,7 +31,13 @@ cat > "$tmp_dir/repo/scripts/checkpoint-publish.sh" <<'EOF'
 #!/usr/bin/env bash
 exit 0
 EOF
-chmod +x "$tmp_dir/repo/scripts/definition-of-done.sh" "$tmp_dir/repo/scripts/checkpoint-publish.sh"
+cat > "$tmp_dir/repo/scripts/secret-scan.sh" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+chmod +x "$tmp_dir/repo/scripts/definition-of-done.sh" \
+    "$tmp_dir/repo/scripts/checkpoint-publish.sh" \
+    "$tmp_dir/repo/scripts/secret-scan.sh"
 
 cd "$tmp_dir/repo"
 git init -q
@@ -39,7 +45,7 @@ git config user.name test-user
 git config user.email test@example.invalid
 git config core.hooksPath .githooks
 printf 'initial\n' > README.md
-git add README.md
+git add .githooks scripts README.md
 git commit --quiet -m initial
 
 # Normal pre-commit verification must not create a bypass event.

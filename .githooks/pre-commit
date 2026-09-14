@@ -9,12 +9,84 @@
 # This will be recorded in .beads/bypasses.jsonl by the post-commit hook.
 
 set -euo pipefail
+umask 077
 
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
 # shellcheck source=../scripts/bypass-detection.sh
 source "$repo_root/scripts/bypass-detection.sh"
+
+git_dir="$(git rev-parse --absolute-git-dir)"
+live_index="$(git rev-parse --path-format=absolute --git-path index)"
+verification_tmp="$(mktemp -d "${TMPDIR:-/tmp}/needle-precommit.XXXXXX")"
+snapshot_git="$verification_tmp/git"
+snapshot_root="$verification_tmp/tree"
+cargo_target_dir="${CARGO_TARGET_DIR:-$repo_root/target}"
+if [[ "$cargo_target_dir" != /* ]]; then
+  cargo_target_dir="$repo_root/$cargo_target_dir"
+fi
+
+cleanup_verification_tmp() {
+  if [[ -n "${verification_tmp:-}" && -d "$verification_tmp" ]]; then
+    find "$verification_tmp" -depth -delete
+  fi
+}
+trap cleanup_verification_tmp EXIT
+
+real_git() {
+  GIT_DIR="$git_dir" GIT_WORK_TREE="$repo_root" GIT_INDEX_FILE="$live_index" git "$@"
+}
+
+current_parent_tree() {
+  local parent tree
+  parent="$(real_git rev-parse --verify HEAD 2>/dev/null || printf '%s' root)"
+  tree="$(real_git write-tree)" || return 1
+  printf '%s %s\n' "$parent" "$tree"
+}
+
+# Copy the index once. Git replaces the index atomically, so the copy is a
+# complete old or new index even when another process stages concurrently.
+# Converting away from split-index form makes the snapshot self-contained.
+captured_parent="$(real_git rev-parse --verify HEAD 2>/dev/null || printf '%s' root)"
+mkdir -p "$snapshot_git/objects/info" "$snapshot_git/refs" "$snapshot_root"
+cp -- "$live_index" "$snapshot_git/index"
+for shared_index in "$git_dir"/sharedindex.*; do
+  [[ -f "$shared_index" ]] || continue
+  cp -- "$shared_index" "$snapshot_git/"
+done
+git_common_dir="$(git rev-parse --path-format=absolute --git-common-dir)"
+printf '%s\n' "$git_common_dir/objects" > "$snapshot_git/objects/info/alternates"
+if [[ "$captured_parent" == root ]]; then
+  printf '%s\n' 'ref: refs/heads/snapshot' > "$snapshot_git/HEAD"
+else
+  printf '%s\n' "$captured_parent" > "$snapshot_git/HEAD"
+fi
+GIT_DIR="$snapshot_git" GIT_WORK_TREE="$snapshot_root" \
+  git update-index --no-split-index
+captured_tree="$(GIT_DIR="$snapshot_git" GIT_WORK_TREE="$snapshot_root" git write-tree)"
+
+if [[ "$(current_parent_tree)" != "$captured_parent $captured_tree" ]]; then
+  echo "ERROR: Git HEAD or index changed while pre-commit captured it; retry the commit." >&2
+  exit 1
+fi
+
+# `git archive` materializes only the captured tree: no unstaged file, ignored
+# build output, or concurrent working-tree edit can enter the verification.
+real_git archive --format=tar "$captured_tree" | tar -xf - -C "$snapshot_root"
+run_in_snapshot() (
+  cd "$snapshot_root"
+  export GIT_DIR="$snapshot_git"
+  export GIT_WORK_TREE="$snapshot_root"
+  export GIT_INDEX_FILE="$snapshot_git/index"
+  export NEEDLE_PRE_COMMIT=1
+  export NEEDLE_BYPASS_LOG="$repo_root/.beads/bypasses.jsonl"
+  # Keep compilation output outside the disposable source tree. Cargo's
+  # package fingerprints and target-dir lock make the checkout's normal cache
+  # safe to reuse across exact-tree invocations and concurrent hooks.
+  export CARGO_TARGET_DIR="$cargo_target_dir"
+  "$@"
+)
 
 echo "=== Running Definition of Done (fast lane, this commit's paths) ==="
 
@@ -24,8 +96,7 @@ echo "=== Running Definition of Done (fast lane, this commit's paths) ==="
 # in-flight work that is not theirs, and the only way out is --no-verify —
 # which is how .beads/bypasses.jsonl reached 607 entries. A pre-existing
 # failure elsewhere is still printed in full; it just does not block.
-export NEEDLE_PRE_COMMIT=1
-if ! scripts/definition-of-done.sh --fast --count-bypass --changed-only; then
+if ! run_in_snapshot scripts/definition-of-done.sh --fast --count-bypass --changed-only; then
   echo ""
   echo "❌ Pre-commit check failed"
   echo ""
@@ -42,15 +113,36 @@ if ! scripts/definition-of-done.sh --fast --count-bypass --changed-only; then
 fi
 
 echo "=== Running secret verification ==="
-if ! "$repo_root/scripts/secret-scan.sh" staged; then
-  needle_clear_index_state
+if ! run_in_snapshot scripts/secret-scan.sh staged; then
   exit 1
 fi
 
 echo "=== Running checkpoint verification ==="
-if ! "$repo_root/scripts/checkpoint-publish.sh" verify-index; then
-  # Do not leave an environment-bypass marker behind if this later hook check
-  # prevents the commit from being created.
-  needle_clear_index_state
+if ! run_in_snapshot scripts/checkpoint-publish.sh verify-index; then
+  exit 1
+fi
+
+# The gate can only return success after verification or an explicit
+# SKIP_CHECKS opt-out. Its own marker lives in the disposable Git directory;
+# derive the existing handoff record here so older staged trees remain
+# committable while this hook change itself is being introduced.
+verification_lanes=fast
+verification_pattern=''
+if needle_bypass_requested; then
+  verification_status=bypass
+  verification_pattern="$(needle_bypass_pattern)"
+else
+  verification_status=verified
+fi
+
+if [[ "$(current_parent_tree)" != "$captured_parent $captured_tree" ]]; then
+  echo "ERROR: Git HEAD or index changed during pre-commit; no verification evidence was published." >&2
+  exit 1
+fi
+
+export NEEDLE_VERIFICATION_PARENT="$captured_parent"
+export NEEDLE_VERIFICATION_TREE="$captured_tree"
+if ! needle_write_state "$verification_status" "$verification_lanes" "$verification_pattern"; then
+  echo "ERROR: Could not publish the verification result for post-commit tracking." >&2
   exit 1
 fi
