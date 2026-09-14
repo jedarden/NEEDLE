@@ -245,6 +245,7 @@ impl BeadStore for CycleStore {
             status: bead.status,
             assignee: bead.assignee,
             revision: None,
+            claim_epoch: None,
         })
     }
 

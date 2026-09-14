@@ -562,12 +562,24 @@ pub enum EventKind {
     ClaimVerifySuccess {
         bead_id: BeadId,
         expected_actor: String,
+        /// Workspace whose store the claim identity was verified against.
+        workspace: String,
+        /// Claim epoch observed in the verified store (`None` when the
+        /// backend does not expose claim epochs).
+        claim_epoch: Option<u64>,
     },
     ClaimVerifyFailed {
         bead_id: BeadId,
         expected_actor: String,
         actual_status: String,
         actual_assignee: String,
+        /// Identity fields that failed: a subset of `status`, `assignee`,
+        /// `revision`, `claim_epoch`.
+        failed_fields: Vec<String>,
+        expected_revision: Option<u64>,
+        actual_revision: Option<u64>,
+        expected_claim_epoch: Option<u64>,
+        actual_claim_epoch: Option<u64>,
     },
     /// A stage-local claim re-check passed.
     ///
@@ -3375,11 +3387,21 @@ impl EventKind {
                 expected_actor,
                 actual_status,
                 actual_assignee,
+                failed_fields,
+                expected_revision,
+                actual_revision,
+                expected_claim_epoch,
+                actual_claim_epoch,
             } => serde_json::json!({
                 "bead_id": bead_id,
                 "expected_actor": expected_actor,
                 "actual_status": actual_status,
                 "actual_assignee": actual_assignee,
+                "failed_fields": failed_fields,
+                "expected_revision": expected_revision,
+                "actual_revision": actual_revision,
+                "expected_claim_epoch": expected_claim_epoch,
+                "actual_claim_epoch": actual_claim_epoch,
             }),
             EventKind::ClaimVerifyStarted {
                 bead_id,
@@ -3391,9 +3413,13 @@ impl EventKind {
             EventKind::ClaimVerifySuccess {
                 bead_id,
                 expected_actor,
+                workspace,
+                claim_epoch,
             } => serde_json::json!({
                 "bead_id": bead_id,
                 "expected_actor": expected_actor,
+                "workspace": workspace,
+                "claim_epoch": claim_epoch,
             }),
             EventKind::ClaimRecheckSucceeded {
                 bead_id,
@@ -6398,6 +6424,8 @@ mod tests {
                 EventKind::ClaimVerifySuccess {
                     bead_id: BeadId::from("nd-x"),
                     expected_actor: "worker-1".to_string(),
+                    workspace: "/tmp/ws".to_string(),
+                    claim_epoch: Some(3),
                 },
                 "bead.claim.verify_success",
             ),
@@ -6407,6 +6435,11 @@ mod tests {
                     expected_actor: "worker-1".to_string(),
                     actual_status: "in_progress".to_string(),
                     actual_assignee: "worker-1".to_string(),
+                    failed_fields: vec!["claim_epoch".to_string()],
+                    expected_revision: Some(9),
+                    actual_revision: Some(9),
+                    expected_claim_epoch: Some(2),
+                    actual_claim_epoch: Some(3),
                 },
                 "bead.claim.verify_failed",
             ),

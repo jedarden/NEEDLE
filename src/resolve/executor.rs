@@ -681,9 +681,10 @@ impl DecisionExecutor {
                 "resolve: ownership re-check failed — no mutation will be attempted"
             );
             let _ = self.telemetry.emit(
-                EventKind::ClaimVerifyFailed {
+                EventKind::ClaimRecheckFailed {
                     bead_id: bead_id.clone(),
                     expected_actor: actor.to_string(),
+                    stage: "resolve".to_string(),
                     actual_status: format!("{:?}", status.status),
                     actual_assignee: status
                         .assignee
@@ -1047,6 +1048,7 @@ mod tests {
                 status: claim.status.clone(),
                 assignee: claim.assignee.clone(),
                 revision: None,
+                claim_epoch: None,
             })
         }
         async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<ClaimResult> {

@@ -15,9 +15,17 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 use needle::bead_store::{BeadStore, Filters};
-use needle::claim::{Claimer, ResolvedStoreContext};
+use needle::claim::{ClaimIdentity, Claimer, ResolvedStoreContext};
 use needle::telemetry::Telemetry;
 use needle::types::{Bead, BeadId, BeadStatus, ClaimResult};
+
+fn identity(actor: &str) -> ClaimIdentity {
+    ClaimIdentity {
+        actor: actor.to_string(),
+        revision: None,
+        claim_epoch: None,
+    }
+}
 
 /// Helper to create a test bead.
 fn create_test_bead(id: &str) -> Bead {
@@ -136,6 +144,7 @@ impl BeadStore for RaceConditionStore {
                 status: bead.status.clone(),
                 assignee: bead.assignee.clone(),
                 revision: None,
+                claim_epoch: None,
             })
         } else {
             Err(anyhow::anyhow!("bead not found: {id}"))
@@ -275,7 +284,7 @@ async fn atomic_verification_prevents_race_condition_at_spawn() {
 
     // Step 2: Worker A's dispatch-time verification should succeed
     let verification_a = claimer_a
-        .verify_claim_at_dispatch(&target, &bead_id, worker_a)
+        .verify_claim_at_dispatch(&target, &bead_id, &identity(worker_a))
         .await
         .expect("worker a verification succeeds");
 
@@ -302,7 +311,7 @@ async fn atomic_verification_prevents_race_condition_at_spawn() {
     // Step 5: Worker A's verification would now fail (preventing spawn)
     // This demonstrates that the atomic verification at spawn time would catch this
     let verification_a_after_race = claimer_a
-        .verify_claim_at_dispatch(&target, &bead_id, worker_a)
+        .verify_claim_at_dispatch(&target, &bead_id, &identity(worker_a))
         .await
         .expect("worker a verification after race completes");
 
@@ -361,7 +370,7 @@ async fn atomic_verification_no_gap_between_check_and_spawn() {
 
     // Verify dispatch-time verification works
     let verification = claimer_a
-        .verify_claim_at_dispatch(&target, &bead_id, worker_a)
+        .verify_claim_at_dispatch(&target, &bead_id, &identity(worker_a))
         .await
         .expect("verification succeeds");
 

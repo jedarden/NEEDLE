@@ -18,9 +18,17 @@ use tokio::sync::Barrier;
 use tokio::time::{sleep, Instant};
 
 use needle::bead_store::{BeadStore, Filters};
-use needle::claim::{Claimer, ResolvedStoreContext};
+use needle::claim::{ClaimIdentity, Claimer, ResolvedStoreContext};
 use needle::telemetry::Telemetry;
 use needle::types::{Bead, BeadId, BeadStatus, ClaimResult};
+
+fn identity(actor: &str) -> ClaimIdentity {
+    ClaimIdentity {
+        actor: actor.to_string(),
+        revision: None,
+        claim_epoch: None,
+    }
+}
 
 /// Helper to create a test bead.
 fn create_test_bead(id: &str) -> Bead {
@@ -131,6 +139,7 @@ impl BeadStore for MockStore {
                 status: bead.status.clone(),
                 assignee: bead.assignee.clone(),
                 revision: None,
+                claim_epoch: None,
             })
         } else {
             Err(anyhow::anyhow!("bead not found: {id}"))
@@ -281,7 +290,7 @@ async fn double_dispatch_prevention_blocks_second_worker() {
 
     // Step 2: Worker A's dispatch-time verification should succeed
     let verification_a = claimer_a
-        .verify_claim_at_dispatch(&target, &bead_id, worker_a)
+        .verify_claim_at_dispatch(&target, &bead_id, &identity(worker_a))
         .await
         .expect("worker a verification succeeds");
 
@@ -292,7 +301,7 @@ async fn double_dispatch_prevention_blocks_second_worker() {
 
     // Step 3: Worker B attempts to dispatch the same bead (should fail)
     let verification_b = claimer_b
-        .verify_claim_at_dispatch(&target, &bead_id, worker_b)
+        .verify_claim_at_dispatch(&target, &bead_id, &identity(worker_b))
         .await
         .expect("worker b verification completes");
 
@@ -372,7 +381,7 @@ async fn double_dispatch_prevention_with_concurrent_dispatch_attempts() {
     let handle_a = tokio::spawn(async move {
         barrier_clone.wait().await; // Wait for both workers to be ready
         let verification = claimer_a
-            .verify_claim_at_dispatch(&target_clone_a, &bead_id_clone_a, worker_a)
+            .verify_claim_at_dispatch(&target_clone_a, &bead_id_clone_a, &identity(worker_a))
             .await
             .expect("worker a verification completes");
 
@@ -390,7 +399,7 @@ async fn double_dispatch_prevention_with_concurrent_dispatch_attempts() {
         sleep(Duration::from_millis(5)).await;
 
         let verification = claimer_b
-            .verify_claim_at_dispatch(&target_clone_b, &bead_id_clone_b, worker_b)
+            .verify_claim_at_dispatch(&target_clone_b, &bead_id_clone_b, &identity(worker_b))
             .await
             .expect("worker b verification completes");
 
@@ -474,7 +483,7 @@ async fn double_dispatch_prevention_after_bead_reassignment() {
 
     // Worker A's initial verification should succeed
     let verification_a_initial = claimer_a
-        .verify_claim_at_dispatch(&target, &bead_id, worker_a)
+        .verify_claim_at_dispatch(&target, &bead_id, &identity(worker_a))
         .await
         .expect("worker a initial verification succeeds");
 
@@ -501,7 +510,7 @@ async fn double_dispatch_prevention_after_bead_reassignment() {
 
     // Worker A's subsequent dispatch attempt should now fail (bead reassigned to B)
     let verification_a_subsequent = claimer_a
-        .verify_claim_at_dispatch(&target, &bead_id, worker_a)
+        .verify_claim_at_dispatch(&target, &bead_id, &identity(worker_a))
         .await
         .expect("worker a subsequent verification completes");
 
@@ -512,7 +521,7 @@ async fn double_dispatch_prevention_after_bead_reassignment() {
 
     // Worker B's verification should succeed
     let verification_b = claimer_b
-        .verify_claim_at_dispatch(&target, &bead_id, worker_b)
+        .verify_claim_at_dispatch(&target, &bead_id, &identity(worker_b))
         .await
         .expect("worker b verification succeeds");
 
@@ -573,7 +582,7 @@ async fn double_dispatch_prevention_performance_under_load() {
 
     for _ in 0..iterations {
         let verification = claimer_a
-            .verify_claim_at_dispatch(&target, &bead_id, worker_a)
+            .verify_claim_at_dispatch(&target, &bead_id, &identity(worker_a))
             .await
             .expect("verification succeeds");
 

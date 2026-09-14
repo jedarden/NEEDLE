@@ -34,7 +34,7 @@ use crate::bead_store::BeadStore;
 use crate::build_status::BuildStatusChecker;
 use crate::canary::CanaryRunner;
 use crate::ci::{self, RegistrationResult};
-use crate::claim::{CircuitGate, Claimer};
+use crate::claim::{CircuitGate, ClaimIdentity, Claimer};
 use crate::clock::{Clock, TokioClock};
 use crate::commit_hook;
 use crate::config::{CliOverrides, Config, ConfigLoader, ConfigSource, SourceMap};
@@ -733,6 +733,10 @@ pub struct Worker {
     /// reconstructed from a path, and never the home store as a fallback.
     /// `None` outside a resolved cycle; verification aborts when absent.
     target_store: Option<crate::claim::ResolvedStoreContext>,
+    /// Full identity read back immediately after this worker's claim lands.
+    /// Dispatch must compare the live store with this claim-time snapshot;
+    /// reconstructing it later would miss a release/re-claim by the same actor.
+    claim_identity: Option<ClaimIdentity>,
     telemetry: Telemetry,
     strands: StrandRunner,
     claimer: Claimer,
@@ -1196,6 +1200,7 @@ impl Worker {
             home_store: store.clone(),
             store,
             target_store: None,
+            claim_identity: None,
             telemetry,
             strands,
             claimer,
@@ -2690,6 +2695,7 @@ impl Worker {
         // The resolved store context belongs to the cycle being torn down;
         // the next selection captures a fresh one.
         self.target_store = None;
+        self.claim_identity = None;
         if !Arc::ptr_eq(&self.store, &self.home_store) {
             tracing::debug!("restoring home workspace store");
             self.store = self.home_store.clone();
@@ -2731,6 +2737,22 @@ impl Worker {
                 "no resolved store context for bead {} — cannot verify the claim \
                  through the store it was made against; refusing to fall back to \
                  the home store",
+                bead_id
+            )
+        })
+    }
+
+    /// Return the identity captured when this cycle's claim landed.
+    ///
+    /// Dispatch must never synthesize this from a later store read: doing so
+    /// would bless a release/re-claim that happened between claim and spawn.
+    fn resolve_claim_identity(
+        claim_identity: &Option<ClaimIdentity>,
+        bead_id: &BeadId,
+    ) -> Result<ClaimIdentity> {
+        claim_identity.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "no claim-time identity for bead {} — refusing to reconstruct it at dispatch",
                 bead_id
             )
         })
@@ -2909,6 +2931,25 @@ impl Worker {
 
         match claim {
             ClaimResult::Claimed(mut bead) => {
+                // Read the full identity back through the exact store the
+                // claim landed in. This snapshot must be taken now, not just
+                // before dispatch: a release/re-claim by the same actor can
+                // otherwise look indistinguishable from the original claim.
+                let target_store = Self::resolve_target_store(&self.target_store, &bead.id)
+                    .with_context(|| {
+                        format!("failed to capture claim identity for bead {}", bead.id)
+                    })?;
+                let identity = ClaimIdentity::capture(
+                    target_store.store().as_ref(),
+                    &bead.id,
+                    &self.qualified_id(),
+                )
+                .await
+                .with_context(|| {
+                    format!("failed to capture claim identity for bead {}", bead.id)
+                })?;
+                self.claim_identity = Some(identity);
+
                 tracing::info!(bead_id = %bead.id, title = %bead.title, "claimed bead");
                 self.consecutive_race_lost = 0;
                 self.retry_count = 0;
@@ -3736,7 +3777,7 @@ impl Worker {
             // collide with the mutable use of self.exec_started_at (E0500). A field
             // access like self.worker_name is a disjoint capture and does not, but
             // worker_name is the WRONG actor -- the claim is made with qualified_id().
-            let qualified_actor = self.qualified_id();
+            let claim_identity = Self::resolve_claim_identity(&self.claim_identity, &bead.id)?;
             let (result, exec_tokens, token) = async {
                 // Snapshot workspace HEAD + the bead's notes before the agent
                 // runs, so the shipped-work gate has a baseline to judge the
@@ -3787,7 +3828,7 @@ impl Worker {
                     })?;
                 let is_valid = self
                     .claimer
-                    .verify_claim_at_dispatch(target_store, &bead.id, &qualified_actor)
+                    .verify_claim_at_dispatch(target_store, &bead.id, &claim_identity)
                     .await
                     .with_context(|| {
                         format!(
@@ -3833,7 +3874,7 @@ impl Worker {
                     bail!(
                         "dispatch-time claim verification failed for bead {}: bead is not assigned to worker {}",
                         bead.id,
-                        qualified_actor
+                        claim_identity.actor
                     );
                 }
 
@@ -8928,6 +8969,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn resolve_claim_identity_rejects_a_missing_claim_time_snapshot() {
+        let bead = make_test_bead("needle-no-claim-identity");
+
+        let error = Worker::resolve_claim_identity(&None, &bead.id)
+            .expect_err("dispatch must fail closed without a claim-time identity");
+
+        let message = error.to_string();
+        assert!(message.contains("no claim-time identity"));
+        assert!(message.contains("refusing to reconstruct"));
+    }
+
     fn make_worker(store: Arc<dyn BeadStore>) -> Worker {
         let mut config = valid_test_config();
         // Disable hot-reload in tests — it would re-exec into a different binary.
@@ -9456,6 +9509,15 @@ mod tests {
         worker.do_claim().await.unwrap();
 
         assert_eq!(*worker.state(), WorkerState::Building);
+        assert_eq!(
+            worker.claim_identity,
+            Some(ClaimIdentity {
+                actor: worker.qualified_id(),
+                revision: None,
+                claim_epoch: None,
+            }),
+            "the claim identity must be captured once at claim time and retained for dispatch"
+        );
         assert_eq!(
             store.show(&deferred.id).await.unwrap().status,
             BeadStatus::Open
@@ -11036,9 +11098,18 @@ mod tests {
         worker.store = remote_store.clone();
         worker.dispatcher.set_bead_store(remote_store);
         worker.current_workspace = PathBuf::from("/tmp/remote-workspace");
+        worker.claim_identity = Some(ClaimIdentity {
+            actor: worker.qualified_id(),
+            revision: Some(2),
+            claim_epoch: Some(1),
+        });
 
         worker.restore_home_store();
 
+        assert!(
+            worker.claim_identity.is_none(),
+            "a completed cycle must not leak its claim identity into the next claim"
+        );
         assert!(Arc::ptr_eq(&worker.store, &home_store));
         assert!(Arc::ptr_eq(
             worker.dispatcher.bead_store().unwrap(),

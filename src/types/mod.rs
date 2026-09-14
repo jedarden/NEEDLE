@@ -986,6 +986,13 @@ pub struct ClaimStatus {
     /// This value increments on every state change. Use it with `--if-revision`
     /// for atomic compare-and-set operations (bead-rs only).
     pub revision: Option<u64>,
+    /// Monotonic claim epoch, bumped on every claim of this bead.
+    ///
+    /// Unlike `revision`, this distinguishes a *re-claim* from other writes:
+    /// a bead released and claimed again by the same actor name gets a new
+    /// epoch while status and assignee look unchanged. `None` for backends
+    /// that don't expose claim epochs (bead-forge).
+    pub claim_epoch: Option<u64>,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

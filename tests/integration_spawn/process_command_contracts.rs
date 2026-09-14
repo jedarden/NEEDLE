@@ -612,6 +612,7 @@ impl BeadStore for TestStore {
             status: self.bead.status.clone(),
             assignee: self.bead.assignee.clone(),
             revision: None,
+            claim_epoch: None,
         })
     }
 

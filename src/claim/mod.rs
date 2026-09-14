@@ -20,7 +20,7 @@ use fs2::FileExt;
 use crate::bead_store::BeadStore;
 use crate::build_status::{BuildStatusChecker, CiWorkflowRun};
 use crate::telemetry::{EventKind, Telemetry};
-use crate::types::{Bead, BeadId, BeadStatus, ClaimOutcome, ClaimResult};
+use crate::types::{Bead, BeadId, BeadStatus, ClaimOutcome, ClaimResult, ClaimStatus};
 
 /// Flock timeout: maximum time to wait for the workspace lock.
 const FLOCK_TIMEOUT: Duration = Duration::from_secs(10);
@@ -233,6 +233,87 @@ impl ResolvedStoreContext {
     /// The workspace this store was resolved for (telemetry/diagnostic use).
     pub fn workspace(&self) -> &Path {
         &self.workspace
+    }
+}
+
+/// The full claim identity captured when a claim landed, and the expected
+/// half of the dispatch-time identity check.
+///
+/// A claim is more than `status + assignee`: a bead that was released and
+/// re-claimed — even by the same worker name — and a bead whose revision
+/// moved underneath the claim both look "still claimed" to a two-field
+/// check. The identity therefore records the revision and claim epoch the
+/// store reported when the claim was captured, and dispatch-time
+/// verification requires all four fields to match exactly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaimIdentity {
+    /// The actor the claim was made with (the worker's qualified ID).
+    pub actor: String,
+    /// Bead revision observed at capture time (`None` when the backend does
+    /// not expose revisions).
+    pub revision: Option<u64>,
+    /// Claim epoch observed at capture time (`None` when the backend does
+    /// not expose claim epochs).
+    pub claim_epoch: Option<u64>,
+}
+
+impl ClaimIdentity {
+    /// Capture the identity of a claim this worker just took in `store`.
+    ///
+    /// Reads the claim back through the live store and refuses to produce an
+    /// identity for anything other than this worker's own `in_progress`
+    /// claim: an identity captured from a foreign or released claim would
+    /// verify nothing at dispatch.
+    pub async fn capture(store: &dyn BeadStore, bead_id: &BeadId, actor: &str) -> Result<Self> {
+        let live = store.claim_status(bead_id).await?;
+        anyhow::ensure!(
+            live.status == BeadStatus::InProgress,
+            "cannot capture claim identity for {bead_id}: bead is {:?}, not in_progress",
+            live.status
+        );
+        anyhow::ensure!(
+            live.assignee.as_deref() == Some(actor),
+            "cannot capture claim identity for {bead_id}: live assignee is {:?}, not {actor}",
+            live.assignee
+        );
+        Ok(ClaimIdentity {
+            actor: actor.to_string(),
+            revision: live.revision,
+            claim_epoch: live.claim_epoch,
+        })
+    }
+
+    /// The identity fields that fail to match a live [`ClaimStatus`].
+    ///
+    /// `revision` and `claim_epoch` must match exactly when both sides are
+    /// known, and must be simultaneously absent when either side is unknown:
+    /// a backend that starts or stops reporting a field mid-claim has moved
+    /// the state underneath the claim, which fails closed.
+    pub fn mismatches(&self, live: &ClaimStatus) -> Vec<&'static str> {
+        let mut failed = Vec::new();
+        if live.status != BeadStatus::InProgress {
+            failed.push("status");
+        }
+        if live.assignee.as_deref() != Some(self.actor.as_str()) {
+            failed.push("assignee");
+        }
+        if !observed_matches(self.revision, live.revision) {
+            failed.push("revision");
+        }
+        if !observed_matches(self.claim_epoch, live.claim_epoch) {
+            failed.push("claim_epoch");
+        }
+        failed
+    }
+}
+
+/// Exact match over an optionally-reported field: both unknown, or both
+/// known and equal.
+fn observed_matches(expected: Option<u64>, actual: Option<u64>) -> bool {
+    match (expected, actual) {
+        (None, None) => true,
+        (Some(e), Some(a)) => e == a,
+        (Some(_), None) | (None, Some(_)) => false,
     }
 }
 
@@ -762,11 +843,15 @@ impl Claimer {
         }
     }
 
-    /// Verify that a bead is still assigned to the expected worker at dispatch time.
+    /// Verify the full claim identity of a bead at dispatch time.
     ///
     /// This prevents double-dispatch by checking the live bead store immediately
-    /// before agent execution. If another worker has reassigned the bead or the
-    /// bead has been released, the dispatch should be aborted.
+    /// before agent execution. The claim's whole identity must still hold:
+    /// `status == in_progress`, `assignee == expected.actor`, and the revision
+    /// and claim epoch captured at claim time must match the live store
+    /// exactly. A released-and-re-claimed bead (new epoch, same actor name) or
+    /// a bead written underneath the claim (moved revision) therefore aborts
+    /// the dispatch even though a status+assignee check alone would pass.
     ///
     /// Verification reads only through [`target`]'s store — the
     /// [`ResolvedStoreContext`] captured when selection resolved and opened the
@@ -775,54 +860,68 @@ impl Claimer {
     /// target bead.
     ///
     /// This uses the `claim_status` method which queries the live database directly
-    /// and includes revision information for optimistic concurrency control. The verification
-    /// happens within the dispatch transaction window - immediately before the agent
-    /// process is spawned, providing atomic verification with no race window.
+    /// and includes revision and claim-epoch information. The verification
+    /// happens immediately before the agent process is spawned, minimizing
+    /// (but not pretending to eliminate) the interval between the live read
+    /// and dispatch.
     ///
     /// Returns:
-    /// - `Ok(true)`: bead is still in_progress and assigned to expected actor
-    /// - `Ok(false)`: bead is not assigned to expected actor (dispatch should abort)
+    /// - `Ok(true)`: the live store still shows exactly the captured claim identity
+    /// - `Ok(false)`: any identity field moved (dispatch should abort); the
+    ///   failure carries the per-field mismatch in structured telemetry
     /// - `Err(e)`: store error
     pub async fn verify_claim_at_dispatch(
         &self,
         target: &ResolvedStoreContext,
         bead_id: &BeadId,
-        expected_actor: &str,
+        expected: &ClaimIdentity,
     ) -> Result<bool> {
         // Emit start event
         self.telemetry.emit(
             EventKind::ClaimVerifyStarted {
                 bead_id: bead_id.clone(),
-                expected_actor: expected_actor.to_string(),
+                expected_actor: expected.actor.clone(),
             },
             chrono::Utc::now(),
         )?;
 
         // Use claim_status to query the resolved target store with revision
-        // information
+        // and claim-epoch information
         match target.store().claim_status(bead_id).await {
             Ok(claim_status) => {
-                let is_valid = claim_status.status == BeadStatus::InProgress
-                    && claim_status.assignee.as_deref() == Some(expected_actor);
+                let failed_fields = expected.mismatches(&claim_status);
+                let is_valid = failed_fields.is_empty();
                 if !is_valid {
                     tracing::warn!(
                         bead_id = %bead_id,
                         target_workspace = %target.workspace().display(),
-                        expected_actor = %expected_actor,
+                        expected_actor = %expected.actor,
+                        failed_fields = ?failed_fields,
                         actual_status = ?claim_status.status,
                         actual_assignee = ?claim_status.assignee,
-                        revision = ?claim_status.revision,
+                        expected_revision = ?expected.revision,
+                        actual_revision = ?claim_status.revision,
+                        expected_claim_epoch = ?expected.claim_epoch,
+                        actual_claim_epoch = ?claim_status.claim_epoch,
                         "atomic claim verification at dispatch failed - aborting"
                     );
                     self.telemetry.emit(
                         EventKind::ClaimVerifyFailed {
                             bead_id: bead_id.clone(),
-                            expected_actor: expected_actor.to_string(),
+                            expected_actor: expected.actor.clone(),
                             actual_status: format!("{:?}", claim_status.status),
                             actual_assignee: claim_status
                                 .assignee
                                 .clone()
                                 .unwrap_or_else(|| "(none)".to_string()),
+                            failed_fields: failed_fields
+                                .iter()
+                                .map(|field| field.to_string())
+                                .collect(),
+                            expected_revision: expected.revision,
+                            actual_revision: claim_status.revision,
+                            expected_claim_epoch: expected.claim_epoch,
+                            actual_claim_epoch: claim_status.claim_epoch,
                         },
                         chrono::Utc::now(),
                     )?;
@@ -830,15 +929,19 @@ impl Claimer {
                     tracing::debug!(
                         bead_id = %bead_id,
                         target_workspace = %target.workspace().display(),
-                        expected_actor = %expected_actor,
+                        expected_actor = %expected.actor,
                         revision = ?claim_status.revision,
+                        claim_epoch = ?claim_status.claim_epoch,
                         "atomic claim verification at dispatch passed"
                     );
-                    // Emit success event
+                    // Emit success event, recording the workspace whose store
+                    // was verified and the claim epoch it answered with.
                     self.telemetry.emit(
                         EventKind::ClaimVerifySuccess {
                             bead_id: bead_id.clone(),
-                            expected_actor: expected_actor.to_string(),
+                            expected_actor: expected.actor.clone(),
+                            workspace: target.workspace().display().to_string(),
+                            claim_epoch: claim_status.claim_epoch,
                         },
                         chrono::Utc::now(),
                     )?;
@@ -1043,6 +1146,9 @@ mod tests {
         claim_auto_result: Mutex<Option<ClaimResult>>,
         claim_event_count: Mutex<Option<u32>>,
         blocked_beads: Mutex<Vec<BeadId>>,
+        /// Claim status served by `claim_status` when set; derived from the
+        /// bead (with no revision/epoch) otherwise.
+        claim_status: Mutex<Option<ClaimStatus>>,
     }
 
     impl MockBeadStore {
@@ -1053,6 +1159,7 @@ mod tests {
                 claim_auto_result: Mutex::new(None),
                 claim_event_count: Mutex::new(None),
                 blocked_beads: Mutex::new(Vec::new()),
+                claim_status: Mutex::new(None),
             }
         }
 
@@ -1068,6 +1175,11 @@ mod tests {
 
         fn with_claim_auto_result(self, result: ClaimResult) -> Self {
             *self.claim_auto_result.lock().unwrap() = Some(result);
+            self
+        }
+
+        fn with_claim_status(self, status: ClaimStatus) -> Self {
+            *self.claim_status.lock().unwrap() = Some(status);
             self
         }
     }
@@ -1094,6 +1206,19 @@ mod tests {
         async fn show_with_claim_history(&self, id: &BeadId) -> Result<(Bead, Option<u32>)> {
             let bead = self.show(id).await?;
             Ok((bead, *self.claim_event_count.lock().unwrap()))
+        }
+
+        async fn claim_status(&self, id: &BeadId) -> Result<ClaimStatus> {
+            if let Some(status) = self.claim_status.lock().unwrap().clone() {
+                return Ok(status);
+            }
+            let bead = self.show(id).await?;
+            Ok(ClaimStatus {
+                status: bead.status,
+                assignee: bead.assignee,
+                revision: None,
+                claim_epoch: None,
+            })
         }
 
         async fn claim(&self, id: &BeadId, actor: &str) -> Result<ClaimResult> {
@@ -1211,6 +1336,84 @@ mod tests {
             Arc::clone(store) as Arc<dyn BeadStore>,
             PathBuf::from(workspace),
         )
+    }
+
+    /// An identity for `actor` with no revision/epoch expectation — matches
+    /// the mock store's derived claim status, which reports neither field.
+    fn plain_identity(actor: &str) -> ClaimIdentity {
+        ClaimIdentity {
+            actor: actor.to_string(),
+            revision: None,
+            claim_epoch: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn claim_identity_capture_persists_revision_and_epoch() {
+        let bead = make_bead("needle-capture", "/tmp/ws");
+        let store = MockBeadStore::new(vec![bead.clone()]).with_claim_status(ClaimStatus {
+            status: BeadStatus::InProgress,
+            assignee: Some("worker-1".to_string()),
+            revision: Some(17),
+            claim_epoch: Some(5),
+        });
+
+        let captured = ClaimIdentity::capture(&store, &bead.id, "worker-1")
+            .await
+            .expect("the worker's live claim should be capturable");
+
+        assert_eq!(
+            captured,
+            ClaimIdentity {
+                actor: "worker-1".to_string(),
+                revision: Some(17),
+                claim_epoch: Some(5),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn claim_identity_capture_refuses_unowned_or_inactive_claims() {
+        let bead = make_bead("needle-refuse-capture", "/tmp/ws");
+        for (status, assignee, expected_message) in [
+            (BeadStatus::Open, Some("worker-1"), "not in_progress"),
+            (BeadStatus::InProgress, Some("worker-2"), "not worker-1"),
+        ] {
+            let store = MockBeadStore::new(vec![bead.clone()]).with_claim_status(ClaimStatus {
+                status,
+                assignee: assignee.map(str::to_string),
+                revision: Some(1),
+                claim_epoch: Some(1),
+            });
+
+            let error = ClaimIdentity::capture(&store, &bead.id, "worker-1")
+                .await
+                .expect_err("an inactive or foreign claim must not be captured");
+            assert!(
+                error.to_string().contains(expected_message),
+                "unexpected capture error: {error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn claim_identity_names_every_moved_field() {
+        let expected = ClaimIdentity {
+            actor: "worker-1".to_string(),
+            revision: Some(8),
+            claim_epoch: Some(3),
+        };
+        let live = ClaimStatus {
+            status: BeadStatus::Open,
+            assignee: Some("worker-2".to_string()),
+            revision: Some(9),
+            claim_epoch: Some(4),
+        };
+
+        assert_eq!(
+            expected.mismatches(&live),
+            vec!["status", "assignee", "revision", "claim_epoch"]
+        );
     }
 
     #[tokio::test]
@@ -1975,11 +2178,77 @@ mod tests {
         let target = target_context(&store, "/tmp/ws");
 
         let result = claimer
-            .verify_claim_at_dispatch(&target, &bead.id, "worker-1")
+            .verify_claim_at_dispatch(&target, &bead.id, &plain_identity("worker-1"))
             .await
             .unwrap();
 
         assert!(result, "expected verification to pass for valid claim");
+    }
+
+    #[tokio::test]
+    async fn each_claim_identity_field_mismatch_aborts_independently() {
+        let expected = ClaimIdentity {
+            actor: "worker-1".to_string(),
+            revision: Some(11),
+            claim_epoch: Some(4),
+        };
+        let cases = [
+            (
+                "status",
+                ClaimStatus {
+                    status: BeadStatus::Open,
+                    assignee: Some("worker-1".to_string()),
+                    revision: Some(11),
+                    claim_epoch: Some(4),
+                },
+            ),
+            (
+                "assignee",
+                ClaimStatus {
+                    status: BeadStatus::InProgress,
+                    assignee: Some("worker-2".to_string()),
+                    revision: Some(11),
+                    claim_epoch: Some(4),
+                },
+            ),
+            (
+                "revision",
+                ClaimStatus {
+                    status: BeadStatus::InProgress,
+                    assignee: Some("worker-1".to_string()),
+                    revision: Some(12),
+                    claim_epoch: Some(4),
+                },
+            ),
+            (
+                "claim_epoch",
+                ClaimStatus {
+                    status: BeadStatus::InProgress,
+                    assignee: Some("worker-1".to_string()),
+                    revision: Some(11),
+                    claim_epoch: Some(5),
+                },
+            ),
+        ];
+
+        for (field, live) in cases {
+            assert_eq!(
+                expected.mismatches(&live),
+                vec![field],
+                "the structured failure must name only the independently moved field"
+            );
+            let bead = make_bead(&format!("needle-moved-{field}"), "/tmp/ws");
+            let store = Arc::new(MockBeadStore::new(vec![bead.clone()]).with_claim_status(live));
+            let telemetry = Telemetry::new("test-worker".to_string());
+            let claimer = Claimer::new(store.clone(), std::env::temp_dir(), 5, 10, telemetry);
+            let target = target_context(&store, "/tmp/ws");
+
+            let verified = claimer
+                .verify_claim_at_dispatch(&target, &bead.id, &expected)
+                .await
+                .expect("a moved identity is a deterministic failed verification");
+            assert!(!verified, "a {field} mismatch must abort dispatch");
+        }
     }
 
     #[tokio::test]
@@ -1995,7 +2264,7 @@ mod tests {
         let target = target_context(&store, "/tmp/ws");
 
         let result = claimer
-            .verify_claim_at_dispatch(&target, &bead.id, "worker-1")
+            .verify_claim_at_dispatch(&target, &bead.id, &plain_identity("worker-1"))
             .await
             .unwrap();
 
@@ -2015,7 +2284,7 @@ mod tests {
         let target = target_context(&store, "/tmp/ws");
 
         let result = claimer
-            .verify_claim_at_dispatch(&target, &bead.id, "worker-1")
+            .verify_claim_at_dispatch(&target, &bead.id, &plain_identity("worker-1"))
             .await
             .unwrap();
 
@@ -2035,7 +2304,7 @@ mod tests {
         let target = target_context(&store, "/tmp/ws");
 
         let result = claimer
-            .verify_claim_at_dispatch(&target, &bead.id, "worker-1")
+            .verify_claim_at_dispatch(&target, &bead.id, &plain_identity("worker-1"))
             .await
             .unwrap();
 
@@ -2067,7 +2336,11 @@ mod tests {
         let target_ctx = target_context(&target, "/tmp/target-ws");
 
         let result = claimer
-            .verify_claim_at_dispatch(&target_ctx, &BeadId::from("needle-collide"), "worker-1")
+            .verify_claim_at_dispatch(
+                &target_ctx,
+                &BeadId::from("needle-collide"),
+                &plain_identity("worker-1"),
+            )
             .await
             .unwrap();
 
@@ -2098,7 +2371,11 @@ mod tests {
         let target_ctx = target_context(&target, "/tmp/target-ws");
 
         let result = claimer
-            .verify_claim_at_dispatch(&target_ctx, &BeadId::from("needle-collide-2"), "worker-1")
+            .verify_claim_at_dispatch(
+                &target_ctx,
+                &BeadId::from("needle-collide-2"),
+                &plain_identity("worker-1"),
+            )
             .await
             .unwrap();
 
@@ -2128,7 +2405,7 @@ mod tests {
         let target_ctx = target_context(&target, "/tmp/target-ws");
 
         let routed = claimer
-            .verify_claim_at_dispatch(&target_ctx, &target_only.id, "worker-1")
+            .verify_claim_at_dispatch(&target_ctx, &target_only.id, &plain_identity("worker-1"))
             .await
             .unwrap();
         assert!(
@@ -2137,7 +2414,11 @@ mod tests {
         );
 
         let home_only_in_target = claimer
-            .verify_claim_at_dispatch(&target_ctx, &BeadId::from("needle-home-only"), "worker-1")
+            .verify_claim_at_dispatch(
+                &target_ctx,
+                &BeadId::from("needle-home-only"),
+                &plain_identity("worker-1"),
+            )
             .await
             .expect_err(
                 "the home-only bead must not be visible through the target context — \
@@ -2164,7 +2445,7 @@ mod tests {
         let target = target_context(&store, "/tmp/ws");
 
         let _ = claimer
-            .verify_claim_at_dispatch(&target, &bead.id, "worker-1")
+            .verify_claim_at_dispatch(&target, &bead.id, &plain_identity("worker-1"))
             .await
             .unwrap();
 
@@ -2184,6 +2465,11 @@ mod tests {
             .to_string()
             .contains("InProgress"));
         assert_eq!(verify_failed.data["actual_assignee"], "attacker-worker");
+        assert_eq!(
+            verify_failed.data["failed_fields"],
+            serde_json::json!(["assignee"]),
+            "the failure must name the identity field that moved, not just carry a reason string"
+        );
     }
 
     #[tokio::test]
@@ -2201,7 +2487,7 @@ mod tests {
         let target = target_context(&store, "/tmp/ws");
 
         let _ = claimer
-            .verify_claim_at_dispatch(&target, &bead.id, "worker-1")
+            .verify_claim_at_dispatch(&target, &bead.id, &plain_identity("worker-1"))
             .await
             .unwrap();
 
@@ -2221,22 +2507,40 @@ mod tests {
 
     #[tokio::test]
     async fn verify_claim_at_dispatch_emits_telemetry_on_success() {
-        // Test that verify_claim_at_dispatch emits ClaimVerifySuccess telemetry when verification passes
+        // Test that verify_claim_at_dispatch emits ClaimVerifySuccess telemetry
+        // when verification passes, carrying the verified workspace and the
+        // claim epoch the target store answered with.
         let bead = make_bead("needle-tel-success", "/tmp/ws");
         let mut bead_claimed = bead.clone();
         bead_claimed.status = BeadStatus::InProgress;
         bead_claimed.assignee = Some("worker-1".to_string());
 
-        let store = Arc::new(MockBeadStore::new(vec![bead_claimed]));
+        let store = Arc::new(MockBeadStore::new(vec![bead_claimed]).with_claim_status(
+            ClaimStatus {
+                status: BeadStatus::InProgress,
+                assignee: Some("worker-1".to_string()),
+                revision: Some(11),
+                claim_epoch: Some(4),
+            },
+        ));
         let (sink, events) = crate::telemetry::test_utils::MemorySink::new();
         let telemetry = Telemetry::with_sink("test-worker".to_string(), sink);
         let claimer = Claimer::new(store.clone(), std::env::temp_dir(), 5, 10, telemetry);
         let target = target_context(&store, "/tmp/ws");
 
-        let _ = claimer
-            .verify_claim_at_dispatch(&target, &bead.id, "worker-1")
+        let verified = claimer
+            .verify_claim_at_dispatch(
+                &target,
+                &bead.id,
+                &ClaimIdentity {
+                    actor: "worker-1".to_string(),
+                    revision: Some(11),
+                    claim_epoch: Some(4),
+                },
+            )
             .await
             .unwrap();
+        assert!(verified, "matching four-field identity must verify");
 
         drop(claimer);
         // Give telemetry writer time to flush
@@ -2250,6 +2554,14 @@ mod tests {
 
         assert_eq!(verify_success.bead_id, Some(bead.id.clone()));
         assert_eq!(verify_success.data["expected_actor"], "worker-1");
+        assert_eq!(
+            verify_success.data["workspace"], "/tmp/ws",
+            "success telemetry must name the workspace whose store was verified"
+        );
+        assert_eq!(
+            verify_success.data["claim_epoch"], 4,
+            "success telemetry must carry the verified claim epoch"
+        );
     }
 
     #[tokio::test]
@@ -2275,7 +2587,7 @@ mod tests {
         const ROUNDS: usize = 3;
         for _ in 0..ROUNDS {
             let verified = claimer
-                .verify_claim_at_dispatch(&target, &bead.id, "worker-1")
+                .verify_claim_at_dispatch(&target, &bead.id, &plain_identity("worker-1"))
                 .await
                 .unwrap();
             assert!(verified, "expected each verification to pass");

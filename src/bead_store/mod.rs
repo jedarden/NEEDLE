@@ -1440,14 +1440,15 @@ pub trait BeadStore: Send + Sync {
     /// compare-and-set operations.
     ///
     /// Returns `Err` if the bead cannot be fetched or parsed. Returns a
-    /// `ClaimStatus` with `revision: None` for backends that don't support
-    /// revisions (bead-forge).
+    /// `ClaimStatus` with `revision: None` and `claim_epoch: None` for
+    /// backends that don't support revisions or claim epochs (bead-forge).
     async fn claim_status(&self, id: &BeadId) -> Result<crate::types::ClaimStatus> {
         let bead = self.show(id).await?;
         Ok(crate::types::ClaimStatus {
             status: bead.status,
             assignee: bead.assignee,
             revision: None,
+            claim_epoch: None,
         })
     }
 

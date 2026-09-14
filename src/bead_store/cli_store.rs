@@ -794,10 +794,16 @@ impl BeadStore for CliBeadStore {
 
         let revision = value.get("revision").and_then(|v| v.as_u64());
 
+        // bead-rs stamps a monotonic claim epoch on every claim. It is the
+        // fencing token that distinguishes a re-claim from every other state
+        // change, so dispatch-time identity verification compares it exactly.
+        let claim_epoch = value.get("claim_epoch").and_then(|v| v.as_u64());
+
         Ok(crate::types::ClaimStatus {
             status,
             assignee,
             revision,
+            claim_epoch,
         })
     }
 
@@ -2112,6 +2118,7 @@ mod tests {
             "status": "open",
             "assignee": "worker-01",
             "revision": 42,
+            "claim_epoch": 7,
             "created_at": "2026-08-28T00:00:00Z"
         }"#;
 
@@ -2128,10 +2135,12 @@ mod tests {
             .map(str::to_string);
 
         let revision = value.get("revision").and_then(|v| v.as_u64());
+        let claim_epoch = value.get("claim_epoch").and_then(|v| v.as_u64());
 
         assert_eq!(status, BeadStatus::Open);
         assert_eq!(assignee, Some("worker-01".to_string()));
         assert_eq!(revision, Some(42));
+        assert_eq!(claim_epoch, Some(7));
     }
 
     #[test]
@@ -2168,7 +2177,9 @@ mod tests {
 
         let value: serde_json::Value = serde_json::from_str(json).unwrap();
         let revision = value.get("revision").and_then(|v| v.as_u64());
+        let claim_epoch = value.get("claim_epoch").and_then(|v| v.as_u64());
 
         assert_eq!(revision, None);
+        assert_eq!(claim_epoch, None);
     }
 }
