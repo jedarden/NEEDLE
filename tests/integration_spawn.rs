@@ -55,6 +55,8 @@ mod hot_reload_reexec;
 mod idle_timeout_tests;
 #[path = "integration_spawn/init_cli_tests.rs"]
 mod init_cli_tests;
+#[path = "integration_spawn/isolation.rs"]
+mod isolation;
 #[path = "integration_spawn/log_capture_helper.rs"]
 mod log_capture_helper;
 #[path = "integration_spawn/logs_stats_cli_tests.rs"]

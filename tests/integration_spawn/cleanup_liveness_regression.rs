@@ -27,6 +27,7 @@ use std::time::Duration;
 use clap::Parser;
 
 // Declare the tmux_fixture module (defined in tmux_fixture.rs in the same tests/ directory)
+use super::isolation::IsolatedChildEnv;
 use super::tmux_fixture;
 
 /// Test helper to check if a PID exists in the process table.
@@ -148,11 +149,7 @@ fn kill_session(session_name: &str) -> Result<(), std::io::Error> {
 #[cfg(unix)]
 #[ignore = "Requires real needle run processes - covered by unit tests in src/cli/mod.rs"]
 fn regression_cleanup_no_flags_removes_only_dead_sessions() {
-    // Skip if needle binary not available
-    if Command::new("needle").arg("--version").output().is_err() {
-        println!("Skipping test: needle binary not available");
-        return;
-    }
+    let fixture = IsolatedChildEnv::new();
 
     // Skip if tmux not available
     if Command::new("tmux").arg("-V").output().is_err() {
@@ -199,10 +196,8 @@ fn regression_cleanup_no_flags_removes_only_dead_sessions() {
     );
 
     // Run bare needle cleanup (no --all, no -i)
-    let needle_binary =
-        std::env::var("CARGO_BIN_EXE_needle").unwrap_or_else(|_| "needle".to_string());
-
-    let output = Command::new(&needle_binary)
+    let output = fixture
+        .needle()
         .env("NEEDLE_TMUX_SOCKET", tmux_fixture::test_tmux_socket())
         .arg("cleanup")
         .stdout(Stdio::piped())
@@ -263,11 +258,7 @@ fn regression_cleanup_no_flags_removes_only_dead_sessions() {
 #[cfg(unix)]
 #[ignore = "Requires real needle run processes - covered by unit tests in src/cli/mod.rs"]
 fn regression_cleanup_no_flags_with_only_live_sessions_removes_nothing() {
-    // Skip if needle binary not available
-    if Command::new("needle").arg("--version").output().is_err() {
-        println!("Skipping test: needle binary not available");
-        return;
-    }
+    let fixture = IsolatedChildEnv::new();
 
     // Skip if tmux not available
     if Command::new("tmux").arg("-V").output().is_err() {
@@ -316,10 +307,8 @@ fn regression_cleanup_no_flags_with_only_live_sessions_removes_nothing() {
     );
 
     // Run bare needle cleanup (no --all, no -i)
-    let needle_binary =
-        std::env::var("CARGO_BIN_EXE_needle").unwrap_or_else(|_| "needle".to_string());
-
-    let output = Command::new(&needle_binary)
+    let output = fixture
+        .needle()
         .env("NEEDLE_TMUX_SOCKET", tmux_fixture::test_tmux_socket())
         .arg("cleanup")
         .stdout(Stdio::piped())
@@ -388,11 +377,7 @@ fn regression_cleanup_no_flags_with_only_live_sessions_removes_nothing() {
 #[cfg(unix)]
 #[ignore = "Requires real needle run processes - covered by unit tests in src/cli/mod.rs"]
 fn regression_cleanup_all_removes_all_sessions_regardless_of_liveness() {
-    // Skip if needle binary not available
-    if Command::new("needle").arg("--version").output().is_err() {
-        println!("Skipping test: needle binary not available");
-        return;
-    }
+    let fixture = IsolatedChildEnv::new();
 
     // Skip if tmux not available
     if Command::new("tmux").arg("-V").output().is_err() {
@@ -454,10 +439,8 @@ fn regression_cleanup_all_removes_all_sessions_regardless_of_liveness() {
     );
 
     // Run needle cleanup --all
-    let needle_binary =
-        std::env::var("CARGO_BIN_EXE_needle").unwrap_or_else(|_| "needle".to_string());
-
-    let output = Command::new(&needle_binary)
+    let output = fixture
+        .needle()
         .env("NEEDLE_TMUX_SOCKET", tmux_fixture::test_tmux_socket())
         .args(["cleanup", "--all"])
         .stdout(Stdio::piped())
@@ -545,6 +528,8 @@ async fn regression_real_tmux_session_not_removed_by_bare_cleanup() {
     use std::process::Stdio;
     use tmux_fixture;
 
+    let fixture = IsolatedChildEnv::new();
+
     // Skip if tmux not available
     if !tmux_fixture::tmux_available() {
         eprintln!("Skipping test: tmux not available");
@@ -618,10 +603,8 @@ async fn regression_real_tmux_session_not_removed_by_bare_cleanup() {
 
     // Run bare needle cleanup (no --all, no --force).
     // This is the exact scenario that killed armor-p6a and needle-supervisor on 2026-07-19.
-    let needle_binary =
-        std::env::var("CARGO_BIN_EXE_needle").unwrap_or_else(|_| "needle".to_string());
-
-    let output = Command::new(&needle_binary)
+    let output = fixture
+        .needle()
         .env("NEEDLE_TMUX_SOCKET", tmux_fixture::test_tmux_socket())
         .arg("cleanup")
         .stdout(Stdio::piped())
@@ -734,6 +717,8 @@ fn p71a_regression_tmux_session_with_shell_wrapper_split_not_removed_by_cleanup(
     use std::fs;
     use std::path::Path;
 
+    let fixture = IsolatedChildEnv::new();
+
     // Skip if tmux not available
     if Command::new("tmux").arg("-V").output().is_err() {
         println!("Skipping test: tmux not available");
@@ -741,11 +726,11 @@ fn p71a_regression_tmux_session_with_shell_wrapper_split_not_removed_by_cleanup(
     }
 
     let session_name = "needle-test-p71a-live";
-    let test_log = "/tmp/needle-test-p71a.log";
+    let test_log = fixture.path().join("needle-test-p71a.log");
 
     // Clean up any existing test session and log
     let _ = kill_session(session_name);
-    let _ = std::fs::remove_file(test_log);
+    let _ = std::fs::remove_file(&test_log);
     thread::sleep(Duration::from_millis(100));
 
     // Launch a REAL tmux session with the exact command shape that launch_in_tmux() uses.
@@ -758,7 +743,7 @@ fn p71a_regression_tmux_session_with_shell_wrapper_split_not_removed_by_cleanup(
             "-d",
             "-s",
             session_name,
-            &format!("NEEDLE_INNER=1 sleep 30 2>> {}", test_log),
+            &format!("NEEDLE_INNER=1 sleep 30 2>> {}", test_log.display()),
         ])
         .status();
 
@@ -835,10 +820,8 @@ fn p71a_regression_tmux_session_with_shell_wrapper_split_not_removed_by_cleanup(
     // 2. That walks the process tree and finds the actual sleep process
     // 3. The sleep PID is in the live_pids set (from scan_needle_processes())
     // 4. So the session is correctly classified as LIVE, not orphaned
-    let needle_binary =
-        std::env::var("CARGO_BIN_EXE_needle").unwrap_or_else(|_| "needle".to_string());
-
-    let output = Command::new(&needle_binary)
+    let output = fixture
+        .needle()
         .env("NEEDLE_TMUX_SOCKET", tmux_fixture::test_tmux_socket())
         .arg("cleanup")
         .stdout(Stdio::piped())

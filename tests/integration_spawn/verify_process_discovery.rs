@@ -7,6 +7,8 @@
 //!
 //! See bead bf-4lkno for full context.
 
+use super::isolation::{ChildGuard, IsolatedChildEnv};
+
 #[test]
 #[cfg(unix)]
 fn test_process_table_reconciliation() {
@@ -15,36 +17,29 @@ fn test_process_table_reconciliation() {
 
     // Verify scan_needle_processes() can be called successfully
     // This is a unit test of the scanning functionality
-    let result = std::process::Command::new(env!("CARGO_BIN_EXE_needle"))
+    let fixture = IsolatedChildEnv::new();
+    let output = fixture
+        .needle()
         .arg("list")
         .arg("--format")
         .arg("json")
-        .output();
-
-    match result {
-        Ok(output) => {
-            if output.status.success() {
-                let json = String::from_utf8_lossy(&output.stdout);
-                eprintln!("✓ needle list --format json succeeded");
-                // Parse the JSON to verify structure
-                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&json) {
-                    eprintln!("✓ needle list output is valid JSON");
-                    // Check for expected fields
-                    if value.is_object() {
-                        eprintln!("✓ needle list output is an object (expected)");
-                    }
-                }
-            } else {
-                eprintln!(
-                    "✗ needle list failed: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            }
-        }
-        Err(e) => {
-            eprintln!("✗ Failed to run needle list: {}", e);
-        }
-    }
+        .output()
+        .expect("run isolated needle list");
+    assert!(
+        output.status.success(),
+        "needle list failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("needle list output is valid JSON");
+    assert!(
+        value["tmux_sessions"].is_array(),
+        "list JSON includes tmux_sessions array: {value}"
+    );
+    assert!(
+        value["discovered"].is_array(),
+        "list JSON includes discovered array: {value}"
+    );
 }
 
 #[test]
@@ -53,43 +48,29 @@ fn test_status_command_reconciliation() {
     // This test verifies that needle status performs reconciliation
     // and reports unregistered workers if found.
 
-    let result = std::process::Command::new(env!("CARGO_BIN_EXE_needle"))
+    let fixture = IsolatedChildEnv::new();
+    let output = fixture
+        .needle()
         .arg("status")
         .arg("--format")
         .arg("json")
-        .output();
-
-    match result {
-        Ok(output) => {
-            if output.status.success() {
-                let json = String::from_utf8_lossy(&output.stdout);
-                eprintln!("✓ needle status --format json succeeded");
-                // Parse the JSON to verify structure includes orphaned workers field
-                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&json) {
-                    eprintln!("✓ needle status output is valid JSON");
-                    // Check for expected fields
-                    if value.is_object() {
-                        eprintln!("✓ needle status output is an object (expected)");
-                        // Verify reconciliation fields exist
-                        if value.get("discovered").is_some() {
-                            eprintln!("✓ needle status includes discovered field");
-                        }
-                        if value.get("unregistered_workers").is_some() {
-                            eprintln!("✓ needle status includes unregistered_workers field");
-                        }
-                    }
-                }
-            } else {
-                eprintln!(
-                    "✗ needle status failed: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            }
-        }
-        Err(e) => {
-            eprintln!("✗ Failed to run needle status: {}", e);
-        }
-    }
+        .output()
+        .expect("run isolated needle status");
+    assert!(
+        output.status.success(),
+        "needle status failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("needle status output is valid JSON");
+    assert!(
+        value["discovered"].is_array(),
+        "status JSON includes discovered array: {value}"
+    );
+    assert!(
+        value["unregistered_workers"].is_u64(),
+        "status JSON includes unregistered_workers count: {value}"
+    );
 }
 
 /// Regression test for descendant process false discovery.
@@ -110,63 +91,41 @@ fn test_status_command_reconciliation() {
 #[cfg(unix)]
 #[ignore]
 fn regression_descendant_processes_not_discovered() {
-    use std::process::{Command, Stdio};
-    use std::thread;
-    use std::time::Duration;
+    use std::process::Stdio;
 
-    // Skip if needle binary not available
-    if Command::new("needle").arg("--version").output().is_err() {
-        println!("Skipping test: needle binary not available");
-        return;
-    }
+    let fixture = IsolatedChildEnv::new();
 
     // Create a fake worker process that has NEEDLE_INNER in its environment
     // but is NOT a needle run process (e.g., a child agent or verifier)
-    let child = Command::new("sh")
+    let child = fixture
+        .command("sh")
         .arg("-c")
         .arg("NEEDLE_INNER=1 sleep 30") // Simulates a child process inheriting NEEDLE_INNER
         .env("NEEDLE_INNER", "1")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn();
-
-    let child_pid = match child {
-        Ok(c) => c.id(),
-        Err(e) => {
-            println!("Skipping test: failed to spawn child process: {}", e);
-            return;
-        }
-    };
+        .spawn()
+        .expect("spawn isolated descendant process");
+    let child = ChildGuard::new(child);
+    let child_pid = child.id();
 
     println!("Spawned child process PID: {}", child_pid);
 
-    // Give process table time to stabilize
-    thread::sleep(Duration::from_secs(1));
-
     // Run needle list to discover processes
-    let list_output = match Command::new("needle")
+    let list_output = fixture
+        .needle()
         .args(["list", "--format", "json"])
         .output()
-    {
-        Ok(o) => o,
-        Err(e) => {
-            println!("Skipping test: needle list failed: {}", e);
-            return;
-        }
-    };
+        .expect("run isolated needle list");
 
-    if !list_output.status.success() {
-        println!("Skipping test: needle list returned non-zero exit code");
-        return;
-    }
+    assert!(
+        list_output.status.success(),
+        "needle list failed: {}",
+        String::from_utf8_lossy(&list_output.stderr)
+    );
 
-    let list_json: serde_json::Value = match serde_json::from_slice(&list_output.stdout) {
-        Ok(v) => v,
-        Err(e) => {
-            println!("Skipping test: failed to parse needle list output: {}", e);
-            return;
-        }
-    };
+    let list_json: serde_json::Value = serde_json::from_slice(&list_output.stdout)
+        .expect("needle list output should be valid JSON");
 
     // The child process should NOT appear in discovered workers
     // because it doesn't have "needle run" in its cmdline
@@ -194,9 +153,5 @@ fn regression_descendant_processes_not_discovered() {
     );
     println!("✓ Child process correctly excluded from discovered workers");
 
-    // Clean up the child process
-    let _ = Command::new("kill").arg(child_pid.to_string()).status();
-    thread::sleep(Duration::from_millis(100));
-
-    println!("✓ Regression test passed: descendant processes not discovered");
+    drop(child);
 }

@@ -8,9 +8,11 @@
 //! dispatching, completely invisible to both needle status and needle list.
 
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use super::isolation::{ChildGuard, IsolatedChildEnv};
 
 /// Test workspace setup helper.
 struct TestWorkspace {
@@ -19,35 +21,39 @@ struct TestWorkspace {
 
 impl TestWorkspace {
     /// Create a temporary test workspace with bead store initialized.
-    fn new() -> Result<Self, std::io::Error> {
-        let temp_dir = std::env::temp_dir().join(format!("needle-test-{}", std::process::id()));
+    fn new(fixture: &IsolatedChildEnv) -> Result<Self, std::io::Error> {
+        let temp_dir = fixture.path().join("process-discovery-workspace");
         std::fs::create_dir_all(&temp_dir)?;
-        std::fs::create_dir_all(temp_dir.join(".beads"))?;
 
         // Initialize bead store
-        let status = Command::new("br")
-            .args(["init", "--non-interactive"])
+        let status = fixture
+            .command("bead")
+            .arg("init")
             .current_dir(&temp_dir)
             .status()?;
 
         if !status.success() {
-            return Err(std::io::Error::other(format!("br init failed: {}", status)));
+            return Err(std::io::Error::other(format!("bead init failed: {status}")));
         }
+        std::fs::write(
+            temp_dir.join(".needle.yaml"),
+            "bead_cli:\n  backend: bead-rs\n",
+        )?;
 
         Ok(TestWorkspace { path: temp_dir })
     }
 
     /// Create a test bead in the workspace.
-    fn create_bead(&self, title: &str) -> Result<(), std::io::Error> {
-        let status = Command::new("br")
-            .args(["create", "--type", "task", title])
+    fn create_bead(&self, fixture: &IsolatedChildEnv, title: &str) -> Result<(), std::io::Error> {
+        let status = fixture
+            .command("bead")
+            .args(["create", "--issue-type", "task", "--title", title])
             .current_dir(&self.path)
             .status()?;
 
         if !status.success() {
             return Err(std::io::Error::other(format!(
-                "br create failed: {}",
-                status
+                "bead create failed: {status}"
             )));
         }
 
@@ -58,16 +64,12 @@ impl TestWorkspace {
     fn path(&self) -> &PathBuf {
         &self.path
     }
-
-    /// Clean up the test workspace.
-    fn cleanup(self) {
-        let _ = std::fs::remove_dir_all(&self.path);
-    }
 }
 
 /// Find needle run processes by scanning the process table.
-fn find_needle_processes() -> Vec<u32> {
-    let output = Command::new("ps")
+fn find_needle_processes(fixture: &IsolatedChildEnv) -> Vec<u32> {
+    let output = fixture
+        .command("ps")
         .args(["aux", "--no-headers"])
         .output()
         .expect("ps command should work");
@@ -86,6 +88,17 @@ fn find_needle_processes() -> Vec<u32> {
     pids
 }
 
+fn wait_until(timeout: Duration, mut predicate: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if predicate() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    predicate()
+}
+
 /// Integration test: verify worker started via NEEDLE_INNER=1 is discoverable.
 ///
 /// This test:
@@ -98,89 +111,44 @@ fn find_needle_processes() -> Vec<u32> {
 #[test]
 #[ignore]
 fn integration_non_tmux_worker_discoverable() {
-    // Skip if needle binary not available
-    if Command::new("needle").arg("--version").output().is_err() {
-        println!("Skipping test: needle binary not available");
-        return;
-    }
+    let fixture = IsolatedChildEnv::new();
 
-    let workspace = match TestWorkspace::new() {
-        Ok(ws) => ws,
-        Err(e) => {
-            println!("Skipping test: failed to create workspace: {}", e);
-            return;
-        }
-    };
+    let workspace = TestWorkspace::new(&fixture).expect("create isolated test workspace");
 
     // Create a test bead
-    if let Err(e) = workspace.create_bead("Test process discovery") {
-        println!("Skipping test: failed to create bead: {}", e);
-        workspace.cleanup();
-        return;
-    }
+    workspace
+        .create_bead(&fixture, "Test process discovery")
+        .expect("create isolated test bead");
 
     // Start worker via NEEDLE_INNER=1 (non-tmux path)
     // This simulates the path that might be invisible to status/list
-    let needle_binary = std::env::var("NEEDLE_BINARY").unwrap_or_else(|_| "needle".to_string());
-
-    let child = Command::new(&needle_binary)
+    let identifier = format!("test-discovery-{}", std::process::id());
+    let child = fixture
+        .needle()
         .env("NEEDLE_INNER", "1")
-        .args([
-            "run",
-            "--workspace",
-            workspace.path().to_str().unwrap(),
-            "--identifier",
-            "test-discovery",
-            "--timeout",
-            "30", // Short timeout for test
-        ])
+        .arg("run")
+        .arg("--workspace")
+        .arg(workspace.path())
+        .arg("--identifier")
+        .arg(&identifier)
+        .args(["--timeout", "30"])
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
         .expect("failed to start needle worker");
-
-    let worker_pid = child.id();
+    let mut worker = ChildGuard::new(child);
+    let worker_pid = worker.id();
     println!("Started worker PID: {}", worker_pid);
 
-    // ProcessGuard ensures cleanup if test panics
-    struct ProcessGuard {
-        inner: Option<std::process::Child>,
-    }
-
-    impl ProcessGuard {
-        fn kill(&mut self) -> std::io::Result<()> {
-            if let Some(ref mut child) = self.inner {
-                child.kill()
-            } else {
-                Ok(())
-            }
-        }
-
-        fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
-            if let Some(ref mut child) = self.inner {
-                child.wait()
-            } else {
-                Err(std::io::Error::other("No child process to wait for"))
-            }
-        }
-    }
-
-    impl Drop for ProcessGuard {
-        fn drop(&mut self) {
-            let _ = self.kill();
-            let _ = self.wait();
-            // Prevent double-wait by consuming the child after our methods handle it
-            let _ = self.inner.take();
-        }
-    }
-
-    let mut worker_guard = ProcessGuard { inner: Some(child) };
-
-    // Wait for worker to boot and register
-    thread::sleep(Duration::from_secs(5));
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            find_needle_processes(&fixture).contains(&worker_pid)
+        }),
+        "worker PID {worker_pid} should enter the process table"
+    );
 
     // Verify worker is in process table
-    let needle_pids = find_needle_processes();
+    let needle_pids = find_needle_processes(&fixture);
     assert!(
         needle_pids.contains(&worker_pid),
         "worker PID {} should be in process table",
@@ -189,7 +157,8 @@ fn integration_non_tmux_worker_discoverable() {
     println!("✓ Worker found in process table");
 
     // Verify worker appears in needle list
-    let list_output = Command::new(&needle_binary)
+    let list_output = fixture
+        .needle()
         .args(["list", "--format", "json"])
         .output()
         .expect("needle list should work");
@@ -238,7 +207,8 @@ fn integration_non_tmux_worker_discoverable() {
     println!("✓ Worker found in needle list");
 
     // Verify worker appears in needle status
-    let status_output = Command::new(&needle_binary)
+    let status_output = fixture
+        .needle()
         .args(["status", "--format", "json"])
         .output()
         .expect("needle status should work");
@@ -291,49 +261,28 @@ fn integration_non_tmux_worker_discoverable() {
 
     // Stop the worker
     println!("Stopping worker...");
-    let _ = Command::new(&needle_binary)
-        .args(["stop", "--all"])
-        .status();
-    let _ = worker_guard.wait();
-
-    // Wait for graceful shutdown
-    thread::sleep(Duration::from_secs(2));
+    let stop_output = fixture
+        .needle()
+        .args(["stop", "--identifier"])
+        .arg(&identifier)
+        .output()
+        .expect("stop isolated worker");
+    assert!(
+        stop_output.status.success(),
+        "targeted stop failed: {}",
+        String::from_utf8_lossy(&stop_output.stderr)
+    );
+    let _ = worker.wait();
 
     // Verify worker is no longer in process table
-    let needle_pids_after = find_needle_processes();
     assert!(
-        !needle_pids_after.contains(&worker_pid),
+        wait_until(Duration::from_secs(2), || {
+            !find_needle_processes(&fixture).contains(&worker_pid)
+        }),
         "worker PID {} should no longer be in process table after stop",
         worker_pid
     );
     println!("✓ Worker no longer in process table");
 
-    workspace.cleanup();
     println!("Test passed: non-tmux worker is discoverable via status and list");
-}
-
-/// Test helper: verify reconciliation check works.
-///
-/// This test manually simulates a scenario where a worker is running
-/// but not in the registry, and verifies that reconciliation detects it.
-#[test]
-#[ignore]
-fn integration_reconciliation_detects_unregistered_workers() {
-    // This test requires:
-    // 1. Starting a worker
-    // 2. Manually removing it from the registry (simulating failed registration)
-    // 3. Running needle status and verifying the orphaned worker is shown
-    // 4. Running needle list and verifying the orphaned worker is shown
-
-    println!("Manual test steps:");
-    println!("  1. Start a worker: needle run -w <workspace> -i test-reconcile");
-    println!("  2. Wait for worker to boot (5 seconds)");
-    println!("  3. Note the worker's PID from: ps aux | grep 'needle run'");
-    println!("  4. Remove worker from registry:");
-    println!("     rm ~/.needle/state/workers.json");
-    println!("  5. Run: needle status --format json");
-    println!("  6. Verify the orphaned worker appears in 'orphaned' array");
-    println!("  7. Run: needle list --format json");
-    println!("  8. Verify the orphaned worker appears in 'orphaned' array");
-    println!("  9. Stop the worker: needle stop -i test-reconcile");
 }

@@ -7,7 +7,8 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+
+use super::isolation::IsolatedChildEnv;
 
 /// Create a minimal workspace with .needle.yaml specifying a bead backend
 fn create_test_workspace(temp_dir: &Path, backend_name: &str) -> PathBuf {
@@ -56,11 +57,12 @@ bead_cli:
 
 #[test]
 fn doctor_exits_nonzero_when_backend_not_on_path() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let workspace = create_test_workspace(temp_dir.path(), "bead-rs");
+    let fixture = IsolatedChildEnv::new();
+    let workspace = create_test_workspace(fixture.path(), "bead-rs");
 
     // Run needle doctor against this workspace
-    let output = Command::new(env!("CARGO_BIN_EXE_needle"))
+    let output = fixture
+        .needle()
         .arg("doctor")
         .arg("--workspace")
         .arg(&workspace)
@@ -88,11 +90,12 @@ fn doctor_exits_nonzero_when_backend_not_on_path() {
 
 #[test]
 fn doctor_exits_zero_when_healthy() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let workspace = create_healthy_workspace(temp_dir.path());
+    let fixture = IsolatedChildEnv::new();
+    let workspace = create_healthy_workspace(fixture.path());
 
     // Run needle doctor against this healthy workspace
-    let output = Command::new(env!("CARGO_BIN_EXE_needle"))
+    let output = fixture
+        .needle()
         .arg("doctor")
         .arg("--workspace")
         .arg(&workspace)
@@ -115,11 +118,12 @@ fn doctor_exits_zero_when_healthy() {
 
 #[test]
 fn doctor_repair_follows_same_exit_code_rules() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let workspace = create_test_workspace(temp_dir.path(), "another-fake-backend-67890");
+    let fixture = IsolatedChildEnv::new();
+    let workspace = create_test_workspace(fixture.path(), "another-fake-backend-67890");
 
     // Run needle doctor --repair against this workspace
-    let output = Command::new(env!("CARGO_BIN_EXE_needle"))
+    let output = fixture
+        .needle()
         .arg("doctor")
         .arg("--repair")
         .arg("--workspace")
@@ -137,8 +141,8 @@ fn doctor_repair_follows_same_exit_code_rules() {
 
 #[test]
 fn doctor_warnings_do_not_cause_nonzero_exit() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let workspace = temp_dir.path().join("warn-workspace");
+    let fixture = IsolatedChildEnv::new();
+    let workspace = fixture.path().join("warn-workspace");
     fs::create_dir_all(&workspace).unwrap();
     fs::create_dir_all(workspace.join(".beads")).unwrap();
 
@@ -154,7 +158,8 @@ bead_cli:
     .unwrap();
 
     // Run needle doctor
-    let output = Command::new(env!("CARGO_BIN_EXE_needle"))
+    let output = fixture
+        .needle()
         .arg("doctor")
         .arg("--workspace")
         .arg(&workspace)
@@ -174,10 +179,11 @@ bead_cli:
 
 #[test]
 fn doctor_mentions_exit_code_in_summary_on_failure() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let workspace = create_test_workspace(temp_dir.path(), "bead-rs");
+    let fixture = IsolatedChildEnv::new();
+    let workspace = create_test_workspace(fixture.path(), "bead-rs");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_needle"))
+    let output = fixture
+        .needle()
         .arg("doctor")
         .arg("--workspace")
         .arg(&workspace)
@@ -199,8 +205,9 @@ fn doctor_mentions_exit_code_in_summary_on_failure() {
 /// The `bead_cli.backend` binding is required for doctor to open the store —
 /// without it every checkpoint row is the "no bead backend binding" WARN and
 /// none of the checkpoint states below are reachable.
-fn init_bead_workspace(workspace: &Path) -> bool {
-    let output = Command::new("bead")
+fn init_bead_workspace(fixture: &IsolatedChildEnv, workspace: &Path) -> bool {
+    let output = fixture
+        .command("bead")
         .arg("init")
         .current_dir(workspace)
         .output();
@@ -241,11 +248,11 @@ fn remove_checkpoint(workspace: &Path) {
 
 #[test]
 fn doctor_empty_store_no_checkpoint_is_warn_not_fail() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let workspace = temp_dir.path().join("empty-store-workspace");
+    let fixture = IsolatedChildEnv::new();
+    let workspace = fixture.path().join("empty-store-workspace");
     fs::create_dir_all(&workspace).unwrap();
 
-    if !init_bead_workspace(&workspace) {
+    if !init_bead_workspace(&fixture, &workspace) {
         return;
     }
     remove_checkpoint(&workspace);
@@ -258,7 +265,8 @@ fn doctor_empty_store_no_checkpoint_is_warn_not_fail() {
     );
 
     // Run needle doctor
-    let doctor_output = Command::new(env!("CARGO_BIN_EXE_needle"))
+    let doctor_output = fixture
+        .needle()
         .arg("doctor")
         .arg("--workspace")
         .arg(&workspace)
@@ -311,17 +319,18 @@ fn doctor_empty_store_no_checkpoint_is_warn_not_fail() {
 
 #[test]
 fn doctor_store_with_beads_no_checkpoint_is_fail() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let workspace = temp_dir.path().join("with-beads-workspace");
+    let fixture = IsolatedChildEnv::new();
+    let workspace = fixture.path().join("with-beads-workspace");
     fs::create_dir_all(&workspace).unwrap();
 
     // Initialize bead workspace
-    if !init_bead_workspace(&workspace) {
+    if !init_bead_workspace(&fixture, &workspace) {
         return;
     }
 
     // Create a bead so the store is no longer empty
-    let bead_output = Command::new("bead")
+    let bead_output = fixture
+        .command("bead")
         .arg("create")
         .arg("--title")
         .arg("Test bead")
@@ -353,7 +362,8 @@ fn doctor_store_with_beads_no_checkpoint_is_fail() {
     }
 
     // Verify we have at least one bead
-    let list_output = Command::new("bead")
+    let list_output = fixture
+        .command("bead")
         .arg("list")
         .arg("--json")
         .current_dir(&workspace)
@@ -367,7 +377,8 @@ fn doctor_store_with_beads_no_checkpoint_is_fail() {
     remove_checkpoint(&workspace);
 
     // Run needle doctor
-    let doctor_output = Command::new(env!("CARGO_BIN_EXE_needle"))
+    let doctor_output = fixture
+        .needle()
         .arg("doctor")
         .arg("--workspace")
         .arg(&workspace)
@@ -404,18 +415,19 @@ fn doctor_store_with_beads_no_checkpoint_is_fail() {
 fn doctor_checkpoint_warn_does_not_cause_exit_1() {
     // This test verifies that the WARN for "empty store + no checkpoint"
     // specifically does not cause exit code 1, even if it's the only check result.
-    let temp_dir = tempfile::tempdir().unwrap();
-    let workspace = temp_dir.path().join("checkpoint-warn-workspace");
+    let fixture = IsolatedChildEnv::new();
+    let workspace = fixture.path().join("checkpoint-warn-workspace");
     fs::create_dir_all(&workspace).unwrap();
 
     // Initialize bead workspace in the empty-store state
-    if !init_bead_workspace(&workspace) {
+    if !init_bead_workspace(&fixture, &workspace) {
         return;
     }
     remove_checkpoint(&workspace);
 
     // Run needle doctor
-    let doctor_output = Command::new(env!("CARGO_BIN_EXE_needle"))
+    let doctor_output = fixture
+        .needle()
         .arg("doctor")
         .arg("--workspace")
         .arg(&workspace)
@@ -463,18 +475,15 @@ use serde_json::Value;
 
 /// Run `needle doctor --json` against `workspace`.
 ///
-/// Returns the raw process output plus the parsed document. HOME is pinned to
-/// the fixture's parent directory so the spawned binary neither reads nor
-/// repairs the real user environment (docs/testing-isolation-patterns.md).
-fn run_doctor_json(workspace: &Path) -> (std::process::Output, Value) {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_needle"));
+/// Returns the raw process output plus the parsed document. All child path
+/// roots are pinned by `fixture`, so the binary cannot read or repair the real
+/// user environment (docs/testing-isolation-patterns.md).
+fn run_doctor_json(fixture: &IsolatedChildEnv, workspace: &Path) -> (std::process::Output, Value) {
+    let mut cmd = fixture.needle();
     cmd.arg("doctor")
         .arg("--json")
         .arg("--workspace")
         .arg(workspace);
-    if let Some(home) = workspace.parent() {
-        cmd.env("HOME", home);
-    }
     let output = cmd
         .output()
         .expect("failed to execute needle doctor --json");
@@ -487,12 +496,9 @@ fn run_doctor_json(workspace: &Path) -> (std::process::Output, Value) {
 
 /// Run `needle doctor` in human mode with the same isolation as
 /// `run_doctor_json`, returning its stdout.
-fn run_doctor_human(workspace: &Path) -> String {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_needle"));
+fn run_doctor_human(fixture: &IsolatedChildEnv, workspace: &Path) -> String {
+    let mut cmd = fixture.needle();
     cmd.arg("doctor").arg("--workspace").arg(workspace);
-    if let Some(home) = workspace.parent() {
-        cmd.env("HOME", home);
-    }
     let output = cmd.output().expect("failed to execute needle doctor");
     String::from_utf8_lossy(&output.stdout).to_string()
 }
@@ -622,9 +628,9 @@ fn create_json_transform_fixture(temp_dir: &Path) -> PathBuf {
 
 #[test]
 fn doctor_json_document_matches_contract() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let workspace = create_json_backend_fixture(temp_dir.path());
-    let (output, doc) = run_doctor_json(&workspace);
+    let fixture = IsolatedChildEnv::new();
+    let workspace = create_json_backend_fixture(fixture.path());
+    let (output, doc) = run_doctor_json(&fixture, &workspace);
     assert_json_contract(&output, &doc);
     assert!(
         !json_rows(&doc).is_empty(),
@@ -634,9 +640,9 @@ fn doctor_json_document_matches_contract() {
 
 #[test]
 fn doctor_json_bead_cli_missing_row_has_fix() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let workspace = create_json_backend_fixture(temp_dir.path());
-    let (_, doc) = run_doctor_json(&workspace);
+    let fixture = IsolatedChildEnv::new();
+    let workspace = create_json_backend_fixture(fixture.path());
+    let (_, doc) = run_doctor_json(&fixture, &workspace);
     let row = json_row(&doc, "Bead backend");
     assert_eq!(row["status"], "fail");
     let fix = row["fix"].as_str().expect("missing bead CLI carries a fix");
@@ -648,8 +654,8 @@ fn doctor_json_bead_cli_missing_row_has_fix() {
 
 #[test]
 fn doctor_json_missing_beads_dir_row_has_fix() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let workspace = temp_dir.path().join("no-beads-fixture");
+    let fixture = IsolatedChildEnv::new();
+    let workspace = fixture.path().join("no-beads-fixture");
     fs::create_dir_all(&workspace).unwrap();
     fs::write(
         workspace.join(".needle.yaml"),
@@ -657,7 +663,7 @@ fn doctor_json_missing_beads_dir_row_has_fix() {
     )
     .unwrap();
 
-    let (_, doc) = run_doctor_json(&workspace);
+    let (_, doc) = run_doctor_json(&fixture, &workspace);
     let row = json_row(&doc, "Workspace");
     assert_eq!(row["status"], "fail");
     let fix = row["fix"].as_str().expect("missing .beads/ carries a fix");
@@ -669,11 +675,11 @@ fn doctor_json_missing_beads_dir_row_has_fix() {
 
 #[test]
 fn doctor_json_missing_needle_yaml_row_has_fix() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let workspace = temp_dir.path().join("no-binding-fixture");
+    let fixture = IsolatedChildEnv::new();
+    let workspace = fixture.path().join("no-binding-fixture");
     fs::create_dir_all(workspace.join(".beads")).unwrap();
 
-    let (output, doc) = run_doctor_json(&workspace);
+    let (output, doc) = run_doctor_json(&fixture, &workspace);
     let row = json_row(&doc, "Workspace");
     assert_eq!(row["status"], "fail");
     assert!(
@@ -691,9 +697,9 @@ fn doctor_json_missing_needle_yaml_row_has_fix() {
 
 #[test]
 fn doctor_json_missing_agent_binary_row_has_fix() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let workspace = create_json_agent_fixture(temp_dir.path());
-    let (_, doc) = run_doctor_json(&workspace);
+    let fixture = IsolatedChildEnv::new();
+    let workspace = create_json_agent_fixture(fixture.path());
+    let (_, doc) = run_doctor_json(&fixture, &workspace);
     let row = json_row(&doc, "Agent binary");
     assert_eq!(row["status"], "fail");
     let fix = row["fix"]
@@ -707,9 +713,9 @@ fn doctor_json_missing_agent_binary_row_has_fix() {
 
 #[test]
 fn doctor_json_missing_transform_rows_have_fix() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let workspace = create_json_transform_fixture(temp_dir.path());
-    let (_, doc) = run_doctor_json(&workspace);
+    let fixture = IsolatedChildEnv::new();
+    let workspace = create_json_transform_fixture(fixture.path());
+    let (_, doc) = run_doctor_json(&fixture, &workspace);
 
     let transforms = json_row(&doc, "Adapter transforms");
     assert_eq!(transforms["status"], "warn");
@@ -734,10 +740,10 @@ fn doctor_json_missing_transform_rows_have_fix() {
 
 #[test]
 fn doctor_human_table_prints_the_json_fix_text() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    let workspace = create_json_backend_fixture(temp_dir.path());
+    let fixture = IsolatedChildEnv::new();
+    let workspace = create_json_backend_fixture(fixture.path());
 
-    let (_, doc) = run_doctor_json(&workspace);
+    let (_, doc) = run_doctor_json(&fixture, &workspace);
     let fixes: Vec<&str> = json_rows(&doc)
         .iter()
         .filter_map(|row| row["fix"].as_str())
@@ -747,7 +753,7 @@ fn doctor_human_table_prints_the_json_fix_text() {
         "the failing fixture must produce at least one fix"
     );
 
-    let human = run_doctor_human(&workspace);
+    let human = run_doctor_human(&fixture, &workspace);
     for fix in fixes {
         assert!(
             human.contains(fix),
@@ -788,12 +794,12 @@ fn add_other_workspace(home: &Path) -> PathBuf {
 
 #[test]
 fn doctor_warns_when_global_config_is_the_quickstart_example() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    write_global_config(temp_dir.path(), QUICKSTART_EXAMPLE);
-    let other = add_other_workspace(temp_dir.path());
-    let workspace = create_test_workspace(temp_dir.path(), "bead-rs");
+    let fixture = IsolatedChildEnv::new();
+    write_global_config(fixture.path(), QUICKSTART_EXAMPLE);
+    let other = add_other_workspace(fixture.path());
+    let workspace = create_test_workspace(fixture.path(), "bead-rs");
 
-    let human = run_doctor_human(&workspace);
+    let human = run_doctor_human(&fixture, &workspace);
     assert!(
         human.contains("[WARN]  Quickstart config"),
         "expected a WARN row for the quickstart config, got:\n{human}"
@@ -811,7 +817,7 @@ fn doctor_warns_when_global_config_is_the_quickstart_example() {
         "the row should name the remedy, got:\n{human}"
     );
 
-    let (_, doc) = run_doctor_json(&workspace);
+    let (_, doc) = run_doctor_json(&fixture, &workspace);
     let row = json_row(&doc, "Quickstart config");
     assert_eq!(row["status"], "warn");
     assert_eq!(row["fix"], "needle init --force");
@@ -819,12 +825,12 @@ fn doctor_warns_when_global_config_is_the_quickstart_example() {
 
 #[test]
 fn doctor_passes_quickstart_example_inside_its_own_sandbox_home() {
-    let temp_dir = tempfile::tempdir().unwrap();
-    write_global_config(temp_dir.path(), QUICKSTART_EXAMPLE);
+    let fixture = IsolatedChildEnv::new();
+    write_global_config(fixture.path(), QUICKSTART_EXAMPLE);
     // No other workspace anywhere in this HOME — the example's own situation.
-    let workspace = create_test_workspace(temp_dir.path(), "bead-rs");
+    let workspace = create_test_workspace(fixture.path(), "bead-rs");
 
-    let human = run_doctor_human(&workspace);
+    let human = run_doctor_human(&fixture, &workspace);
     assert!(
         human.contains("[PASS]  Quickstart config"),
         "a sandbox HOME is the one place the example belongs, got:\n{human}"
@@ -841,20 +847,20 @@ fn doctor_passes_quickstart_example_inside_its_own_sandbox_home() {
 
 #[test]
 fn doctor_passes_when_global_config_differs_from_the_example() {
-    let temp_dir = tempfile::tempdir().unwrap();
+    let fixture = IsolatedChildEnv::new();
     write_global_config(
-        temp_dir.path(),
+        fixture.path(),
         "# fleet config under test\nagent:\n  default: opus\nworker:\n  max_workers: 6\n",
     );
-    add_other_workspace(temp_dir.path());
-    let workspace = create_test_workspace(temp_dir.path(), "bead-rs");
+    add_other_workspace(fixture.path());
+    let workspace = create_test_workspace(fixture.path(), "bead-rs");
 
-    let human = run_doctor_human(&workspace);
+    let human = run_doctor_human(&fixture, &workspace);
     assert!(
         human.contains("[PASS]  Quickstart config"),
         "a real fleet config is not the example, got:\n{human}"
     );
 
-    let (_, doc) = run_doctor_json(&workspace);
+    let (_, doc) = run_doctor_json(&fixture, &workspace);
     assert_eq!(json_row(&doc, "Quickstart config")["status"], "pass");
 }

@@ -5,22 +5,26 @@
 //! with "Broken pipe" and exit code 101.
 
 use std::io::Read;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
+
+use super::isolation::{ChildGuard, IsolatedChildEnv};
 
 #[test]
 fn test_sigpipe_on_closed_stdout() {
-    // Get the needle binary path
-    let bin_path = std::env::var("CARGO_BIN_EXE_needle").unwrap_or_else(|_| "needle".to_string());
+    let fixture = IsolatedChildEnv::new();
 
     // Create a pipe for stdout
     let (mut reader, writer) = os_pipe::pipe().expect("failed to create pipe");
 
     // Spawn needle with stdout piped
-    let mut child = Command::new(&bin_path)
-        .arg("config")
-        .stdout(Stdio::from(writer))
-        .spawn()
-        .expect("failed to spawn needle");
+    let mut child = ChildGuard::new(
+        fixture
+            .needle()
+            .arg("config")
+            .stdout(Stdio::from(writer))
+            .spawn()
+            .expect("failed to spawn needle"),
+    );
 
     // Read just one byte from the pipe, then close the reader
     // This simulates `head -1` exiting after reading one line
