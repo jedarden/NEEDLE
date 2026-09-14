@@ -33,9 +33,9 @@ use crate::types::{BeadId, InputMethod, StrandResult};
 
 /// Keep generated prompts comfortably below model context limits after the
 /// agent adds repository instructions and other harness context of its own.
-const MAX_WEAVE_DOC_CONTEXT_BYTES: usize = 64 * 1024;
-const MAX_WEAVE_DOC_FILE_BYTES: usize = 16 * 1024;
-const MAX_WEAVE_BEAD_CONTEXT_BYTES: usize = 48 * 1024;
+const MAX_WEAVE_DOC_CONTEXT_BYTES: usize = 32 * 1024;
+const MAX_WEAVE_DOC_FILE_BYTES: usize = 4 * 1024;
+const MAX_WEAVE_BEAD_CONTEXT_BYTES: usize = 16 * 1024;
 const CONTEXT_TRUNCATION_MARKER: &str = "\n\n[context truncated]\n";
 
 // ─── WeaveAgent trait ────────────────────────────────────────────────────────
@@ -917,14 +917,14 @@ impl super::Strand for FleetWeaveStrand {
 #[allow(dead_code)]
 const WEAVE_AGENT_TIMEOUT_SECS: u64 = 60;
 
-/// Maximum timeout for weave strand evaluation (120 seconds).
+/// Maximum timeout for weave strand evaluation (180 seconds).
 ///
-/// This prevents a single weave strand from stalling the entire
-/// SELECTING cycle for minutes. Without this timeout, issues like
-/// bead store problems or filesystem hangs can cause weave to take
-/// 237+ seconds while other strands fail in milliseconds.
+/// This prevents a single weave strand from stalling the entire SELECTING
+/// cycle indefinitely while leaving enough time for a bounded production
+/// prompt to complete. Store enumeration has its own shorter timeout, so this
+/// remaining budget belongs to the creator agent.
 /// See: needle-bf-5hlhn (weave strand stall investigation).
-const WEAVE_STRAND_TIMEOUT_SECS: u64 = 120;
+const WEAVE_STRAND_TIMEOUT_SECS: u64 = 180;
 
 /// Production Weave invocation source.
 enum WeaveInvocation {
