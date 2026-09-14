@@ -69,6 +69,21 @@ fn cargo_program() -> PathBuf {
                 .map(|home| home.join("bin/cargo"))
                 .filter(|path| path.is_file())
         })
+        // An archived test can intentionally replace HOME and PATH, while
+        // nextest can also restore the producer's stale runtime variables.
+        // The archive is executed with the same pinned toolchain image that
+        // built it, so Cargo's compile-time path is the stable final anchor.
+        .or_else(|| {
+            option_env!("CARGO")
+                .map(PathBuf::from)
+                .filter(|path| path.is_file())
+        })
+        .or_else(|| {
+            option_env!("CARGO_HOME")
+                .map(PathBuf::from)
+                .map(|home| home.join("bin/cargo"))
+                .filter(|path| path.is_file())
+        })
         .unwrap_or_else(|| PathBuf::from("cargo"))
 }
 
