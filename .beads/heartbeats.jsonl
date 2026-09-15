@@ -6780,3 +6780,9 @@
 {"last_strand":null,"state":"idle","ts":"2026-09-15T00:21:45.440586828+00:00","worker":"test-exhaust-exit"}
 {"last_strand":null,"state":"idle","ts":"2026-09-15T00:29:28.377185958+00:00","worker":"glm-needle"}
 {"last_strand":null,"state":"idle","ts":"2026-09-15T00:38:59.633576793+00:00","worker":"glm-needle"}
+{"last_strand":null,"state":"idle","ts":"2026-09-15T00:46:58.515228313+00:00","worker":"glm-needle"}
+{"last_strand":null,"state":"idle","ts":"2026-09-15T00:57:12.354322585+00:00","worker":"glm-needle"}
+{"last_strand":null,"state":"idle","ts":"2026-09-15T01:06:25.210676427+00:00","worker":"glm-needle"}
+{"last_strand":null,"state":"idle","ts":"2026-09-15T01:15:12.573162143+00:00","worker":"glm-needle"}
+{"last_strand":null,"state":"idle","ts":"2026-09-15T01:23:00.282489226+00:00","worker":"glm-needle"}
+{"last_strand":null,"state":"idle","ts":"2026-09-15T01:32:24.200937362+00:00","worker":"glm-needle"}
