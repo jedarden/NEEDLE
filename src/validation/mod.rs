@@ -22,6 +22,7 @@
 
 pub mod default_gates;
 pub mod dod_bypass;
+pub mod fallback;
 pub mod predispatch;
 mod shipped_work;
 pub mod worker_config;
