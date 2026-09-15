@@ -1396,6 +1396,26 @@ pub trait BeadStore: Send + Sync {
         Ok(None)
     }
 
+    /// Whether [`BeadStore::close_reason`] can return a closed bead's close
+    /// reason on this backend.
+    ///
+    /// Callers that judge the close reason (the close-evidence gate) must
+    /// skip backends that cannot expose it rather than treating every close
+    /// on such a backend as evidence-free.
+    fn exposes_close_reason(&self) -> bool {
+        false
+    }
+
+    /// The close reason a closed bead was closed with, when the backend
+    /// records one.
+    ///
+    /// `Ok(None)` means the backend exposes no reason for this bead —
+    /// including when the bead is not closed. An inability to fetch is an
+    /// `Err`, a missing reason is `Ok(None)`; callers distinguish the two.
+    async fn close_reason(&self, _id: &BeadId) -> Result<Option<String>> {
+        Ok(None)
+    }
+
     /// Record one attempt's outcome in the backend's attempt ledger (bead-rs
     /// `resolve`, attempt-outcome-v1) without applying a lifecycle action —
     /// NEEDLE's guarded action path does that. Idempotent per attempt ID:

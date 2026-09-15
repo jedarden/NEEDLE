@@ -68,6 +68,23 @@ So an agent actually reads it, not just a human browsing `docs/`:
 - [`docs/agent-onboarding.md`](agent-onboarding.md) — the bead-creation step
   of first-run setup.
 
+## Quote acceptance commands so NEEDLE can re-run them
+
+NEEDLE re-runs what a close reason claims, and also re-runs the `go test` /
+`cargo test` commands a bead's own description quotes — in fenced code blocks
+or inline code spans — so the dispatching agent cannot quietly drop the test
+its bead names (see [close-verification.md](close-verification.md)). That
+mining is deliberately literal, so author beads accordingly:
+
+- Quote the one acceptance command in backticks, exactly as it should run:
+  `` `go test ./internal/crypto/` ``, not "the crypto tests".
+- Don't quote example or template commands in a bead meant for a different
+  language — a mined command only re-runs where its build marker exists
+  (`go.mod`/`go.work` for `go test`, `Cargo.toml` for `cargo test`), but a
+  quote that *does* apply will run, so `` `cargo test --lib` `` in a Rust
+  bead is a commitment, not decoration.
+- Ellipsis templates (`go test …`) are never run; name one concrete command.
+
 ## Related NEEDLE-side machinery
 
 Wording is the agent-side fix. NEEDLE's own automatic decomposition (mitosis)

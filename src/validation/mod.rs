@@ -375,7 +375,7 @@ pub struct GateEnvironment {
 }
 
 impl GateEnvironment {
-    fn capture() -> Self {
+    pub(crate) fn capture() -> Self {
         let values = COMMAND_GATE_ENV_ALLOWLIST
             .iter()
             .filter_map(|name| std::env::var_os(name).map(|value| (OsString::from(name), value)))
@@ -396,6 +396,12 @@ impl GateEnvironment {
     fn apply(&self, command: &mut tokio::process::Command) {
         command.env_clear();
         command.envs(self.values.iter());
+    }
+
+    /// The captured allowlisted pairs, for executors that describe the
+    /// environment as data (a `ProcessRequest`) rather than a tokio Command.
+    pub(crate) fn env_pairs(&self) -> impl Iterator<Item = (&OsString, &OsString)> {
+        self.values.iter()
     }
 }
 
@@ -758,6 +764,20 @@ async fn extract_committed_state(
     std::mem::forget(temp_dir);
 
     Ok(leaked_dir)
+}
+
+/// Extract a workspace's committed HEAD state into a temporary directory for
+/// consumers outside the gate registry (the close-evidence re-run).
+///
+/// The directory is deliberately leaked exactly like the gate extractions it
+/// mirrors: the caller removes it when verification passed and leaves it in
+/// place for diagnosis when a command failed.
+pub(crate) async fn extract_head_for_verification(
+    workspace: &Path,
+    bead_id: &str,
+) -> Result<PathBuf> {
+    let subject = GateSubject::capture(workspace).await?;
+    extract_committed_state(workspace, bead_id, &subject).await
 }
 
 #[async_trait::async_trait]

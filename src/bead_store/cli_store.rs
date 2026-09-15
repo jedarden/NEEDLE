@@ -814,6 +814,47 @@ impl BeadStore for CliBeadStore {
             .map(str::to_string))
     }
 
+    fn exposes_close_reason(&self) -> bool {
+        // bead-rs projects `close_reason` through its safe query language;
+        // the legacy bf `show --json` projection carries no close reason, so
+        // the close-evidence gate skips those workspaces instead of judging
+        // every close there as evidence-free.
+        self.backend.name == "bead-rs"
+    }
+
+    async fn close_reason(&self, id: &BeadId) -> Result<Option<String>> {
+        if !self.exposes_close_reason() {
+            return Ok(None);
+        }
+        let query = serde_json::json!({
+            "version": "v1",
+            "predicates": [
+                {"field": "id", "operator": "equals", "value": id.to_string()}
+            ],
+            "sort": [],
+            "limit": 1,
+        });
+        let args = vec![
+            "query".to_string(),
+            "--json".to_string(),
+            query.to_string(),
+            "--output-json".to_string(),
+        ];
+        let raw = self
+            .run_argv("close_reason", &args, DEFAULT_TIMEOUT_SECS)
+            .await?;
+        let value: serde_json::Value = serde_json::from_str(raw.trim())
+            .with_context(|| format!("bead-rs query for {id} returned non-JSON output"))?;
+        let object = value
+            .as_array()
+            .and_then(|items| items.first())
+            .unwrap_or(&value);
+        Ok(object
+            .get("close_reason")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string))
+    }
+
     async fn claim_status(&self, id: &BeadId) -> Result<crate::types::ClaimStatus> {
         let values = HashMap::from([("id", id.to_string())]);
         let raw = self.run_operation("show", &values).await?;
@@ -1375,8 +1416,83 @@ fn is_optional_placeholder(name: &str) -> bool {
 #[cfg(test)]
 mod process_runner_tests {
     use super::{super::builtin_bead_backends, CliBeadStore};
+    use crate::bead_store::BeadStore as _;
     use crate::process_runner::{FakeProcessRunner, ProcessOutput};
+    use crate::types::BeadId;
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn close_reason_reads_the_bead_rs_query_projection() {
+        let directory = tempfile::tempdir().unwrap();
+        let binary = directory.path().join("fixture-cli");
+        std::fs::write(&binary, "fixture").unwrap();
+        let backend = builtin_bead_backends()
+            .into_iter()
+            .find(|backend| backend.name == "bead-rs")
+            .unwrap();
+        let runner = Arc::new(FakeProcessRunner::new());
+        runner.push_output(ProcessOutput::success(
+            br#"[{"id":"nd-1","status":"closed","close_reason":"done\n```verified:\ncargo test --lib exit=0\n```"}]"#
+                .to_vec(),
+        ));
+        let store = CliBeadStore::new(
+            backend,
+            binary,
+            directory.path().to_path_buf(),
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .with_process_runner(runner.clone());
+
+        assert!(
+            store.exposes_close_reason(),
+            "bead-rs exposes close reasons through its query projection"
+        );
+        let reason = store
+            .close_reason(&BeadId::from("nd-1"))
+            .await
+            .unwrap()
+            .expect("the closed bead carries a close reason");
+        assert!(reason.contains("verified:"), "got: {reason}");
+
+        let requests = runner.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].arguments()[0], "query");
+        assert!(
+            requests[0]
+                .arguments()
+                .iter()
+                .any(|arg| arg == "--output-json"),
+            "the query must ask for machine-readable output"
+        );
+    }
+
+    #[tokio::test]
+    async fn close_reason_absent_from_projection_reads_as_none() {
+        let directory = tempfile::tempdir().unwrap();
+        let binary = directory.path().join("fixture-cli");
+        std::fs::write(&binary, "fixture").unwrap();
+        let backend = builtin_bead_backends().into_iter().next().unwrap();
+        let runner = Arc::new(FakeProcessRunner::new());
+        runner.push_output(ProcessOutput::success(
+            b"[{\"id\":\"nd-2\",\"status\":\"closed\"}]".to_vec(),
+        ));
+        let store = CliBeadStore::new(
+            backend,
+            binary,
+            directory.path().to_path_buf(),
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .with_process_runner(runner);
+
+        let reason = store.close_reason(&BeadId::from("nd-2")).await.unwrap();
+        assert_eq!(reason, None, "a bead closed without a reason reads as None");
+    }
 
     #[tokio::test]
     async fn process_runner_fake_drives_bead_adapter_without_a_child() {

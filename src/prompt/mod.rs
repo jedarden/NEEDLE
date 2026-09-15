@@ -80,6 +80,23 @@ Complete the task described above. When finished:
 
 `{bead_cli} close {bead_id} --reason \"...\"`
 
+  The close reason MUST end with a fenced `verified:` block listing every
+  verification command you actually ran and its exit code, one per line:
+
+  ```verified:
+  go test -short ./internal/crypto/ exit=0
+  cargo test --lib exit=0
+  ```
+
+  NEEDLE re-runs each command in that block inside a clean extraction of your
+  committed work before honouring the close, and also re-runs any go test /
+  cargo test acceptance commands quoted in the bead description even if you
+  omit them. A close reason without the block is rejected — the bead is
+  reopened and released with reason \"close reason carries no verification evidence\".
+  Only these command prefixes are re-run; anything else in the block is
+  ignored, never executed: go test, go vet, go build, cargo test, cargo build,
+  npm test, pytest, make test, scripts/definition-of-done.sh
+
 If you cannot complete the task:
 - Do NOT close the bead
 - The bead will be automatically released for retry
@@ -1510,6 +1527,41 @@ mod tests {
         assert!(
             result.content.contains("needle-abc"),
             "prompt must contain bead ID"
+        );
+    }
+
+    #[test]
+    fn build_pluck_requires_a_verified_block_in_the_close_reason() {
+        // Close-evidence gate contract: the prompt must tell the agent to end
+        // the close reason with a fenced `verified:` block, show the shape,
+        // and say what happens to a close reason without one.
+        let config = PromptConfig::default();
+        let builder = PromptBuilder::new(&config);
+        let bead = test_bead();
+        let result = builder
+            .build_pluck(&bead, Path::new("/tmp/test-workspace"), "worker-01")
+            .unwrap();
+
+        assert!(
+            result.content.contains("```verified:"),
+            "prompt must show the fenced verified: block, got: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("exit=0"),
+            "prompt must show the per-line exit-code convention"
+        );
+        assert!(
+            result
+                .content
+                .contains("close reason carries no verification evidence"),
+            "prompt must name the rejection reason for a blockless close"
+        );
+        assert!(
+            result
+                .content
+                .contains("go test, go vet, go build, cargo test"),
+            "prompt must list the re-run allow-list"
         );
     }
 
