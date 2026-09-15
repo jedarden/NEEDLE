@@ -1,9 +1,10 @@
 # ex44 NEEDLE fleet policy
 
 This directory makes the codinghome/ex44 worker capacity and backlog policy
-reproducible. It targets up to 25 workers against the shared Z.ai proxy: 11
-home-only workers and 14 workers allowed to roam across the maintained-workspace
-frontier. Nine workers use GLM-5.3 and up
+reproducible. It targets up to 25 workers against the shared Z.ai proxy. Every
+worker tries its listed home workspace first, then may roam across the
+maintained-workspace frontier when that route has no eligible work. Nine
+workers use GLM-5.3 and up
 to sixteen use GLM-5.3-Flash, with live-session concurrency enforced separately
 from the number of registered workers.
 
@@ -14,26 +15,28 @@ from the number of registered workers.
    hold expires. Human/manual holds remain hard exclusions.
 2. **Finish high-leverage blockers first.** Pluck orders pinned candidates by
    open-dependent impact before normal priority/age tie-breakers.
-3. **Fix routing.** `workers.tsv` removes the superseded CLASP route, pins the
-   SEAM and irreversible-command-gate workers correctly, and adds three roaming
-   workers. `required-explore-workspaces.txt` restores maintained FABRIC to the
-   explicit roaming set.
+3. **Fix routing.** `workers.tsv` removes the superseded CLASP route, keeps
+   SEAM and irreversible-command-gate as the home-first routes for their
+   assigned workers, and lets every worker fall back to roaming. This avoids
+   idling a pinned worker while eligible work exists elsewhere.
+   `required-explore-workspaces.txt` restores maintained FABRIC to the explicit
+   roaming set.
 4. **Replenish automatically.** `fleet-policy.env` enables the low-water
    generation gate with six eligible beads in reserve and a five-minute
-   workspace/strand lease, preventing a thundering herd of generators. Pinned
-   workers replenish their home repository; roaming workers use the same
-   approved workspace set as Explore, skip healthy or contended repositories,
-   and run at most one creative pass per selection cycle.
+   workspace/strand lease, preventing a thundering herd of generators. Workers
+   replenish their home repository first; after roaming is needed, they use the
+   same approved workspace set as Explore, skip healthy or contended
+   repositories, and run at most one creative pass per selection cycle.
 5. **Enforce a backlog SLO.** For 25 workers, the nominal target is 100
    eligible beads (four per worker) and the minimum is 50 (two per worker).
    Fresh heartbeats raise those thresholds when temporary workers are also
    deployed, so extra consumers cannot be hidden behind the steady-state
    manifest count.
-   The verdict is route-aware: every pinned repository must cover its assigned
-   workers, and the roaming pool must have enough residual work after pinned
-   reservations. This prevents a large NEEDLE queue from hiding an idle SEAM
-   worker. `needle-backlog-slo.timer` measures the actual frontier every five
-   minutes and emits the under-provisioned routes in JSON.
+   The verdict follows the roster: home-only routes, when configured, reserve
+   local inventory before the roaming pool is evaluated. The ex44 roster lets
+   every worker roam, so its minimum applies to the shared eligible frontier.
+   `needle-backlog-slo.timer` measures that frontier every five minutes and
+   emits under-provisioned routes in JSON.
 6. **Improve task yield.** Full agent-wallclock timeouts trigger Mitosis once
    90% of the configured timeout has elapsed. New beads should describe one
    bounded deliverable, name an executable acceptance check, and use dependency
@@ -70,8 +73,9 @@ timestamped files under `~/.config/systemd/user` and `~/.config/needle`, run
 `needle-zai-governor` protects the proxy without fighting the manifest. It
 scales the eight expansion workers (`glm-icg` and `glm-roam-18` through `24`)
 between one and eight, for 18--25 active workers including the fixed base. The
-pinned ICG route is first in the pool and is therefore preserved by the
-one-worker floor; pressure sheds roamers first. A productive window with no
+home-first ICG worker is first in the pool and is therefore preserved by the
+one-worker floor, but it can roam when ICG has no eligible work. A productive
+window with no
 recoverable 429 adds one worker. One independently affected request holds the
 quota boundary; multiple affected requests or any terminal 429 remove one.
 The separate 17-worker base fleet is never disabled by this controller.

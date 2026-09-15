@@ -2,25 +2,27 @@
 #
 # Columns (tab-separated):
 #   identifier  workspace  agent  start_delay_seconds  explore_enabled
+# Every worker keeps its listed workspace as the Pluck-first home route, then
+# uses Explore as a fleet fallback when that route has no eligible work.
 #identifier	workspace	agent	start_delay	explore
 glm-needle	/home/coding/NEEDLE	claude-code-glm-5.3-flash	0	true
-glm-loom	/home/coding/LOOM	claude-code-glm-5.3	15	false
-glm-armor	/home/coding/ARMOR	claude-code-glm-5.3-flash	30	false
+glm-loom	/home/coding/LOOM	claude-code-glm-5.3	15	true
+glm-armor	/home/coding/ARMOR	claude-code-glm-5.3-flash	30	true
 glm-mta	/home/coding/mta-my-way	claude-code-glm-5.3-flash	45	true
-glm-pdftract	/home/coding/pdftract	claude-code-glm-5.3	60	false
+glm-pdftract	/home/coding/pdftract	claude-code-glm-5.3	60	true
 glm-spaxel	/home/coding/spaxel	claude-code-glm-5.3-flash	75	true
 glm-tradegraph	/home/coding/.needle/roam-only	claude-code-glm-5.3-flash	90	true
-glm53-tgplat	/home/coding/tradegraph-platform	claude-code-glm-5.3	105	false
-glm53-cgraph2	/home/coding/commitgraph	claude-code-glm-5.3	120	false
+glm53-tgplat	/home/coding/tradegraph-platform	claude-code-glm-5.3	105	true
+glm53-cgraph2	/home/coding/commitgraph	claude-code-glm-5.3	120	true
 glm53-adc	/home/coding/.needle/roam-only	claude-code-glm-5.3	135	true
-glm53-ibkr	/home/coding/ibkr-mcp	claude-code-glm-5.3	150	false
-glm53-irmcp	/home/coding/investment-research-mcp	claude-code-glm-5.3	165	false
-glm-archivist	/home/coding/agent-archivist	claude-code-glm-5.3	180	false
-glm-archivist-b	/home/coding/agent-archivist	claude-code-glm-5.3	195	false
+glm53-ibkr	/home/coding/ibkr-mcp	claude-code-glm-5.3	150	true
+glm53-irmcp	/home/coding/investment-research-mcp	claude-code-glm-5.3	165	true
+glm-archivist	/home/coding/agent-archivist	claude-code-glm-5.3	180	true
+glm-archivist-b	/home/coding/agent-archivist	claude-code-glm-5.3	195	true
 glm-seam	/home/coding/SEAM	claude-code-glm-5.3-flash	210	true
-glm-icg	/home/coding/irreversible-command-gate	claude-code-glm-5.3-flash	225	false
+glm-icg	/home/coding/irreversible-command-gate	claude-code-glm-5.3-flash	225	true
 glm-cgraph	/home/coding/claude-governor	claude-code-glm-5.3-flash	240	true
-glm-tgp	/home/coding/claude-print	claude-code-glm-5.3-flash	255	false
+glm-tgp	/home/coding/claude-print	claude-code-glm-5.3-flash	255	true
 glm-roam-18	/home/coding/jedarden.com	claude-code-glm-5.3-flash	270	true
 glm-roam-19	/home/coding/ytt	claude-code-glm-5.3-flash	285	true
 glm-roam-20	/home/coding/bead-rs	claude-code-glm-5.3-flash	300	true

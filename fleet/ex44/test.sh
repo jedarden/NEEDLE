@@ -10,7 +10,7 @@ bash -n "$SRC_DIR/apply-ex44-fleet.sh" "$SRC_DIR/backlog-slo.sh" "$SRC_DIR/needl
 rows=$(awk -F'\t' '$1 !~ /^#/ && NF == 5 {print}' "$MANIFEST")
 [[ "$(wc -l <<<"$rows")" -eq 25 ]]
 [[ "$(cut -f1 <<<"$rows" | sort -u | wc -l)" -eq 25 ]]
-[[ "$(awk -F'\t' '$5 == "true" {n++} END {print n+0}' <<<"$rows")" -eq 14 ]]
+[[ "$(awk -F'\t' '$5 == "true" {n++} END {print n+0}' <<<"$rows")" -eq 25 ]]
 grep -q $'^glm-tradegraph\t/home/coding/.needle/roam-only\t.*\ttrue$' "$MANIFEST"
 grep -q $'^glm53-adc\t/home/coding/.needle/roam-only\t.*\ttrue$' "$MANIFEST"
 grep -q '^  backend: bead-rs$' "$SRC_DIR/roam-home.yaml"
