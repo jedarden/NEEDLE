@@ -6425,6 +6425,18 @@ impl Worker {
 
     /// Handle the EXHAUSTED state: either wait and retry or exit.
     async fn handle_exhausted(&mut self) -> Result<WorkerState> {
+        // EXHAUSTED is also a safe cycle boundary: no bead is claimed and no
+        // agent is running. Check for a promoted binary here as well as after
+        // LOGGING so an idle worker can acquire fixes that let it discover or
+        // create new work. Without this check, an already-exhausted worker can
+        // remain on the old binary forever because it never reaches LOGGING.
+        if let Err(e) = self.check_hot_reload().await {
+            tracing::warn!(
+                error = %e,
+                "hot-reload check failed while exhausted, continuing on current binary"
+            );
+        }
+
         self.telemetry.emit(
             EventKind::WorkerExhausted {
                 cycle_count: self.beads_processed,
