@@ -2,9 +2,9 @@
 
 > **N**avigates **E**very **E**nqueued **D**eliverable, **L**ogs **E**ffort
 
-Plan revision: 34
+Plan revision: 35
 
-As of: 2026-09-13
+As of: 2026-09-15
 
 Status owner: NEEDLE maintainers
 
@@ -53,6 +53,13 @@ verified-closure yield and cost. N-T45–N-T56 are the next wires; each is one
 single-behavior bead, and the two tracking parents are manually held. The
 META harness epic now waits on the loop's first live receipts instead of on
 an unwritten ADR.
+Revision 35 adds detection and repair that do not wait on a healthy fleet
+(section 4.11): a daily `factory` audit whose violations file a few
+deduplicated beads, workspace-scoped routing with workspace-only candidates,
+reserved Pluck lanes, and a learning-loop stall escalation. N-T57–N-T62 and
+the existing N-T48 implement it, every behaviour off by default, and the
+roster, timer and routing changes that activate it wait for operator
+confirmation.
 
 ## 0. How to read this plan
 
@@ -942,6 +949,101 @@ L4 proposal per day; N-T55 receipts on those; the budget rises only after
 two consecutive horizons with net-positive receipts. Tracking parent:
 `needle-48867e1b` (manually held); ADR contract test `needle-73c1958b`.
 
+### 4.11 Detection and repair that do not wait on a healthy fleet (revision 35)
+
+The loop in section 4.10 runs on the fleet it improves. When that fleet cannot
+work NEEDLE itself, the loop stops, and nothing in the system notices. The
+2026-09-15 live check found four such states, every one of them by a person
+running queries and none of them by NEEDLE:
+
+- the NEEDLE workspace resolved 22 attempts in 72 hours with zero verified
+  closures, 21 of them hour-long glm-5.3-flash timeouts;
+- needle-ci failed every run from 2026-09-14T22:16Z, because iad-ci's clone of
+  Forgejo returned HTTP 503, and no bead tracked it for 20 hours;
+- seven ready P1 `learning-loop` beads sat behind 204 ready beads, several of
+  them P0, and revision 34's seventeen beads did not move for 36 hours;
+- the split-as-success and $0-timeout defects (N-T46, N-T47) were visible only
+  in tables a person computed.
+
+The only thing that advanced the loop that week was an interactive session.
+Revision 35 adds four mechanisms that do not depend on the fleet being healthy.
+Each decision below is locked; the beads implement them.
+
+1. **Factory-health audit** (N-T57, N-T58; delivers `needle-a0d1eb19` with
+   N-T62).
+   - It lives in `needle audit` as the `factory` predicate group, beside the
+     reachability groups, which keep their owners (`needle-c1ae2730`,
+     `needle-b9772de3`, `needle-73d53f34`).
+   - Inputs are collected once; every predicate is a pure function of them,
+     and the determinism and exit-code contracts of `src/cli/audit.rs` stand.
+   - Rules and `audit.factory` defaults:
+     `F1_WORKSPACE_NO_VERIFIED_CLOSURES` (window 72 h, at least 10 judged
+     attempts, zero verified); `F2_LATE_TIER_YIELD_INVERSION` (tier >= 4 yield
+     exceeds tier 1 by at least 30 points, at least 20 rows per tier);
+     `F3_UNCOSTED_TIMEOUTS`; `F4_CI_RED` (continuously failed for at least
+     1 hour, with the failed-node signature); `I_CHECKLIST_DRIFT`
+     (informational).
+   - One run per host per day from a systemd `--user` timer, never one per
+     worker.
+   - Every finding is telemetry. Violations file at most three new beads per
+     run, one per evidence signature (label `audit-signature:<hash>`), and a
+     repeat adds a note instead of a duplicate. Informational findings never
+     file, filed beads never carry `human`, and nothing is repaired from the
+     timer.
+2. **A repair path around a failing adapter** (N-T48, N-T61).
+   - Routing evidence is scoped workspace first, fleet second, static default
+     last, and the receipt records which scope decided.
+   - A workspace whose every candidate is below
+     `workspace_poor_threshold` emits `workspace.adapter_evidence_poor` once
+     per window instead of moving routing.
+   - `workspace_only_candidates` lets an adapter win only on workspace
+     evidence: it is never chosen on fleet evidence and never explored. This
+     is the precondition for adding codex as a candidate, together with a
+     `limits.providers.openai` cap (N-T62).
+3. **Reserved capacity** (N-T59).
+   - `strands.pluck.lanes` binds named worker identifiers, not shares, to a
+     required label, so capacity is auditable in the roster.
+   - The filter applies in every Pluck relaxation tier and in Explore's
+     admission; ordering inside a lane is unchanged, and deferred, human,
+     blocked and quarantine exclusions still hold.
+   - A lane worker idles when its lane is empty unless
+     `when_empty: normal`; ordinary workers are unchanged.
+   - The first lane is `codex-loop` on NEEDLE for `learning-loop` (N-T62).
+4. **Loop liveness and escalation** (N-T60).
+   - `F5_LEARNING_LOOP_STALLED` fires when open, unassigned `learning-loop`
+     beads exist and no loop bead has closed for three days. A closed bead's
+     `updated_at` stands in for its close time, because bead-rs exposes none.
+   - The escalation is a filed bead carrying `escalation`, which Pluck
+     excludes by default, and a brief under
+     `~/.needle/state/escalations/` for an operator session or a
+     stronger-model lane. Nothing is reassigned automatically.
+
+Authority (section 5.7): the audit is L0 detection whose bead filing is
+budgeted L4-shaped proposal work; lanes and routing scope are L1/L3
+configuration inside approved bounds. Changing the live roster, timers,
+candidates or provider caps changes fleet spend and behaviour, so N-T62 is
+applied on the host only after operator confirmation, and the binary ships
+through `needle upgrade` with its canary.
+
+Every new behaviour ships off by default. Activation order: N-T48 and N-T61;
+N-T57 and N-T58; N-T60; N-T59; then N-T62. Integration targets are fixed at
+five (`tests/cargo-targets`), so each wire's acceptance command is
+`cargo test --lib nt<NN>_`, N-T48 included.
+
+Measures: F1, F4 and F5 findings trending to zero; learning-loop closes per day
+and time from filing to close; the codex share of dispatches staying inside
+its provider cap.
+
+| Wire | Bead |
+| --- | --- |
+| N-T48 workspace-scoped routing evidence and the poor-workspace signal | `needle-f84c01a4` |
+| N-T57 `factory` predicate group in `needle audit` | `needle-76b52674` |
+| N-T58 audit CLI, per-finding telemetry, deduplicated bead filing | `needle-e42f3f0b` |
+| N-T59 reserved Pluck lanes | `needle-bc162127` |
+| N-T60 loop-stall predicate and escalation handoff | `needle-e0ad35bd` |
+| N-T61 workspace-only routing candidates | `needle-54699c67` |
+| N-T62 `fleet/ex44` activation: loop-lane worker, audit timer, config, openai cap | `needle-62d6eab9` |
+
 ## 5. In-process learning kernel
 
 ### 5.1 Deployment decision and dependency rule
@@ -1253,6 +1355,12 @@ generated conformance report.
 | N-T54 | admission adapter | Proposals admitted through N-T07 into provenance-linked beads; dedup against existing owners; budget; L5 refused (ADR-029) | unchanged-retry proposal resolves to R1/R2 and creates nothing; one bead across concurrent submissions | blocked by N-T53, `needle-43c0d818`, `needle-f754b4cb`; `needle-e830524d` |
 | N-T55 | receipts store | Impact receipt per admitted proposal; promote/withdraw on cohort measures; withdrawal is a revert proposal; contaminated cohort holds (ADR-029) | improved/unchanged/contaminated fixtures decide promote/withdraw/hold; receipts append-only | blocked by N-T54; `needle-c4e6424a` |
 | N-T56 | `src/cli/` | `needle improvements` read-only view of proposals, beads, receipts and trend | deterministic JSON/human output; no write | blocked by N-T55; `needle-65e66131` |
+| N-T57 | `src/cli/audit.rs`, `src/build_status.rs` | `factory` predicate group in `needle audit`: no verified closures, late-tier yield inversion, uncosted timeouts, CI red, checklist drift (4.11) | a firing and a healthy-state fixture per rule; deterministic output | transition (4.11); `needle-76b52674` |
+| N-T58 | `src/cli/`, `src/cli/audit.rs` | `needle audit` CLI, `audit.finding`/`audit.completed` telemetry, deduplicated and budgeted bead filing for violations | one bead per evidence signature across runs; budget honoured; informational findings never file | blocked by N-T57; `needle-e42f3f0b` |
+| N-T59 | `src/strand/pluck.rs`, `src/strand/explore.rs`, `src/config/` | Reserved Pluck lanes binding named workers to a required label | a lane worker never selects an unlabelled bead in any tier; idle or fallback when empty | transition (4.11); `needle-bc162127` |
+| N-T60 | `src/cli/audit.rs`, `src/strand/pluck.rs` | `F5_LEARNING_LOOP_STALLED` and the escalation handoff: a fleet-excluded `escalation` bead and a brief | stall fixture fires once; Pluck excludes the escalation bead; the brief is rewritten, not duplicated | blocked by N-T57, N-T58; `needle-e0ad35bd` |
+| N-T61 | `src/evidence_routing.rs`, `src/config/` | Workspace-only routing candidates, never chosen on fleet evidence or by exploration | fleet evidence withholds the candidate; workspace evidence routes to it; exploration never picks it | blocked by N-T48; `needle-54699c67` |
+| N-T62 | `fleet/ex44/` | Loop-lane worker row, `needle-factory-audit` timer, lane and routing configuration, openai provider cap | fleet tests pass; operator-confirmed application verified live | blocked by N-T48, N-T58–N-T61; `needle-62d6eab9` |
 
 ## 9. Transition gates and order
 
