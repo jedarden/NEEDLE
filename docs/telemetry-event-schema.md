@@ -399,6 +399,7 @@ attempt ID as authoritative.
     "tokens_in": 120000,
     "tokens_out": 4500,
     "estimated_cost_usd": 0.0921,
+    "costed": true,
     "commits": ["deadbee"],
     "duration_ms": 614000,
     "terminal_reason": "gate:clippy",
@@ -440,6 +441,7 @@ attempt ID as authoritative.
     "tokens_in": 118000,
     "tokens_out": 5200,
     "estimated_cost_usd": 0.0894,
+    "costed": true,
     "commits": ["deadbee"],
     "duration_ms": 589000,
     "exit_code": 0
