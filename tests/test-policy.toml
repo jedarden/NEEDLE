@@ -51,7 +51,11 @@ version = 1
 # two pricing cases in src/cost (cache rates, fleet GLM defaults), stats
 # treating uncosted rows as unknown, and the always-serialized costed flag.
 # All pure; `cargo test --lib nt47_` stands in for the bead's dedicated target.
-max_tests = 3756
+# +4 workspace-scoped routing evidence, N-T48 (needle-f84c01a4): per-workspace
+# replay routing, the once-per-window poor-workspace signal, scope off equals
+# the fleet choice, and freeze/degraded/default-floor guards. Pure;
+# `cargo test --lib nt48_`.
+max_tests = 3760
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

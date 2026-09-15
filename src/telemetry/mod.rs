@@ -1132,7 +1132,9 @@ pub enum EventKind {
         bytes: usize,
     },
     /// Evidence-based adapter selection made a choice (N-T18). `considered`
-    /// carries every candidate's evidence so the receipt explains itself.
+    /// carries every candidate's evidence in the deciding scope so the
+    /// receipt explains itself; `scope` names that scope, and both the
+    /// workspace and fleet evidence sets are recorded (N-T48).
     EvidenceRoutingDecision {
         bead_id: BeadId,
         static_adapter: String,
@@ -1140,6 +1142,20 @@ pub enum EventKind {
         reason: String,
         explored: bool,
         considered: Vec<serde_json::Value>,
+        scope: String,
+        workspace: Option<String>,
+        considered_workspace: Vec<serde_json::Value>,
+        considered_fleet: Vec<serde_json::Value>,
+    },
+    /// Every routing candidate in a workspace has enough evidence and every
+    /// one verifies below the poor-workspace threshold (N-T48): a workspace
+    /// signal, emitted once per window across the fleet, never a routing
+    /// change.
+    WorkspaceAdapterEvidencePoor {
+        workspace: String,
+        threshold: f64,
+        window_days: u32,
+        candidates: Vec<serde_json::Value>,
     },
     /// A prompt-variant canary regressed past the margin and was stopped
     /// (N-T19); the receipt file carries the same numbers.
@@ -1749,6 +1765,7 @@ impl EventKind {
             EventKind::ProviderRestored { .. } => "provider.restored",
             EventKind::PromptMemoryRetrieved { .. } => "prompt.memory_retrieved",
             EventKind::EvidenceRoutingDecision { .. } => "agent.evidence_routing",
+            EventKind::WorkspaceAdapterEvidencePoor { .. } => "workspace.adapter_evidence_poor",
             EventKind::ExperimentStopped { .. } => "experiment.stopped",
             EventKind::UnravelAnalyzed { .. } => "bead.unravel.analyzed",
             EventKind::UnravelSkipped { .. } => "bead.unravel.skipped",
@@ -2022,6 +2039,7 @@ impl EventKind {
             EventKind::Log { bead_id, .. } => bead_id.clone(),
             EventKind::UpgradeCheckStarted { .. } => None,
             EventKind::ExperimentStopped { .. } => None,
+            EventKind::WorkspaceAdapterEvidencePoor { .. } => None,
             EventKind::UpgradeCheckCompleted { .. } => None,
             EventKind::UpgradeCheckFailed { .. } => None,
             EventKind::PluckOrderingDegraded { .. } => None,
@@ -2822,6 +2840,10 @@ impl EventKind {
                 reason,
                 explored,
                 considered,
+                scope,
+                workspace,
+                considered_workspace,
+                considered_fleet,
             } => {
                 serde_json::json!({
                     "bead_id": bead_id.as_ref(),
@@ -2830,6 +2852,23 @@ impl EventKind {
                     "reason": reason,
                     "explored": explored,
                     "considered": considered,
+                    "scope": scope,
+                    "workspace": workspace,
+                    "considered_workspace": considered_workspace,
+                    "considered_fleet": considered_fleet,
+                })
+            }
+            EventKind::WorkspaceAdapterEvidencePoor {
+                workspace,
+                threshold,
+                window_days,
+                candidates,
+            } => {
+                serde_json::json!({
+                    "workspace": workspace,
+                    "threshold": threshold,
+                    "window_days": window_days,
+                    "candidates": candidates,
                 })
             }
             EventKind::ExperimentStopped {
@@ -3919,6 +3958,7 @@ impl EventKind {
             | EventKind::ProviderRestored { .. }
             | EventKind::PromptMemoryRetrieved { .. }
             | EventKind::EvidenceRoutingDecision { .. }
+            | EventKind::WorkspaceAdapterEvidencePoor { .. }
             | EventKind::ExperimentStopped { .. }
             | EventKind::UnravelAnalyzed { .. }
             | EventKind::UnravelSkipped { .. }

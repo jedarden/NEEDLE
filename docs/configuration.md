@@ -503,6 +503,16 @@ receipt (`agent.evidence_routing`). Off by default — this selects among
 approved variants and records exposure (plan 5.7 L1); it never creates or
 widens anything.
 
+With `workspace_scope: true` (N-T48, ADR-030 decision 4) the bead's own
+workspace decides first: when the static default and at least one other
+eligible candidate each have `min_attempts` judged attempts in that
+workspace, the choice is made on that workspace's evidence alone. Below the
+floor the fleet's evidence decides as before, and below that the static
+default; the receipt's `scope` records which. A workspace where every
+candidate clears the floor and verifies below `workspace_poor_threshold` is
+not routed on: it emits `workspace.adapter_evidence_poor` once per window
+instead (0 turns the signal off).
+
 ```yaml
 agent:
   evidence_routing:
@@ -513,6 +523,8 @@ agent:
     min_improvement: 0.05
     window_days: 7
     refresh_secs: 600
+    workspace_scope: false
+    workspace_poor_threshold: 0.0
 ```
 
 ### Prompt-Variant Canaries (N-T19)

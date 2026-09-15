@@ -88,7 +88,18 @@ Additional fields are event-specific and documented per type below.
   `below_min_improvement:…`, `insufficient_evidence:…`, `explore:<share>`,
   `frozen:<why>`, `no_eligible_candidate`), `explored`, `considered` (every
   candidate's `attempts`, `judged`, `verified`, `success_rate`,
-  `cost_per_success`).
+  `cost_per_success`). N-T48 adds `scope` (`workspace`, `fleet` or
+  `static`: which evidence decided), `workspace` (the bead's workspace, when
+  known), and `considered_workspace` / `considered_fleet` (every candidate's
+  evidence at each scope; `considered` is the deciding scope's). With
+  `workspace_scope` on, `reason` is prefixed with the scope
+  (`workspace:evidence:…`).
+- `workspace.adapter_evidence_poor` — Every routing candidate in a workspace
+  has at least `min_attempts` judged attempts and verifies below
+  `workspace_poor_threshold`: a workspace signal, emitted once per
+  `window_days` window across the fleet (receipt under
+  `~/.needle/state/evidence_routing/`), never a routing change. Fields:
+  `workspace`, `threshold`, `window_days`, `candidates`.
 - `experiment.stopped` — A prompt-variant canary trailed the default by more
   than the margin with enough attempts on both sides and was stopped; the
   receipt file under `~/.needle/state/experiments/` carries the same numbers.
