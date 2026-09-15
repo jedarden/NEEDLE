@@ -1,13 +1,13 @@
 {
-  "timestamp": "2026-09-15T14:40:40.202942984Z",
-  "total_open_beads": 620,
+  "timestamp": "2026-09-15T15:38:07.860527755Z",
+  "total_open_beads": 619,
   "exclusion_criteria": {
     "has_assignee": 0,
     "manually_blocked": 21,
     "has_dependencies": 429,
     "resource_conflicts": 1
   },
-  "final_candidate_count": 202,
+  "final_candidate_count": 201,
   "excluded_beads": [
     {
       "bead_id": "needle-6b02eb9d",
