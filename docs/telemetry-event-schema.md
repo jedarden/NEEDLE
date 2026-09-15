@@ -93,7 +93,8 @@ Additional fields are event-specific and documented per type below.
   known), and `considered_workspace` / `considered_fleet` (every candidate's
   evidence at each scope; `considered` is the deciding scope's). With
   `workspace_scope` on, `reason` is prefixed with the scope
-  (`workspace:evidence:…`).
+  (`workspace:evidence:…`), and a fleet-scope decision that passed over a
+  `workspace_only_candidates` entry ends `+withheld:<adapter>` (N-T61).
 - `workspace.adapter_evidence_poor` — Every routing candidate in a workspace
   has at least `min_attempts` judged attempts and verifies below
   `workspace_poor_threshold`: a workspace signal, emitted once per

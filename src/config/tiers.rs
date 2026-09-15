@@ -243,6 +243,10 @@ static TIER_TABLE: &[(&str, ReloadTier)] = &[
         "agent.evidence_routing.workspace_poor_threshold",
         ReloadTier::Live,
     ),
+    (
+        "agent.evidence_routing.workspace_only_candidates",
+        ReloadTier::Live,
+    ),
     ("agent.routing.strict", ReloadTier::Live),
     // Worker configuration (mostly live)
     ("worker.idle_timeout", ReloadTier::Live),

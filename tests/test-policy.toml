@@ -55,7 +55,10 @@ version = 1
 # replay routing, the once-per-window poor-workspace signal, scope off equals
 # the fleet choice, and freeze/degraded/default-floor guards. Pure;
 # `cargo test --lib nt48_`.
-max_tests = 3760
+# +3 workspace-only routing candidates, N-T61 (needle-54699c67): withheld at
+# fleet scope, still chosen on workspace evidence, never explored. Pure;
+# `cargo test --lib nt61_`.
+max_tests = 3763
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

@@ -279,6 +279,12 @@ pub struct EvidenceRoutingConfig {
     /// instead of routed on (default: 0.0, off).
     #[serde(default)]
     pub workspace_poor_threshold: f64,
+    /// Candidates that may only be chosen where their own workspace evidence
+    /// decides: never on fleet evidence and never by exploration (N-T61).
+    /// This is how an adapter that verifies well in one workspace is offered
+    /// there without the fleet migrating onto it.
+    #[serde(default)]
+    pub workspace_only_candidates: Vec<String>,
 }
 
 impl Default for EvidenceRoutingConfig {
@@ -293,6 +299,7 @@ impl Default for EvidenceRoutingConfig {
             refresh_secs: Self::default_refresh_secs(),
             workspace_scope: false,
             workspace_poor_threshold: 0.0,
+            workspace_only_candidates: Vec::new(),
         }
     }
 }

@@ -439,6 +439,58 @@ fn is_static_fallback(reason: &str) -> bool {
         || reason == "no_eligible_candidate"
 }
 
+/// The configuration a fleet-scope decision sees: workspace-only candidates
+/// are not selectable there, so they are neither ranked nor explored
+/// fleet-wide (N-T61). The statically routed default always stays, since it
+/// is what a fleet-scope decision falls back to.
+fn fleet_scope_config(config: &EvidenceRoutingConfig) -> EvidenceRoutingConfig {
+    EvidenceRoutingConfig {
+        candidates: config
+            .candidates
+            .iter()
+            .filter(|name| !config.workspace_only_candidates.contains(name))
+            .cloned()
+            .collect(),
+        ..config.clone()
+    }
+}
+
+/// The workspace-only candidate a fleet-scope decision had to pass over: the
+/// best one that clears the evidence floor and beats the chosen adapter by
+/// `min_improvement` (N-T61). The receipt names it, so the withholding is
+/// visible rather than silent.
+fn withheld_candidate(
+    config: &EvidenceRoutingConfig,
+    evidence: &HashMap<String, AdapterEvidence>,
+    chosen: &str,
+    degraded_adapters: &HashSet<String>,
+) -> Option<String> {
+    let chosen_rate = evidence
+        .get(chosen)
+        .and_then(|e| e.success_rate())
+        .unwrap_or(0.0);
+    let mut best: Option<(&String, f64)> = None;
+    for name in &config.workspace_only_candidates {
+        if degraded_adapters.contains(name) || name == chosen {
+            continue;
+        }
+        let Some(candidate) = evidence.get(name) else {
+            continue;
+        };
+        if candidate.judged() < config.min_attempts {
+            continue;
+        }
+        let rate = candidate.success_rate().unwrap_or(0.0);
+        if rate < chosen_rate + config.min_improvement {
+            continue;
+        }
+        if best.map(|(_, best_rate)| rate > best_rate).unwrap_or(true) {
+            best = Some((name, rate));
+        }
+    }
+    best.map(|(name, _)| name.clone())
+}
+
 /// Choose an adapter from the narrowest evidence that can decide (N-T48,
 /// ADR-030 decision 4).
 ///
@@ -498,17 +550,26 @@ pub fn choose_scoped(
             DecisionScope::Workspace,
         )
     } else {
-        (
-            choose(
-                default,
-                config,
-                &evidence.fleet,
-                degraded_adapters,
-                frozen,
-                roll,
-            ),
-            DecisionScope::Fleet,
-        )
+        // N-T61: a workspace-only candidate is not selectable here, and the
+        // receipt says so when it would otherwise have won.
+        let fleet_config = fleet_scope_config(config);
+        let mut fleet_choice = choose(
+            default,
+            &fleet_config,
+            &evidence.fleet,
+            degraded_adapters,
+            frozen,
+            roll,
+        );
+        if let Some(withheld) = withheld_candidate(
+            config,
+            &evidence.fleet,
+            &fleet_choice.adapter,
+            degraded_adapters,
+        ) {
+            fleet_choice.reason = format!("{}+withheld:{withheld}", fleet_choice.reason);
+        }
+        (fleet_choice, DecisionScope::Fleet)
     };
     let scope = if is_static_fallback(&choice.reason) {
         DecisionScope::Static
@@ -717,6 +778,7 @@ mod tests {
             refresh_secs: 600,
             workspace_scope: false,
             workspace_poor_threshold: 0.0,
+            workspace_only_candidates: Vec::new(),
         }
     }
 
@@ -985,6 +1047,90 @@ mod tests {
             "trailing-slash rows join the workspace"
         );
         assert_eq!(loom.considered_fleet.len(), 3);
+    }
+
+    fn workspace_only_cfg() -> EvidenceRoutingConfig {
+        EvidenceRoutingConfig {
+            workspace_only_candidates: vec!["codex".into()],
+            ..scoped_cfg()
+        }
+    }
+
+    #[test]
+    fn nt61_a_workspace_only_candidate_is_withheld_from_fleet_scope() {
+        let evidence = Evidence::from_rows(&replay_rows());
+        let none = HashSet::new();
+        // LOOM is below the workspace floor, so fleet evidence decides — and
+        // fleet-wide codex verifies best (33/34). It must not be chosen.
+        let loom = choose_scoped(
+            "flash",
+            &workspace_only_cfg(),
+            &evidence,
+            Some("/home/coding/LOOM"),
+            &none,
+            None,
+            0.5,
+        );
+        assert_eq!(loom.scope, DecisionScope::Fleet);
+        assert_eq!(loom.choice.adapter, "flash");
+        assert!(
+            loom.choice.reason.ends_with("+withheld:codex"),
+            "{}",
+            loom.choice.reason
+        );
+        // Without the restriction the same evidence does move to codex.
+        let unrestricted = choose_scoped(
+            "flash",
+            &scoped_cfg(),
+            &evidence,
+            Some("/home/coding/LOOM"),
+            &none,
+            None,
+            0.5,
+        );
+        assert_eq!(unrestricted.choice.adapter, "codex");
+    }
+
+    #[test]
+    fn nt61_a_workspace_only_candidate_still_wins_on_its_own_workspace_evidence() {
+        let evidence = Evidence::from_rows(&replay_rows());
+        let rmp = choose_scoped(
+            "flash",
+            &workspace_only_cfg(),
+            &evidence,
+            Some("/home/coding/reddit-media-player"),
+            &HashSet::new(),
+            None,
+            0.5,
+        );
+        assert_eq!(rmp.choice.adapter, "codex");
+        assert_eq!(rmp.scope, DecisionScope::Workspace);
+    }
+
+    #[test]
+    fn nt61_exploration_never_picks_a_workspace_only_candidate() {
+        let evidence = Evidence::from_rows(&replay_rows());
+        let config = EvidenceRoutingConfig {
+            exploration_share: 0.9,
+            ..workspace_only_cfg()
+        };
+        let none = HashSet::new();
+        for roll in [0.0, 0.1, 0.3, 0.5, 0.8] {
+            let explored = choose_scoped(
+                "flash",
+                &config,
+                &evidence,
+                Some("/home/coding/LOOM"),
+                &none,
+                None,
+                roll,
+            );
+            assert_ne!(
+                explored.choice.adapter, "codex",
+                "roll {roll} explored onto a workspace-only candidate: {}",
+                explored.choice.reason
+            );
+        }
     }
 
     #[test]
