@@ -396,6 +396,10 @@ pub struct AttemptContext {
     pub tokens_out: Option<u64>,
     /// Estimated cost in USD (None when no pricing is configured).
     pub estimated_cost_usd: Option<f64>,
+    /// Whether the cost was established (N-T47): from the result envelope,
+    /// or from the stream's per-turn usage when a killed attempt wrote none.
+    /// `false` is unknown, never free.
+    pub costed: bool,
     /// When the cycle started (claim time), for the attempt's `duration_ms`.
     pub started_at: Option<std::time::Instant>,
 }
@@ -1484,6 +1488,7 @@ impl OutcomeHandler {
             tokens_in: attempt.tokens_in,
             tokens_out: attempt.tokens_out,
             estimated_cost_usd: attempt.estimated_cost_usd,
+            costed: attempt.costed,
             commits: attempt.commits,
             duration_ms,
             terminal_reason: resolved_reason,

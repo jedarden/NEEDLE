@@ -45,7 +45,13 @@ version = 1
 # parent without commits). The bead named a dedicated `--test` target, but the
 # explicit five-target boundary (tests/cargo-targets) makes the unit tier the
 # cheapest correct home; the acceptance command is `cargo test --lib nt46_`.
-max_tests = 3748
+# +8 attempt accounting, N-T47 (needle-ec41ceba): four stream-usage contracts
+# in src/attempt_accounting.rs (killed transcript charged, envelope reconciled
+# exactly, no usage uncosted, repeated and interleaved reports counted once),
+# two pricing cases in src/cost (cache rates, fleet GLM defaults), stats
+# treating uncosted rows as unknown, and the always-serialized costed flag.
+# All pure; `cargo test --lib nt47_` stands in for the bead's dedicated target.
+max_tests = 3756
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

@@ -336,9 +336,10 @@ as authoritative** — provisional rows are excluded from SLOs (plan Gate A).
 | `provider`             | string          | optional| Model provider (e.g. `"anthropic"`).                                        |
 | `context_manifest_hash`| string          | optional| ContextManifest hash — absent until N-T10 ships manifest hashing.           |
 | `confirmed_state`      | string          | optional| Authoritative post-action bead state; reserved for the resolver's re-read (plan section 3.2 step 5). |
-| `tokens_in`            | integer         | optional| Input tokens reported by the agent's token extractor.                       |
-| `tokens_out`           | integer         | optional| Output tokens reported by the agent's token extractor.                      |
-| `estimated_cost_usd`   | number          | optional| Estimated cost in USD; absent when no pricing is configured.                |
+| `tokens_in`            | integer         | optional| Input tokens, cache reads and writes excluded: from the agent's token extractor or result envelope, or summed from the per-turn usage reports in its stream when a killed attempt wrote no envelope (N-T47). |
+| `tokens_out`           | integer         | optional| Output tokens, from the same source as `tokens_in`.                         |
+| `estimated_cost_usd`   | number          | optional| Estimated cost in USD: the result envelope's reported cost when the agent wrote one, otherwise the pricing table (`pricing`, with cache-read and cache-write rates) applied to the per-turn usage summed from its stream. Absent when it could not be established. |
+| `costed`               | boolean         | always  | Whether `estimated_cost_usd` was established (N-T47, ADR-030). `false` means unknown (no usage reported, or the model has no price), never free: `needle stats` averages cost over costed rows only. |
 | `terminal_reason`      | string          | optional| Short machine-readable reason for the terminal state (e.g. `"gate:fmt"`, `"exit_code:1"`, `"signal:9"`, `"decomposed:split_template"`). Absent on a verified success. |
 
 **Outcome vocabulary:**
@@ -353,7 +354,7 @@ as authoritative** — provisional rows are excluded from SLOs (plan Gate A).
 **Versioned contract:** [`tests/fixtures/attempt-resolved-v2.schema.json`](../tests/fixtures/attempt-resolved-v2.schema.json)
 is the schema this row must satisfy; conformance is asserted in
 `src/telemetry/mod.rs`. Breaking changes version both the fixture and the
-row's `schema_version`. Version 2 added `decomposed`; rows carrying
+row's `schema_version`. Version 2 added `decomposed` and `costed`; rows carrying
 `schema_version: 1` predate it and validate against
 [`attempt-resolved-v1.schema.json`](../tests/fixtures/attempt-resolved-v1.schema.json).
 

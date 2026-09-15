@@ -3996,18 +3996,30 @@ impl Worker {
         // Extract tokens and compute cost for effort tracking. The agent's
         // own result envelope fills in tokens the configured extractor missed
         // and supplies the cost when it reports a positive one; otherwise the
-        // pricing table estimates it from the token counts.
-        let (tokens, reported_cost) = dispatch::extract_tokens_with_envelope(
+        // pricing table estimates it from the token counts. A killed attempt
+        // writes no envelope, so its usage is summed from the stream's
+        // per-turn reports instead of being booked at $0 (N-T47, ADR-030).
+        let (extracted, reported_cost) = dispatch::extract_tokens_with_envelope(
             &adapter.token_extraction,
             &output.stdout,
             &output.stderr,
         );
         let model_name = adapter.model.as_deref().unwrap_or("");
-        let estimated_cost = reported_cost
-            .or_else(|| cost::estimate_cost(&tokens, model_name, &self.config.pricing));
+        let usage = crate::attempt_accounting::resolve_usage(
+            &extracted,
+            reported_cost,
+            &output.stdout,
+            model_name,
+            &self.config.pricing,
+        );
+        let estimated_cost = usage.estimated_cost_usd;
         // Read the figures out before `tokens` moves into the effort record —
         // the attempt ledger row below needs the same numbers.
-        let (tokens_in, tokens_out) = (tokens.input_tokens, tokens.output_tokens);
+        let (tokens_in, tokens_out) = (usage.tokens_in, usage.tokens_out);
+        let tokens = dispatch::TokenUsage {
+            input_tokens: tokens_in,
+            output_tokens: tokens_out,
+        };
 
         if let Some(ref mut effort) = self.last_effort {
             effort.agent_name = adapter.name.clone();
@@ -4060,6 +4072,7 @@ impl Worker {
                 tokens_in,
                 tokens_out,
                 estimated_cost_usd: estimated_cost,
+                costed: usage.costed,
                 started_at: self.last_effort.as_ref().map(|e| e.cycle_start),
             });
 

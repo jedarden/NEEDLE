@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://ardenone.com/schemas/needle/attempt-resolved-v2.schema.json",
   "title": "attempt.resolved",
-  "description": "Terminal ledger row for one dispatch (plan section 4.4 step 1, transition N-T16). Exactly one is emitted per dispatch, from OutcomeHandler::handle, regardless of which of the eight terminal paths resolved it. The canonical Rust type is AttemptResolvedFields in src/telemetry/mod.rs; this fixture is the versioned contract its serialized `data` object must satisfy. schema_version 2 adds the `decomposed` outcome (N-T46, ADR-030); rows written before it carry schema_version 1 and validate against attempt-resolved-v1.schema.json.",
+  "description": "Terminal ledger row for one dispatch (plan section 4.4 step 1, transition N-T16). Exactly one is emitted per dispatch, from OutcomeHandler::handle, regardless of which of the eight terminal paths resolved it. The canonical Rust type is AttemptResolvedFields in src/telemetry/mod.rs; this fixture is the versioned contract its serialized `data` object must satisfy. schema_version 2 adds the `decomposed` outcome (N-T46) and the always-present `costed` flag (N-T47), both ADR-030; rows written before it carry schema_version 1 and validate against attempt-resolved-v1.schema.json.",
   "type": "object",
   "required": [
     "schema_version",
@@ -19,7 +19,8 @@
     "requested_action",
     "commits",
     "duration_ms",
-    "exit_code"
+    "exit_code",
+    "costed"
   ],
   "properties": {
     "schema_version": {
@@ -129,7 +130,11 @@
     "estimated_cost_usd": {
       "type": "number",
       "minimum": 0,
-      "description": "Estimated cost in USD. Absent when no pricing is configured."
+      "description": "Estimated cost in USD: the result envelope's reported cost when the agent wrote one, otherwise the pricing table applied to the per-turn usage in its stream. Absent when it could not be established."
+    },
+    "costed": {
+      "type": "boolean",
+      "description": "Whether estimated_cost_usd was established (N-T47, ADR-030). false means the cost is unknown (no usage was reported, or the model has no price), never that the attempt was free; consumers treat the row's cost as unknown."
     },
     "commits": {
       "type": "array",

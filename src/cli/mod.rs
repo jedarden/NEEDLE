@@ -3876,7 +3876,7 @@ fn cmd_stats(
             let key_width = rows.iter().map(|r| r.key.len()).max().unwrap_or(16).max(16);
             if show_provisional {
                 println!(
-                    "{:<width$} {:>8} {:>11} {:>6} {:>6} {:>8} {:>6} {:>6} {:>9} {:>10} {:>12}",
+                    "{:<width$} {:>8} {:>11} {:>6} {:>6} {:>8} {:>6} {:>6} {:>9} {:>10} {:>6} {:>12}",
                     dim_label,
                     count_label,
                     "PROVISIONAL",
@@ -3887,12 +3887,13 @@ fn cmd_stats(
                     "DECOMP",
                     "PASS RATE",
                     "AVG TOK",
+                    "COSTED",
                     "AVG COST",
                     width = key_width,
                 );
                 println!(
                     "{}",
-                    "-".repeat(key_width + 8 + 11 + 6 + 6 + 8 + 6 + 6 + 9 + 10 + 12 + 10)
+                    "-".repeat(key_width + 8 + 11 + 6 + 6 + 8 + 6 + 6 + 9 + 10 + 6 + 12 + 11)
                 );
             } else {
                 println!(
@@ -3927,7 +3928,7 @@ fn cmd_stats(
                     .unwrap_or_else(|| "-".to_string());
                 if show_provisional {
                     println!(
-                        "{:<width$} {:>8} {:>11} {:>6} {:>6} {:>8} {:>6} {:>6} {:>9} {:>10} {:>12}",
+                        "{:<width$} {:>8} {:>11} {:>6} {:>6} {:>8} {:>6} {:>6} {:>9} {:>10} {:>6} {:>12}",
                         row.key,
                         row.beads,
                         row.provisional,
@@ -3938,6 +3939,7 @@ fn cmd_stats(
                         row.decomposed,
                         pass_rate,
                         avg_tok,
+                        row.costed,
                         avg_cost,
                         width = key_width,
                     );
@@ -3980,6 +3982,7 @@ fn cmd_stats(
                         "timeout": row.timeout,
                         "infra": row.infra,
                         "decomposed": row.decomposed,
+                        "costed": row.costed,
                         "pass_rate": row.pass_rate(),
                         "avg_tokens": row.avg_tokens(),
                         "avg_cost_usd": row.avg_cost_usd(),

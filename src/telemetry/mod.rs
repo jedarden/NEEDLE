@@ -194,6 +194,9 @@ pub struct AttemptResolvedFields {
     pub tokens_in: Option<u64>,
     pub tokens_out: Option<u64>,
     pub estimated_cost_usd: Option<f64>,
+    /// Whether `estimated_cost_usd` was established (N-T47, ADR-030): `false`
+    /// means the attempt's cost is unknown, never that it was free.
+    pub costed: bool,
     pub commits: Vec<String>,
     pub duration_ms: u64,
     pub terminal_reason: Option<String>,
@@ -3758,6 +3761,7 @@ impl EventKind {
                     tokens_in,
                     tokens_out,
                     estimated_cost_usd,
+                    costed,
                     commits,
                     duration_ms,
                     terminal_reason,
@@ -3767,7 +3771,8 @@ impl EventKind {
                     // Ledger rows are read by consumers that outlive this
                     // binary; the version lets them detect field drift
                     // instead of guessing from a missing key. 2 added the
-                    // `decomposed` outcome (N-T46, ADR-030).
+                    // `decomposed` outcome (N-T46) and the `costed` flag
+                    // (N-T47), both ADR-030.
                     "schema_version": 2,
                     "attempt_id": attempt_id,
                     "provisional": provisional,
@@ -3783,6 +3788,9 @@ impl EventKind {
                     "commits": commits,
                     "duration_ms": duration_ms,
                     "exit_code": exit_code,
+                    // Always present (N-T47): a missing cost reads as unknown
+                    // only because this says so, never as a silent zero.
+                    "costed": costed,
                 });
 
                 // Add optional fields if present
@@ -6910,11 +6918,32 @@ mod tests {
             tokens_in: Some(120_000),
             tokens_out: Some(4_500),
             estimated_cost_usd: Some(0.0921),
+            costed: true,
             commits: vec!["deadbee".to_string()],
             duration_ms: 614_000,
             terminal_reason: Some("gate:clippy".to_string()),
             exit_code: 0,
         }
+    }
+
+    #[test]
+    fn nt47_costed_is_always_serialized_and_an_uncosted_row_conforms() {
+        let data = EventKind::AttemptResolved(Box::new(attempt_resolved_fields())).to_data();
+        assert_eq!(data["costed"], true);
+
+        let mut fields = attempt_resolved_fields();
+        fields.tokens_in = None;
+        fields.tokens_out = None;
+        fields.estimated_cost_usd = None;
+        fields.costed = false;
+        let data = EventKind::AttemptResolved(Box::new(fields)).to_data();
+        check_object_matches("attempt.resolved", &data, &fixture_spec())
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(data["costed"], false, "an unknown cost is stated");
+        assert!(
+            data.get("estimated_cost_usd").is_none(),
+            "an unknown cost is never a silent zero"
+        );
     }
 
     #[test]
@@ -6960,6 +6989,7 @@ mod tests {
             "tokens_in",
             "tokens_out",
             "estimated_cost_usd",
+            "costed",
             "commits",
             "duration_ms",
             "terminal_reason",
