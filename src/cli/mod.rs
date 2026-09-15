@@ -419,7 +419,9 @@ pub enum CliCommand {
     /// by bead ID, and prints per-group statistics. The `adapter` and
     /// `outcome` dimensions aggregate the `attempt.resolved` ledger rows
     /// directly: one row per attempt, so the count column is attempts and
-    /// PASS RATE is verified success over all attempts in the group. Both
+    /// PASS RATE is verified success over the group's attempts excluding
+    /// DECOMP, the attempts that split their bead instead of delivering it
+    /// (ADR-030). Both
     /// also surface a PROVISIONAL count of rows whose attempt ID is still
     /// provisional — treat such rows as non-authoritative.
     ///
@@ -3874,7 +3876,7 @@ fn cmd_stats(
             let key_width = rows.iter().map(|r| r.key.len()).max().unwrap_or(16).max(16);
             if show_provisional {
                 println!(
-                    "{:<width$} {:>8} {:>11} {:>6} {:>6} {:>8} {:>6} {:>9} {:>10} {:>12}",
+                    "{:<width$} {:>8} {:>11} {:>6} {:>6} {:>8} {:>6} {:>6} {:>9} {:>10} {:>12}",
                     dim_label,
                     count_label,
                     "PROVISIONAL",
@@ -3882,6 +3884,7 @@ fn cmd_stats(
                     "FAIL",
                     "TIMEOUT",
                     "INFRA",
+                    "DECOMP",
                     "PASS RATE",
                     "AVG TOK",
                     "AVG COST",
@@ -3889,7 +3892,7 @@ fn cmd_stats(
                 );
                 println!(
                     "{}",
-                    "-".repeat(key_width + 8 + 11 + 6 + 6 + 8 + 6 + 9 + 10 + 12 + 9)
+                    "-".repeat(key_width + 8 + 11 + 6 + 6 + 8 + 6 + 6 + 9 + 10 + 12 + 10)
                 );
             } else {
                 println!(
@@ -3924,7 +3927,7 @@ fn cmd_stats(
                     .unwrap_or_else(|| "-".to_string());
                 if show_provisional {
                     println!(
-                        "{:<width$} {:>8} {:>11} {:>6} {:>6} {:>8} {:>6} {:>9} {:>10} {:>12}",
+                        "{:<width$} {:>8} {:>11} {:>6} {:>6} {:>8} {:>6} {:>6} {:>9} {:>10} {:>12}",
                         row.key,
                         row.beads,
                         row.provisional,
@@ -3932,6 +3935,7 @@ fn cmd_stats(
                         row.fail,
                         row.timeout,
                         row.infra,
+                        row.decomposed,
                         pass_rate,
                         avg_tok,
                         avg_cost,
@@ -3975,6 +3979,7 @@ fn cmd_stats(
                         "fail": row.fail,
                         "timeout": row.timeout,
                         "infra": row.infra,
+                        "decomposed": row.decomposed,
                         "pass_rate": row.pass_rate(),
                         "avg_tokens": row.avg_tokens(),
                         "avg_cost_usd": row.avg_cost_usd(),

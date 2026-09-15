@@ -38,7 +38,14 @@ version = 1
 # doctor repair surface remains scoped to missing workspaces.
 # +2 fail-closed claim verification (needle-40ca2f6e): store-error abort with
 # category telemetry, and the error-text category classifier.
-max_tests = 3736
+# +12 attempt accounting, N-T46 (needle-16657d72): six pure decomposition-rule
+# contracts in src/attempt_accounting.rs, one exclusion case each for stats,
+# evidence routing and experiments, v2 fixture conformance of a decomposed
+# row, and two OutcomeHandler ledger-row cases (split template; new split
+# parent without commits). The bead named a dedicated `--test` target, but the
+# explicit five-target boundary (tests/cargo-targets) makes the unit tier the
+# cheapest correct home; the acceptance command is `cargo test --lib nt46_`.
+max_tests = 3748
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
@@ -59,7 +66,9 @@ contract = 67
 # instead of reintroducing subprocesses into --lib (needle-aee9e898).
 # +8 Pulse scanner process contracts (needle-b3a720b7).
 # +15 consolidated resolution lifecycle process contracts (needle-6a36c428).
-e2e = 767
+# +1 N-T46 split-attempt ledger row keeps real gate results (needle-16657d72):
+# the gate must execute, which --lib forbids.
+e2e = 768
 soak = 0
 fuzz = 0
 
@@ -67,7 +76,8 @@ fuzz = 0
 name = "integration_spawn"
 path = "tests/integration_spawn.rs"
 tier = "e2e"
-max_tests = 395
+# +1 N-T46 decomposed row keeps real gate results (needle-16657d72).
+max_tests = 396
 owner = "component:process-integration"
 
 [[harness]]

@@ -43,6 +43,10 @@ pub struct AdapterEvidence {
     pub verified: u64,
     /// Rows resolved `infrastructure_failure` (excluded from the rate).
     pub infrastructure: u64,
+    /// Rows resolved `decomposed` (excluded from the rate): a split is
+    /// neither a win nor a loss for the adapter (ADR-030).
+    #[serde(default)]
+    pub decomposed: u64,
     /// Sum of `estimated_cost_usd` over rows that reported one.
     pub cost_usd: f64,
     /// Rows that reported a cost (denominator for cost per success).
@@ -51,9 +55,31 @@ pub struct AdapterEvidence {
 
 impl AdapterEvidence {
     /// Attempts that were the adapter's to win: everything but
-    /// infrastructure failures.
+    /// infrastructure failures and decompositions.
     pub fn judged(&self) -> u64 {
-        self.attempts.saturating_sub(self.infrastructure)
+        self.attempts
+            .saturating_sub(self.infrastructure)
+            .saturating_sub(self.decomposed)
+    }
+
+    /// Fold one `attempt.resolved` row's `data` into this evidence.
+    ///
+    /// The one reading of a ledger row for routing: [`evidence_from_logs`]
+    /// and the worker's cached ledger snapshot both call it, so a new
+    /// resolution class is classified in one place. A decomposed row still
+    /// adds its cost — splitting is spend without a verified success.
+    pub fn observe_row(&mut self, row: &serde_json::Value) {
+        self.attempts += 1;
+        match row.get("outcome").and_then(|v| v.as_str()) {
+            Some("verified_success") => self.verified += 1,
+            Some("infrastructure_failure") => self.infrastructure += 1,
+            Some(crate::attempt_accounting::DECOMPOSED) => self.decomposed += 1,
+            _ => {}
+        }
+        if let Some(cost) = row.get("estimated_cost_usd").and_then(|v| v.as_f64()) {
+            self.cost_usd += cost;
+            self.costed += 1;
+        }
     }
 
     /// Verified successes over judged attempts.
@@ -262,16 +288,7 @@ pub fn evidence_from_logs(log_dir: &Path, window_days: u32) -> HashMap<String, A
                 adapter,
                 ..AdapterEvidence::default()
             });
-        entry.attempts += 1;
-        match row.get("outcome").and_then(|v| v.as_str()) {
-            Some("verified_success") => entry.verified += 1,
-            Some("infrastructure_failure") => entry.infrastructure += 1,
-            _ => {}
-        }
-        if let Some(cost) = row.get("estimated_cost_usd").and_then(|v| v.as_f64()) {
-            entry.cost_usd += cost;
-            entry.costed += 1;
-        }
+        entry.observe_row(&row);
     }
     out
 }
@@ -347,6 +364,7 @@ mod tests {
             attempts,
             verified,
             infrastructure: 0,
+            decomposed: 0,
             cost_usd: cost,
             costed: attempts,
         }
@@ -446,12 +464,37 @@ mod tests {
     }
 
     #[test]
+    fn nt46_splits_are_attempts_but_never_verified_or_judged() {
+        let dir = tempfile::tempdir().unwrap();
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let split = serde_json::json!({
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "event_type": "attempt.resolved",
+            "worker_id": "w",
+            "data": {"adapter": "a", "outcome": "decomposed", "estimated_cost_usd": 0.5}
+        })
+        .to_string();
+        std::fs::write(
+            dir.path().join(format!("w-abcd1234-{today}.jsonl")),
+            vec![split; 10].join("\n"),
+        )
+        .unwrap();
+        let evidence = evidence_from_logs(dir.path(), 7);
+        let a = evidence.get("a").expect("adapter a");
+        assert_eq!((a.attempts, a.verified, a.judged()), (10, 0, 0));
+        assert_eq!(a.decomposed, 10);
+        assert_eq!(a.success_rate(), None, "splits are no evidence either way");
+        assert_eq!(a.costed, 10, "a split is still spend");
+    }
+
+    #[test]
     fn infrastructure_failures_do_not_count_against_an_adapter() {
         let e = AdapterEvidence {
             adapter: "a".into(),
             attempts: 30,
             verified: 15,
             infrastructure: 10,
+            decomposed: 0,
             cost_usd: 0.0,
             costed: 0,
         };

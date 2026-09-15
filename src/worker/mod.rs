@@ -7362,16 +7362,7 @@ impl Worker {
                     ..Default::default()
                 }
             });
-            entry.attempts += 1;
-            match row.get("outcome").and_then(|v| v.as_str()) {
-                Some("verified_success") => entry.verified += 1,
-                Some("infrastructure_failure") => entry.infrastructure += 1,
-                _ => {}
-            }
-            if let Some(cost) = row.get("estimated_cost_usd").and_then(|v| v.as_f64()) {
-                entry.cost_usd += cost;
-                entry.costed += 1;
-            }
+            entry.observe_row(row);
         }
         let variants = crate::experiments::variant_outcomes(&rows);
         let cache = LedgerCache {

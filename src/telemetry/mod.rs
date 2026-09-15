@@ -205,7 +205,7 @@ pub struct AttemptResolvedFields {
 /// will do about it.
 ///
 /// The wire form is snake_case and matches the `outcome` enum of
-/// `tests/fixtures/attempt-resolved-v1.schema.json`, which is the versioned
+/// `tests/fixtures/attempt-resolved-v2.schema.json`, which is the versioned
 /// contract consumers validate against — a variant added here without a
 /// fixture version bump (or vice versa) is caught by
 /// `attempt_outcome_wire_vocabulary_matches_the_schema_fixture`.
@@ -228,17 +228,23 @@ pub enum AttemptOutcome {
     /// The attempt ended without a verdict: the time budget expired while the
     /// work was still running.
     Indeterminate,
+    /// The attempt split its bead into children instead of delivering the
+    /// work (ADR-030 decision 1): no verified credit and no failure. Work
+    /// delivered on the children earns credit on their own attempts. See
+    /// [`crate::attempt_accounting`].
+    Decomposed,
 }
 
 impl AttemptOutcome {
     /// Every variant, for exhaustive iteration.
-    pub const ALL: [AttemptOutcome; 6] = [
+    pub const ALL: [AttemptOutcome; 7] = [
         AttemptOutcome::VerifiedSuccess,
         AttemptOutcome::WorkFailure,
         AttemptOutcome::InfrastructureFailure,
         AttemptOutcome::Cancelled,
         AttemptOutcome::StaleOwnership,
         AttemptOutcome::Indeterminate,
+        AttemptOutcome::Decomposed,
     ];
 
     /// The wire string stored in ledger rows.
@@ -250,6 +256,7 @@ impl AttemptOutcome {
             AttemptOutcome::Cancelled => "cancelled",
             AttemptOutcome::StaleOwnership => "stale_ownership",
             AttemptOutcome::Indeterminate => "indeterminate",
+            AttemptOutcome::Decomposed => "decomposed",
         }
     }
 }
@@ -3759,8 +3766,9 @@ impl EventKind {
                 let mut data = serde_json::json!({
                     // Ledger rows are read by consumers that outlive this
                     // binary; the version lets them detect field drift
-                    // instead of guessing from a missing key.
-                    "schema_version": 1,
+                    // instead of guessing from a missing key. 2 added the
+                    // `decomposed` outcome (N-T46, ADR-030).
+                    "schema_version": 2,
                     "attempt_id": attempt_id,
                     "provisional": provisional,
                     "bead_id": bead_id,
@@ -6910,12 +6918,25 @@ mod tests {
     }
 
     #[test]
+    fn nt46_decomposed_row_conforms_to_the_v2_fixture() {
+        let mut fields = attempt_resolved_fields();
+        fields.outcome = AttemptOutcome::Decomposed.as_str().to_string();
+        fields.prompt_template = "split".to_string();
+        fields.terminal_reason = Some("decomposed:split_template".to_string());
+        let data = EventKind::AttemptResolved(Box::new(fields)).to_data();
+        check_object_matches("attempt.resolved", &data, &fixture_spec())
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(data["schema_version"], 2);
+        assert_eq!(data["outcome"], "decomposed");
+    }
+
+    #[test]
     fn attempt_resolved_fixture_describes_this_event() {
         let fixture = attempt_resolved_fixture();
         assert_eq!(fixture["title"], "attempt.resolved");
         assert_eq!(
             fixture["$id"],
-            "https://ardenone.com/schemas/needle/attempt-resolved-v1.schema.json"
+            "https://ardenone.com/schemas/needle/attempt-resolved-v2.schema.json"
         );
         // Every field AttemptResolvedFields can emit is covered by the fixture.
         for field in [
@@ -7011,7 +7032,7 @@ mod tests {
     }
 
     #[test]
-    fn attempt_outcome_round_trips_all_six_variants() {
+    fn attempt_outcome_round_trips_every_variant() {
         for outcome in AttemptOutcome::ALL {
             let wire = outcome.as_str();
             let json = serde_json::to_string(&outcome).expect("serialize");
@@ -7101,7 +7122,7 @@ mod tests {
             parsed.data, event.data,
             "the ledger payload must survive the JSONL round-trip byte-identically"
         );
-        assert_eq!(parsed.data["schema_version"], 1);
+        assert_eq!(parsed.data["schema_version"], 2);
         assert_eq!(parsed.data["outcome"], "work_failure");
         assert_eq!(
             parsed.data["context_manifest_hash"], "9f2b1c4d5e6a7b8c",

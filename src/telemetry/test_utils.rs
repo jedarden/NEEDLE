@@ -333,10 +333,11 @@ impl TestHelper {
 // ── attempt.resolved schema-fixture checks (N-T16) ──────────────────────────
 //
 // Shared helpers for validating a serialized `attempt.resolved` row against
-// `tests/fixtures/attempt-resolved-v1.schema.json` — the versioned contract.
-// They live here rather than in `telemetry::tests` so the outcome handler's
-// tests and any integration test can validate captured rows, not just
-// synthetic ones.
+// `tests/fixtures/attempt-resolved-v2.schema.json` — the versioned contract
+// rows are written to now (v1 stays in the tree for rows written before the
+// `decomposed` outcome existed). They live here rather than in
+// `telemetry::tests` so the outcome handler's tests and any integration test
+// can validate captured rows, not just synthetic ones.
 
 /// The versioned contract every serialized `attempt.resolved` row must
 /// satisfy. Compiled into the test binary so a moved or renamed fixture
@@ -344,7 +345,7 @@ impl TestHelper {
 #[cfg(any(test, feature = "integration"))]
 pub fn attempt_resolved_fixture() -> serde_json::Value {
     serde_json::from_str(include_str!(
-        "../../tests/fixtures/attempt-resolved-v1.schema.json"
+        "../../tests/fixtures/attempt-resolved-v2.schema.json"
     ))
     .expect("schema fixture must parse")
 }

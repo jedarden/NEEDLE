@@ -3615,6 +3615,66 @@ async fn resolution_process_contracts_outcome_runs_missing_path_for_its_verdict(
         .any(|action| action.contains("verification-failed")));
 }
 
+/// N-T46 (ADR-030): a split attempt whose workspace gate really ran and passed
+/// resolves `decomposed` in the ledger, and the row keeps that gate evidence;
+/// only the semantic outcome moves.
+#[serial_test::serial]
+#[tokio::test]
+async fn nt46_split_template_success_resolves_decomposed_and_keeps_gate_results() {
+    let home = TempDir::new().expect("create isolated HOME");
+    let _home = HomeGuard::set(home.path());
+    let workspace = TempDir::new().expect("create gate workspace");
+    fs::write(
+        workspace.path().join(".needle.yaml"),
+        "gates:\n  - type: command\n    run_in: workspace\n    commands:\n      - \"true\"\n",
+    )
+    .expect("write gate config");
+    let bead = test_bead(workspace.path(), BeadStatus::InProgress);
+    let store = TestStore::new(test_bead(workspace.path(), BeadStatus::Done));
+    let mut config = Config::default();
+    config.worker.enforce_shipped_work = false;
+    let log_dir = home.path().join("telemetry");
+    let telemetry = Telemetry::with_log_dir("nt46-split-gates".to_string(), &log_dir);
+    telemetry.start();
+    let handler = OutcomeHandler::new(config, telemetry.clone());
+    handler.set_attempt_context(AttemptContext {
+        prompt_template: "split".to_string(),
+        template_version: "split-default".to_string(),
+        ..AttemptContext::default()
+    });
+
+    let result = handler
+        .handle(
+            &store,
+            &bead,
+            &resolution_process_contracts_output(0),
+            false,
+        )
+        .await
+        .expect("route split outcome");
+    telemetry
+        .force_flush_async(std::time::Duration::from_secs(2))
+        .await
+        .expect("flush telemetry");
+
+    assert_eq!(result.outcome, Outcome::Success);
+    let rows: Vec<TelemetryEvent> = telemetry_events(&log_dir)
+        .into_iter()
+        .filter(|event| event.event_type == "attempt.resolved")
+        .collect();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].data["outcome"], "decomposed");
+    assert_eq!(rows[0].data["terminal_reason"], "decomposed:split_template");
+    let gates = rows[0].data["gate_results"]
+        .as_array()
+        .expect("gate_results array");
+    assert!(
+        !gates.is_empty() && gates.iter().all(|gate| gate["status"] == "pass"),
+        "the passing gate evidence must be kept: {gates:?}"
+    );
+    telemetry.shutdown().await;
+}
+
 #[serial_test::serial]
 #[tokio::test]
 async fn resolution_process_contracts_outcome_timeout_kills_gate_child() {

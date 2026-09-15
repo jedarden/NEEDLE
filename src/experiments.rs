@@ -33,11 +33,17 @@ pub struct VariantOutcome {
     pub attempts: u64,
     pub verified: u64,
     pub infrastructure: u64,
+    /// Rows resolved `decomposed`: a split is neither a win nor a loss for
+    /// the variant (ADR-030).
+    #[serde(default)]
+    pub decomposed: u64,
 }
 
 impl VariantOutcome {
     pub fn judged(&self) -> u64 {
-        self.attempts.saturating_sub(self.infrastructure)
+        self.attempts
+            .saturating_sub(self.infrastructure)
+            .saturating_sub(self.decomposed)
     }
     pub fn success_rate(&self) -> Option<f64> {
         let judged = self.judged();
@@ -107,6 +113,7 @@ pub fn variant_outcomes(rows: &[serde_json::Value]) -> HashMap<String, VariantOu
         match row.get("outcome").and_then(|v| v.as_str()) {
             Some("verified_success") => entry.verified += 1,
             Some("infrastructure_failure") => entry.infrastructure += 1,
+            Some(crate::attempt_accounting::DECOMPOSED) => entry.decomposed += 1,
             _ => {}
         }
     }
@@ -272,6 +279,26 @@ mod tests {
             ));
         }
         out
+    }
+
+    #[test]
+    fn nt46_decomposed_rows_are_neither_verified_nor_judged() {
+        let mut r = rows((40, 30), (0, 0));
+        for _ in 0..10 {
+            r.push(row("pluck-default", "decomposed"));
+        }
+        let outcomes = variant_outcomes(&r);
+        let baseline = &outcomes["pluck-default"];
+        assert_eq!(
+            (
+                baseline.attempts,
+                baseline.verified,
+                baseline.decomposed,
+                baseline.judged()
+            ),
+            (50, 30, 10, 40)
+        );
+        assert_eq!(baseline.success_rate(), Some(0.75));
     }
 
     #[test]

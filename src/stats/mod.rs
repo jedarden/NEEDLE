@@ -883,6 +883,12 @@ pub struct StatsRow {
     /// or gate outage, not the bead's fault). Attempt dimensions only.
     #[serde(default)]
     pub infra: u64,
+    /// Number of attempts that resolved as `decomposed`: the bead was split
+    /// into children instead of delivered (ADR-030). They earn no verified
+    /// credit and are no failure, so they leave `pass_rate()`'s denominator.
+    /// Attempt dimensions only.
+    #[serde(default)]
+    pub decomposed: u64,
     /// Sum of (tokens_in + tokens_out) across all effort events in this group.
     pub total_tokens: u64,
     /// Sum of `estimated_cost_usd` across all effort events in this group.
@@ -892,12 +898,16 @@ pub struct StatsRow {
 }
 
 impl StatsRow {
-    /// Pass rate as a fraction in `[0.0, 1.0]`. `None` when `beads == 0`.
+    /// Pass rate as a fraction in `[0.0, 1.0]`: verified successes over the
+    /// attempts that could have earned one. Decomposed attempts are excluded
+    /// (ADR-030), so splitting a bead never moves the rate. `None` when no
+    /// such attempt exists.
     pub fn pass_rate(&self) -> Option<f64> {
-        if self.beads == 0 {
+        let judged = self.beads.saturating_sub(self.decomposed);
+        if judged == 0 {
             None
         } else {
-            Some(self.pass as f64 / self.beads as f64)
+            Some(self.pass as f64 / judged as f64)
         }
     }
 
@@ -1039,11 +1049,11 @@ pub fn compute_stats(
 ///
 /// Each ledger row is one attempt, so a row's count is attempts rather than
 /// dispatches correlated across event types. `pass`/`fail`/`timeout` count the
-/// semantic ledger outcomes they correspond to; the remaining outcomes
-/// (`infrastructure_failure`, `cancelled`, `stale_ownership`) are counted in
-/// `beads` but in none of the three, so `pass_rate()` stays "verified success
-/// over all attempts" — the number the routing and canary consumers in plan
-/// section 4.4 read.
+/// semantic ledger outcomes they correspond to, `infra` and `decomposed`
+/// count theirs, and `cancelled`/`stale_ownership` are counted only in
+/// `beads`. `pass_rate()` is verified success over every attempt except the
+/// decomposed ones (ADR-030) — the number the routing and canary consumers in
+/// plan section 4.4 read.
 pub fn compute_attempt_stats(
     events: &[crate::telemetry::TelemetryEvent],
     dimension: StatsDimension,
@@ -1098,6 +1108,7 @@ pub fn compute_attempt_stats(
             Some("work_failure") => row.fail += 1,
             Some("indeterminate") => row.timeout += 1,
             Some("infrastructure_failure") => row.infra += 1,
+            Some(crate::attempt_accounting::DECOMPOSED) => row.decomposed += 1,
             _ => {}
         }
 
@@ -1575,6 +1586,34 @@ mod tests {
             data["estimated_cost_usd"] = serde_json::json!(c);
         }
         make_tel_event("attempt.resolved", "needle-alpha", Some("nd-1"), data)
+    }
+
+    #[test]
+    fn nt46_ten_splits_show_as_decomposed_and_leave_verified_yield_unchanged() {
+        let mut events = vec![
+            attempt_row("adapter-a", "verified_success", None, None, None),
+            attempt_row("adapter-a", "work_failure", None, None, None),
+        ];
+        let before = compute_attempt_stats(&events, StatsDimension::Adapter);
+        events.extend((0..10).map(|_| attempt_row("adapter-a", "decomposed", None, None, None)));
+        let after = compute_attempt_stats(&events, StatsDimension::Adapter);
+
+        assert_eq!(after[0].beads, 12);
+        assert_eq!(after[0].decomposed, 10);
+        assert_eq!((after[0].pass, after[0].fail), (1, 1));
+        assert_eq!(after[0].pass_rate(), before[0].pass_rate());
+        assert_eq!(after[0].pass_rate(), Some(0.5));
+
+        let by_outcome = compute_attempt_stats(&events, StatsDimension::Outcome);
+        let decomposed = by_outcome
+            .iter()
+            .find(|r| r.key == "decomposed")
+            .expect("decomposed gets its own line");
+        assert_eq!(
+            (decomposed.beads, decomposed.decomposed, decomposed.pass),
+            (10, 10, 0)
+        );
+        assert_eq!(decomposed.pass_rate(), None);
     }
 
     #[test]

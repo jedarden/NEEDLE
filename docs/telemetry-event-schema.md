@@ -316,7 +316,7 @@ as authoritative** — provisional rows are excluded from SLOs (plan Gate A).
 
 | Field                  | Type            | Present | Description                                                                 |
 |------------------------|-----------------|---------|-----------------------------------------------------------------------------|
-| `schema_version`       | integer         | always  | Row schema version; `1` for this contract.                                  |
+| `schema_version`       | integer         | always  | Row schema version; `2` for this contract (`1` on rows written before the `decomposed` outcome existed). |
 | `attempt_id`           | string          | always  | UUIDv7 minted at dispatch start.                                            |
 | `provisional`          | boolean         | always  | `true` until the real attempt identity exists (N-T03).                      |
 | `bead_id`              | string          | always  | Bead the attempt worked on.                                                 |
@@ -326,7 +326,7 @@ as authoritative** — provisional rows are excluded from SLOs (plan Gate A).
 | `prompt_template`      | string          | always  | Prompt template that built the dispatch prompt (e.g. `"pluck"`).            |
 | `template_version`     | string          | always  | Version tag of that template (e.g. `"pluck-default"`).                      |
 | `gate_results`         | array           | always  | Per-gate entries `{name, status, duration_ms}`, ordered by gate name. `status` is `pass`, `fail`, or `execution_error`; empty when no gate ran. |
-| `outcome`              | string          | always  | `verified_success`, `work_failure`, `infrastructure_failure`, `cancelled`, `stale_ownership`, or `indeterminate`. |
+| `outcome`              | string          | always  | `verified_success`, `work_failure`, `infrastructure_failure`, `cancelled`, `stale_ownership`, `indeterminate`, or `decomposed`. |
 | `requested_action`     | string          | always  | Bead lifecycle action the handler requested (e.g. `"Completed"`, `"Released"`). |
 | `commits`              | array           | always  | Commit SHAs created in the workspace during the attempt.                    |
 | `duration_ms`          | integer         | always  | Wall-clock time from claim to resolution.                                   |
@@ -339,7 +339,7 @@ as authoritative** — provisional rows are excluded from SLOs (plan Gate A).
 | `tokens_in`            | integer         | optional| Input tokens reported by the agent's token extractor.                       |
 | `tokens_out`           | integer         | optional| Output tokens reported by the agent's token extractor.                      |
 | `estimated_cost_usd`   | number          | optional| Estimated cost in USD; absent when no pricing is configured.                |
-| `terminal_reason`      | string          | optional| Short machine-readable reason for the terminal state (e.g. `"gate:fmt"`, `"exit_code:1"`, `"signal:9"`). Absent on a verified success. |
+| `terminal_reason`      | string          | optional| Short machine-readable reason for the terminal state (e.g. `"gate:fmt"`, `"exit_code:1"`, `"signal:9"`, `"decomposed:split_template"`). Absent on a verified success. |
 
 **Outcome vocabulary:**
 - `verified_success` — the work passed every gate.
@@ -348,11 +348,14 @@ as authoritative** — provisional rows are excluded from SLOs (plan Gate A).
 - `cancelled` — the worker was interrupted before a verdict.
 - `stale_ownership` — reserved; assigned by the resolver once ownership is re-checked at resolution time (ADR-024), not by the outcome handler.
 - `indeterminate` — the attempt ended without a verdict: the time budget expired while the work was still running.
+- `decomposed` — the attempt split its bead into children instead of delivering the work (ADR-030, N-T46): a success of the auto-split template (`terminal_reason: "decomposed:split_template"`), or an attempt that made its bead an `auto-split-parent` and created no commit (`"decomposed:split_parent_without_commits"`). It earns no verified credit and is no failure: `needle stats` reports it in its own DECOMP column and leaves it out of PASS RATE, and evidence routing and prompt canaries count it as an attempt that is neither verified nor judged. Gate results are kept. bead-rs has no such outcome, so the backend resolution records it as `indeterminate` with the same reason.
 
-**Versioned contract:** [`tests/fixtures/attempt-resolved-v1.schema.json`](../tests/fixtures/attempt-resolved-v1.schema.json)
+**Versioned contract:** [`tests/fixtures/attempt-resolved-v2.schema.json`](../tests/fixtures/attempt-resolved-v2.schema.json)
 is the schema this row must satisfy; conformance is asserted in
 `src/telemetry/mod.rs`. Breaking changes version both the fixture and the
-row's `schema_version`.
+row's `schema_version`. Version 2 added `decomposed`; rows carrying
+`schema_version: 1` predate it and validate against
+[`attempt-resolved-v1.schema.json`](../tests/fixtures/attempt-resolved-v1.schema.json).
 
 **Aggregation:** `needle stats --by adapter` and `needle stats --by outcome`
 aggregate these rows directly — one attempt per row, with PASS RATE reading
@@ -374,7 +377,7 @@ attempt ID as authoritative.
   "workspace": "/home/coding/NEEDLE",
   "attempt_id": "0198f6a1-7c2d-7cc3-98c4-dc0c0c07398f",
   "data": {
-    "schema_version": 1,
+    "schema_version": 2,
     "attempt_id": "0198f6a1-7c2d-7cc3-98c4-dc0c0c07398f",
     "provisional": true,
     "bead_id": "needle-96dec90b",
@@ -415,7 +418,7 @@ attempt ID as authoritative.
   "workspace": "/home/coding/NEEDLE",
   "attempt_id": "0198f6a2-e4b5-7cc3-9c2e-1f4b8d6a02c1",
   "data": {
-    "schema_version": 1,
+    "schema_version": 2,
     "attempt_id": "0198f6a2-e4b5-7cc3-9c2e-1f4b8d6a02c1",
     "provisional": true,
     "bead_id": "needle-2f97cbb5",
