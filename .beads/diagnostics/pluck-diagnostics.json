@@ -1,13 +1,13 @@
 {
-  "timestamp": "2026-09-15T15:38:07.860527755Z",
+  "timestamp": "2026-09-15T16:40:43.025620263Z",
   "total_open_beads": 619,
   "exclusion_criteria": {
     "has_assignee": 0,
     "manually_blocked": 21,
-    "has_dependencies": 429,
+    "has_dependencies": 428,
     "resource_conflicts": 1
   },
-  "final_candidate_count": 201,
+  "final_candidate_count": 202,
   "excluded_beads": [
     {
       "bead_id": "needle-6b02eb9d",
@@ -2069,17 +2069,6 @@
     {
       "bead_id": "needle-c2df72f9",
       "title": "Repair real bead-rs integration fixtures for leased-claim fencing",
-      "priority": 1,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
-      "bead_id": "needle-a3a70677",
-      "title": "Wire the fallback gate into run_verification_gates for gate-less workspaces",
       "priority": 1,
       "assignee": null,
       "manual_blocked": false,
