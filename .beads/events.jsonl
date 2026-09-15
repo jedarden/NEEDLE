@@ -16997,3 +16997,4 @@
 {"adapter":"claude-code-glm-5.3-flash","attempt_id":"01a0a606-ab8a-7a12-969f-c06581193369","bead":"needle-a3a70677","event":"dispatch","model":"glm-5.3-flash","strand":"pluck","ts":"2026-09-15T17:04:10.123587832+00:00","worker":"glm-needle"}
 {"bead":"needle-a3a70677","event":"claim","strand":"pluck","ts":"2026-09-15T18:03:13.905410724+00:00","worker":"glm53-cgraph2"}
 {"adapter":"claude-code-glm-5.3-flash","attempt_id":"01a0a63c-c078-7db3-b4be-6c5e8be7e034","bead":"needle-a3a70677","event":"dispatch","model":"glm-5.3-flash","strand":"pluck","ts":"2026-09-15T18:03:14.424469150+00:00","worker":"glm53-cgraph2"}
+{"bead":"needle-a3a70677","duration_ms":3602632,"event":"timeout","exit_code":124,"outcome":"timeout","strand":"pluck","ts":"2026-09-15T19:03:17.101850021+00:00","worker":"glm53-cgraph2"}
