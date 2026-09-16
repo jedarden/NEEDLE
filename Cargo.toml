@@ -179,6 +179,11 @@ name = "nt45_failure_evidence_capture"
 path = "tests/nt45_failure_evidence_capture.rs"
 harness = true
 
+[[test]]
+name = "nt50_exception_lessons"
+path = "tests/nt50_exception_lessons.rs"
+harness = true
+
 [[bench]]
 name = "sanitize"
 harness = false

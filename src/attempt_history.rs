@@ -46,6 +46,10 @@ pub const SCHEMA_VERSION: u32 = 1;
 pub const DATA_NAMESPACE: &str = "needle-attempts";
 /// Immutable schema reference declared with the structured data.
 pub const DATA_SCHEMA_REF: &str = "urn:needle:schema:attempt-history:v1";
+/// bead-rs structured-data namespace holding candidate lessons.
+pub const LESSONS_DATA_NAMESPACE: &str = crate::learning::CANDIDATE_LESSONS_DATA_NAMESPACE;
+/// Immutable schema reference declared with candidate-lesson data.
+pub const LESSONS_DATA_SCHEMA_REF: &str = crate::learning::CANDIDATE_LESSONS_DATA_SCHEMA_REF;
 /// Records kept in the local journal before the oldest are dropped.
 const LOCAL_KEEP: usize = 50;
 /// Records mirrored into bead-rs structured data.
@@ -792,6 +796,188 @@ pub fn history_path(workspace: &Path, bead_id: &BeadId) -> PathBuf {
         .join("traces")
         .join(bead_id.as_ref())
         .join("attempts.jsonl")
+}
+
+/// Path of the local candidate-lesson journal for `bead_id` in `workspace`.
+pub fn lessons_path(workspace: &Path, bead_id: &BeadId) -> PathBuf {
+    workspace
+        .join(".beads")
+        .join("traces")
+        .join(bead_id.as_ref())
+        .join("lessons.jsonl")
+}
+
+/// Load locally produced candidate lessons, oldest first.
+pub fn load_candidate_lessons(
+    workspace: &Path,
+    bead_id: &BeadId,
+) -> Result<Vec<crate::learning::CandidateLesson>> {
+    let path = lessons_path(workspace, bead_id);
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    Ok(text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect())
+}
+
+/// Load candidate lessons from every bead trace directory in one workspace.
+///
+/// Lessons are per-bead for provenance, while retrieval needs a workspace-local
+/// source so a recovery on a different bead can still ask the configured
+/// command whether an earlier candidate applies.
+pub fn load_candidate_lessons_for_workspace(
+    workspace: &Path,
+) -> Result<Vec<crate::learning::CandidateLesson>> {
+    let traces = workspace.join(".beads").join("traces");
+    if !traces.exists() {
+        return Ok(Vec::new());
+    }
+    let mut lessons: Vec<crate::learning::CandidateLesson> = Vec::new();
+    for entry in std::fs::read_dir(&traces)
+        .with_context(|| format!("failed to read {}", traces.display()))?
+    {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let path = entry.path().join("lessons.jsonl");
+        if !path.exists() {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        lessons.extend(
+            text.lines()
+                .filter(|line| !line.trim().is_empty())
+                .filter_map(|line| serde_json::from_str(line).ok()),
+        );
+    }
+    lessons.sort_by(|left, right| left.id.cmp(&right.id));
+    lessons.dedup_by(|left, right| left.id == right.id);
+    Ok(lessons)
+}
+
+/// Append one candidate lesson unless its stable ID is already present.
+///
+/// The stable-ID check is the replay boundary: replaying a resolved attempt
+/// pair does not append another local record.
+pub fn append_candidate_lesson(
+    workspace: &Path,
+    bead_id: &BeadId,
+    lesson: &crate::learning::CandidateLesson,
+) -> Result<bool> {
+    const KEEP: usize = 50;
+    let path = lessons_path(workspace, bead_id);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let mut lessons = load_candidate_lessons(workspace, bead_id).unwrap_or_default();
+    if lessons.iter().any(|existing| existing.id == lesson.id) {
+        return Ok(false);
+    }
+    lessons.push(lesson.clone());
+    if lessons.len() > KEEP {
+        let drop = lessons.len() - KEEP;
+        lessons.drain(..drop);
+    }
+    let mut body = String::new();
+    for lesson in &lessons {
+        body.push_str(&serde_json::to_string(lesson)?);
+        body.push('\n');
+    }
+    let tmp = path.with_extension("jsonl.tmp");
+    std::fs::write(&tmp, body).with_context(|| format!("failed to write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &path)
+        .with_context(|| format!("failed to replace {}", path.display()))?;
+    Ok(true)
+}
+
+/// Persist a candidate lesson locally and, when supported, in bead-rs data.
+///
+/// Effects stay in this storage/controller boundary; candidate construction
+/// itself remains the pure reducer in [`crate::learning`].
+pub async fn record_candidate_lesson(
+    workspace: &Path,
+    bead_id: &BeadId,
+    lesson: crate::learning::CandidateLesson,
+    store: &dyn BeadStore,
+    mirror: bool,
+) {
+    let appended = match append_candidate_lesson(workspace, bead_id, &lesson) {
+        Ok(appended) => appended,
+        Err(error) => {
+            tracing::warn!(
+                bead_id = %bead_id,
+                workspace = %workspace.display(),
+                %error,
+                "candidate lesson: failed to append local journal"
+            );
+            return;
+        }
+    };
+    if !appended || !mirror {
+        return;
+    }
+    let lessons = load_candidate_lessons(workspace, bead_id).unwrap_or_else(|_| vec![lesson]);
+    let value = crate::learning::candidate_lessons_to_data_value(&lessons);
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        store.set_data(
+            bead_id,
+            LESSONS_DATA_NAMESPACE,
+            LESSONS_DATA_SCHEMA_REF,
+            &value,
+        ),
+    )
+    .await
+    {
+        Ok(Ok(true)) => {}
+        Ok(Ok(false)) => tracing::debug!(
+            bead_id = %bead_id,
+            "candidate lesson: backend has no structured data support; local journal only"
+        ),
+        Ok(Err(error)) => tracing::debug!(
+            bead_id = %bead_id,
+            %error,
+            "candidate lesson: mirror write failed; local journal only"
+        ),
+        Err(_) => tracing::debug!(
+            bead_id = %bead_id,
+            "candidate lesson: mirror write timed out; local journal only"
+        ),
+    }
+}
+
+/// Load local candidate lessons, falling back to bead-rs data on another host.
+pub async fn load_candidate_lessons_for_retrieval(
+    workspace: &Path,
+    bead_id: &BeadId,
+    store: &dyn BeadStore,
+) -> Vec<crate::learning::CandidateLesson> {
+    match load_candidate_lessons_for_workspace(workspace) {
+        Ok(lessons) if !lessons.is_empty() => return lessons,
+        Ok(_) => {}
+        Err(error) => tracing::debug!(
+            bead_id = %bead_id,
+            %error,
+            "candidate lesson: local journal unreadable, trying bead-rs mirror"
+        ),
+    }
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        store.get_data(bead_id, LESSONS_DATA_NAMESPACE),
+    )
+    .await
+    {
+        Ok(Ok(Some(value))) => crate::learning::candidate_lessons_from_data_value(&value),
+        Ok(Ok(None)) | Ok(Err(_)) | Err(_) => Vec::new(),
+    }
 }
 
 /// Append `record` to the local journal, keeping the newest [`LOCAL_KEEP`].

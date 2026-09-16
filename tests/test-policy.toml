@@ -122,8 +122,9 @@ contract = 67
 # the gate must execute, which --lib forbids.
 # +1 end-to-end escalation ladder harness (needle-e4d0f4b9).
 # +4 bounded transcript/gate capture contracts, N-T45 (needle-ab3601e5).
-# The acceptance command is the focused dedicated harness.
-e2e = 773
+# +6 candidate-lesson contracts, N-T50 (needle-75368add); the acceptance
+# command is the focused dedicated harness.
+e2e = 779
 soak = 0
 fuzz = 0
 
@@ -178,6 +179,13 @@ name = "nt45_failure_evidence_capture"
 path = "tests/nt45_failure_evidence_capture.rs"
 tier = "e2e"
 max_tests = 4
+owner = "component:attempt-history"
+
+[[harness]]
+name = "nt50_exception_lessons"
+path = "tests/nt50_exception_lessons.rs"
+tier = "e2e"
+max_tests = 6
 owner = "component:attempt-history"
 
 # These are strict ceilings on existing debt. A new occurrence fails the fast

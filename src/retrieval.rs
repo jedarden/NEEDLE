@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::config::RetrievalConfig;
+use crate::learning::CandidateLesson;
 use crate::process_guard::ProcessGroupKillGuard;
 
 /// What the retrieval command is asked about.
@@ -40,6 +41,11 @@ pub struct RetrievalRequest {
     pub failure_summary: String,
     #[serde(default)]
     pub terminal_reason: Option<String>,
+    /// Candidate lessons already observed in this workspace. The configured
+    /// retrieval command may return one as a hit, but NEEDLE never injects
+    /// this source as prompt guidance by itself (ADR-026).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub local_candidates: Vec<CandidateLesson>,
 }
 
 /// One retrieved hint.
@@ -211,7 +217,18 @@ pub fn render(items: &[RetrievedItem], max_bytes: usize) -> String {
     );
     for item in items {
         let mut block = String::new();
-        block.push_str(&format!("- **{}**", item.title.trim()));
+        let is_candidate = item.source.to_ascii_lowercase().contains("candidate")
+            || item
+                .id
+                .to_ascii_lowercase()
+                .starts_with("candidate-lesson-");
+        if is_candidate {
+            block.push_str("- **[candidate] ");
+            block.push_str(item.title.trim());
+            block.push_str("**");
+        } else {
+            block.push_str(&format!("- **{}**", item.title.trim()));
+        }
         if !item.source.is_empty() {
             block.push_str(&format!(" _({})_", item.source.trim()));
         }

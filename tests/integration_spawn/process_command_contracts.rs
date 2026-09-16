@@ -3819,6 +3819,7 @@ fn resolution_process_contracts_retrieval_request() -> RetrievalRequest {
         attempt: 2,
         failure_summary: "mismatched types".to_string(),
         terminal_reason: Some("gate:default_rust".to_string()),
+        local_candidates: Vec::new(),
     }
 }
 

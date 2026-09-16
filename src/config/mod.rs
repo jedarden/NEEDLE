@@ -5314,6 +5314,39 @@ pub struct LearningConfig {
     /// section 4.4 step 7). Off until `command` is set.
     #[serde(default)]
     pub retrieval: RetrievalConfig,
+
+    /// Produce unevaluated candidate lessons from failing-then-succeeding
+    /// attempt pairs (N-T50). Disabled until the learning-loop activation
+    /// order enables candidate production.
+    #[serde(default)]
+    pub candidate_lessons: CandidateLessonsConfig,
+}
+
+/// Candidate-lesson production settings (N-T50).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CandidateLessonsConfig {
+    /// Master switch; defaults to false because candidates are not evaluated
+    /// or safe to treat as guidance until N-T08 promotes them.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Mirror locally produced candidates into bead-rs structured data.
+    #[serde(default = "CandidateLessonsConfig::default_sync_to_bead_data")]
+    pub sync_to_bead_data: bool,
+}
+
+impl Default for CandidateLessonsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            sync_to_bead_data: Self::default_sync_to_bead_data(),
+        }
+    }
+}
+
+impl CandidateLessonsConfig {
+    fn default_sync_to_bead_data() -> bool {
+        true
+    }
 }
 
 /// Retry-time retrieval of prior fixes (see [`crate::retrieval`]).
@@ -5479,6 +5512,7 @@ impl Default for LearningConfig {
             max_learning_context_bytes: Self::default_max_learning_context_bytes(),
             failure_history: FailureHistoryConfig::default(),
             retrieval: RetrievalConfig::default(),
+            candidate_lessons: CandidateLessonsConfig::default(),
         }
     }
 }

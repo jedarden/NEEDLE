@@ -3368,6 +3368,13 @@ impl Worker {
                         attempt: attempt_no,
                         failure_summary: last.failure_summary.clone().unwrap_or_default(),
                         terminal_reason: last.terminal_reason.clone(),
+                        local_candidates:
+                            crate::attempt_history::load_candidate_lessons_for_retrieval(
+                                &build_ws,
+                                &bead.id,
+                                self.store.as_ref(),
+                            )
+                            .await,
                     };
                     let result = crate::retrieval::retrieve(retrieval, &request).await;
                     if !result.items.is_empty() {

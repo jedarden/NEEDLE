@@ -17,6 +17,246 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::attempt_history::{AttemptRecord, FailureEvidence};
+use crate::sanitize::Sanitizer;
+
+/// Schema version for the append-only candidate-lesson record.
+pub const CANDIDATE_LESSON_SCHEMA_VERSION: u32 = 1;
+/// bead-rs namespace used by candidate-lesson mirrors.
+pub const CANDIDATE_LESSONS_DATA_NAMESPACE: &str = "needle-lessons";
+/// Schema reference used by candidate-lesson mirrors.
+pub const CANDIDATE_LESSONS_DATA_SCHEMA_REF: &str = "urn:needle:schema:candidate-lesson:v1";
+/// Maximum bytes retained for one candidate-lesson text field.
+const CANDIDATE_LESSON_FIELD_BYTES: usize = 800;
+
+/// Confidence is deliberately not evaluated at production time.
+///
+/// N-T08 owns evaluation and promotion. Keeping this as a separate enum from
+/// the legacy learning confidence prevents an unevaluated candidate from being
+/// mistaken for a reviewed learning entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CandidateConfidence {
+    Unevaluated,
+}
+
+/// The observable intervention between a failed attempt and its success.
+///
+/// This is intentionally a summary, not a transcript or model rationale.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InterventionSummary {
+    /// Paths changed by the successful attempt, relative to its baseline.
+    #[serde(default)]
+    pub changed_paths: Vec<String>,
+    /// Subjects of commits produced by the successful attempt.
+    #[serde(default)]
+    pub commit_subjects: Vec<String>,
+    /// Gate state transitions observed across the pair.
+    #[serde(default)]
+    pub gate_deltas: Vec<String>,
+}
+
+/// An evidence-backed but not-yet-evaluated lesson candidate.
+///
+/// Candidate lessons are retrieval records only. They must not be rendered as
+/// policy, prompt guidance, or legacy learnings until N-T08 evaluates them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CandidateLesson {
+    /// [`CANDIDATE_LESSON_SCHEMA_VERSION`] at the time of writing.
+    pub schema_version: u32,
+    /// Stable identity derived from the normalized failure signatures.
+    pub id: String,
+    /// Bead whose attempt pair supplied the evidence.
+    pub bead_id: String,
+    /// Failure signatures extracted from the failed attempt's evidence.
+    pub failure_signatures: Vec<String>,
+    /// Observable intervention summary from the succeeding attempt.
+    pub intervention_summary: InterventionSummary,
+    /// Attempt IDs supporting this candidate, oldest first.
+    pub evidence_refs: Vec<String>,
+    /// Workspace in which the pair was observed.
+    pub workspace: String,
+    /// Adapter used for the succeeding attempt.
+    pub adapter: String,
+    /// Always [`CandidateConfidence::Unevaluated`] at production time.
+    pub confidence: CandidateConfidence,
+}
+
+impl CandidateLesson {
+    /// Build one candidate from a failed attempt followed by a verified one.
+    ///
+    /// The reducer is pure: it reads only the supplied records and summary.
+    /// Every string copied into the candidate is sanitized before it is
+    /// returned. A candidate is refused when the pair is not a real
+    /// work-failure → verified-success pair or when no failure signature is
+    /// available.
+    pub fn from_attempt_pair(
+        failed: &AttemptRecord,
+        succeeded: &AttemptRecord,
+        intervention_summary: InterventionSummary,
+        bead_id: &str,
+        workspace: &str,
+        adapter: &str,
+        sanitizer: &Sanitizer,
+    ) -> Option<Self> {
+        if failed.outcome != "work_failure"
+            || succeeded.outcome != "verified_success"
+            || failed.attempt_id.is_empty()
+            || succeeded.attempt_id.is_empty()
+        {
+            return None;
+        }
+
+        let failure_signatures = signatures_from_evidence(failed.failure_evidence.as_ref())
+            .into_iter()
+            .map(|signature| sanitize_field(sanitizer, &signature))
+            .filter(|signature| !signature.is_empty())
+            .collect::<Vec<_>>();
+        if failure_signatures.is_empty() {
+            return None;
+        }
+
+        let failure_signatures = unique_sorted(failure_signatures);
+        let intervention_summary = sanitize_intervention(sanitizer, intervention_summary);
+        let evidence_refs = vec![
+            sanitize_field(sanitizer, &failed.attempt_id),
+            sanitize_field(sanitizer, &succeeded.attempt_id),
+        ];
+        if evidence_refs.iter().any(|reference| reference.is_empty())
+            || evidence_refs[0] == evidence_refs[1]
+        {
+            return None;
+        }
+
+        Some(Self {
+            schema_version: CANDIDATE_LESSON_SCHEMA_VERSION,
+            id: candidate_id(&failure_signatures),
+            bead_id: sanitize_field(sanitizer, bead_id),
+            failure_signatures,
+            intervention_summary,
+            evidence_refs,
+            workspace: sanitize_field(sanitizer, workspace),
+            adapter: sanitize_field(sanitizer, adapter),
+            confidence: CandidateConfidence::Unevaluated,
+        })
+    }
+}
+
+/// Build a candidate from the newest verified record and its preceding failed
+/// record in one bead's attempt history.
+pub fn build_candidate_lesson(
+    records: &[AttemptRecord],
+    intervention_summary: InterventionSummary,
+    bead_id: &str,
+    workspace: &str,
+    adapter: &str,
+    sanitizer: &Sanitizer,
+) -> Option<CandidateLesson> {
+    let succeeded = records.last()?;
+    if succeeded.outcome != "verified_success" {
+        return None;
+    }
+    let failed = records[..records.len().saturating_sub(1)]
+        .iter()
+        .rev()
+        .find(|record| record.outcome == "work_failure")?;
+    CandidateLesson::from_attempt_pair(
+        failed,
+        succeeded,
+        intervention_summary,
+        bead_id,
+        workspace,
+        adapter,
+        sanitizer,
+    )
+}
+
+/// Serialize candidate lessons for the bead-rs `needle-lessons` namespace.
+pub fn candidate_lessons_to_data_value(lessons: &[CandidateLesson]) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": CANDIDATE_LESSON_SCHEMA_VERSION,
+        "lessons": lessons,
+    })
+}
+
+/// Parse a bead-rs candidate-lesson document, ignoring malformed entries.
+pub fn candidate_lessons_from_data_value(value: &serde_json::Value) -> Vec<CandidateLesson> {
+    value
+        .get("lessons")
+        .and_then(serde_json::Value::as_array)
+        .map(|lessons| {
+            lessons
+                .iter()
+                .filter_map(|lesson| serde_json::from_value(lesson.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn signatures_from_evidence(evidence: Option<&FailureEvidence>) -> Vec<String> {
+    let Some(evidence) = evidence else {
+        return Vec::new();
+    };
+    let mut signatures = evidence
+        .tool_errors
+        .iter()
+        .filter_map(|error| (!error.signature.trim().is_empty()).then_some(error.signature.clone()))
+        .collect::<Vec<_>>();
+    signatures.extend(evidence.gate_diagnostics.iter().map(|diagnostic| {
+        format!(
+            "gate:{}:{}",
+            diagnostic.gate_name,
+            crate::verification_fingerprint::normalize_output(&diagnostic.error_block)
+        )
+    }));
+    signatures
+}
+
+fn sanitize_intervention(
+    sanitizer: &Sanitizer,
+    intervention: InterventionSummary,
+) -> InterventionSummary {
+    InterventionSummary {
+        changed_paths: sanitize_list(sanitizer, intervention.changed_paths),
+        commit_subjects: sanitize_list(sanitizer, intervention.commit_subjects),
+        gate_deltas: sanitize_list(sanitizer, intervention.gate_deltas),
+    }
+}
+
+fn sanitize_list(sanitizer: &Sanitizer, values: Vec<String>) -> Vec<String> {
+    unique_sorted(
+        values
+            .into_iter()
+            .map(|value| sanitize_field(sanitizer, &value))
+            .filter(|value| !value.is_empty())
+            .collect(),
+    )
+}
+
+fn sanitize_field(sanitizer: &Sanitizer, value: &str) -> String {
+    crate::attempt_history::truncate_head_tail(
+        &sanitizer.sanitize(value.trim()),
+        CANDIDATE_LESSON_FIELD_BYTES,
+    )
+}
+
+fn unique_sorted(mut values: Vec<String>) -> Vec<String> {
+    values.sort();
+    values.dedup();
+    values
+}
+
+fn candidate_id(signatures: &[String]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"candidate-lesson:");
+    for signature in signatures {
+        hasher.update(signature.as_bytes());
+        hasher.update([0]);
+    }
+    let digest = hasher.finalize();
+    format!("candidate-lesson-{}", hex::encode(&digest[..12]))
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Learning Entry Types
 // ──────────────────────────────────────────────────────────────────────────────

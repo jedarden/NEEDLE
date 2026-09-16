@@ -352,6 +352,138 @@ fn build_failure_evidence_sanitizer(config: &Config) -> Result<crate::sanitize::
     crate::sanitize::Sanitizer::new(&custom_patterns)
 }
 
+/// Gather the small, observable intervention summary used by N-T50.
+///
+/// Git is invoked read-only with optional locks disabled. A missing baseline
+/// or failed command leaves that part of the summary unknown rather than
+/// inventing paths or commit subjects.
+async fn candidate_intervention_summary(
+    workspace: &std::path::Path,
+    baseline: Option<&str>,
+    commits: &[String],
+    failed: &crate::attempt_history::AttemptRecord,
+    succeeding_gates: &[crate::telemetry::GateResultEntry],
+) -> crate::learning::InterventionSummary {
+    let (mut changed_paths, mut commit_subjects) = match baseline {
+        Some(baseline) if !baseline.is_empty() => {
+            let changed_paths = candidate_git_lines(workspace, &["diff", "--name-only", baseline])
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|path| !path.starts_with(".beads/") && path != ".needle-predispatch-sha")
+                .collect();
+            let range = format!("{baseline}..HEAD");
+            let commit_subjects =
+                candidate_git_lines(workspace, &["log", "--format=%s", "--reverse", &range])
+                    .await
+                    .unwrap_or_default();
+            (changed_paths, commit_subjects)
+        }
+        _ => (Vec::new(), Vec::new()),
+    };
+    if baseline.is_none() {
+        for commit in commits
+            .iter()
+            .filter(|commit| !commit.trim().is_empty())
+            .take(20)
+        {
+            if let Some(subject) =
+                candidate_git_lines(workspace, &["show", "-s", "--format=%s", commit.as_str()])
+                    .await
+                    .and_then(|lines| lines.into_iter().next())
+            {
+                commit_subjects.push(subject);
+            }
+            if let Some(paths) = candidate_git_lines(
+                workspace,
+                &[
+                    "diff-tree",
+                    "--no-commit-id",
+                    "--name-only",
+                    "-r",
+                    commit.as_str(),
+                ],
+            )
+            .await
+            {
+                changed_paths.extend(paths);
+            }
+        }
+    }
+
+    let mut failed_gates = failed
+        .failure_evidence
+        .as_ref()
+        .map(|evidence| {
+            evidence
+                .gate_diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.gate_name.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if failed_gates.is_empty() {
+        if let Some(reason) = failed.terminal_reason.as_deref() {
+            if let Some(gates) = reason.strip_prefix("gate:") {
+                failed_gates.extend(
+                    gates
+                        .split(',')
+                        .filter(|gate| !gate.trim().is_empty())
+                        .map(str::to_string),
+                );
+            }
+        }
+    }
+    failed_gates.sort();
+    failed_gates.dedup();
+    let gate_deltas = failed_gates
+        .into_iter()
+        .map(|gate| {
+            let after = succeeding_gates
+                .iter()
+                .find(|result| result.name == gate)
+                .map(|result| result.status.as_str())
+                .unwrap_or("pass");
+            format!("{gate}: fail -> {after}")
+        })
+        .collect();
+
+    crate::learning::InterventionSummary {
+        changed_paths,
+        commit_subjects,
+        gate_deltas,
+    }
+}
+
+/// Run one bounded, read-only git query for candidate evidence.
+async fn candidate_git_lines(workspace: &std::path::Path, args: &[&str]) -> Option<Vec<String>> {
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::process::Command::new("git")
+            .args(args)
+            .current_dir(workspace)
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("LC_ALL", "C")
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
 /// Convert a gate report into the ledger's per-gate entries, ordered by name.
 ///
 /// Gate execution is not individually timed today, so `duration_ms` is 0
@@ -1467,7 +1599,8 @@ impl OutcomeHandler {
         failure_evidence: Option<crate::attempt_history::FailureEvidence>,
     ) {
         let history = &self.config.strands.learning.failure_history;
-        if !history.enabled {
+        let candidates_enabled = self.config.strands.learning.candidate_lessons.enabled;
+        if !history.enabled && !candidates_enabled {
             return;
         }
         let workspace = if bead.workspace.as_os_str().is_empty()
@@ -1498,7 +1631,88 @@ impl OutcomeHandler {
             &bead.id,
             record,
             store,
-            history.sync_to_bead_data,
+            history.enabled && history.sync_to_bead_data,
+        )
+        .await;
+
+        if self.config.strands.learning.candidate_lessons.enabled
+            && ledger.outcome == "verified_success"
+        {
+            self.record_candidate_lesson(store, bead, &workspace, ledger)
+                .await;
+        }
+    }
+
+    /// Produce the N-T50 candidate only after the current attempt has been
+    /// recorded as a verified success. Candidate construction is pure; this
+    /// method only gathers read-only git facts and hands the result to the
+    /// attempt-history storage boundary.
+    async fn record_candidate_lesson(
+        &self,
+        store: &dyn BeadStore,
+        bead: &Bead,
+        workspace: &std::path::Path,
+        ledger: &crate::telemetry::AttemptResolvedFields,
+    ) {
+        let records = match crate::attempt_history::load_local(workspace, &bead.id) {
+            Ok(records) => records,
+            Err(error) => {
+                tracing::debug!(
+                    bead_id = %bead.id,
+                    %error,
+                    "candidate lesson: could not load attempt history"
+                );
+                return;
+            }
+        };
+        let Some(failed) = records
+            .iter()
+            .rev()
+            .skip(1)
+            .find(|record| record.outcome == "work_failure")
+        else {
+            return;
+        };
+
+        let intervention = candidate_intervention_summary(
+            workspace,
+            ledger.bead_revision_start.as_deref(),
+            &ledger.commits,
+            failed,
+            &ledger.gate_results,
+        )
+        .await;
+        let sanitizer = match build_failure_evidence_sanitizer(&self.config) {
+            Ok(sanitizer) => sanitizer,
+            Err(error) => {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    %error,
+                    "candidate lesson: sanitizer unavailable; refusing candidate"
+                );
+                return;
+            }
+        };
+        let Some(lesson) = crate::learning::build_candidate_lesson(
+            &records,
+            intervention,
+            bead.id.as_ref(),
+            &workspace.display().to_string(),
+            &ledger.adapter,
+            &sanitizer,
+        ) else {
+            return;
+        };
+        crate::attempt_history::record_candidate_lesson(
+            workspace,
+            &bead.id,
+            lesson,
+            store,
+            self.config
+                .strands
+                .learning
+                .candidate_lessons
+                .sync_to_bead_data,
         )
         .await;
     }
