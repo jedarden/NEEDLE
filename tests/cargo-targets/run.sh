@@ -13,6 +13,7 @@ EXPECTED_TARGETS="$(printf '%s\n' \
   escalation_ladder \
   integration_spawn \
   integration_tests \
+  nt45_failure_evidence_capture \
   p2_integration_tests \
   p3_integration_tests \
   real_br_integration_tests)"
@@ -115,7 +116,7 @@ for marker_fragment in \
   'nextest_profile=ci' \
   'features=default' \
   'target_triple=' \
-  'target_set=lib,integration_spawn,integration_tests,p2_integration_tests,p3_integration_tests,real_br_integration_tests,escalation_ladder' \
+  'target_set=lib,integration_spawn,integration_tests,p2_integration_tests,p3_integration_tests,real_br_integration_tests,escalation_ladder,nt45_failure_evidence_capture' \
   'workspace_root=/workspace' \
   'target_dir=/opt/needle-ci-target' \
   'cargo_build_jobs=2'; do
@@ -288,7 +289,7 @@ probe_targets="$(test_targets "$probe_root/Cargo.toml")"
   "tests/scratch.rs changed Cargo metadata: $(tr '\n' ' ' <<<"$probe_targets")"
 [[ "$probe_targets" != *scratch* ]] || fail 'Cargo auto-discovered tests/scratch.rs'
 
-echo 'PASS: Cargo reports only the six explicit integration-test roots'
+echo 'PASS: Cargo reports only the seven explicit integration-test roots'
 echo 'PASS: a stray tests/scratch.rs is not auto-discovered'
 echo 'PASS: dependency-image stubs cover every declared Cargo target'
 echo 'PASS: dependency image preserves its target tree outside /workspace'

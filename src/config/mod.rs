@@ -5397,6 +5397,38 @@ pub struct FailureHistoryConfig {
     /// journal only.
     #[serde(default = "FailureHistoryConfig::default_sync_to_bead_data")]
     pub sync_to_bead_data: bool,
+    /// Capture structured transcript and gate evidence on failed attempts.
+    ///
+    /// This is separate from the original R3 history switch so the richer
+    /// evidence wire remains off until its activation order is approved.
+    #[serde(default)]
+    pub evidence: FailureEvidenceConfig,
+}
+
+/// Configuration for N-T45's structured failure evidence capture.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FailureEvidenceConfig {
+    /// Master switch; defaults to false until the plan activates N-T45.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Maximum serialized evidence bytes retained on a local attempt record.
+    #[serde(default = "FailureEvidenceConfig::default_max_bytes")]
+    pub max_bytes: usize,
+}
+
+impl Default for FailureEvidenceConfig {
+    fn default() -> Self {
+        FailureEvidenceConfig {
+            enabled: false,
+            max_bytes: crate::attempt_history::MAX_FAILURE_EVIDENCE_BYTES,
+        }
+    }
+}
+
+impl FailureEvidenceConfig {
+    fn default_max_bytes() -> usize {
+        crate::attempt_history::MAX_FAILURE_EVIDENCE_BYTES
+    }
 }
 
 impl Default for FailureHistoryConfig {
@@ -5406,6 +5438,7 @@ impl Default for FailureHistoryConfig {
             max_attempts: Self::default_max_attempts(),
             max_bytes: Self::default_max_bytes(),
             sync_to_bead_data: Self::default_sync_to_bead_data(),
+            evidence: FailureEvidenceConfig::default(),
         }
     }
 }

@@ -118,14 +118,14 @@ else
 fi
 
 # ── needle_slow_targets ──────────────────────────────────────────────────────
-assert_lines "target table lists eight names" 8 needle_slow_targets
+assert_lines "target table lists nine names" 9 needle_slow_targets
 
 # Exact set, asserted literally: a renamed or dropped target must be caught
 # here rather than silently accepted by every consumer of the table.
-WANT_TABLE="$(printf '%s\n' lib integration_spawn integration_tests p2_integration_tests p3_integration_tests real_br_integration_tests escalation_ladder installer)"
+WANT_TABLE="$(printf '%s\n' lib integration_spawn integration_tests p2_integration_tests p3_integration_tests real_br_integration_tests escalation_ladder nt45_failure_evidence_capture installer)"
 GOT_TABLE="$(needle_slow_targets)"
 if [[ "$GOT_TABLE" == "$WANT_TABLE" ]]; then
-  ok "target table is exactly the seven cargo targets plus installer"
+  ok "target table is exactly the eight cargo targets plus installer"
 else
   bad "target table drifted (got: $(echo "$GOT_TABLE" | tr '\n' ' '))"
 fi
@@ -138,6 +138,7 @@ assert_selector "p2 selects its target" "--test p2_integration_tests" p2_integra
 assert_selector "p3 selects its target" "--test p3_integration_tests" p3_integration_tests
 assert_selector "real_br selects its target" "--test real_br_integration_tests" real_br_integration_tests
 assert_selector "escalation ladder selects its target" "--test escalation_ladder" escalation_ladder
+assert_selector "N-T45 selects its target" "--test nt45_failure_evidence_capture" nt45_failure_evidence_capture
 assert_fails "unknown target has no selector" needle_cargo_selector nope
 assert_fails "installer is not a cargo target" needle_cargo_selector installer
 
@@ -149,12 +150,13 @@ assert_nextest_filter "p2 has an exact nextest binary ID" "binary_id(=needle::p2
 assert_nextest_filter "p3 has an exact nextest binary ID" "binary_id(=needle::p3_integration_tests)" p3_integration_tests
 assert_nextest_filter "real_br has an exact nextest binary ID" "binary_id(=needle::real_br_integration_tests)" real_br_integration_tests
 assert_nextest_filter "escalation ladder has an exact nextest binary ID" "binary_id(=needle::escalation_ladder)" escalation_ladder
+assert_nextest_filter "N-T45 has an exact nextest binary ID" "binary_id(=needle::nt45_failure_evidence_capture)" nt45_failure_evidence_capture
 assert_fails "unknown target has no nextest filter" needle_nextest_filter nope
 assert_fails "installer has no nextest filter" needle_nextest_filter installer
 
 # ── selected_cargo_targets ───────────────────────────────────────────────────
 SLOW_TARGET=""
-assert_lines "default selection is all seven cargo targets" 7 selected_cargo_targets
+assert_lines "default selection is all eight cargo targets" 8 selected_cargo_targets
 
 WANT_DEFAULT="$(needle_expected_slow_targets | grep -vx installer)"
 GOT_DEFAULT="$(selected_cargo_targets)"
@@ -173,7 +175,8 @@ fi
 if (
   needle_slow_targets() {
     printf '%s\n' lib integration_tests p2_integration_tests \
-      p3_integration_tests real_br_integration_tests escalation_ladder installer
+      p3_integration_tests real_br_integration_tests escalation_ladder \
+      nt45_failure_evidence_capture installer
   }
   needle_validate_slow_target_coverage
 ) >/dev/null 2>&1; then
@@ -262,10 +265,11 @@ WANT_HARNESSES="$(printf '%s\t%s\n' \
   p2_integration_tests tests/p2_integration_tests.rs \
   p3_integration_tests tests/p3_integration_tests.rs \
   real_br_integration_tests tests/real_br_integration_tests.rs \
-  escalation_ladder tests/escalation_ladder.rs)"
+  escalation_ladder tests/escalation_ladder.rs \
+  nt45_failure_evidence_capture tests/nt45_failure_evidence_capture.rs)"
 GOT_HARNESSES="$(needle_declared_test_harnesses)"
 if [[ "$GOT_HARNESSES" == "$WANT_HARNESSES" ]]; then
-  ok "Clippy reads the six declared test harness roots from Cargo.toml"
+  ok "Clippy reads the seven declared test harness roots from Cargo.toml"
 else
   bad "declared test harness parsing drifted (got: $(echo "$GOT_HARNESSES" | tr '\n' ' '))"
 fi

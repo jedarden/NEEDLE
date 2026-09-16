@@ -23,18 +23,22 @@
 //!   sees the same history. It survives `bead update --notes`, which
 //!   *replaces* notes and is what the prompt tells agents to run.
 //!
-//! The record carries what the ledger row carries plus a bounded, sanitized
-//! failure summary. It never carries a transcript, model reasoning, or a
-//! credential: the summary is gate output or stderr already passed through
-//! the trace sanitizer's caps, cut to a fixed size.
+//! The record carries what the ledger row carries plus bounded, sanitized
+//! failure context. It never carries a transcript, model reasoning, or a
+//! credential: the legacy summary and the opt-in structured evidence are
+//! derived from gate/output data, sanitized, and cut to fixed sizes.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::bead_store::BeadStore;
+use crate::sanitize::Sanitizer;
 use crate::types::BeadId;
+use crate::validation::{GateReport, GateResult};
 
 /// Schema version stamped on every record.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -52,6 +56,239 @@ const MIRROR_SUMMARY_BYTES: usize = 600;
 pub const LOCAL_SUMMARY_BYTES: usize = 1200;
 /// Semantic outcome of an attempt whose evidence was accepted.
 const VERIFIED_SUCCESS: &str = "verified_success";
+
+/// Maximum serialized size of the failure evidence attached to a local record.
+///
+/// This is deliberately smaller than the history prompt cap because a record
+/// also carries the legacy summary and attempt metadata. The bounded object is
+/// safe to mirror without allowing a single failed attempt to consume the
+/// whole bead-rs data value.
+pub const MAX_FAILURE_EVIDENCE_BYTES: usize = 2400;
+/// Maximum number of tool failures retained, newest failures last in storage
+/// order. Rendering reverses the containing attempts, not this list.
+pub const MAX_TOOL_ERRORS: usize = 3;
+/// Maximum bytes retained for the final assistant message before the overall
+/// evidence cap is applied.
+const FINAL_MESSAGE_BYTES: usize = 600;
+/// Maximum bytes retained for a normalized tool signature.
+const TOOL_SIGNATURE_BYTES: usize = 320;
+/// Maximum bytes retained for a tool error excerpt.
+const TOOL_EXCERPT_BYTES: usize = 400;
+/// Maximum bytes retained for one gate's first error block.
+const GATE_ERROR_BLOCK_BYTES: usize = 650;
+/// Maximum bytes retained for names in the evidence object.
+const EVIDENCE_NAME_BYTES: usize = 64;
+/// Marker used when sanitization cannot safely return the source content.
+pub const SANITIZER_BLOCKED_MARKER: &str = "[failure evidence blocked by sanitizer]";
+/// Marker used when a failed attempt had no structured transcript content.
+pub const EVIDENCE_UNAVAILABLE_MARKER: &str = "[no structured failure evidence captured]";
+
+/// One failed tool invocation retained as attempt evidence.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ToolErrorEvidence {
+    /// Adapter-normalized tool name (for example, `Bash` or `shell`).
+    pub tool_name: String,
+    /// Stable signature of the sanitized error output.
+    pub signature: String,
+    /// Short sanitized excerpt useful to the next attempt.
+    pub excerpt: String,
+}
+
+/// One failing validation gate's first useful error block.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct GateDiagnostic {
+    /// Name of the gate that rejected the attempt.
+    pub gate_name: String,
+    /// First error-shaped block from the gate output, sanitized and bounded.
+    pub error_block: String,
+}
+
+/// Bounded, sanitized evidence captured from a failed attempt.
+///
+/// This is intentionally a small derived record, not a transcript archive.
+/// The complete transcript remains owned by the existing trace/archive path;
+/// this object contains only the pieces useful for retry context and retrieval.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FailureEvidence {
+    /// The last assistant text message observed in the partial or complete
+    /// transcript.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_message: Option<String>,
+    /// The newest failed tool results, in transcript order.
+    #[serde(default)]
+    pub tool_errors: Vec<ToolErrorEvidence>,
+    /// Failing gates, ordered by gate name for byte-stable records.
+    #[serde(default)]
+    pub gate_diagnostics: Vec<GateDiagnostic>,
+}
+
+impl FailureEvidence {
+    /// Construct an explicit marker record when no structured transcript was
+    /// available. A missing field would look indistinguishable from a feature
+    /// that was not enabled, so failures retain this fact explicitly.
+    pub fn unavailable() -> Self {
+        Self {
+            final_message: Some(EVIDENCE_UNAVAILABLE_MARKER.to_string()),
+            tool_errors: Vec::new(),
+            gate_diagnostics: Vec::new(),
+        }
+    }
+
+    /// Return the serialized byte size of this evidence object.
+    pub fn serialized_bytes(&self) -> usize {
+        serde_json::to_vec(self)
+            .map(|bytes| bytes.len())
+            .unwrap_or(usize::MAX)
+    }
+
+    /// Bound a record before it is persisted or mirrored.
+    pub fn bounded(mut self, max_bytes: usize) -> Self {
+        self.final_message = self
+            .final_message
+            .take()
+            .map(|text| truncate_head_tail(&text, FINAL_MESSAGE_BYTES));
+        for error in &mut self.tool_errors {
+            error.tool_name = truncate_bytes(&error.tool_name, EVIDENCE_NAME_BYTES);
+            error.signature = truncate_head_tail(&error.signature, TOOL_SIGNATURE_BYTES);
+            error.excerpt = truncate_head_tail(&error.excerpt, TOOL_EXCERPT_BYTES);
+        }
+        self.tool_errors
+            .truncate(self.tool_errors.len().min(MAX_TOOL_ERRORS));
+        for diagnostic in &mut self.gate_diagnostics {
+            diagnostic.gate_name = truncate_bytes(&diagnostic.gate_name, EVIDENCE_NAME_BYTES);
+            diagnostic.error_block =
+                truncate_head_tail(&diagnostic.error_block, GATE_ERROR_BLOCK_BYTES);
+        }
+
+        // The per-field limits above bound normal records. This final pass
+        // also bounds records assembled by callers or old fixtures with
+        // unusually many gate diagnostics. Keep a marker in every content
+        // field while shrinking so sanitization is never silently represented
+        // by an empty string.
+        let max_bytes = max_bytes.max(SANITIZER_BLOCKED_MARKER.len() + 128);
+        while self.serialized_bytes() > max_bytes {
+            let current = self.serialized_bytes();
+            let excess = current.saturating_sub(max_bytes).max(1);
+            let mut longest = FieldRef::None;
+            let mut longest_len = 0;
+
+            if let Some(text) = self.final_message.as_ref() {
+                if text.len() > longest_len {
+                    longest = FieldRef::Final;
+                    longest_len = text.len();
+                }
+            }
+            for (index, error) in self.tool_errors.iter().enumerate() {
+                for (kind, len) in [
+                    (ToolField::ToolName, error.tool_name.len()),
+                    (ToolField::Signature, error.signature.len()),
+                    (ToolField::Excerpt, error.excerpt.len()),
+                ] {
+                    if len > longest_len {
+                        longest = FieldRef::Tool(index, kind);
+                        longest_len = len;
+                    }
+                }
+            }
+            for (index, diagnostic) in self.gate_diagnostics.iter().enumerate() {
+                for (kind, len) in [
+                    (GateField::GateName, diagnostic.gate_name.len()),
+                    (GateField::ErrorBlock, diagnostic.error_block.len()),
+                ] {
+                    if len > longest_len {
+                        longest = FieldRef::Gate(index, kind);
+                        longest_len = len;
+                    }
+                }
+            }
+
+            if longest_len == 0 {
+                // A very small caller-supplied cap can be smaller than the
+                // JSON framing for every retained item. Compact the lists in
+                // that case, keeping at least one explicit piece of evidence
+                // rather than silently dropping a blocked marker.
+                if self.drop_one_for_cap() {
+                    continue;
+                }
+                break;
+            }
+            let target = longest_len.saturating_sub(excess);
+            let before = self.serialized_bytes();
+            match longest {
+                FieldRef::Final => {
+                    if let Some(text) = self.final_message.as_mut() {
+                        *text = truncate_preserving_marker(text, target);
+                    }
+                }
+                FieldRef::Tool(index, ToolField::ToolName) => {
+                    self.tool_errors[index].tool_name =
+                        truncate_bytes(&self.tool_errors[index].tool_name, target);
+                }
+                FieldRef::Tool(index, ToolField::Signature) => {
+                    self.tool_errors[index].signature =
+                        truncate_preserving_marker(&self.tool_errors[index].signature, target);
+                }
+                FieldRef::Tool(index, ToolField::Excerpt) => {
+                    self.tool_errors[index].excerpt =
+                        truncate_preserving_marker(&self.tool_errors[index].excerpt, target);
+                }
+                FieldRef::Gate(index, GateField::GateName) => {
+                    self.gate_diagnostics[index].gate_name =
+                        truncate_bytes(&self.gate_diagnostics[index].gate_name, target);
+                }
+                FieldRef::Gate(index, GateField::ErrorBlock) => {
+                    self.gate_diagnostics[index].error_block = truncate_preserving_marker(
+                        &self.gate_diagnostics[index].error_block,
+                        target,
+                    );
+                }
+                FieldRef::None => break,
+            }
+            if self.serialized_bytes() >= before && !self.drop_one_for_cap() {
+                break;
+            }
+        }
+        self
+    }
+
+    fn drop_one_for_cap(&mut self) -> bool {
+        if self.tool_errors.len() > 1 {
+            self.tool_errors.remove(0);
+        } else if self.gate_diagnostics.len() > 1 {
+            self.gate_diagnostics.remove(0);
+        } else if !self.gate_diagnostics.is_empty() && !self.tool_errors.is_empty() {
+            self.gate_diagnostics.clear();
+        } else if !self.tool_errors.is_empty() {
+            self.tool_errors.clear();
+        } else if !self.gate_diagnostics.is_empty() {
+            self.gate_diagnostics.clear();
+        } else {
+            return false;
+        }
+        true
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FieldRef {
+    None,
+    Final,
+    Tool(usize, ToolField),
+    Gate(usize, GateField),
+}
+
+#[derive(Clone, Copy)]
+enum ToolField {
+    ToolName,
+    Signature,
+    Excerpt,
+}
+
+#[derive(Clone, Copy)]
+enum GateField {
+    GateName,
+    ErrorBlock,
+}
 
 /// One resolved attempt, as the next attempt should see it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -88,6 +325,9 @@ pub struct AttemptRecord {
     /// Bounded, sanitized failure text — the part the next agent must read.
     #[serde(default)]
     pub failure_summary: Option<String>,
+    /// Bounded, sanitized structured evidence from the failed attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_evidence: Option<FailureEvidence>,
 }
 
 impl AttemptRecord {
@@ -95,6 +335,436 @@ impl AttemptRecord {
     pub fn is_verified_success(&self) -> bool {
         self.outcome == VERIFIED_SUCCESS
     }
+}
+
+/// Capture structured failure evidence from a raw or normalized JSONL
+/// transcript and an optional gate report.
+///
+/// The parser is deliberately tolerant: adapters can be killed between any
+/// two lines, so malformed trailing JSON and unmatched tool calls are normal
+/// timeout shapes. It understands the raw Claude/Codex/opencode forms as well
+/// as the normalized [`crate::agent_event::AgentEvent`] form written by the
+/// existing output transforms.
+pub fn capture_failure_evidence(
+    transcript: &str,
+    gate_report: Option<&GateReport>,
+    sanitizer: Option<&Sanitizer>,
+) -> Option<FailureEvidence> {
+    capture_failure_evidence_with_limit(
+        transcript,
+        gate_report,
+        sanitizer,
+        MAX_FAILURE_EVIDENCE_BYTES,
+        false,
+    )
+}
+
+/// Capture evidence while explicitly recording that sanitization was blocked.
+///
+/// This is used by the outcome controller when the configured sanitizer could
+/// not be built. Source content is never allowed through in that case: every
+/// captured content field receives [`SANITIZER_BLOCKED_MARKER`].
+pub fn capture_failure_evidence_blocked(
+    transcript: &str,
+    gate_report: Option<&GateReport>,
+) -> Option<FailureEvidence> {
+    capture_failure_evidence_with_limit(
+        transcript,
+        gate_report,
+        None,
+        MAX_FAILURE_EVIDENCE_BYTES,
+        true,
+    )
+}
+
+/// Capture evidence with the caller's local-record cap.
+pub fn capture_failure_evidence_with_limit(
+    transcript: &str,
+    gate_report: Option<&GateReport>,
+    sanitizer: Option<&Sanitizer>,
+    max_bytes: usize,
+    sanitizer_blocked: bool,
+) -> Option<FailureEvidence> {
+    let mut parsed = ParsedTranscript::default();
+    for line in transcript.lines() {
+        let Ok(value) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        parse_transcript_value(&value, &mut parsed);
+    }
+
+    let final_message = parsed
+        .final_message
+        .map(|text| sanitize_content(&text, sanitizer, sanitizer_blocked, FINAL_MESSAGE_BYTES));
+    let tool_errors: Vec<ToolErrorEvidence> = parsed
+        .tool_errors
+        .into_iter()
+        .rev()
+        .take(MAX_TOOL_ERRORS)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(|error| {
+            let sanitized_output = sanitize_untrusted(&error.output, sanitizer, sanitizer_blocked);
+            let content = truncate_head_tail(&sanitized_output, TOOL_EXCERPT_BYTES);
+            ToolErrorEvidence {
+                tool_name: sanitize_name(&error.tool_name, sanitizer, sanitizer_blocked),
+                signature: truncate_head_tail(
+                    &crate::verification_fingerprint::normalize_output(&sanitized_output),
+                    TOOL_SIGNATURE_BYTES,
+                ),
+                excerpt: content,
+            }
+        })
+        .collect();
+
+    let gate_diagnostics: Vec<GateDiagnostic> = gate_report
+        .map(|report| {
+            let mut results: Vec<(&String, &GateResult)> = report.results.iter().collect();
+            results.sort_by(|a, b| a.0.cmp(b.0));
+            results
+                .into_iter()
+                .filter_map(|(name, result)| {
+                    let raw = match result {
+                        GateResult::Pass => return None,
+                        GateResult::Fail(reason) => first_error_block(reason).to_string(),
+                        GateResult::ExecutionError { command, reason } => {
+                            let combined = format!("{reason}\ncommand: {command}");
+                            first_error_block(&combined).to_string()
+                        }
+                    };
+                    Some(GateDiagnostic {
+                        gate_name: sanitize_name(name, sanitizer, sanitizer_blocked),
+                        error_block: sanitize_content(
+                            &raw,
+                            sanitizer,
+                            sanitizer_blocked,
+                            GATE_ERROR_BLOCK_BYTES,
+                        ),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if final_message.is_none() && tool_errors.is_empty() && gate_diagnostics.is_empty() {
+        return None;
+    }
+
+    Some(
+        FailureEvidence {
+            final_message,
+            tool_errors,
+            gate_diagnostics,
+        }
+        .bounded(max_bytes),
+    )
+}
+
+#[derive(Default)]
+struct ParsedTranscript {
+    final_message: Option<String>,
+    tool_errors: Vec<RawToolError>,
+    pending_tools: HashMap<String, String>,
+}
+
+struct RawToolError {
+    tool_name: String,
+    output: String,
+}
+
+fn parse_transcript_value(value: &Value, parsed: &mut ParsedTranscript) {
+    match value.get("type").and_then(Value::as_str) {
+        Some("assistant") => parse_assistant_message(value.get("message"), parsed),
+        Some("user") => parse_user_message(value.get("message"), parsed),
+        Some("tool_result") => parse_tool_result(value, parsed),
+        Some("agent_message") => {
+            let is_user = value
+                .get("role")
+                .and_then(Value::as_str)
+                .map(|role| role.eq_ignore_ascii_case("user"))
+                .unwrap_or(false);
+            if !is_user {
+                if let Some(content) = value.get("content").and_then(Value::as_str) {
+                    remember_final_message(content, parsed);
+                }
+            }
+        }
+        Some("result") => {
+            if let Some(result) = value.get("result").and_then(Value::as_str) {
+                remember_final_message(result, parsed);
+            }
+        }
+        Some("item.completed") => parse_completed_item(value.get("item"), parsed),
+        Some("tool_use") => {
+            if let (Some(id), Some(name)) = (
+                value.get("id").and_then(Value::as_str),
+                value.get("name").and_then(Value::as_str),
+            ) {
+                parsed
+                    .pending_tools
+                    .insert(id.to_string(), name.to_string());
+            }
+        }
+        Some("tool_call") => {
+            if let (Some(id), Some(name)) = (
+                value.get("id").and_then(Value::as_str),
+                value.get("tool").and_then(Value::as_str),
+            ) {
+                parsed
+                    .pending_tools
+                    .insert(id.to_string(), name.to_string());
+            }
+        }
+        _ => {}
+    }
+
+    // opencode carries tool calls and their result in one `tool_use` line.
+    if value.get("type").and_then(Value::as_str) == Some("tool_use") {
+        parse_opencode_tool(value.get("part"), parsed);
+    }
+}
+
+fn parse_assistant_message(message: Option<&Value>, parsed: &mut ParsedTranscript) {
+    let Some(message) = message else { return };
+    let Some(content) = message.get("content").and_then(Value::as_array) else {
+        if let Some(text) = message.get("content").and_then(Value::as_str) {
+            remember_final_message(text, parsed);
+        }
+        return;
+    };
+    for block in content {
+        match block.get("type").and_then(Value::as_str) {
+            Some("text") => {
+                if let Some(text) = block.get("text").and_then(Value::as_str) {
+                    remember_final_message(text, parsed);
+                }
+            }
+            Some("tool_use") => {
+                if let (Some(id), Some(name)) = (
+                    block.get("id").and_then(Value::as_str),
+                    block.get("name").and_then(Value::as_str),
+                ) {
+                    parsed
+                        .pending_tools
+                        .insert(id.to_string(), name.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn parse_user_message(message: Option<&Value>, parsed: &mut ParsedTranscript) {
+    let Some(content) = message.and_then(|m| m.get("content")) else {
+        return;
+    };
+    let Some(blocks) = content.as_array() else {
+        return;
+    };
+    for block in blocks {
+        if block.get("type").and_then(Value::as_str) == Some("tool_result") {
+            parse_tool_result(block, parsed);
+        }
+    }
+}
+
+fn parse_tool_result(value: &Value, parsed: &mut ParsedTranscript) {
+    let is_error = value
+        .get("is_error")
+        .and_then(Value::as_bool)
+        .or_else(|| value.get("success").and_then(Value::as_bool).map(|v| !v))
+        .unwrap_or(false);
+    if !is_error {
+        return;
+    }
+    let tool_name = value
+        .get("tool")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            value
+                .get("tool_use_id")
+                .and_then(Value::as_str)
+                .and_then(|id| parsed.pending_tools.get(id).map(String::as_str))
+        })
+        .unwrap_or("unknown")
+        .to_string();
+    let output = value
+        .get("output")
+        .or_else(|| value.get("content"))
+        .map(value_as_text)
+        .filter(|text| !text.trim().is_empty())
+        .unwrap_or_else(|| "tool failed without an error message".to_string());
+    parsed.tool_errors.push(RawToolError { tool_name, output });
+    if let Some(id) = value.get("tool_use_id").and_then(Value::as_str) {
+        parsed.pending_tools.remove(id);
+    }
+}
+
+fn parse_completed_item(item: Option<&Value>, parsed: &mut ParsedTranscript) {
+    let Some(item) = item else { return };
+    match item.get("type").and_then(Value::as_str) {
+        Some("agent_message") => {
+            let content = item
+                .get("content")
+                .or_else(|| item.get("text"))
+                .and_then(Value::as_str);
+            if let Some(content) = content {
+                remember_final_message(content, parsed);
+            }
+        }
+        Some("command_execution") => {
+            let failed = item
+                .get("exit_code")
+                .and_then(Value::as_i64)
+                .map(|code| code != 0)
+                .unwrap_or(false);
+            if failed {
+                let output = item
+                    .get("output")
+                    .map(value_as_text)
+                    .filter(|text| !text.trim().is_empty())
+                    .unwrap_or_else(|| {
+                        format!(
+                            "command exited with code {}",
+                            item.get("exit_code").and_then(Value::as_i64).unwrap_or(-1)
+                        )
+                    });
+                parsed.tool_errors.push(RawToolError {
+                    tool_name: "shell".to_string(),
+                    output,
+                });
+            }
+        }
+        Some("mcp_tool_call") | Some("collab_tool_call") => {
+            if let Some(error) = item.get("error") {
+                parsed.tool_errors.push(RawToolError {
+                    tool_name: item
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("mcp_tool")
+                        .to_string(),
+                    output: value_as_text(error),
+                });
+            }
+        }
+        _ => {}
+    }
+}
+
+fn parse_opencode_tool(part: Option<&Value>, parsed: &mut ParsedTranscript) {
+    let Some(part) = part else { return };
+    let Some(state) = part.get("state") else {
+        return;
+    };
+    if state.get("status").and_then(Value::as_str) != Some("error") {
+        return;
+    }
+    let output = state
+        .get("error")
+        .or_else(|| state.get("output"))
+        .map(value_as_text)
+        .unwrap_or_else(|| "tool failed without an error message".to_string());
+    parsed.tool_errors.push(RawToolError {
+        tool_name: part
+            .get("tool")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string(),
+        output,
+    });
+}
+
+fn remember_final_message(text: &str, parsed: &mut ParsedTranscript) {
+    if !text.trim().is_empty() {
+        parsed.final_message = Some(text.to_string());
+    }
+}
+
+fn value_as_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Array(items) => items
+            .iter()
+            .map(value_as_text)
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Value::Object(map) => map
+            .get("text")
+            .or_else(|| map.get("content"))
+            .or_else(|| map.get("message"))
+            .map(value_as_text)
+            .unwrap_or_else(|| value.to_string()),
+        _ => value.to_string(),
+    }
+}
+
+fn first_error_block(text: &str) -> &str {
+    let mut first = None;
+    for block in text.split("\n\n").map(str::trim).filter(|b| !b.is_empty()) {
+        if first.is_none() {
+            first = Some(block);
+        }
+        let lower = block.to_ascii_lowercase();
+        if [
+            "error",
+            "failed",
+            "failure",
+            "panic",
+            "fatal",
+            "test result",
+        ]
+        .iter()
+        .any(|marker| lower.contains(marker))
+        {
+            return block;
+        }
+    }
+    first.unwrap_or("gate failed without diagnostic output")
+}
+
+fn sanitize_content(
+    text: &str,
+    sanitizer: Option<&Sanitizer>,
+    sanitizer_blocked: bool,
+    max_bytes: usize,
+) -> String {
+    truncate_head_tail(
+        &sanitize_untrusted(text, sanitizer, sanitizer_blocked),
+        max_bytes,
+    )
+}
+
+fn sanitize_untrusted(
+    text: &str,
+    sanitizer: Option<&Sanitizer>,
+    sanitizer_blocked: bool,
+) -> String {
+    if text.trim().is_empty() {
+        return if sanitizer_blocked {
+            SANITIZER_BLOCKED_MARKER.to_string()
+        } else {
+            "failure reported without diagnostic output".to_string()
+        };
+    }
+    if sanitizer_blocked || sanitizer.is_none() {
+        return SANITIZER_BLOCKED_MARKER.to_string();
+    }
+    let Some(sanitizer) = sanitizer else {
+        return SANITIZER_BLOCKED_MARKER.to_string();
+    };
+    let sanitized = sanitizer.sanitize(text);
+    if sanitized.trim().is_empty() {
+        SANITIZER_BLOCKED_MARKER.to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn sanitize_name(text: &str, sanitizer: Option<&Sanitizer>, sanitizer_blocked: bool) -> String {
+    let name = sanitize_untrusted(text, sanitizer, sanitizer_blocked);
+    truncate_bytes(&name, EVIDENCE_NAME_BYTES)
 }
 
 /// How much history the prompt renderer may spend.
@@ -132,7 +802,12 @@ pub fn append_local(workspace: &Path, bead_id: &BeadId, record: &AttemptRecord) 
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     let mut records = load_local(workspace, bead_id).unwrap_or_default();
-    records.push(record.clone());
+    let mut record = record.clone();
+    record.failure_evidence = record
+        .failure_evidence
+        .take()
+        .map(|evidence| evidence.bounded(MAX_FAILURE_EVIDENCE_BYTES));
+    records.push(record);
     if records.len() > LOCAL_KEEP {
         let drop = records.len() - LOCAL_KEEP;
         records.drain(..drop);
@@ -166,7 +841,8 @@ pub fn load_local(workspace: &Path, bead_id: &BeadId) -> Result<Vec<AttemptRecor
 }
 
 /// The bounded mirror written to bead-rs structured data: the newest
-/// [`MIRROR_KEEP`] records with summaries cut to [`MIRROR_SUMMARY_BYTES`].
+/// [`MIRROR_KEEP`] records with legacy summaries and structured evidence cut
+/// to [`MIRROR_SUMMARY_BYTES`].
 pub fn to_data_value(records: &[AttemptRecord]) -> serde_json::Value {
     let start = records.len().saturating_sub(MIRROR_KEEP);
     let attempts: Vec<AttemptRecord> = records[start..]
@@ -176,6 +852,10 @@ pub fn to_data_value(records: &[AttemptRecord]) -> serde_json::Value {
                 .failure_summary
                 .as_deref()
                 .map(|s| truncate_head_tail(s, MIRROR_SUMMARY_BYTES)),
+            failure_evidence: r
+                .failure_evidence
+                .clone()
+                .map(|evidence| evidence.bounded(MIRROR_SUMMARY_BYTES)),
             ..r.clone()
         })
         .collect();
@@ -194,7 +874,14 @@ pub fn from_data_value(value: &serde_json::Value) -> Vec<AttemptRecord> {
         .map(|items| {
             items
                 .iter()
-                .filter_map(|v| serde_json::from_value::<AttemptRecord>(v.clone()).ok())
+                .filter_map(|v| {
+                    let mut record = serde_json::from_value::<AttemptRecord>(v.clone()).ok()?;
+                    record.failure_evidence = record
+                        .failure_evidence
+                        .take()
+                        .map(|evidence| evidence.bounded(MIRROR_SUMMARY_BYTES));
+                    Some(record)
+                })
                 .collect()
         })
         .unwrap_or_default()
@@ -307,6 +994,11 @@ pub fn render(records: &[AttemptRecord], limits: HistoryLimits) -> String {
         if records.len() == 1 { "" } else { "s" },
         failed
     ));
+    if out.len() >= limits.max_bytes {
+        return truncate_bytes(&out, limits.max_bytes)
+            .trim_end()
+            .to_string();
+    }
 
     let newest_first = records.iter().rev().take(limits.max_attempts);
     for (i, r) in newest_first.enumerate() {
@@ -337,20 +1029,59 @@ pub fn render(records: &[AttemptRecord], limits: HistoryLimits) -> String {
             .as_deref()
             .filter(|s| !s.trim().is_empty())
         {
-            block.push_str("```\n");
-            block.push_str(summary.trim_end());
-            block.push_str("\n```\n");
+            if r.failure_evidence.is_none() {
+                block.push_str("```\n");
+                block.push_str(summary.trim_end());
+                block.push_str("\n```\n");
+            }
+        }
+        if let Some(evidence) = r.failure_evidence.as_ref() {
+            block.push_str(&render_failure_evidence(evidence));
         }
         block.push('\n');
         if out.len() + block.len() > limits.max_bytes {
-            out.push_str("(older attempts omitted — history capped at ");
-            out.push_str(&limits.max_bytes.to_string());
-            out.push_str(" bytes)\n");
+            let omitted = format!(
+                "(older attempts omitted — history capped at {} bytes)\n",
+                limits.max_bytes
+            );
+            let remaining = limits.max_bytes.saturating_sub(out.len());
+            if remaining > 0 {
+                out.push_str(&truncate_bytes(&omitted, remaining));
+            }
             break;
         }
         out.push_str(&block);
     }
     out.trim_end().to_string()
+}
+
+fn render_failure_evidence(evidence: &FailureEvidence) -> String {
+    let mut out = String::from("Failure evidence:\n");
+    if let Some(message) = evidence
+        .final_message
+        .as_deref()
+        .filter(|text| !text.trim().is_empty())
+    {
+        out.push_str("Final assistant message:\n```\n");
+        out.push_str(message.trim_end());
+        out.push_str("\n```\n");
+    }
+    for error in &evidence.tool_errors {
+        out.push_str(&format!(
+            "Tool error — {} — signature: {}\n```\n{}\n```\n",
+            error.tool_name,
+            error.signature,
+            error.excerpt.trim_end()
+        ));
+    }
+    for diagnostic in &evidence.gate_diagnostics {
+        out.push_str(&format!(
+            "Gate diagnostic — {}:\n```\n{}\n```\n",
+            diagnostic.gate_name,
+            diagnostic.error_block.trim_end()
+        ));
+    }
+    out
 }
 
 /// `2026-09-12T14:19:11.123Z` → `2026-09-12T14:19Z`; anything else unchanged.
@@ -370,7 +1101,7 @@ pub fn truncate_head_tail(text: &str, max_bytes: usize) -> String {
     }
     let marker = "\n… [elided] …\n";
     if max_bytes <= marker.len() + 2 {
-        return text.chars().take(max_bytes).collect();
+        return truncate_bytes(text, max_bytes);
     }
     let budget = max_bytes - marker.len();
     let head_len = budget * 2 / 3;
@@ -384,6 +1115,30 @@ pub fn truncate_head_tail(text: &str, max_bytes: usize) -> String {
         tail_start += 1;
     }
     format!("{}{}{}", &text[..head_end], marker, &text[tail_start..])
+}
+
+/// Truncate a string to a byte cap without splitting UTF-8.
+fn truncate_bytes(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    let end = text
+        .char_indices()
+        .take_while(|(index, _)| *index < max_bytes)
+        .map(|(index, _)| index)
+        .last()
+        .unwrap_or(0);
+    text[..end].to_string()
+}
+
+fn truncate_preserving_marker(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        text.to_string()
+    } else if max_bytes < SANITIZER_BLOCKED_MARKER.len() {
+        SANITIZER_BLOCKED_MARKER.to_string()
+    } else {
+        truncate_head_tail(text, max_bytes)
+    }
 }
 
 #[cfg(test)]
@@ -405,6 +1160,7 @@ mod tests {
             commits: vec!["abcdef1234567890".into()],
             duration_ms: 1000,
             failure_summary: summary.map(str::to_string),
+            failure_evidence: None,
         }
     }
 

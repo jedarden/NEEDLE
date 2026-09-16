@@ -333,6 +333,25 @@ fn attempt_failure_summary(
     Some(truncate_head_tail(&parts.join("\n\n"), LOCAL_SUMMARY_BYTES))
 }
 
+/// Build the sanitizer used for N-T45 evidence. This mirrors the dispatch
+/// trace sanitizer's configured custom rules, but is kept here so evidence is
+/// protected even when trace capture is disabled.
+fn build_failure_evidence_sanitizer(config: &Config) -> Result<crate::sanitize::Sanitizer> {
+    let custom_patterns = config
+        .strands
+        .learning
+        .trace_sanitization
+        .custom_patterns
+        .iter()
+        .map(|pattern| crate::sanitize::CustomPattern {
+            id: pattern.id.clone(),
+            pattern: pattern.pattern.clone(),
+            entropy: pattern.entropy,
+        })
+        .collect::<Vec<_>>();
+    crate::sanitize::Sanitizer::new(&custom_patterns)
+}
+
 /// Convert a gate report into the ledger's per-gate entries, ordered by name.
 ///
 /// Gate execution is not individually timed today, so `duration_ms` is 0
@@ -893,6 +912,61 @@ impl OutcomeHandler {
         // here, before the report moves, from the same evidence the ledger
         // summarizes as a name.
         let failure_summary = attempt_failure_summary(&outcome, output, gate_report.as_ref());
+        // N-T45: retain only a small, sanitized slice of the transcript and
+        // gate output. The complete transcript remains owned by trace/archive
+        // storage. Sanitizer construction is fail-closed for this prompt
+        // evidence: a blocked sanitizer produces an explicit marker rather
+        // than silently omitting the evidence or leaking raw content.
+        let failure_evidence = if !matches!(outcome, Outcome::Success)
+            && self
+                .config
+                .strands
+                .learning
+                .failure_history
+                .evidence
+                .enabled
+        {
+            let transcript = if output.stderr.is_empty() {
+                output.stdout.clone()
+            } else if output.stdout.is_empty() {
+                output.stderr.clone()
+            } else {
+                format!("{}\n{}", output.stdout, output.stderr)
+            };
+            let max_bytes = self
+                .config
+                .strands
+                .learning
+                .failure_history
+                .evidence
+                .max_bytes;
+            match build_failure_evidence_sanitizer(&self.config) {
+                Ok(sanitizer) => crate::attempt_history::capture_failure_evidence_with_limit(
+                    &transcript,
+                    gate_report.as_ref(),
+                    Some(&sanitizer),
+                    max_bytes,
+                    false,
+                ),
+                Err(error) => {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        error = %error,
+                        "failure evidence sanitizer unavailable; recording blocked markers"
+                    );
+                    crate::attempt_history::capture_failure_evidence_with_limit(
+                        &transcript,
+                        gate_report.as_ref(),
+                        None,
+                        max_bytes,
+                        true,
+                    )
+                }
+            }
+            .or_else(|| Some(crate::attempt_history::FailureEvidence::unavailable()))
+        } else {
+            None
+        };
 
         // Set outcome as span attribute
         tracing::Span::current().record("needle.outcome", outcome.as_str());
@@ -1060,7 +1134,7 @@ impl OutcomeHandler {
         // R3: what this attempt was and why it ended becomes the next
         // attempt's context. Best-effort and bounded; it never changes the
         // action decided above.
-        self.record_attempt_history(store, bead, &ledger, failure_summary)
+        self.record_attempt_history(store, bead, &ledger, failure_summary, failure_evidence)
             .await;
 
         // Plan section 4.4 step 4 / ADR-024: the backend's own attempt ledger
@@ -1390,6 +1464,7 @@ impl OutcomeHandler {
         bead: &Bead,
         ledger: &crate::telemetry::AttemptResolvedFields,
         failure_summary: Option<String>,
+        failure_evidence: Option<crate::attempt_history::FailureEvidence>,
     ) {
         let history = &self.config.strands.learning.failure_history;
         if !history.enabled {
@@ -1416,6 +1491,7 @@ impl OutcomeHandler {
             commits: ledger.commits.clone(),
             duration_ms: ledger.duration_ms,
             failure_summary,
+            failure_evidence,
         };
         crate::attempt_history::record(
             &workspace,

@@ -109,6 +109,7 @@ fn attempt_record(summary: Option<String>) -> AttemptRecord {
         commits: vec!["abcdef1234567890".to_string()],
         duration_ms: 1000,
         failure_summary: summary,
+        failure_evidence: None,
     }
 }
 

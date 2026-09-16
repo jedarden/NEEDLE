@@ -121,7 +121,9 @@ contract = 67
 # +1 N-T46 split-attempt ledger row keeps real gate results (needle-16657d72):
 # the gate must execute, which --lib forbids.
 # +1 end-to-end escalation ladder harness (needle-e4d0f4b9).
-e2e = 769
+# +4 bounded transcript/gate capture contracts, N-T45 (needle-ab3601e5).
+# The acceptance command is the focused dedicated harness.
+e2e = 773
 soak = 0
 fuzz = 0
 
@@ -170,6 +172,13 @@ path = "tests/escalation_ladder.rs"
 tier = "e2e"
 max_tests = 1
 owner = "component:escalation-ladder"
+
+[[harness]]
+name = "nt45_failure_evidence_capture"
+path = "tests/nt45_failure_evidence_capture.rs"
+tier = "e2e"
+max_tests = 4
+owner = "component:attempt-history"
 
 # These are strict ceilings on existing debt. A new occurrence fails the fast
 # lane; deleting an occurrence makes the corresponding exception stale so the

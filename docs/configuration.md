@@ -939,7 +939,19 @@ strands:
       max_attempts: 3          # newest attempts rendered into the prompt
       max_bytes: 4000          # byte cap on the rendered section
       sync_to_bead_data: true  # mirror into bead-rs `data` (needs bead-rs >= 0.2.6)
+      evidence:
+        enabled: false         # capture structured transcript/gate evidence
+        max_bytes: 2400        # serialized evidence cap per failed attempt
 ```
+
+When enabled, each non-verified attempt also carries a bounded
+`failure_evidence` object. It contains the final assistant message, the last
+few failed tool results with a normalized signature and short excerpt, and the
+first useful error block for each failing gate. Content is sanitized before it
+is truncated; if sanitization cannot be constructed, an explicit blocked
+marker is recorded instead of dropping the evidence. Timeouts and crashes use
+the partial transcript available at resolution time. This wire is off by
+default and does not change the existing `failure_summary` field.
 
 On a retry (attempt ≥ `min_attempt`) NEEDLE can also ask an external command
 for **prior fixes** of the failure and inject them as a bounded, clearly
