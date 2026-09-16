@@ -78,3 +78,21 @@ target/criterion/
 # `cargo install --root .needle-install` output — compiled binaries, never
 # source. Same commit as above tracked these; see .beads/traces/ note.
 .needle-install/
+
+# Local NEEDLE and bead runtime state
+.needle-predispatch-sha
+.beads/events.jsonl
+.beads/heartbeats.jsonl
+.beads/diagnostics/
+.beads/logs/
+.beads/traces/
+.beads/receipts/
+.beads/*.db
+.beads/*.db-shm
+.beads/*.db-wal
+.beads/*.db.backup.*
+.beads/*.lock
+.beads/*.tmp
+.beads/*.temp
+.beads/*.journal
+.br_recovery/
