@@ -37,6 +37,35 @@ claim. The ledger is append-only and stores only bounded summaries and
 credential-free run/log references, so it remains useful after Argo pods and
 their logs expire.
 
+## Release quickstart gate
+
+The `needle-ci` WorkflowTemplate runs the `needle-quickstart-gate` step after
+each newly published release. It starts in a pinned `alpine:3.22.1` container
+with no Rust toolchain or bead binary, downloads that release's published
+`install.sh` asset, and executes the README quickstart against a disposable
+workspace:
+
+```text
+needle init --backend bead-rs
+bead init --prefix gate
+bead create --title "Quickstart gate fixture" --priority 2 --issue-type task
+needle doctor
+needle run --agent noop --identifier gate --timeout 60
+bead list --status closed --json
+```
+
+The gate requires `needle doctor` to exit zero and contain no `[FAIL]` rows,
+and requires the created bead to appear with `status: "closed"`. Its failure
+is a normal `needle-ci` failure and blocks a release from appearing healthy.
+The `noop` fixture is stored in
+[`examples/adapters/noop.yaml`](../examples/adapters/noop.yaml).
+
+The template is deployed by ArgoCD application
+`argo-workflows-ns-iad-ci`; inspect that Application after pushing the
+declarative-config change. The negative scratch proof deliberately removed the
+`install_bead` call from `install.sh`; `needle-quickstart-gate` then failed at
+the backend/doctor assertions as intended.
+
 Every implementation commit must have exactly one `Bead-Id: <parent>` trailer.
 Missing, duplicate, or mismatched trailers fail closed: the worker releases the
 parent without guessing a CI owner. Duplicate registration, webhook delivery,

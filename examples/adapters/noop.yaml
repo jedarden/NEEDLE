@@ -1,0 +1,14 @@
+# Deterministic fixture adapter for smoke tests and CI quickstart gates.
+# The adapter invokes the installed bead CLI directly; it never invokes an LLM
+# and exits successfully after closing the selected fixture bead.
+name: noop
+description: Successful deterministic fixture agent for integration tests.
+agent_cli: bead
+invoke_template: |
+  cd {workspace} && bead close {bead_id} --reason 'Quickstart gate fixture completed
+  ```verified:
+  noop fixture exit=0
+  ```' --fencing-token "$NEEDLE_BEAD_FENCING_TOKEN" --no-auto-flush
+timeout_secs: 30
+provider: local
+model: noop
