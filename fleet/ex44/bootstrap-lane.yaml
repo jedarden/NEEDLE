@@ -27,9 +27,15 @@ strands:
     # Why a reserved worker rather than priority: on 2026-09-15 seven ready
     # P1 learning-loop beads sat behind 204 ready beads, several of them P0,
     # and revision 34's seventeen beads had not moved in 36 hours.
+    # Updated 2026-09-16: GLM and Claude perform the learnings alongside
+    # codex, not instead of it. Enabling evidence routing on codex-needle-01
+    # would have REPLACED codex with GLM -- NEEDLE's workspace evidence is
+    # glm-flash 0 verified of 23, so workspace scope falls through to fleet
+    # scope, where codex is withheld by workspace_only_candidates and
+    # glm-flash (51%) wins. Adding lane-bound workers keeps all three.
     lanes:
       - label: learning-loop
-        workers: [codex-needle-01]
+        workers: [codex-needle-01, glm-needle-01, claude-needle-01]
         when_empty: idle
 
 agent:
