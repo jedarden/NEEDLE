@@ -1017,7 +1017,11 @@ Each decision below is locked; the beads implement them.
      blocked and quarantine exclusions still hold.
    - A lane worker idles when its lane is empty unless
      `when_empty: normal`; ordinary workers are unchanged.
-   - The first lane is `codex-loop` on NEEDLE for `learning-loop` (N-T62).
+   - The first lane binds the worker the fleet already pins to NEEDLE,
+     `codex-needle-01`, to `learning-loop` (N-T62), so reserving this capacity
+     costs no new worker. Binding it trades that worker's general-purpose and
+     roaming duty for the lane; adding a worker instead is the alternative,
+     and raises fleet spend against a provider that has no cap today.
 4. **Loop liveness and escalation** (N-T60).
    - `F5_LEARNING_LOOP_STALLED` fires when open, unassigned `learning-loop`
      beads exist and no loop bead has closed for three days. A closed bead's
