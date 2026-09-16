@@ -36,7 +36,16 @@ strands:
     lanes:
       - label: learning-loop
         workers: [codex-needle-01, glm-needle-01, claude-needle-01]
-        when_empty: idle
+        # `normal`, not `idle`: lane beads still take priority, but when none
+        # are READY the worker falls back to ordinary NEEDLE selection.
+        # `idle` deadlocked the lane on 2026-09-16: 39 open learning-loop
+        # beads had ZERO in the ready frontier because they gate on root
+        # blockers that carry no learning-loop label (split-child, gate,
+        # cross-repo-gate), and a lane worker is never handed an unlabelled
+        # bead (nt59_relaxed_tiers_never_hand_a_lane_worker_an_unlabelled_bead).
+        # So all three NEEDLE workers refused the very beads gating the
+        # learnings and idled instead.
+        when_empty: normal
 
 agent:
   evidence_routing:
