@@ -3,14 +3,10 @@ agent:
   args: []
   timeout: 3600
   adapters_dir: /home/coding/.config/needle/adapters
-  routing:
-    rules:
-    - match_model: glm.*
-      adapter: claude-code-glm-5.3-flash
-    - match_model: (claude-)?(sonnet|opus|fable|haiku).*
-      adapter: claude
-    default_adapter: claude
-    strict: false
+  # Fleet workers select an adapter by its YAML filename with --agent. Keep
+  # workspace routing absent so that selection is not silently rewritten from
+  # the adapter's model string (for example, Luna -> routing-default -> claude).
+  routing: null
 bead_cli:
   backend: bead-rs
 worker:
