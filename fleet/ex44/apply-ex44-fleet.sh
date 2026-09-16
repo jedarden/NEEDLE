@@ -14,6 +14,8 @@ REQUIRED_EXPLORE="$SRC_DIR/required-explore-workspaces.txt"
 GLOBAL_CONFIG="$NEEDLE_CONFIG_DIR/config.yaml"
 ROAM_HOME="$NEEDLE_HOST_HOME/.needle/roam-only"
 ROAM_HOME_CONFIG="$SRC_DIR/roam-home.yaml"
+FLEET_POLICY="$SRC_DIR/fleet-policy.env"
+MANAGED_ADAPTERS_DIR="$SRC_DIR/adapters"
 
 DRY_RUN=0
 START_NEW=0
@@ -46,8 +48,13 @@ manifest_ids() {
 }
 
 worker_count=$(manifest_ids | wc -l)
-[[ "$worker_count" -eq 25 ]] || {
-    echo "workers.tsv must contain exactly 25 workers; found $worker_count" >&2
+configured_worker_cap=$(sed -n 's/^NEEDLE_WORKER__MAX_WORKERS=//p' "$FLEET_POLICY")
+[[ "$configured_worker_cap" =~ ^[1-9][0-9]*$ ]] || {
+    echo "fleet-policy.env must define a positive NEEDLE_WORKER__MAX_WORKERS" >&2
+    exit 1
+}
+[[ "$worker_count" -eq "$configured_worker_cap" ]] || {
+    echo "workers.tsv has $worker_count workers but the fleet cap is $configured_worker_cap" >&2
     exit 1
 }
 [[ "$(manifest_ids | sort -u | wc -l)" -eq "$worker_count" ]] || {
@@ -86,7 +93,7 @@ while IFS=$'\t' read -r id workspace agent delay explore; do
         echo "$id workspace does not exist: $workspace" >&2
         exit 1
     }
-    [[ -f "$NEEDLE_CONFIG_DIR/adapters/$agent.yaml" ]] || {
+    [[ -f "$MANAGED_ADAPTERS_DIR/$agent.yaml" || -f "$NEEDLE_CONFIG_DIR/adapters/$agent.yaml" ]] || {
         echo "$id adapter does not exist: $agent" >&2
         exit 1
     }
@@ -130,7 +137,7 @@ while IFS= read -r workspace; do
     fi
 done <"$REQUIRED_EXPLORE"
 
-mkdir -p "$SYSTEMD_DIR" "$WORKERS_DIR" "$NEEDLE_HOST_HOME/.local/bin"
+mkdir -p "$SYSTEMD_DIR" "$WORKERS_DIR" "$NEEDLE_CONFIG_DIR/adapters" "$NEEDLE_HOST_HOME/.local/bin"
 
 install_if_changed() {
     local mode=$1 source=$2 target=$3
@@ -154,6 +161,9 @@ install_if_changed 644 "$SRC_DIR/needle-zai-governor.timer" "$SYSTEMD_DIR/needle
 install_if_changed 755 "$SRC_DIR/needle-zai-governor" "$NEEDLE_HOST_HOME/.local/bin/needle-zai-governor"
 install_if_changed 644 "$SRC_DIR/fleet-policy.env" "$NEEDLE_CONFIG_DIR/fleet-policy.env"
 install_if_changed 644 "$SRC_DIR/backlog-policy.env" "$NEEDLE_CONFIG_DIR/backlog-policy.env"
+for adapter in "$MANAGED_ADAPTERS_DIR"/*.yaml; do
+    install_if_changed 644 "$adapter" "$NEEDLE_CONFIG_DIR/adapters/$(basename "$adapter")"
+done
 
 while IFS=$'\t' read -r id workspace agent delay explore; do
     target="$WORKERS_DIR/$id.env"

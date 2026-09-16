@@ -1,12 +1,12 @@
 # ex44 NEEDLE fleet policy
 
 This directory makes the codinghome/ex44 worker capacity and backlog policy
-reproducible. It targets up to 25 workers against the shared Z.ai proxy. Every
-worker tries its listed home workspace first, then may roam across the
-maintained-workspace frontier when that route has no eligible work. Nine
-workers use GLM-5.3 and up
-to sixteen use GLM-5.3-Flash, with live-session concurrency enforced separately
-from the number of registered workers.
+reproducible. It targets up to 27 workers across the Z.ai and OpenAI provider
+pools. Every worker tries its listed home workspace first, then may roam across
+the maintained-workspace frontier when that route has no eligible work. Nine
+workers use GLM-5.3, up to sixteen use GLM-5.3-Flash, and two roaming workers
+use Codex GPT-5.6 Luna. Live-session concurrency is enforced separately from
+the number of registered workers.
 
 ## What this implements
 
@@ -27,8 +27,8 @@ from the number of registered workers.
    replenish their home repository first; after roaming is needed, they use the
    same approved workspace set as Explore, skip healthy or contended
    repositories, and run at most one creative pass per selection cycle.
-5. **Enforce a backlog SLO.** For 25 workers, the nominal target is 100
-   eligible beads (four per worker) and the minimum is 50 (two per worker).
+5. **Enforce a backlog SLO.** For 27 workers, the nominal target is 108
+   eligible beads (four per worker) and the minimum is 54 (two per worker).
    Fresh heartbeats raise those thresholds when temporary workers are also
    deployed, so extra consumers cannot be hidden behind the steady-state
    manifest count.
@@ -72,13 +72,15 @@ timestamped files under `~/.config/systemd/user` and `~/.config/needle`, run
 
 `needle-zai-governor` protects the proxy without fighting the manifest. It
 scales the eight expansion workers (`glm-icg` and `glm-roam-18` through `24`)
-between one and eight, for 18--25 active workers including the fixed base. The
+between one and eight, for 18--25 active GLM workers including the fixed base.
+The two fixed Codex roamers are outside this Z.ai-specific controller, making
+the total operating range 20--27 workers. The
 home-first ICG worker is first in the pool and is therefore preserved by the
 one-worker floor, but it can roam when ICG has no eligible work. A productive
 window with no
 recoverable 429 adds one worker. One independently affected request holds the
 quota boundary; multiple affected requests or any terminal 429 remove one.
-The separate 17-worker base fleet is never disabled by this controller.
+The separate 17-worker GLM base fleet is never disabled by this controller.
 Scale-down disables the excess unit immediately but stops it only after NEEDLE
 reports `EXHAUSTED` with no current bead; selectors and executors drain instead
 of abandoning an epoch-fenced claim. A v3 state file starts at the prior

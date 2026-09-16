@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Scale only the ex44 expansion workers to the observed Z.ai quota boundary.
-# The original 17-worker fleet remains fixed; this controller cannot silently
-# disable a pinned base route.
+# The original 17-worker GLM fleet remains fixed; Codex workers use a separate
+# provider pool and this controller cannot disable either fixed population.
 set -euo pipefail
 
 # Keep the pinned ICG route first: the floor therefore always preserves route

@@ -1,0 +1,14 @@
+name: codex-gpt-5.6-luna-xhigh
+description: OpenAI Codex CLI using GPT-5.6 Luna with xhigh reasoning
+agent_cli: codex
+version_command: "codex --version"
+input_method:
+  method: stdin
+invoke_template: "cd {workspace} && git rev-parse HEAD > .needle-predispatch-sha 2>/dev/null; CARGO_BUILD_JOBS=2 RUST_TEST_THREADS=2 CARGO_INCREMENTAL=0 codex exec --json --model gpt-5.6-luna -c 'model_reasoning_effort=\"xhigh\"' --dangerously-bypass-approvals-and-sandbox -C {workspace} - < {prompt_file}"
+environment: {}
+timeout_secs: 3600
+provider: openai
+model: gpt-5.6-luna
+token_extraction:
+  method: none
+output_transform: needle-transform-codex
