@@ -1,0 +1,79 @@
+# The ~/.config/needle/config.yaml keys that activate plan revision 35's
+# bootstrap lane on codinghome (N-T62, plan section 4.11).
+#
+# This file is documentation, not a live configuration: config.yaml is not
+# source-controlled, so an operator merges these keys by hand and lets the
+# workers reload them (every key below is Live reload tier — no restart).
+#
+# Order: land the code (N-T48, N-T57-N-T61), deploy the binary with
+# `needle upgrade --from-file` and its canary, add the codex-loop worker row
+# (workers.tsv) with `apply-ex44-fleet.sh --start-new`, then merge these keys.
+# Each block is independently reversible by removing it.
+
+strands:
+  pluck:
+    # N-T59: binds the worker the fleet already pins to NEEDLE
+    # (codex-needle-01, added by ops on 2026-09-16) so the lane costs no new
+    # worker and no new spend. That worker then claims only `learning-loop`
+    # beads and idles when the lane is empty; every other worker is
+    # unaffected and may still claim lane beads, so this reserves capacity
+    # without fencing work off.
+    #
+    # The trade: codex-needle-01 stops being a general-purpose NEEDLE/roaming
+    # worker. If that capacity is needed as well, add a 28th worker to
+    # workers.tsv instead of binding this one, and raise
+    # NEEDLE_WORKER__MAX_WORKERS with it.
+    #
+    # Why a reserved worker rather than priority: on 2026-09-15 seven ready
+    # P1 learning-loop beads sat behind 204 ready beads, several of them P0,
+    # and revision 34's seventeen beads had not moved in 36 hours.
+    lanes:
+      - label: learning-loop
+        workers: [codex-needle-01]
+        when_empty: idle
+
+agent:
+  evidence_routing:
+    # N-T48: the bead's own workspace decides first; below the floor the
+    # fleet's evidence decides, and below that the static default.
+    workspace_scope: true
+    # A workspace where every candidate clears the floor and verifies below
+    # 20% is signalled (workspace.adapter_evidence_poor), never routed on.
+    # The NEEDLE workspace was 0 verified of 22 attempts on 2026-09-15.
+    workspace_poor_threshold: 0.20
+    candidates:
+      - claude-code-glm-5.3-flash
+      - claude-code-glm-5.3
+      - codex-gpt-5.6-luna-xhigh
+    # N-T61: codex may win only where its own workspace evidence decides, and
+    # is never explored fleet-wide. Without this, one adapter clearing the
+    # fleet floor would migrate 45 GLM workers onto an OpenAI-billed adapter.
+    workspace_only_candidates:
+      - codex-gpt-5.6-luna-xhigh
+
+limits:
+  providers:
+    # Three codex workers (codex-needle-01, codex-roam-01, codex-roam-02) have
+    # been running since 2026-09-16 against a provider with NO cap at all:
+    # `limits.providers` has no openai entry. This closes that gap and is the
+    # one block here worth applying on its own, independently of the lane.
+    # Limits match on the provider of the adapter a dispatch actually uses.
+    openai:
+      max_concurrent: 2
+      requests_per_minute: 60
+
+audit:
+  # N-T57/N-T58: one host run per day through needle-factory-audit.timer.
+  # Violations file at most three deduplicated beads per run; informational
+  # findings never file; nothing is repaired from the timer.
+  max_beads_per_run: 3
+  home_workspace: /home/coding/NEEDLE
+  factory:
+    window_hours: 72
+    min_attempts: 10
+    ci_red_hours: 1
+  loop:
+    # N-T60: no learning-loop bead closed for three days, while open ones
+    # wait, is an escalation with a brief under ~/.needle/state/escalations.
+    workspaces: [/home/coding/NEEDLE]
+    stall_days: 3

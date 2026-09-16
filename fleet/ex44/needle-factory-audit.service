@@ -1,0 +1,13 @@
+[Unit]
+Description=Factory-health audit of the codinghome fleet
+After=default.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/coding/NEEDLE
+Environment=PATH=/home/coding/.local/bin:/home/coding/.cargo/bin:/home/coding/bin:/run/current-system/sw/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/home/coding/.needle/bin/needle audit --emit-telemetry --file-beads --json
+# Exit 1 means the audit produced findings, which is a verdict and not a
+# broken probe. Exit 2 — the audit could not look — is a real failure and is
+# left to fail the unit.
+SuccessExitStatus=1

@@ -158,6 +158,8 @@ install_if_changed 644 "$SRC_DIR/needle-backlog-slo.service" "$SYSTEMD_DIR/needl
 install_if_changed 644 "$SRC_DIR/needle-backlog-slo.timer" "$SYSTEMD_DIR/needle-backlog-slo.timer"
 install_if_changed 644 "$SRC_DIR/needle-zai-governor.service" "$SYSTEMD_DIR/needle-zai-governor.service"
 install_if_changed 644 "$SRC_DIR/needle-zai-governor.timer" "$SYSTEMD_DIR/needle-zai-governor.timer"
+install_if_changed 644 "$SRC_DIR/needle-factory-audit.service" "$SYSTEMD_DIR/needle-factory-audit.service"
+install_if_changed 644 "$SRC_DIR/needle-factory-audit.timer" "$SYSTEMD_DIR/needle-factory-audit.timer"
 install_if_changed 755 "$SRC_DIR/needle-zai-governor" "$NEEDLE_HOST_HOME/.local/bin/needle-zai-governor"
 install_if_changed 644 "$SRC_DIR/fleet-policy.env" "$NEEDLE_CONFIG_DIR/fleet-policy.env"
 install_if_changed 644 "$SRC_DIR/backlog-policy.env" "$NEEDLE_CONFIG_DIR/backlog-policy.env"
@@ -235,6 +237,16 @@ if ! systemctl --user is-enabled -q needle-zai-governor.timer 2>/dev/null; then
 fi
 if [[ "$START_NEW" == 1 ]] && ! systemctl --user is-active -q needle-zai-governor.timer; then
     run systemctl --user start --no-block needle-zai-governor.timer
+fi
+
+# One factory-health audit per host per day (needle-a0d1eb19): never one per
+# worker, and it repairs nothing. It reports, files at most three deduplicated
+# beads per run, and writes an escalation brief when the learning loop stalls.
+if ! systemctl --user is-enabled -q needle-factory-audit.timer 2>/dev/null; then
+    run systemctl --user enable needle-factory-audit.timer
+fi
+if [[ "$START_NEW" == 1 ]] && ! systemctl --user is-active -q needle-factory-audit.timer; then
+    run systemctl --user start --no-block needle-factory-audit.timer
 fi
 
 echo "- policy converged; no running worker was restarted"

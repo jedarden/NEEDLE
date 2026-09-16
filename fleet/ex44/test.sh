@@ -42,6 +42,21 @@ fleet_policy_line=$(grep -n 'EnvironmentFile=%h/.config/needle/fleet-policy.env'
 instance_policy_line=$(grep -n 'EnvironmentFile=%h/.config/needle/workers/%i.env' "$SRC_DIR/needle-worker@.service" | cut -d: -f1)
 [[ "$fleet_policy_line" -lt "$instance_policy_line" ]]
 
+# The audit runs once a day, reports rather than repairs, and treats findings
+# (exit 1) as a verdict instead of a broken probe.
+grep -q 'ExecStart=/home/coding/.needle/bin/needle audit --emit-telemetry --file-beads --json' "$SRC_DIR/needle-factory-audit.service"
+grep -qx 'SuccessExitStatus=1' "$SRC_DIR/needle-factory-audit.service"
+grep -q '^OnCalendar=\*-\*-\* ' "$SRC_DIR/needle-factory-audit.timer"
+grep -qx 'Persistent=true' "$SRC_DIR/needle-factory-audit.timer"
+grep -q 'needle-factory-audit.timer' "$SRC_DIR/apply-ex44-fleet.sh"
+
+# The activation fragment keeps the lane, the workspace-only codex candidate
+# and the OpenAI cap together: enabling the candidate without the cap is what
+# would let one adapter pull the fleet onto an unbilled-by-us provider.
+grep -q 'workers: \[codex-needle-01\]' "$SRC_DIR/bootstrap-lane.yaml"
+grep -q 'workspace_only_candidates:' "$SRC_DIR/bootstrap-lane.yaml"
+grep -q 'openai:' "$SRC_DIR/bootstrap-lane.yaml"
+
 "$SRC_DIR/backlog-slo.sh" --self-test
 "$SRC_DIR/needle-zai-governor" --self-test
 echo "ex44 fleet policy tests passed"
