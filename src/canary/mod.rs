@@ -154,7 +154,17 @@ fn canary_adapter_name(expected: &ExpectedOutcome) -> &'static str {
 fn canary_adapter_yaml(expected: &ExpectedOutcome) -> &'static str {
     match expected {
         ExpectedOutcome::Success { .. } => {
-            "name: canary-success\nagent_cli: bead\ninvoke_template: \"cd '{workspace}' && bead close {bead_id} --reason 'Canary success fixture completed' --fencing-token $NEEDLE_BEAD_FENCING_TOKEN --no-auto-flush\"\ntimeout_secs: 30\n"
+            // The close reason must carry a fenced `verified:` block: since
+            // a05a441b the close-evidence gate rejects an evidence-free close
+            // (reopen + release), which made this fixture fail for every
+            // binary built after that commit — the fleet could not promote
+            // any build at all. `true` is deliberately not allow-listed, so
+            // it is ignored rather than re-run and the command list filters
+            // to empty, which `CloseVerificationRuntime::verify` passes
+            // without extracting committed state. That matters here: the
+            // canary workspace carries no build markers, so no allow-listed
+            // command could succeed in an extraction of it.
+            "name: canary-success\nagent_cli: bead\ninvoke_template: \"cd '{workspace}' && bead close {bead_id} --reason 'Canary success fixture completed\\n\\n```verified:\\ntrue exit=0\\n```' --fencing-token $NEEDLE_BEAD_FENCING_TOKEN --no-auto-flush\"\ntimeout_secs: 30\n"
         }
         ExpectedOutcome::Failure { .. } => {
             "name: canary-failure\nagent_cli: sh\ninvoke_template: \"cd '{workspace}' && exit 42\"\ntimeout_secs: 30\n"
@@ -163,7 +173,12 @@ fn canary_adapter_yaml(expected: &ExpectedOutcome) -> &'static str {
             "name: canary-timeout\nagent_cli: sh\ninvoke_template: \"cd '{workspace}' && sleep 10\"\ntimeout_secs: 0\nidle_timeout_secs: 1\nhard_timeout_secs: 3\n"
         }
         ExpectedOutcome::StateMachine { .. } => {
-            "name: canary-state-machine\nagent_cli: bead\ninvoke_template: \"cd '{workspace}' && bead close {bead_id} --reason 'Canary state-machine fixture completed' --fencing-token $NEEDLE_BEAD_FENCING_TOKEN --no-auto-flush\"\ntimeout_secs: 30\n"
+            // Same close-evidence requirement as canary-success above. This
+            // fixture asserts state transitions rather than final status, so
+            // without the block it still scored as passing while its bead was
+            // being reopened with `verification-failed` — a fixture that hid
+            // the very regression the suite exists to catch.
+            "name: canary-state-machine\nagent_cli: bead\ninvoke_template: \"cd '{workspace}' && bead close {bead_id} --reason 'Canary state-machine fixture completed\\n\\n```verified:\\ntrue exit=0\\n```' --fencing-token $NEEDLE_BEAD_FENCING_TOKEN --no-auto-flush\"\ntimeout_secs: 30\n"
         }
     }
 }
@@ -1321,11 +1336,28 @@ mod tests {
             final_status: "open".to_string(),
         };
 
+        let state_machine = ExpectedOutcome::StateMachine {
+            transitions: vec!["BOOTING".to_string()],
+        };
+
         assert_eq!(canary_adapter_name(&success), "canary-success");
         assert!(canary_adapter_yaml(&success).contains("bead close {bead_id}"));
         assert!(canary_adapter_yaml(&success).contains("$NEEDLE_BEAD_FENCING_TOKEN"));
         assert!(canary_adapter_yaml(&failure).contains("exit 42"));
         assert!(canary_adapter_yaml(&timeout).contains("idle_timeout_secs: 1"));
+
+        // Every fixture that closes a bead must carry close evidence, or the
+        // close-evidence gate reopens it and the suite rejects every binary
+        // built after a05a441b — which is exactly what happened.
+        for closing in [&success, &state_machine] {
+            let yaml = canary_adapter_yaml(closing);
+            assert!(
+                yaml.contains("```verified:"),
+                "{} must carry a verified: block, got: {yaml}",
+                canary_adapter_name(closing)
+            );
+        }
+        assert!(!canary_adapter_yaml(&failure).contains("```verified:"));
 
         let runner = CanaryRunner::new(
             PathBuf::from("/tmp/.needle"),
