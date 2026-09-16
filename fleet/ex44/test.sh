@@ -13,7 +13,8 @@ rows=$(awk -F'\t' '$1 !~ /^#/ && NF == 5 {print}' "$MANIFEST")
 [[ "$(awk -F'\t' '$5 == "true" {n++} END {print n+0}' <<<"$rows")" -eq 27 ]]
 grep -q $'^glm-tradegraph\t/home/coding/.needle/roam-only\t.*\ttrue$' "$MANIFEST"
 grep -q $'^glm53-adc\t/home/coding/.needle/roam-only\t.*\ttrue$' "$MANIFEST"
-[[ "$(awk -F'\t' '$3 == "codex-gpt-5.6-luna-xhigh" && $5 == "true" {n++} END {print n+0}' <<<"$rows")" -eq 2 ]]
+[[ "$(awk -F'\t' '$3 == "codex-gpt-5.6-luna-xhigh" && $5 == "true" {n++} END {print n+0}' <<<"$rows")" -eq 3 ]]
+grep -q $'^codex-needle-01\t/home/coding/NEEDLE\tcodex-gpt-5.6-luna-xhigh\t0\ttrue$' "$MANIFEST"
 grep -q '^  backend: bead-rs$' "$SRC_DIR/roam-home.yaml"
 [[ "$(awk -F'\t' '$3 == "claude-code-glm-5.3" {n++} END {print n+0}' <<<"$rows")" -le 9 ]]
 ! grep -Eq '/(CLASP|agentists-quickstart-deprecated|commitgraph-deprecated)([[:space:]]|$)' "$MANIFEST"

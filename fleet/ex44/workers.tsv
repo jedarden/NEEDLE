@@ -5,7 +5,7 @@
 # Every worker keeps its listed workspace as the Pluck-first home route, then
 # uses Explore as a fleet fallback when that route has no eligible work.
 #identifier	workspace	agent	start_delay	explore
-glm-needle	/home/coding/NEEDLE	claude-code-glm-5.3-flash	0	true
+codex-needle-01	/home/coding/NEEDLE	codex-gpt-5.6-luna-xhigh	0	true
 glm-loom	/home/coding/LOOM	claude-code-glm-5.3	15	true
 glm-armor	/home/coding/ARMOR	claude-code-glm-5.3-flash	30	true
 glm-mta	/home/coding/mta-my-way	claude-code-glm-5.3-flash	45	true

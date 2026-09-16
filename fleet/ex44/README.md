@@ -4,9 +4,9 @@ This directory makes the codinghome/ex44 worker capacity and backlog policy
 reproducible. It targets up to 27 workers across the Z.ai and OpenAI provider
 pools. Every worker tries its listed home workspace first, then may roam across
 the maintained-workspace frontier when that route has no eligible work. Nine
-workers use GLM-5.3, up to sixteen use GLM-5.3-Flash, and two roaming workers
-use Codex GPT-5.6 Luna. Live-session concurrency is enforced separately from
-the number of registered workers.
+workers use GLM-5.3, up to fifteen use GLM-5.3-Flash, one NEEDLE-home worker
+uses Codex GPT-5.6 Luna, and two additional Luna workers roam. Live-session
+concurrency is enforced separately from the number of registered workers.
 
 ## What this implements
 
@@ -72,15 +72,15 @@ timestamped files under `~/.config/systemd/user` and `~/.config/needle`, run
 
 `needle-zai-governor` protects the proxy without fighting the manifest. It
 scales the eight expansion workers (`glm-icg` and `glm-roam-18` through `24`)
-between one and eight, for 18--25 active GLM workers including the fixed base.
-The two fixed Codex roamers are outside this Z.ai-specific controller, making
-the total operating range 20--27 workers. The
+between one and eight, for 17--24 active GLM workers including the fixed base.
+The NEEDLE-home Codex worker and two fixed Codex roamers are outside this
+Z.ai-specific controller, making the total operating range 20--27 workers. The
 home-first ICG worker is first in the pool and is therefore preserved by the
 one-worker floor, but it can roam when ICG has no eligible work. A productive
 window with no
 recoverable 429 adds one worker. One independently affected request holds the
 quota boundary; multiple affected requests or any terminal 429 remove one.
-The separate 17-worker GLM base fleet is never disabled by this controller.
+The separate 16-worker GLM base fleet is never disabled by this controller.
 Scale-down disables the excess unit immediately but stops it only after NEEDLE
 reports `EXHAUSTED` with no current bead; selectors and executors drain instead
 of abandoning an epoch-fenced claim. A v3 state file starts at the prior
