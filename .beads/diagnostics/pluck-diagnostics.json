@@ -1,13 +1,13 @@
 {
-  "timestamp": "2026-09-15T19:40:55.840743829Z",
-  "total_open_beads": 620,
+  "timestamp": "2026-09-16T01:37:24.211444149Z",
+  "total_open_beads": 638,
   "exclusion_criteria": {
-    "has_assignee": 0,
-    "manually_blocked": 21,
-    "has_dependencies": 429,
-    "resource_conflicts": 1
+    "has_assignee": 5,
+    "manually_blocked": 20,
+    "has_dependencies": 433,
+    "resource_conflicts": 0
   },
-  "final_candidate_count": 203,
+  "final_candidate_count": 204,
   "excluded_beads": [
     {
       "bead_id": "needle-6b02eb9d",
@@ -573,17 +573,6 @@
     {
       "bead_id": "needle-b5cd1938",
       "title": "Fix claimed workers emitting EXHAUSTED_IDLE during dispatch",
-      "priority": 1,
-      "assignee": null,
-      "manual_blocked": true,
-      "has_blockers": false,
-      "blocker_count": 0,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
-      "bead_id": "needle-b45a0690",
-      "title": "Add BeadStore::show() method to return Bead struct",
       "priority": 1,
       "assignee": null,
       "manual_blocked": true,
@@ -1407,28 +1396,6 @@
       "conflict_count": 0
     },
     {
-      "bead_id": "needle-9a06603d",
-      "title": "Phase 20: worker integration — claim on mutation, release on every terminal path",
-      "priority": 1,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
-      "bead_id": "needle-25fc511f",
-      "title": "Phase 20: CLI verbs claim-file, release-file, claims",
-      "priority": 1,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
       "bead_id": "needle-4612dec5",
       "title": "N-T06: schedule independent event/time controller ticks with deterministic fairness [cargo test --test nt06_scheduler_contract]",
       "priority": 1,
@@ -1979,46 +1946,13 @@
       "conflict_count": 0
     },
     {
-      "bead_id": "needle-f84c01a4",
-      "title": "N-T48: choose adapters from workspace-scoped evidence with fleet fallback and record the deciding scope [cargo test --test nt48_workspace_routing]",
-      "priority": 1,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
-      "bead_id": "needle-c2fc81d6",
-      "title": "N-T49: run gates once on the pre-dispatch revision and classify a matching post-attempt failure as workspace_red, not task failure [cargo test --test nt49_baseline_gate]",
-      "priority": 1,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
-      "bead_id": "needle-f2b97407",
-      "title": "N-T51: extract tokens and cost from codex, opencode and omp adapter output so every adapter is costed [cargo test --test nt51_adapter_usage_capture]",
-      "priority": 1,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
       "bead_id": "needle-908c1f25",
       "title": "N-T53: generate ImprovementProposal records from ledger evidence classes in the N-T07 envelope, side-effect free [cargo test --test nt53_improvement_proposals]",
       "priority": 1,
       "assignee": null,
       "manual_blocked": false,
       "has_blockers": true,
-      "blocker_count": 3,
+      "blocker_count": 1,
       "has_resource_conflicts": false,
       "conflict_count": 0
     },
@@ -2040,7 +1974,7 @@
       "assignee": null,
       "manual_blocked": false,
       "has_blockers": true,
-      "blocker_count": 1,
+      "blocker_count": 2,
       "has_resource_conflicts": false,
       "conflict_count": 0
     },
@@ -2051,7 +1985,7 @@
       "assignee": null,
       "manual_blocked": true,
       "has_blockers": true,
-      "blocker_count": 11,
+      "blocker_count": 8,
       "has_resource_conflicts": false,
       "conflict_count": 0
     },
@@ -2063,6 +1997,17 @@
       "manual_blocked": true,
       "has_blockers": true,
       "blocker_count": 4,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-9feef60c",
+      "title": "Prove full test suite leaves inherited HOME state byte-identical",
+      "priority": 1,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
       "has_resource_conflicts": false,
       "conflict_count": 0
     },
@@ -2107,6 +2052,237 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-76b52674",
+      "title": "N-T57: register a factory-health predicate group in needle audit over the attempt ledger, CI runs and bead inventories [cargo test --lib nt57_]",
+      "priority": 1,
+      "assignee": "claude-interactive-codinghome",
+      "manual_blocked": false,
+      "has_blockers": false,
+      "blocker_count": 0,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-e42f3f0b",
+      "title": "N-T58: wire needle audit into the CLI with per-finding telemetry and deduplicated, budgeted bead filing for violations [cargo test --lib nt58_]",
+      "priority": 1,
+      "assignee": "claude-interactive-codinghome",
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-bc162127",
+      "title": "N-T59: reserved Pluck lanes: named workers claim only beads carrying the lane label, across every relaxation tier and Explore [cargo test --lib nt59_]",
+      "priority": 1,
+      "assignee": "claude-interactive-codinghome",
+      "manual_blocked": false,
+      "has_blockers": false,
+      "blocker_count": 0,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-e0ad35bd",
+      "title": "N-T60: F5_LEARNING_LOOP_STALLED predicate and escalation handoff: a fleet-excluded escalation bead plus a brief for a stronger model or an operator session [cargo test --lib nt60_]",
+      "priority": 1,
+      "assignee": "claude-interactive-codinghome",
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 2,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-62d6eab9",
+      "title": "N-T62: fleet/ex44 activation of the bootstrap lane: codex loop-lane worker row, needle-factory-audit timer, lane and routing config fragment, openai provider cap",
+      "priority": 1,
+      "assignee": "claude-interactive-codinghome",
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 3,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-9c5ee565",
+      "title": "Define the versioned application-impact contract [cargo test --test nt07_impact_contract]. Work on this issue directly.",
+      "priority": 1,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-8c3520f7",
+      "title": "Reject non-executable proposals at admission [cargo test --test nt07_executable_admission]. Work on this issue directly.",
+      "priority": 1,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-29f396d3",
+      "title": "Compute deterministic expected application value at admission [cargo test --test nt07_impact_scoring]. Work on this issue directly.",
+      "priority": 1,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-797ef16c",
+      "title": "Order Pluck and Explore by expected application value [cargo test --test nt07_impact_ordering]. Work on this issue directly.",
+      "priority": 1,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-b90af7ce",
+      "title": "Maintain a fleet-global impact-weighted ready reserve [cargo test --test nt07_global_ready_reserve]. Work on this issue directly.",
+      "priority": 1,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-2448a953",
+      "title": "Materialize admitted proposal DAGs in one atomic batch [cargo test --test nt07_batch_admission]. Work on this issue directly.",
+      "priority": 1,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-80b6f6e3",
+      "title": "Parse scanner findings through versioned JSON and SARIF adapters [cargo test --test nt07_scanner_protocol]. Work on this issue directly.",
+      "priority": 1,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-a582702c",
+      "title": "Compile approved plans into bounded proposal DAGs [cargo test --test nt07_roadmap_compiler]. Work on this issue directly.",
+      "priority": 1,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 3,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-ec55ecc6",
+      "title": "Prefer public-safe work only after application value [cargo test --test nt07_public_routing]. Work on this issue directly.",
+      "priority": 1,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-be1a186e",
+      "title": "Prove the foundry sustains a 1000-bead daily rate [cargo test --test nt07_foundry_capacity -- --ignored]. Work on this issue directly.",
+      "priority": 1,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 2,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-4e2242e7",
+      "title": "Initialize operator-owned profiles for the public canary roster [cargo test --test nt07_public_canary_profiles]. Work on this issue directly.",
+      "priority": 1,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-6ab1f4f3",
+      "title": "Run the impact-ranked public foundry canary [cargo test --test nt07_public_canary]. Work on this issue directly.",
+      "priority": 1,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 5,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-9e778fad",
+      "title": "Prevent file-contention markers from entering Git so cargo test --lib file_contention::git_safety passes. Work on this issue directly.",
+      "priority": 1,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-3f3c6825",
+      "title": "Classify live and abandoned file-contention markers so cargo test --lib file_contention::assessment passes. Work on this issue directly.",
+      "priority": 1,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-04798783",
+      "title": "Integrate opt-in pre-write markers with capable workers so cargo test --lib worker::tests::file_contention passes. Work on this issue directly.",
+      "priority": 1,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 2,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-4386d7bd",
+      "title": "Prove opt-in shared-checkout collision behavior so cargo test --test p2_integration_tests file_contention passes. Work on this issue directly.",
+      "priority": 1,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 4,
       "has_resource_conflicts": false,
       "conflict_count": 0
     },
@@ -3585,28 +3761,6 @@
       "conflict_count": 0
     },
     {
-      "bead_id": "needle-e328149f",
-      "title": "Remove deprecated block operation from backend descriptor",
-      "priority": 2,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
-      "bead_id": "needle-6a0d3665",
-      "title": "Write comprehensive integration tests for quarantine label flow",
-      "priority": 2,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
       "bead_id": "needle-9ec8cc18",
       "title": "Add quarantine labeling test infrastructure and basic failure count test",
       "priority": 2,
@@ -3706,17 +3860,6 @@
       "conflict_count": 0
     },
     {
-      "bead_id": "needle-c504655b",
-      "title": "Implement test isolation helper for HOME environment",
-      "priority": 2,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
       "bead_id": "needle-224d3b0d",
       "title": "Evidence-based adapter selection among configured adapters with an evidence floor (N-T18)",
       "priority": 2,
@@ -3752,17 +3895,6 @@
     {
       "bead_id": "needle-276f95cf",
       "title": "Freeze adapter selection, experiments and promotion while a workspace is gate-degraded (N-T21)",
-      "priority": 2,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
-      "bead_id": "needle-a9b62e3f",
-      "title": "Fix any compilation errors found",
       "priority": 2,
       "assignee": null,
       "manual_blocked": false,
@@ -3899,7 +4031,7 @@
       "assignee": null,
       "manual_blocked": false,
       "has_blockers": true,
-      "blocker_count": 3,
+      "blocker_count": 5,
       "has_resource_conflicts": false,
       "conflict_count": 0
     },
@@ -4124,28 +4256,6 @@
       "conflict_count": 0
     },
     {
-      "bead_id": "needle-5782ad15",
-      "title": "Phase 20: hook contract plus reference PreToolUse claim hook for interactive CLI sessions",
-      "priority": 2,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
-      "bead_id": "needle-b8fda50c",
-      "title": "Phase 20: needle doctor checks for dead-holder, over-TTL, and unenforced claims",
-      "priority": 2,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
       "bead_id": "needle-2b0a309b",
       "title": "N-T07: define the typed proposal envelope and immutable producer evidence contract [cargo test --test nt07_proposal_contract]",
       "priority": 2,
@@ -4163,7 +4273,7 @@
       "assignee": null,
       "manual_blocked": false,
       "has_blockers": true,
-      "blocker_count": 1,
+      "blocker_count": 2,
       "has_resource_conflicts": false,
       "conflict_count": 0
     },
@@ -4174,7 +4284,7 @@
       "assignee": null,
       "manual_blocked": false,
       "has_blockers": true,
-      "blocker_count": 1,
+      "blocker_count": 3,
       "has_resource_conflicts": false,
       "conflict_count": 0
     },
@@ -4218,7 +4328,7 @@
       "assignee": null,
       "manual_blocked": false,
       "has_blockers": true,
-      "blocker_count": 1,
+      "blocker_count": 2,
       "has_resource_conflicts": false,
       "conflict_count": 0
     },
@@ -4251,7 +4361,7 @@
       "assignee": null,
       "manual_blocked": false,
       "has_blockers": true,
-      "blocker_count": 6,
+      "blocker_count": 7,
       "has_resource_conflicts": false,
       "conflict_count": 0
     },
@@ -4344,8 +4454,8 @@
       "conflict_count": 0
     },
     {
-      "bead_id": "needle-c0003de3",
-      "title": "N-T47: stop a dispatch when accumulated cost crosses limits.attempt.max_cost_usd and resolve it as budget_exhausted [cargo test --test nt47_attempt_spend_cap]",
+      "bead_id": "needle-75368add",
+      "title": "N-T50: produce a CandidateLesson from a failing-then-succeeding attempt pair on one bead, keyed by failure signature [cargo test --test nt50_exception_lessons]",
       "priority": 2,
       "assignee": null,
       "manual_blocked": false,
@@ -4353,28 +4463,6 @@
       "blocker_count": 1,
       "has_resource_conflicts": false,
       "conflict_count": 0
-    },
-    {
-      "bead_id": "needle-75368add",
-      "title": "N-T50: produce a CandidateLesson from a failing-then-succeeding attempt pair on one bead, keyed by failure signature [cargo test --test nt50_exception_lessons]",
-      "priority": 2,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 2,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
-      "bead_id": "needle-17a7f6a0",
-      "title": "N-T51: key provider health by the adapter's gateway so every adapter behind one provider shares degradation and recovery [cargo test --test nt51_gateway_health]",
-      "priority": 2,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": false,
-      "blocker_count": 0,
-      "has_resource_conflicts": true,
-      "conflict_count": 1
     },
     {
       "bead_id": "needle-65e66131",
@@ -4390,6 +4478,105 @@
     {
       "bead_id": "needle-96052436",
       "title": "Write end-to-end verification for start-timestamp telemetry",
+      "priority": 2,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-332fff9b",
+      "title": "Generate proposals from surviving mutations [cargo test --test nt07_mutation_generator]. Work on this issue directly.",
+      "priority": 2,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 2,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-dca0eb8c",
+      "title": "Generate proposals from minimized fuzz failures [cargo test --test nt07_fuzz_generator]. Work on this issue directly.",
+      "priority": 2,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 2,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-37646258",
+      "title": "Generate proposals from specified coverage gaps [cargo test --test nt07_coverage_generator]. Work on this issue directly.",
+      "priority": 2,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 2,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-86271d93",
+      "title": "Generate bounded dependency-migration proposals [cargo test --test nt07_migration_generator]. Work on this issue directly.",
+      "priority": 2,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 2,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-c9a320e4",
+      "title": "Generate proposals from executable documentation failures [cargo test --test nt07_docs_generator]. Work on this issue directly.",
+      "priority": 2,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 2,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-c5035d13",
+      "title": "Roll out the impact-ranked foundry to the eligible fleet roster [cargo test --test nt07_fleet_rollout]. Work on this issue directly.",
+      "priority": 2,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 6,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-f0552fec",
+      "title": "Expose file-contention marker commands so cargo test --lib cli::tests::file_contention passes. Work on this issue directly.",
+      "priority": 2,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-7f04ec50",
+      "title": "Publish the opt-in harness hook contract so cargo test --lib dispatch::tests::file_contention_hook_contract passes. Work on this issue directly.",
+      "priority": 2,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 2,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-0d2df6d5",
+      "title": "Report file-contention coverage and stale markers so cargo test --lib cli::tests::file_contention_doctor passes. Work on this issue directly.",
       "priority": 2,
       "assignee": null,
       "manual_blocked": false,
