@@ -66,7 +66,17 @@ version = 1
 # telemetry), one Explore admission contract, three config contracts (roster
 # matching, empty default, when_empty YAML default) and the live-reload tier.
 # All in-process; `cargo test --lib nt59_` is the bead's acceptance command.
-max_tests = 3774
+# +12 factory-health predicate group, N-T57 (needle-76b52674): ten predicate
+# contracts in src/cli/audit/factory.rs — a firing fixture and a healthy-state
+# fixture for each of F1–F4, the informational I_CHECKLIST_DRIFT case, and the
+# group-registration/clean-run case — plus two CI run-history contracts in
+# src/build_status.rs (failed-Pod-node parsing with the message fallback, and
+# newest-first ordering including the trait's default single-run history).
+# The unit tier is the cheapest correct home because every one of them is a
+# pure function of a fixture context; the explicit five-target boundary
+# (tests/cargo-targets) rules out a dedicated harness. Acceptance command:
+# `cargo test --lib nt57_`.
+max_tests = 3786
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

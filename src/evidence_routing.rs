@@ -690,8 +690,32 @@ pub fn evidence_from_logs(log_dir: &Path, window_days: u32) -> HashMap<String, A
     Evidence::from_rows(&ledger_rows(log_dir, window_days)).fleet
 }
 
+/// One `attempt.resolved` row with the envelope timestamp that ordered it.
+///
+/// `timestamp` is `None` when the envelope carried none or it did not parse.
+/// Such a row is still a real attempt, so it is kept rather than dropped — a
+/// consumer that needs ordering places it last instead of losing the attempt.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LedgerRow {
+    pub timestamp: Option<chrono::DateTime<chrono::Utc>>,
+    pub data: serde_json::Value,
+}
+
 /// The `data` objects of every `attempt.resolved` row in the window.
 pub fn ledger_rows(log_dir: &Path, window_days: u32) -> Vec<serde_json::Value> {
+    timestamped_ledger_rows(log_dir, window_days)
+        .into_iter()
+        .map(|row| row.data)
+        .collect()
+}
+
+/// Every `attempt.resolved` row in the window, with its envelope timestamp.
+///
+/// The sibling of [`ledger_rows`], and the one that does the work: both share
+/// this single file-window walk, so the date-suffix bound, the skipped log
+/// kinds and the cutoff comparison cannot drift apart between the routing
+/// reader and a consumer that also needs to order rows in time.
+pub fn timestamped_ledger_rows(log_dir: &Path, window_days: u32) -> Vec<LedgerRow> {
     let cutoff = chrono::Utc::now() - chrono::Duration::days(i64::from(window_days));
     let cutoff_day = cutoff.format("%Y-%m-%d").to_string();
     let cutoff_ts = cutoff.to_rfc3339();
@@ -736,15 +760,15 @@ pub fn ledger_rows(log_dir: &Path, window_days: u32) -> Vec<serde_json::Value> {
             if event.get("event_type").and_then(|v| v.as_str()) != Some("attempt.resolved") {
                 continue;
             }
-            if event
-                .get("timestamp")
-                .and_then(|v| v.as_str())
-                .is_some_and(|ts| ts < cutoff_ts.as_str())
-            {
+            let stamp = event.get("timestamp").and_then(|v| v.as_str());
+            if stamp.is_some_and(|ts| ts < cutoff_ts.as_str()) {
                 continue;
             }
+            let timestamp = stamp
+                .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+                .map(|ts| ts.with_timezone(&chrono::Utc));
             if let Some(data) = event.get("data").cloned() {
-                rows.push(data);
+                rows.push(LedgerRow { timestamp, data });
             }
         }
     }

@@ -3121,6 +3121,7 @@ mod tests {
             name: format!("needle-ci-{phase}"),
             phase: phase.to_string(),
             created_at: Some(chrono::Utc::now()),
+            ..CiWorkflowRun::default()
         }
     }
 

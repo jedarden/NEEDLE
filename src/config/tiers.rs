@@ -90,6 +90,7 @@ fn assert_all_config_fields_have_tiers(config: &Config) {
         ref stop,
         ref attempt_archive,
         ref transitions,
+        ref audit,
     } = config;
 
     // Verify tier A assignments
@@ -100,6 +101,7 @@ fn assert_all_config_fields_have_tiers(config: &Config) {
     let _ = pricing.reload_tier();
     let _ = post_push_ci.reload_tier();
     let _ = stop.reload_tier();
+    let _ = audit.reload_tier();
 
     // Verify tier B assignments
     let _ = telemetry.reload_tier();
@@ -382,6 +384,19 @@ static TIER_TABLE: &[(&str, ReloadTier)] = &[
         "workspace_health.fingerprint_min_distinct_beads",
         ReloadTier::Live,
     ),
+    // `needle audit` thresholds (live: a one-shot command reads them at start
+    // and exits, so there is nothing to rebuild and nothing to restart)
+    ("audit.max_beads_per_run", ReloadTier::Live),
+    ("audit.home_workspace", ReloadTier::Live),
+    ("audit.factory.window_hours", ReloadTier::Live),
+    ("audit.factory.min_attempts", ReloadTier::Live),
+    ("audit.factory.tier_inversion_points", ReloadTier::Live),
+    ("audit.factory.tier_min_rows", ReloadTier::Live),
+    ("audit.factory.min_costed_rows", ReloadTier::Live),
+    ("audit.factory.min_uncosted_timeouts", ReloadTier::Live),
+    ("audit.factory.ci_red_hours", ReloadTier::Live),
+    ("audit.loop.workspaces", ReloadTier::Live),
+    ("audit.loop.stall_days", ReloadTier::Live),
     // ═══════════════════════════════════════════════════════════════════════════════
     // TIER B: COMPONENT REBUILD
     // ═══════════════════════════════════════════════════════════════════════════════

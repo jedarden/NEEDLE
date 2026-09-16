@@ -49,12 +49,19 @@
 //! bead-level (needle-b9772de3) and flow (needle-73d53f34) — and cadence plus
 //! per-finding telemetry emission belongs to needle-a0d1eb19.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{bail, Context, Result};
+use chrono::{DateTime, Utc};
 
-use crate::config::{expand_tilde_str, Config, ConfigLoader};
+use crate::bead_store::BeadStore;
+use crate::build_status::{BuildStatusChecker, CiWorkflowRun};
+use crate::config::{expand_tilde_str, CliOverrides, Config, ConfigLoader};
+use crate::types::Bead;
+
+pub mod factory;
 
 /// The message an empty registry fails with. Worded for an operator who has
 /// just been told the estate is fine by a command that checked nothing.
@@ -172,6 +179,54 @@ pub struct AuditContext {
     /// a host running workers — it is never a probe failure; a probe failure
     /// fails the audit instead (see [`live_worker_identities`]).
     pub live_worker_identities: BTreeSet<String>,
+    /// When collection ran.
+    ///
+    /// Predicates read ages and windows from this rather than from
+    /// `Utc::now()`. A predicate that reads the wall clock is not a pure
+    /// function of the context, cannot be pinned by a fixture, and quietly
+    /// breaks the determinism contract two runs apart.
+    pub collected_at: DateTime<Utc>,
+    /// `attempt.resolved` ledger rows in the window, with their timestamps.
+    pub ledger: Vec<crate::evidence_routing::LedgerRow>,
+    /// CI run history per workspace name, newest first.
+    pub ci: BTreeMap<String, Collected<Vec<CiWorkflowRun>>>,
+    /// The CI workflow template each workspace resolved to, for reporting.
+    pub ci_templates: BTreeMap<String, String>,
+    /// Bead inventory per workspace path.
+    pub beads: BTreeMap<PathBuf, Collected<Vec<Bead>>>,
+}
+
+/// One collected input, and what to say when it could not be collected.
+///
+/// A predicate must be able to tell "I looked and there was nothing" from "I
+/// could not look". The first is a clean result; the second is a gap, and a
+/// gap reported as a clean result is the fail-open shape this command exists
+/// to refuse. Rules skip an `Unavailable` input, and [`run`] carries every
+/// reason into the report so a reader sees the gap beside the verdict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Collected<T> {
+    /// The source answered.
+    Available(T),
+    /// The source could not be asked, with the reason an operator reads.
+    Unavailable(String),
+}
+
+impl<T> Collected<T> {
+    /// The value, when the source answered.
+    pub fn available(&self) -> Option<&T> {
+        match self {
+            Collected::Available(value) => Some(value),
+            Collected::Unavailable(_) => None,
+        }
+    }
+
+    /// Why the source could not be asked, when it could not.
+    pub fn unavailable_reason(&self) -> Option<&str> {
+        match self {
+            Collected::Available(_) => None,
+            Collected::Unavailable(reason) => Some(reason),
+        }
+    }
 }
 
 /// Every bead workspace at depth 1 under `root`.
@@ -296,18 +351,116 @@ fn parse_identifier_args(ps_stdout: &str) -> BTreeSet<String> {
 /// `root` wins over config so an operator can scope a run (and so tests can
 /// point the binary at a fixture); the default is
 /// `strands.explore.workspace_root`, the same root a worker discovers under.
-pub fn collect_context(config: Config, root: Option<PathBuf>) -> Result<AuditContext> {
+pub async fn collect_context(config: Config, root: Option<PathBuf>) -> Result<AuditContext> {
     let root = root
         .map(|root| PathBuf::from(expand_tilde_str(&root.to_string_lossy())))
         .unwrap_or_else(|| config.strands.explore.workspace_root.clone());
     let workspaces = discover_workspaces(&root)?;
     let live_worker_identities = live_worker_identities()?;
+    let collected_at = Utc::now();
+
+    // The ledger reader is bounded by whole files' date suffixes, so ask it
+    // for enough days to cover the window and trim to the hour in-predicate.
+    let window_hours = config.audit.factory.window_hours;
+    let window_days = u32::try_from((window_hours + 23) / 24).unwrap_or(1).max(1);
+    let ledger = crate::evidence_routing::timestamped_ledger_rows(
+        &config.workspace.home.join("logs"),
+        window_days,
+    );
+
+    let (ci, ci_templates) =
+        collect_ci(&workspaces, &BuildStatusChecker::production(), collected_at).await;
+    let beads = collect_beads(&workspaces).await;
+
     Ok(AuditContext {
         root,
         config,
         workspaces,
         live_worker_identities,
+        collected_at,
+        ledger,
+        ci,
+        ci_templates,
+        beads,
     })
+}
+
+/// CI run history per workspace, with the template each one resolved to.
+///
+/// A workspace whose template cannot be named has no CI to be red — it is not
+/// a repository this convention watches — so it is skipped rather than
+/// reported as an outage. A workspace whose template *is* named but whose
+/// history cannot be fetched is recorded `Unavailable`: "this template has
+/// never failed" and "nobody could ask" are different facts, and collapsing
+/// them is how a detector comes to report a cluster it cannot reach as green.
+async fn collect_ci(
+    workspaces: &[WorkspaceEntry],
+    checker: &BuildStatusChecker,
+    _collected_at: DateTime<Utc>,
+) -> (
+    BTreeMap<String, Collected<Vec<CiWorkflowRun>>>,
+    BTreeMap<String, String>,
+) {
+    let mut history = BTreeMap::new();
+    let mut templates = BTreeMap::new();
+    for workspace in workspaces {
+        let Ok(template) = crate::build_status::template_for_workspace(&workspace.path).await
+        else {
+            continue;
+        };
+        templates.insert(workspace.name.clone(), template.clone());
+        let collected = match checker.run_history_for_template(&template).await {
+            Ok(runs) => Collected::Available(runs),
+            Err(error) => Collected::Unavailable(format!("CI unavailable: {error:#}")),
+        };
+        history.insert(workspace.name.clone(), collected);
+    }
+    (history, templates)
+}
+
+/// Bead inventory per workspace, for the rules that reconcile bead state.
+async fn collect_beads(workspaces: &[WorkspaceEntry]) -> BTreeMap<PathBuf, Collected<Vec<Bead>>> {
+    let mut out = BTreeMap::new();
+    for workspace in workspaces {
+        out.insert(
+            workspace.path.clone(),
+            collect_workspace_beads(&workspace.path).await,
+        );
+    }
+    out
+}
+
+/// One workspace's bead inventory, or why it could not be read.
+pub(crate) async fn collect_workspace_beads(path: &Path) -> Collected<Vec<Bead>> {
+    match workspace_store(path) {
+        Ok(store) => match store.list_all().await {
+            Ok(beads) => Collected::Available(beads),
+            Err(error) => Collected::Unavailable(format!("bead inventory unreadable: {error:#}")),
+        },
+        Err(error) => Collected::Unavailable(format!("bead store unavailable: {error:#}")),
+    }
+}
+
+/// Open the bead store a workspace's own resolved config binds it to.
+///
+/// The binding is read per workspace rather than assumed from the global
+/// config: the estate runs more than one backend, and opening a store with
+/// the wrong one is the mistake that corrupts the other tool's schema.
+pub(crate) fn workspace_store(path: &Path) -> Result<Arc<dyn BeadStore>> {
+    let (config, _) = ConfigLoader::load_resolved(
+        path,
+        CliOverrides {
+            workspace: Some(path.to_path_buf()),
+            ..Default::default()
+        },
+    )?;
+    crate::bead_store::open_configured(
+        &config.bead_cli,
+        path.to_path_buf(),
+        None,
+        Some("needle-audit".to_string()),
+        Some(env!("CARGO_PKG_VERSION").to_string()),
+    )
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -338,7 +491,8 @@ pub trait Predicate {
 
 /// The predicate groups registered for this build, in reporting order.
 ///
-/// Deliberately empty until the child beads land:
+/// The `factory` group (N-T57) asks whether the work factory is producing.
+/// The reachability groups are still their own beads:
 ///
 /// - needle-c1ae2730 — `R1_WORKSPACE_UNSCANNED`, `R2_ADAPTER_MISSING`
 /// - needle-b9772de3 — `R3_ASSIGNEE_DEAD` (+ the `I_HUMAN_GATED` report), `R4_LABEL_EXCLUDED`
@@ -346,12 +500,9 @@ pub trait Predicate {
 ///
 /// An empty registry is an error, never a clean pass. An audit that checked
 /// nothing must not be able to say "no unreachable work found" — that is the
-/// fail-open shape this whole design exists to refuse. Until the first group
-/// lands, `needle audit` exits 2 with [`EMPTY_REGISTRY`], and the CLI test
-/// pinning that tripwire is the one that breaks when the first predicate is
-/// registered here.
+/// fail-open shape this whole design exists to refuse.
 pub fn registry() -> Vec<Box<dyn Predicate>> {
-    Vec::new()
+    factory::predicates()
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -373,6 +524,13 @@ pub struct AuditReport {
     pub predicates_run: Vec<String>,
     /// Every finding, sorted by (rule, scope, subject).
     pub findings: Vec<Finding>,
+    /// Inputs that could not be collected, sorted, as `<scope>: <reason>`.
+    ///
+    /// A predicate whose input is missing reports nothing for that scope, so
+    /// without this line the run would look clean where it was merely blind.
+    /// Naming the gap beside the verdict is what keeps "no findings" from
+    /// being read as "everything was checked and everything is fine".
+    pub inputs_unavailable: Vec<String>,
 }
 
 /// Run `predicates` over `ctx` and collect their findings.
@@ -402,11 +560,34 @@ pub fn run(ctx: &AuditContext, predicates: &[Box<dyn Predicate>]) -> Result<Audi
         workspaces_discovered: ctx.workspaces.len(),
         predicates_run,
         findings,
+        inputs_unavailable: unavailable_inputs(ctx),
     })
 }
 
+/// Every input the collector could not read, as `<scope>: <reason>`.
+fn unavailable_inputs(ctx: &AuditContext) -> Vec<String> {
+    let ci = ctx.ci.iter().filter_map(|(scope, collected)| {
+        collected
+            .unavailable_reason()
+            .map(|reason| format!("{scope}: {reason}"))
+    });
+    let beads = ctx.beads.iter().filter_map(|(path, collected)| {
+        collected.unavailable_reason().map(|reason| {
+            let scope = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string());
+            format!("{scope}: {reason}")
+        })
+    });
+    let mut out: Vec<String> = ci.chain(beads).collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 /// Load config, collect inputs, and run the registered predicates.
-pub fn run_audit(root: Option<PathBuf>) -> Result<AuditReport> {
+pub async fn run_audit(root: Option<PathBuf>) -> Result<(AuditContext, AuditReport)> {
     let predicates = registry();
     if predicates.is_empty() {
         // Bail before touching the estate: an audit with nothing to reconcile
@@ -414,8 +595,9 @@ pub fn run_audit(root: Option<PathBuf>) -> Result<AuditReport> {
         bail!("{EMPTY_REGISTRY}");
     }
     let config = ConfigLoader::load_global()?;
-    let ctx = collect_context(config, root)?;
-    run(&ctx, &predicates)
+    let ctx = collect_context(config, root).await?;
+    let report = run(&ctx, &predicates)?;
+    Ok((ctx, report))
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -456,13 +638,29 @@ pub fn render_human(report: &AuditReport) -> String {
         .filter(|finding| finding.severity == Severity::Informational)
         .collect();
 
+    // Printed before the verdict, not after: a reader who stops at the first
+    // line must not stop at a clean one when part of the estate went unread.
+    let mut unread = String::new();
+    if !report.inputs_unavailable.is_empty() {
+        unread.push_str(&format!(
+            "inputs not collected ({} — these scopes were NOT checked):\n",
+            report.inputs_unavailable.len()
+        ));
+        for input in &report.inputs_unavailable {
+            unread.push_str(&format!("    {input}\n"));
+        }
+        unread.push('\n');
+    }
+
     let mut out = String::new();
     if violations.is_empty() && informational.is_empty() {
+        out.push_str(&unread);
         out.push_str(&format!(
             "reachability audit: no unreachable work found ({checked})\n"
         ));
         return out;
     }
+    out.push_str(&unread);
 
     out.push_str(&format!(
         "reachability audit: {} violation(s), {} bead(s) affected ({checked})\n\n",
@@ -531,6 +729,7 @@ pub fn render_json(report: &AuditReport) -> Result<String> {
             "informational_beads": beads_affected(&informational),
         },
         "findings": report.findings,
+        "inputs_unavailable": report.inputs_unavailable,
         "exit_code": exit_code(report),
     });
     Ok(serde_json::to_string_pretty(&value)?)
@@ -605,6 +804,11 @@ mod tests {
                 name: "alpha".to_string(),
             }],
             live_worker_identities: BTreeSet::new(),
+            collected_at: Utc::now(),
+            ledger: Vec::new(),
+            ci: BTreeMap::new(),
+            ci_templates: BTreeMap::new(),
+            beads: BTreeMap::new(),
         }
     }
 

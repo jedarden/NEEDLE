@@ -7110,6 +7110,177 @@ pub struct WorkspaceStrandsOverrides {
     pub resolve: Option<ResolveConfig>,
 }
 
+// ──────────────────────────────────────────────────────────────────────────────
+// `needle audit` configuration (plan section 4.11; N-T57, N-T58, N-T60)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Thresholds and budgets for `needle audit`.
+///
+/// Everything here is read once per invocation of a one-shot command; no
+/// worker ever holds a value from this section, so the whole of it is Tier A
+/// and a change is live for the next run with no restart and no rebuild.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditConfig {
+    /// Factory-health predicate thresholds (F1–F5).
+    #[serde(default)]
+    pub factory: AuditFactoryConfig,
+    /// The most beads `--file-beads` may create in one run.
+    ///
+    /// A violation past the budget is reported and telemetered but not filed.
+    /// The cap exists because of what happened without one: 931 of 946
+    /// self-filed alert beads were noise, and the response to a noisy
+    /// detector is to stop reading it — which is fatal for a detector that
+    /// exists precisely to catch what nobody is watching.
+    #[serde(default = "AuditConfig::default_max_beads_per_run")]
+    pub max_beads_per_run: usize,
+    /// The workspace whose bead store owns a finding that resolves to no
+    /// discovered workspace (a fleet-scoped finding, say).
+    #[serde(default = "AuditConfig::default_home_workspace")]
+    pub home_workspace: PathBuf,
+    /// Learning-loop liveness thresholds (F5).
+    #[serde(default, rename = "loop")]
+    pub loop_: AuditLoopConfig,
+}
+
+impl Default for AuditConfig {
+    fn default() -> Self {
+        AuditConfig {
+            factory: AuditFactoryConfig::default(),
+            max_beads_per_run: Self::default_max_beads_per_run(),
+            home_workspace: Self::default_home_workspace(),
+            loop_: AuditLoopConfig::default(),
+        }
+    }
+}
+
+impl AuditConfig {
+    pub fn default_max_beads_per_run() -> usize {
+        3
+    }
+
+    /// The same directory `workspace.default` resolves to: an un-scoped
+    /// finding belongs in the audit's own repository, not in whichever
+    /// workspace happened to sort first.
+    pub fn default_home_workspace() -> PathBuf {
+        WorkspaceConfig::default_workspace()
+    }
+}
+
+impl ConfigTier for AuditConfig {
+    fn reload_tier(&self) -> ReloadTier {
+        // Tier A: `needle audit` is a one-shot command that loads config and
+        // exits. There is no component to rebuild and no process to restart.
+        ReloadTier::Live
+    }
+}
+
+/// Factory-health predicate thresholds.
+///
+/// The defaults are the values the 2026-09-15 evidence was measured against —
+/// the run where the NEEDLE workspace took 22 attempts to zero verified
+/// closures and needle-ci stayed red for 20 h, both found by a person and
+/// detected by nothing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditFactoryConfig {
+    /// The ledger window F1, F2 and F3 reconcile over.
+    #[serde(default = "AuditFactoryConfig::default_window_hours")]
+    pub window_hours: i64,
+    /// Judged attempts a workspace needs in the window before zero verified
+    /// closures counts as evidence rather than as a small sample (F1).
+    #[serde(default = "AuditFactoryConfig::default_min_attempts")]
+    pub min_attempts: u64,
+    /// Percentage points by which late-tier verified yield must exceed
+    /// tier-1 yield before the inversion is reported (F2).
+    #[serde(default = "AuditFactoryConfig::default_tier_inversion_points")]
+    pub tier_inversion_points: f64,
+    /// Rows each compared tier needs before F2 will compare them at all.
+    #[serde(default = "AuditFactoryConfig::default_tier_min_rows")]
+    pub tier_min_rows: u64,
+    /// Costed rows an adapter needs before F3 reads uncosted timeouts as a
+    /// defect rather than as an adapter that never reported cost at all.
+    #[serde(default = "AuditFactoryConfig::default_min_costed_rows")]
+    pub min_costed_rows: u64,
+    /// Uncosted timeouts an adapter needs before F3 fires.
+    #[serde(default = "AuditFactoryConfig::default_min_uncosted_timeouts")]
+    pub min_uncosted_timeouts: u64,
+    /// How long a CI template must have been continuously red before F4
+    /// reports it.
+    #[serde(default = "AuditFactoryConfig::default_ci_red_hours")]
+    pub ci_red_hours: i64,
+}
+
+impl Default for AuditFactoryConfig {
+    fn default() -> Self {
+        AuditFactoryConfig {
+            window_hours: Self::default_window_hours(),
+            min_attempts: Self::default_min_attempts(),
+            tier_inversion_points: Self::default_tier_inversion_points(),
+            tier_min_rows: Self::default_tier_min_rows(),
+            min_costed_rows: Self::default_min_costed_rows(),
+            min_uncosted_timeouts: Self::default_min_uncosted_timeouts(),
+            ci_red_hours: Self::default_ci_red_hours(),
+        }
+    }
+}
+
+impl AuditFactoryConfig {
+    pub fn default_window_hours() -> i64 {
+        72
+    }
+    pub fn default_min_attempts() -> u64 {
+        10
+    }
+    pub fn default_tier_inversion_points() -> f64 {
+        30.0
+    }
+    pub fn default_tier_min_rows() -> u64 {
+        20
+    }
+    pub fn default_min_costed_rows() -> u64 {
+        5
+    }
+    pub fn default_min_uncosted_timeouts() -> u64 {
+        5
+    }
+    pub fn default_ci_red_hours() -> i64 {
+        1
+    }
+}
+
+/// Learning-loop liveness thresholds (F5).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditLoopConfig {
+    /// Workspaces whose learning loop must stay alive. Empty — the default —
+    /// means `audit.home_workspace` alone.
+    #[serde(default)]
+    pub workspaces: Vec<PathBuf>,
+    /// Days without a closed `learning-loop` bead before the loop counts as
+    /// stalled.
+    #[serde(default = "AuditLoopConfig::default_stall_days")]
+    pub stall_days: i64,
+}
+
+impl Default for AuditLoopConfig {
+    fn default() -> Self {
+        // Written out rather than derived: `#[derive(Default)]` would give
+        // `stall_days: 0` while serde gave 3, so a config built in code and
+        // one parsed from an empty document would disagree.
+        AuditLoopConfig {
+            workspaces: Vec::new(),
+            stall_days: Self::default_stall_days(),
+        }
+    }
+}
+
+impl AuditLoopConfig {
+    pub fn default_stall_days() -> i64 {
+        3
+    }
+}
+
 /// Non-overridable top-level keys in workspace config.
 ///
 /// Note: `workspace` is intentionally absent — `workspace.labels` IS overridable
@@ -7206,6 +7377,9 @@ pub struct Config {
     /// change).
     #[serde(default)]
     pub transitions: TransitionsConfig,
+    /// `needle audit` thresholds and budgets (N-T57, N-T58, N-T60).
+    #[serde(default)]
+    pub audit: AuditConfig,
 }
 
 impl Config {
@@ -7727,6 +7901,7 @@ pub fn validate_key_path(key_path: &str) -> Result<(), ConfigError> {
         "validation",
         "post_push_ci",
         "attempt_archive",
+        "audit",
     ];
 
     if !valid_top_level.contains(&root) {

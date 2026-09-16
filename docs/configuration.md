@@ -1253,6 +1253,76 @@ supervisor:
 
 ---
 
+## Audit Configuration
+
+`needle audit` reconciles state already at rest and reports what it finds. It
+never repairs anything. Every key below is read once per invocation of that
+one-shot command, so the whole section is Tier A (live): a change applies to
+the next run with no restart and no rebuild.
+
+```yaml
+audit:
+  # The most beads `--file-beads` may create in one run (default: 3).
+  #
+  # A violation past the budget is still reported and still emits telemetry —
+  # it is only the bead that is withheld. The cap exists because of what
+  # happened without one: 931 of 946 self-filed alert beads were noise, and
+  # the response to a noisy detector is to stop reading it, which is fatal for
+  # a detector whose whole purpose is catching what nobody is watching.
+  max_beads_per_run: 3
+
+  # Bead store that owns a finding which resolves to no discovered workspace —
+  # a fleet-scoped finding, say (default: the `workspace.default` directory).
+  home_workspace: ~/NEEDLE
+
+  # Factory-health thresholds. The defaults are the values the 2026-09-15
+  # evidence was measured against, the run where one workspace took 22
+  # attempts to zero verified closures and needle-ci stayed red for 20 h.
+  factory:
+    # Ledger window F1, F2 and F3 reconcile over (default: 72).
+    window_hours: 72
+
+    # Judged attempts a workspace needs inside the window before zero verified
+    # closures counts as evidence rather than as a small sample (default: 10).
+    min_attempts: 10
+
+    # Percentage points by which verified yield on attempt tier >= 4 must
+    # exceed tier-1 yield before the inversion is reported (default: 30).
+    tier_inversion_points: 30
+
+    # Rows each compared tier needs before the tiers are compared at all
+    # (default: 20). A two-row tier can hold any rate whatsoever.
+    tier_min_rows: 20
+
+    # Costed rows an adapter needs before uncosted timeouts read as a defect
+    # rather than as an adapter that never reported cost at all (default: 5).
+    min_costed_rows: 5
+
+    # Uncosted timeouts an adapter needs before the rule fires (default: 5).
+    min_uncosted_timeouts: 5
+
+    # How long a CI template must have been continuously red before it is
+    # reported (default: 1). CI is allowed to be red for the minutes between
+    # a bad push and its fix.
+    ci_red_hours: 1
+```
+
+The `factory` predicate group and the keys each rule reads:
+
+| Rule | Severity | Reads |
+|------|----------|-------|
+| `F1_WORKSPACE_NO_VERIFIED_CLOSURES` | violation | `window_hours`, `min_attempts` |
+| `F2_LATE_TIER_YIELD_INVERSION` | violation | `window_hours`, `tier_min_rows`, `tier_inversion_points` |
+| `F3_UNCOSTED_TIMEOUTS` | violation | `window_hours`, `min_costed_rows`, `min_uncosted_timeouts` |
+| `F4_CI_RED` | violation | `ci_red_hours` |
+| `I_CHECKLIST_DRIFT` | informational | bead inventories only — no threshold |
+
+Informational rules (prefixed `I_`) report states that are correct as-is and
+must never be repaired automatically. They still drive exit code 1, because
+"clean" has to mean "nothing here needs a human".
+
+---
+
 ## Environment Variable Overrides
 
 Any config field can be overridden via environment variables with the `NEEDLE_` prefix and `__` as separator:

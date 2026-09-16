@@ -74,8 +74,23 @@ impl BuildStatus {
     }
 }
 
-/// One CI workflow run, reduced to what the circuit breaker decides on.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One failed step of a CI run, reduced to what names the failure.
+///
+/// Only Pod nodes are collected: the DAG and Steps nodes above them restate a
+/// child's failure without adding information, so including them would turn
+/// one broken step into four indistinguishable lines.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FailedNode {
+    /// Argo `displayName`, the step name an operator recognises
+    /// (for example `verify-fast`).
+    pub display_name: String,
+    /// Argo's own message for the node (for example `main: Error (exit code 128)`).
+    pub message: String,
+}
+
+/// One CI workflow run, reduced to what the circuit breaker decides on plus
+/// what a reader needs to tell two different outages apart.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CiWorkflowRun {
     /// Workflow name (for example `needle-ci-xg7fb`).
     pub name: String,
@@ -83,6 +98,16 @@ pub struct CiWorkflowRun {
     pub phase: String,
     /// When the workflow was created, if the API reported a parseable stamp.
     pub created_at: Option<DateTime<Utc>>,
+    /// The run's own `status.message`, when the API reported one.
+    pub message: Option<String>,
+    /// Failed Pod nodes, sorted by display name.
+    ///
+    /// Sorted on parse rather than on read: the API returns `status.nodes` as
+    /// a JSON object, so iteration order is not stable, and an unsorted
+    /// signature would differ between two reads of the same unchanged run —
+    /// which would defeat both the determinism contract and any deduplication
+    /// keyed on the signature.
+    pub failed_nodes: Vec<FailedNode>,
 }
 
 impl CiWorkflowRun {
@@ -97,6 +122,24 @@ impl CiWorkflowRun {
             _ => BuildStatus::Unknown,
         }
     }
+
+    /// The failed-node signature: `<step>: <message>` per failed Pod node,
+    /// joined by `; `.
+    ///
+    /// Falls back to the run's own `status.message` when no Pod node failed —
+    /// a clone or an artifact step that dies before any pod starts leaves the
+    /// node list empty, and "CI is red for no stated reason" is exactly the
+    /// report that gets ignored.
+    pub fn failed_node_signature(&self) -> String {
+        if self.failed_nodes.is_empty() {
+            return self.message.clone().unwrap_or_default();
+        }
+        self.failed_nodes
+            .iter()
+            .map(|node| format!("{}: {}", node.display_name, node.message))
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
 }
 
 /// Decides the build status for a named workflow template.
@@ -108,6 +151,18 @@ pub trait CiStatusSource: Send + Sync {
     /// Returns the newest run of `template`, or `None` when the cluster has
     /// never run it.
     async fn newest_run(&self, template: &str) -> Result<Option<CiWorkflowRun>>;
+
+    /// Every run of `template` the source can see, newest first.
+    ///
+    /// The circuit breaker only ever needs the newest run; a caller asking
+    /// "how long has this been red?" needs the ones behind it. The default
+    /// reports just the newest run, so a source written before this method
+    /// existed stays correct — it simply cannot establish a streak longer
+    /// than one, which reads as "not enough history" rather than as a clean
+    /// bill of health.
+    async fn run_history(&self, template: &str) -> Result<Vec<CiWorkflowRun>> {
+        Ok(self.newest_run(template).await?.into_iter().collect())
+    }
 }
 
 /// Read-only Argo Workflows API source.
@@ -136,49 +191,83 @@ impl ArgoWorkflowStatusSource {
     /// Runs are matched on `spec.workflowTemplateRef.name`; a run that does
     /// not name a template (or names another one) is not this template's run.
     fn newest_run_of_template(list: &WorkflowList, template: &str) -> Option<CiWorkflowRun> {
-        let mut newest: Option<(&ArgoWorkflow, Option<DateTime<Utc>>)> = None;
-        for item in &list.items {
-            let named = item
-                .spec
-                .workflow_template_ref
-                .as_ref()
-                .and_then(|reference| reference.name.as_deref());
-            if named != Some(template) {
-                continue;
-            }
-            let created_at = item
+        Self::runs_of_template(list, template).into_iter().next()
+    }
+
+    /// Every run of `template` in the list, newest first.
+    ///
+    /// Ordering: stamped runs descending by creation time, unstamped runs
+    /// last in list order. The sort is stable, so this keeps
+    /// [`Self::newest_run_of_template`]'s original rule — a stamped run
+    /// always outranks an unstamped one, and among unstamped runs the first
+    /// the API listed wins — while also giving a caller the runs behind it.
+    fn runs_of_template(list: &WorkflowList, template: &str) -> Vec<CiWorkflowRun> {
+        let mut runs: Vec<CiWorkflowRun> = list
+            .items
+            .iter()
+            .filter(|item| {
+                item.spec
+                    .workflow_template_ref
+                    .as_ref()
+                    .and_then(|reference| reference.name.as_deref())
+                    == Some(template)
+            })
+            .map(Self::run_from_workflow)
+            .collect();
+        // `None` sorts last: `Option`'s own ordering puts it first, which
+        // would rank an unstamped run above every stamped one.
+        runs.sort_by(|a, b| match (b.created_at, a.created_at) {
+            (Some(newer), Some(older)) => newer.cmp(&older),
+            (Some(_), None) => std::cmp::Ordering::Greater,
+            (None, Some(_)) => std::cmp::Ordering::Less,
+            (None, None) => std::cmp::Ordering::Equal,
+        });
+        runs
+    }
+
+    /// Reduce one Argo workflow object to the run facts this module exposes.
+    fn run_from_workflow(item: &ArgoWorkflow) -> CiWorkflowRun {
+        let status = item.status.as_ref();
+        let mut failed_nodes: Vec<FailedNode> = status
+            .map(|status| {
+                status
+                    .nodes
+                    .values()
+                    .filter(|node| {
+                        node.node_type == "Pod"
+                            && matches!(node.phase.as_deref(), Some("Failed") | Some("Error"))
+                    })
+                    .map(|node| FailedNode {
+                        display_name: node.display_name.clone(),
+                        message: node.message.clone().unwrap_or_default(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        failed_nodes
+            .sort_by(|a, b| (&a.display_name, &a.message).cmp(&(&b.display_name, &b.message)));
+
+        CiWorkflowRun {
+            name: item.metadata.name.clone(),
+            phase: status
+                .and_then(|status| status.phase.clone())
+                .unwrap_or_default(),
+            created_at: item
                 .metadata
                 .creation_timestamp
                 .as_deref()
                 .and_then(|stamp| DateTime::parse_from_rfc3339(stamp).ok())
-                .map(|stamp| stamp.with_timezone(&Utc));
-            let replace = match (&newest, created_at) {
-                // A stamped run beats anything seen so far that is older — or
-                // that has no stamp at all.
-                (Some((_, Some(seen))), Some(created)) => created > *seen,
-                (Some((_, None)), Some(_)) => true,
-                (Some(_), None) => false,
-                (None, _) => true,
-            };
-            if replace {
-                newest = Some((item, created_at));
-            }
+                .map(|stamp| stamp.with_timezone(&Utc)),
+            message: status.and_then(|status| status.message.clone()),
+            failed_nodes,
         }
-        newest.map(|(item, created_at)| CiWorkflowRun {
-            name: item.metadata.name.clone(),
-            phase: item
-                .status
-                .as_ref()
-                .and_then(|status| status.phase.clone())
-                .unwrap_or_default(),
-            created_at,
-        })
     }
-}
 
-#[async_trait::async_trait]
-impl CiStatusSource for ArgoWorkflowStatusSource {
-    async fn newest_run(&self, template: &str) -> Result<Option<CiWorkflowRun>> {
+    /// Fetch the namespace's whole workflow list once.
+    ///
+    /// Both trait methods read the same list: the API has no per-template
+    /// query, so asking twice would double the cost without adding anything.
+    async fn fetch_list(&self) -> Result<WorkflowList> {
         let url = format!(
             "{}/apis/argoproj.io/v1alpha1/namespaces/argo-workflows/workflows",
             self.endpoint.trim_end_matches('/')
@@ -193,9 +282,20 @@ impl CiStatusSource for ArgoWorkflowStatusSource {
         .await
         .map_err(|error| anyhow!("CI workflow query task failed: {error}"))??;
 
-        let list: WorkflowList = serde_json::from_str(&response)
-            .context("CI workflow list was not a valid WorkflowList")?;
+        serde_json::from_str(&response).context("CI workflow list was not a valid WorkflowList")
+    }
+}
+
+#[async_trait::async_trait]
+impl CiStatusSource for ArgoWorkflowStatusSource {
+    async fn newest_run(&self, template: &str) -> Result<Option<CiWorkflowRun>> {
+        let list = self.fetch_list().await?;
         Ok(Self::newest_run_of_template(&list, template))
+    }
+
+    async fn run_history(&self, template: &str) -> Result<Vec<CiWorkflowRun>> {
+        let list = self.fetch_list().await?;
+        Ok(Self::runs_of_template(&list, template))
     }
 }
 
@@ -216,11 +316,31 @@ struct ArgoWorkflow {
     status: Option<WorkflowStatus>,
 }
 
-/// Subset of the workflow status: only the phase matters here.
-#[derive(Debug, Clone, Deserialize)]
+/// Subset of the workflow status: the phase the circuit breaker decides on,
+/// plus the message and node set that name *why* a run failed.
+#[derive(Debug, Clone, Default, Deserialize)]
 struct WorkflowStatus {
     #[serde(default)]
     phase: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
+    /// Argo returns this as a JSON object keyed by node id, so its iteration
+    /// order is not stable; everything read out of it is sorted before use.
+    #[serde(default)]
+    nodes: HashMap<String, ArgoNode>,
+}
+
+/// Subset of one Argo workflow node.
+#[derive(Debug, Clone, Default, Deserialize)]
+struct ArgoNode {
+    #[serde(default, rename = "displayName")]
+    display_name: String,
+    #[serde(default, rename = "type")]
+    node_type: String,
+    #[serde(default)]
+    phase: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
 }
 
 /// Subset of workflow object metadata.
@@ -340,6 +460,22 @@ impl BuildStatusChecker {
         run
     }
 
+    /// Every run of a workflow template, newest first.
+    ///
+    /// Unlike [`BuildStatusChecker::newest_run_for_template`] this surfaces
+    /// the source's error instead of folding it into an empty history. The
+    /// circuit breaker is right to treat "nobody could look" as no evidence
+    /// of a failure; a caller asking *how long* CI has been red is asking the
+    /// opposite question, and an empty history would answer it with a clean
+    /// bill of health the source never gave.
+    ///
+    /// Deliberately uncached: the history is read once per audit run, and
+    /// sharing the breaker's TTL would let a cache decide whether an outage
+    /// is visible.
+    pub async fn run_history_for_template(&self, template: &str) -> Result<Vec<CiWorkflowRun>> {
+        self.source.run_history(template).await
+    }
+
     /// Drop every cached status (used by tests and by operators forcing a
     /// re-read).
     pub fn clear_cache(&self) {
@@ -430,6 +566,7 @@ mod tests {
             },
             status: Some(WorkflowStatus {
                 phase: Some(phase.to_string()),
+                ..WorkflowStatus::default()
             }),
         }
     }
@@ -452,6 +589,7 @@ mod tests {
                     name: "needle-ci-xg7fb".to_string(),
                     phase: "Failed".to_string(),
                     created_at: Some(Utc::now()),
+                    ..CiWorkflowRun::default()
                 }),
                 error: None,
                 asked: Mutex::new(Vec::new()),
@@ -503,6 +641,7 @@ mod tests {
                 name: "needle-ci-abcde".to_string(),
                 phase: phase.to_string(),
                 created_at: None,
+                ..CiWorkflowRun::default()
             }
             .status()
         };
@@ -534,6 +673,7 @@ mod tests {
                 },
                 status: Some(WorkflowStatus {
                     phase: Some("Failed".to_string()),
+                    ..WorkflowStatus::default()
                 }),
             },
         ]);
@@ -645,6 +785,134 @@ mod tests {
             2,
             "clear_cache forces a re-read"
         );
+    }
+
+    /// A source that only implements `newest_run`, to exercise the trait's
+    /// default `run_history`.
+    struct NewestOnlySource(Option<CiWorkflowRun>);
+
+    #[async_trait::async_trait]
+    impl CiStatusSource for NewestOnlySource {
+        async fn newest_run(&self, _template: &str) -> Result<Option<CiWorkflowRun>> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[test]
+    fn nt57_run_history_parses_the_message_and_failed_pod_nodes() {
+        // The shape the read-only proxy actually returns for a red run: a
+        // status message, one failed Pod node, one failed DAG node restating
+        // it, and one Pod that succeeded.
+        let payload = r#"{
+            "items": [{
+                "metadata": {"name": "needle-ci-xg7fb", "creationTimestamp": "2026-09-14T22:16:00Z"},
+                "spec": {"workflowTemplateRef": {"name": "needle-ci"}},
+                "status": {
+                    "phase": "Failed",
+                    "message": "child 'needle-ci-xg7fb-1' failed",
+                    "nodes": {
+                        "needle-ci-xg7fb-1": {
+                            "displayName": "verify-fast",
+                            "type": "Pod",
+                            "phase": "Error",
+                            "message": "main: Error (exit code 128)"
+                        },
+                        "needle-ci-xg7fb": {
+                            "displayName": "needle-ci-xg7fb",
+                            "type": "DAG",
+                            "phase": "Failed",
+                            "message": "child failed"
+                        },
+                        "needle-ci-xg7fb-2": {
+                            "displayName": "clone",
+                            "type": "Pod",
+                            "phase": "Succeeded"
+                        }
+                    }
+                }
+            }]
+        }"#;
+        let list: WorkflowList = serde_json::from_str(payload).expect("parses");
+        let runs = ArgoWorkflowStatusSource::runs_of_template(&list, "needle-ci");
+
+        assert_eq!(runs.len(), 1);
+        let run = &runs[0];
+        assert_eq!(run.status(), BuildStatus::Failing);
+        assert_eq!(
+            run.message.as_deref(),
+            Some("child 'needle-ci-xg7fb-1' failed")
+        );
+        // Only the Pod node: the DAG above it restates the same failure, and
+        // the Pod that succeeded is not a failure at all.
+        assert_eq!(
+            run.failed_nodes,
+            vec![FailedNode {
+                display_name: "verify-fast".to_string(),
+                message: "main: Error (exit code 128)".to_string(),
+            }]
+        );
+        assert_eq!(
+            run.failed_node_signature(),
+            "verify-fast: main: Error (exit code 128)"
+        );
+
+        // A run with no failed Pod node still names a reason rather than
+        // reporting an empty signature.
+        let no_nodes = CiWorkflowRun {
+            phase: "Failed".to_string(),
+            message: Some("clone returned HTTP 503".to_string()),
+            ..CiWorkflowRun::default()
+        };
+        assert_eq!(no_nodes.failed_node_signature(), "clone returned HTTP 503");
+    }
+
+    #[tokio::test]
+    async fn nt57_run_history_is_newest_first_and_defaults_to_the_newest_run() {
+        let mut unstamped = run("needle-ci-unstamped", "2026-09-14T00:00:00Z", "Failed");
+        unstamped.metadata.creation_timestamp = None;
+        let list = list(vec![
+            run("needle-ci-old", "2026-09-14T22:16:00Z", "Failed"),
+            unstamped,
+            run("needle-ci-new", "2026-09-15T18:00:00Z", "Failed"),
+            run("needle-ci-mid", "2026-09-15T02:00:00Z", "Succeeded"),
+        ]);
+
+        let ordered = ArgoWorkflowStatusSource::runs_of_template(&list, "needle-ci");
+        let names: Vec<&str> = ordered.iter().map(|run| run.name.as_str()).collect();
+        // Stamped runs newest first; the unstamped run sorts last rather than
+        // outranking every stamped one, which is what `Option`'s own ordering
+        // would have done.
+        assert_eq!(
+            names,
+            vec![
+                "needle-ci-new",
+                "needle-ci-mid",
+                "needle-ci-old",
+                "needle-ci-unstamped"
+            ]
+        );
+        // The newest run is still the head of the history.
+        assert_eq!(
+            ArgoWorkflowStatusSource::newest_run_of_template(&list, "needle-ci")
+                .expect("a run exists")
+                .name,
+            "needle-ci-new"
+        );
+
+        // A source predating `run_history` reports the newest run alone —
+        // never an empty history, which would read as "nothing ever failed".
+        let newest = CiWorkflowRun {
+            name: "needle-ci-only".to_string(),
+            phase: "Failed".to_string(),
+            ..CiWorkflowRun::default()
+        };
+        let source = NewestOnlySource(Some(newest.clone()));
+        assert_eq!(source.run_history("needle-ci").await.unwrap(), vec![newest]);
+        assert!(NewestOnlySource(None)
+            .run_history("needle-ci")
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
