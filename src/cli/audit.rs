@@ -62,11 +62,18 @@ use crate::config::{expand_tilde_str, CliOverrides, Config, ConfigLoader};
 use crate::types::Bead;
 
 pub mod factory;
+pub mod filing;
 
 /// The message an empty registry fails with. Worded for an operator who has
 /// just been told the estate is fine by a command that checked nothing.
 const EMPTY_REGISTRY: &str =
     "no predicates registered — the audit would reconcile nothing; refusing to report a clean pass";
+
+/// Exit code for a run that never produced a verdict.
+///
+/// The one that matters: an audit that errored must never be
+/// indistinguishable from an audit that passed.
+pub const EXIT_NO_VERDICT: i32 = 2;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Finding model
@@ -81,6 +88,17 @@ pub enum Severity {
     /// A state that is correct as-is (usually a deliberate human gate),
     /// reported so the exclusion is visible. Never auto-repair.
     Informational,
+}
+
+impl Severity {
+    /// The wire name, shared by the JSON report and the telemetry event so a
+    /// consumer joining the two never has to translate between them.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Severity::Violation => "violation",
+            Severity::Informational => "informational",
+        }
+    }
 }
 
 /// One violation of one rule, at one place, with the number of beads it stands
@@ -736,6 +754,56 @@ pub fn render_json(report: &AuditReport) -> Result<String> {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Telemetry
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Every event one audit run emits under `--emit-telemetry`: one
+/// `audit.finding` per finding, then exactly one `audit.completed`.
+///
+/// Built as a pure function of the report rather than emitted inline, so the
+/// contract "one event per finding, one completion" is provable against a
+/// fixture without an emitter, a sink, or a background writer task.
+///
+/// Informational findings emit too. They are reported states, and a telemetry
+/// stream that silently disagreed with the printed report would be worse than
+/// no stream at all.
+pub fn audit_events(
+    report: &AuditReport,
+    beads_filed: usize,
+    beads_noted: usize,
+) -> Vec<crate::telemetry::EventKind> {
+    use crate::telemetry::EventKind;
+
+    let mut events: Vec<EventKind> = report
+        .findings
+        .iter()
+        .map(|finding| EventKind::AuditFinding {
+            rule: finding.rule.clone(),
+            severity: finding.severity.as_str().to_string(),
+            scope: finding.scope.clone(),
+            subject: finding.subject.clone(),
+            count: finding.count,
+        })
+        .collect();
+
+    let violations = report
+        .findings
+        .iter()
+        .filter(|finding| finding.severity == Severity::Violation)
+        .count();
+
+    events.push(EventKind::AuditCompleted {
+        predicates_run: report.predicates_run.len(),
+        violation_findings: violations,
+        informational_findings: report.findings.len() - violations,
+        beads_filed,
+        beads_noted,
+        exit_code: exit_code(report),
+    });
+    events
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Tests
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -980,6 +1048,110 @@ mod tests {
         assert_eq!(value["workspaces_discovered"], 1);
         assert_eq!(value["findings"][0]["severity"], "violation");
         assert_eq!(value["findings"][0]["count"], 144);
+    }
+
+    /// The emission contract: one `audit.finding` per finding — informational
+    /// included — then exactly one `audit.completed`.
+    #[test]
+    fn nt58_telemetry_emits_one_finding_event_each_and_one_completion() {
+        use crate::telemetry::EventKind;
+
+        let ctx = test_context();
+        let report = run(
+            &ctx,
+            &[
+                Box::new(Fixed::reporting(
+                    "F4_CI_RED",
+                    vec![
+                        violation("F4_CI_RED", "NEEDLE", 3),
+                        violation("F4_CI_RED", "SEAM", 1),
+                    ],
+                )) as Box<dyn Predicate>,
+                Box::new(Fixed::reporting(
+                    "I_CHECKLIST_DRIFT",
+                    vec![Finding::informational(
+                        "I_CHECKLIST_DRIFT",
+                        "NEEDLE",
+                        "needle-parent",
+                        "an unchecked line names a closed bead",
+                        1,
+                    )],
+                )),
+            ],
+        )
+        .unwrap();
+
+        let events = audit_events(&report, 2, 1);
+        assert_eq!(
+            events.len(),
+            report.findings.len() + 1,
+            "one event per finding plus one completion"
+        );
+
+        let findings_emitted = events
+            .iter()
+            .filter(|event| matches!(event, EventKind::AuditFinding { .. }))
+            .count();
+        assert_eq!(findings_emitted, 3, "the informational finding emits too");
+
+        // The completion is last, so a consumer reading in order never sees a
+        // run summarized before its findings.
+        match events.last().expect("a completion event") {
+            EventKind::AuditCompleted {
+                predicates_run,
+                violation_findings,
+                informational_findings,
+                beads_filed,
+                beads_noted,
+                exit_code,
+            } => {
+                assert_eq!(*predicates_run, 2);
+                assert_eq!(*violation_findings, 2);
+                assert_eq!(*informational_findings, 1);
+                assert_eq!(*beads_filed, 2);
+                assert_eq!(*beads_noted, 1);
+                assert_eq!(*exit_code, 1, "findings exit 1");
+            }
+            other => panic!("expected audit.completed last, got {other:?}"),
+        }
+    }
+
+    /// A clean run still reports that it ran. "Checked nothing" and "found
+    /// nothing" have to be distinguishable in the telemetry too, not just in
+    /// the printed report.
+    #[test]
+    fn nt58_a_clean_run_still_emits_its_completion_with_exit_zero() {
+        use crate::telemetry::EventKind;
+
+        let ctx = test_context();
+        let report = run(
+            &ctx,
+            &[Box::new(Fixed::healthy(
+                "F1_WORKSPACE_NO_VERIFIED_CLOSURES",
+            ))],
+        )
+        .unwrap();
+
+        let events = audit_events(&report, 0, 0);
+        assert_eq!(events.len(), 1, "no findings, but the run still reports");
+        match &events[0] {
+            EventKind::AuditCompleted {
+                predicates_run,
+                violation_findings,
+                informational_findings,
+                beads_filed,
+                beads_noted,
+                exit_code,
+            } => {
+                assert_eq!(*predicates_run, 1, "what the run actually checked");
+                assert_eq!(*violation_findings, 0);
+                assert_eq!(*informational_findings, 0);
+                assert_eq!(*beads_filed, 0, "nothing is filed without --file-beads");
+                assert_eq!(*beads_noted, 0);
+                assert_eq!(*exit_code, 0);
+            }
+            other => panic!("expected audit.completed, got {other:?}"),
+        }
     }
 
     #[test]

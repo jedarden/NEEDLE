@@ -107,6 +107,17 @@ Additional fields are event-specific and documented per type below.
   Fields: `template`, `variant`, `variant_rate`, `baseline_rate`,
   `variant_attempts`, `baseline_attempts`.
 
+### Audit (plan 4.11, N-T57/N-T58)
+- `audit.finding` — One finding from a `needle audit` run, emitted per finding
+  under `--emit-telemetry`. Fields: `rule`, `severity`, `scope`, `subject`,
+  `count`. Informational findings emit too — they are reported states, and a
+  stream that disagreed with the printed report would be worse than none.
+- `audit.completed` — One `needle audit` run finished. Fields:
+  `predicates_run`, `violation_findings`, `informational_findings`,
+  `beads_filed`, `beads_noted`, `exit_code`. `predicates_run` is what the run
+  actually checked, so a reader can tell a clean estate from an audit that
+  reconciled nothing.
+
 ### Configuration
 - `config.warning` — Configuration validation warning
 
@@ -687,6 +698,37 @@ Emitted when the spawn-path binary is modified without a corresponding re-exec.
 | `path`        | string | Path to the modified binary.                   |
 | `old_hash`    | string | Original binary hash.                          |
 | `new_hash`    | string | New binary hash after modification.            |
+
+---
+
+### Audit Events
+
+#### `audit.finding`
+One finding from a `needle audit` run (plan section 4.11, N-T58). Emitted only
+under `--emit-telemetry`, once per finding in the report, in report order
+(sorted by rule, scope, then subject — so two runs over unchanged inputs emit
+the same events in the same order).
+
+| Field      | Type    | Present | Description                                                                 |
+|------------|---------|---------|-----------------------------------------------------------------------------|
+| `rule`     | string  | always  | Stable rule id, e.g. `F4_CI_RED`. Rule ids are part of the output contract: they are never renamed, only retired. |
+| `severity` | string  | always  | `violation` or `informational`. The same wire names the JSON report uses.    |
+| `scope`    | string  | always  | Where the finding lives — a workspace directory name, or `fleet`.           |
+| `subject`  | string  | always  | The specific thing breaking the rule: a template, an adapter, a bead id.    |
+| `count`    | integer | always  | How many beads or rows the finding stands for. One for a single-bead finding. |
+
+#### `audit.completed`
+Exactly one per `needle audit` run under `--emit-telemetry`, after every
+`audit.finding`.
+
+| Field                     | Type    | Present | Description                                                                 |
+|---------------------------|---------|---------|-----------------------------------------------------------------------------|
+| `predicates_run`          | integer | always  | Rule ids that actually ran. A run that checked nothing is visible here rather than reading as a clean pass. |
+| `violation_findings`      | integer | always  | Findings of severity `violation`.                                            |
+| `informational_findings`  | integer | always  | Findings of severity `informational`.                                        |
+| `beads_filed`             | integer | always  | Beads created this run by `--file-beads`. Zero without that flag.            |
+| `beads_noted`             | integer | always  | Existing beads that gained a repeat note instead of a duplicate.             |
+| `exit_code`               | integer | always  | 0 clean, 1 findings, 2 no verdict. Mirrors the process exit code.            |
 
 ---
 

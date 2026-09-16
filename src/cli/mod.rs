@@ -500,6 +500,33 @@ pub enum CliCommand {
         #[arg(long)]
         once: bool,
     },
+
+    /// Reconcile state at rest and report unreachable or unproductive work.
+    ///
+    /// Exits 0 when every registered predicate ran and found nothing, 1 when
+    /// there are findings, and 2 when no verdict was produced at all.
+    Audit {
+        /// Emit the machine-readable report instead of the operator view.
+        #[arg(long)]
+        json: bool,
+
+        /// Root to discover workspaces under.
+        ///
+        /// Defaults to `strands.explore.workspace_root`, the same root a
+        /// worker discovers under.
+        #[arg(long)]
+        root: Option<PathBuf>,
+
+        /// Emit one `audit.finding` event per finding and one
+        /// `audit.completed` for the run.
+        #[arg(long)]
+        emit_telemetry: bool,
+
+        /// File a bead for each new violation signature, within
+        /// `audit.max_beads_per_run`. Repeats note the existing bead.
+        #[arg(long)]
+        file_beads: bool,
+    },
 }
 
 /// Output format for the list command.
@@ -638,6 +665,12 @@ pub fn run() -> Result<()> {
         } => cmd_stats(by, since, until, format),
         CliCommand::Supervise { workspace } => cmd_supervise(workspace),
         CliCommand::CiReconcile { workspace, once } => cmd_ci_reconcile(workspace, once),
+        CliCommand::Audit {
+            json,
+            root,
+            emit_telemetry,
+            file_beads,
+        } => cmd_audit(json, root, emit_telemetry, file_beads),
         CliCommand::Query {
             worker_id,
             since,
@@ -651,6 +684,81 @@ pub fn run() -> Result<()> {
 // ──────────────────────────────────────────────────────────────────────────────
 // Command handlers
 // ──────────────────────────────────────────────────────────────────────────────
+
+/// `needle audit` — reconcile state at rest and report what it finds.
+///
+/// The exit-code contract is the point of the command: 0 clean, 1 findings,
+/// 2 no verdict. Every error path here exits 2 rather than returning, because
+/// an audit that could not look must never be indistinguishable from one that
+/// looked and was satisfied — that is the failure mode of every check that
+/// fails open, and this command exists for the states nobody is watching.
+fn cmd_audit(
+    json: bool,
+    root: Option<PathBuf>,
+    emit_telemetry: bool,
+    file_beads: bool,
+) -> Result<()> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to create the audit runtime")?;
+
+    match rt.block_on(audit_run(json, root, emit_telemetry, file_beads)) {
+        Ok(code) => std::process::exit(code),
+        Err(error) => {
+            eprintln!("audit: no verdict: {error:#}");
+            std::process::exit(audit::EXIT_NO_VERDICT);
+        }
+    }
+}
+
+/// One audit run: collect, reconcile, report, and optionally file and emit.
+///
+/// Filing runs before rendering so the printed report is the same one the
+/// telemetry describes, and so a filing failure fails the run rather than
+/// leaving an operator with a clean-looking report and no bead.
+async fn audit_run(
+    json: bool,
+    root: Option<PathBuf>,
+    emit_telemetry: bool,
+    file_beads: bool,
+) -> Result<i32> {
+    let (ctx, report) = audit::run_audit(root).await?;
+
+    let mut filed = 0usize;
+    let mut noted = 0usize;
+    if file_beads {
+        let summary = audit::filing::file_report(&ctx, &report).await?;
+        filed = summary.created.len();
+        noted = summary.noted.len();
+        eprintln!(
+            "audit: filed {filed} bead(s), noted {noted} repeat(s), {} withheld by the per-run budget",
+            summary.over_budget
+        );
+    }
+
+    if json {
+        println!("{}", audit::render_json(&report)?);
+    } else {
+        print!("{}", audit::render_human(&report));
+    }
+
+    if emit_telemetry {
+        let telemetry = Telemetry::from_config("needle-audit".to_string(), &ctx.config.telemetry)
+            .unwrap_or_else(|error| {
+                tracing::warn!(error = %error, "failed to configure audit telemetry");
+                Telemetry::new("needle-audit".to_string())
+            });
+        telemetry.start_and_wait().await?;
+        let at = chrono::Utc::now();
+        for event in audit::audit_events(&report, filed, noted) {
+            telemetry.emit(event, at)?;
+        }
+        telemetry.shutdown().await;
+    }
+
+    Ok(audit::exit_code(&report))
+}
 
 /// `needle ci-reconcile` — run the worker-free post-push CI reconciler.
 fn cmd_ci_reconcile(workspace: Option<PathBuf>, once: bool) -> Result<()> {

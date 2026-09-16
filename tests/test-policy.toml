@@ -76,7 +76,17 @@ version = 1
 # pure function of a fixture context; the explicit five-target boundary
 # (tests/cargo-targets) rules out a dedicated harness. Acceptance command:
 # `cargo test --lib nt57_`.
-max_tests = 3786
+
+# +12 audit CLI, telemetry and bead filing, N-T58 (needle-e42f3f0b): ten
+# filing-policy contracts in src/cli/audit/filing.rs (signature stability and
+# scoping, informational never filed, the per-run budget, notes not being
+# budgeted, intra-run duplicates, the create-then-note sequence over two runs,
+# label shape including never-`human`, closed beads not suppressing a new one,
+# owning-store fallback, and the bounded repeat note) plus two telemetry-shape
+# contracts in src/cli/audit.rs. All pure or against an in-memory store — the
+# `--lib` harness may not spawn a process (tests/lib-process-purity).
+# Acceptance command: `cargo test --lib nt58_`.
+max_tests = 3798
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

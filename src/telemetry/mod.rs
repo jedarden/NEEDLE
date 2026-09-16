@@ -592,6 +592,28 @@ pub enum EventKind {
         excluded_count: usize,
         candidate_exclusion_reasons: Vec<String>,
     },
+    /// One `needle audit` finding, emitted per finding under
+    /// `--emit-telemetry`. Informational findings are emitted too: they are
+    /// reported states, and suppressing them here would make the telemetry
+    /// disagree with the report.
+    AuditFinding {
+        rule: String,
+        severity: String,
+        scope: String,
+        subject: String,
+        count: u64,
+    },
+    /// One `needle audit` run finished. Carries what the run actually checked
+    /// alongside what it found, so a reader can tell a clean estate from an
+    /// audit that reconciled nothing.
+    AuditCompleted {
+        predicates_run: usize,
+        violation_findings: usize,
+        informational_findings: usize,
+        beads_filed: usize,
+        beads_noted: usize,
+        exit_code: i32,
+    },
     /// Pluck ordering degraded due to large queue size.
     PluckOrderingDegraded {
         open_bead_count: usize,
@@ -1683,6 +1705,8 @@ impl EventKind {
             EventKind::PluckLaneEmpty { .. } => "strand.pluck.lane_empty",
             EventKind::PluckBypassActivated { .. } => "strand.pluck.bypass_activated",
             EventKind::KnotStarvationDetected { .. } => "strand.knot.starvation_detected",
+            EventKind::AuditFinding { .. } => "audit.finding",
+            EventKind::AuditCompleted { .. } => "audit.completed",
             EventKind::PluckOrderingDegraded { .. } => "strand.pluck.ordering_degraded",
             EventKind::MendCycleBroken { .. } => "mend.cycle_broken",
             EventKind::AuditBeadClosedAsVerification { .. } => "audit.bead_closed_as_verification",
@@ -1954,6 +1978,8 @@ impl EventKind {
             | EventKind::PluckLaneEmpty { .. }
             | EventKind::PluckBypassActivated { .. }
             | EventKind::KnotStarvationDetected { .. }
+            | EventKind::AuditFinding { .. }
+            | EventKind::AuditCompleted { .. }
             | EventKind::AlertDeduplicated { .. }
             | EventKind::GatePathMissing { .. }
             | EventKind::HealthCheck { .. }
@@ -2319,6 +2345,38 @@ impl EventKind {
                     "lane": lane,
                     "workspace": workspace,
                     "fallback": fallback,
+                })
+            }
+            EventKind::AuditFinding {
+                rule,
+                severity,
+                scope,
+                subject,
+                count,
+            } => {
+                serde_json::json!({
+                    "rule": rule,
+                    "severity": severity,
+                    "scope": scope,
+                    "subject": subject,
+                    "count": count,
+                })
+            }
+            EventKind::AuditCompleted {
+                predicates_run,
+                violation_findings,
+                informational_findings,
+                beads_filed,
+                beads_noted,
+                exit_code,
+            } => {
+                serde_json::json!({
+                    "predicates_run": predicates_run,
+                    "violation_findings": violation_findings,
+                    "informational_findings": informational_findings,
+                    "beads_filed": beads_filed,
+                    "beads_noted": beads_noted,
+                    "exit_code": exit_code,
                 })
             }
             EventKind::PluckBypassActivated {
@@ -3923,6 +3981,8 @@ impl EventKind {
             | EventKind::PluckLaneEmpty { .. }
             | EventKind::PluckBypassActivated { .. }
             | EventKind::KnotStarvationDetected { .. }
+            | EventKind::AuditFinding { .. }
+            | EventKind::AuditCompleted { .. }
             | EventKind::AlertDeduplicated { .. }
             | EventKind::ClaimAttempt { .. }
             | EventKind::ClaimSuccess { .. }
