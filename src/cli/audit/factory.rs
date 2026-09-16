@@ -19,10 +19,12 @@
 //! given.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
 use super::{AuditContext, Collected, Finding, Predicate};
+use crate::config::Config;
 use crate::evidence_routing::LedgerRow;
 
 /// Ledger `outcome` value for a verified closure.
@@ -40,6 +42,7 @@ pub fn predicates() -> Vec<Box<dyn Predicate>> {
         Box::new(LateTierYieldInversion),
         Box::new(UncostedTimeouts),
         Box::new(CiRed),
+        Box::new(LearningLoopStalled),
         Box::new(ChecklistDrift),
     ]
 }
@@ -562,6 +565,163 @@ impl Predicate for ChecklistDrift {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// F5 — a learning loop that has stopped closing anything
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Label marking a bead as part of the learning loop.
+pub const LOOP_LABEL: &str = "learning-loop";
+
+/// Rule id for a stalled learning loop.
+///
+/// A named constant because filing keys the `escalation` label on it: this is
+/// the one rule whose bead is deliberately withheld from the fleet, because
+/// the fleet is precisely what has failed to move it.
+pub const F5_LEARNING_LOOP_STALLED: &str = "F5_LEARNING_LOOP_STALLED";
+
+/// One open, unassigned learning-loop bead that is waiting for someone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StalledBead {
+    pub id: String,
+    pub title: String,
+    pub priority: u8,
+    pub age_days: i64,
+}
+
+/// The workspaces F5 watches: `audit.loop.workspaces`, or the home workspace
+/// alone when that list is empty.
+pub fn loop_workspaces_of(config: &Config) -> Vec<PathBuf> {
+    if config.audit.loop_.workspaces.is_empty() {
+        vec![config.audit.home_workspace.clone()]
+    } else {
+        config.audit.loop_.workspaces.clone()
+    }
+}
+
+/// Whether a bead belongs to the learning loop.
+fn is_loop_bead(bead: &crate::types::Bead) -> bool {
+    bead.labels.iter().any(|label| label == LOOP_LABEL)
+}
+
+/// Open and held by nobody: the shape of a bead that is waiting rather than
+/// being worked.
+fn is_waiting(bead: &crate::types::Bead) -> bool {
+    bead.status == crate::types::BeadStatus::Open && bead.assignee.is_none()
+}
+
+/// Open, unassigned learning-loop beads in `workspace`, longest-waiting first.
+///
+/// Public because the escalation brief lists exactly these, with their
+/// priority and age, and recomputing them from the finding's prose would be a
+/// second source of truth.
+pub fn stalled_loop_beads(ctx: &AuditContext, workspace: &Path) -> Vec<StalledBead> {
+    let Some(Collected::Available(beads)) = ctx.beads.get(workspace) else {
+        return Vec::new();
+    };
+    let mut stalled: Vec<StalledBead> = beads
+        .iter()
+        .filter(|bead| is_loop_bead(bead) && is_waiting(bead))
+        .map(|bead| StalledBead {
+            id: bead.id.to_string(),
+            title: bead.title.clone(),
+            priority: bead.priority,
+            age_days: (ctx.collected_at - bead.created_at).num_days(),
+        })
+        .collect();
+    // Longest-waiting first: the brief is read top-down, and the bead that has
+    // waited longest is the one a person should look at first. The id breaks
+    // ties so two runs over unchanged inputs render byte-identically.
+    stalled.sort_by(|a, b| b.age_days.cmp(&a.age_days).then_with(|| a.id.cmp(&b.id)));
+    stalled
+}
+
+/// Open learning-loop beads are waiting and nothing has closed in the window.
+///
+/// # Why `updated_at` stands in for a close time
+///
+/// bead-rs exposes no close timestamp, so a closed bead's `updated_at` is the
+/// best available proxy for when it closed. The approximation can only run
+/// *late* — any edit after the close moves it forward, never back — so it can
+/// only make this rule quieter, never noisier. A loop that genuinely stalled
+/// is still reported; a loop whose last close was edited afterwards is
+/// forgiven for a while longer. That asymmetry is the right one for a rule
+/// whose false positive costs an operator's attention.
+struct LearningLoopStalled;
+
+impl Predicate for LearningLoopStalled {
+    fn id(&self) -> &'static str {
+        F5_LEARNING_LOOP_STALLED
+    }
+
+    fn description(&self) -> &'static str {
+        "open learning-loop beads are waiting and no loop bead closed inside the stall window"
+    }
+
+    fn check(&self, ctx: &AuditContext) -> Result<Vec<Finding>> {
+        let stall_days = ctx.config.audit.loop_.stall_days;
+        let cutoff = ctx.collected_at - chrono::Duration::days(stall_days);
+        let mut findings = Vec::new();
+
+        for workspace in loop_workspaces_of(&ctx.config) {
+            // Not collected means "could not look", which the run reports as
+            // an unavailable input rather than as a healthy loop.
+            let Some(Collected::Available(beads)) = ctx.beads.get(&workspace) else {
+                continue;
+            };
+            let stalled = stalled_loop_beads(ctx, &workspace);
+            // Nothing waiting is not a stall: a loop with no open work is a
+            // loop that has nothing to do, which is a different state.
+            if stalled.is_empty() {
+                continue;
+            }
+
+            let newest_close = beads
+                .iter()
+                .filter(|bead| is_loop_bead(bead) && bead.status.is_done())
+                .map(|bead| bead.updated_at)
+                .max();
+            if newest_close.is_some_and(|closed| closed >= cutoff) {
+                continue;
+            }
+
+            let name = workspace
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| workspace.display().to_string());
+            let since = match newest_close {
+                Some(closed) => format!(
+                    "newest loop close {} ({} day(s) ago, approximated by updated_at)",
+                    closed.to_rfc3339(),
+                    (ctx.collected_at - closed).num_days()
+                ),
+                None => "no learning-loop bead has ever closed here".to_string(),
+            };
+            let oldest = stalled
+                .first()
+                .map(|bead| {
+                    format!(
+                        "oldest {} (P{}, waiting {} day(s))",
+                        bead.id, bead.priority, bead.age_days
+                    )
+                })
+                .unwrap_or_default();
+
+            findings.push(Finding::violation(
+                self.id(),
+                name,
+                LOOP_LABEL,
+                format!(
+                    "{} open unassigned learning-loop bead(s) waiting and nothing closed \
+                     within {stall_days} day(s): {since}; {oldest}",
+                    stalled.len(),
+                ),
+                stalled.len() as u64,
+            ));
+        }
+        Ok(findings)
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Tests
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -632,6 +792,129 @@ mod tests {
 
     fn findings_of(predicate: &dyn Predicate, ctx: &AuditContext) -> Vec<Finding> {
         predicate.check(ctx).expect("predicate runs")
+    }
+
+    // ── F5 ────────────────────────────────────────────────────────────────
+
+    /// A learning-loop bead, optionally closed `closed_days_ago`.
+    fn loop_bead(id: &str, status: crate::types::BeadStatus, closed_days_ago: Option<i64>) -> Bead {
+        let mut bead = bead(id, status, &[LOOP_LABEL]);
+        if let Some(days) = closed_days_ago {
+            bead.updated_at = now() - chrono::Duration::days(days);
+        }
+        bead
+    }
+
+    /// The loop workspace a fixture watches, wired through config so the
+    /// predicate reads it the way production does.
+    fn loop_ctx(beads: Vec<Bead>) -> AuditContext {
+        let mut context = ctx();
+        let workspace = PathBuf::from("/fixture-root/NEEDLE");
+        context.config.audit.loop_.workspaces = vec![workspace.clone()];
+        context.workspaces.push(WorkspaceEntry {
+            path: workspace.clone(),
+            name: "NEEDLE".to_string(),
+        });
+        context.beads.insert(workspace, Collected::Available(beads));
+        context
+    }
+
+    #[test]
+    fn nt60_f5_reports_a_loop_whose_newest_close_is_four_days_old() {
+        let context = loop_ctx(vec![
+            bead(
+                "needle-open-1",
+                crate::types::BeadStatus::Open,
+                &[LOOP_LABEL],
+            ),
+            bead(
+                "needle-open-2",
+                crate::types::BeadStatus::Open,
+                &[LOOP_LABEL],
+            ),
+            loop_bead("needle-closed", crate::types::BeadStatus::Closed, Some(4)),
+        ]);
+
+        let findings = findings_of(&LearningLoopStalled, &context);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].scope, "NEEDLE");
+        assert_eq!(findings[0].subject, LOOP_LABEL);
+        assert_eq!(findings[0].count, 2, "both waiting beads are counted");
+        assert!(
+            findings[0].detail.contains("approximated by updated_at"),
+            "the detail names the approximation: {}",
+            findings[0].detail
+        );
+    }
+
+    #[test]
+    fn nt60_f5_stays_quiet_when_a_loop_bead_closed_inside_the_window() {
+        // A close one day ago: the loop is alive.
+        let context = loop_ctx(vec![
+            bead("needle-open", crate::types::BeadStatus::Open, &[LOOP_LABEL]),
+            loop_bead("needle-closed", crate::types::BeadStatus::Closed, Some(1)),
+        ]);
+        assert!(findings_of(&LearningLoopStalled, &context).is_empty());
+    }
+
+    #[test]
+    fn nt60_f5_stays_quiet_without_an_open_unassigned_loop_bead() {
+        // Nothing waiting: a loop with no open work is not a stalled loop.
+        let context = loop_ctx(vec![loop_bead(
+            "needle-closed",
+            crate::types::BeadStatus::Closed,
+            Some(30),
+        )]);
+        assert!(findings_of(&LearningLoopStalled, &context).is_empty());
+
+        // Open but already claimed: somebody is on it.
+        let mut assigned = bead(
+            "needle-claimed",
+            crate::types::BeadStatus::Open,
+            &[LOOP_LABEL],
+        );
+        assigned.assignee = Some("glm-needle".to_string());
+        let context = loop_ctx(vec![assigned]);
+        assert!(findings_of(&LearningLoopStalled, &context).is_empty());
+    }
+
+    #[test]
+    fn nt60_the_loop_watches_the_home_workspace_by_default() {
+        let mut config = crate::config::Config::default();
+        config.audit.home_workspace = PathBuf::from("/fixture-root/NEEDLE");
+        config.audit.loop_.workspaces.clear();
+        assert_eq!(
+            loop_workspaces_of(&config),
+            vec![PathBuf::from("/fixture-root/NEEDLE")],
+            "an empty list means the home workspace alone"
+        );
+
+        config.audit.loop_.workspaces = vec![PathBuf::from("/srv/other")];
+        assert_eq!(
+            loop_workspaces_of(&config),
+            vec![PathBuf::from("/srv/other")],
+            "a configured list replaces the default"
+        );
+    }
+
+    #[test]
+    fn nt60_stalled_beads_are_longest_waiting_first_with_priority_and_age() {
+        let mut young = bead(
+            "needle-young",
+            crate::types::BeadStatus::Open,
+            &[LOOP_LABEL],
+        );
+        young.created_at = now() - chrono::Duration::days(2);
+        let mut old = bead("needle-old", crate::types::BeadStatus::Open, &[LOOP_LABEL]);
+        old.created_at = now() - chrono::Duration::days(20);
+
+        let context = loop_ctx(vec![young, old]);
+        let stalled = stalled_loop_beads(&context, Path::new("/fixture-root/NEEDLE"));
+
+        let ids: Vec<&str> = stalled.iter().map(|bead| bead.id.as_str()).collect();
+        assert_eq!(ids, vec!["needle-old", "needle-young"]);
+        assert_eq!(stalled[0].age_days, 20);
+        assert_eq!(stalled[0].priority, 1);
     }
 
     // ── F1 ────────────────────────────────────────────────────────────────
@@ -1061,6 +1344,7 @@ mod tests {
                 "F2_LATE_TIER_YIELD_INVERSION",
                 "F3_UNCOSTED_TIMEOUTS",
                 "F4_CI_RED",
+                "F5_LEARNING_LOOP_STALLED",
                 "I_CHECKLIST_DRIFT",
             ]
         );
@@ -1079,6 +1363,6 @@ mod tests {
         let report = run(&ctx(), &predicates()).expect("audit runs");
         assert!(report.findings.is_empty(), "{:?}", report.findings);
         assert_eq!(exit_code(&report), 0);
-        assert_eq!(report.predicates_run.len(), 5);
+        assert_eq!(report.predicates_run.len(), 6);
     }
 }

@@ -86,7 +86,18 @@ version = 1
 # contracts in src/cli/audit.rs. All pure or against an in-memory store — the
 # `--lib` harness may not spawn a process (tests/lib-process-purity).
 # Acceptance command: `cargo test --lib nt58_`.
-max_tests = 3798
+
+# +10 learning-loop stall and escalation handoff, N-T60 (needle-e0ad35bd):
+# five F5 predicate contracts in src/cli/audit/factory.rs (fires on a
+# four-day-old newest close, quiet on a close inside the window, quiet without
+# an open unassigned loop bead, the home-workspace default, and the
+# longest-waiting-first ordering carrying priority and age), three brief
+# contracts in src/cli/audit/escalation.rs (content, rewritten-not-duplicated,
+# and a path-safe name), one filing contract for the `escalation` label and the
+# brief path in the bead body, and one Pluck default-exclusion contract in
+# src/strand/pluck.rs. All pure or against a tempdir and an in-memory store.
+# Acceptance command: `cargo test --lib nt60_`.
+max_tests = 3808
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

@@ -1305,6 +1305,21 @@ audit:
     # reported (default: 1). CI is allowed to be red for the minutes between
     # a bad push and its fix.
     ci_red_hours: 1
+
+  # Learning-loop liveness (F5).
+  loop:
+    # Workspaces whose learning loop must stay alive. Empty — the default —
+    # means `audit.home_workspace` alone.
+    workspaces: []
+
+    # Days without a closed `learning-loop` bead before the loop counts as
+    # stalled (default: 3).
+    #
+    # A closed bead's `updated_at` stands in for its close time, because
+    # bead-rs exposes no close timestamp. The approximation can only run late
+    # — an edit after the close moves it forward, never back — so it can only
+    # make this rule quieter, never noisier.
+    stall_days: 3
 ```
 
 The `factory` predicate group and the keys each rule reads:
@@ -1315,7 +1330,17 @@ The `factory` predicate group and the keys each rule reads:
 | `F2_LATE_TIER_YIELD_INVERSION` | violation | `window_hours`, `tier_min_rows`, `tier_inversion_points` |
 | `F3_UNCOSTED_TIMEOUTS` | violation | `window_hours`, `min_costed_rows`, `min_uncosted_timeouts` |
 | `F4_CI_RED` | violation | `ci_red_hours` |
+| `F5_LEARNING_LOOP_STALLED` | violation | `loop.workspaces`, `loop.stall_days` |
 | `I_CHECKLIST_DRIFT` | informational | bead inventories only — no threshold |
+
+`F5_LEARNING_LOOP_STALLED` escalates rather than filing ordinary work. It fires
+when the fleet has failed to move the learning loop, so handing the bead back to
+the fleet would return the problem to its cause. The bead it files therefore
+carries `escalation`, which `strands.pluck.exclude_labels` excludes by default,
+and the run writes a brief to `~/.needle/state/escalations/<RULE>--<scope>.md`
+for an interactive session or a stronger-model lane. The brief is rewritten in
+place per rule and scope, never duplicated, and the filed bead names its path.
+Nothing is reassigned or re-prioritised automatically.
 
 Informational rules (prefixed `I_`) report states that are correct as-is and
 must never be repaired automatically. They still drive exit code 1, because

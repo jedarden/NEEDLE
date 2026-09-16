@@ -4009,6 +4009,9 @@ impl Default for PluckConfig {
                 "deferred".to_string(),
                 "human".to_string(),
                 "blocked".to_string(),
+                // N-T60: an escalation is work the fleet already failed to
+                // move, so no worker claims it by default.
+                "escalation".to_string(),
             ],
             lanes: Vec::new(),
             split_after_failures: Self::default_split_after_failures(),

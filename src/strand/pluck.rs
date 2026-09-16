@@ -20,7 +20,12 @@ use std::path::PathBuf;
 use std::sync::{atomic::AtomicUsize, atomic::Ordering, Mutex};
 
 /// Default labels excluded from Pluck selection when not configured.
-const DEFAULT_EXCLUDE_LABELS: &[&str] = &["deferred", "human", "blocked"];
+///
+/// `escalation` (N-T60) marks work the fleet has already failed to move: a
+/// stalled learning loop is escalated precisely because workers did not
+/// advance it, so letting a worker claim the escalation would hand the problem
+/// back to the thing that caused it.
+const DEFAULT_EXCLUDE_LABELS: &[&str] = &["deferred", "human", "blocked", "escalation"];
 
 /// Failure count at which an ADR-022 quarantine triggers, used when a caller
 /// does not wire the configured threshold explicitly. Production wiring passes
@@ -4714,7 +4719,25 @@ mod tests {
     #[test]
     fn default_exclude_labels_applied_when_empty() {
         let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()));
-        assert_eq!(strand.exclude_labels, vec!["deferred", "human", "blocked"]);
+        assert_eq!(
+            strand.exclude_labels,
+            vec!["deferred", "human", "blocked", "escalation"]
+        );
+    }
+
+    /// An escalation is work the fleet already failed to move, so no worker
+    /// may claim it by default (N-T60).
+    #[test]
+    fn nt60_escalation_is_excluded_from_pluck_by_default() {
+        let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()));
+        assert!(
+            strand
+                .exclude_labels
+                .iter()
+                .any(|label| label == "escalation"),
+            "escalation must be excluded by default: {:?}",
+            strand.exclude_labels
+        );
     }
 
     #[test]
@@ -5664,7 +5687,9 @@ mod tests {
 
         assert_eq!(
             record["worker_constraints"]["exclude_labels"],
-            serde_json::json!(["deferred", "human", "blocked"])
+            // `escalation` joined the defaults with N-T60: an escalation is
+            // work the fleet already failed to move, so no worker claims it.
+            serde_json::json!(["deferred", "human", "blocked", "escalation"])
         );
         assert_eq!(
             record["worker_constraints"]["exclude_ids"],

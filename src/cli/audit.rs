@@ -61,6 +61,7 @@ use crate::build_status::{BuildStatusChecker, CiWorkflowRun};
 use crate::config::{expand_tilde_str, CliOverrides, Config, ConfigLoader};
 use crate::types::Bead;
 
+pub mod escalation;
 pub mod factory;
 pub mod filing;
 
@@ -388,7 +389,19 @@ pub async fn collect_context(config: Config, root: Option<PathBuf>) -> Result<Au
 
     let (ci, ci_templates) =
         collect_ci(&workspaces, &BuildStatusChecker::production(), collected_at).await;
-    let beads = collect_beads(&workspaces).await;
+    let mut beads = collect_beads(&workspaces).await;
+    // F5 watches configured loop workspaces, which discovery need not have
+    // found: a loop workspace outside the audit root would otherwise be
+    // silently unwatched rather than reported, which is the fail-open shape
+    // this command exists to refuse.
+    let unwatched: Vec<PathBuf> = factory::loop_workspaces_of(&config)
+        .into_iter()
+        .filter(|workspace| !beads.contains_key(workspace))
+        .collect();
+    for workspace in unwatched {
+        let collected = collect_workspace_beads(&workspace).await;
+        beads.insert(workspace, collected);
+    }
 
     Ok(AuditContext {
         root,

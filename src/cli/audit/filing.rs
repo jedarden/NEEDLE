@@ -43,6 +43,20 @@ pub const AUDIT_LABEL: &str = "audit";
 /// The label Unravel consumes. An audit bead must never carry it.
 pub const HUMAN_LABEL: &str = "human";
 
+/// Label marking a bead no fleet worker may claim (N-T60).
+///
+/// `strands.pluck.exclude_labels` carries it by default.
+pub const ESCALATION_LABEL: &str = "escalation";
+
+/// Whether a finding escalates instead of filing ordinary work.
+///
+/// One rule does. `F5_LEARNING_LOOP_STALLED` fires exactly when the fleet has
+/// failed to move the learning loop, so a bead a worker could claim would hand
+/// the problem straight back to its cause.
+pub fn is_escalating(finding: &Finding) -> bool {
+    finding.rule == super::factory::F5_LEARNING_LOOP_STALLED
+}
+
 /// Longest repeat note appended to an existing bead.
 ///
 /// Bounded because the note is appended once per run per still-open finding:
@@ -80,11 +94,15 @@ pub fn signature_label(finding: &Finding) -> String {
 /// Labels a filed bead carries: the population label, the rule, and the
 /// signature. Never [`HUMAN_LABEL`].
 pub fn labels_for(finding: &Finding) -> Vec<String> {
-    vec![
+    let mut labels = vec![
         AUDIT_LABEL.to_string(),
         format!("{AUDIT_LABEL}:{}", finding.rule),
         signature_label(finding),
-    ]
+    ];
+    if is_escalating(finding) {
+        labels.push(ESCALATION_LABEL.to_string());
+    }
+    labels
 }
 
 /// The title a filed bead carries.
@@ -93,8 +111,12 @@ pub fn title_for(finding: &Finding) -> String {
 }
 
 /// The body a filed bead carries.
-pub fn body_for(finding: &Finding) -> String {
-    format!(
+///
+/// `escalation` names the brief written for an escalating finding, so the bead
+/// points at the file a person is meant to open. An escalation whose brief
+/// nobody can find is the same as no brief at all.
+pub fn body_for(finding: &Finding, escalation: Option<&Path>) -> String {
+    let mut body = format!(
         "Filed by `needle audit` (N-T58). This bead reports a finding; it does not repair it.\n\
          \n\
          - rule: {rule}\n\
@@ -115,7 +137,18 @@ pub fn body_for(finding: &Finding) -> String {
         count = finding.count,
         detail = finding.detail,
         label = signature_label(finding),
-    )
+    );
+    if let Some(path) = escalation {
+        body.push_str(&format!(
+            "\nThis finding is escalated. The bead carries `{ESCALATION_LABEL}`, which\n\
+             Pluck excludes by default, so no fleet worker will claim it — the fleet is\n\
+             what failed to move this work. The brief for an interactive session or a\n\
+             stronger-model lane is at:\n\
+             \n    {}\n",
+            path.display()
+        ));
+    }
+    body
 }
 
 /// The note a repeat sighting appends to an existing bead.
@@ -162,6 +195,11 @@ pub struct PlannedFiling {
     pub finding: Finding,
     pub signature: String,
     pub action: Filing,
+    /// The escalation brief written for this finding, when it escalates.
+    ///
+    /// Set by [`file_report`] once the brief exists, so the filed bead can
+    /// name a path that is already on disk rather than one it hopes for.
+    pub escalation: Option<PathBuf>,
 }
 
 /// Decide what to do with every violation in `report`.
@@ -203,6 +241,7 @@ pub fn plan(
             finding: finding.clone(),
             signature,
             action,
+            escalation: None,
         });
     }
     planned
@@ -283,7 +322,7 @@ pub async fn apply(
             let id = store
                 .create_bead(
                     &title_for(&planned.finding),
-                    &body_for(&planned.finding),
+                    &body_for(&planned.finding, planned.escalation.as_deref()),
                     &label_refs,
                 )
                 .await
@@ -329,10 +368,6 @@ pub async fn file_report(ctx: &AuditContext, report: &AuditReport) -> Result<Fil
         stores.insert(path, (store, signatures));
     }
 
-    let owned: Vec<PathBuf> = violations
-        .iter()
-        .map(|finding| owning_workspace(finding, &ctx.workspaces, home))
-        .collect();
     let lookup = |finding: &Finding| -> Option<BeadId> {
         let path = owning_workspace(finding, &ctx.workspaces, home);
         stores
@@ -344,11 +379,32 @@ pub async fn file_report(ctx: &AuditContext, report: &AuditReport) -> Result<Fil
         .iter()
         .map(|finding| (*finding).clone())
         .collect();
-    let planned = plan(&findings, &lookup, ctx.config.audit.max_beads_per_run);
+    let mut planned = plan(&findings, &lookup, ctx.config.audit.max_beads_per_run);
+
+    // An escalating finding gets its brief before its bead, so the bead names
+    // a path that is already on disk rather than one it hopes for (N-T60).
+    let brief_dir = super::escalation::default_brief_dir(&ctx.config);
+    for item in planned
+        .iter_mut()
+        .filter(|item| is_escalating(&item.finding))
+    {
+        let workspace = owning_workspace(&item.finding, &ctx.workspaces, home);
+        let stalled = super::factory::stalled_loop_beads(ctx, &workspace);
+        item.escalation = Some(super::escalation::write_brief(
+            &brief_dir,
+            &item.finding,
+            &stalled,
+            ctx.collected_at,
+        )?);
+    }
 
     let mut summary = FilingSummary::default();
-    for (index, item) in planned.iter().enumerate() {
-        let path = owned.get(index).cloned().unwrap_or_else(|| home.clone());
+    for item in &planned {
+        // Resolved from the finding rather than from a parallel index: `plan`
+        // drops intra-run duplicate signatures, so a positional index into
+        // `violations` can run short and file a finding into another
+        // workspace's store.
+        let path = owning_workspace(&item.finding, &ctx.workspaces, home);
         let Some((store, _)) = stores.get(&path) else {
             continue;
         };
@@ -746,6 +802,53 @@ mod tests {
             owning_workspace(&fleet, &workspaces, home),
             home.to_path_buf()
         );
+    }
+
+    /// The escalation bead is the one bead the fleet must not claim, and it
+    /// has to name the brief a person is meant to open (N-T60).
+    #[tokio::test]
+    async fn nt60_an_escalation_bead_carries_the_label_and_names_its_brief() {
+        let store = MemoryStore::default();
+        let finding = Finding::violation(
+            crate::cli::audit::factory::F5_LEARNING_LOOP_STALLED,
+            "NEEDLE",
+            "learning-loop",
+            "7 open unassigned learning-loop bead(s) waiting",
+            7,
+        );
+        assert!(is_escalating(&finding));
+
+        let mut planned = plan(std::slice::from_ref(&finding), &|_| None, 3);
+        let brief =
+            PathBuf::from("/fixture/.needle/state/escalations/F5_LEARNING_LOOP_STALLED--NEEDLE.md");
+        planned[0].escalation = Some(brief.clone());
+
+        let mut summary = FilingSummary::default();
+        apply(&store, &planned[0], now(), &mut summary)
+            .await
+            .expect("filing applies");
+
+        let (_, body, labels) = store.created()[0].clone();
+        assert!(
+            labels.contains(&ESCALATION_LABEL.to_string()),
+            "an escalation bead carries the label Pluck excludes: {labels:?}"
+        );
+        assert!(
+            !labels.iter().any(|label| label == HUMAN_LABEL),
+            "still never `human`: {labels:?}"
+        );
+        assert!(
+            body.contains("F5_LEARNING_LOOP_STALLED--NEEDLE.md"),
+            "the bead names its brief: {body}"
+        );
+
+        // An ordinary violation is not escalated and names no brief.
+        let ordinary = violation("F4_CI_RED", "NEEDLE", "needle-ci");
+        assert!(!is_escalating(&ordinary));
+        assert!(!labels_for(&ordinary)
+            .iter()
+            .any(|label| label == ESCALATION_LABEL));
+        assert!(!body_for(&ordinary, None).contains("escalated"));
     }
 
     #[test]
