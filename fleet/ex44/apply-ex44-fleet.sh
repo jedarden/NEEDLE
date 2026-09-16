@@ -169,6 +169,12 @@ while IFS=$'\t' read -r id workspace agent delay explore; do
     target="$WORKERS_DIR/$id.env"
     expected=$(printf 'NEEDLE_WS=%s\nNEEDLE_AGENT=%s\nNEEDLE_START_DELAY=%s\nNEEDLE_STRANDS__EXPLORE__ENABLED=%s' \
         "$workspace" "$agent" "$delay" "$explore")
+    if [[ "$agent" == codex-* ]]; then
+        # Codex capacity must remain Codex capacity. The fleet-wide evidence
+        # router intentionally explores GLM variants for Z.ai workers, but a
+        # Codex worker must not be sampled back onto that provider pool.
+        expected+=$'\nNEEDLE_AGENT__EVIDENCE_ROUTING__ENABLED=false'
+    fi
     if [[ -f "$target" && "$(<"$target")" == "$expected" ]]; then
         echo "- $id.env already current"
         continue

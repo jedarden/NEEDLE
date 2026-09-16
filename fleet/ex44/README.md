@@ -7,6 +7,9 @@ the maintained-workspace frontier when that route has no eligible work. Nine
 workers use GLM-5.3, up to fifteen use GLM-5.3-Flash, one NEEDLE-home worker
 uses Codex GPT-5.6 Luna, and two additional Luna workers roam. Live-session
 concurrency is enforced separately from the number of registered workers.
+Codex instance environments disable the fleet-wide GLM evidence router so
+those three workers remain Codex capacity rather than entering its 10% GLM
+exploration sample.
 
 ## What this implements
 

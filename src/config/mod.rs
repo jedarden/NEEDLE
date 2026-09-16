@@ -8495,6 +8495,18 @@ impl ConfigLoader {
                             .default_adapter = Some(value);
                         sources.insert(config_path, source);
                     }
+                    "agent.evidence_routing.enabled" => {
+                        if let Ok(v) = value.parse::<bool>() {
+                            config.agent.evidence_routing.enabled = v;
+                            sources.insert(config_path, source);
+                        } else {
+                            tracing::warn!(
+                                env_var = %key,
+                                value = %value,
+                                "invalid value for agent.evidence_routing.enabled — expected true/false"
+                            );
+                        }
+                    }
                     "worker.max_workers" => {
                         if let Ok(v) = value.parse::<u32>() {
                             config.worker.max_workers = v;
