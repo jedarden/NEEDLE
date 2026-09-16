@@ -53,6 +53,7 @@ RUN mkdir -p src/bin benches tests && \
     echo "fn main() {}" > tests/p2_integration_tests.rs && \
     echo "fn main() {}" > tests/p3_integration_tests.rs && \
     echo "fn main() {}" > tests/real_br_integration_tests.rs && \
+    echo "fn main() {}" > tests/escalation_ladder.rs && \
     CARGO_BUILD_JOBS=2 cargo-nextest nextest archive \
       --archive-file /tmp/needle-nextest-dependency-warm.tar.zst \
       --profile ci \
@@ -62,7 +63,8 @@ RUN mkdir -p src/bin benches tests && \
       --test integration_tests \
       --test p2_integration_tests \
       --test p3_integration_tests \
-      --test real_br_integration_tests && \
+      --test real_br_integration_tests \
+      --test escalation_ladder && \
     rm -f /tmp/needle-nextest-dependency-warm.tar.zst && \
     test -d /opt/needle-ci-target/debug/deps && \
     actual_toolchain="$(rustc -vV | sed -n 's/^release: //p')" && \
@@ -84,7 +86,7 @@ RUN mkdir -p src/bin benches tests && \
       printf '%s\n' 'nextest_profile=ci'; \
       printf '%s\n' 'features=default'; \
       printf 'target_triple=%s\n' "$target_triple"; \
-      printf '%s\n' 'target_set=lib,integration_spawn,integration_tests,p2_integration_tests,p3_integration_tests,real_br_integration_tests'; \
+      printf '%s\n' 'target_set=lib,integration_spawn,integration_tests,p2_integration_tests,p3_integration_tests,real_br_integration_tests,escalation_ladder'; \
       printf '%s\n' 'workspace_root=/workspace'; \
       printf '%s\n' 'target_dir=/opt/needle-ci-target'; \
       printf '%s\n' 'cargo_build_jobs=2'; \

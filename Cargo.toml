@@ -169,6 +169,11 @@ name = "real_br_integration_tests"
 path = "tests/real_br_integration_tests.rs"
 harness = true
 
+[[test]]
+name = "escalation_ladder"
+path = "tests/escalation_ladder.rs"
+harness = true
+
 [[bench]]
 name = "sanitize"
 harness = false

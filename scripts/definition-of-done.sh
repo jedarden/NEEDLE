@@ -164,7 +164,7 @@ done
 # actually runs.
 needle_slow_targets() {
   printf '%s\n' lib integration_spawn integration_tests p2_integration_tests \
-    p3_integration_tests real_br_integration_tests installer
+    p3_integration_tests real_br_integration_tests escalation_ladder installer
 }
 
 needle_cargo_selector() {
@@ -175,11 +175,12 @@ needle_cargo_selector() {
     p2_integration_tests)      printf '%s\n' --test p2_integration_tests ;;
     p3_integration_tests)      printf '%s\n' --test p3_integration_tests ;;
     real_br_integration_tests) printf '%s\n' --test real_br_integration_tests ;;
+    escalation_ladder)         printf '%s\n' --test escalation_ladder ;;
     *)                         return 1 ;;
   esac
 }
 
-# An archive contains all six Cargo test binaries, so archive consumers must
+# An archive contains all seven Cargo test binaries, so archive consumers must
 # select by nextest's stable binary ID rather than passing Cargo target flags
 # (Cargo build options conflict with --archive-file). Equality matchers are
 # deliberate: contains/glob matching could silently run a newly added binary.
@@ -191,6 +192,7 @@ needle_nextest_filter() {
     p2_integration_tests)      printf '%s\n' 'binary_id(=needle::p2_integration_tests)' ;;
     p3_integration_tests)      printf '%s\n' 'binary_id(=needle::p3_integration_tests)' ;;
     real_br_integration_tests) printf '%s\n' 'binary_id(=needle::real_br_integration_tests)' ;;
+    escalation_ladder)         printf '%s\n' 'binary_id(=needle::escalation_ladder)' ;;
     *)                         return 1 ;;
   esac
 }

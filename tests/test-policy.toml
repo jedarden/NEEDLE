@@ -120,7 +120,8 @@ contract = 67
 # +15 consolidated resolution lifecycle process contracts (needle-6a36c428).
 # +1 N-T46 split-attempt ledger row keeps real gate results (needle-16657d72):
 # the gate must execute, which --lib forbids.
-e2e = 768
+# +1 end-to-end escalation ladder harness (needle-e4d0f4b9).
+e2e = 769
 soak = 0
 fuzz = 0
 
@@ -162,6 +163,13 @@ path = "tests/real_br_integration_tests.rs"
 tier = "contract"
 max_tests = 67
 owner = "component:bead-rs-contract"
+
+[[harness]]
+name = "escalation_ladder"
+path = "tests/escalation_ladder.rs"
+tier = "e2e"
+max_tests = 1
+owner = "component:escalation-ladder"
 
 # These are strict ceilings on existing debt. A new occurrence fails the fast
 # lane; deleting an occurrence makes the corresponding exception stale so the

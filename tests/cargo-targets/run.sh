@@ -10,6 +10,7 @@ TOOLCHAIN_FILE="$REPO_ROOT/rust-toolchain.toml"
 NEXTEST_CONFIG="$REPO_ROOT/.config/nextest.toml"
 CI_VERSION_FILE="$REPO_ROOT/ci/VERSION"
 EXPECTED_TARGETS="$(printf '%s\n' \
+  escalation_ladder \
   integration_spawn \
   integration_tests \
   p2_integration_tests \
@@ -114,7 +115,7 @@ for marker_fragment in \
   'nextest_profile=ci' \
   'features=default' \
   'target_triple=' \
-  'target_set=lib,integration_spawn,integration_tests,p2_integration_tests,p3_integration_tests,real_br_integration_tests' \
+  'target_set=lib,integration_spawn,integration_tests,p2_integration_tests,p3_integration_tests,real_br_integration_tests,escalation_ladder' \
   'workspace_root=/workspace' \
   'target_dir=/opt/needle-ci-target' \
   'cargo_build_jobs=2'; do
@@ -287,7 +288,7 @@ probe_targets="$(test_targets "$probe_root/Cargo.toml")"
   "tests/scratch.rs changed Cargo metadata: $(tr '\n' ' ' <<<"$probe_targets")"
 [[ "$probe_targets" != *scratch* ]] || fail 'Cargo auto-discovered tests/scratch.rs'
 
-echo 'PASS: Cargo reports only the five explicit integration-test roots'
+echo 'PASS: Cargo reports only the six explicit integration-test roots'
 echo 'PASS: a stray tests/scratch.rs is not auto-discovered'
 echo 'PASS: dependency-image stubs cover every declared Cargo target'
 echo 'PASS: dependency image preserves its target tree outside /workspace'
