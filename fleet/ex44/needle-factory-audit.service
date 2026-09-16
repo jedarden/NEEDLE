@@ -11,3 +11,12 @@ ExecStart=/home/coding/.needle/bin/needle audit --emit-telemetry --file-beads --
 # broken probe. Exit 2 — the audit could not look — is a real failure and is
 # left to fail the unit.
 SuccessExitStatus=1
+# A full run reads the whole telemetry ledger (~306 MB of JSONL on this host)
+# and then queries CI once per discovered workspace, serially, at ~12 s a
+# query against 80 workspaces. Measured 2026-09-16: still running at 15 min.
+# `DefaultTimeoutStartUSec` here is 90 s and, for Type=oneshot, it bounds the
+# whole of ExecStart — so without this the nightly audit is SIGKILLed every
+# night while the timer still reports healthy, which is the exact silent
+# detector this audit exists to eliminate. Bounded rather than infinite: a
+# genuinely hung run must fail the unit instead of hanging forever.
+TimeoutStartSec=3600
