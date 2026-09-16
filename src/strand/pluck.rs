@@ -2387,7 +2387,7 @@ impl super::Strand for PluckStrand {
         //    enough consecutive failures, dispatch a SPLIT instruction instead
         //    of returning the bead for normal processing.
         if self.split_after_failures > 0 {
-            if let Some(first_candidate) = candidates.first() {
+            while let Some(first_candidate) = candidates.first() {
                 let failure_count = Self::extract_failure_count(first_candidate);
                 tracing::debug!(
                     bead_id = %first_candidate.id,
@@ -2408,17 +2408,19 @@ impl super::Strand for PluckStrand {
                             failure_count = failure_count,
                             "Split skipped: bead references NEEDLE-internal configuration, out of scope for target workspace"
                         );
-                        // Filter out this candidate and re-evaluate the remaining candidates.
+                        // Filter this candidate from the already-sorted snapshot.
+                        // Re-entering evaluate() would query the store again,
+                        // select the same candidate, and livelock forever.
                         let excluded_id = first_candidate.id.clone();
                         candidates.retain(|b| b.id != excluded_id);
+                        stats.excluded_count += 1;
+                        stats
+                            .exclusion_reasons
+                            .push(format!("split-out-of-scope:{excluded_id}"));
                         if candidates.is_empty() {
-                            // All remaining candidates were filtered out, return NoWork.
                             return StrandResult::NoWork;
                         }
-                        // Continue with remaining candidates - do not trigger split.
-                        // Jump to stats storage and return the next valid candidate.
-                        // (Skip the rest of the split trigger logic for this iteration.)
-                        return self.evaluate(store, exclusions).await;
+                        continue;
                     }
 
                     tracing::info!(
@@ -2429,6 +2431,8 @@ impl super::Strand for PluckStrand {
                     );
                     return StrandResult::Split(Box::new(first_candidate.clone()), failure_count);
                 }
+
+                break;
             }
         } else {
             tracing::debug!("Split trigger disabled (threshold = 0)");
@@ -4474,6 +4478,8 @@ mod tests {
             1,
             vec!["failure-count:3"],
         );
+        assert!(detects_needle_internal_config(&starvation_bead));
+        assert_eq!(PluckStrand::extract_failure_count(&starvation_bead), 3);
 
         let store = MemoryStore {
             beads: vec![starvation_bead],
@@ -4500,24 +4506,27 @@ mod tests {
         // Regression test for "Pluck configuration" and "exclude_labels" references
         let config_bead = make_bead_with_labels(
             "Fix bead discovery configuration",
-            1,
+            0,
             vec!["failure-count:3"],
         );
+        let normal_bead = make_bead("normal-work", 3, "2026-01-01 00:00:00");
 
         let store = MemoryStore {
-            beads: vec![config_bead],
+            beads: vec![config_bead, normal_bead],
         };
 
         let strand =
             PluckStrand::with_split_threshold(vec![], 3, Telemetry::new("test-worker".to_string()));
         let result = strand.evaluate(&store, &HashSet::new()).await;
 
-        // Should NOT trigger split
+        // The rejected split candidate must be excluded from this snapshot,
+        // and selection must continue without recursively re-querying it.
         match result {
-            StrandResult::NoWork => {
-                // Expected - bead filtered due to NEEDLE-internal config reference
+            StrandResult::BeadFound(beads) => {
+                assert_eq!(beads.len(), 1);
+                assert_eq!(beads[0].id.as_ref(), "normal-work");
             }
-            other => panic!("expected NoWork for Pluck config bead, got: {:?}", other),
+            other => panic!("expected the next candidate, got: {:?}", other),
         }
     }
 
