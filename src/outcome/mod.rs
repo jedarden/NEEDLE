@@ -70,8 +70,10 @@ const DEGRADED_WINDOW_MARKER_PREFIX: &str = "degraded-window-failure:";
 /// Classify an agent result into an `Outcome`, with verification and shutdown
 /// signal support.
 ///
-/// Interruption takes precedence. Otherwise, failed verification is always a
-/// failure; only verified results are delegated to the exit-code classifier.
+/// Interruption takes precedence. An abnormal negative exit is retained as an
+/// infrastructure outcome even without a verification verdict; otherwise,
+/// failed verification is a failure and verified results are delegated to the
+/// exit-code classifier.
 pub fn classify(exit_code: i32, was_interrupted: bool, verified: bool) -> Outcome {
     classify_with_stream(exit_code, was_interrupted, verified, "")
 }
@@ -92,6 +94,17 @@ pub fn classify_with_stream(
 ) -> Outcome {
     if was_interrupted {
         return Outcome::Interrupted;
+    }
+    // A negative exit code is the dispatcher's sentinel for a process that
+    // never produced a normal exit status (including the -1/0ms spawn-error
+    // shape). It is infrastructure evidence, not a verification failure.
+    // Classify it before consulting `verified`, otherwise a missing agent
+    // process can be turned into `Outcome::Failure`, incrementing the bead's
+    // failure counter and feeding mitosis with evidence that the task is too
+    // large. A genuine fast task failure still has a normal exit code and
+    // follows the verification path below.
+    if exit_code < 0 {
+        return Outcome::classify(exit_code, false);
     }
 
     if !verified {
@@ -4446,6 +4459,25 @@ mod tests {
     #[test]
     fn classify_with_stream_unverified_still_fails() {
         assert_eq!(classify_with_stream(0, false, false, ""), Outcome::Failure);
+    }
+
+    #[test]
+    fn classify_never_started_negative_exit_is_not_work_attributable() {
+        // A failed spawn is reported as -1 with a zero-duration dispatch. It
+        // must retain its infrastructure classification even when the caller
+        // has no successful verification verdict to report.
+        let outcome = classify_with_stream(-1, false, false, "");
+        assert_eq!(outcome, Outcome::Crash(-1));
+        assert!(!outcome.is_work_attributable());
+    }
+
+    #[test]
+    fn classify_fast_normal_exit_failure_remains_work_attributable() {
+        // Duration alone must not make a real process failure non-attributable:
+        // a normal non-zero exit is still evidence from the agent.
+        let outcome = classify_with_stream(1, false, false, "");
+        assert_eq!(outcome, Outcome::Failure);
+        assert!(outcome.is_work_attributable());
     }
 
     // ── handle tests ──
