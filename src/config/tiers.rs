@@ -273,6 +273,7 @@ static TIER_TABLE: &[(&str, ReloadTier)] = &[
     ("pricing", ReloadTier::Live),
     // Strand thresholds (live)
     ("strands.pluck.exclude_labels", ReloadTier::Live),
+    ("strands.pluck.lanes", ReloadTier::Live),
     // Mend's and Explore's claim TTLs are stored under the field names
     // `stale_claim_ttl` (the spellings `apply_tier_a_config` reports). The
     // legacy `stuck_threshold_secs` spellings — the field names these TTLs
@@ -494,6 +495,16 @@ mod tests {
         // The real enforcement is in assert_all_config_fields_have_tiers().
         let config = Config::default();
         assert_all_config_fields_have_tiers(&config);
+    }
+
+    #[test]
+    fn nt59_pluck_lanes_is_live_reloadable() {
+        // A lane roster an operator has to restart a worker to change is a
+        // roster nobody adjusts (N-T59, needle-bc162127).
+        assert_eq!(
+            get_tier_for_key("strands.pluck.lanes"),
+            Some(ReloadTier::Live)
+        );
     }
 
     #[test]

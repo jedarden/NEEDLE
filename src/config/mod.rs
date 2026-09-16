@@ -3894,12 +3894,85 @@ impl CircuitBreakerConfig {
     }
 }
 
+/// What a lane worker does when its lane holds no claimable bead.
+///
+/// `idle` is the default because a reserved lane exists to hold capacity: a
+/// lane worker that drifts onto ordinary work the moment its lane empties
+/// reserves nothing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LaneWhenEmpty {
+    /// Return no candidate, so the worker backs off and stays available for
+    /// the next lane bead.
+    #[default]
+    Idle,
+    /// Fall back to ordinary selection for this cycle.
+    Normal,
+}
+
+/// A reserved Pluck lane: the named workers claim only beads carrying `label`.
+///
+/// Priority orders one queue; it cannot reserve capacity. A lane does: the
+/// listed workers are removed from general contention and see only lane work,
+/// in every Pluck relaxation tier and in Explore's candidate admission.
+/// Ordinary workers are unaffected and may still claim lane beads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluckLaneConfig {
+    /// The label a bead must carry to be claimable by this lane's workers.
+    pub label: String,
+
+    /// Worker identifiers bound to this lane.
+    ///
+    /// An entry matches either the qualified worker id the strand waterfall
+    /// runs under (`{adapter}-{identifier}`) or the bare `--identifier`, so a
+    /// roster written as `[alpha]` binds `claude-alpha` without the operator
+    /// having to know which adapter a worker launched with.
+    #[serde(default)]
+    pub workers: Vec<String>,
+
+    /// What a bound worker does when the lane holds no claimable bead.
+    #[serde(default)]
+    pub when_empty: LaneWhenEmpty,
+}
+
+impl PluckLaneConfig {
+    /// Whether `worker_id` is bound to this lane.
+    pub fn binds(&self, worker_id: &str) -> bool {
+        self.workers
+            .iter()
+            .any(|entry| lane_roster_entry_matches(entry, worker_id))
+    }
+}
+
+/// Match one lane roster entry against the worker identity the strand
+/// waterfall was constructed with.
+///
+/// `StrandRunner::from_config` receives the qualified id
+/// (`{adapter}-{identifier}`), while an operator writing a roster thinks in
+/// bare `--identifier` values. Both spellings are accepted; a blank entry
+/// never matches.
+fn lane_roster_entry_matches(entry: &str, worker_id: &str) -> bool {
+    let entry = entry.trim();
+    if entry.is_empty() {
+        return false;
+    }
+    entry == worker_id || worker_id.ends_with(&format!("-{entry}"))
+}
+
 /// Pluck strand configuration (primary bead selection).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluckConfig {
     /// Labels to exclude from selection.
     #[serde(default)]
     pub exclude_labels: Vec<String>,
+
+    /// Reserved lanes binding named workers to a required label.
+    ///
+    /// Empty by default, which is a complete no-op: with no lane bound to a
+    /// worker, selection is exactly what it was before lanes existed. Live
+    /// reloadable (`strands.pluck.lanes`, Tier A).
+    #[serde(default)]
+    pub lanes: Vec<PluckLaneConfig>,
 
     /// Auto-split beads after this many consecutive failures (0 = disabled).
     ///
@@ -3937,6 +4010,7 @@ impl Default for PluckConfig {
                 "human".to_string(),
                 "blocked".to_string(),
             ],
+            lanes: Vec::new(),
             split_after_failures: Self::default_split_after_failures(),
             persistent_starvation_records: Self::default_persistent_starvation_records(),
             circuit_breaker: CircuitBreakerConfig::default(),
@@ -3945,6 +4019,15 @@ impl Default for PluckConfig {
 }
 
 impl PluckConfig {
+    /// The lane bound to `worker_id`, if any.
+    ///
+    /// Configuration order decides: the first lane listing the worker wins, so
+    /// a worker named in two lanes has one deterministic lane rather than a
+    /// set that varies with hash order.
+    pub fn lane_for(&self, worker_id: &str) -> Option<&PluckLaneConfig> {
+        self.lanes.iter().find(|lane| lane.binds(worker_id))
+    }
+
     fn default_split_after_failures() -> u32 {
         3
     }
@@ -15315,5 +15398,90 @@ exit 0
             content, multiline_content,
             "executable should preserve multiline content exactly"
         );
+    }
+
+    // ── Reserved Pluck lanes (N-T59, needle-bc162127) ────────────────────────
+
+    #[test]
+    fn nt59_lane_roster_matches_the_bare_identifier_and_the_qualified_id() {
+        let lane = PluckLaneConfig {
+            label: "learning-loop".to_string(),
+            workers: vec![
+                "alpha".to_string(),
+                "codex-delta".to_string(),
+                "   ".to_string(),
+            ],
+            when_empty: LaneWhenEmpty::Idle,
+        };
+
+        // The strand waterfall runs under the qualified id ({adapter}-{id});
+        // an operator writes the bare --identifier. Both spellings bind.
+        assert!(lane.binds("claude-alpha"));
+        assert!(lane.binds("alpha"));
+        assert!(lane.binds("codex-delta"));
+        assert!(!lane.binds("claude-bravo"));
+        assert!(
+            !lane.binds("claude-alphabet"),
+            "a roster entry must match a whole identifier, not a prefix of one"
+        );
+        assert!(
+            !lane.binds(""),
+            "a blank roster entry must bind nobody, not everybody"
+        );
+    }
+
+    #[test]
+    fn nt59_default_pluck_config_reserves_no_lane() {
+        let pluck = PluckConfig::default();
+        assert!(
+            pluck.lanes.is_empty(),
+            "lanes must default to empty so the feature is a fleet-wide no-op"
+        );
+        assert!(pluck.lane_for("claude-alpha").is_none());
+
+        // A worker listed twice takes the first lane in configuration order,
+        // so the binding is deterministic rather than hash-ordered.
+        let configured = PluckConfig {
+            lanes: vec![
+                PluckLaneConfig {
+                    label: "first".to_string(),
+                    workers: vec!["alpha".to_string()],
+                    when_empty: LaneWhenEmpty::Idle,
+                },
+                PluckLaneConfig {
+                    label: "second".to_string(),
+                    workers: vec!["alpha".to_string()],
+                    when_empty: LaneWhenEmpty::Normal,
+                },
+            ],
+            ..PluckConfig::default()
+        };
+        assert_eq!(
+            configured
+                .lane_for("claude-alpha")
+                .map(|l| l.label.as_str()),
+            Some("first")
+        );
+        assert!(configured.lane_for("claude-bravo").is_none());
+    }
+
+    #[test]
+    fn nt59_lane_yaml_omitting_when_empty_defaults_to_idle() {
+        let implicit: PluckConfig =
+            serde_yaml::from_str("lanes:\n  - label: learning-loop\n    workers: [alpha]\n")
+                .expect("lane config parses");
+        assert_eq!(implicit.lanes.len(), 1);
+        assert_eq!(implicit.lanes[0].label, "learning-loop");
+        assert_eq!(
+            implicit.lanes[0].when_empty,
+            LaneWhenEmpty::Idle,
+            "an unspecified when_empty must reserve capacity, not drift onto general work"
+        );
+
+        let explicit: PluckConfig = serde_yaml::from_str(
+            "lanes:\n  - label: learning-loop\n    workers: [alpha]\n    when_empty: normal\n",
+        )
+        .expect("lane config with when_empty parses");
+        assert_eq!(explicit.lanes[0].when_empty, LaneWhenEmpty::Normal);
     }
 }

@@ -144,6 +144,14 @@ impl StrandRunner {
         registry: crate::registry::Registry,
         telemetry: crate::telemetry::Telemetry,
     ) -> Self {
+        // A reserved lane (`strands.pluck.lanes`) binds this worker to one
+        // label for the whole waterfall: Pluck's selection at home and
+        // Explore's admission abroad read the same binding, so a lane worker
+        // cannot be handed unlabelled work by the strand the other one does
+        // not cover. No lane matches this worker => `None` => no behaviour
+        // change anywhere.
+        let lane = config.strands.pluck.lane_for(worker_id).cloned();
+
         let pluck = PluckStrand::with_persistent_records(
             config.strands.pluck.exclude_labels.clone(),
             config.strands.pluck.split_after_failures,
@@ -151,7 +159,8 @@ impl StrandRunner {
             config.workspace.home.clone(),
             config.strands.pluck.persistent_starvation_records,
         )
-        .with_quarantine_threshold(config.outcome.quarantine_after_failures);
+        .with_quarantine_threshold(config.outcome.quarantine_after_failures)
+        .with_lane(lane.clone());
 
         let heartbeat_dir = config.workspace.home.join("state").join("heartbeats");
         let heartbeat_ttl = std::time::Duration::from_secs(config.health.heartbeat_ttl_secs);
@@ -205,7 +214,8 @@ impl StrandRunner {
         // Explore must reject beads the worker would immediately release as
         // split_out_of_scope; without the threshold it cannot tell which those
         // are (needle-ee024ae4).
-        .with_split_after_failures(config.strands.pluck.split_after_failures);
+        .with_split_after_failures(config.strands.pluck.split_after_failures)
+        .with_lane(lane);
 
         // Rung 4 of the escalation ladder (Phase 19 §19.2, ADR-022 decision 3):
         // settles a bead whose round-3 quarantine expired — the bead Pluck

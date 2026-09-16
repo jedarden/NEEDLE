@@ -58,7 +58,15 @@ version = 1
 # +3 workspace-only routing candidates, N-T61 (needle-54699c67): withheld at
 # fleet scope, still chosen on workspace evidence, never explored. Pure;
 # `cargo test --lib nt61_`.
-max_tests = 3763
+# +11 reserved Pluck lanes, N-T59 (needle-bc162127): six Pluck selection
+# contracts (lane bead over an unlabelled P0 while an ordinary worker still
+# takes the P0, order preserved inside the lane, no relaxed tier handing a lane
+# worker unlabelled work, safety exclusions still applying inside a lane, empty
+# lane idling and falling back under when_empty: normal with lane_empty
+# telemetry), one Explore admission contract, three config contracts (roster
+# matching, empty default, when_empty YAML default) and the live-reload tier.
+# All in-process; `cargo test --lib nt59_` is the bead's acceptance command.
+max_tests = 3774
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

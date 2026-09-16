@@ -567,6 +567,14 @@ pub enum EventKind {
         excluded_count: usize,
         candidate_exclusion_reasons: Vec<String>,
     },
+    /// A reserved-lane worker's lane held no claimable bead. `fallback` names
+    /// what the worker did about it: `idle` (no candidate, the default) or
+    /// `normal` (ordinary selection for this cycle).
+    PluckLaneEmpty {
+        lane: String,
+        workspace: String,
+        fallback: String,
+    },
     /// Pluck automatic bypass activated: returned oldest open bead despite all filters.
     PluckBypassActivated {
         workspace: String,
@@ -1672,6 +1680,7 @@ impl EventKind {
             EventKind::QueueEmpty => "worker.queue_empty",
             EventKind::PluckStarvationDetected { .. } => "strand.pluck.starvation_detected",
             EventKind::PluckNoCandidate { .. } => "strand.pluck.no_candidate",
+            EventKind::PluckLaneEmpty { .. } => "strand.pluck.lane_empty",
             EventKind::PluckBypassActivated { .. } => "strand.pluck.bypass_activated",
             EventKind::KnotStarvationDetected { .. } => "strand.knot.starvation_detected",
             EventKind::PluckOrderingDegraded { .. } => "strand.pluck.ordering_degraded",
@@ -1942,6 +1951,7 @@ impl EventKind {
             | EventKind::QueueEmpty
             | EventKind::PluckStarvationDetected { .. }
             | EventKind::PluckNoCandidate { .. }
+            | EventKind::PluckLaneEmpty { .. }
             | EventKind::PluckBypassActivated { .. }
             | EventKind::KnotStarvationDetected { .. }
             | EventKind::AlertDeduplicated { .. }
@@ -2298,6 +2308,17 @@ impl EventKind {
                     "open_count": open_count,
                     "excluded_count": excluded_count,
                     "candidate_exclusion_reasons": candidate_exclusion_reasons,
+                })
+            }
+            EventKind::PluckLaneEmpty {
+                lane,
+                workspace,
+                fallback,
+            } => {
+                serde_json::json!({
+                    "lane": lane,
+                    "workspace": workspace,
+                    "fallback": fallback,
                 })
             }
             EventKind::PluckBypassActivated {
@@ -3899,6 +3920,7 @@ impl EventKind {
             | EventKind::QueueEmpty
             | EventKind::PluckStarvationDetected { .. }
             | EventKind::PluckNoCandidate { .. }
+            | EventKind::PluckLaneEmpty { .. }
             | EventKind::PluckBypassActivated { .. }
             | EventKind::KnotStarvationDetected { .. }
             | EventKind::AlertDeduplicated { .. }

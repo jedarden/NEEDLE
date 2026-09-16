@@ -1117,10 +1117,41 @@ struct PluckParameters {
     final_relaxation_tier: String,
 }
 
+/// One pass through the relaxation waterfall.
+struct QueryOutcome {
+    /// Candidates the waterfall produced, in backend order.
+    candidates: Vec<Bead>,
+    /// Tier the candidates came from.
+    tier: RelaxationTier,
+    /// Whether `candidates` are already lane-scoped.
+    ///
+    /// False when no lane is bound, and false when an empty lane fell back to
+    /// ordinary selection under `when_empty: normal` — the later filter stage
+    /// must not re-impose a constraint the query deliberately dropped.
+    lane_enforced: bool,
+}
+
+/// Whether a bead is claimable inside `lane_label`.
+///
+/// `None` — no lane bound, or a lane that fell back — admits everything, which
+/// is what makes the empty default lane list a no-op.
+fn lane_admits(bead: &Bead, lane_label: Option<&str>) -> bool {
+    match lane_label {
+        Some(label) => bead.labels.iter().any(|candidate| candidate == label),
+        None => true,
+    }
+}
+
 /// The Pluck strand — primary work selection.
 pub struct PluckStrand {
     /// Labels to exclude from candidate selection.
     exclude_labels: Vec<String>,
+    /// Reserved lane bound to this worker, if any (`strands.pluck.lanes`).
+    ///
+    /// `None` — the default — is the pre-lane behaviour exactly. When set,
+    /// only beads carrying the lane's label are candidates, in every
+    /// relaxation tier, and an empty lane is handled per its `when_empty`.
+    lane: Option<crate::config::PluckLaneConfig>,
     /// Auto-split beads after this many consecutive failures (0 = disabled).
     split_after_failures: u32,
     /// Failure count at which an ADR-022 quarantine triggers. Pluck
@@ -1179,6 +1210,7 @@ impl PluckStrand {
             last_excluded_count: AtomicUsize::new(0),
             last_exclusion_reasons: Mutex::new(Vec::new()),
             last_snapshot_signatures: Mutex::new(HashMap::new()),
+            lane: None,
         }
     }
 
@@ -1210,6 +1242,7 @@ impl PluckStrand {
             last_excluded_count: AtomicUsize::new(0),
             last_exclusion_reasons: Mutex::new(Vec::new()),
             last_snapshot_signatures: Mutex::new(HashMap::new()),
+            lane: None,
         }
     }
 
@@ -1246,6 +1279,7 @@ impl PluckStrand {
             last_excluded_count: AtomicUsize::new(0),
             last_exclusion_reasons: Mutex::new(Vec::new()),
             last_snapshot_signatures: Mutex::new(HashMap::new()),
+            lane: None,
         }
     }
 
@@ -1259,8 +1293,97 @@ impl PluckStrand {
         self
     }
 
-    /// Query for work, progressively relaxing constraints when the ready
-    /// frontier is empty.
+    /// Bind this strand to a reserved lane (`strands.pluck.lanes`).
+    ///
+    /// `None` leaves selection untouched, which is why the empty default
+    /// lane list is a no-op for the whole fleet.
+    pub fn with_lane(mut self, lane: Option<crate::config::PluckLaneConfig>) -> Self {
+        self.lane = lane;
+        self
+    }
+
+    /// Query for work, scoped to this worker's reserved lane when it has one.
+    ///
+    /// Without a lane this is exactly `query_tiers` — the relaxation waterfall
+    /// documented there. With one, that waterfall runs inside the lane, and an
+    /// empty lane is recorded (`strand.pluck.lane_empty`) and then handled per
+    /// its `when_empty`: `idle` returns no candidate so the worker backs off,
+    /// `normal` re-runs the waterfall unscoped for this cycle.
+    async fn query_with_relaxation(&self, store: &dyn BeadStore) -> Result<QueryOutcome> {
+        let lane = match self.lane.as_ref() {
+            Some(lane) => lane,
+            None => {
+                let (candidates, tier) = self.query_tiers(store, None).await?;
+                return Ok(QueryOutcome {
+                    candidates,
+                    tier,
+                    lane_enforced: false,
+                });
+            }
+        };
+
+        let (candidates, tier) = self.query_tiers(store, Some(lane.label.as_str())).await?;
+        if !candidates.is_empty() {
+            return Ok(QueryOutcome {
+                candidates,
+                tier,
+                lane_enforced: true,
+            });
+        }
+
+        // The lane is empty. That is an ordinary, expected state for reserved
+        // capacity — it is recorded rather than repaired, because the whole
+        // point of the lane is that this worker waits for lane work instead of
+        // draining the general queue.
+        let fallback = match lane.when_empty {
+            crate::config::LaneWhenEmpty::Idle => "idle",
+            crate::config::LaneWhenEmpty::Normal => "normal",
+        };
+        let workspace = match store.starvation_inventory().await {
+            Ok(inventory) => extract_workspace_path(&inventory),
+            Err(error) => {
+                tracing::debug!(
+                    error = %error,
+                    "could not read the inventory to name the workspace for a lane-empty event"
+                );
+                "unknown".to_string()
+            }
+        };
+        tracing::info!(
+            lane = %lane.label,
+            workspace = %workspace,
+            fallback,
+            "reserved Pluck lane holds no claimable bead"
+        );
+        if let Err(error) = self.telemetry.emit(
+            crate::telemetry::EventKind::PluckLaneEmpty {
+                lane: lane.label.clone(),
+                workspace,
+                fallback: fallback.to_string(),
+            },
+            Utc::now(),
+        ) {
+            tracing::warn!(error = %error, "failed to emit lane-empty telemetry");
+        }
+
+        match lane.when_empty {
+            crate::config::LaneWhenEmpty::Idle => Ok(QueryOutcome {
+                candidates: Vec::new(),
+                tier,
+                lane_enforced: true,
+            }),
+            crate::config::LaneWhenEmpty::Normal => {
+                let (candidates, tier) = self.query_tiers(store, None).await?;
+                Ok(QueryOutcome {
+                    candidates,
+                    tier,
+                    lane_enforced: false,
+                })
+            }
+        }
+    }
+
+    /// Run the relaxation waterfall, optionally scoped to one lane label.
     ///
     /// The first retry drops configured worker-label exclusions. The second
     /// retry also drops any priority predicate (the current `Filters` type has
@@ -1268,9 +1391,16 @@ impl PluckStrand {
     /// The final retry reads the complete inventory and accepts open beads
     /// that have no unfinished blocking dependency. Dependency safety is not
     /// a worker-local constraint and is therefore never relaxed.
-    async fn query_with_relaxation(
+    ///
+    /// `lane_label` is applied to every tier, so no relaxation can widen a
+    /// lane worker's candidate set beyond its lane: relaxation drops *worker
+    /// preferences*, and a lane is a reservation, not a preference. Ordering
+    /// inside the lane is untouched — the same tier, the same backend order,
+    /// the same later sort.
+    async fn query_tiers(
         &self,
         store: &dyn BeadStore,
+        lane_label: Option<&str>,
     ) -> Result<(Vec<Bead>, RelaxationTier)> {
         let initial_filters = Filters {
             assignee: None,
@@ -1291,7 +1421,12 @@ impl PluckStrand {
             "Executing Pluck query with filters"
         );
 
-        let candidates = store.ready(&initial_filters).await?;
+        let candidates: Vec<Bead> = store
+            .ready(&initial_filters)
+            .await?
+            .into_iter()
+            .filter(|bead| lane_admits(bead, lane_label))
+            .collect();
         tracing::debug!(
             tier = RelaxationTier::Initial.name(),
             count = candidates.len(),
@@ -1326,7 +1461,10 @@ impl PluckStrand {
                 .ready(&relaxed_filters)
                 .await?
                 .into_iter()
-                .filter(|bead| passes_never_relaxed_ready_constraints(bead, Utc::now()))
+                .filter(|bead| {
+                    passes_never_relaxed_ready_constraints(bead, Utc::now())
+                        && lane_admits(bead, lane_label)
+                })
                 .collect();
             tracing::debug!(
                 tier = tier.name(),
@@ -1358,7 +1496,10 @@ impl PluckStrand {
         let status_only_now = Utc::now();
         let candidates: Vec<Bead> = inventory
             .into_iter()
-            .filter(|bead| passes_never_relaxed_constraints(bead, &finished_by_id, status_only_now))
+            .filter(|bead| {
+                passes_never_relaxed_constraints(bead, &finished_by_id, status_only_now)
+                    && lane_admits(bead, lane_label)
+            })
             .collect();
         tracing::debug!(
             tier = tier.name(),
@@ -1392,7 +1533,10 @@ impl PluckStrand {
         let oldest_open_now = Utc::now();
         let open_beads: Vec<&Bead> = inventory
             .iter()
-            .filter(|bead| passes_never_relaxed_constraints(bead, &finished_by_id, oldest_open_now))
+            .filter(|bead| {
+                passes_never_relaxed_constraints(bead, &finished_by_id, oldest_open_now)
+                    && lane_admits(bead, lane_label)
+            })
             .collect();
 
         if open_beads.is_empty() {
@@ -1906,7 +2050,11 @@ impl super::Strand for PluckStrand {
 
         // 1. Query bead store for ready, unassigned beads. If the normal
         // query is empty, retry through the bounded relaxation waterfall.
-        let (mut candidates, relaxation_tier) = match self.query_with_relaxation(store).await {
+        let QueryOutcome {
+            mut candidates,
+            tier: relaxation_tier,
+            lane_enforced,
+        } = match self.query_with_relaxation(store).await {
             Ok(result) => result,
             Err(e) => {
                 // Log the full error chain to capture stderr/exit code details.
@@ -2125,6 +2273,54 @@ impl super::Strand for PluckStrand {
                 after_count: after_label_filter,
                 filtered_count: 0,
                 filter_reasons: vec!["no_label_matches".to_string()],
+            });
+        }
+
+        // 2a. Filter: a reserved-lane worker sees only its own lane's beads.
+        //     The waterfall already applied this to every tier; this stage is
+        //     the same defensive second pass the label filter above is, so no
+        //     query path — present or future — can hand a lane worker
+        //     unlabelled work. It is skipped when an empty lane fell back
+        //     under `when_empty: normal`, whose entire purpose is ordinary
+        //     selection for that cycle.
+        if let Some(lane) = self.lane.as_ref().filter(|_| lane_enforced) {
+            let lane_label = Some(lane.label.as_str());
+            let before_lane_filter = candidates.len();
+            let outside_lane: Vec<String> = candidates
+                .iter()
+                .filter(|b| !lane_admits(b, lane_label))
+                .map(|b| format!("{}:outside-lane:{}", b.id, lane.label))
+                .collect();
+            candidates.retain(|b| lane_admits(b, lane_label));
+            let after_lane_filter = candidates.len();
+            let lane_excluded_count = before_lane_filter - after_lane_filter;
+
+            if lane_excluded_count > 0 {
+                stats.excluded_count += lane_excluded_count;
+                for _ in 0..lane_excluded_count {
+                    stats
+                        .exclusion_reasons
+                        .push(format!("outside-lane:{}", lane.label));
+                }
+                tracing::debug!(
+                    lane = %lane.label,
+                    excluded_count = lane_excluded_count,
+                    remaining = after_lane_filter,
+                    "Lane filtering excluded {} beads outside the lane",
+                    lane_excluded_count
+                );
+            }
+
+            filter_stages.push(FilterStage {
+                stage_name: "lane_filter".to_string(),
+                before_count: before_lane_filter,
+                after_count: after_lane_filter,
+                filtered_count: lane_excluded_count,
+                filter_reasons: if outside_lane.is_empty() {
+                    vec![format!("all_candidates_in_lane:{}", lane.label)]
+                } else {
+                    outside_lane
+                },
             });
         }
 
@@ -2548,7 +2744,11 @@ impl super::Strand for PluckStrand {
 
                     // Re-query candidates after successful repair
                     match self.query_with_relaxation(store).await {
-                        Ok((mut repaired_candidates, repaired_tier)) => {
+                        Ok(QueryOutcome {
+                            candidates: mut repaired_candidates,
+                            tier: repaired_tier,
+                            ..
+                        }) => {
                             // The re-queried set must pass the same guards as the first
                             // query. A repair that did not actually release a bead
                             // (store refused, race, mock) must not turn into a claim on
@@ -2671,7 +2871,11 @@ impl super::Strand for PluckStrand {
                 // query — a repair that did not actually restore visibility
                 // must not turn into a claim on a bead another worker holds.
                 match self.query_with_relaxation(store).await {
-                    Ok((mut recovered_candidates, recovered_tier)) => {
+                    Ok(QueryOutcome {
+                        candidates: mut recovered_candidates,
+                        tier: recovered_tier,
+                        ..
+                    }) => {
                         let recovered_now = Utc::now();
                         let recovered_worker_label_exclusions = if recovered_tier.ignores_labels() {
                             &[]
@@ -4097,6 +4301,221 @@ mod tests {
             matches!(result, StrandResult::NoWork),
             "safety-quarantined work escaped a relaxation tier: {result:?}"
         );
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Reserved lanes (N-T59, needle-bc162127)
+    // ──────────────────────────────────────────────────────────────────────────
+
+    fn nt59_lane(
+        label: &str,
+        when_empty: crate::config::LaneWhenEmpty,
+    ) -> crate::config::PluckLaneConfig {
+        crate::config::PluckLaneConfig {
+            label: label.to_string(),
+            workers: vec!["alpha".to_string()],
+            when_empty,
+        }
+    }
+
+    #[tokio::test]
+    async fn nt59_lane_worker_takes_the_lane_bead_and_an_ordinary_worker_takes_the_p0() {
+        // Young beads: the ordering under test is priority, not the 14/30-day
+        // aging adjustment that would flatten P0 and P1 to the same effective
+        // priority and leave the id tiebreak to decide.
+        let mut lane_bead = make_bead_with_age("lane-p1", 1, 1);
+        lane_bead.labels = vec!["learning-loop".to_string()];
+        let store = MemoryStore {
+            beads: vec![make_bead_with_age("unlabelled-p0", 0, 1), lane_bead],
+        };
+
+        let lane_worker =
+            PluckStrand::new(vec![], Telemetry::new("alpha".to_string())).with_lane(Some(
+                nt59_lane("learning-loop", crate::config::LaneWhenEmpty::Idle),
+            ));
+        match lane_worker.evaluate(&store, &HashSet::new()).await {
+            StrandResult::BeadFound(found) => {
+                assert_eq!(
+                    found.first().map(|b| b.id.as_ref()),
+                    Some("lane-p1"),
+                    "the lane worker must pass over the higher-priority unlabelled bead"
+                );
+                assert!(
+                    found
+                        .iter()
+                        .all(|b| b.labels.iter().any(|l| l == "learning-loop")),
+                    "no unlabelled bead may reach a lane worker: {found:?}"
+                );
+            }
+            other => panic!("expected the lane bead, got: {other:?}"),
+        }
+
+        // The reservation is one-directional: an ordinary worker still sees
+        // the whole queue and takes the P0.
+        let ordinary = PluckStrand::new(vec![], Telemetry::new("bravo".to_string()));
+        match ordinary.evaluate(&store, &HashSet::new()).await {
+            StrandResult::BeadFound(found) => assert_eq!(
+                found.first().map(|b| b.id.as_ref()),
+                Some("unlabelled-p0"),
+                "an ordinary worker's selection must be unchanged by a lane"
+            ),
+            other => panic!("expected the P0, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn nt59_lane_selection_preserves_deterministic_order_inside_the_lane() {
+        // Ages are kept short so the ordering under test is priority, not the
+        // 14/30-day aging adjustment.
+        let mut lane_low = make_bead_with_age("lane-a-p2", 2, 1);
+        lane_low.labels = vec!["learning-loop".to_string()];
+        let mut lane_high = make_bead_with_age("lane-b-p0", 0, 1);
+        lane_high.labels = vec!["learning-loop".to_string()];
+        let store = MemoryStore {
+            beads: vec![
+                lane_low,
+                lane_high,
+                make_bead_with_age("unlabelled-p0", 0, 1),
+            ],
+        };
+
+        let strand = PluckStrand::new(vec![], Telemetry::new("alpha".to_string())).with_lane(Some(
+            nt59_lane("learning-loop", crate::config::LaneWhenEmpty::Idle),
+        ));
+
+        match strand.evaluate(&store, &HashSet::new()).await {
+            StrandResult::BeadFound(found) => {
+                let ids: Vec<&str> = found.iter().map(|b| b.id.as_ref()).collect();
+                assert_eq!(
+                    ids,
+                    vec!["lane-b-p0", "lane-a-p2"],
+                    "a lane narrows the candidate set without reordering it"
+                );
+            }
+            other => panic!("expected the lane's beads, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn nt59_relaxed_tiers_never_hand_a_lane_worker_an_unlabelled_bead() {
+        // Every bead carries the configured worker-label exclusion, so the
+        // ready frontier is empty and the query walks the relaxed, status-only
+        // and oldest-open tiers — the tiers whose whole purpose is widening a
+        // worker's view.
+        let store = MemoryStore {
+            beads: vec![
+                make_bead_with_labels("wip-unlabelled", 0, vec!["wip"]),
+                make_bead_with_labels("wip-unlabelled-older", 1, vec!["wip"]),
+            ],
+        };
+
+        let lane_worker =
+            PluckStrand::new(vec!["wip".to_string()], Telemetry::new("alpha".to_string()))
+                .with_lane(Some(nt59_lane(
+                    "learning-loop",
+                    crate::config::LaneWhenEmpty::Idle,
+                )));
+        let result = lane_worker.evaluate(&store, &HashSet::new()).await;
+        assert!(
+            matches!(result, StrandResult::NoWork),
+            "a relaxation tier handed a lane worker an unlabelled bead: {result:?}"
+        );
+
+        // Control: the same store does hand an ordinary worker one of those
+        // beads, so the tiers really were reached above.
+        let ordinary =
+            PluckStrand::new(vec!["wip".to_string()], Telemetry::new("bravo".to_string()));
+        assert!(
+            matches!(
+                ordinary.evaluate(&store, &HashSet::new()).await,
+                StrandResult::BeadFound(_)
+            ),
+            "control failed: relaxation should surface these beads for an ordinary worker"
+        );
+    }
+
+    #[tokio::test]
+    async fn nt59_lane_membership_does_not_override_safety_exclusions() {
+        let store = MemoryStore {
+            beads: vec![
+                make_bead_with_labels("lane-deferred", 0, vec!["learning-loop", "deferred"]),
+                make_bead_with_labels("lane-human", 0, vec!["learning-loop", "human"]),
+                make_bead_with_labels("lane-blocked", 0, vec!["learning-loop", "blocked"]),
+                make_bead_with_assignee("lane-assigned", "someone-else"),
+            ],
+        };
+
+        let strand = PluckStrand::new(vec![], Telemetry::new("alpha".to_string())).with_lane(Some(
+            nt59_lane("learning-loop", crate::config::LaneWhenEmpty::Idle),
+        ));
+        let result = strand.evaluate(&store, &HashSet::new()).await;
+
+        assert!(
+            matches!(result, StrandResult::NoWork),
+            "a lane must not relax the deferred/human/blocked or assignee guards: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn nt59_empty_lane_idles_by_default_and_emits_lane_empty() {
+        use crate::telemetry::test_utils::TestHelper;
+
+        let helper = TestHelper::new("alpha");
+        let store = MemoryStore {
+            beads: vec![make_bead_with_labels("unlabelled-p0", 0, vec![])],
+        };
+
+        let strand = PluckStrand::new(vec![], helper.telemetry().clone()).with_lane(Some(
+            nt59_lane("learning-loop", crate::config::LaneWhenEmpty::Idle),
+        ));
+        let result = strand.evaluate(&store, &HashSet::new()).await;
+
+        assert!(
+            matches!(result, StrandResult::NoWork),
+            "an empty lane must back the worker off rather than drain the general queue: {result:?}"
+        );
+
+        helper.sync().await;
+        helper.assert_event_emitted("strand.pluck.lane_empty");
+        let event = helper
+            .find_event("strand.pluck.lane_empty")
+            .expect("lane_empty event");
+        assert_eq!(event.data["lane"], "learning-loop");
+        assert_eq!(event.data["fallback"], "idle");
+        assert!(
+            event.data["workspace"].is_string(),
+            "lane_empty must name the workspace: {:?}",
+            event.data
+        );
+    }
+
+    #[tokio::test]
+    async fn nt59_empty_lane_falls_back_to_ordinary_selection_under_when_empty_normal() {
+        use crate::telemetry::test_utils::TestHelper;
+
+        let helper = TestHelper::new("alpha");
+        let store = MemoryStore {
+            beads: vec![make_bead_with_labels("unlabelled-p0", 0, vec![])],
+        };
+
+        let strand = PluckStrand::new(vec![], helper.telemetry().clone()).with_lane(Some(
+            nt59_lane("learning-loop", crate::config::LaneWhenEmpty::Normal),
+        ));
+        match strand.evaluate(&store, &HashSet::new()).await {
+            StrandResult::BeadFound(found) => assert_eq!(
+                found.first().map(|b| b.id.as_ref()),
+                Some("unlabelled-p0"),
+                "when_empty: normal must fall back to ordinary selection"
+            ),
+            other => panic!("expected the fallback selection, got: {other:?}"),
+        }
+
+        helper.sync().await;
+        let event = helper
+            .find_event("strand.pluck.lane_empty")
+            .expect("a fallback is still an empty lane and must be recorded");
+        assert_eq!(event.data["lane"], "learning-loop");
+        assert_eq!(event.data["fallback"], "normal");
     }
 
     #[test]

@@ -164,6 +164,12 @@ pub struct ExploreStrand {
     /// `split_out_of_scope`. Zero disables splitting and therefore disables
     /// this rejection too.
     split_after_failures: u32,
+    /// Reserved lane bound to this worker (`strands.pluck.lanes`), if any.
+    ///
+    /// A lane worker roaming other workspaces stays inside its lane: only
+    /// beads carrying the lane's label are admitted as candidates. `None` —
+    /// the default — admits candidates exactly as before lanes existed.
+    lane: Option<crate::config::PluckLaneConfig>,
     /// Re-discovery interval, still parsed from config for backward
     /// compatibility with existing `.needle.yaml` files, but no longer read:
     /// re-discovery runs unconditionally every cycle as of bf-6anj4 (the
@@ -273,6 +279,7 @@ impl ExploreStrand {
             store_factory: Arc::new(DefaultStoreFactory),
             cycles_since_rediscovery: std::sync::atomic::AtomicU32::new(0),
             split_after_failures: 0,
+            lane: None,
             rediscovery_cycles: config.rediscovery_cycles,
             workspace_root: config.workspace_root,
             auto_discovery_mode,
@@ -335,6 +342,7 @@ impl ExploreStrand {
             store_factory: Arc::new(DefaultStoreFactory),
             cycles_since_rediscovery: std::sync::atomic::AtomicU32::new(0),
             split_after_failures: 0,
+            lane: None,
             rediscovery_cycles: 0,
             workspace_root: PathBuf::from("/tmp/needle-test-root"),
             auto_discovery_mode: false,
@@ -376,6 +384,7 @@ impl ExploreStrand {
             store_factory,
             cycles_since_rediscovery: std::sync::atomic::AtomicU32::new(0),
             split_after_failures: 0,
+            lane: None,
             rediscovery_cycles: 0,
             workspace_root: PathBuf::from("/tmp/needle-test-root"),
             auto_discovery_mode: false,
@@ -403,6 +412,28 @@ impl ExploreStrand {
     pub fn with_split_after_failures(mut self, split_after_failures: u32) -> Self {
         self.split_after_failures = split_after_failures;
         self
+    }
+
+    /// Bind this strand to a reserved lane (`strands.pluck.lanes`).
+    ///
+    /// Roaming is where a lane would otherwise leak: Pluck can hold a worker
+    /// to its label at home and Explore hand it anything abroad. `None` — the
+    /// default — is the pre-lane admission.
+    pub fn with_lane(mut self, lane: Option<crate::config::PluckLaneConfig>) -> Self {
+        self.lane = lane;
+        self
+    }
+
+    /// Whether a bead is claimable by this strand's lane worker.
+    ///
+    /// Unbound workers admit everything. A lane worker admits only beads
+    /// carrying its lane label — in every workspace it roams, and regardless
+    /// of `when_empty`, which governs Pluck's home-workspace fallback only.
+    fn lane_admits(&self, bead: &crate::types::Bead) -> bool {
+        match &self.lane {
+            Some(lane) => bead.labels.iter().any(|label| label == &lane.label),
+            None => true,
+        }
     }
 
     pub fn with_heartbeat_ttl(mut self, heartbeat_ttl: Duration) -> Self {
@@ -626,6 +657,7 @@ impl ExploreStrand {
             .filter(|bead| {
                 bead.assignee.is_none()
                     && !crate::bead_store::excluded_by_labels(bead, filters, now)
+                    && self.lane_admits(bead)
             })
             .collect()
     }
@@ -5648,5 +5680,77 @@ mod tests {
                 "workspace with alphabetically first path should rank higher when all else is equal"
             );
         });
+    }
+
+    // ── Reserved lanes (N-T59, needle-bc162127) ──────────────────────────────
+
+    #[tokio::test]
+    async fn nt59_explore_never_admits_an_unlabelled_bead_for_a_lane_worker() {
+        fn candidate(id: &str, labels: Vec<&str>) -> Bead {
+            Bead {
+                id: BeadId::from(id.to_string()),
+                title: id.to_string(),
+                body: None,
+                priority: 0,
+                status: BeadStatus::Open,
+                assignee: None,
+                labels: labels.into_iter().map(|s| s.to_string()).collect(),
+                workspace: PathBuf::from("/tmp/nt59-remote"),
+                dependencies: vec![],
+                dependents: vec![],
+                comments: vec![],
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            }
+        }
+
+        let temp_root = tempfile::tempdir().unwrap();
+        let pinned = vec![temp_root.path().to_path_buf()];
+        let home = temp_root.path().join("home");
+        let filters = Filters {
+            assignee: None,
+            exclude_labels: vec![
+                "deferred".to_string(),
+                "human".to_string(),
+                "blocked".to_string(),
+            ],
+            exclude_ids: HashSet::new(),
+        };
+        let candidates = vec![
+            candidate("unlabelled", vec![]),
+            candidate("lane-bead", vec!["learning-loop"]),
+            candidate("lane-blocked", vec!["learning-loop", "blocked"]),
+        ];
+
+        // `when_empty: normal` deliberately: the fallback governs Pluck's
+        // home-workspace selection, never Explore's admission, so a roaming
+        // lane worker cannot quietly leave its lane.
+        let lane_worker = make_test_explore_strand(true, pinned.clone(), home.clone()).with_lane(
+            Some(crate::config::PluckLaneConfig {
+                label: "learning-loop".to_string(),
+                workers: vec!["test-worker".to_string()],
+                when_empty: crate::config::LaneWhenEmpty::Normal,
+            }),
+        );
+        let admitted = lane_worker
+            .admit_candidates(&DummyStore, candidates.clone(), &filters)
+            .await;
+        let ids: Vec<String> = admitted.iter().map(|b| b.id.to_string()).collect();
+        assert_eq!(
+            ids,
+            vec!["lane-bead".to_string()],
+            "a lane worker roaming other workspaces must see only its lane's beads"
+        );
+
+        let ordinary = make_test_explore_strand(true, pinned, home);
+        let admitted = ordinary
+            .admit_candidates(&DummyStore, candidates, &filters)
+            .await;
+        let ids: Vec<String> = admitted.iter().map(|b| b.id.to_string()).collect();
+        assert_eq!(
+            ids,
+            vec!["unlabelled".to_string(), "lane-bead".to_string()],
+            "an ordinary worker's admission must be unchanged, lane beads included"
+        );
     }
 }

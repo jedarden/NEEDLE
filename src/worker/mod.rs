@@ -6164,6 +6164,11 @@ impl Worker {
             candidate.strands.pluck.exclude_labels
         );
         replace!(
+            "strands.pluck.lanes",
+            next.strands.pluck.lanes,
+            candidate.strands.pluck.lanes
+        );
+        replace!(
             "strands.mend.stale_claim_ttl",
             next.strands.mend.stale_claim_ttl,
             candidate.strands.mend.stale_claim_ttl

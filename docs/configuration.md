@@ -52,6 +52,7 @@ This guide covers the most commonly used configuration options.
 
 **Strand thresholds:**
 - `strands.pluck.exclude_labels` — Labels to exclude from plucking
+- `strands.pluck.lanes` — Reserved lanes binding named workers to a required label (see [Pluck (Reserved Lanes)](#pluck-reserved-lanes))
 - `strands.mend.stuck_threshold_secs` — Time before a claimed in-progress bead is considered stale and becomes a release candidate. `strands.mend.stale_claim_ttl` is an accepted alias of the same key (the name used in the original plan); both spellings are live-reloadable
 - `strands.mend.lock_ttl_secs` — Lock file TTL. `strands.mend.lock_ttl` is an accepted alias of the same key
 - `strands.explore.workspaces` — Pinned workspace list
@@ -675,6 +676,45 @@ independently, so bead-forge and bead-rs workspaces can coexist during rollout.
 
 NEEDLE runs multiple "strands" that find or create work when the primary workspace is empty.
 
+### Pluck (Reserved Lanes)
+
+Priority orders one queue; it cannot reserve capacity. A P1 bead behind 200
+ready beads — several of them P0 — is never selected, however important it is
+to a particular stream of work. A **lane** reserves capacity instead: the
+named workers are removed from general contention and claim only beads
+carrying the lane's label.
+
+```yaml
+strands:
+  pluck:
+    # Empty by default: with no lane, selection is unchanged for every worker.
+    lanes:
+      - label: learning-loop        # a bead must carry this label to be claimable
+        workers: [alpha, bravo]     # bare --identifier, or the qualified {adapter}-{identifier}
+        when_empty: idle            # idle (default) | normal
+```
+
+- A listed worker claims **only** lane beads — in every Pluck relaxation tier
+  (ready, relaxed worker labels, status-only, oldest-open) and in Explore's
+  candidate admission while roaming other workspaces. Relaxation drops worker
+  *preferences*; a lane is a reservation, so no tier widens it.
+- Ordering inside the lane is unchanged: the same deterministic
+  `(effective_priority, pinned_bucket, failure_count, created_at, id)` sort.
+- **Ordinary workers are unaffected** and may still claim lane beads. A lane
+  reserves a worker for a label, not a label for a worker.
+- `when_empty: idle` (the default) returns no candidate when the lane holds
+  nothing claimable, so the worker backs off and stays available for the next
+  lane bead. `when_empty: normal` falls back to ordinary selection for that
+  cycle. Either way `strand.pluck.lane_empty` is emitted, naming the lane, the
+  workspace and the fallback taken. Under `normal` the fallback applies to
+  Pluck's home-workspace selection only; Explore stays lane-scoped so a
+  roaming worker cannot quietly leave its lane.
+- Exclusions still apply inside a lane: a lane bead that is `deferred`,
+  `human`, `blocked`, assigned, or under an active quarantine is no more
+  claimable than it would be outside one.
+- A worker listed in two lanes takes the first lane in configuration order.
+- Live reloadable (Tier A).
+
 ### Explore (Multi-workspace Discovery)
 
 ```yaml
@@ -1275,6 +1315,7 @@ workspace:
 strands:
   pluck:
     exclude_labels: []
+    lanes: []
     split_after_failures: 3
   explore:
     enabled: true
