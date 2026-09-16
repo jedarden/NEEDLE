@@ -2,9 +2,9 @@
 
 > **N**avigates **E**very **E**nqueued **D**eliverable, **L**ogs **E**ffort
 
-Plan revision: 34
+Plan revision: 35
 
-As of: 2026-09-13
+As of: 2026-09-15
 
 Status owner: NEEDLE maintainers
 
@@ -53,6 +53,15 @@ verified-closure yield and cost. N-T45–N-T56 are the next wires; each is one
 single-behavior bead, and the two tracking parents are manually held. The
 META harness epic now waits on the loop's first live receipts instead of on
 an unwritten ADR.
+Revision 35 makes the shared-checkout anti-collision design normative (section
+4.11 and Phase 20). A harness that supports and opts into the pre-write hook
+claims a file lazily, immediately before its first intended mutation. The
+resulting marker mirrors the repository-relative path under
+`<repo>/.needle/locks/` and exists only to tell other participants which files
+are at risk of contention. Unsupported or non-participating harnesses continue
+unchanged. The entire lock tree is local runtime state: it is ignored by Git,
+rejected if staged, never checkpointed or published, and is not durable bead or
+attempt authority.
 
 ## 0. How to read this plan
 
@@ -941,6 +950,38 @@ N-T53 in shadow, proposals visible but none admitted; N-T54 at one admitted
 L4 proposal per day; N-T55 receipts on those; the budget rises only after
 two consecutive horizons with net-positive receipts. Tracking parent:
 `needle-48867e1b` (manually held); ADR contract test `needle-73c1958b`.
+
+### 4.11 Shared-checkout file-contention markers (revision 35, 2026-09-15)
+
+NEEDLE keeps the shared-checkout and no-worktree decisions from ADR-015. A
+worker or interactive-agent harness that exposes a compatible pre-write hook
+may opt into a lightweight advisory marker protocol so its participants can see
+when another participant intends to mutate the same file. Harnesses without
+that capability continue to dispatch normally; NEEDLE does not attempt to
+intercept or infer their writes.
+
+For an opted-in harness, the marker is acquired lazily by its pre-write hook;
+beads do not declare a file set in advance. For a repository-relative path
+`src/worker/mod.rs`, the local record is
+`<repo>/.needle/locks/src/worker/mod.rs.lock`. It identifies the bead when one
+exists, attempt, worker or interactive session, acquisition and renewal times,
+intended operation, and enough baseline file metadata to help a later
+participant distinguish a live collision from abandoned work.
+
+These records have exactly one authority: they advertise local file-contention
+risk to other agents using the same checkout. They do not claim or release a
+bead, prove attempt ownership, authorize a lifecycle transition, form part of
+an evidence bundle, or replace the bead store's fenced `ClaimHandle`. A future
+participant combines the marker with current worker/attempt liveness and the
+file's state before deciding whether to wait, reclaim a stale marker, resume
+the owning bead, or propose follow-up inspection.
+
+`<repo>/.needle/locks/` is ephemeral runtime state and must never enter Git.
+NEEDLE installs a repository-local exclude for it, ignores it while collecting
+changes, and rejects any staged or tracked path below it. It is never flushed
+to a bead checkpoint, copied into a commit, pushed, or treated as a project
+artifact. Phase 20 owns the detailed hook, metadata, staleness, and acceptance
+contract.
 
 ## 5. In-process learning kernel
 
@@ -6338,136 +6379,222 @@ Gate *execution* errors (19.1) are not failures and do not advance a bead down t
 
 ---
 
-# Phase 20: Concurrent-Mutation Safety — File-Level Claims in the Shared Checkout
+# Phase 20: Concurrent-Mutation Safety — Checkout-Local File-Contention Markers
 
-ADR-015 rejected per-worker worktrees and gave good reasons: merge-back complexity,
-build-cache duplication, and the observation that the failure mode it was reaching
-for — a bead worked twice — lives at the bead level, where blocking dependencies
-already serialize it. Those reasons stand and this phase does not reopen them.
+ADR-015 rejected per-worker worktrees because they duplicate repositories and
+build caches without solving duplicate bead ownership. That decision stands.
+The remaining shared-checkout failure is narrower: workers on different beads,
+and interactive agents holding no bead, can intend to change the same file at
+the same time. Bead dependencies cannot describe overlap discovered only while
+an agent is working.
 
-But ADR-015's own Context states the residual gap plainly:
+This phase adds an opt-in, checkout-local way for participating agents to
+advertise that risk. Adoption is per harness: a harness advertises a compatible
+pre-write-hook capability and the workspace enables it. Harnesses that cannot
+run such a hook retain existing behavior and do not block dispatch. This phase
+does not add a second durable claim system or claim complete coverage of
+non-participating writers.
 
-> The per-workspace claim `flock` guards only the CLAIMING step's `br update
-> --claim` call. Once two workers are each dispatched into the same workspace,
-> their agents can run concurrent `git add`, `commit`, `reset --hard`, and
-> `checkout` operations in that single shared tree for the full duration of both
-> dispatches, with nothing serializing them beyond whatever the agents themselves
-> happen to do.
+## 20.1 Location, lifetime, and Git exclusion
 
-That gap is now measured, not hypothetical. Observed on codinghome 2026-09-12 in
-NEEDLE's own checkout, with three workers dispatched plus one interactive session:
+For a repository-relative source path, the marker mirrors that path below the
+repository's local `.needle/locks/` directory:
 
-- Eight source files were modified inside thirty minutes by different actors,
-  including `types/mod.rs`, `bead_store/`, `validation/shipped_work.rs` and
-  `strand/pluck.rs`.
-- Three files carried 827 added lines of which one actor's work was 39. That actor
-  could not commit its own change without sweeping in ~700 lines of another's
-  half-finished work, and could not separate them, because `git` stages paths and
-  the contention is *within* the path.
-- The lib test suite moved from 33 to 35 failures between two consecutive runs
-  with an entirely different module distribution, because the tree was being
-  rewritten during the run. Nobody was testing what they thought they were testing.
+```text
+<repo>/src/worker/mod.rs
+<repo>/.needle/locks/src/worker/mod.rs.lock
+```
 
-Bead-level serialization cannot address this. The interactive session held no bead,
-so no dependency edge could have ordered it; and two workers on *different* beads
-legitimately touched the same file. The unit of contention is the file, so the
-claim must be on the file.
+The marker is visible precisely to the agents sharing that checkout. It is not
+useful to a worker on another host or in another checkout, and NEEDLE must not
+copy or synchronize it elsewhere.
 
-## 20.1 Advisory file claims
+The lock tree is ephemeral runtime state, not repository content:
 
-A claim is an advisory lock on a path, taken before first mutation and released at
-dispatch end. Advisory, not mandatory: nothing in the OS enforces it, and a
-participant that ignores it is not prevented from writing — the value is that
-every participant that *does* check gets a truthful answer about who else is
-editing.
+- `<repo>/.needle/locks/` is excluded through the repository's local
+  `.git/info/exclude`; a project need not commit a `.gitignore` change merely
+  to use the mechanism.
+- NEEDLE change collection, staging, checkpoint publication, and commit helpers
+  exclude `.needle/locks/**` unconditionally.
+- A commit guard rejects a staged or tracked `.needle/locks/**` path, including
+  one added with `git add -f`.
+- Lock records are never committed, pushed, checkpointed, included in a patch,
+  uploaded as evidence, or treated as project artifacts.
 
-Claims live under `~/.needle/locks/<workspace-id>/<path-id>.json`, not inside the
-target repository. Putting them in the workspace would add an untracked directory
-to every repo the fleet touches and invite a `.gitignore` per repo; NEEDLE already
-keeps per-workspace state centrally (`agents/`, `cache/`, `diagnostics/`), and a
-lock is state about a dispatch, not content of the project.
+The only purpose of a marker is to tell another participant using the same
+checkout that a file may be under active modification and to supply enough
+context to judge the collision risk.
 
-Each claim records: absolute path, workspace, holder identity (worker id, or an
-interactive session id), PID where one exists, acquisition time, and a TTL.
+## 20.2 Lazy pre-write hook
 
-## 20.2 Liveness and staleness — the part that must not be got wrong
+Beads do not declare paths in advance. When an opted-in harness intends to
+create, edit, delete, or rename a file, its write hook asks NEEDLE to record
+that path immediately before the mutation. Within that harness, the write
+proceeds only after the hook has checked the existing marker and reported
+whether another participant is active or abandoned work may be present.
 
-A lock whose holder dies is worse than no lock: it blocks every future worker
-forever and is invisible until someone asks why a repo went quiet. This is the
-exact shape of the 583 assigned-but-open beads that starved ten workspaces on
-2026-08-16, and of the `stuck_threshold_secs` claim-TTL behaviour that releases a
-LIVE worker's claim when the age check overrides the liveness check.
+Hook support is a negotiated harness capability, disabled unless both the
+adapter and workspace opt in. Absence of the capability is not a worker-health
+failure, an admission failure, or a reason to reject a dispatch. NEEDLE does
+not inject a universal filesystem interceptor or pretend that an unsupported
+harness is covered; status and telemetry report coverage as `enabled`,
+`supported_disabled`, or `unsupported`.
 
-So claims expire by TTL **and** are reclaimable on proven holder death, and the
-two are separate checks:
-- TTL expiry is a backstop, sized well above the longest legitimate dispatch.
-- Holder liveness is the primary signal — a PID that is gone, or a heartbeat that
-  has stopped, releases the claim immediately rather than after the TTL.
-- A live holder's claim is never reclaimed on age alone. The claim-TTL bug this
-  mirrors is documented in `~/.config/needle/config.yaml` under
-  `stuck_threshold_secs`; do not reproduce its precedence order.
+Structured tools such as `Write`, `Edit`, and `apply_patch` expose their target
+paths before mutation. A multi-file operation checks and records the complete
+set under one short registry mutex. A rename checks both the source and
+destination. Commands whose output paths cannot be determined in advance are
+reported as unguarded; detecting their changed paths afterwards is diagnostic,
+not proof that a collision was prevented.
 
-## 20.3 Granularity and deadlock
+The marker remains for the attempt rather than being removed after one tool
+call. Repeated writes by the same attempt renew it. Normal completion or
+cancellation removes that attempt's markers; interrupted markers remain long
+enough for the next participant to evaluate them.
 
-Claims are per-file, taken in a deterministic order (lexicographic by absolute
-path) when several are needed at once, so two participants requesting overlapping
-sets cannot deadlock. A participant that cannot acquire the full set releases
-what it holds and retries with backoff rather than waiting while holding.
+## 20.3 Marker metadata
 
-Directory-level claims are explicitly out of scope: they re-create worktree-shaped
-contention at a coarser grain, which is what ADR-015 rejected.
+Each marker is a small, versioned record containing at least:
 
-## 20.4 Hook architecture for non-worker participants
+```json
+{
+  "schema_version": 1,
+  "path": "src/worker/mod.rs",
+  "bead_id": "needle-123",
+  "attempt_id": "0199...",
+  "worker_id": "needle-luna-07",
+  "session_id": null,
+  "host": "codinghome",
+  "pid": 18342,
+  "intent": "modify",
+  "claimed_at": "2026-09-15T14:30:00Z",
+  "last_renewed_at": "2026-09-15T14:31:00Z",
+  "lease_expires_at": "2026-09-15T14:33:00Z",
+  "baseline": {
+    "existed": true,
+    "mtime_ns": 1789482590123456789,
+    "size": 4812,
+    "git_blob": "abc123..."
+  }
+}
+```
 
-The interactive case is the one bead dependencies can never cover, and on this box
-it is common: operators run Claude Code and codex sessions in the same checkouts
-the fleet roams. Those sessions must be able to participate.
+`bead_id` may be absent for an interactive session, but `attempt_id` or
+`session_id` and the participant identity are required. `claimed_at` is
+immutable. Heartbeat renewal updates `last_renewed_at` and
+`lease_expires_at`; the lock file's own modification time is not substituted
+for either field. The record contains identifiers and file metadata only, not
+prompts, credentials, bead bodies, or source contents.
 
-NEEDLE already has hook precedent (`src/commit_hook.rs`, which validates that
-agents do not sweep in other workers' changes, and `src/hoop_hooks.rs`). This
-phase generalises that into a documented hook surface a non-worker can call:
+## 20.4 How a future participant evaluates a marker
 
-- `needle claim-file <path>...` / `needle release-file <path>...` — the CLI verbs.
-- `needle claims [--workspace <w>]` — who holds what, for the fleet panel.
-- A `PreToolUse`-shaped contract so a Claude Code session can acquire a claim
-  before `Write`/`Edit` and refuse (or warn) when another participant holds it.
+The next participant combines the marker with current worker/session liveness,
+the authoritative bead attempt when one exists, and the current file state:
 
-The hook must fail **open**, loudly. A claim subsystem that cannot answer must not
-be able to stop an operator from editing their own repository — the same posture
-`org-rule-guard.py` takes. A claim system that blocks work when it breaks will be
-disabled within a day and then relied upon while disabled, which is worse than not
-having it.
+- The same attempt renews the marker and continues.
+- A different participant with a fresh heartbeat or current attempt means a
+  collision is anticipated; the hook reports the holder and the write does not
+  proceed automatically.
+- A dead or expired holder whose file still matches the recorded baseline left
+  no observed mutation. The stale marker can be reclaimed atomically, and the
+  owning bead can be disclaimed or requeued through its normal fenced lifecycle.
+- A dead or expired holder whose file differs from the baseline may have left
+  abandoned work. The new participant does not overwrite it. NEEDLE points to
+  the owning bead for resumption, or proposes a follow-up inspection bead when
+  the original work is already closed or superseded.
+- Missing, corrupt, or contradictory metadata is reported as ambiguous
+  contention rather than silently declared safe.
 
-## 20.5 What this does NOT do
+Source `mtime_ns` is a cheap first signal, including whether it is later than
+`claimed_at`, but it is not sufficient by itself. Size and Git blob or content
+hash distinguish a timestamp-only change from a content change. The marker is
+for diagnosis and coordination; it cannot itself release a bead or prove who
+owns an attempt.
 
-- It does not isolate checkouts. One shared working directory per repo remains the
-  model (ADR-015).
-- It does not serialize `git` itself. Two participants can still race on the index;
-  that is a narrower, separately-tracked problem (see the shared-checkout
-  `git add`+`commit` race).
-- It does not replace bead-level dependencies for work that genuinely overlaps in
-  scope. It covers the case dependencies structurally cannot: participants holding
-  no bead, and distinct beads that happen to share a file.
+## 20.5 Atomicity and path safety
+
+Paths are normalized relative to the canonical repository root. Absolute
+paths, `..`, symlink escapes, `.git/**`, and `.needle/**` mutation targets are
+rejected by the marker API. Marker creation and takeover use a short
+`<repo>/.needle/locks/.registry.lock` critical section so two participants
+cannot both decide that the same path is available. Multi-path requests are
+all-or-none and ordered lexicographically; a conflict leaves no partial set.
+
+The files are advisory: the operating system does not prevent a program that
+ignores NEEDLE from writing. Participating NEEDLE workers and supported
+interactive hooks treat a known active collision as a reason to stop or back
+off. If the marker subsystem itself is unavailable, the hook reports degraded
+coverage explicitly rather than pretending the path was checked.
+
+## 20.6 What this does not do
+
+- It does not isolate checkouts or introduce per-worker worktrees.
+- It does not replace bead-rs claims, fencing, resource keys, dependencies, or
+  attempt authority.
+- It does not create durable history. Durable recovery evidence and follow-up
+  bead creation use their existing stores after interpreting the local marker.
+- It does not by itself serialize the shared Git index, `HEAD`, or refs; Git
+  publication remains a separate critical section.
+- It does not guarantee safety for tools that bypass the hook or have unknown
+  write sets. It makes the risk visible to cooperating agents in the checkout.
+- It does not require every harness to implement the hook. Unsupported and
+  non-participating harnesses retain existing shared-checkout behavior.
 
 ## Changes
-- `~/.needle/locks/` claim store with acquisition, release, listing, and
-  liveness-first staleness reclamation.
-- Worker integration: claim on first mutation of a path within a dispatch, release
-  at every terminal outcome path — the same exhaustiveness requirement the
-  `attempt.resolved` work established across all eight terminal paths.
-- CLI verbs `claim-file`, `release-file`, `claims`.
-- A documented hook contract plus a reference `PreToolUse` implementation for
-  Claude Code sessions.
-- `needle doctor` check: claims held by dead holders, and claims older than TTL.
+
+- Checkout-local `<repo>/.needle/locks/<relative-path>.lock` records plus a
+  short registry mutex.
+- Local Git exclusion and a hard guard preventing lock records from being
+  staged, committed, checkpointed, or included in worker patches.
+- Worker integration that checks on first write intent, renews on later writes,
+  and removes owned markers across every terminal attempt path.
+- Adapter capability negotiation and per-workspace opt-in configuration, with
+  explicit enabled, supported-disabled, and unsupported coverage states.
+- CLI verbs for checking, recording, releasing, and listing contention markers.
+- A documented pre-write hook contract for worker and interactive-agent tools.
+- Doctor output for live, stale, ambiguous, and modified-after-claim markers.
+
+## Implementation graph
+
+The graph is ordered by impact and born with its blocking edges and workspace
+resource keys. Priority 1 contains the correctness boundary and release proof;
+priority 2 contains operator and harness-author surfaces. The first two leaves
+are independent and may run in parallel.
+
+| Order | Bead | Deliverable | Priority | Blocked by |
+| --- | --- | --- | --- | --- |
+| 1 | `needle-ae8ff2a3` | Checkout-local marker store | P1 | — |
+| 1 | `needle-dcb47589` | Opt-in adapter capability and configuration | P1 | — |
+| 2 | `needle-9e778fad` | Git exclusion and publication guard | P1 | `needle-ae8ff2a3` |
+| 2 | `needle-3f3c6825` | Live/stale/modified marker assessment | P1 | `needle-ae8ff2a3` |
+| 3 | `needle-04798783` | Capable-worker hook lifecycle | P1 | `needle-3f3c6825`, `needle-dcb47589` |
+| 3 | `needle-f0552fec` | Marker CLI | P2 | `needle-3f3c6825` |
+| 4 | `needle-7f04ec50` | Versioned harness hook contract | P2 | `needle-dcb47589`, `needle-f0552fec` |
+| 4 | `needle-0d2df6d5` | Doctor and coverage reporting | P2 | `needle-f0552fec` |
+| 5 | `needle-4386d7bd` | Shared-checkout integration proof | P1 | `needle-9e778fad`, `needle-04798783`, `needle-7f04ec50`, `needle-0d2df6d5` |
+
+The older Phase 20 beads `needle-00585e81`, `needle-9a06603d`,
+`needle-25fc511f`, `needle-5782ad15`, and `needle-b8fda50c` are closed as
+superseded because they specified a central `~/.needle/locks` store or implied
+unconditional hook adoption.
 
 ## Exit criteria
-- Two workers dispatched into one workspace, both instructed to edit the same
-  file, produce exactly one writer; the second reports the holder and backs off.
-- An interactive session holding a claim is visible in `needle claims` and blocks
-  a worker from editing that path for the claim's life.
-- A holder killed with SIGKILL has its claims reclaimed within one Mend interval,
-  proven by PID death rather than by TTL expiry.
-- A live holder mid-dispatch never loses a claim to age alone, for a dispatch
-  longer than the TTL.
-- With the claim subsystem forcibly broken (store unreadable), an operator can
-  still edit files and a worker can still dispatch; both log the degradation.
+
+- Two participating workers intending to edit the same file see one current
+  holder; the second identifies the bead, worker, and claim time and does not
+  overwrite the file automatically.
+- Disjoint files can be edited concurrently without predeclaring paths on the
+  beads.
+- A future worker distinguishes an unchanged stale marker from a file modified
+  after the recorded claim, using timestamp metadata and a content identity.
+- An interrupted modified file is preserved and routed to the owning bead or a
+  provenance-linked follow-up inspection instead of being silently overwritten.
+- An interactive session without a bead is represented by its session and
+  worker identity and is visible to NEEDLE workers in the same checkout.
+- `.needle/locks/**` remains untracked and unstaged through normal, forced-add,
+  patch-capture, checkpoint, and commit-helper tests.
+- Marker operations in one checkout neither appear in nor affect another
+  checkout of the same repository.
+- A harness without the pre-write capability dispatches exactly as before and
+  is reported as `unsupported`, while a capable but disabled harness writes no
+  markers and is reported as `supported_disabled`.
