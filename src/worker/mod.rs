@@ -133,7 +133,8 @@ fn remove_placed_learnings_for_workspace(workspace: &Path) {
 #[derive(Debug, Clone)]
 struct LedgerCache {
     computed_at: Instant,
-    adapters: std::collections::HashMap<String, crate::evidence_routing::AdapterEvidence>,
+    /// Routing evidence at fleet and workspace scope (N-T48).
+    evidence: crate::evidence_routing::Evidence,
     variants: std::collections::HashMap<String, crate::experiments::VariantOutcome>,
 }
 
@@ -3996,18 +3997,30 @@ impl Worker {
         // Extract tokens and compute cost for effort tracking. The agent's
         // own result envelope fills in tokens the configured extractor missed
         // and supplies the cost when it reports a positive one; otherwise the
-        // pricing table estimates it from the token counts.
-        let (tokens, reported_cost) = dispatch::extract_tokens_with_envelope(
+        // pricing table estimates it from the token counts. A killed attempt
+        // writes no envelope, so its usage is summed from the stream's
+        // per-turn reports instead of being booked at $0 (N-T47, ADR-030).
+        let (extracted, reported_cost) = dispatch::extract_tokens_with_envelope(
             &adapter.token_extraction,
             &output.stdout,
             &output.stderr,
         );
         let model_name = adapter.model.as_deref().unwrap_or("");
-        let estimated_cost = reported_cost
-            .or_else(|| cost::estimate_cost(&tokens, model_name, &self.config.pricing));
+        let usage = crate::attempt_accounting::resolve_usage(
+            &extracted,
+            reported_cost,
+            &output.stdout,
+            model_name,
+            &self.config.pricing,
+        );
+        let estimated_cost = usage.estimated_cost_usd;
         // Read the figures out before `tokens` moves into the effort record —
         // the attempt ledger row below needs the same numbers.
-        let (tokens_in, tokens_out) = (tokens.input_tokens, tokens.output_tokens);
+        let (tokens_in, tokens_out) = (usage.tokens_in, usage.tokens_out);
+        let tokens = dispatch::TokenUsage {
+            input_tokens: tokens_in,
+            output_tokens: tokens_out,
+        };
 
         if let Some(ref mut effort) = self.last_effort {
             effort.agent_name = adapter.name.clone();
@@ -4060,6 +4073,7 @@ impl Worker {
                 tokens_in,
                 tokens_out,
                 estimated_cost_usd: estimated_cost,
+                costed: usage.costed,
                 started_at: self.last_effort.as_ref().map(|e| e.cycle_start),
             });
 
@@ -7346,43 +7360,69 @@ impl Worker {
             .max(self.config.prompt.experiments.window_days)
             .max(1);
         let rows = crate::evidence_routing::ledger_rows(&log_dir, window);
-        let mut adapters = std::collections::HashMap::new();
-        for row in &rows {
-            let adapter = row
-                .get("adapter")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            if adapter.is_empty() {
-                continue;
-            }
-            let entry = adapters.entry(adapter.clone()).or_insert_with(|| {
-                crate::evidence_routing::AdapterEvidence {
-                    adapter,
-                    ..Default::default()
-                }
-            });
-            entry.attempts += 1;
-            match row.get("outcome").and_then(|v| v.as_str()) {
-                Some("verified_success") => entry.verified += 1,
-                Some("infrastructure_failure") => entry.infrastructure += 1,
-                _ => {}
-            }
-            if let Some(cost) = row.get("estimated_cost_usd").and_then(|v| v.as_f64()) {
-                entry.cost_usd += cost;
-                entry.costed += 1;
-            }
-        }
+        let evidence = crate::evidence_routing::Evidence::from_rows(&rows);
         let variants = crate::experiments::variant_outcomes(&rows);
         let cache = LedgerCache {
             computed_at: self.clock.now(),
-            adapters,
+            evidence,
             variants,
         };
         *guard = Some(cache.clone());
         drop(guard);
         self.evaluate_prompt_canaries(&cache);
+        self.signal_poor_workspaces(&cache);
         cache
+    }
+
+    /// N-T48: a workspace whose every routing candidate verifies below the
+    /// threshold is a workspace signal, not a routing change. The receipt is
+    /// created exclusively, so the fleet emits it once per window between
+    /// all of its workers.
+    fn signal_poor_workspaces(&self, cache: &LedgerCache) {
+        let config = &self.config.agent.evidence_routing;
+        if !config.enabled {
+            return;
+        }
+        let poor = crate::evidence_routing::poor_workspaces(&cache.evidence, config);
+        if poor.is_empty() {
+            return;
+        }
+        let state_dir = crate::evidence_routing::default_state_dir();
+        for workspace in &poor {
+            match crate::evidence_routing::record_poor_workspace(
+                &state_dir,
+                workspace,
+                config.window_days,
+                chrono::Utc::now(),
+            ) {
+                Ok(true) => {
+                    tracing::warn!(
+                        workspace = %workspace.workspace,
+                        threshold = config.workspace_poor_threshold,
+                        "every routing candidate verifies below the threshold here — signalling, not routing"
+                    );
+                    let _ = self.telemetry.emit(
+                        EventKind::WorkspaceAdapterEvidencePoor {
+                            workspace: workspace.workspace.clone(),
+                            threshold: config.workspace_poor_threshold,
+                            window_days: config.window_days,
+                            candidates: workspace
+                                .candidates
+                                .iter()
+                                .map(crate::evidence_routing::AdapterEvidence::receipt)
+                                .collect(),
+                        },
+                        chrono::Utc::now(),
+                    );
+                }
+                Ok(false) => {}
+                Err(e) => tracing::warn!(
+                    workspace = %workspace.workspace,
+                    error = %e,
+                    "could not record the poor-workspace receipt"
+                ),
+            }
+        }
     }
 
     /// N-T19: stop any configured prompt variant that regressed past the
@@ -7490,14 +7530,21 @@ impl Worker {
             self.worker_name.hash(&mut h);
             (h.finish() % 10_000) as f64 / 10_000.0
         };
-        let choice = crate::evidence_routing::choose(
+        // A dispatch's own workspace decides first (N-T48); preflight and
+        // identity lookups carry no bead and use fleet evidence.
+        let workspace = bead_id
+            .filter(|_| !is_workspace_unset(&self.current_workspace))
+            .map(|_| self.current_workspace.to_string_lossy().into_owned());
+        let scoped = crate::evidence_routing::choose_scoped(
             &static_adapter,
             config,
-            &cache.adapters,
+            &cache.evidence,
+            workspace.as_deref(),
             &degraded,
             frozen,
             roll,
         );
+        let choice = &scoped.choice;
         // Only an adapter the dispatcher can load is a real choice.
         let chosen = if choice.adapter != static_adapter
             && self.dispatcher.adapter(&choice.adapter).is_none()
@@ -7511,20 +7558,11 @@ impl Worker {
             choice.adapter.clone()
         };
         if let Some(id) = bead_id {
-            let considered = choice
-                .considered
-                .iter()
-                .map(|e| {
-                    serde_json::json!({
-                        "adapter": e.adapter,
-                        "attempts": e.attempts,
-                        "judged": e.judged(),
-                        "verified": e.verified,
-                        "success_rate": e.success_rate(),
-                        "cost_per_success": e.cost_per_success(),
-                    })
-                })
-                .collect();
+            let receipts = |set: &[crate::evidence_routing::AdapterEvidence]| {
+                set.iter()
+                    .map(crate::evidence_routing::AdapterEvidence::receipt)
+                    .collect::<Vec<_>>()
+            };
             let _ = self.telemetry.emit(
                 EventKind::EvidenceRoutingDecision {
                     bead_id: id.clone(),
@@ -7532,7 +7570,11 @@ impl Worker {
                     chosen_adapter: chosen.clone(),
                     reason: choice.reason.clone(),
                     explored: choice.explored,
-                    considered,
+                    considered: receipts(&choice.considered),
+                    scope: scoped.scope.as_str().to_string(),
+                    workspace: scoped.workspace.clone(),
+                    considered_workspace: receipts(&scoped.considered_workspace),
+                    considered_fleet: receipts(&scoped.considered_fleet),
                 },
                 chrono::Utc::now(),
             );

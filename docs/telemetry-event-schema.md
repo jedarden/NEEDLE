@@ -88,7 +88,19 @@ Additional fields are event-specific and documented per type below.
   `below_min_improvement:…`, `insufficient_evidence:…`, `explore:<share>`,
   `frozen:<why>`, `no_eligible_candidate`), `explored`, `considered` (every
   candidate's `attempts`, `judged`, `verified`, `success_rate`,
-  `cost_per_success`).
+  `cost_per_success`). N-T48 adds `scope` (`workspace`, `fleet` or
+  `static`: which evidence decided), `workspace` (the bead's workspace, when
+  known), and `considered_workspace` / `considered_fleet` (every candidate's
+  evidence at each scope; `considered` is the deciding scope's). With
+  `workspace_scope` on, `reason` is prefixed with the scope
+  (`workspace:evidence:…`), and a fleet-scope decision that passed over a
+  `workspace_only_candidates` entry ends `+withheld:<adapter>` (N-T61).
+- `workspace.adapter_evidence_poor` — Every routing candidate in a workspace
+  has at least `min_attempts` judged attempts and verifies below
+  `workspace_poor_threshold`: a workspace signal, emitted once per
+  `window_days` window across the fleet (receipt under
+  `~/.needle/state/evidence_routing/`), never a routing change. Fields:
+  `workspace`, `threshold`, `window_days`, `candidates`.
 - `experiment.stopped` — A prompt-variant canary trailed the default by more
   than the margin with enough attempts on both sides and was stopped; the
   receipt file under `~/.needle/state/experiments/` carries the same numbers.
@@ -316,7 +328,7 @@ as authoritative** — provisional rows are excluded from SLOs (plan Gate A).
 
 | Field                  | Type            | Present | Description                                                                 |
 |------------------------|-----------------|---------|-----------------------------------------------------------------------------|
-| `schema_version`       | integer         | always  | Row schema version; `1` for this contract.                                  |
+| `schema_version`       | integer         | always  | Row schema version; `2` for this contract (`1` on rows written before the `decomposed` outcome existed). |
 | `attempt_id`           | string          | always  | UUIDv7 minted at dispatch start.                                            |
 | `provisional`          | boolean         | always  | `true` until the real attempt identity exists (N-T03).                      |
 | `bead_id`              | string          | always  | Bead the attempt worked on.                                                 |
@@ -326,7 +338,7 @@ as authoritative** — provisional rows are excluded from SLOs (plan Gate A).
 | `prompt_template`      | string          | always  | Prompt template that built the dispatch prompt (e.g. `"pluck"`).            |
 | `template_version`     | string          | always  | Version tag of that template (e.g. `"pluck-default"`).                      |
 | `gate_results`         | array           | always  | Per-gate entries `{name, status, duration_ms}`, ordered by gate name. `status` is `pass`, `fail`, or `execution_error`; empty when no gate ran. |
-| `outcome`              | string          | always  | `verified_success`, `work_failure`, `infrastructure_failure`, `cancelled`, `stale_ownership`, or `indeterminate`. |
+| `outcome`              | string          | always  | `verified_success`, `work_failure`, `infrastructure_failure`, `cancelled`, `stale_ownership`, `indeterminate`, or `decomposed`. |
 | `requested_action`     | string          | always  | Bead lifecycle action the handler requested (e.g. `"Completed"`, `"Released"`). |
 | `commits`              | array           | always  | Commit SHAs created in the workspace during the attempt.                    |
 | `duration_ms`          | integer         | always  | Wall-clock time from claim to resolution.                                   |
@@ -336,10 +348,11 @@ as authoritative** — provisional rows are excluded from SLOs (plan Gate A).
 | `provider`             | string          | optional| Model provider (e.g. `"anthropic"`).                                        |
 | `context_manifest_hash`| string          | optional| ContextManifest hash — absent until N-T10 ships manifest hashing.           |
 | `confirmed_state`      | string          | optional| Authoritative post-action bead state; reserved for the resolver's re-read (plan section 3.2 step 5). |
-| `tokens_in`            | integer         | optional| Input tokens reported by the agent's token extractor.                       |
-| `tokens_out`           | integer         | optional| Output tokens reported by the agent's token extractor.                      |
-| `estimated_cost_usd`   | number          | optional| Estimated cost in USD; absent when no pricing is configured.                |
-| `terminal_reason`      | string          | optional| Short machine-readable reason for the terminal state (e.g. `"gate:fmt"`, `"exit_code:1"`, `"signal:9"`). Absent on a verified success. |
+| `tokens_in`            | integer         | optional| Input tokens, cache reads and writes excluded: from the agent's token extractor or result envelope, or summed from the per-turn usage reports in its stream when a killed attempt wrote no envelope (N-T47). |
+| `tokens_out`           | integer         | optional| Output tokens, from the same source as `tokens_in`.                         |
+| `estimated_cost_usd`   | number          | optional| Estimated cost in USD: the result envelope's reported cost when the agent wrote one, otherwise the pricing table (`pricing`, with cache-read and cache-write rates) applied to the per-turn usage summed from its stream. Absent when it could not be established. |
+| `costed`               | boolean         | always  | Whether `estimated_cost_usd` was established (N-T47, ADR-030). `false` means unknown (no usage reported, or the model has no price), never free: `needle stats` averages cost over costed rows only. |
+| `terminal_reason`      | string          | optional| Short machine-readable reason for the terminal state (e.g. `"gate:fmt"`, `"exit_code:1"`, `"signal:9"`, `"decomposed:split_template"`). Absent on a verified success. |
 
 **Outcome vocabulary:**
 - `verified_success` — the work passed every gate.
@@ -348,11 +361,14 @@ as authoritative** — provisional rows are excluded from SLOs (plan Gate A).
 - `cancelled` — the worker was interrupted before a verdict.
 - `stale_ownership` — reserved; assigned by the resolver once ownership is re-checked at resolution time (ADR-024), not by the outcome handler.
 - `indeterminate` — the attempt ended without a verdict: the time budget expired while the work was still running.
+- `decomposed` — the attempt split its bead into children instead of delivering the work (ADR-030, N-T46): a success of the auto-split template (`terminal_reason: "decomposed:split_template"`), or an attempt that made its bead an `auto-split-parent` and created no commit (`"decomposed:split_parent_without_commits"`). It earns no verified credit and is no failure: `needle stats` reports it in its own DECOMP column and leaves it out of PASS RATE, and evidence routing and prompt canaries count it as an attempt that is neither verified nor judged. Gate results are kept. bead-rs has no such outcome, so the backend resolution records it as `indeterminate` with the same reason.
 
-**Versioned contract:** [`tests/fixtures/attempt-resolved-v1.schema.json`](../tests/fixtures/attempt-resolved-v1.schema.json)
+**Versioned contract:** [`tests/fixtures/attempt-resolved-v2.schema.json`](../tests/fixtures/attempt-resolved-v2.schema.json)
 is the schema this row must satisfy; conformance is asserted in
 `src/telemetry/mod.rs`. Breaking changes version both the fixture and the
-row's `schema_version`.
+row's `schema_version`. Version 2 added `decomposed` and `costed`; rows carrying
+`schema_version: 1` predate it and validate against
+[`attempt-resolved-v1.schema.json`](../tests/fixtures/attempt-resolved-v1.schema.json).
 
 **Aggregation:** `needle stats --by adapter` and `needle stats --by outcome`
 aggregate these rows directly — one attempt per row, with PASS RATE reading
@@ -374,7 +390,7 @@ attempt ID as authoritative.
   "workspace": "/home/coding/NEEDLE",
   "attempt_id": "0198f6a1-7c2d-7cc3-98c4-dc0c0c07398f",
   "data": {
-    "schema_version": 1,
+    "schema_version": 2,
     "attempt_id": "0198f6a1-7c2d-7cc3-98c4-dc0c0c07398f",
     "provisional": true,
     "bead_id": "needle-96dec90b",
@@ -395,6 +411,7 @@ attempt ID as authoritative.
     "tokens_in": 120000,
     "tokens_out": 4500,
     "estimated_cost_usd": 0.0921,
+    "costed": true,
     "commits": ["deadbee"],
     "duration_ms": 614000,
     "terminal_reason": "gate:clippy",
@@ -415,7 +432,7 @@ attempt ID as authoritative.
   "workspace": "/home/coding/NEEDLE",
   "attempt_id": "0198f6a2-e4b5-7cc3-9c2e-1f4b8d6a02c1",
   "data": {
-    "schema_version": 1,
+    "schema_version": 2,
     "attempt_id": "0198f6a2-e4b5-7cc3-9c2e-1f4b8d6a02c1",
     "provisional": true,
     "bead_id": "needle-2f97cbb5",
@@ -436,6 +453,7 @@ attempt ID as authoritative.
     "tokens_in": 118000,
     "tokens_out": 5200,
     "estimated_cost_usd": 0.0894,
+    "costed": true,
     "commits": ["deadbee"],
     "duration_ms": 589000,
     "exit_code": 0

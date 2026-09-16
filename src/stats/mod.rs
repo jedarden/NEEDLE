@@ -883,21 +883,39 @@ pub struct StatsRow {
     /// or gate outage, not the bead's fault). Attempt dimensions only.
     #[serde(default)]
     pub infra: u64,
+    /// Number of attempts that resolved as `decomposed`: the bead was split
+    /// into children instead of delivered (ADR-030). They earn no verified
+    /// credit and are no failure, so they leave `pass_rate()`'s denominator.
+    /// Attempt dimensions only.
+    #[serde(default)]
+    pub decomposed: u64,
+    /// Number of rows whose cost is known: attempts whose row is costed (or,
+    /// for rows written before the flag existed, carries `estimated_cost_usd`)
+    /// and effort events that report a cost. The denominator of
+    /// `avg_cost_usd()`: an uncosted attempt's cost is unknown, never zero
+    /// (ADR-030).
+    #[serde(default)]
+    pub costed: u64,
     /// Sum of (tokens_in + tokens_out) across all effort events in this group.
     pub total_tokens: u64,
     /// Sum of `estimated_cost_usd` across all effort events in this group.
     pub total_cost_usd: f64,
-    /// Number of effort events with token/cost data (denominator for averages).
+    /// Number of rows with token data: every effort event, and the attempt
+    /// rows that reported tokens (denominator for `avg_tokens()`).
     pub effort_events: u64,
 }
 
 impl StatsRow {
-    /// Pass rate as a fraction in `[0.0, 1.0]`. `None` when `beads == 0`.
+    /// Pass rate as a fraction in `[0.0, 1.0]`: verified successes over the
+    /// attempts that could have earned one. Decomposed attempts are excluded
+    /// (ADR-030), so splitting a bead never moves the rate. `None` when no
+    /// such attempt exists.
     pub fn pass_rate(&self) -> Option<f64> {
-        if self.beads == 0 {
+        let judged = self.beads.saturating_sub(self.decomposed);
+        if judged == 0 {
             None
         } else {
-            Some(self.pass as f64 / self.beads as f64)
+            Some(self.pass as f64 / judged as f64)
         }
     }
 
@@ -910,12 +928,13 @@ impl StatsRow {
         }
     }
 
-    /// Average cost in USD per effort event. `None` when no effort data.
+    /// Average cost in USD over the rows whose cost is known. `None` when no
+    /// row's cost is known: an uncosted attempt never averages in as zero.
     pub fn avg_cost_usd(&self) -> Option<f64> {
-        if self.effort_events == 0 {
+        if self.costed == 0 {
             None
         } else {
-            Some(self.total_cost_usd / self.effort_events as f64)
+            Some(self.total_cost_usd / self.costed as f64)
         }
     }
 }
@@ -1021,6 +1040,7 @@ pub fn compute_stats(
                             .and_then(|v| v.as_f64())
                         {
                             row.total_cost_usd += cost;
+                            row.costed += 1;
                         }
                         row.effort_events += 1;
                     }
@@ -1039,11 +1059,11 @@ pub fn compute_stats(
 ///
 /// Each ledger row is one attempt, so a row's count is attempts rather than
 /// dispatches correlated across event types. `pass`/`fail`/`timeout` count the
-/// semantic ledger outcomes they correspond to; the remaining outcomes
-/// (`infrastructure_failure`, `cancelled`, `stale_ownership`) are counted in
-/// `beads` but in none of the three, so `pass_rate()` stays "verified success
-/// over all attempts" — the number the routing and canary consumers in plan
-/// section 4.4 read.
+/// semantic ledger outcomes they correspond to, `infra` and `decomposed`
+/// count theirs, and `cancelled`/`stale_ownership` are counted only in
+/// `beads`. `pass_rate()` is verified success over every attempt except the
+/// decomposed ones (ADR-030) — the number the routing and canary consumers in
+/// plan section 4.4 read.
 pub fn compute_attempt_stats(
     events: &[crate::telemetry::TelemetryEvent],
     dimension: StatsDimension,
@@ -1098,28 +1118,34 @@ pub fn compute_attempt_stats(
             Some("work_failure") => row.fail += 1,
             Some("indeterminate") => row.timeout += 1,
             Some("infrastructure_failure") => row.infra += 1,
+            Some(crate::attempt_accounting::DECOMPOSED) => row.decomposed += 1,
             _ => {}
         }
 
-        let tokens_in = event
-            .data
-            .get("tokens_in")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        let tokens_out = event
-            .data
-            .get("tokens_out")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0);
-        row.total_tokens += tokens_in + tokens_out;
-        if let Some(cost) = event
-            .data
-            .get("estimated_cost_usd")
-            .and_then(|v| v.as_f64())
-        {
-            row.total_cost_usd += cost;
+        let tokens_in = event.data.get("tokens_in").and_then(|v| v.as_u64());
+        let tokens_out = event.data.get("tokens_out").and_then(|v| v.as_u64());
+        // Only rows that reported tokens average them in.
+        if tokens_in.is_some() || tokens_out.is_some() {
+            row.total_tokens += tokens_in.unwrap_or(0) + tokens_out.unwrap_or(0);
+            row.effort_events += 1;
         }
-        row.effort_events += 1;
+        // `costed: false` is an unknown cost, never a free attempt (N-T47);
+        // rows written before the flag existed are costed when they carry one.
+        let costed = event
+            .data
+            .get("costed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        if let (true, Some(cost)) = (
+            costed,
+            event
+                .data
+                .get("estimated_cost_usd")
+                .and_then(|v| v.as_f64()),
+        ) {
+            row.total_cost_usd += cost;
+            row.costed += 1;
+        }
     }
 
     rows.into_values().collect()
@@ -1575,6 +1601,64 @@ mod tests {
             data["estimated_cost_usd"] = serde_json::json!(c);
         }
         make_tel_event("attempt.resolved", "needle-alpha", Some("nd-1"), data)
+    }
+
+    #[test]
+    fn nt47_uncosted_attempts_are_unknown_cost_never_zero() {
+        let mut uncosted = attempt_row("adapter-a", "indeterminate", None, None, None);
+        uncosted.data["costed"] = serde_json::json!(false);
+        let mut costed = attempt_row(
+            "adapter-a",
+            "verified_success",
+            Some(1_000),
+            Some(100),
+            Some(2.0),
+        );
+        costed.data["costed"] = serde_json::json!(true);
+        // Written before the flag existed: costed because it carries a cost.
+        let legacy = attempt_row("adapter-a", "work_failure", Some(500), Some(50), Some(1.0));
+
+        let rows = compute_attempt_stats(&[uncosted, costed, legacy], StatsDimension::Adapter);
+        assert_eq!(rows[0].beads, 3);
+        assert_eq!(rows[0].costed, 2);
+        assert_eq!(
+            rows[0].avg_cost_usd(),
+            Some(1.5),
+            "the uncosted attempt is not a $0 attempt"
+        );
+        assert_eq!(
+            rows[0].avg_tokens(),
+            Some(825.0),
+            "only rows that reported tokens average them in"
+        );
+    }
+
+    #[test]
+    fn nt46_ten_splits_show_as_decomposed_and_leave_verified_yield_unchanged() {
+        let mut events = vec![
+            attempt_row("adapter-a", "verified_success", None, None, None),
+            attempt_row("adapter-a", "work_failure", None, None, None),
+        ];
+        let before = compute_attempt_stats(&events, StatsDimension::Adapter);
+        events.extend((0..10).map(|_| attempt_row("adapter-a", "decomposed", None, None, None)));
+        let after = compute_attempt_stats(&events, StatsDimension::Adapter);
+
+        assert_eq!(after[0].beads, 12);
+        assert_eq!(after[0].decomposed, 10);
+        assert_eq!((after[0].pass, after[0].fail), (1, 1));
+        assert_eq!(after[0].pass_rate(), before[0].pass_rate());
+        assert_eq!(after[0].pass_rate(), Some(0.5));
+
+        let by_outcome = compute_attempt_stats(&events, StatsDimension::Outcome);
+        let decomposed = by_outcome
+            .iter()
+            .find(|r| r.key == "decomposed")
+            .expect("decomposed gets its own line");
+        assert_eq!(
+            (decomposed.beads, decomposed.decomposed, decomposed.pass),
+            (10, 10, 0)
+        );
+        assert_eq!(decomposed.pass_rate(), None);
     }
 
     #[test]

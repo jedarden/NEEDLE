@@ -269,6 +269,22 @@ pub struct EvidenceRoutingConfig {
     /// How often a worker re-reads the ledger (default: 600 s).
     #[serde(default = "EvidenceRoutingConfig::default_refresh_secs")]
     pub refresh_secs: u64,
+    /// Let the bead's own workspace evidence decide first, falling back to
+    /// fleet evidence below the floor and recording the deciding scope
+    /// (N-T48, ADR-030 decision 4; default: false).
+    #[serde(default)]
+    pub workspace_scope: bool,
+    /// Verified-success rate below which a workspace whose every candidate
+    /// has enough evidence is signalled (`workspace.adapter_evidence_poor`)
+    /// instead of routed on (default: 0.0, off).
+    #[serde(default)]
+    pub workspace_poor_threshold: f64,
+    /// Candidates that may only be chosen where their own workspace evidence
+    /// decides: never on fleet evidence and never by exploration (N-T61).
+    /// This is how an adapter that verifies well in one workspace is offered
+    /// there without the fleet migrating onto it.
+    #[serde(default)]
+    pub workspace_only_candidates: Vec<String>,
 }
 
 impl Default for EvidenceRoutingConfig {
@@ -281,6 +297,9 @@ impl Default for EvidenceRoutingConfig {
             min_improvement: Self::default_min_improvement(),
             window_days: Self::default_window_days(),
             refresh_secs: Self::default_refresh_secs(),
+            workspace_scope: false,
+            workspace_poor_threshold: 0.0,
+            workspace_only_candidates: Vec::new(),
         }
     }
 }

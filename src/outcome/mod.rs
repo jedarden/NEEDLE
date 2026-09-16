@@ -396,6 +396,10 @@ pub struct AttemptContext {
     pub tokens_out: Option<u64>,
     /// Estimated cost in USD (None when no pricing is configured).
     pub estimated_cost_usd: Option<f64>,
+    /// Whether the cost was established (N-T47): from the result envelope,
+    /// or from the stream's per-turn usage when a killed attempt wrote none.
+    /// `false` is unknown, never free.
+    pub costed: bool,
     /// When the cycle started (claim time), for the attempt's `duration_ms`.
     pub started_at: Option<std::time::Instant>,
 }
@@ -1010,6 +1014,27 @@ impl OutcomeHandler {
             tracing::Span::current().record("otel.status_description", outcome.as_str());
         }
 
+        // N-T46 (ADR-030): a decomposition earns no verified credit. The
+        // verdict above judged the process and its gates; whether the attempt
+        // delivered the work or only split the bead is decided here, once the
+        // agent's own bead mutations are visible. Gate evidence is kept.
+        let (resolved_outcome, resolved_reason) = match self
+            .classify_decomposition(
+                store,
+                bead,
+                &attempt_context.prompt_template,
+                !attempt_context.commits.is_empty(),
+                &resolved_outcome,
+            )
+            .await
+        {
+            Some(decomposition) => (
+                crate::attempt_accounting::DECOMPOSED.to_string(),
+                Some(decomposition.terminal_reason().to_string()),
+            ),
+            None => (resolved_outcome, resolved_reason),
+        };
+
         let ledger = self.emit_attempt_resolved(
             bead,
             output,
@@ -1114,7 +1139,9 @@ impl OutcomeHandler {
         let resolution = crate::bead_store::AttemptResolution {
             bead_id: bead.id.clone(),
             attempt_id: ledger.attempt_id.clone(),
-            outcome: ledger.outcome.clone(),
+            // bead-rs has no decomposition class; the mapping keeps a split
+            // from resetting or extending the bead's failure run there.
+            outcome: crate::attempt_accounting::backend_outcome(&ledger.outcome).to_string(),
             actor: if actor.is_empty() {
                 ledger.worker.clone()
             } else {
@@ -1153,6 +1180,41 @@ impl OutcomeHandler {
                 "backend attempt resolution timed out; NEEDLE ledger row is the record"
             ),
         }
+    }
+
+    /// Whether this attempt decomposed its bead instead of delivering it
+    /// (N-T46, ADR-030; the rules are [`crate::attempt_accounting`]).
+    ///
+    /// Reads the bead back only for a commit-less verified success outside
+    /// the split template, the one shape whose answer depends on labels the
+    /// agent may have just written. A failed read decides nothing: the row
+    /// keeps its verdict rather than guessing.
+    async fn classify_decomposition(
+        &self,
+        store: &dyn BeadStore,
+        bead: &Bead,
+        prompt_template: &str,
+        delivered_commits: bool,
+        resolved_outcome: &str,
+    ) -> Option<crate::attempt_accounting::Decomposition> {
+        use crate::attempt_accounting as accounting;
+        let labels_after =
+            if accounting::needs_labels_after(resolved_outcome, prompt_template, delivered_commits)
+            {
+                match self.timeout_op(|| store.show(&bead.id), "show").await {
+                    Ok(Some(current)) => Some(current.labels),
+                    Ok(None) | Err(_) => None,
+                }
+            } else {
+                None
+            };
+        accounting::classify_decomposition(&accounting::AttemptShape {
+            outcome: resolved_outcome,
+            prompt_template,
+            delivered_commits,
+            labels_before: &bead.labels,
+            labels_after: labels_after.as_deref(),
+        })
     }
 
     /// Record the adapter's own failure signal against its host-wide health
@@ -1426,6 +1488,7 @@ impl OutcomeHandler {
             tokens_in: attempt.tokens_in,
             tokens_out: attempt.tokens_out,
             estimated_cost_usd: attempt.estimated_cost_usd,
+            costed: attempt.costed,
             commits: attempt.commits,
             duration_ms,
             terminal_reason: resolved_reason,
@@ -6215,7 +6278,8 @@ mod tests {
 
     // ── attempt.resolved ledger row (N-T16) ──
 
-    /// Every emitted row satisfies the versioned v1 fixture, and carries the
+    /// Every emitted row satisfies the versioned fixture (v2 since N-T46; the
+    /// helper's name predates the bump), and carries the
     /// two pins this audit stands guard on: `provisional: true` until N-T03
     /// resolves attempt identity, and no `context_manifest_hash` until N-T10
     /// ships manifest hashing. The hash pin is *absence*, not null — the
@@ -6228,7 +6292,7 @@ mod tests {
             &crate::telemetry::test_utils::fixture_spec(),
         )
         .unwrap_or_else(|e| panic!("{label}: {e}"));
-        assert_eq!(row.data["schema_version"], 1, "{label}: schema_version");
+        assert_eq!(row.data["schema_version"], 2, "{label}: schema_version");
         assert_eq!(
             row.data["provisional"], true,
             "{label}: every row is provisional until N-T03"
@@ -6289,6 +6353,81 @@ mod tests {
         assert_ne!(minted, attempt_id, "no cycle: the row mints its own id");
         assert_eq!(solo[1].attempt_id.as_deref(), Some(minted));
         assert_row_satisfies_v1_contract("solo-handler row", &solo[1]);
+    }
+
+    /// N-T46 (ADR-030): the auto-split template's success is a decomposition,
+    /// not a verified success. The process verdict and the bead action are
+    /// unchanged; only the ledger's semantic outcome moves.
+    #[tokio::test]
+    async fn nt46_split_template_success_resolves_decomposed() {
+        let (_guard, _home) = isolated_home();
+        let mut config = Config::default();
+        config.worker.enforce_shipped_work = false;
+        let helper = crate::telemetry::test_utils::TestHelper::new("nt46-split-template");
+        let handler = OutcomeHandler::new(config, helper.telemetry().clone());
+        handler.set_attempt_context(AttemptContext {
+            adapter: "claude-code-glm-5.3-flash".to_string(),
+            prompt_template: crate::attempt_accounting::SPLIT_TEMPLATE.to_string(),
+            template_version: "split-default".to_string(),
+            ..Default::default()
+        });
+        let store = test_store(BeadStatus::Done);
+        let bead = test_bead(BeadStatus::InProgress);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+        helper.sync().await;
+
+        assert_eq!(result.outcome, Outcome::Success);
+        assert_eq!(result.bead_action, BeadAction::Closed);
+        let rows = helper.events_by_type("attempt.resolved");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].data["outcome"], "decomposed");
+        assert_eq!(rows[0].data["terminal_reason"], "decomposed:split_template");
+        assert_row_satisfies_v1_contract("decomposed row", &rows[0]);
+    }
+
+    /// N-T46: an attempt that made its bead an auto-split parent and delivered
+    /// no commit decomposed it, whatever template dispatched it. The same
+    /// label beside a delivered commit is still a verified success.
+    #[tokio::test]
+    async fn nt46_new_split_parent_without_commits_resolves_decomposed() {
+        let (_guard, _home) = isolated_home();
+        let mut config = Config::default();
+        config.worker.enforce_shipped_work = false;
+        let helper = crate::telemetry::test_utils::TestHelper::new("nt46-split-parent");
+        let bead = test_bead(BeadStatus::InProgress);
+        let parent_labels = vec![
+            "umbrella".to_string(),
+            crate::mitosis::AUTO_SPLIT_PARENT_LABEL.to_string(),
+        ];
+
+        for commits in [Vec::new(), vec!["deadbee".to_string()]] {
+            let handler = OutcomeHandler::new(config.clone(), helper.telemetry().clone());
+            handler.set_attempt_context(AttemptContext {
+                prompt_template: "pluck".to_string(),
+                commits,
+                ..Default::default()
+            });
+            let store = test_store(BeadStatus::Done).with_labels(parent_labels.clone());
+            let result = handler
+                .handle(&store, &bead, &test_output(0), false)
+                .await
+                .unwrap();
+            assert_eq!(result.outcome, Outcome::Success);
+        }
+        helper.sync().await;
+
+        let rows = helper.events_by_type("attempt.resolved");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].data["outcome"], "decomposed");
+        assert_eq!(
+            rows[0].data["terminal_reason"],
+            "decomposed:split_parent_without_commits"
+        );
+        assert_eq!(rows[1].data["outcome"], "verified_success");
     }
 
     /// A dispatch cancelled before `handle` runs is still terminal, so it

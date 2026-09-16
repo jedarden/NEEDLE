@@ -26,6 +26,15 @@ pub struct ModelPricing {
     pub input_per_million: f64,
     /// Cost per million output tokens (USD).
     pub output_per_million: f64,
+    /// Cost per million cache-read input tokens (USD). When absent, a tenth
+    /// of the input rate: the ratio Anthropic publishes and the Claude CLI
+    /// applies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_per_million: Option<f64>,
+    /// Cost per million cache-write input tokens (USD). When absent, 1.25×
+    /// the input rate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_per_million: Option<f64>,
 }
 
 /// Pricing configuration: maps model name → pricing.
@@ -39,6 +48,8 @@ pub fn default_pricing() -> PricingConfig {
         ModelPricing {
             input_per_million: 3.0,
             output_per_million: 15.0,
+            cache_read_per_million: None,
+            cache_write_per_million: None,
         },
     );
     m.insert(
@@ -46,6 +57,8 @@ pub fn default_pricing() -> PricingConfig {
         ModelPricing {
             input_per_million: 15.0,
             output_per_million: 75.0,
+            cache_read_per_million: None,
+            cache_write_per_million: None,
         },
     );
     m.insert(
@@ -53,8 +66,27 @@ pub fn default_pricing() -> PricingConfig {
         ModelPricing {
             input_per_million: 30.0,
             output_per_million: 60.0,
+            cache_read_per_million: None,
+            cache_write_per_million: None,
         },
     );
+    // The fleet's GLM models (through zai-proxy), at the rates the Claude CLI
+    // applies to them in its result envelope. Pricing twelve completed
+    // attempts from 2026-09-15 at these rates reproduces the envelope's
+    // `total_cost_usd` to within 1-6%, the gap being side requests the stream
+    // never shows. One basis keeps a killed attempt's estimate comparable with
+    // a completed attempt's reported cost (N-T47, ADR-030).
+    for model in ["glm-5.3", "glm-5.3-flash"] {
+        m.insert(
+            model.to_string(),
+            ModelPricing {
+                input_per_million: 5.0,
+                output_per_million: 25.0,
+                cache_read_per_million: Some(0.5),
+                cache_write_per_million: Some(6.25),
+            },
+        );
+    }
     m
 }
 
@@ -121,6 +153,47 @@ pub fn estimate_cost(tokens: &TokenUsage, model: &str, pricing: &PricingConfig) 
     }
 
     let cost = (input * price.input_per_million + output * price.output_per_million) / 1_000_000.0;
+    Some(cost)
+}
+
+/// Token counts by kind for one attempt, as summed from its stream.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UsageBreakdown {
+    /// Input tokens, excluding cache reads and writes.
+    pub input: u64,
+    /// Output tokens.
+    pub output: u64,
+    /// Input tokens read from the prompt cache.
+    pub cache_read: u64,
+    /// Input tokens written to the prompt cache.
+    pub cache_write: u64,
+}
+
+/// Estimate cost in USD from a usage breakdown, cache tokens included.
+///
+/// Cache reads and writes are priced at the model's cache rates (see
+/// [`ModelPricing`]); on a long cached session they are most of the bill.
+/// Returns `None` when the model is not priced or nothing was used.
+pub fn estimate_breakdown_cost(
+    usage: &UsageBreakdown,
+    model: &str,
+    pricing: &PricingConfig,
+) -> Option<f64> {
+    let price = pricing.get(model)?;
+    if *usage == UsageBreakdown::default() {
+        return None;
+    }
+    let cache_read_rate = price
+        .cache_read_per_million
+        .unwrap_or(price.input_per_million * 0.1);
+    let cache_write_rate = price
+        .cache_write_per_million
+        .unwrap_or(price.input_per_million * 1.25);
+    let cost = (usage.input as f64 * price.input_per_million
+        + usage.output as f64 * price.output_per_million
+        + usage.cache_read as f64 * cache_read_rate
+        + usage.cache_write as f64 * cache_write_rate)
+        / 1_000_000.0;
     Some(cost)
 }
 
@@ -272,6 +345,8 @@ mod tests {
             ModelPricing {
                 input_per_million: 3.0,
                 output_per_million: 15.0,
+                cache_read_per_million: None,
+                cache_write_per_million: None,
             },
         );
         m.insert(
@@ -279,9 +354,61 @@ mod tests {
             ModelPricing {
                 input_per_million: 15.0,
                 output_per_million: 75.0,
+                cache_read_per_million: None,
+                cache_write_per_million: None,
             },
         );
         m
+    }
+
+    // ── estimate_breakdown_cost (N-T47) ──
+
+    #[test]
+    fn nt47_breakdown_cost_prices_cache_tokens_at_cache_rates() {
+        let million = UsageBreakdown {
+            input: 1_000_000,
+            output: 1_000_000,
+            cache_read: 1_000_000,
+            cache_write: 1_000_000,
+        };
+        // No cache rates configured: a tenth and 1.25x of the input rate.
+        let cost = estimate_breakdown_cost(&million, "claude-sonnet-4-6", &test_pricing()).unwrap();
+        assert!(
+            (cost - (3.0 + 15.0 + 0.3 + 3.75)).abs() < 1e-9,
+            "cost {cost}"
+        );
+        // Configured cache rates win.
+        let cost = estimate_breakdown_cost(&million, "glm-5.3-flash", &default_pricing()).unwrap();
+        assert!(
+            (cost - (5.0 + 25.0 + 0.5 + 6.25)).abs() < 1e-9,
+            "cost {cost}"
+        );
+        // Nothing used, or nothing priced, is no estimate.
+        assert!(estimate_breakdown_cost(
+            &UsageBreakdown::default(),
+            "claude-sonnet-4-6",
+            &test_pricing()
+        )
+        .is_none());
+        assert!(estimate_breakdown_cost(&million, "unpriced-model", &test_pricing()).is_none());
+    }
+
+    #[test]
+    fn nt47_default_pricing_covers_the_fleet_glm_models() {
+        let pricing = default_pricing();
+        for model in ["glm-5.3", "glm-5.3-flash"] {
+            let price = &pricing[model];
+            assert_eq!(
+                (
+                    price.input_per_million,
+                    price.output_per_million,
+                    price.cache_read_per_million,
+                    price.cache_write_per_million
+                ),
+                (5.0, 25.0, Some(0.5), Some(6.25)),
+                "{model}"
+            );
+        }
     }
 
     // ── estimate_cost ──

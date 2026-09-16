@@ -1,11 +1,11 @@
 {
-  "timestamp": "2026-09-16T00:41:03.98005423Z",
-  "total_open_beads": 616,
+  "timestamp": "2026-09-15T19:40:55.840743829Z",
+  "total_open_beads": 620,
   "exclusion_criteria": {
-    "has_assignee": 5,
-    "manually_blocked": 20,
-    "has_dependencies": 412,
-    "resource_conflicts": 0
+    "has_assignee": 0,
+    "manually_blocked": 21,
+    "has_dependencies": 429,
+    "resource_conflicts": 1
   },
   "final_candidate_count": 203,
   "excluded_beads": [
@@ -573,6 +573,17 @@
     {
       "bead_id": "needle-b5cd1938",
       "title": "Fix claimed workers emitting EXHAUSTED_IDLE during dispatch",
+      "priority": 1,
+      "assignee": null,
+      "manual_blocked": true,
+      "has_blockers": false,
+      "blocker_count": 0,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-b45a0690",
+      "title": "Add BeadStore::show() method to return Bead struct",
       "priority": 1,
       "assignee": null,
       "manual_blocked": true,
@@ -1968,13 +1979,46 @@
       "conflict_count": 0
     },
     {
+      "bead_id": "needle-f84c01a4",
+      "title": "N-T48: choose adapters from workspace-scoped evidence with fleet fallback and record the deciding scope [cargo test --test nt48_workspace_routing]",
+      "priority": 1,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-c2fc81d6",
+      "title": "N-T49: run gates once on the pre-dispatch revision and classify a matching post-attempt failure as workspace_red, not task failure [cargo test --test nt49_baseline_gate]",
+      "priority": 1,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-f2b97407",
+      "title": "N-T51: extract tokens and cost from codex, opencode and omp adapter output so every adapter is costed [cargo test --test nt51_adapter_usage_capture]",
+      "priority": 1,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
       "bead_id": "needle-908c1f25",
       "title": "N-T53: generate ImprovementProposal records from ledger evidence classes in the N-T07 envelope, side-effect free [cargo test --test nt53_improvement_proposals]",
       "priority": 1,
       "assignee": null,
       "manual_blocked": false,
       "has_blockers": true,
-      "blocker_count": 1,
+      "blocker_count": 3,
       "has_resource_conflicts": false,
       "conflict_count": 0
     },
@@ -2007,7 +2051,7 @@
       "assignee": null,
       "manual_blocked": true,
       "has_blockers": true,
-      "blocker_count": 8,
+      "blocker_count": 11,
       "has_resource_conflicts": false,
       "conflict_count": 0
     },
@@ -2019,17 +2063,6 @@
       "manual_blocked": true,
       "has_blockers": true,
       "blocker_count": 4,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
-      "bead_id": "needle-9feef60c",
-      "title": "Prove full test suite leaves inherited HOME state byte-identical",
-      "priority": 1,
-      "assignee": null,
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 1,
       "has_resource_conflicts": false,
       "conflict_count": 0
     },
@@ -2074,61 +2107,6 @@
       "manual_blocked": false,
       "has_blockers": true,
       "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
-      "bead_id": "needle-76b52674",
-      "title": "N-T57: register a factory-health predicate group in needle audit over the attempt ledger, CI runs and bead inventories [cargo test --lib nt57_]",
-      "priority": 1,
-      "assignee": "claude-interactive-codinghome",
-      "manual_blocked": false,
-      "has_blockers": false,
-      "blocker_count": 0,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
-      "bead_id": "needle-e42f3f0b",
-      "title": "N-T58: wire needle audit into the CLI with per-finding telemetry and deduplicated, budgeted bead filing for violations [cargo test --lib nt58_]",
-      "priority": 1,
-      "assignee": "claude-interactive-codinghome",
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 1,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
-      "bead_id": "needle-bc162127",
-      "title": "N-T59: reserved Pluck lanes: named workers claim only beads carrying the lane label, across every relaxation tier and Explore [cargo test --lib nt59_]",
-      "priority": 1,
-      "assignee": "claude-interactive-codinghome",
-      "manual_blocked": false,
-      "has_blockers": false,
-      "blocker_count": 0,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
-      "bead_id": "needle-e0ad35bd",
-      "title": "N-T60: F5_LEARNING_LOOP_STALLED predicate and escalation handoff: a fleet-excluded escalation bead plus a brief for a stronger model or an operator session [cargo test --lib nt60_]",
-      "priority": 1,
-      "assignee": "claude-interactive-codinghome",
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 2,
-      "has_resource_conflicts": false,
-      "conflict_count": 0
-    },
-    {
-      "bead_id": "needle-62d6eab9",
-      "title": "N-T62: fleet/ex44 activation of the bootstrap lane: codex loop-lane worker row, needle-factory-audit timer, lane and routing config fragment, openai provider cap",
-      "priority": 1,
-      "assignee": "claude-interactive-codinghome",
-      "manual_blocked": false,
-      "has_blockers": true,
-      "blocker_count": 3,
       "has_resource_conflicts": false,
       "conflict_count": 0
     },
@@ -3607,6 +3585,28 @@
       "conflict_count": 0
     },
     {
+      "bead_id": "needle-e328149f",
+      "title": "Remove deprecated block operation from backend descriptor",
+      "priority": 2,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-6a0d3665",
+      "title": "Write comprehensive integration tests for quarantine label flow",
+      "priority": 2,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
       "bead_id": "needle-9ec8cc18",
       "title": "Add quarantine labeling test infrastructure and basic failure count test",
       "priority": 2,
@@ -3706,6 +3706,17 @@
       "conflict_count": 0
     },
     {
+      "bead_id": "needle-c504655b",
+      "title": "Implement test isolation helper for HOME environment",
+      "priority": 2,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
       "bead_id": "needle-224d3b0d",
       "title": "Evidence-based adapter selection among configured adapters with an evidence floor (N-T18)",
       "priority": 2,
@@ -3741,6 +3752,17 @@
     {
       "bead_id": "needle-276f95cf",
       "title": "Freeze adapter selection, experiments and promotion while a workspace is gate-degraded (N-T21)",
+      "priority": 2,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 1,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-a9b62e3f",
+      "title": "Fix any compilation errors found",
       "priority": 2,
       "assignee": null,
       "manual_blocked": false,
@@ -3877,7 +3899,7 @@
       "assignee": null,
       "manual_blocked": false,
       "has_blockers": true,
-      "blocker_count": 5,
+      "blocker_count": 3,
       "has_resource_conflicts": false,
       "conflict_count": 0
     },
@@ -4322,8 +4344,8 @@
       "conflict_count": 0
     },
     {
-      "bead_id": "needle-75368add",
-      "title": "N-T50: produce a CandidateLesson from a failing-then-succeeding attempt pair on one bead, keyed by failure signature [cargo test --test nt50_exception_lessons]",
+      "bead_id": "needle-c0003de3",
+      "title": "N-T47: stop a dispatch when accumulated cost crosses limits.attempt.max_cost_usd and resolve it as budget_exhausted [cargo test --test nt47_attempt_spend_cap]",
       "priority": 2,
       "assignee": null,
       "manual_blocked": false,
@@ -4331,6 +4353,28 @@
       "blocker_count": 1,
       "has_resource_conflicts": false,
       "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-75368add",
+      "title": "N-T50: produce a CandidateLesson from a failing-then-succeeding attempt pair on one bead, keyed by failure signature [cargo test --test nt50_exception_lessons]",
+      "priority": 2,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": true,
+      "blocker_count": 2,
+      "has_resource_conflicts": false,
+      "conflict_count": 0
+    },
+    {
+      "bead_id": "needle-17a7f6a0",
+      "title": "N-T51: key provider health by the adapter's gateway so every adapter behind one provider shares degradation and recovery [cargo test --test nt51_gateway_health]",
+      "priority": 2,
+      "assignee": null,
+      "manual_blocked": false,
+      "has_blockers": false,
+      "blocker_count": 0,
+      "has_resource_conflicts": true,
+      "conflict_count": 1
     },
     {
       "bead_id": "needle-65e66131",
