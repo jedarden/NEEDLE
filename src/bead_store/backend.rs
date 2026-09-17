@@ -22,6 +22,7 @@ const REQUIRED_OPERATIONS: &[&str] = &[
     "release",
     "block",
     "clear_assignee",
+    "clear_manual_block",
     "flush",
     "reopen",
     "labels",
@@ -375,6 +376,8 @@ fn allowed_placeholders(operation: &str) -> &'static [&'static str] {
         "show" | "labels" => &["id"],
         "release" => &["id", "if_revision", "fencing_token"],
         "block" | "clear_assignee" | "reopen" => &["id", "fencing_token"],
+        "clear_manual_block" => &["id"],
+        "manual_blocked" => &["limit"],
         "claim" => &["id", "actor"],
         "claim_auto" => &["actor", "model", "harness", "harness_version"],
         "label_add" | "label_remove" => &["id", "label"],
@@ -502,6 +505,7 @@ fn common_operations() -> HashMap<String, BeadOperationSpec> {
         ("release", operation(&[], None, None)),
         ("block", operation(&[], None, None)),
         ("clear_assignee", operation(&[], None, None)),
+        ("clear_manual_block", operation(&[], None, None)),
         ("flush", operation(&[], None, None)),
         ("reopen", operation(&[], None, None)),
         ("labels", operation(&[], None, None)),
@@ -647,6 +651,26 @@ fn builtin_bead_rs() -> BeadBackend {
             ],
             None,
             None,
+        ),
+    );
+    operations.insert(
+        "clear_manual_block".into(),
+        operation(&["update", "{id}", "--status", "open"], None, None),
+    );
+    operations.insert(
+        "manual_blocked".into(),
+        operation(
+            &[
+                "list",
+                "--status",
+                "open",
+                "--blocked",
+                "--json",
+                "--limit",
+                "{limit}",
+            ],
+            None,
+            Some(ParseShape::JsonLines),
         ),
     );
     operations.insert(

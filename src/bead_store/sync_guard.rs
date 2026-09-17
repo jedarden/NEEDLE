@@ -58,6 +58,8 @@ pub(super) fn guarded_operation(name: &str) -> bool {
             | "release"
             | "block"
             | "clear_assignee"
+            | "clear_manual_block"
+            | "append_notes"
             | "flush"
             | "reopen"
             | "close"

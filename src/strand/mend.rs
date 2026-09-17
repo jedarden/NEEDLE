@@ -859,6 +859,114 @@ impl MendStrand {
         Ok(())
     }
 
+    // ── Step 2.4: Migrate legacy manual blocks ─────────────────────────────
+
+    /// Convert bead-rs's legacy manual-block overlay into an expiring ADR-022
+    /// quarantine and then clear the overlay. The store query is intentionally
+    /// performed once per Mend cycle so older backends can cache their
+    /// per-bead `why` lookups.
+    async fn migrate_manual_blocked(
+        &self,
+        store: &dyn BeadStore,
+        _summary: &mut MendSummary,
+    ) -> Result<()> {
+        const MIGRATION_NOTE: &str = "migrated from manual_blocked (ADR-022)";
+
+        let beads = store.manually_blocked_open().await?;
+        for bead in beads {
+            let until = Utc::now();
+            let until_label = format!("quarantine-until:{}", until.to_rfc3339());
+            let labels = [
+                (
+                    "quarantined",
+                    !bead.labels.iter().any(|label| label == "quarantined"),
+                ),
+                (
+                    "quarantine-round:1",
+                    !bead
+                        .labels
+                        .iter()
+                        .any(|label| label == "quarantine-round:1"),
+                ),
+            ];
+
+            let mut failed = false;
+            for (label, missing) in labels {
+                if missing {
+                    if let Err(error) = store.add_label(&bead.id, label).await {
+                        tracing::warn!(
+                            bead_id = %bead.id,
+                            label,
+                            error = %error,
+                            "mend: failed to add manual-block migration label"
+                        );
+                        failed = true;
+                    }
+                }
+            }
+            if !bead
+                .labels
+                .iter()
+                .any(|label| label.starts_with("quarantine-until:"))
+            {
+                if let Err(error) = store.add_label(&bead.id, &until_label).await {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        error = %error,
+                        "mend: failed to add manual-block migration expiry"
+                    );
+                    failed = true;
+                }
+            }
+            if failed {
+                continue;
+            }
+
+            let note_present = match store.notes(&bead.id).await {
+                Ok(notes) => notes
+                    .as_deref()
+                    .is_some_and(|notes| notes.lines().any(|line| line.trim() == MIGRATION_NOTE)),
+                Err(error) => {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        error = %error,
+                        "mend: failed to read notes before manual-block migration"
+                    );
+                    continue;
+                }
+            };
+            if !note_present {
+                if let Err(error) = store.append_notes(&bead.id, MIGRATION_NOTE).await {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        error = %error,
+                        "mend: failed to append manual-block migration note"
+                    );
+                    continue;
+                }
+            }
+
+            if let Err(error) = store.clear_manual_block(&bead.id).await {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    error = %error,
+                    "mend: failed to clear manual-block overlay after migration"
+                );
+                continue;
+            }
+
+            let _ = self.telemetry.emit(
+                EventKind::QuarantineMigrated {
+                    bead_id: bead.id,
+                    until: until.to_rfc3339(),
+                },
+                Utc::now(),
+            );
+        }
+
+        Ok(())
+    }
+
     // ── Step 1.75: Orphaned heartbeat file removal ────────────────────────────
 
     /// Remove heartbeat files that have no matching entry in the worker registry.
@@ -2331,6 +2439,13 @@ impl super::Strand for MendStrand {
             // Non-fatal — continue with remaining steps.
         }
 
+        // Step 2.4: Migrate legacy manual-blocked open beads to ADR-022
+        // quarantine labels and clear the backend overlay.
+        if let Err(e) = self.migrate_manual_blocked(store, &mut summary).await {
+            tracing::warn!(error = %e, "mend: manual-block migration failed");
+            // Non-fatal — continue with remaining steps.
+        }
+
         // Step 2.5: Orphaned heartbeat file removal.
         if let Err(e) = self.cleanup_orphaned_heartbeats(&mut summary) {
             tracing::warn!(error = %e, "mend: orphaned heartbeat cleanup failed");
@@ -2566,6 +2681,7 @@ mod tests {
 
     use async_trait::async_trait;
     use chrono::{DateTime, TimeZone, Utc};
+    use std::collections::HashMap;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -2573,6 +2689,7 @@ mod tests {
 
     struct MockBeadStore {
         all_beads: Mutex<Vec<Bead>>,
+        notes: Mutex<HashMap<BeadId, String>>,
         release_count: Arc<AtomicU32>,
         clear_assignee_count: Arc<AtomicU32>,
         /// Warnings returned by doctor_check (probe-only).
@@ -2590,6 +2707,7 @@ mod tests {
             (
                 MockBeadStore {
                     all_beads: Mutex::new(beads),
+                    notes: Mutex::new(HashMap::new()),
                     release_count: release_count.clone(),
                     clear_assignee_count: clear_assignee_count.clone(),
                     check_warnings: vec![],
@@ -2712,19 +2830,47 @@ mod tests {
         async fn reopen(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
-        async fn labels(&self, _id: &BeadId) -> Result<Vec<String>> {
-            Ok(vec![])
+        async fn labels(&self, id: &BeadId) -> Result<Vec<String>> {
+            let beads = self.all_beads.lock().unwrap();
+            beads
+                .iter()
+                .find(|bead| &bead.id == id)
+                .map(|bead| bead.labels.clone())
+                .ok_or_else(|| anyhow::anyhow!("bead not found: {}", id))
         }
-        async fn add_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
-            Ok(())
+        async fn add_label(&self, id: &BeadId, label: &str) -> Result<()> {
+            let mut beads = self.all_beads.lock().unwrap();
+            if let Some(bead) = beads.iter_mut().find(|bead| &bead.id == id) {
+                if !bead.labels.iter().any(|existing| existing == label) {
+                    bead.labels.push(label.to_string());
+                }
+                Ok(())
+            } else {
+                anyhow::bail!("bead not found: {}", id)
+            }
         }
-        async fn remove_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
-            Ok(())
+        async fn remove_label(&self, id: &BeadId, label: &str) -> Result<()> {
+            let mut beads = self.all_beads.lock().unwrap();
+            if let Some(bead) = beads.iter_mut().find(|bead| &bead.id == id) {
+                bead.labels.retain(|existing| existing != label);
+                Ok(())
+            } else {
+                anyhow::bail!("bead not found: {}", id)
+            }
         }
         async fn create_bead(&self, _title: &str, _body: &str, _labels: &[&str]) -> Result<BeadId> {
             Ok(BeadId::from("mock-bead"))
         }
-        async fn append_notes(&self, _id: &BeadId, _note: &str) -> Result<()> {
+        async fn notes(&self, id: &BeadId) -> Result<Option<String>> {
+            Ok(self.notes.lock().unwrap().get(id).cloned())
+        }
+        async fn append_notes(&self, id: &BeadId, note: &str) -> Result<()> {
+            let mut notes = self.notes.lock().unwrap();
+            let entry = notes.entry(id.clone()).or_default();
+            if !entry.is_empty() {
+                entry.push('\n');
+            }
+            entry.push_str(note);
             Ok(())
         }
         async fn doctor_repair(&self) -> Result<RepairReport> {
@@ -2765,6 +2911,16 @@ mod tests {
             if let Some(bead) = beads.iter_mut().find(|b| &b.id == id) {
                 bead.assignee = None;
                 self.clear_assignee_count.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            } else {
+                anyhow::bail!("bead not found: {}", id)
+            }
+        }
+
+        async fn clear_manual_block(&self, id: &BeadId) -> Result<()> {
+            let mut beads = self.all_beads.lock().unwrap();
+            if let Some(bead) = beads.iter_mut().find(|bead| &bead.id == id) {
+                bead.labels.retain(|label| label != "manual_blocked");
                 Ok(())
             } else {
                 anyhow::bail!("bead not found: {}", id)
@@ -4298,6 +4454,55 @@ mod tests {
         let reg_dir = tempfile::tempdir().unwrap();
         let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
         assert_eq!(mend.name(), "mend");
+    }
+
+    #[tokio::test]
+    async fn migrates_manual_blocked_open_bead_idempotently() {
+        let hb_dir = tempfile::tempdir().unwrap();
+        let lock_dir = tempfile::tempdir().unwrap();
+        let reg_dir = tempfile::tempdir().unwrap();
+
+        let mut bead = make_bead_with_deps("legacy-manual-block", BeadStatus::Open, vec![]);
+        bead.labels = vec!["manual_blocked".to_string(), "existing-label".to_string()];
+        let (store, _, _) = MockBeadStore::new(vec![bead]);
+        let mend = make_mend_strand(hb_dir.path(), lock_dir.path(), reg_dir.path());
+
+        let first = mend.evaluate(&store, &HashSet::new()).await;
+        assert!(matches!(first, StrandResult::NoWork));
+
+        let migrated = store.all_beads.lock().unwrap().first().cloned().unwrap();
+        assert!(!migrated
+            .labels
+            .iter()
+            .any(|label| label == "manual_blocked"));
+        assert!(migrated
+            .labels
+            .iter()
+            .any(|label| label == "existing-label"));
+        assert!(migrated.labels.iter().any(|label| label == "quarantined"));
+        assert!(migrated
+            .labels
+            .iter()
+            .any(|label| label == "quarantine-round:1"));
+        assert!(migrated
+            .labels
+            .iter()
+            .any(|label| label.starts_with("quarantine-until:")));
+        assert_eq!(
+            store
+                .notes
+                .lock()
+                .unwrap()
+                .get(&migrated.id)
+                .map(String::as_str),
+            Some("migrated from manual_blocked (ADR-022)")
+        );
+
+        let labels_after_first = migrated.labels.clone();
+        let second = mend.evaluate(&store, &HashSet::new()).await;
+        assert!(matches!(second, StrandResult::NoWork));
+        let labels_after_second = store.all_beads.lock().unwrap()[0].labels.clone();
+        assert_eq!(labels_after_second, labels_after_first);
     }
 
     // ── Combined cleanup test ────────────────────────────────────────────────

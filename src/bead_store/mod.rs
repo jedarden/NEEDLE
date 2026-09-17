@@ -1387,6 +1387,27 @@ pub trait BeadStore: Send + Sync {
         self.list_all().await
     }
 
+    /// List open beads carrying the backend's manual-block marker.
+    ///
+    /// bead-rs exposes this as a derived `manual_blocked` field rather than a
+    /// stored status. The default uses the already-enriched starvation
+    /// inventory so older bead-rs binaries and test stores remain compatible.
+    async fn manually_blocked_open(&self) -> Result<Vec<Bead>> {
+        let beads = self.starvation_inventory().await?;
+        Ok(beads
+            .into_iter()
+            .filter(|bead| {
+                bead.status == BeadStatus::Open
+                    && bead.labels.iter().any(|label| {
+                        matches!(
+                            label.trim().to_ascii_lowercase().as_str(),
+                            "manual_blocked" | "manual-blocked" | "blocked:manual"
+                        )
+                    })
+            })
+            .collect())
+    }
+
     /// Fetch a single bead by ID.
     async fn show(&self, id: &BeadId) -> Result<Bead>;
 
@@ -1542,6 +1563,12 @@ pub trait BeadStore: Send + Sync {
     /// stuck with an assignee). Note: As of 2026-08-24, `bead reopen` clears the
     /// assignee, so this is not needed for reopened beads.
     async fn clear_assignee(&self, id: &BeadId) -> Result<()>;
+
+    /// Clear a backend-specific manual-block overlay without changing the
+    /// bead's open status or labels.
+    async fn clear_manual_block(&self, _id: &BeadId) -> Result<()> {
+        bail!("configured bead backend does not implement clear_manual_block")
+    }
 
     /// Flush local bead changes to JSONL before release.
     ///

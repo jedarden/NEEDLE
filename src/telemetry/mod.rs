@@ -793,6 +793,11 @@ pub enum EventKind {
         until: String,
         failure_count: u32,
     },
+    /// A legacy bead-rs manual block was converted to an ADR-022 quarantine.
+    QuarantineMigrated {
+        bead_id: BeadId,
+        until: String,
+    },
     QuarantineExpired {
         bead_id: BeadId,
     },
@@ -1759,6 +1764,7 @@ impl EventKind {
             EventKind::BeadCompleted { .. } => "bead.completed",
             EventKind::BeadOrphaned { .. } => "bead.orphaned",
             EventKind::BeadQuarantined { .. } => "bead.quarantined",
+            EventKind::QuarantineMigrated { .. } => "bead.quarantine_migrated",
             EventKind::QuarantineExpired { .. } => "bead.quarantine_expired",
             EventKind::BeadEscalated { .. } => "bead.escalated",
             EventKind::HumanRung { .. } => "bead.human_rung",
@@ -1924,6 +1930,7 @@ impl EventKind {
             | EventKind::BeadCompleted { bead_id, .. }
             | EventKind::BeadOrphaned { bead_id }
             | EventKind::BeadQuarantined { bead_id, .. }
+            | EventKind::QuarantineMigrated { bead_id, .. }
             | EventKind::BeadEscalated { bead_id, .. }
             | EventKind::HumanRung { bead_id, .. }
             | EventKind::FalseCloseDetected { bead_id, .. }
@@ -3778,6 +3785,10 @@ impl EventKind {
                 "until": until,
                 "failure_count": failure_count,
             }),
+            EventKind::QuarantineMigrated { bead_id, until } => serde_json::json!({
+                "bead_id": bead_id,
+                "until": until,
+            }),
             EventKind::FalseCloseDetected {
                 bead_id,
                 failure_count,
@@ -4185,6 +4196,7 @@ impl EventKind {
             | EventKind::WorkerAdmissionRestored { .. }
             | EventKind::ConfigWarning { .. }
             | EventKind::BeadQuarantined { .. }
+            | EventKind::QuarantineMigrated { .. }
             | EventKind::FalseCloseDetected { .. }
             | EventKind::SpawnPathModifiedInPlace { .. }
             | EventKind::Log { .. }

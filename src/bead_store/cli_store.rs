@@ -636,6 +636,44 @@ impl BeadStore for CliBeadStore {
         Ok(beads)
     }
 
+    async fn manually_blocked_open(&self) -> Result<Vec<Bead>> {
+        if self.backend.name == "bead-rs" && self.operation("manual_blocked").is_ok() {
+            let limit = if self.has_quirk("limit_zero_returns_empty_set") {
+                "999999"
+            } else {
+                "0"
+            };
+            let values = HashMap::from([("limit", limit.to_string())]);
+            match self.run_operation("manual_blocked", &values).await {
+                Ok(stdout) => {
+                    let mut beads = self.parse_beads("manual_blocked", &stdout)?;
+                    for bead in &mut beads {
+                        if !bead.labels.iter().any(|label| label == "manual_blocked") {
+                            bead.labels.push("manual_blocked".to_string());
+                        }
+                    }
+                    return Ok(beads);
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        error = %error,
+                        "bead-rs manual-blocked listing unavailable; falling back to why enrichment"
+                    );
+                }
+            }
+        }
+
+        let mut beads = self.list_all().await?;
+        self.enrich_manual_block_labels(&mut beads).await;
+        Ok(beads
+            .into_iter()
+            .filter(|bead| {
+                bead.status == BeadStatus::Open
+                    && bead.labels.iter().any(|label| label == "manual_blocked")
+            })
+            .collect())
+    }
+
     async fn show(&self, id: &BeadId) -> Result<Bead> {
         let values = HashMap::from([("id", id.to_string())]);
 
@@ -1035,6 +1073,10 @@ impl BeadStore for CliBeadStore {
         self.mutate("clear_assignee", &[("id", id.to_string())])
             .await
     }
+    async fn clear_manual_block(&self, id: &BeadId) -> Result<()> {
+        self.mutate("clear_manual_block", &[("id", id.to_string())])
+            .await
+    }
     async fn flush(&self) -> Result<()> {
         self.mutate("flush", &[]).await
     }
@@ -1058,6 +1100,27 @@ impl BeadStore for CliBeadStore {
             ],
         )
         .await
+    }
+
+    async fn append_notes(&self, id: &BeadId, note: &str) -> Result<()> {
+        let existing = self.notes(id).await?.unwrap_or_default();
+        if existing.lines().any(|line| line.trim() == note.trim()) {
+            return Ok(());
+        }
+        let notes = if existing.trim().is_empty() {
+            note.to_string()
+        } else {
+            format!("{existing}\n{note}")
+        };
+        let args = vec![
+            "update".to_string(),
+            id.to_string(),
+            "--notes".to_string(),
+            notes,
+        ];
+        self.run_argv("append_notes", &args, DEFAULT_TIMEOUT_SECS)
+            .await
+            .map(|_| ())
     }
 
     async fn labels(&self, id: &BeadId) -> Result<Vec<String>> {
