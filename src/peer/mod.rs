@@ -16,10 +16,11 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use chrono::Utc;
 
-use crate::bead_store::BeadStore;
+use crate::bead_store::{BeadStore, RecoveryReleaseOutcome};
 use crate::health::{HealthMonitor, StalePeer};
 use crate::registry::Registry;
 use crate::telemetry::{EventKind, Telemetry};
+use crate::types::BeadStatus;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // PeerCheckResult
@@ -205,24 +206,89 @@ impl<'a> PeerMonitor<'a> {
 
         // 1. Release the claimed bead (if any).
         if let Some(ref bead_id) = peer.current_bead {
-            match self.store.release(bead_id).await {
-                Ok(()) => {
-                    tracing::info!(
-                        bead = %bead_id,
-                        worker = %peer.worker_id,
-                        "released orphaned bead from crashed worker"
-                    );
-                    bead_released = true;
-                }
-                Err(e) => {
-                    // Release failure is non-fatal — the bead may have already
-                    // been released or closed by another path.
+            let observed = self.store.claim_status(bead_id).await;
+            let expected_worker = peer.qualified_id.as_deref().unwrap_or(&peer.worker_id);
+            let observed = match observed {
+                Ok(observed) => Some(observed),
+                Err(error) => {
                     tracing::warn!(
+                        event_type = "mend.bead_release_failed",
                         bead = %bead_id,
-                        worker = %peer.worker_id,
-                        error = %e,
-                        "failed to release bead from crashed worker (may already be released)"
+                        worker = %expected_worker,
+                        error = %error,
+                        "failed to re-read crashed peer claim before recovery release"
                     );
+                    let _ = self.telemetry.emit(
+                        EventKind::MendBeadReleaseFailed {
+                            bead_id: bead_id.to_string(),
+                            assignee: expected_worker.to_string(),
+                            error: error.to_string(),
+                        },
+                        Utc::now(),
+                    );
+                    None
+                }
+            };
+            if let Some(observed) = observed {
+                let assignee_matches_peer = observed.assignee.as_deref().is_some_and(|assignee| {
+                    assignee == peer.worker_id
+                        || peer
+                            .qualified_id
+                            .as_deref()
+                            .is_some_and(|id| id == assignee)
+                });
+                if observed.status != BeadStatus::InProgress || !assignee_matches_peer {
+                    tracing::info!(
+                        event_type = "mend.bead_release_conflict",
+                        bead = %bead_id,
+                        crashed_worker = %expected_worker,
+                        observed_status = ?observed.status,
+                        observed_assignee = ?observed.assignee,
+                        "crashed peer claim changed before recovery release; leaving the live claim untouched"
+                    );
+                } else {
+                    match self.store.release_recovery(bead_id, &observed).await {
+                        Ok(RecoveryReleaseOutcome::Released) => {
+                            tracing::info!(
+                                event_type = "mend.bead_released",
+                                bead = %bead_id,
+                                worker = %expected_worker,
+                                claim_epoch = ?observed.claim_epoch,
+                                revision = ?observed.revision,
+                                "released orphaned bead from crashed worker"
+                            );
+                            bead_released = true;
+                        }
+                        Ok(RecoveryReleaseOutcome::Conflict) => {
+                            tracing::info!(
+                                event_type = "mend.bead_release_conflict",
+                                bead = %bead_id,
+                                worker = %expected_worker,
+                                claim_epoch = ?observed.claim_epoch,
+                                revision = ?observed.revision,
+                                "claim changed during crashed-peer recovery release; leaving the live claim untouched"
+                            );
+                        }
+                        Err(error) => {
+                            // Release failure is non-fatal — the bead may have already
+                            // been released or closed by another path.
+                            tracing::warn!(
+                                event_type = "mend.bead_release_failed",
+                                bead = %bead_id,
+                                worker = %expected_worker,
+                                error = %error,
+                                "failed to release bead from crashed worker (may already be released)"
+                            );
+                            let _ = self.telemetry.emit(
+                                EventKind::MendBeadReleaseFailed {
+                                    bead_id: bead_id.to_string(),
+                                    assignee: expected_worker.to_string(),
+                                    error: error.to_string(),
+                                },
+                                Utc::now(),
+                            );
+                        }
+                    }
                 }
             }
 
@@ -240,6 +306,10 @@ impl<'a> PeerMonitor<'a> {
             )?;
         }
 
+        self.finish_crashed_peer_cleanup(peer, bead_released)
+    }
+
+    fn finish_crashed_peer_cleanup(&self, peer: &StalePeer, bead_released: bool) -> Result<bool> {
         // 2. Remove the heartbeat file.
         remove_heartbeat_file(&peer.heartbeat_file)?;
 
@@ -286,20 +356,22 @@ fn remove_heartbeat_file(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bead_store::{Filters, RepairReport};
+    use crate::bead_store::{Filters, RecoveryReleaseOutcome, RepairReport};
     use crate::health::HeartbeatData;
-    use crate::types::{Bead, BeadId, ClaimResult, WorkerState};
+    use crate::types::{Bead, BeadId, ClaimResult, ClaimStatus, WorkerState};
     use async_trait::async_trait;
     use chrono::Utc;
+    use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     // ── Mock bead store ─────────────────────────────────────────────────────
 
     /// Track which beads were released.
     struct MockBeadStore {
         release_count: Arc<AtomicU32>,
+        claims: Mutex<HashMap<BeadId, String>>,
     }
 
     impl MockBeadStore {
@@ -308,9 +380,17 @@ mod tests {
             (
                 MockBeadStore {
                     release_count: count.clone(),
+                    claims: Mutex::new(HashMap::new()),
                 },
                 count,
             )
+        }
+
+        fn record_claim(&self, bead_id: &str, assignee: &str) {
+            self.claims
+                .lock()
+                .unwrap()
+                .insert(BeadId::from(bead_id), assignee.to_string());
         }
     }
 
@@ -334,8 +414,39 @@ mod tests {
         }
 
         async fn release(&self, _id: &BeadId) -> Result<()> {
+            anyhow::bail!("peer recovery must not use claimant-owned release")
+        }
+        async fn claim_status(&self, id: &BeadId) -> Result<ClaimStatus> {
+            let claims = self.claims.lock().unwrap();
+            let assignee = claims
+                .get(id)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("bead not found: {id}"))?;
+            Ok(ClaimStatus {
+                status: BeadStatus::InProgress,
+                assignee: Some(assignee),
+                revision: Some(1),
+                claim_epoch: Some(1),
+            })
+        }
+        async fn release_recovery(
+            &self,
+            id: &BeadId,
+            expected: &ClaimStatus,
+        ) -> Result<RecoveryReleaseOutcome> {
+            let mut claims = self.claims.lock().unwrap();
+            let current = claims.get(id).cloned().map(|assignee| ClaimStatus {
+                status: BeadStatus::InProgress,
+                assignee: Some(assignee),
+                revision: Some(1),
+                claim_epoch: Some(1),
+            });
+            if current.as_ref() != Some(expected) {
+                return Ok(RecoveryReleaseOutcome::Conflict);
+            }
+            claims.remove(id);
             self.release_count.fetch_add(1, Ordering::Relaxed);
-            Ok(())
+            Ok(RecoveryReleaseOutcome::Released)
         }
         async fn block(&self, _id: &BeadId) -> Result<()> {
             Ok(())
@@ -480,6 +591,7 @@ mod tests {
         );
 
         let (store, release_count) = MockBeadStore::new();
+        store.record_claim("nd-orphan", "claude-dead-worker");
         let registry = Registry::new(reg_dir.path());
         let telemetry = Telemetry::new("test-monitor".to_string());
 
@@ -656,6 +768,7 @@ mod tests {
         );
 
         let (store, release_count) = MockBeadStore::new();
+        store.record_claim("nd-3", "claude-crashed");
         let registry = Registry::new(reg_dir.path());
         let telemetry = Telemetry::new("test-monitor".to_string());
 

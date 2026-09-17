@@ -45,7 +45,9 @@ use std::process::Command;
 use anyhow::{Context, Result};
 use tempfile::TempDir;
 
+use needle::bead_store::{BeadStore, RecoveryReleaseOutcome};
 use needle::checkpoint_utils::{flush_checkpoint_to_temp, restore_checkpoint_to_fresh_workspace};
+use needle::types::ClaimResult;
 use needle::workspace_equality::{assert_workspace_eq, WorkspaceEqualityConfig};
 
 /// Path to the bead-rs binary used by the repository's current backend.
@@ -368,6 +370,42 @@ async fn checkpoint_roundtrip_handles_single_bead() {
     // Verify equality
     let config = WorkspaceEqualityConfig::default();
     assert_workspace_eq(source_workspace.path(), &restored_path, &config);
+
+    // The recovery adapter must reject the guards from an earlier ownership
+    // epoch even when this store has since cached the new owner's token. Keep
+    // this in an existing real-backend contract test so the harness count does
+    // not grow for a second assertion over the same isolated CLI fixture.
+    let recovery_workspace = super::create_test_workspace("recovery-fencing")
+        .expect("failed to create recovery fencing workspace");
+    let recovery_store = super::store_for_workspace(recovery_workspace.path())
+        .expect("failed to open recovery fencing store");
+    let recovery_id = super::create_bead(recovery_workspace.path(), "recovery fencing", 1)
+        .expect("failed to create recovery fencing bead");
+    assert!(matches!(
+        recovery_store
+            .claim(&recovery_id, "abandoned-worker")
+            .await
+            .unwrap(),
+        ClaimResult::Claimed(_)
+    ));
+    let abandoned = recovery_store.claim_status(&recovery_id).await.unwrap();
+    recovery_store.release(&recovery_id).await.unwrap();
+    assert!(matches!(
+        recovery_store
+            .claim(&recovery_id, "replacement-worker")
+            .await
+            .unwrap(),
+        ClaimResult::Claimed(_)
+    ));
+
+    let outcome = recovery_store
+        .release_recovery(&recovery_id, &abandoned)
+        .await
+        .unwrap();
+    assert_eq!(outcome, RecoveryReleaseOutcome::Conflict);
+    let replacement = recovery_store.claim_status(&recovery_id).await.unwrap();
+    assert_eq!(replacement.assignee.as_deref(), Some("replacement-worker"));
+    assert_ne!(replacement.claim_epoch, abandoned.claim_epoch);
 }
 
 /// Integration test: Checkpoint pointer file format.

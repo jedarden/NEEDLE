@@ -15,7 +15,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 
-use crate::bead_store::BeadStore;
+use crate::bead_store::{BeadStore, RecoveryReleaseOutcome};
 use crate::config::{LimitsConfig, MendConfig};
 use crate::health::{ExecutorLookup, HealthMonitor};
 use crate::learning::LearningsFile;
@@ -399,8 +399,52 @@ async fn cleanup_in_progress(
             "releasing stale in-progress bead"
         );
 
-        match store.release(&bead.id).await {
-            Ok(()) => {
+        let observed = match store.claim_status(&bead.id).await {
+            Ok(observed) => observed,
+            Err(error) => {
+                tracing::warn!(
+                    event_type = "mend.bead_release_failed",
+                    bead_id = %bead.id,
+                    assignee = %assignee,
+                    error = %error,
+                    "failed to re-read stale claim before recovery release"
+                );
+                let _ = telemetry.emit(
+                    EventKind::MendBeadReleaseFailed {
+                        bead_id: bead.id.to_string(),
+                        assignee: assignee.clone(),
+                        error: error.to_string(),
+                    },
+                    chrono::Utc::now(),
+                );
+                continue;
+            }
+        };
+
+        if observed.status != BeadStatus::InProgress
+            || observed.assignee.as_deref() != Some(assignee.as_str())
+        {
+            tracing::info!(
+                event_type = "mend.bead_release_conflict",
+                bead_id = %bead.id,
+                stale_assignee = %assignee,
+                observed_status = ?observed.status,
+                observed_assignee = ?observed.assignee,
+                "stale claim changed before recovery release; deferring to the next mend cycle"
+            );
+            continue;
+        }
+
+        match store.release_recovery(&bead.id, &observed).await {
+            Ok(RecoveryReleaseOutcome::Released) => {
+                tracing::info!(
+                    event_type = "mend.bead_released",
+                    bead_id = %bead.id,
+                    assignee = %assignee,
+                    claim_epoch = ?observed.claim_epoch,
+                    revision = ?observed.revision,
+                    "released stale in-progress bead with observed recovery guards"
+                );
                 let _ = telemetry.emit(
                     EventKind::BeadReleased {
                         bead_id: bead.id.clone(),
@@ -417,17 +461,29 @@ async fn cleanup_in_progress(
                 );
                 released += 1;
             }
-            Err(e) => {
-                tracing::warn!(
+            Ok(RecoveryReleaseOutcome::Conflict) => {
+                tracing::info!(
+                    event_type = "mend.bead_release_conflict",
                     bead_id = %bead.id,
-                    error = %e,
+                    assignee = %assignee,
+                    claim_epoch = ?observed.claim_epoch,
+                    revision = ?observed.revision,
+                    "claim changed during recovery release; deferring to the next mend cycle"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    event_type = "mend.bead_release_failed",
+                    bead_id = %bead.id,
+                    assignee = %assignee,
+                    error = %error,
                     "failed to release orphaned in-progress bead"
                 );
                 let _ = telemetry.emit(
                     EventKind::MendBeadReleaseFailed {
                         bead_id: bead.id.to_string(),
                         assignee: assignee.clone(),
-                        error: e.to_string(),
+                        error: error.to_string(),
                     },
                     chrono::Utc::now(),
                 );
@@ -2506,7 +2562,7 @@ mod tests {
     use crate::bead_store::{Filters, RepairReport};
     use crate::health::HeartbeatData;
     use crate::telemetry::test_utils::MemorySink;
-    use crate::types::{Bead, BeadId, BrDependency, ClaimResult, WorkerState};
+    use crate::types::{Bead, BeadId, BrDependency, ClaimResult, ClaimStatus, WorkerState};
 
     use async_trait::async_trait;
     use chrono::{DateTime, TimeZone, Utc};
@@ -2588,17 +2644,46 @@ mod tests {
             anyhow::bail!("not implemented in mock")
         }
 
-        async fn release(&self, id: &BeadId) -> Result<()> {
+        async fn release(&self, _id: &BeadId) -> Result<()> {
+            anyhow::bail!("mend recovery must not use claimant-owned release")
+        }
+        async fn claim_status(&self, id: &BeadId) -> Result<ClaimStatus> {
+            let beads = self.all_beads.lock().unwrap();
+            let bead = beads
+                .iter()
+                .find(|bead| &bead.id == id)
+                .ok_or_else(|| anyhow::anyhow!("bead not found: {id}"))?;
+            Ok(ClaimStatus {
+                status: bead.status.clone(),
+                assignee: bead.assignee.clone(),
+                revision: Some(1),
+                claim_epoch: Some(1),
+            })
+        }
+        async fn release_recovery(
+            &self,
+            id: &BeadId,
+            expected: &ClaimStatus,
+        ) -> Result<RecoveryReleaseOutcome> {
             // Find and update the bead's status, simulating real bead store behavior.
             let mut beads = self.all_beads.lock().unwrap();
             if let Some(bead) = beads.iter_mut().find(|b| &b.id == id) {
+                let current = ClaimStatus {
+                    status: bead.status.clone(),
+                    assignee: bead.assignee.clone(),
+                    revision: Some(1),
+                    claim_epoch: Some(1),
+                };
+                if current != *expected {
+                    return Ok(RecoveryReleaseOutcome::Conflict);
+                }
                 // Only count releases for InProgress beads (real behavior).
                 if bead.status == BeadStatus::InProgress {
                     bead.status = BeadStatus::Open;
                     bead.assignee = None;
                     self.release_count.fetch_add(1, Ordering::Relaxed);
                 }
-                Ok(())
+                Ok(RecoveryReleaseOutcome::Released)
             } else {
                 anyhow::bail!("bead not found: {}", id)
             }
