@@ -14,7 +14,8 @@ fn test_sigpipe_on_closed_stdout() {
     let fixture = IsolatedChildEnv::new();
 
     // Create a pipe for stdout
-    let (mut reader, writer) = os_pipe::pipe().expect("failed to create pipe");
+    let (mut reader, writer) = os_pipe::pipe().expect("failed to create stdout pipe");
+    let (mut stderr_reader, stderr_writer) = os_pipe::pipe().expect("failed to create stderr pipe");
 
     // Spawn needle with stdout piped
     let mut child = ChildGuard::new(
@@ -22,6 +23,7 @@ fn test_sigpipe_on_closed_stdout() {
             .needle()
             .arg("config")
             .stdout(Stdio::from(writer))
+            .stderr(Stdio::from(stderr_writer))
             .spawn()
             .expect("failed to spawn needle"),
     );
@@ -34,6 +36,11 @@ fn test_sigpipe_on_closed_stdout() {
 
     // Wait for the child to exit
     let status = child.wait().expect("failed to wait for child");
+    let mut stderr = Vec::new();
+    stderr_reader
+        .read_to_end(&mut stderr)
+        .expect("failed to read child stderr");
+    let stderr = String::from_utf8_lossy(&stderr);
 
     // On Unix systems with SIG_DFL, the exit status should be:
     // - 0 if the process handled the broken pipe gracefully
@@ -44,10 +51,12 @@ fn test_sigpipe_on_closed_stdout() {
     {
         let exit_code = status.code().unwrap_or(0);
         assert_ne!(
-            exit_code,
-            101,
-            "needle exited with panic code 101 on broken pipe; stderr:\n{:?}",
-            String::from_utf8_lossy(&[])
+            exit_code, 101,
+            "needle exited with panic code 101 on broken pipe; stderr:\n{stderr}"
+        );
+        assert!(
+            !stderr.to_ascii_lowercase().contains("panicked"),
+            "needle reported a panic on broken pipe; stderr:\n{stderr}"
         );
         assert!(
             exit_code == 0 || exit_code == 141,
@@ -63,6 +72,10 @@ fn test_sigpipe_on_closed_stdout() {
         assert_ne!(
             exit_code, 101,
             "needle exited with panic code 101 on broken pipe"
+        );
+        assert!(
+            !stderr.to_ascii_lowercase().contains("panicked"),
+            "needle reported a panic on broken pipe; stderr:\n{stderr}"
         );
     }
 }
