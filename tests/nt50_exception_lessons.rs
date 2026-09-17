@@ -162,6 +162,7 @@ fn failure_record() -> AttemptRecord {
                 error_block: "test result: FAILED; secret=gate-secret".to_string(),
             }],
         }),
+        wip_patch: None,
     }
 }
 
@@ -181,6 +182,7 @@ fn success_record(outcome: &str) -> AttemptRecord {
         duration_ms: 200,
         failure_summary: None,
         failure_evidence: None,
+        wip_patch: None,
     }
 }
 

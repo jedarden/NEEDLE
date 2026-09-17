@@ -22,6 +22,7 @@ use tokio::sync::mpsc;
 
 use crate::config::{ColorMode, HookConfig, StdoutFormat, StdoutSinkConfig, TelemetryConfig};
 use crate::types::{BeadId, WorkerId, WorkerState};
+use crate::wip::WipPatch;
 
 // ─── OTLP Sink (feature-gated) ───────────────────────────────────────────────────
 
@@ -201,6 +202,9 @@ pub struct AttemptResolvedFields {
     pub duration_ms: u64,
     pub terminal_reason: Option<String>,
     pub exit_code: i32,
+    /// Durable working-tree recovery patch captured before a timeout, crash,
+    /// or interruption released the bead.
+    pub wip_patch: Option<WipPatch>,
 }
 
 /// The semantic outcome vocabulary of an `attempt.resolved` ledger row
@@ -3905,6 +3909,7 @@ impl EventKind {
                     duration_ms,
                     terminal_reason,
                     exit_code,
+                    wip_patch,
                 } = &**fields;
                 let mut data = serde_json::json!({
                     // Ledger rows are read by consumers that outlive this
@@ -3959,6 +3964,9 @@ impl EventKind {
                 }
                 if let Some(reason) = terminal_reason {
                     data["terminal_reason"] = serde_json::json!(reason);
+                }
+                if let Some(patch) = wip_patch {
+                    data["wip_patch"] = serde_json::json!(patch);
                 }
 
                 data
@@ -7069,6 +7077,7 @@ mod tests {
             duration_ms: 614_000,
             terminal_reason: Some("gate:clippy".to_string()),
             exit_code: 0,
+            wip_patch: None,
         }
     }
 
@@ -7140,6 +7149,7 @@ mod tests {
             "duration_ms",
             "terminal_reason",
             "exit_code",
+            "wip_patch",
         ] {
             assert!(
                 fixture["properties"].get(field).is_some(),
@@ -7199,6 +7209,21 @@ mod tests {
             result.is_err(),
             "an outcome outside the enum must fail validation"
         );
+    }
+
+    #[test]
+    fn attempt_resolved_row_carries_wip_patch_reference() {
+        let mut fields = attempt_resolved_fields();
+        fields.wip_patch = Some(crate::wip::WipPatch {
+            path: ".beads/traces/needle-96dec90b/wip-att.patch".to_string(),
+            bytes: 123,
+        });
+        let data = EventKind::AttemptResolved(Box::new(fields)).to_data();
+        assert_eq!(
+            data["wip_patch"]["path"],
+            ".beads/traces/needle-96dec90b/wip-att.patch"
+        );
+        assert_eq!(data["wip_patch"]["bytes"], 123);
     }
 
     #[test]

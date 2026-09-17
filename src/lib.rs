@@ -97,5 +97,6 @@ pub mod validation;
 /// Verification-failure fingerprinting and the cross-bead gate-degradation trip.
 pub mod verification_fingerprint;
 pub mod version_probe;
+pub mod wip;
 pub mod worker;
 pub mod workspace_equality;

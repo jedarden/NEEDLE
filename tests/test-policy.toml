@@ -97,7 +97,7 @@ version = 1
 # brief path in the bead body, and one Pluck default-exclusion contract in
 # src/strand/pluck.rs. All pure or against a tempdir and an in-memory store.
 # Acceptance command: `cargo test --lib nt60_`.
-max_tests = 3808
+max_tests = 3810
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
@@ -286,6 +286,12 @@ max_occurrences = 1
 owner = "component:outcome"
 reason = "The outcome lifecycle contract exercises the real subprocess boundary; keep it out of the unit tier."
 
+[[unit_exception]]
+path = "src/wip.rs"
+kind = "process"
+max_occurrences = 2
+owner = "component:wip-capture"
+reason = "The WIP capture fixture exercises the real Git stash/apply boundary."
 [[unit_exception]]
 path = "src/outcome/mod.rs"
 kind = "sleep"

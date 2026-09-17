@@ -3763,6 +3763,7 @@ impl Worker {
         // dispatches on one bead share the single-slot snapshot file —
         // needle-e4fbe47c).
         let mut predispatch_token: Option<String> = None;
+        let mut predispatch_dirty_paths: Vec<String> = Vec::new();
         let exec_result = if self.shutdown.load(Ordering::SeqCst) {
             // Already shutting down — don't start the agent.
             was_interrupted = true;
@@ -3826,7 +3827,7 @@ impl Worker {
                     return Err(e);
                 }
             };
-            let (result, exec_tokens, token) = async {
+            let (result, exec_tokens, token, dirty_paths) = async {
                 // Snapshot workspace HEAD + the bead's notes before the agent
                 // runs, so the shipped-work gate has a baseline to judge the
                 // closure against. Best-effort: a missing snapshot degrades the
@@ -3851,6 +3852,21 @@ impl Worker {
                         );
                         None
                     }
+                };
+
+                let predispatch_dirty_paths = match predispatch_token.as_deref() {
+                    Some(token) => crate::validation::predispatch::load(dispatch_ws, &bead.id)
+                        .await
+                        .filter(|snapshot| snapshot.identity().as_deref() == Some(token))
+                        .map(|snapshot| {
+                            snapshot
+                                .dirty_files
+                                .into_iter()
+                                .map(|file| file.path)
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default(),
+                    None => Vec::new(),
                 };
 
                 // ── Atomic claim verification at dispatch time ──
@@ -3966,11 +3982,17 @@ impl Worker {
                     &result.stdout,
                     &result.stderr,
                 );
-                Ok::<_, anyhow::Error>((result, exec_tokens, predispatch_token))
+                Ok::<_, anyhow::Error>((
+                    result,
+                    exec_tokens,
+                    predispatch_token,
+                    predispatch_dirty_paths,
+                ))
             }
             .instrument(execution_span)
             .await?;
             predispatch_token = token;
+            predispatch_dirty_paths = dirty_paths;
 
             // Now we're back in the agent.dispatch span. Record the execution results.
             tracing::Span::current().record("needle.agent.pid", result.pid);
@@ -4084,11 +4106,14 @@ impl Worker {
                 bead_revision_start: self.pre_dispatch_head.clone(),
                 commits,
                 predispatch_token,
+                predispatch_dirty_paths,
                 tokens_in,
                 tokens_out,
                 estimated_cost_usd: estimated_cost,
                 costed: usage.costed,
                 started_at: self.last_effort.as_ref().map(|e| e.cycle_start),
+                started_at_wall: exec_result.as_ref().and(self.dispatch_started_at),
+                wip_patch: None,
             });
 
         // Write trace files for stdout and stderr.

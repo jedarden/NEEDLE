@@ -153,6 +153,16 @@
     "exit_code": {
       "type": "integer",
       "description": "Agent process exit code. Observation only: it says what the process did, never whether the work was accepted — `outcome` carries that."
+    },
+    "wip_patch": {
+      "type": "object",
+      "description": "Durable working-tree recovery patch captured before a timeout, crash, or interruption release.",
+      "required": ["path", "bytes"],
+      "properties": {
+        "path": { "type": "string" },
+        "bytes": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
     }
   }
 }

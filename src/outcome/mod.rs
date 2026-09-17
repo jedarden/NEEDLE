@@ -555,6 +555,11 @@ pub struct AttemptContext {
     /// otherwise destroy the survivor's baseline and wedge every later
     /// closure on "no pre-dispatch snapshot recorded" (bead needle-e4fbe47c).
     pub predispatch_token: Option<String>,
+    /// Paths that were already dirty when this dispatch began. They may only
+    /// enter a recovery capture when the attempt's transcript names them.
+    pub predispatch_dirty_paths: Vec<String>,
+    /// Wall-clock start of the attempt, used to attribute mtime-only edits.
+    pub started_at_wall: Option<chrono::DateTime<Utc>>,
     /// Input tokens reported by the agent's token extractor.
     pub tokens_in: Option<u64>,
     /// Output tokens reported by the agent's token extractor.
@@ -565,6 +570,8 @@ pub struct AttemptContext {
     /// or from the stream's per-turn usage when a killed attempt wrote none.
     /// `false` is unknown, never free.
     pub costed: bool,
+    /// Durable recovery patch captured by timeout/crash/interruption paths.
+    pub wip_patch: Option<crate::wip::WipPatch>,
     /// When the cycle started (claim time), for the attempt's `duration_ms`.
     pub started_at: Option<std::time::Instant>,
 }
@@ -698,6 +705,71 @@ impl OutcomeHandler {
     /// finishing.
     pub fn attempt_id(&self) -> Option<String> {
         self.telemetry.attempt_id()
+    }
+
+    fn set_wip_patch(&self, patch: Option<crate::wip::WipPatch>) {
+        if let Some(context) = self
+            .attempt_context
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_mut()
+        {
+            context.wip_patch = patch;
+        }
+    }
+
+    /// Preserve only this attempt's working-tree edits before a release. The
+    /// helper is best-effort so a Git failure cannot strand the bead in
+    /// HANDLING; the attempt ledger still records the ordinary terminal row.
+    async fn capture_wip_patch(&self, bead: &Bead, output: &AgentOutcome) {
+        let Some(attempt_id) = self.attempt_id() else {
+            tracing::warn!(
+                bead_id = %bead.id,
+                "cannot capture WIP patch without an attempt ID"
+            );
+            return;
+        };
+        let context = self.peek_attempt_context();
+        let workspace = if bead.workspace.as_os_str().is_empty()
+            || bead.workspace == std::path::Path::new(".")
+        {
+            self.config.workspace.default.clone()
+        } else {
+            bead.workspace.clone()
+        };
+        let transcript = if output.stderr.is_empty() {
+            output.stdout.clone()
+        } else if output.stdout.is_empty() {
+            output.stderr.clone()
+        } else {
+            format!("{}\n{}", output.stdout, output.stderr)
+        };
+        match crate::wip::capture(crate::wip::Capture {
+            workspace: &workspace,
+            bead_id: bead.id.as_ref(),
+            attempt_id: &attempt_id,
+            started_at: context.started_at_wall,
+            preexisting_paths: &context.predispatch_dirty_paths,
+            transcript: &transcript,
+        })
+        .await
+        {
+            Ok(Some(patch)) => {
+                tracing::info!(
+                    bead_id = %bead.id,
+                    path = %patch.path,
+                    bytes = patch.bytes,
+                    "captured WIP patch before releasing attempt"
+                );
+                self.set_wip_patch(Some(patch));
+            }
+            Ok(None) => tracing::debug!(bead_id = %bead.id, "attempt left no capturable WIP"),
+            Err(error) => tracing::warn!(
+                bead_id = %bead.id,
+                error = %error,
+                "failed to capture WIP patch before release"
+            ),
+        }
     }
 
     /// Run a bead store operation with a 30s timeout.
@@ -1229,10 +1301,10 @@ impl OutcomeHandler {
                             self.handle_failure(store, bead).await?
                         }
                     }
-                    Outcome::Timeout => self.handle_timeout(store, bead).await?,
+                    Outcome::Timeout => self.handle_timeout(store, bead, output).await?,
                     Outcome::AgentNotFound => self.handle_agent_not_found(store, bead).await?,
-                    Outcome::Interrupted => self.handle_interrupted(store, bead).await?,
-                    Outcome::Crash(code) => self.handle_crash(store, bead, code).await?,
+                    Outcome::Interrupted => self.handle_interrupted(store, bead, output).await?,
+                    Outcome::Crash(code) => self.handle_crash(store, bead, code, output).await?,
                     Outcome::GateError => {
                         // This should not be reached - GateError is only produced during outcome handling
                         // when gate execution errors are detected. For now, treat as regular failure.
@@ -1690,6 +1762,7 @@ impl OutcomeHandler {
             duration_ms: ledger.duration_ms,
             failure_summary,
             failure_evidence,
+            wip_patch: ledger.wip_patch.clone(),
         };
         crate::attempt_history::record(
             &workspace,
@@ -1863,6 +1936,7 @@ impl OutcomeHandler {
             // The exit code is observation only: it says what the process did,
             // not whether the work was accepted — `outcome` carries that.
             exit_code: output.exit_code,
+            wip_patch: attempt.wip_patch,
         };
         let event = EventKind::AttemptResolved(Box::new(fields.clone()));
 
@@ -3589,9 +3663,11 @@ impl OutcomeHandler {
         &self,
         store: &dyn BeadStore,
         bead: &Bead,
+        output: &AgentOutcome,
     ) -> Result<(BeadAction, Vec<EventKind>)> {
         tracing::warn!(bead_id = %bead.id, "agent timed out — releasing bead as deferred");
 
+        self.capture_wip_patch(bead, output).await;
         let events = self.prepare_release_events(store, bead).await?;
 
         // The release itself now happens later in the worker's apply_bead_action(),
@@ -3622,6 +3698,7 @@ impl OutcomeHandler {
         store: &dyn BeadStore,
         bead: &Bead,
         signal_code: i32,
+        output: &AgentOutcome,
     ) -> Result<(BeadAction, Vec<EventKind>)> {
         tracing::error!(
             bead_id = %bead.id,
@@ -3630,6 +3707,7 @@ impl OutcomeHandler {
             "agent crashed — releasing bead and creating alert"
         );
 
+        self.capture_wip_patch(bead, output).await;
         let events = self.prepare_release_events(store, bead).await?;
 
         // Create alert bead with diagnostic info (best-effort).
@@ -3773,9 +3851,11 @@ impl OutcomeHandler {
         &self,
         store: &dyn BeadStore,
         bead: &Bead,
+        output: &AgentOutcome,
     ) -> Result<(BeadAction, Vec<EventKind>)> {
         tracing::info!(bead_id = %bead.id, "agent interrupted — releasing bead for clean shutdown");
 
+        self.capture_wip_patch(bead, output).await;
         let events = self.prepare_release_events(store, bead).await?;
         Ok((BeadAction::Interrupted, events))
     }

@@ -333,6 +333,9 @@ pub struct AttemptRecord {
     /// Bounded, sanitized structured evidence from the failed attempt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_evidence: Option<FailureEvidence>,
+    /// Durable working-tree patch left by a timeout, crash, or interruption.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wip_patch: Option<crate::wip::WipPatch>,
 }
 
 impl AttemptRecord {
@@ -1225,6 +1228,13 @@ pub fn render(records: &[AttemptRecord], limits: HistoryLimits) -> String {
                     .join(", ")
             ));
         }
+        if let Some(patch) = r.wip_patch.as_ref() {
+            block.push_str(&format!(
+                "Previous attempt left a working-tree patch at {} ({} bytes). \
+                 After review, it may be applied with `git apply --3way`.\n",
+                patch.path, patch.bytes
+            ));
+        }
         if let Some(summary) = r
             .failure_summary
             .as_deref()
@@ -1362,6 +1372,7 @@ mod tests {
             duration_ms: 1000,
             failure_summary: summary.map(str::to_string),
             failure_evidence: None,
+            wip_patch: None,
         }
     }
 
@@ -1416,6 +1427,18 @@ mod tests {
         assert!(text.contains("error[E0308]"));
         assert!(text.contains("abcdef123456"));
         assert!(text.contains("Do NOT repeat"));
+    }
+
+    #[test]
+    fn render_mentions_wip_patch_path_and_size() {
+        let mut record = rec(1, "indeterminate", None);
+        record.wip_patch = Some(crate::wip::WipPatch {
+            path: ".beads/traces/nd-1/wip-att-1.patch".to_string(),
+            bytes: 321,
+        });
+        let text = render(&[record], HistoryLimits::default());
+        assert!(text.contains(".beads/traces/nd-1/wip-att-1.patch (321 bytes)"));
+        assert!(text.contains("git apply --3way"));
     }
 
     #[test]

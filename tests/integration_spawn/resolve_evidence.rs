@@ -110,6 +110,7 @@ fn attempt_record(summary: Option<String>) -> AttemptRecord {
         duration_ms: 1000,
         failure_summary: summary,
         failure_evidence: None,
+        wip_patch: None,
     }
 }
 

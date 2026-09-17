@@ -62,6 +62,7 @@ fn record_with(evidence: FailureEvidence) -> AttemptRecord {
         duration_ms: 10,
         failure_summary: None,
         failure_evidence: Some(evidence),
+        wip_patch: None,
     }
 }
 

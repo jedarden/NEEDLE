@@ -265,6 +265,7 @@ fn journal_roundtrip_under_the_override_stays_inside_it() {
         duration_ms: 1_000,
         failure_summary: None,
         failure_evidence: None,
+        wip_patch: None,
     };
     needle::attempt_history::append_local(workspace, &bead, &record).unwrap();
     assert_beneath(
