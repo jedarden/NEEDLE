@@ -767,6 +767,29 @@ async fn shipped_work_distinguishes_pushed_unpushed_and_missing_upstreams() {
         UpstreamStatus::NotConfigured
     ));
     let pre = repo.head();
+    repo.commit("work.rs", "fn work() {}\n", "work without upstream");
+    let bead = test_bead(repo.path(), BeadStatus::Done);
+    let store = TestStore::new(bead.clone());
+    let snapshot = PreDispatch {
+        head_sha: Some(pre.clone()),
+        notes_hash: Some(predispatch::hash_notes("")),
+        dirty_files: Vec::new(),
+        captured_at: Some(Utc::now()),
+    };
+    match verify_shipped_work(&bead, repo.path(), &store, Some(&snapshot))
+        .await
+        .unwrap()
+    {
+        GateResult::Unsatisfiable(reason) => {
+            assert!(reason.contains("no upstream configured"));
+            assert!(reason.contains("git remote add"));
+            assert!(reason.contains("git push -u"));
+            assert!(reason.contains("worker.enforce_shipped_work: false"));
+            assert!(!reason.contains("has not been pushed"));
+        }
+        other => panic!("expected an unsatisfiable gate, got {other:?}"),
+    }
+
     let remote = TempDir::new().expect("create bare remote");
     git_ok(remote.path(), &["init", "-q", "--bare"]);
     git_ok(
@@ -780,14 +803,6 @@ async fn shipped_work_distinguishes_pushed_unpushed_and_missing_upstreams() {
     ));
 
     repo.commit("work.rs", "fn work() {}\n", "unpushed work");
-    let bead = test_bead(repo.path(), BeadStatus::Done);
-    let store = TestStore::new(bead.clone());
-    let snapshot = PreDispatch {
-        head_sha: Some(pre),
-        notes_hash: Some(predispatch::hash_notes("")),
-        dirty_files: Vec::new(),
-        captured_at: Some(Utc::now()),
-    };
     let result = verify_shipped_work(&bead, repo.path(), &store, Some(&snapshot))
         .await
         .unwrap();
@@ -837,6 +852,7 @@ async fn outcome_routes_an_unjudgeable_shipped_work_gate_without_penalty() {
         )
         .await
         .expect("route outcome");
+    assert_eq!(result.outcome, Outcome::GateUnsatisfiable);
     assert!(matches!(result.bead_action, BeadAction::Released(_)));
     telemetry
         .force_flush_async(std::time::Duration::from_secs(2))
@@ -848,7 +864,7 @@ async fn outcome_routes_an_unjudgeable_shipped_work_gate_without_penalty() {
             .iter()
             .filter(|event| event.event_type == "gate.execution_error")
             .count(),
-        1
+        0
     );
     assert_eq!(
         events

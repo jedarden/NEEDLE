@@ -288,6 +288,12 @@ fn attempt_failure_summary(
                 GateResult::Fail(reason) => {
                     parts.push(format!("gate `{name}` failed:\n{}", reason.trim_end()));
                 }
+                GateResult::Unsatisfiable(reason) => {
+                    parts.push(format!(
+                        "gate `{name}` has an unsatisfiable precondition:\n{}",
+                        reason.trim_end()
+                    ));
+                }
                 GateResult::ExecutionError { command, reason } => {
                     parts.push(format!(
                         "gate `{name}` could not run ({reason}) — command: {command}"
@@ -512,6 +518,7 @@ fn gate_result_entries(gate_report: Option<&GateReport>) -> Vec<crate::telemetry
             let status = match result {
                 GateResult::Pass => "pass",
                 GateResult::Fail(_) => "fail",
+                GateResult::Unsatisfiable(_) => "unsatisfiable",
                 GateResult::ExecutionError { .. } => "execution_error",
             };
             crate::telemetry::GateResultEntry {
@@ -1181,7 +1188,7 @@ impl OutcomeHandler {
 
         // Classification consults the stream's result envelope in addition to
         // the exit code: a terminal API error exits 0 but is not a success.
-        let outcome =
+        let mut outcome =
             classify_with_stream(output.exit_code, was_interrupted, verified, &output.stdout);
 
         // N-T23: judge the adapter's own failure signal before the bead is
@@ -1311,7 +1318,10 @@ impl OutcomeHandler {
                     .await?
             } else {
                 match outcome.clone() {
-                    Outcome::Success => self.handle_success(store, bead, gate_report).await?,
+                    Outcome::Success => {
+                        self.handle_success(store, bead, gate_report, &mut outcome)
+                            .await?
+                    }
                     Outcome::Failure => {
                         // If we have a gate report with failures, check if any gate had execution errors.
                         if let Some(report) = gate_report {
@@ -1357,16 +1367,23 @@ impl OutcomeHandler {
                         self.handle_failure(store, bead).await?
                     }
                     Outcome::GateUnsatisfiable => {
-                        // Not reachable yet: no classification path produces GateUnsatisfiable —
-                        // it is assigned from gate-report analysis (precondition unsatisfiable),
-                        // which lands separately. Placeholder follows the GateError precedent;
-                        // the real handling must NOT attribute the failure to the work or retry
-                        // the bead, since no work can satisfy the gate.
-                        tracing::error!(
-                            bead_id = %bead.id,
-                            "unexpected GateUnsatisfiable outcome — treating as regular failure"
-                        );
-                        self.handle_failure(store, bead).await?
+                        let reason = gate_report
+                            .as_ref()
+                            .and_then(|report| {
+                                report.results.values().find_map(|result| match result {
+                                    GateResult::Unsatisfiable(reason) => Some(reason.as_str()),
+                                    _ => None,
+                                })
+                            })
+                            .unwrap_or("gate precondition is unsatisfiable");
+                        self.handle_gate_unsatisfiable(
+                            store,
+                            bead,
+                            &bead.workspace.display().to_string(),
+                            "validation",
+                            reason,
+                        )
+                        .await?
                     }
                 }
             };
@@ -1416,21 +1433,28 @@ impl OutcomeHandler {
         // verdict above judged the process and its gates; whether the attempt
         // delivered the work or only split the bead is decided here, once the
         // agent's own bead mutations are visible. Gate evidence is kept.
-        let (resolved_outcome, resolved_reason) = match self
-            .classify_decomposition(
-                store,
-                bead,
-                &attempt_context.prompt_template,
-                !attempt_context.commits.is_empty(),
-                &resolved_outcome,
+        let (resolved_outcome, resolved_reason) = if matches!(outcome, Outcome::GateUnsatisfiable) {
+            (
+                semantic_outcome(&outcome).to_string(),
+                terminal_reason(&outcome, output.exit_code, None),
             )
-            .await
-        {
-            Some(decomposition) => (
-                crate::attempt_accounting::DECOMPOSED.to_string(),
-                Some(decomposition.terminal_reason().to_string()),
-            ),
-            None => (resolved_outcome, resolved_reason),
+        } else {
+            match self
+                .classify_decomposition(
+                    store,
+                    bead,
+                    &attempt_context.prompt_template,
+                    !attempt_context.commits.is_empty(),
+                    &resolved_outcome,
+                )
+                .await
+            {
+                Some(decomposition) => (
+                    crate::attempt_accounting::DECOMPOSED.to_string(),
+                    Some(decomposition.terminal_reason().to_string()),
+                ),
+                None => (resolved_outcome, resolved_reason),
+            }
         };
 
         let ledger = self.emit_attempt_resolved(
@@ -2234,6 +2258,7 @@ impl OutcomeHandler {
         store: &dyn BeadStore,
         bead: &Bead,
         gate_report: Option<GateReport>,
+        outcome: &mut Outcome,
     ) -> Result<(BeadAction, Vec<EventKind>)> {
         tracing::info!(bead_id = %bead.id, "agent completed successfully");
 
@@ -2372,6 +2397,23 @@ impl OutcomeHandler {
                             // Shipped-work check passed — reset failure count now that we're
                             // certain the bead is properly closed and shipped.
                             let _ = self.reset_failure_count(store, bead).await;
+                        }
+                        Ok(crate::validation::GateResult::Unsatisfiable(reason)) => {
+                            *outcome = Outcome::GateUnsatisfiable;
+                            tracing::warn!(
+                                bead_id = %bead.id,
+                                reason = %reason,
+                                "shipped-work precondition is unsatisfiable — releasing without incrementing failure count"
+                            );
+                            return self
+                                .handle_gate_unsatisfiable(
+                                    store,
+                                    bead,
+                                    &bead.workspace.display().to_string(),
+                                    "shipped_work",
+                                    &reason,
+                                )
+                                .await;
                         }
                         Ok(crate::validation::GateResult::ExecutionError { command, reason }) => {
                             // A gate that could not run is not a gate that
@@ -2553,6 +2595,24 @@ impl OutcomeHandler {
                                 let _ = self.increment_failure_count(store, bead).await;
                             }
                             return Ok((BeadAction::Released(ReleaseReason::GateFailed), events));
+                        }
+                        Ok(crate::validation::GateResult::Unsatisfiable(reason)) => {
+                            *outcome = Outcome::GateUnsatisfiable;
+                            tracing::warn!(
+                                bead_id = %bead.id,
+                                reason = %reason,
+                                "shipped-work precondition is unsatisfiable — releasing orphaned bead without incrementing failure count"
+                            );
+                            let mut release_events =
+                                self.prepare_release_events(store, bead).await?;
+                            release_events.push(EventKind::BeadReleased {
+                                bead_id: bead.id.clone(),
+                                reason: "gate_unsatisfiable".to_string(),
+                            });
+                            return Ok((
+                                BeadAction::Released(ReleaseReason::GateExecutionError),
+                                release_events,
+                            ));
                         }
                         Ok(crate::validation::GateResult::ExecutionError { command, reason }) => {
                             tracing::warn!(
@@ -2823,6 +2883,7 @@ impl OutcomeHandler {
             .map(|(name, r)| {
                 let reason = match r {
                     GateResult::Fail(reason) => reason.clone(),
+                    GateResult::Unsatisfiable(reason) => reason.clone(),
                     GateResult::ExecutionError { reason, .. } => reason.clone(),
                     GateResult::Pass => String::new(),
                 };
@@ -3300,6 +3361,39 @@ impl OutcomeHandler {
         // configuration or environment issue that should be fixed before retry.
 
         Ok((BeadAction::Released(ReleaseReason::AgentNotFound), events))
+    }
+
+    /// Handle a gate whose precondition is impossible for this workspace.
+    ///
+    /// Unlike a normal gate failure, this is not evidence against the bead and
+    /// must not increment its failure count or create a work-failure signal.
+    /// The caller has already classified the attempt as
+    /// `Outcome::GateUnsatisfiable`; this helper only performs the safe release.
+    async fn handle_gate_unsatisfiable(
+        &self,
+        store: &dyn BeadStore,
+        bead: &Bead,
+        workspace: &str,
+        gate_name: &str,
+        reason: &str,
+    ) -> Result<(BeadAction, Vec<EventKind>)> {
+        tracing::warn!(
+            bead_id = %bead.id,
+            workspace,
+            gate = %gate_name,
+            reason = %reason,
+            "gate precondition is unsatisfiable — releasing bead without incrementing failure count"
+        );
+
+        let mut events = self.prepare_release_events(store, bead).await?;
+        events.push(EventKind::BeadReleased {
+            bead_id: bead.id.clone(),
+            reason: "gate_unsatisfiable".to_string(),
+        });
+        Ok((
+            BeadAction::Released(ReleaseReason::GateExecutionError),
+            events,
+        ))
     }
 
     /// Create a "Gate broken" alert bead when workspace degrades.

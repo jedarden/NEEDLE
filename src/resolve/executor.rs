@@ -357,6 +357,17 @@ impl DecisionExecutor {
                     );
                     return self.reject_release(store, bead, actor, &reason).await;
                 }
+                Ok(crate::validation::GateResult::Unsatisfiable(reason)) => {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        reason = %reason,
+                        "resolve complete: shipped-work precondition is unsatisfiable — releasing without penalty"
+                    );
+                    return self
+                        .release_owned(store, bead, actor, ReleaseCause::Unverifiable)
+                        .await
+                        .map(|_| AppliedDecision::Released(ReleaseCause::Unverifiable));
+                }
                 Ok(crate::validation::GateResult::ExecutionError { command, reason }) => {
                     tracing::warn!(
                         bead_id = %bead.id,

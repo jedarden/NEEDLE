@@ -54,6 +54,9 @@ pub enum GateResult {
     Pass,
     /// The gate failed validation with a reason.
     Fail(String),
+    /// The gate's precondition cannot be satisfied by any work in this
+    /// workspace, so the result is not attributable to the bead.
+    Unsatisfiable(String),
     /// The gate could not run (execution error: ENOENT/EACCES/missing directory/timeout).
     ExecutionError {
         /// The command that could not run.
@@ -74,6 +77,7 @@ impl GateResult {
         match self {
             GateResult::Pass => None,
             GateResult::Fail(reason) => Some(reason),
+            GateResult::Unsatisfiable(_) => None,
             GateResult::ExecutionError { .. } => None,
         }
     }
@@ -81,6 +85,12 @@ impl GateResult {
     /// Returns true if this is an execution error (gate could not run).
     pub fn is_execution_error(&self) -> bool {
         matches!(self, GateResult::ExecutionError { .. })
+    }
+
+    /// Returns true if the gate ran but its precondition made the verdict
+    /// impossible for every possible bead change.
+    pub fn is_unsatisfiable(&self) -> bool {
+        matches!(self, GateResult::Unsatisfiable(_))
     }
 }
 
@@ -133,6 +143,12 @@ impl GateReport {
         if self.all_passed {
             GateResult::Pass
         } else {
+            if let Some(reason) = self.results.values().find_map(|result| match result {
+                GateResult::Unsatisfiable(reason) => Some(reason.clone()),
+                _ => None,
+            }) {
+                return GateResult::Unsatisfiable(reason);
+            }
             // An executed rejection is attributable to the work, while an
             // execution error means the gate never produced a verdict. Do
             // not collapse the latter into a generic Fail while aggregating

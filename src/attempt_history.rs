@@ -436,6 +436,7 @@ pub fn capture_failure_evidence_with_limit(
                     let raw = match result {
                         GateResult::Pass => return None,
                         GateResult::Fail(reason) => first_error_block(reason).to_string(),
+                        GateResult::Unsatisfiable(reason) => first_error_block(reason).to_string(),
                         GateResult::ExecutionError { command, reason } => {
                             let combined = format!("{reason}\ncommand: {command}");
                             first_error_block(&combined).to_string()

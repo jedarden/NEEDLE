@@ -29,13 +29,13 @@
 //!
 //! A workspace with no upstream for its branch (`git rev-parse @{u}` does not
 //! resolve — e.g. plain `git init`, or a remote added without `push -u`) gets
-//! `GateResult::ExecutionError`, not `Fail`. The gate literally cannot check a
+//! `GateResult::Unsatisfiable`, not `Fail`. The gate literally cannot check a
 //! push there, so every closure would fail regardless of what the agent
 //! produced, burning the retry counter toward quarantine and mitosis splitting
 //! on unjudged work (GitHub issue #18: three correct commits rejected, parent
-//! split into seven children in ~70s). A gate that cannot run is not a gate
-//! that failed — the `handle_gate_error` precedent (needle-4aaa010c) releases
-//! without touching the failure count.
+//! split into seven children in ~70s). An unsatisfiable gate is not a work
+//! failure — it releases without touching the failure count and is classified
+//! as `Outcome::GateUnsatisfiable` for downstream attribution.
 //!
 //! # Why not `updated_at`
 //!
@@ -315,9 +315,9 @@ pub async fn upstream_status(workspace: &Path) -> UpstreamStatus {
 /// changed) rather than a hard pass/fail.
 ///
 /// A workspace with no upstream configured returns
-/// `GateResult::ExecutionError` instead of a verdict: the gate cannot run at
-/// all, and the caller releases without incrementing the failure count (see
-/// `outcome::handle_gate_error`).
+/// `GateResult::Unsatisfiable` instead of an ordinary failure: every commit
+/// would be judged the same way until the repository gets an upstream or
+/// shipped-work enforcement is disabled.
 async fn check_commit(
     workspace: &Path,
     snapshot: Option<&predispatch::PreDispatch>,
@@ -358,18 +358,16 @@ async fn check_commit(
             let branch = git_output(workspace, &["rev-parse", "--abbrev-ref", "HEAD"])
                 .await
                 .unwrap_or_else(|_| "HEAD".to_string());
-            return Ok(Some(GateResult::ExecutionError {
-                command: format!("git {}", UPSTREAM_PROBE_ARGS.join(" ")),
-                reason: format!(
-                    "no upstream configured for branch '{}': the shipped-work gate cannot \
-                         verify that the commit was pushed, so this closure is not counted as a \
-                         failure. Remedy: `git push -u <remote> {}` — that publishes the branch \
-                         and sets its upstream in one step. If no remote exists yet, add one \
-                         first: `git remote add origin <url>` (adding a remote that already \
-                         exists is an error, so check `git remote -v` first).",
-                    branch, branch
-                ),
-            }));
+            return Ok(Some(GateResult::Unsatisfiable(format!(
+                "no upstream configured for branch '{}': the shipped-work gate cannot verify \
+                 that the commit was pushed, so this closure is not counted as a failure. \
+                 Remedy: `git push -u <remote> {}` — that publishes the branch and sets its \
+                 upstream in one step. If no remote exists yet, add one first: `git remote add \
+                 origin <url>` (adding a remote that already exists is an error, so check `git \
+                 remote -v` first). For a local-only repository, set \
+                 `worker.enforce_shipped_work: false`.",
+                branch, branch
+            ))));
         }
         UpstreamStatus::GitError(stderr) => {
             // Git could not answer the upstream question at all — the ancestry
