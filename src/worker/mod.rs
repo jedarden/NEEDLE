@@ -4865,10 +4865,44 @@ impl Worker {
         handler_result.bead_action
     }
 
+    /// The beads this worker's post-dispatch audit may act on: beads created
+    /// by this worker's own actor during the dispatch window, minus the
+    /// parent bead itself (plan Phase 19.4: "beads created during the
+    /// dispatch window by the dispatching worker's actor").
+    ///
+    /// The backend records no creator of its own, so attribution is the
+    /// `creator:<actor>` label written at creation time
+    /// ([`crate::bead_store::creator_of`]). A bead with no creator label, or
+    /// with a label naming some other actor, is foreign — written by an
+    /// operator, another agent, or a worker that predates attribution — and
+    /// is out of scope unconditionally, no matter when it was created.
+    ///
+    /// This list is the only input to the audit's fold and defer loops, so a
+    /// foreign bead can never be closed, deferred, or folded here, and it
+    /// never consumes this worker's generation budget (needle-29d26e3a: the
+    /// audit used to filter on the window alone and closed an operator's bead
+    /// 31 minutes after creation).
+    fn audit_candidates(
+        all_beads: Vec<Bead>,
+        dispatch_start: chrono::DateTime<chrono::Utc>,
+        parent_bead: &Bead,
+        actor: &str,
+    ) -> Vec<Bead> {
+        all_beads
+            .into_iter()
+            .filter(|b| {
+                b.created_at >= dispatch_start
+                    && b.id != parent_bead.id
+                    && crate::bead_store::creator_of(b) == Some(actor)
+            })
+            .collect()
+    }
+
     /// Run post-dispatch audit (Phase 19.4).
     ///
     /// This step runs after the gate completes in HANDLING. It inspects beads
-    /// created during the dispatch window and:
+    /// created during the dispatch window **by this worker's own actor**
+    /// (see [`audit_candidates`]) and:
     ///
     /// 1. Closes verification-shaped beads that reference the parent, folding
     ///    their content into the parent's notes.
@@ -4900,16 +4934,13 @@ impl Worker {
             }
         };
 
-        // Filter beads created during the dispatch window.
-        // We use creation timestamp to find beads created between dispatch_start and now.
-        // The parent bead is excluded since it existed before dispatch.
-        let created_during_dispatch: Vec<_> = all_beads
-            .into_iter()
-            .filter(|b| {
-                // Bead was created during the dispatch window (between dispatch_start and now)
-                b.created_at >= dispatch_start && b.id != parent_bead.id
-            })
-            .collect();
+        // Filter beads created during the dispatch window by this worker's
+        // own actor. The window alone is not scope: an operator's bead, a
+        // sibling worker's bead, or a backend that predates attribution can
+        // all land inside the window, and none of them may be closed,
+        // deferred, or folded here (needle-29d26e3a).
+        let created_during_dispatch: Vec<_> =
+            Self::audit_candidates(all_beads, dispatch_start, parent_bead, &actor);
 
         if created_during_dispatch.is_empty() {
             tracing::debug!("no beads created during dispatch window");
@@ -9504,6 +9535,218 @@ mod tests {
             vec![verify.id.clone()],
             "the close still happens"
         );
+    }
+
+    // ── Post-dispatch audit: actor scoping (needle-29d26e3a) ──
+    //
+    // Phase 19.4 inspects "beads created during the dispatch window by the
+    // dispatching worker's actor". The window alone is not scope: on a shared
+    // checkout, operators, agents, and sibling workers all write into the
+    // same store during any dispatch window, and the audit once closed an
+    // operator's bead 31 minutes after creation because it filtered on the
+    // timestamps alone.
+
+    /// A bead attributed to `actor` and created at `created_at`.
+    fn attributed_bead(id: &str, actor: &str, created_at: chrono::DateTime<chrono::Utc>) -> Bead {
+        let mut bead = make_test_bead(id);
+        bead.labels = vec![crate::bead_store::creator_label(actor)];
+        bead.created_at = created_at;
+        bead
+    }
+
+    #[test]
+    fn audit_candidates_require_this_workers_creator_label() {
+        let actor = "claude-sonnet-test-worker";
+        let other = "some-other-worker";
+        let dispatch_start = chrono::Utc::now();
+        let in_window = dispatch_start + chrono::Duration::seconds(1);
+        let before_window = dispatch_start - chrono::Duration::seconds(1);
+
+        // The parent itself, as it would look if it had been created by this
+        // worker inside the window: excluded by identity regardless.
+        let parent = attributed_bead("audit-parent", actor, in_window);
+        let beads = vec![
+            parent.clone(),
+            attributed_bead("own-in-window", actor, in_window),
+            attributed_bead("own-before-window", actor, before_window),
+            attributed_bead("foreign-in-window", other, in_window),
+            // An operator's bead: no creator label at all, which is how every
+            // bead created outside NEEDLE looks.
+            {
+                let mut bead = make_test_bead("unattributed-in-window");
+                bead.created_at = in_window;
+                bead
+            },
+        ];
+
+        let candidates = Worker::audit_candidates(beads, dispatch_start, &parent, actor);
+        let ids: Vec<&str> = candidates.iter().map(|b| b.id.as_ref()).collect();
+        assert_eq!(ids, vec!["own-in-window"]);
+    }
+
+    /// Push a bead into the mock store attributed to `creator` (`None` for an
+    /// unattributed bead) and created one second into the dispatch window.
+    fn push_window_bead(
+        store: &MockStore,
+        bead: &Bead,
+        creator: Option<&str>,
+        dispatch_start: chrono::DateTime<chrono::Utc>,
+    ) {
+        let mut bead = bead.clone();
+        bead.labels
+            .extend(creator.map(crate::bead_store::creator_label));
+        bead.created_at = dispatch_start + chrono::Duration::seconds(1);
+        store.beads.lock().unwrap().push(bead);
+    }
+
+    #[tokio::test]
+    async fn audit_never_folds_or_closes_a_foreign_bead_created_in_the_window() {
+        let parent = make_test_bead("audit-scope-parent");
+        let store = Arc::new(MockStore::new(vec![parent.clone()]));
+        let mut worker = make_worker(store.clone());
+        let actor = worker.qualified_id();
+        let dispatch_start = chrono::Utc::now();
+        worker.dispatch_started_at = Some(dispatch_start);
+
+        // Three verification-shaped beads that all reference the parent, all
+        // created inside the window. Only the one this worker created is a
+        // candidate; the sibling worker's and the operator's are not.
+        // Each bead names the parent in its body, so references_parent is
+        // true for all three and the only remaining gate is the actor
+        // scoping under test.
+        let mut own = verification_bead("audit-scope-own");
+        let mut foreign = verification_bead("audit-scope-foreign");
+        let mut unattributed = verification_bead("audit-scope-unattributed");
+        for bead in [&mut own, &mut foreign, &mut unattributed] {
+            bead.body = Some(format!("Check that {} endpoint responds", parent.id));
+        }
+        push_window_bead(&store, &own, Some(&actor), dispatch_start);
+        push_window_bead(&store, &foreign, Some("sibling-worker-7"), dispatch_start);
+        push_window_bead(&store, &unattributed, None, dispatch_start);
+
+        worker
+            .run_post_dispatch_audit(&parent)
+            .await
+            .expect("the audit should not fail");
+
+        // The worker's own bead was folded and closed as before.
+        assert_eq!(store.close_calls(), vec![own.id.clone()]);
+        let parent_body = store.show(&parent.id).await.unwrap().body.unwrap();
+        assert!(parent_body.contains("audit-scope-own"));
+
+        // Every foreign bead survives untouched: open, no fold content in the
+        // parent, no over-budget label.
+        for survivor in [&foreign, &unattributed] {
+            let bead = store.show(&survivor.id).await.unwrap();
+            assert_eq!(bead.status, BeadStatus::Open, "{} must stay open", bead.id);
+            assert!(
+                !bead.labels.contains(&"over-budget".to_string()),
+                "{} must not be marked over-budget",
+                bead.id
+            );
+            assert!(
+                !parent_body.contains(bead.id.as_ref()),
+                "{} must not be folded into the parent",
+                bead.id
+            );
+        }
+        assert_eq!(
+            store.close_calls(),
+            vec![own.id.clone()],
+            "exactly one close — the worker's own bead"
+        );
+    }
+
+    #[tokio::test]
+    async fn foreign_beads_do_not_consume_the_generation_budget() {
+        let parent = make_test_bead("audit-budget-parent");
+        let store = Arc::new(MockStore::new(vec![parent.clone()]));
+        let mut worker = make_worker(store.clone());
+        let actor = worker.qualified_id();
+        let dispatch_start = chrono::Utc::now();
+        worker.dispatch_started_at = Some(dispatch_start);
+
+        // Three beads this worker created (exactly at the default budget of
+        // three) plus one a sibling worker created in the same window. If the
+        // foreign bead counted toward the window's population, the oldest own
+        // bead would land one over budget and be deferred.
+        let beads: Vec<(Bead, Option<String>)> = (1..=3)
+            .map(|n| {
+                let mut bead = make_test_bead(&format!("audit-budget-own-{n}"));
+                bead.title = format!("Follow-up item {n}");
+                (bead, Some(actor.clone()))
+            })
+            .chain(std::iter::once({
+                let mut bead = make_test_bead("audit-budget-foreign");
+                bead.title = "Follow-up from a sibling".to_string();
+                (bead, Some("sibling-worker-7".to_string()))
+            }))
+            .collect();
+        for (bead, creator) in &beads {
+            push_window_bead(&store, bead, creator.as_deref(), dispatch_start);
+        }
+
+        worker
+            .run_post_dispatch_audit(&parent)
+            .await
+            .expect("the audit should not fail");
+
+        for (bead, _) in &beads {
+            let after = store.show(&bead.id).await.unwrap();
+            assert!(
+                !after.labels.contains(&"over-budget".to_string()),
+                "{} must not be deferred: a foreign bead must not consume \
+                 this worker's generation allowance",
+                after.id
+            );
+        }
+        assert!(
+            store.close_calls().is_empty(),
+            "nothing here is verification-shaped; nothing may be closed"
+        );
+    }
+
+    #[tokio::test]
+    async fn own_beads_beyond_the_budget_are_still_deferred() {
+        let parent = make_test_bead("audit-over-budget-parent");
+        let store = Arc::new(MockStore::new(vec![parent.clone()]));
+        let mut worker = make_worker(store.clone());
+        let actor = worker.qualified_id();
+        let dispatch_start = chrono::Utc::now();
+        worker.dispatch_started_at = Some(dispatch_start);
+
+        // Four beads this worker created — one over the default budget of
+        // three. The oldest (pushed first) is the one that must be deferred,
+        // proving the harness above can observe a deferral at all.
+        let beads: Vec<Bead> = (1..=4)
+            .map(|n| {
+                let mut bead = make_test_bead(&format!("audit-defer-own-{n}"));
+                bead.title = format!("Follow-up item {n}");
+                bead
+            })
+            .collect();
+        for bead in &beads {
+            push_window_bead(&store, bead, Some(&actor), dispatch_start);
+        }
+
+        worker
+            .run_post_dispatch_audit(&parent)
+            .await
+            .expect("the audit should not fail");
+
+        let oldest = store.show(&beads[0].id).await.unwrap();
+        assert!(
+            oldest.labels.contains(&"over-budget".to_string()),
+            "the oldest own bead is one over budget and must be deferred"
+        );
+        for bead in &beads[1..] {
+            let after = store.show(&bead.id).await.unwrap();
+            assert!(
+                !after.labels.contains(&"over-budget".to_string()),
+                "{} is within budget and must not be deferred",
+                after.id
+            );
+        }
     }
 
     #[tokio::test]
