@@ -2480,13 +2480,15 @@ fn saturated_host_worker_stays_resident_until_load_clears() -> Result<()> {
     )?;
     let canary = create_bead(&workspace, "Saturated host canary", 1)?;
 
-    // Deterministic adapter: closes the canary and exits.
+    // Deterministic adapter: closes the canary and exits. The pinned 0.2.6
+    // bead CLI creates a non-leased claim with no fencing token, so this
+    // compatibility fixture must not pass an empty token argument to `close`.
     let adapters = home.join(".config/needle/adapters");
     std::fs::create_dir_all(&adapters)?;
     std::fs::write(
         adapters.join("sat-agent.yaml"),
         format!(
-            "name: sat-agent\ndescription: deterministic closer for the saturated-host fixture\nagent_cli: /bin/true\ninvoke_template: \"cd {{workspace}} && {} close {{bead_id}} --reason 'closed by saturated-host fixture\\n\\n```verified:\\ntrue exit=0\\n```' --fencing-token $NEEDLE_BEAD_FENCING_TOKEN --no-auto-flush\"\ntimeout_secs: 30\nprovider: local\nmodel: e2e\n",
+            "name: sat-agent\ndescription: deterministic closer for the saturated-host fixture\nagent_cli: /bin/true\ninvoke_template: \"cd {{workspace}} && {} close {{bead_id}} --reason 'closed by saturated-host fixture\\n\\n```verified:\\ntrue exit=0\\n```' --no-auto-flush\"\ntimeout_secs: 30\nprovider: local\nmodel: e2e\n",
             pinned_bead.display()
         ),
     )?;

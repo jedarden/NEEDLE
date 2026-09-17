@@ -8055,6 +8055,12 @@ mod tests {
         let (_guard, _home) = isolated_home();
         let mut config = Config::default();
         config.worker.enforce_shipped_work = false;
+        // This fixture exercises the wrapper-path ledger guard, not the
+        // default verification gates. Keep the success paths synchronous so
+        // only the deliberately slow `show()` in cycle 4 can hit the 1s
+        // handler timeout.
+        config.validation.default_gates.enabled = false;
+        config.validation.fallback_gate = false;
         // Long enough that the first three cycles never race it, short enough
         // that the fourth cycle's 2s `show()` triggers the handler timeout.
         config.validation.outcome_timeout_seconds = 1;
