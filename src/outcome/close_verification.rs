@@ -218,9 +218,27 @@ fn is_verified_fence(trimmed: &str) -> bool {
     matches!(info, "verified" | "verified:")
 }
 
-/// Parse the fenced `verified:` block out of a close reason.
+/// Whether a line is a bare `verified:` label — evidence without a fence.
 ///
-/// Returns `None` when the reason carries no verified block, and
+/// Agents reliably write the label bare: five consecutive evidence-free
+/// rejections on 2026-09-17 (fingerprint `ea603be160bd`, workspace degraded)
+/// were all fenced-form parses of reasons whose evidence was present but
+/// unfenced. The fence stays the prompt's requested shape; this only stops
+/// the parser from discarding evidence that is actually there.
+fn is_bare_verified_label(trimmed: &str) -> bool {
+    trimmed == "verified:"
+}
+
+/// Parse the `verified:` evidence out of a close reason.
+///
+/// Two shapes are accepted: the prompt's fenced block, and a bare
+/// `verified:` line whose claim is the contiguous run of non-blank lines
+/// after it (stopped by the first blank line, a fence marker, or the end of
+/// the reason — prose in a later paragraph is never swallowed into the
+/// claim). In both, the claim ends where the reason ends, so the bare form
+/// can only recognise evidence the contract already places last.
+///
+/// Returns `None` when the reason carries no verified evidence, and
 /// `Some(commands)` — possibly empty — when it does. The exit codes the
 /// agent claims are stripped and deliberately not trusted: every command is
 /// re-run, which is the entire point of the block.
@@ -228,6 +246,19 @@ pub(crate) fn parse_verified_block(reason: &str) -> Option<Vec<String>> {
     let mut lines = reason.lines();
     while let Some(line) = lines.next() {
         let trimmed = line.trim();
+        if is_bare_verified_label(trimmed) {
+            let mut commands = Vec::new();
+            for inner in lines.by_ref() {
+                let inner_trimmed = inner.trim();
+                if inner_trimmed.is_empty() || fence_marker(inner_trimmed).is_some() {
+                    break;
+                }
+                if let Some(command) = normalize_claimed_command(inner_trimmed) {
+                    commands.push(command);
+                }
+            }
+            return Some(commands);
+        }
         if !is_verified_fence(trimmed) {
             continue;
         }
@@ -490,6 +521,82 @@ mod tests {
         assert_eq!(
             parse_verified_block("```verified:\ngo build ./...\n"),
             Some(vec!["go build ./...".to_string()])
+        );
+    }
+
+    // ── bare (unfenced) `verified:` label — the shape agents actually write ──
+
+    #[test]
+    fn bare_verified_label_with_commands_is_evidence() {
+        // Reduced from claudepr-a847d4de's rejected close (fingerprint
+        // ea603be160bd): evidence present, label bare, block unfenced.
+        let reason = "Added tests/stop_delayed_payload_e2e.rs (commit de77ab9, pushed).\n\
+                      Mutation-verified: early read_fd drop fails both binary tests.\n\
+                      \n\
+                      verified:\n\
+                      cargo test --test stop_delayed_payload_e2e exit=0\n\
+                      cargo build exit=0";
+        assert_eq!(
+            parse_verified_block(reason),
+            Some(vec![
+                "cargo test --test stop_delayed_payload_e2e".to_string(),
+                "cargo build".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn bare_label_claim_stops_at_blank_line_so_later_prose_is_not_claimed() {
+        let reason = "Shipped in 72f3249.\n\n\
+                      verified:\n\
+                      cargo build exit=0\n\
+                      \n\
+                      No new commit this attempt — docs-only work was already committed.\n\
+                      cargo test of the prose paragraph below must never be re-run.";
+        assert_eq!(
+            parse_verified_block(reason),
+            Some(vec!["cargo build".to_string()])
+        );
+    }
+
+    #[test]
+    fn bare_label_mid_sentence_is_not_evidence() {
+        for reason in [
+            "Everything verified: tests green, work pushed.",
+            "Re-verification attempt: all green.",
+            "The work was verified by CI.",
+        ] {
+            assert_eq!(
+                parse_verified_block(reason),
+                None,
+                "got evidence from: {reason}"
+            );
+        }
+    }
+
+    #[test]
+    fn bare_label_with_nothing_after_is_empty_evidence() {
+        assert_eq!(parse_verified_block("all green\n\nverified:"), Some(vec![]));
+    }
+
+    #[test]
+    fn bare_label_claim_stops_at_a_fence_marker() {
+        let reason = "verified:\ncargo build exit=0\n```\ncargo test --lib\n```";
+        assert_eq!(
+            parse_verified_block(reason),
+            Some(vec!["cargo build".to_string()])
+        );
+    }
+
+    #[test]
+    fn bare_label_ignores_shell_prompt_decoration_and_indented_commands() {
+        let reason = "  verified:\n  $ cargo test --lib exit=0\n  cargo build exit=0";
+        assert_eq!(
+            parse_verified_block(reason),
+            Some(vec![
+                "cargo test --lib".to_string(),
+                "cargo build".to_string(),
+            ])
         );
     }
 

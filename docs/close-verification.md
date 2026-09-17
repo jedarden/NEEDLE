@@ -30,7 +30,19 @@ cargo test --lib exit=0
 The claimed exit codes are informational only and are never trusted: every
 command is re-run, which is the entire point of the block.
 
-A close reason without the block is rejected: the bead is reopened and
+**The bare label is also accepted.** Agents reliably drop the fence: five
+consecutive closes on 2026-09-17 (fingerprint `ea603be160bd`, which degraded
+the `claude-print` workspace) carried real evidence as a bare `verified:`
+line with the commands on the following lines, and were all rejected as
+evidence-free. The parser therefore also recognises a line that is exactly
+`verified:` — no fence — and claims the contiguous non-blank lines after it,
+stopping at the first blank line, a fence marker, or the end of the reason.
+Prose in a later paragraph is never claimed, and `verified:` embedded in a
+sentence does not open evidence. The fenced form stays the prompt's
+requested shape; the bare form is tolerance for how closes are actually
+written, not an invitation to write them that way.
+
+A close reason with neither shape is rejected: the bead is reopened and
 released with reason `close reason carries no verification evidence`, and the
 attempt counts toward the failure ceiling like any other gate failure.
 
