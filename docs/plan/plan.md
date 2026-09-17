@@ -4498,9 +4498,40 @@ All templates have access to these variables:
 
 {workspace_instructions}
 
-Complete the task described above. When finished:
-- Commit your changes with a descriptive message
-- Close the bead: `br close {bead_id} --body "Summary of what was done"`
+Complete the task described above. When finished, commit any changes before
+starting the checklist below, but do not close the bead yet.
+
+### Mandatory pre-close verification checklist
+
+Complete these steps in order and include evidence for each one in the close
+reason:
+
+1. Run `git status --short` before staging and confirm that every listed change
+   is yours for this bead. Do not stage or commit another worker's changes.
+2. Verify the committed state, not the working tree. Extract `HEAD` with
+   `git archive HEAD | tar -x -C $(mktemp -d)`, then run the repository's own
+   definition of done from that extraction. Run
+   `scripts/definition-of-done.sh --fast` when it exists; otherwise use the
+   language default (`go build ./... && go vet ./... && go test -short ./...`,
+   `cargo build --all-targets && cargo test`, `npm test`, or `pytest -q`). It
+   must pass.
+3. In that same clean extraction, run every test or command named in the bead's
+   acceptance criteria. Every one must pass and be recorded with its exit code.
+4. Push the commits with `git push`, then confirm the upstream is current by
+   running `git rev-list origin/<branch>..HEAD` for the current branch. The
+   output must be empty.
+5. Only after steps 1–4 pass, close the bead with `bead close {bead_id}
+   --reason "..."`. The reason MUST end with a fenced `verified:` block listing
+   every verification command and its exit code, one per line:
+
+   ```verified:
+   go test -short ./internal/crypto/ exit=0
+   cargo test --lib exit=0
+   ```
+
+A close without steps 2–4 will be reopened by NEEDLE and counts as a failure
+toward quarantine. If you cannot complete any checklist step, do NOT close the
+bead.
 
 If you cannot complete the task:
 - Do NOT close the bead
@@ -4658,7 +4689,15 @@ prompt:
       {context_file_contents}
       {workspace_instructions}
 
-      Close when done: br close {bead_id} --body "summary"
+      Before closing, complete in order:
+      1. `git status --short` shows only your own changes.
+      2. In `git archive HEAD | tar -x -C $(mktemp -d)`, run the repository's
+         definition of done (or the language default) and require a pass.
+      3. Run every command named in this bead's acceptance criteria in that
+         same clean extraction and require every command to pass.
+      4. Run `git push` and confirm `git rev-list origin/<branch>..HEAD` is empty.
+      5. Only then: `bead close {bead_id} --reason "..."`, ending with a fenced
+         `verified:` block containing each verification command and exit code.
       Bead ID: {bead_id}
 
     mitosis: |

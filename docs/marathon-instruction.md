@@ -45,12 +45,28 @@ needle-0ez (types) → needle-h8l (config) → needle-sxl (telemetry) → needle
 7. Run `cargo fmt`
 8. Run `cargo test` — all tests must pass
 
-### Step 3: Commit and close
+### Step 3: Commit, verify, and close
 
 1. Stage your changes: `git add` the specific files you modified/created
 2. Commit with the convention: `feat(needle-XYZ): short description`
-3. Push to origin: `git push`
-4. Close the bead: `br close <bead_id> --body "Summary of what was implemented"`
+3. Before closing, complete this mandatory checklist in order and record the
+   evidence in the close reason:
+   1. Run `git status --short`; every listed change must be yours for this bead.
+   2. From committed `HEAD`, run `git archive HEAD | tar -x -C $(mktemp -d)` and
+      run the repository's `scripts/definition-of-done.sh --fast`, or its
+      language default (`go build ./... && go vet ./... && go test -short ./...`,
+      `cargo build --all-targets && cargo test`, `npm test`, or `pytest -q`).
+      Run it in the extraction, never in the working tree, and require a pass.
+   3. In that same extraction, run every test or command named in the bead's
+      acceptance criteria; all must pass.
+   4. Push with `git push`, then run `git rev-list origin/<branch>..HEAD` for
+      the current branch and require empty output.
+   5. Only then close with `bead close <bead_id> --reason "..."`; the reason
+      must end with a fenced `verified:` block listing each verification
+      command and its exit code.
+4. A close without checklist steps 2–4 will be reopened by NEEDLE and counts
+   as a failure toward quarantine. If you cannot complete the checklist, do
+   NOT close the bead.
 
 ### If no beads are available
 

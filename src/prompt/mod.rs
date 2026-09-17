@@ -53,8 +53,9 @@ const DEFAULT_PLUCK_TEMPLATE: &str = "\
 {workspace_instructions}
 
 Complete the task described above. When finished:
-- **If you changed files, commit and push them.** `git commit`, then `git push`. Real
-  changes are source, tests, config, or documentation the task actually asked for.
+- **If you changed files, commit them before starting the checklist below, but do not
+  close the bead yet.** Real changes are source, tests, config, or documentation the
+  task actually asked for.
 
   **Important:** The commit hook will reject commits that include files that were already
   dirty before you started and you haven't modified. This prevents accidentally sweeping
@@ -76,7 +77,28 @@ Complete the task described above. When finished:
   commit requirement. Status belongs on the bead, not in git history. A commit whose only
   changes are under `notes/` or `.beads/` does not count as shipped work and will be
   rejected.
-- Close the bead:
+
+## Mandatory pre-close verification checklist
+
+Complete these steps in order and include evidence for each one in the close reason:
+
+1. Run `git status --short` before staging and confirm that every listed change is
+   yours for this bead. Do not stage or commit another worker's changes.
+2. Verify the committed state, not the working tree. Extract `HEAD` with
+   `git archive HEAD | tar -x -C $(mktemp -d)` (a named temporary directory is fine
+   when you need to run several commands there), then run the repository's own
+   definition of done from that extraction. Run `scripts/definition-of-done.sh --fast`
+   when the script exists; otherwise use the language default (`go build ./... && go
+   vet ./... && go test -short ./...`, `cargo build --all-targets && cargo test`,
+   `npm test`, or `pytest -q`). It must pass. Never run this verification from the
+   shared working tree.
+3. In that same clean extraction, run every test or command named in the bead's
+   acceptance criteria. Every one must pass and its command and exit code must be
+   recorded in the evidence below.
+4. Push the commits with `git push`, then confirm the upstream is current: replace
+   `<branch>` with the current branch and run `git rev-list origin/<branch>..HEAD`.
+   The output must be empty.
+5. Only after steps 1–4 pass, close the bead:
 
 `{bead_cli} close {bead_id} --reason \"...\"`
 
@@ -96,6 +118,9 @@ Complete the task described above. When finished:
   Only these command prefixes are re-run; anything else in the block is
   ignored, never executed: go test, go vet, go build, cargo test, cargo build,
   npm test, pytest, make test, scripts/definition-of-done.sh
+
+A close without steps 2–4 will be reopened by NEEDLE and counts as a failure toward
+quarantine. If you cannot complete any checklist step, do NOT close the bead.
 
 If you cannot complete the task:
 - Do NOT close the bead
@@ -1822,6 +1847,43 @@ mod tests {
             .unwrap();
         assert!(pluck.content.contains("bead close needle-abc"));
         assert!(!pluck.content.contains("bf close needle-abc"));
+
+        let ordered_markers = [
+            "1. Run `git status --short`",
+            "2. Verify the committed state",
+            "git archive HEAD | tar -x -C $(mktemp -d)",
+            "scripts/definition-of-done.sh --fast",
+            "3. In that same clean extraction",
+            "4. Push the commits with `git push`",
+            "git rev-list origin/<branch>..HEAD",
+            "5. Only after steps 1–4 pass, close the bead",
+            "bead close needle-abc --reason",
+            "```verified:",
+        ];
+        let mut previous = 0;
+        for marker in ordered_markers {
+            let position = pluck
+                .content
+                .find(marker)
+                .unwrap_or_else(|| panic!("prompt is missing checklist marker: {marker}"));
+            assert!(
+                position >= previous,
+                "prompt checklist marker {marker:?} is out of order"
+            );
+            previous = position;
+        }
+        assert!(pluck
+            .content
+            .contains("every listed change is yours for this bead"));
+        assert!(pluck
+            .content
+            .contains("every test or command named in the bead's acceptance criteria"));
+        assert!(pluck
+            .content
+            .contains("A close without steps 2–4 will be reopened by NEEDLE"));
+        assert!(pluck
+            .content
+            .contains("counts as a failure toward\nquarantine"));
 
         let split = builder
             .build_split(&bead, workspace.path(), "worker-01", 3)
