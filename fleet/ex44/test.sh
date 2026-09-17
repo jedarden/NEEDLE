@@ -8,13 +8,16 @@ bash -n "$SRC_DIR/apply-ex44-fleet.sh" "$SRC_DIR/backlog-slo.sh" "$SRC_DIR/needl
 [[ -r "$SRC_DIR/required-explore-workspaces.txt" ]]
 
 rows=$(awk -F'\t' '$1 !~ /^#/ && NF == 5 {print}' "$MANIFEST")
-[[ "$(wc -l <<<"$rows")" -eq 27 ]]
-[[ "$(cut -f1 <<<"$rows" | sort -u | wc -l)" -eq 27 ]]
+[[ "$(wc -l <<<"$rows")" -eq 29 ]]
+[[ "$(cut -f1 <<<"$rows" | sort -u | wc -l)" -eq 29 ]]
 [[ "$(awk -F'\t' '$5 == "true" {n++} END {print n+0}' <<<"$rows")" -eq 27 ]]
 grep -q $'^glm-tradegraph\t/home/coding/.needle/roam-only\t.*\ttrue$' "$MANIFEST"
 grep -q $'^glm53-adc\t/home/coding/.needle/roam-only\t.*\ttrue$' "$MANIFEST"
-[[ "$(awk -F'\t' '$3 == "codex-gpt-5.6-luna-xhigh" && $5 == "true" {n++} END {print n+0}' <<<"$rows")" -eq 3 ]]
+[[ "$(awk -F'\t' '$3 == "codex-gpt-5.6-luna-xhigh" {n++} END {print n+0}' <<<"$rows")" -eq 6 ]]
 grep -q $'^codex-needle-01\t/home/coding/NEEDLE\tcodex-gpt-5.6-luna-xhigh\t0\ttrue$' "$MANIFEST"
+grep -q $'^glm-tradegraph\t/home/coding/.needle/roam-only\tcodex-gpt-5.6-luna-xhigh\t90\ttrue$' "$MANIFEST"
+grep -q $'^glm53-adc\t/home/coding/.needle/roam-only\tcodex-gpt-5.6-luna-xhigh\t135\ttrue$' "$MANIFEST"
+grep -q $'^glm-needle-01\t/home/coding/NEEDLE\tcodex-gpt-5.6-luna-xhigh\t315\tfalse$' "$MANIFEST"
 grep -q 'NEEDLE_AGENT__EVIDENCE_ROUTING__ENABLED=false' "$SRC_DIR/apply-ex44-fleet.sh"
 grep -q '^  backend: bead-rs$' "$SRC_DIR/roam-home.yaml"
 [[ "$(awk -F'\t' '$3 == "claude-code-glm-5.3" {n++} END {print n+0}' <<<"$rows")" -le 9 ]]
@@ -24,7 +27,7 @@ grep -qx '/home/coding/FABRIC' "$SRC_DIR/required-explore-workspaces.txt"
 grep -qx 'NEEDLE_STRANDS__GENERATION__LOW_WATER_RESERVE=6' "$SRC_DIR/fleet-policy.env"
 ! grep -q 'NEEDLE_STRANDS__GENERATION__ENABLED' "$SRC_DIR/apply-ex44-fleet.sh"
 grep -qx 'NEEDLE_STRANDS__MITOSIS__TIMEOUT_TRIGGERED__AGENT_WALLCLOCK_TIMEOUT=true' "$SRC_DIR/fleet-policy.env"
-grep -qx 'NEEDLE_WORKER__MAX_WORKERS=27' "$SRC_DIR/fleet-policy.env"
+grep -qx 'NEEDLE_WORKER__MAX_WORKERS=29' "$SRC_DIR/fleet-policy.env"
 grep -qx 'FLEET_WORKER_TARGET=27' "$SRC_DIR/backlog-policy.env"
 grep -qx 'FLEET_ELIGIBLE_TARGET=108' "$SRC_DIR/backlog-policy.env"
 grep -qx 'FLEET_ELIGIBLE_MINIMUM=54' "$SRC_DIR/backlog-policy.env"
@@ -53,7 +56,7 @@ grep -q 'needle-factory-audit.timer' "$SRC_DIR/apply-ex44-fleet.sh"
 # The activation fragment keeps the lane, the workspace-only codex candidate
 # and the OpenAI cap together: enabling the candidate without the cap is what
 # would let one adapter pull the fleet onto an unbilled-by-us provider.
-grep -q 'workers: \[codex-needle-01\]' "$SRC_DIR/bootstrap-lane.yaml"
+grep -q 'workers: \[codex-needle-01, glm-needle-01, claude-needle-01\]' "$SRC_DIR/bootstrap-lane.yaml"
 grep -q 'workspace_only_candidates:' "$SRC_DIR/bootstrap-lane.yaml"
 grep -q 'openai:' "$SRC_DIR/bootstrap-lane.yaml"
 

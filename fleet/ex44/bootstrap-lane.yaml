@@ -68,11 +68,11 @@ agent:
 
 limits:
   providers:
-    # Three codex workers (codex-needle-01, codex-roam-01, codex-roam-02) have
-    # been running since 2026-09-16 against a provider with NO cap at all:
-    # `limits.providers` has no openai entry. This closes that gap and is the
-    # one block here worth applying on its own, independently of the lane.
-    # Limits match on the provider of the adapter a dispatch actually uses.
+    # Six codex workers now use this provider: the original codex-needle-01
+    # and codex-roam-01/02 plus the 2026-09-17 conversions glm-tradegraph,
+    # glm53-adc, and glm-needle-01. The identifiers are stable, but provider
+    # limits match the adapter a dispatch actually uses, so all six share this
+    # OpenAI ceiling.
     openai:
       max_concurrent: 10
       requests_per_minute: 60

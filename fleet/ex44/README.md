@@ -1,14 +1,15 @@
 # ex44 NEEDLE fleet policy
 
 This directory makes the codinghome/ex44 worker capacity and backlog policy
-reproducible. It targets up to 27 workers across the Z.ai and OpenAI provider
-pools. Every worker tries its listed home workspace first, then may roam across
-the maintained-workspace frontier when that route has no eligible work. Nine
-workers use GLM-5.3, up to fifteen use GLM-5.3-Flash, one NEEDLE-home worker
-uses Codex GPT-5.6 Luna, and two additional Luna workers roam. Live-session
+reproducible. It registers 29 workers across the Z.ai, OpenAI, and Anthropic
+provider pools; 27 can roam, while two NEEDLE-home workers remain scoped to
+that build-heavy repository. Every roaming worker tries its listed home
+workspace first, then may use the maintained-workspace frontier when that
+route has no eligible work. Eight workers use GLM-5.3, fourteen use
+GLM-5.3-Flash, six use Codex GPT-5.6 Luna, and one uses Claude. Live-session
 concurrency is enforced separately from the number of registered workers.
 Codex instance environments disable the fleet-wide GLM evidence router so
-those three workers remain Codex capacity rather than entering its 10% GLM
+those six workers remain Codex capacity rather than entering its 10% GLM
 exploration sample.
 
 ## What this implements
@@ -75,9 +76,10 @@ timestamped files under `~/.config/systemd/user` and `~/.config/needle`, run
 
 `needle-zai-governor` protects the proxy without fighting the manifest. It
 scales the eight expansion workers (`glm-icg` and `glm-roam-18` through `24`)
-between one and eight, for 17--24 active GLM workers including the fixed base.
-The NEEDLE-home Codex worker and two fixed Codex roamers are outside this
-Z.ai-specific controller, making the total operating range 20--27 workers. The
+between one and eight, for 15--22 active GLM workers including the fixed base.
+The six Codex workers and the Claude worker are outside this Z.ai-specific
+controller. The total registered-service range is 22--29; excluding the two
+NEEDLE-home workers, the general roaming range remains 20--27 workers. The
 home-first ICG worker is first in the pool and is therefore preserved by the
 one-worker floor, but it can roam when ICG has no eligible work. A productive
 window with no
@@ -89,3 +91,9 @@ reports `EXHAUSTED` with no current bead; selectors and executors drain instead
 of abandoning an epoch-fenced claim. A v3 state file starts at the prior
 four-worker expansion ceiling, so the four new roamers are probed one per clean
 window rather than enabled together.
+
+The 2026-09-17 Z.ai concurrency experiment moved `glm-tradegraph`,
+`glm53-adc`, and `glm-needle-01` to the Luna adapter without renaming their
+service identifiers. All three were claim-free at the handoff. Keeping their
+identifiers preserves lane bindings and telemetry continuity while making the
+provider change directly comparable and reversible.
