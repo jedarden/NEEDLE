@@ -91,6 +91,10 @@ fn assert_all_config_fields_have_tiers(config: &Config) {
         ref attempt_archive,
         ref transitions,
         ref audit,
+
+        // Central filesystem roots (state_dir is published once at load; a
+        // change needs a restart — N-T52, ADR-030 decision 5)
+        ref paths,
     } = config;
 
     // Verify tier A assignments
@@ -128,6 +132,9 @@ fn assert_all_config_fields_have_tiers(config: &Config) {
     // Tracked but not yet tier-assigned: TransitionsConfig has no reload_tier
     // yet, so a change to it is treated like a restart-required section.
     let _ = transitions;
+
+    // Restart-required by construction: state_dir is read once at load.
+    let _ = paths;
 }
 
 /// Reload tier for a configuration field.
@@ -473,6 +480,7 @@ static TIER_TABLE: &[(&str, ReloadTier)] = &[
     ),
     // Workspace paths (Tier C - process identity depends on these)
     ("workspace.home", ReloadTier::RestartRequired),
+    ("paths.state_dir", ReloadTier::RestartRequired),
     ("workspace.default", ReloadTier::RestartRequired),
     // Bead CLI backend (Tier C - store-level decision, process-scoped)
     ("bead_cli.backend", ReloadTier::RestartRequired),
