@@ -3356,23 +3356,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_severity_for_fleet_cpu_saturated_is_warn() {
+    async fn test_severity_for_saturation_events_are_warn() {
         let sink = make_test_sink();
 
-        // Test that fleet.cpu_saturated is WARN severity
-        let (severity, text) = sink.severity_for_event("fleet.cpu_saturated");
-        assert_eq!(severity, Severity::Warn);
-        assert_eq!(text, "WARN");
+        // The saturation family is WARN: host-level capacity signals and the
+        // worker-side capacity block (N-T33) are operational warnings, not
+        // errors — a worker holds resident and restores on its own.
+        for event_type in [
+            "fleet.cpu_saturated",
+            "fleet.memory_low",
+            "worker.admission_blocked",
+        ] {
+            let (severity, text) = sink.severity_for_event(event_type);
+            assert_eq!(severity, Severity::Warn, "{event_type}");
+            assert_eq!(text, "WARN", "{event_type}");
+        }
     }
 
     #[tokio::test]
-    async fn test_severity_for_fleet_memory_low_is_warn() {
+    async fn test_severity_for_worker_admission_restored_is_info() {
         let sink = make_test_sink();
 
-        // Test that fleet.memory_low is WARN severity
-        let (severity, text) = sink.severity_for_event("fleet.memory_low");
-        assert_eq!(severity, Severity::Warn);
-        assert_eq!(text, "WARN");
+        // Restoration is the normal resume of selection, so it keeps the
+        // default INFO tier.
+        let (severity, text) = sink.severity_for_event("worker.admission_restored");
+        assert_eq!(severity, Severity::Info);
+        assert_eq!(text, "INFO");
     }
 
     #[tokio::test]
