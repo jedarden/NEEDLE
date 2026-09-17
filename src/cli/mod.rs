@@ -17,6 +17,8 @@ use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::bead_store::{spawn_with_etxtbsy_retry_sync_child, BeadStore};
+#[cfg(test)]
+use crate::config::ConfigSource;
 use crate::config::{CliOverrides, Config, ConfigLoader, SourceMap, StdoutSinkConfig};
 use crate::dispatch;
 use crate::health::{HealthMonitor, HeartbeatData};
