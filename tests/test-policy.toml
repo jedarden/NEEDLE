@@ -117,7 +117,7 @@ version = 1
 # the private dispatch-start timestamp, so the unit tier is the only tier that
 # can reach them. The acceptance command is
 # `cargo test --lib audit_candidates_require audit_never_folds foreign_beads_do_not own_beads_beyond`.
-max_tests = 3843
+max_tests = 3846
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
@@ -340,6 +340,13 @@ kind = "process"
 max_occurrences = 2
 owner = "component:wip-capture"
 reason = "The WIP capture fixture exercises the real Git stash/apply boundary."
+
+[[unit_exception]]
+path = "src/validation/shipped_work.rs"
+kind = "process"
+max_occurrences = 2
+owner = "component:validation"
+reason = "The shipped-work fixtures exercise real Git upstream and ancestry boundaries."
 [[unit_exception]]
 path = "src/outcome/mod.rs"
 kind = "sleep"

@@ -419,3 +419,137 @@ async fn git_output(workspace: &Path, args: &[&str]) -> Result<String> {
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use std::fs;
+    use std::process::Command;
+    use tempfile::TempDir;
+
+    fn git_ok(workspace: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(workspace)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .expect("run git fixture command");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn git_stdout(workspace: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(workspace)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .expect("run git fixture command");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("git fixture output is UTF-8")
+            .trim()
+            .to_string()
+    }
+
+    fn git_repo() -> TempDir {
+        let repo = tempfile::tempdir().expect("create Git fixture");
+        git_ok(repo.path(), &["init", "-q"]);
+        git_ok(
+            repo.path(),
+            &["config", "user.email", "test@example.invalid"],
+        );
+        git_ok(repo.path(), &["config", "user.name", "Needle Test"]);
+        fs::write(repo.path().join("README.md"), "seed\n").expect("write fixture seed");
+        git_ok(repo.path(), &["add", "README.md"]);
+        git_ok(repo.path(), &["commit", "-q", "-m", "seed"]);
+        repo
+    }
+
+    fn commit_work(repo: &TempDir) {
+        fs::write(repo.path().join("work.rs"), "fn work() {}\n").expect("write fixture work");
+        git_ok(repo.path(), &["add", "work.rs"]);
+        git_ok(repo.path(), &["commit", "-q", "-m", "ship work"]);
+    }
+
+    fn snapshot_at(head_sha: String) -> predispatch::PreDispatch {
+        predispatch::PreDispatch {
+            head_sha: Some(head_sha),
+            notes_hash: Some(predispatch::hash_notes("")),
+            dirty_files: Vec::new(),
+            captured_at: Some(Utc::now()),
+        }
+    }
+
+    fn bare_upstream(repo: &TempDir) -> TempDir {
+        let remote = tempfile::tempdir().expect("create bare upstream fixture");
+        git_ok(remote.path(), &["init", "-q", "--bare"]);
+        git_ok(
+            repo.path(),
+            &[
+                "remote",
+                "add",
+                "origin",
+                remote.path().to_str().expect("upstream path is UTF-8"),
+            ],
+        );
+        git_ok(repo.path(), &["push", "-q", "-u", "origin", "HEAD"]);
+        remote
+    }
+
+    async fn verdict(repo: &TempDir, snapshot: &predispatch::PreDispatch) -> GateResult {
+        check_commit(repo.path(), Some(snapshot))
+            .await
+            .expect("shipped-work check should run")
+            .expect("substantial committed work should produce a verdict")
+    }
+
+    #[tokio::test]
+    async fn no_upstream_is_unsatisfiable_and_not_a_failure_verdict() {
+        let repo = git_repo();
+        let before = git_stdout(repo.path(), &["rev-parse", "HEAD"]);
+        commit_work(&repo);
+
+        let result = verdict(&repo, &snapshot_at(before)).await;
+        assert!(matches!(result, GateResult::Unsatisfiable(_)));
+        assert!(result.is_unsatisfiable());
+        assert!(
+            result.failure_reason().is_none(),
+            "an unsatisfiable precondition must not enter failure accounting"
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_upstream_with_unpushed_head_is_a_work_failure() {
+        let repo = git_repo();
+        let before = git_stdout(repo.path(), &["rev-parse", "HEAD"]);
+        let _remote = bare_upstream(&repo);
+        commit_work(&repo);
+
+        let result = verdict(&repo, &snapshot_at(before)).await;
+        assert!(
+            matches!(result, GateResult::Fail(ref reason) if reason.contains("has not been pushed"))
+        );
+        assert!(!result.is_unsatisfiable());
+    }
+
+    #[tokio::test]
+    async fn configured_upstream_with_pushed_head_passes() {
+        let repo = git_repo();
+        let before = git_stdout(repo.path(), &["rev-parse", "HEAD"]);
+        let _remote = bare_upstream(&repo);
+        commit_work(&repo);
+        git_ok(repo.path(), &["push", "-q"]);
+
+        let result = verdict(&repo, &snapshot_at(before)).await;
+        assert_eq!(result, GateResult::Pass);
+    }
+}
