@@ -105,7 +105,10 @@ version = 1
 # explicit five-target boundary (tests/cargo-targets) makes the unit tier the
 # cheapest correct home; the acceptance command is
 # `cargo test --lib break_dependency_cycles`.
-max_tests = 3819
+# +4 circuit-breaker contracts (needle-f74d0110): Forgejo status mapping and
+# repository parsing, fake red/green policy admission, and P0 fix-bead
+# creation/deduplication. These are in-process and belong in the unit tier.
+max_tests = 3823
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

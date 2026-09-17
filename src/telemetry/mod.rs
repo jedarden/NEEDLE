@@ -672,6 +672,14 @@ pub enum EventKind {
         /// Phase the failing run ended in (`Failed`, `Error`).
         phase: String,
     },
+    /// Pluck or Explore skipped an ordinary candidate because the workspace's
+    /// main branch is red.
+    StrandCircuitOpen {
+        /// Workspace whose main branch is failing.
+        workspace: String,
+        /// SHA carrying the failing status.
+        sha: String,
+    },
     ClaimRaceLostSkipped {
         consecutive_losses: u32,
         threshold: u32,
@@ -1749,6 +1757,7 @@ impl EventKind {
             EventKind::ClaimRaceLostSkipped { .. } => "bead.claim.race_lost_skipped",
             EventKind::ClaimFailed { .. } => "bead.claim.failed",
             EventKind::ClaimBlockedCircuitOpen { .. } => "bead.claim.circuit_open",
+            EventKind::StrandCircuitOpen { .. } => "strand.circuit_open",
             EventKind::ClaimErrorThreshold { .. } => "bead.claim.error_threshold",
             EventKind::ClaimVerifyStarted { .. } => "bead.claim.verify_started",
             EventKind::ClaimVerifySuccess { .. } => "bead.claim.verify_success",
@@ -1980,6 +1989,7 @@ impl EventKind {
             | EventKind::SplitParentReconciled { parent_id, .. } => Some(parent_id.clone()),
             EventKind::MitosisOutOfScope { bead_id } => Some(bead_id.clone()),
             EventKind::HeartbeatEmitted { bead_id, .. } => bead_id.clone(),
+            EventKind::StrandCircuitOpen { .. } => None,
             EventKind::BeadStoreError { .. }
             | EventKind::WorkerBooting { .. }
             | EventKind::WorkerStarted { .. }
@@ -2487,6 +2497,12 @@ impl EventKind {
                     "workspace": workspace,
                     "template": template,
                     "phase": phase,
+                })
+            }
+            EventKind::StrandCircuitOpen { workspace, sha } => {
+                serde_json::json!({
+                    "workspace": workspace,
+                    "sha": sha,
                 })
             }
             EventKind::BeadReleased { bead_id, reason } => {
@@ -4046,6 +4062,7 @@ impl EventKind {
             | EventKind::ClaimRaceLostSkipped { .. }
             | EventKind::ClaimFailed { .. }
             | EventKind::ClaimBlockedCircuitOpen { .. }
+            | EventKind::StrandCircuitOpen { .. }
             | EventKind::BeadReleased { .. }
             | EventKind::BeadReleaseFailed { .. }
             | EventKind::BeadOrphaned { .. }

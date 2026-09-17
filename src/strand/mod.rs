@@ -154,6 +154,12 @@ impl StrandRunner {
         // not cover. No lane matches this worker => `None` => no behaviour
         // change anywhere.
         let lane = config.strands.pluck.lane_for(worker_id).cloned();
+        let circuit_checker = config
+            .strands
+            .pluck
+            .circuit_breaker
+            .enabled
+            .then(crate::build_status::BuildStatusChecker::production);
 
         // All host-level strand state follows the single configured root.
         // `root_for` retains the historical workspace-home fallback when no
@@ -171,6 +177,15 @@ impl StrandRunner {
         )
         .with_quarantine_threshold(config.outcome.quarantine_after_failures)
         .with_lane(lane.clone());
+        let pluck = if let Some(checker) = &circuit_checker {
+            pluck.with_circuit_breaker(
+                config.workspace.default.clone(),
+                checker.clone(),
+                config.strands.pluck.circuit_breaker.labels.clone(),
+            )
+        } else {
+            pluck
+        };
 
         let heartbeat_dir = state_base.join("heartbeats");
         let heartbeat_ttl = std::time::Duration::from_secs(config.health.heartbeat_ttl_secs);
@@ -222,6 +237,12 @@ impl StrandRunner {
         // are (needle-ee024ae4).
         .with_split_after_failures(config.strands.pluck.split_after_failures)
         .with_lane(lane);
+        let explore = if let Some(checker) = circuit_checker {
+            explore
+                .with_circuit_breaker(checker, config.strands.pluck.circuit_breaker.labels.clone())
+        } else {
+            explore
+        };
 
         // Rung 4 of the escalation ladder (Phase 19 §19.2, ADR-022 decision 3):
         // settles a bead whose round-3 quarantine expired — the bead Pluck

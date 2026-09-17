@@ -125,6 +125,21 @@ An agent-level error occurred.
 
 ---
 
+## NEEDLE strand telemetry
+
+NEEDLE's worker telemetry also emits the additive event
+`strand.circuit_open` when Pluck or Explore skips ordinary work in a workspace
+whose `main` build is failing. Its payload is:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `workspace` | string | Workspace whose circuit is open. |
+| `sha` | string | Commit SHA carrying the failing build status. |
+
+The event is emitted once for the skipped workspace during a selection pass.
+Beads labelled `fix-build` (or another configured circuit-breaker label) are
+not skipped. Unknown status is fail-open and produces no circuit event.
+
 ## Versioning
 
 - `schema_version` is an integer incremented on every breaking change.

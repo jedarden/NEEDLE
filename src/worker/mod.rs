@@ -974,11 +974,12 @@ impl Worker {
         );
         // A red build stops work: claims in the home workspace are refused
         // while its newest CI run is failing, except for beads labeled as the
-        // way back to green (fix-build / ci-red).
+        // way back to green (fix-build; ci-red remains accepted when
+        // explicitly configured).
         let claimer = if config.strands.pluck.circuit_breaker.enabled {
             claimer.with_circuit_gate(CircuitGate::new(
                 BuildStatusChecker::production(),
-                config.workspace.home.clone(),
+                config.workspace.default.clone(),
                 config.strands.pluck.circuit_breaker.labels.clone(),
             ))
         } else {
@@ -2688,13 +2689,22 @@ impl Worker {
         self.store = remote_store.clone();
         self.current_workspace = workspace.to_path_buf();
         self.dispatcher.set_bead_store(remote_store.clone());
-        self.claimer = Claimer::new(
+        let claimer = Claimer::new(
             remote_store,
             std::env::temp_dir(),
             self.config.worker.max_claim_retries,
             100,
             self.telemetry.clone(),
         );
+        self.claimer = if self.config.strands.pluck.circuit_breaker.enabled {
+            claimer.with_circuit_gate(CircuitGate::new(
+                BuildStatusChecker::production(),
+                workspace.to_path_buf(),
+                self.config.strands.pluck.circuit_breaker.labels.clone(),
+            ))
+        } else {
+            claimer
+        };
         // Update registry so observers see the actual workspace being processed.
         if let Err(e) = self
             .registry
@@ -2716,13 +2726,22 @@ impl Worker {
             self.store = self.home_store.clone();
             self.current_workspace = self.config.workspace.default.clone();
             self.dispatcher.set_bead_store(self.home_store.clone());
-            self.claimer = Claimer::new(
+            let claimer = Claimer::new(
                 self.home_store.clone(),
                 std::env::temp_dir(),
                 self.config.worker.max_claim_retries,
                 100,
                 self.telemetry.clone(),
             );
+            self.claimer = if self.config.strands.pluck.circuit_breaker.enabled {
+                claimer.with_circuit_gate(CircuitGate::new(
+                    BuildStatusChecker::production(),
+                    self.config.workspace.default.clone(),
+                    self.config.strands.pluck.circuit_breaker.labels.clone(),
+                ))
+            } else {
+                claimer
+            };
             // Update registry to reflect return to home workspace.
             if let Err(e) = self
                 .registry

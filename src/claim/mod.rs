@@ -72,7 +72,7 @@ enum CircuitVerdict {
     /// that carries a bypass label.
     Admit,
     /// The claim is refused: the circuit is open and the bead does not fix it.
-    Refuse(CircuitRefusal),
+    Refuse(Box<CircuitRefusal>),
 }
 
 /// The evidence behind a refusal, for the reason string and telemetry.
@@ -82,18 +82,20 @@ struct CircuitRefusal {
     template: String,
     run: CiWorkflowRun,
     bypass_labels: Vec<String>,
+    failing_sha: String,
 }
 
 impl CircuitRefusal {
     /// Human-readable refusal reason, recorded on the claim attempt.
     fn reason(&self) -> String {
         format!(
-            "circuit open: {} ({}) ended {} in {}; only beads labeled {:?} are claimable until CI is green",
+            "circuit open: {} ({}) ended {} in {}; only beads labeled {:?} are claimable until CI is green (sha {})",
             self.run.name,
             self.template,
             self.run.phase,
             self.workspace.display(),
             self.bypass_labels,
+            self.failing_sha,
         )
     }
 }
@@ -132,14 +134,15 @@ impl CircuitGate {
         if !self.covers(bead) {
             return CircuitVerdict::Admit;
         }
+        let workspace = self.workspace_for(bead);
         // Without a nameable CI template there is no verdict to fail on.
         let template = match &self.template {
             Some(template) => template.clone(),
-            None => match crate::build_status::template_for_workspace(&self.workspace).await {
+            None => match crate::build_status::template_for_workspace(&workspace).await {
                 Ok(template) => template,
                 Err(error) => {
                     tracing::debug!(
-                        workspace = %self.workspace.display(),
+                        workspace = %workspace.display(),
                         error = %error,
                         "No CI workflow template for workspace; circuit gate admits the claim"
                     );
@@ -148,12 +151,19 @@ impl CircuitGate {
             },
         };
 
-        let Some(run) = self.checker.newest_run_for_template(&template).await else {
+        let commit_sha = crate::build_status::main_branch_sha(&workspace).await;
+        let Some(run) = (if self.template.is_some() {
+            self.checker.newest_run_for_template(&template).await
+        } else {
+            self.checker
+                .newest_run_for_workspace(&workspace, &template, commit_sha.as_deref())
+                .await
+        }) else {
             return CircuitVerdict::Admit;
         };
         if run.status().is_passing() || run.status().is_unknown() {
             tracing::debug!(
-                workspace = %self.workspace.display(),
+                workspace = %workspace.display(),
                 workflow = %run.name,
                 phase = %run.phase,
                 "CI circuit closed; claim proceeds"
@@ -162,7 +172,7 @@ impl CircuitGate {
         }
         if self.bypasses(bead) {
             tracing::info!(
-                workspace = %self.workspace.display(),
+                workspace = %workspace.display(),
                 bead_id = %bead.id,
                 labels = ?bead.labels,
                 workflow = %run.name,
@@ -172,12 +182,18 @@ impl CircuitGate {
             return CircuitVerdict::Admit;
         }
 
-        CircuitVerdict::Refuse(CircuitRefusal {
-            workspace: self.workspace.clone(),
+        let failing_sha = run
+            .commit_sha
+            .clone()
+            .or(commit_sha)
+            .unwrap_or_else(|| "unknown".to_string());
+        CircuitVerdict::Refuse(Box::new(CircuitRefusal {
+            workspace,
             template,
             run,
             bypass_labels: self.bypass_labels.clone(),
-        })
+            failing_sha,
+        }))
     }
 
     /// Whether this gate has jurisdiction over `bead`.
@@ -188,11 +204,23 @@ impl CircuitGate {
         workspace_is_unset(&bead.workspace) || bead.workspace == self.workspace
     }
 
+    fn workspace_for(&self, bead: &Bead) -> PathBuf {
+        if workspace_is_unset(&bead.workspace) {
+            self.workspace.clone()
+        } else {
+            bead.workspace.clone()
+        }
+    }
+
     /// Whether `bead` is a way back to green (carries a bypass label).
     fn bypasses(&self, bead: &Bead) -> bool {
-        bead.labels
-            .iter()
-            .any(|label| self.bypass_labels.contains(label))
+        bead.labels.iter().any(|label| {
+            label.eq_ignore_ascii_case("ci-red")
+                || self
+                    .bypass_labels
+                    .iter()
+                    .any(|allowed| label.eq_ignore_ascii_case(allowed))
+        })
     }
 }
 
@@ -806,6 +834,13 @@ impl Claimer {
                         workspace: refusal.workspace.display().to_string(),
                         template: refusal.template.clone(),
                         phase: refusal.run.phase.clone(),
+                    },
+                    Utc::now(),
+                );
+                let _ = self.telemetry.emit(
+                    EventKind::StrandCircuitOpen {
+                        workspace: refusal.workspace.display().to_string(),
+                        sha: refusal.failing_sha.clone(),
                     },
                     Utc::now(),
                 );
@@ -3121,6 +3156,7 @@ mod tests {
             name: format!("needle-ci-{phase}"),
             phase: phase.to_string(),
             created_at: Some(chrono::Utc::now()),
+            commit_sha: Some("deadbeef".to_string()),
             ..CiWorkflowRun::default()
         }
     }
@@ -3198,6 +3234,15 @@ mod tests {
             .expect("the refusal must be recorded as bead.claim.circuit_open");
         assert_eq!(refusal.bead_id, Some(bead.id.clone()));
         assert_eq!(refusal.data["phase"], serde_json::json!("Error"));
+        let circuit = captured
+            .iter()
+            .find(|event| event.event_type == "strand.circuit_open")
+            .expect("the strand circuit event must be recorded");
+        assert_eq!(
+            circuit.data["workspace"],
+            serde_json::json!("/tmp/claim-circuit-home")
+        );
+        assert_eq!(circuit.data["sha"], serde_json::json!("deadbeef"));
     }
 
     #[tokio::test]

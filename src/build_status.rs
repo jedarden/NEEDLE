@@ -6,12 +6,12 @@
 //! claiming work in a workspace whose main branch is failing, and to lift the
 //! stop the moment a run Succeeds.
 //!
-//! The authoritative source is the Argo Workflows API on iad-ci, reached
-//! through the credential-free read-only kubectl proxy endpoint documented in
-//! `CLAUDE.md`. Workflows are matched on `spec.workflowTemplateRef.name`,
-//! which the `needle-ci` template sets on every run it starts (labels are not
-//! reliable here — most workflows in the namespace carry no template label).
-//! The run's `status.phase` maps onto [`BuildStatus`]:
+//! The authoritative source is the commit-status API on Forgejo. The status
+//! context is `iad-ci/<template>` and is queried for the current tip of
+//! `origin/main`. If Forgejo has not received a status yet, the read-only Argo
+//! Workflows API is used as a fallback; it is matched on
+//! `spec.workflowTemplateRef.name`, which the `needle-ci` template sets on
+//! every run it starts.
 //!
 //! | phase               | status     | claim behaviour            |
 //! |---------------------|------------|----------------------------|
@@ -45,6 +45,15 @@ pub const DEFAULT_CI_ENDPOINT: &str = "http://traefik-iad-ci:8001";
 
 /// Environment variable overriding the Argo Workflows endpoint.
 pub const CI_ENDPOINT_ENV: &str = "NEEDLE_CI_ENDPOINT";
+
+/// Optional Forgejo base URL override. Normally the host is read from the
+/// workspace's `origin` URL.
+pub const FORGEJO_URL_ENV: &str = "NEEDLE_FORGEJO_URL";
+
+/// Environment variable containing an optional read-only Forgejo API token.
+/// Public repositories work without it; the value is read only inside the
+/// request task and is never included in diagnostics.
+pub const FORGEJO_TOKEN_ENV: &str = "FORGEJO_TOKEN";
 
 /// Build status for a workspace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +117,10 @@ pub struct CiWorkflowRun {
     /// which would defeat both the determinism contract and any deduplication
     /// keyed on the signature.
     pub failed_nodes: Vec<FailedNode>,
+    /// Commit SHA associated with this verdict, when the source reported one.
+    pub commit_sha: Option<String>,
+    /// Source that supplied the verdict (`forgejo` or `argo`).
+    pub source: Option<String>,
 }
 
 impl CiWorkflowRun {
@@ -151,6 +164,19 @@ pub trait CiStatusSource: Send + Sync {
     /// Returns the newest run of `template`, or `None` when the cluster has
     /// never run it.
     async fn newest_run(&self, template: &str) -> Result<Option<CiWorkflowRun>>;
+
+    /// Returns the newest verdict for a concrete workspace and main-branch
+    /// SHA. Older test sources only implement [`Self::newest_run`], so the
+    /// default preserves that contract while production can consult Forgejo
+    /// first and Argo second.
+    async fn newest_run_for_workspace(
+        &self,
+        _workspace: &Path,
+        template: &str,
+        _commit_sha: Option<&str>,
+    ) -> Result<Option<CiWorkflowRun>> {
+        self.newest_run(template).await
+    }
 
     /// Every run of `template` the source can see, newest first.
     ///
@@ -260,6 +286,8 @@ impl ArgoWorkflowStatusSource {
                 .map(|stamp| stamp.with_timezone(&Utc)),
             message: status.and_then(|status| status.message.clone()),
             failed_nodes,
+            commit_sha: None,
+            source: Some("argo".to_string()),
         }
     }
 
@@ -296,6 +324,186 @@ impl CiStatusSource for ArgoWorkflowStatusSource {
     async fn run_history(&self, template: &str) -> Result<Vec<CiWorkflowRun>> {
         let list = self.fetch_list().await?;
         Ok(Self::runs_of_template(&list, template))
+    }
+}
+
+/// Read-only Forgejo commit-status source.
+///
+/// Forgejo's status endpoint returns all statuses for one commit. Filtering
+/// by the exact `iad-ci/<template>` context prevents an unrelated check from
+/// opening NEEDLE's circuit. An empty matching result is deliberately `None`,
+/// allowing the production composite source to fall back to Argo.
+pub struct ForgejoStatusSource {
+    base_url: Option<String>,
+    token_env: String,
+}
+
+impl ForgejoStatusSource {
+    /// Create a source using `NEEDLE_FORGEJO_URL` when set, otherwise the
+    /// Forgejo host in each workspace's origin URL.
+    pub fn from_env() -> Self {
+        Self {
+            base_url: std::env::var(FORGEJO_URL_ENV).ok(),
+            token_env: FORGEJO_TOKEN_ENV.to_string(),
+        }
+    }
+
+    fn endpoint(&self, workspace: &Path, template: &str, sha: &str) -> Result<String> {
+        let remote = remote_origin(workspace)?;
+        let (host, owner, repo) = repository_parts(&remote)?;
+        let base = self
+            .base_url
+            .clone()
+            .unwrap_or_else(|| format!("https://{host}"));
+        // The context is a query value; slash must not be interpreted as part
+        // of the endpoint path by proxies that normalize query strings.
+        Ok(format!(
+            "{}/api/v1/repos/{owner}/{repo}/commits/{sha}/statuses?context=iad-ci%2F{}",
+            base.trim_end_matches('/'),
+            template
+        ))
+    }
+
+    async fn fetch(
+        &self,
+        workspace: &Path,
+        template: &str,
+        sha: &str,
+    ) -> Result<Vec<ForgejoCommitStatus>> {
+        let url = self.endpoint(workspace, template, sha)?;
+        let token_env = self.token_env.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut request = ureq::get(&url).timeout(Duration::from_secs(15));
+            if let Ok(token) = std::env::var(token_env) {
+                request = request.set("Authorization", &format!("token {token}"));
+            }
+            let response = request.call().map_err(|error| anyhow!(error.to_string()))?;
+            let body = response
+                .into_string()
+                .map_err(|error| anyhow!(error.to_string()))?;
+            serde_json::from_str(&body).context("Forgejo commit statuses were not valid JSON")
+        })
+        .await
+        .map_err(|error| anyhow!("Forgejo status query task failed: {error}"))?
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ForgejoCommitStatus {
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    context: String,
+    #[serde(default)]
+    sha: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    updated_at: Option<String>,
+    #[serde(default)]
+    created_at: Option<String>,
+}
+
+fn forgejo_status_run(status: &ForgejoCommitStatus, template: &str, sha: &str) -> CiWorkflowRun {
+    let phase = match status.state.to_ascii_lowercase().as_str() {
+        "success" => "Succeeded",
+        "failure" | "error" => "Failed",
+        "pending" | "running" => "Running",
+        _ => "Unknown",
+    };
+    let created_at = status
+        .updated_at
+        .as_deref()
+        .or(status.created_at.as_deref())
+        .and_then(|stamp| DateTime::parse_from_rfc3339(stamp).ok())
+        .map(|stamp| stamp.with_timezone(&Utc));
+    CiWorkflowRun {
+        name: format!("iad-ci/{template}"),
+        phase: phase.to_string(),
+        created_at,
+        message: status.description.clone(),
+        failed_nodes: Vec::new(),
+        commit_sha: Some(status.sha.clone().unwrap_or_else(|| sha.to_string())),
+        source: Some("forgejo".to_string()),
+    }
+}
+
+#[async_trait::async_trait]
+impl CiStatusSource for ForgejoStatusSource {
+    async fn newest_run(&self, _template: &str) -> Result<Option<CiWorkflowRun>> {
+        // A workspace and branch SHA are required to query Forgejo. The
+        // production composite calls the workspace-aware method below.
+        Ok(None)
+    }
+
+    async fn newest_run_for_workspace(
+        &self,
+        workspace: &Path,
+        template: &str,
+        commit_sha: Option<&str>,
+    ) -> Result<Option<CiWorkflowRun>> {
+        let Some(sha) = commit_sha else {
+            return Ok(None);
+        };
+        let statuses = self.fetch(workspace, template, sha).await?;
+        let context = format!("iad-ci/{template}");
+        let mut matching: Vec<_> = statuses
+            .into_iter()
+            .filter(|status| status.context == context)
+            .collect();
+        matching.sort_by(|a, b| {
+            let stamp = |status: &ForgejoCommitStatus| -> String {
+                status
+                    .updated_at
+                    .as_deref()
+                    .or(status.created_at.as_deref())
+                    .unwrap_or("")
+                    .to_string()
+            };
+            stamp(b).cmp(&stamp(a))
+        });
+        Ok(matching
+            .first()
+            .map(|status| forgejo_status_run(status, template, sha)))
+    }
+}
+
+/// Production source: Forgejo commit status first, Argo workflow phase as a
+/// compatibility fallback when the status webhook has not landed yet.
+struct ProductionStatusSource {
+    forgejo: ForgejoStatusSource,
+    argo: ArgoWorkflowStatusSource,
+}
+
+impl ProductionStatusSource {
+    fn new() -> Self {
+        Self {
+            forgejo: ForgejoStatusSource::from_env(),
+            argo: ArgoWorkflowStatusSource::from_env(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl CiStatusSource for ProductionStatusSource {
+    async fn newest_run(&self, template: &str) -> Result<Option<CiWorkflowRun>> {
+        self.argo.newest_run(template).await
+    }
+
+    async fn newest_run_for_workspace(
+        &self,
+        workspace: &Path,
+        template: &str,
+        commit_sha: Option<&str>,
+    ) -> Result<Option<CiWorkflowRun>> {
+        match self
+            .forgejo
+            .newest_run_for_workspace(workspace, template, commit_sha)
+            .await
+        {
+            Ok(Some(run)) => Ok(Some(run)),
+            Ok(None) | Err(_) => self.argo.newest_run(template).await,
+        }
     }
 }
 
@@ -373,7 +581,69 @@ struct CachedStatus {
     expires_at: DateTime<Utc>,
 }
 
+/// The workspace-scoped circuit view used by `needle status` and telemetry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildStatusSnapshot {
+    /// Workspace whose `origin/main` was checked.
+    pub workspace: std::path::PathBuf,
+    /// CI workflow template associated with the repository.
+    pub template: String,
+    /// The resolved circuit verdict.
+    pub status: BuildStatus,
+    /// Failing or checked commit SHA, when it could be determined.
+    pub commit_sha: Option<String>,
+    /// Source of the verdict (`forgejo`, `argo`, or `unknown`).
+    pub source: String,
+    /// Source-specific phase (`Succeeded`, `Failed`, `Running`, …).
+    pub phase: Option<String>,
+    /// Workflow or status context name, when available.
+    pub run_name: Option<String>,
+}
+
+/// Result of applying the circuit policy to one workspace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CircuitDecision {
+    /// The workspace is green or has no usable verdict.
+    Closed(BuildStatusSnapshot),
+    /// The workspace is red and only configured repair labels are allowed.
+    Open(BuildStatusSnapshot),
+}
+
+/// Shared selection-time circuit policy for Pluck and Explore.
+#[derive(Clone)]
+pub struct CircuitPolicy {
+    checker: BuildStatusChecker,
+    labels: Vec<String>,
+}
+
+impl CircuitPolicy {
+    pub fn new(checker: BuildStatusChecker, labels: Vec<String>) -> Self {
+        Self { checker, labels }
+    }
+
+    pub fn label_allowed(&self, labels: &[String]) -> bool {
+        labels.iter().any(|candidate| {
+            candidate.eq_ignore_ascii_case("ci-red")
+                || self
+                    .labels
+                    .iter()
+                    .any(|allowed| candidate.eq_ignore_ascii_case(allowed))
+        })
+    }
+
+    /// Evaluate a workspace and its candidate labels using the cached status.
+    pub async fn decide(&self, workspace: &Path, labels: &[String]) -> Result<CircuitDecision> {
+        let snapshot = self.checker.snapshot_for_workspace(workspace).await?;
+        if snapshot.status.is_failing() && !self.label_allowed(labels) {
+            Ok(CircuitDecision::Open(snapshot))
+        } else {
+            Ok(CircuitDecision::Closed(snapshot))
+        }
+    }
+}
+
 /// Checks and caches the build status of a workspace's CI workflow.
+#[derive(Clone)]
 pub struct BuildStatusChecker {
     source: Arc<dyn CiStatusSource>,
     cache: Arc<RwLock<HashMap<String, CachedStatus>>>,
@@ -385,7 +655,7 @@ impl BuildStatusChecker {
     pub fn production() -> Self {
         Self::with_source(
             DEFAULT_CACHE_TTL_SECS,
-            Arc::new(ArgoWorkflowStatusSource::from_env()),
+            Arc::new(ProductionStatusSource::new()),
         )
     }
 
@@ -405,8 +675,45 @@ impl BuildStatusChecker {
     /// A source failure is *not* an error: it degrades to
     /// [`BuildStatus::Unknown`], which never opens the circuit.
     pub async fn check_status(&self, workspace: &Path) -> Result<BuildStatus> {
+        Ok(self.snapshot_for_workspace(workspace).await?.status)
+    }
+
+    /// Read the cached circuit state for one workspace.
+    ///
+    /// The cache key is the workspace path, not merely the template name. That
+    /// keeps separate checkouts independent and satisfies the worker contract
+    /// that a status belongs to one repository's `main` branch.
+    pub async fn snapshot_for_workspace(&self, workspace: &Path) -> Result<BuildStatusSnapshot> {
         let template = template_for_workspace(workspace).await?;
-        Ok(self.status_for_template(&template).await)
+        let commit_sha = main_branch_sha(workspace).await;
+        let cache_key = workspace_cache_key(workspace);
+        let run = self
+            .newest_run_for_workspace_cached(
+                &cache_key,
+                workspace,
+                &template,
+                commit_sha.as_deref(),
+            )
+            .await;
+        let status = run
+            .as_ref()
+            .map(CiWorkflowRun::status)
+            .unwrap_or(BuildStatus::Unknown);
+        Ok(BuildStatusSnapshot {
+            workspace: workspace.to_path_buf(),
+            template,
+            status,
+            commit_sha: run
+                .as_ref()
+                .and_then(|run| run.commit_sha.clone())
+                .or(commit_sha),
+            source: run
+                .as_ref()
+                .and_then(|run| run.source.clone())
+                .unwrap_or_else(|| "unknown".to_string()),
+            phase: run.as_ref().map(|run| run.phase.clone()),
+            run_name: run.as_ref().map(|run| run.name.clone()),
+        })
     }
 
     /// Build status for a named workflow template, cached for the TTL.
@@ -457,6 +764,50 @@ impl BuildStatusChecker {
         }
 
         self.store(template, run.clone());
+        run
+    }
+
+    /// The newest run for a workspace, with the same short-TTL semantics as
+    /// template queries but keyed by workspace path.
+    pub async fn newest_run_for_workspace(
+        &self,
+        workspace: &Path,
+        template: &str,
+        commit_sha: Option<&str>,
+    ) -> Option<CiWorkflowRun> {
+        let key = workspace_cache_key(workspace);
+        self.newest_run_for_workspace_cached(&key, workspace, template, commit_sha)
+            .await
+    }
+
+    async fn newest_run_for_workspace_cached(
+        &self,
+        cache_key: &str,
+        workspace: &Path,
+        template: &str,
+        commit_sha: Option<&str>,
+    ) -> Option<CiWorkflowRun> {
+        if let Some(cached) = self.fresh_entry(cache_key) {
+            return cached;
+        }
+
+        let run = match self
+            .source
+            .newest_run_for_workspace(workspace, template, commit_sha)
+            .await
+        {
+            Ok(run) => run,
+            Err(error) => {
+                tracing::warn!(
+                    workspace = %workspace.display(),
+                    template = %template,
+                    error = %error,
+                    "CI status source failed; treating build status as Unknown"
+                );
+                None
+            }
+        };
+        self.store(cache_key, run.clone());
         run
     }
 
@@ -548,6 +899,82 @@ pub fn template_for_repo(repo: &str) -> String {
     format!("{}-ci", repo.trim().trim_end_matches(".git").to_lowercase())
 }
 
+fn workspace_cache_key(workspace: &Path) -> String {
+    workspace
+        .canonicalize()
+        .unwrap_or_else(|_| workspace.to_path_buf())
+        .display()
+        .to_string()
+}
+
+/// Resolve the SHA currently advertised by `origin/main`.
+pub(crate) async fn main_branch_sha(workspace: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .args(["ls-remote", "origin", "refs/heads/main"])
+        .current_dir(workspace)
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.split_whitespace().next())
+        .filter(|sha| !sha.is_empty())
+        .map(str::to_string)
+}
+
+fn remote_origin(workspace: &Path) -> Result<String> {
+    // This helper is called from a blocking request task only after the
+    // asynchronous template probe has established that the workspace is a
+    // repository. Reading the config file directly avoids spawning a second
+    // asynchronous process from that task.
+    let output = std::process::Command::new("git")
+        .args(["config", "--get", "remote.origin.url"])
+        .current_dir(workspace)
+        .output()
+        .context("failed to read the workspace git remote")?;
+    if !output.status.success() {
+        return Err(anyhow!("git config remote.origin.url failed"));
+    }
+    let remote = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if remote.is_empty() {
+        return Err(anyhow!("workspace has no remote.origin.url"));
+    }
+    Ok(remote)
+}
+
+fn repository_parts(remote: &str) -> Result<(String, String, String)> {
+    let remote = remote.trim().trim_end_matches('/').trim_end_matches(".git");
+    let (host, path) = if let Some(rest) = remote.strip_prefix("ssh://") {
+        let (host, path) = rest
+            .split_once('/')
+            .ok_or_else(|| anyhow!("remote has no repository path"))?;
+        (host.rsplit('@').next().unwrap_or(host), path)
+    } else if let Some(rest) = remote
+        .strip_prefix("https://")
+        .or_else(|| remote.strip_prefix("http://"))
+    {
+        let (host, path) = rest
+            .split_once('/')
+            .ok_or_else(|| anyhow!("remote has no repository path"))?;
+        (host, path)
+    } else if let Some((user_host, path)) = remote.split_once(':') {
+        (user_host.rsplit('@').next().unwrap_or(user_host), path)
+    } else {
+        return Err(anyhow!("unsupported Forgejo remote URL"));
+    };
+    let mut pieces = path.split('/').filter(|piece| !piece.is_empty());
+    let owner = pieces
+        .next()
+        .ok_or_else(|| anyhow!("remote has no repository owner"))?;
+    let repo = pieces
+        .next()
+        .ok_or_else(|| anyhow!("remote has no repository name"))?;
+    Ok((host.to_string(), owner.to_string(), repo.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -632,6 +1059,51 @@ mod tests {
         assert!(BuildStatus::Passing.is_passing());
         assert!(BuildStatus::Unknown.is_unknown());
         assert!(!BuildStatus::Failing.is_unknown());
+    }
+
+    #[test]
+    fn forgejo_status_context_and_states_map_to_circuit_verdicts() {
+        let status = ForgejoCommitStatus {
+            state: "failure".to_string(),
+            context: "iad-ci/needle-ci".to_string(),
+            sha: Some("abc123".to_string()),
+            description: Some("cargo check failed".to_string()),
+            updated_at: Some("2026-09-17T12:00:00Z".to_string()),
+            created_at: None,
+        };
+        let run = forgejo_status_run(&status, "needle-ci", "fallback");
+        assert_eq!(run.status(), BuildStatus::Failing);
+        assert_eq!(run.commit_sha.as_deref(), Some("abc123"));
+        assert_eq!(run.source.as_deref(), Some("forgejo"));
+
+        let success = ForgejoCommitStatus {
+            state: "success".to_string(),
+            ..status
+        };
+        assert_eq!(
+            forgejo_status_run(&success, "needle-ci", "fallback").status(),
+            BuildStatus::Passing
+        );
+    }
+
+    #[test]
+    fn forgejo_repository_parts_accept_https_and_scp_origins() {
+        assert_eq!(
+            repository_parts("https://git.ardenone.com/jedarden/NEEDLE.git").unwrap(),
+            (
+                "git.ardenone.com".to_string(),
+                "jedarden".to_string(),
+                "NEEDLE".to_string()
+            )
+        );
+        assert_eq!(
+            repository_parts("git@git.ardenone.com:jedarden/NEEDLE.git").unwrap(),
+            (
+                "git.ardenone.com".to_string(),
+                "jedarden".to_string(),
+                "NEEDLE".to_string()
+            )
+        );
     }
 
     #[test]
@@ -741,6 +1213,44 @@ mod tests {
             checker.status_for_template("needle-ci").await,
             BuildStatus::Failing
         );
+    }
+
+    #[tokio::test]
+    async fn fake_red_status_allows_only_repair_labels_and_green_is_normal() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let red = CircuitPolicy::new(
+            BuildStatusChecker::with_source(60, Arc::new(FixedSource::failing_run())),
+            vec!["fix-build".to_string()],
+        );
+        assert!(matches!(
+            red.decide(workspace, &[]).await.unwrap(),
+            CircuitDecision::Open(_)
+        ));
+        assert!(matches!(
+            red.decide(workspace, &["fix-build".to_string()])
+                .await
+                .unwrap(),
+            CircuitDecision::Closed(_)
+        ));
+
+        let green = CircuitPolicy::new(
+            BuildStatusChecker::with_source(
+                60,
+                Arc::new(FixedSource {
+                    run: Some(CiWorkflowRun {
+                        phase: "Succeeded".to_string(),
+                        ..CiWorkflowRun::default()
+                    }),
+                    error: None,
+                    asked: Mutex::new(Vec::new()),
+                }),
+            ),
+            vec!["fix-build".to_string()],
+        );
+        assert!(matches!(
+            green.decide(workspace, &[]).await.unwrap(),
+            CircuitDecision::Closed(_)
+        ));
     }
 
     #[tokio::test]

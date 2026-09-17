@@ -8,6 +8,7 @@
 //! Given the same queue state, every worker computes the same candidate list.
 
 use crate::bead_store::{active_quarantine_until, BeadStore, Filters};
+use crate::build_status::{BuildStatusChecker, CircuitDecision, CircuitPolicy};
 use crate::deferral::{holds as deferral_holds, until as deferred_until};
 use crate::mitosis::detects_needle_internal_config;
 use crate::telemetry::Telemetry;
@@ -16,7 +17,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{atomic::AtomicUsize, atomic::Ordering, Mutex};
 
 /// Default labels excluded from Pluck selection when not configured.
@@ -1185,6 +1186,10 @@ pub struct PluckStrand {
     /// and worker identity are excluded so a *change* is what produces a new
     /// record.
     last_snapshot_signatures: Mutex<HashMap<String, String>>,
+    /// Build circuit policy applied before a candidate is returned.
+    circuit: Option<CircuitPolicy>,
+    /// Workspace whose local queue Pluck is evaluating.
+    circuit_workspace: Option<PathBuf>,
 }
 
 impl PluckStrand {
@@ -1213,6 +1218,8 @@ impl PluckStrand {
             last_exclusion_reasons: Mutex::new(Vec::new()),
             last_snapshot_signatures: Mutex::new(HashMap::new()),
             lane: None,
+            circuit: None,
+            circuit_workspace: None,
         }
     }
 
@@ -1245,6 +1252,8 @@ impl PluckStrand {
             last_exclusion_reasons: Mutex::new(Vec::new()),
             last_snapshot_signatures: Mutex::new(HashMap::new()),
             lane: None,
+            circuit: None,
+            circuit_workspace: None,
         }
     }
 
@@ -1282,6 +1291,8 @@ impl PluckStrand {
             last_exclusion_reasons: Mutex::new(Vec::new()),
             last_snapshot_signatures: Mutex::new(HashMap::new()),
             lane: None,
+            circuit: None,
+            circuit_workspace: None,
         }
     }
 
@@ -1302,6 +1313,52 @@ impl PluckStrand {
     pub fn with_lane(mut self, lane: Option<crate::config::PluckLaneConfig>) -> Self {
         self.lane = lane;
         self
+    }
+
+    /// Apply the workspace CI circuit before Pluck returns a candidate.
+    pub fn with_circuit_breaker(
+        mut self,
+        workspace: PathBuf,
+        checker: BuildStatusChecker,
+        labels: Vec<String>,
+    ) -> Self {
+        self.circuit = Some(CircuitPolicy::new(checker, labels));
+        self.circuit_workspace = Some(workspace);
+        self
+    }
+
+    async fn filter_circuit_candidates(&self, candidates: &mut Vec<Bead>, workspace: &Path) {
+        let Some(policy) = &self.circuit else {
+            return;
+        };
+        let decision = match policy.decide(workspace, &[]).await {
+            Ok(decision) => decision,
+            Err(error) => {
+                tracing::debug!(
+                    workspace = %workspace.display(),
+                    error = %error,
+                    "Pluck circuit status unavailable; retaining normal selection"
+                );
+                return;
+            }
+        };
+        let CircuitDecision::Open(snapshot) = decision else {
+            return;
+        };
+        let skipped = candidates
+            .iter()
+            .filter(|candidate| !policy.label_allowed(&candidate.labels))
+            .count();
+        if skipped > 0 {
+            let _ = self.telemetry.emit(
+                crate::telemetry::EventKind::StrandCircuitOpen {
+                    workspace: workspace.display().to_string(),
+                    sha: snapshot.commit_sha.unwrap_or_else(|| "unknown".to_string()),
+                },
+                Utc::now(),
+            );
+            candidates.retain(|candidate| policy.label_allowed(&candidate.labels));
+        }
     }
 
     /// Query for work, scoped to this worker's reserved lane when it has one.
@@ -2083,6 +2140,11 @@ impl super::Strand for PluckStrand {
             "Pluck candidate query completed"
         );
 
+        if let Some(workspace) = &self.circuit_workspace {
+            self.filter_circuit_candidates(&mut candidates, workspace)
+                .await;
+        }
+
         // Initialize query execution diagnostic tracking
         let database_result_count = candidates.len();
         let mut filter_stages: Vec<FilterStage> = Vec::new();
@@ -2751,6 +2813,10 @@ impl super::Strand for PluckStrand {
                             tier: repaired_tier,
                             ..
                         }) => {
+                            if let Some(workspace) = self.circuit_workspace.as_deref() {
+                                self.filter_circuit_candidates(&mut repaired_candidates, workspace)
+                                    .await;
+                            }
                             // The re-queried set must pass the same guards as the first
                             // query. A repair that did not actually release a bead
                             // (store refused, race, mock) must not turn into a claim on
@@ -2878,6 +2944,10 @@ impl super::Strand for PluckStrand {
                         tier: recovered_tier,
                         ..
                     }) => {
+                        if let Some(workspace) = self.circuit_workspace.as_deref() {
+                            self.filter_circuit_candidates(&mut recovered_candidates, workspace)
+                                .await;
+                        }
                         let recovered_now = Utc::now();
                         let recovered_worker_label_exclusions = if recovered_tier.ignores_labels() {
                             &[]

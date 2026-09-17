@@ -3541,6 +3541,7 @@ fn cmd_status(
             }
         })
         .collect();
+    let circuit_statuses = collect_circuit_statuses(&config, &workers);
 
     match format {
         ListFormat::Table => {
@@ -3552,6 +3553,25 @@ fn cmd_status(
             println!("  Total beads processed: {total_beads}");
             if !unregistered.is_empty() {
                 println!("  Unregistered workers: {} (WARN)", unregistered.len());
+            }
+            println!();
+
+            println!("Build Circuits:");
+            println!("{:<42} {:<10} {:<12} SHA", "WORKSPACE", "STATE", "SOURCE");
+            println!("{}", "-".repeat(88));
+            for circuit in &circuit_statuses {
+                let workspace = if circuit.workspace.len() > 40 {
+                    format!("...{}", &circuit.workspace[circuit.workspace.len() - 37..])
+                } else {
+                    circuit.workspace.clone()
+                };
+                println!(
+                    "{:<42} {:<10} {:<12} {}",
+                    workspace,
+                    circuit.state,
+                    circuit.source,
+                    circuit.sha.as_deref().unwrap_or("-")
+                );
             }
             println!();
 
@@ -3701,6 +3721,17 @@ fn cmd_status(
                 "discovered_workers": discovered_count,
                 "total_beads_processed": total_beads,
                 "unregistered_workers": unregistered.len(),
+                "circuits": circuit_statuses.iter().map(|circuit| {
+                    serde_json::json!({
+                        "workspace": circuit.workspace,
+                        "state": circuit.state,
+                        "status": circuit.status,
+                        "source": circuit.source,
+                        "template": circuit.template,
+                        "sha": circuit.sha,
+                        "phase": circuit.phase,
+                    })
+                }).collect::<Vec<_>>(),
                 "degraded_workspaces": degraded_workspaces.len(),
                 "degraded": degraded_workspaces.iter().map(|state| {
                     serde_json::json!({
@@ -6309,6 +6340,106 @@ fn print_query_stats_table(stats: &telemetry::AggregateStats) {
 
 // Status helpers
 // ──────────────────────────────────────────────────────────────────────────────
+
+/// One workspace's live build circuit state for `needle status`.
+struct CircuitStatusRow {
+    workspace: String,
+    state: String,
+    status: String,
+    source: String,
+    template: String,
+    sha: Option<String>,
+    phase: Option<String>,
+}
+
+fn collect_circuit_statuses(config: &Config, workers: &[WorkerEntry]) -> Vec<CircuitStatusRow> {
+    let mut workspaces = vec![config.workspace.default.clone()];
+    for workspace in &config.strands.explore.workspaces {
+        if !workspaces.contains(workspace) {
+            workspaces.push(workspace.clone());
+        }
+    }
+    for worker in workers {
+        if !workspaces.contains(&worker.workspace) {
+            workspaces.push(worker.workspace.clone());
+        }
+    }
+
+    if !config.strands.pluck.circuit_breaker.enabled {
+        return workspaces
+            .into_iter()
+            .map(|workspace| CircuitStatusRow {
+                workspace: workspace.display().to_string(),
+                state: "disabled".to_string(),
+                status: "disabled".to_string(),
+                source: "config".to_string(),
+                template: String::new(),
+                sha: None,
+                phase: None,
+            })
+            .collect();
+    }
+
+    let checker = crate::build_status::BuildStatusChecker::production();
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            tracing::warn!(error = %error, "could not create runtime for build circuit status");
+            return workspaces
+                .into_iter()
+                .map(|workspace| CircuitStatusRow {
+                    workspace: workspace.display().to_string(),
+                    state: "unknown".to_string(),
+                    status: "unknown".to_string(),
+                    source: "unknown".to_string(),
+                    template: String::new(),
+                    sha: None,
+                    phase: None,
+                })
+                .collect();
+        }
+    };
+
+    workspaces
+        .into_iter()
+        .map(|workspace| {
+            let workspace_display = workspace.display().to_string();
+            match runtime.block_on(checker.snapshot_for_workspace(&workspace)) {
+                Ok(snapshot) => CircuitStatusRow {
+                    workspace: workspace_display,
+                    state: match snapshot.status {
+                        crate::build_status::BuildStatus::Failing => "open",
+                        crate::build_status::BuildStatus::Passing => "closed",
+                        crate::build_status::BuildStatus::Unknown => "unknown",
+                    }
+                    .to_string(),
+                    status: match snapshot.status {
+                        crate::build_status::BuildStatus::Failing => "failing",
+                        crate::build_status::BuildStatus::Passing => "passing",
+                        crate::build_status::BuildStatus::Unknown => "unknown",
+                    }
+                    .to_string(),
+                    source: snapshot.source,
+                    template: snapshot.template,
+                    sha: snapshot.commit_sha,
+                    phase: snapshot.phase,
+                },
+                Err(error) => {
+                    tracing::debug!(workspace = %workspace_display, error = %error, "build circuit status unavailable");
+                    CircuitStatusRow {
+                        workspace: workspace_display,
+                        state: "unknown".to_string(),
+                        status: "unknown".to_string(),
+                        source: "unknown".to_string(),
+                        template: String::new(),
+                        sha: None,
+                        phase: None,
+                    }
+                }
+            }
+        })
+        .collect()
+}
 
 /// Per-worker status information for the status command.
 struct WorkerStatus {

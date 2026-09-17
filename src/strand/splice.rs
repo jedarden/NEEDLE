@@ -29,6 +29,78 @@ use crate::config::SpliceConfig;
 use crate::telemetry::Telemetry;
 use crate::types::{BeadId, StrandResult};
 
+/// Ensure the red workspace has one P0 repair bead for a failed build gate.
+///
+/// This is called from the outcome path (the same path Splice documents) so a
+/// failed `definition-of-done --fast` or `cargo check` immediately leaves a
+/// claimable way to close the circuit. The list/create sequence is intentionally
+/// idempotent with respect to all non-terminal `fix-build` beads in the target
+/// workspace; concurrent workers therefore converge on one repair bead.
+pub async fn ensure_fix_build_bead(
+    store: &dyn BeadStore,
+    workspace: &Path,
+    commit_sha: &str,
+    first_error: &str,
+) -> Result<Option<BeadId>> {
+    let existing = store
+        .list_all()
+        .await
+        .context("failed to list beads while checking for an existing fix-build bead")?
+        .into_iter()
+        .find(|bead| {
+            !bead.status.is_done()
+                && bead
+                    .labels
+                    .iter()
+                    .any(|label| label.eq_ignore_ascii_case("fix-build"))
+                && (bead.workspace == workspace || workspace_is_unset(&bead.workspace))
+        });
+    if let Some(existing) = existing {
+        return Ok(Some(existing.id));
+    }
+
+    let sha = if commit_sha.trim().is_empty() {
+        "unknown"
+    } else {
+        commit_sha.trim()
+    };
+    let error_line = first_nonempty_line(first_error);
+    let title = format!("Fix build: {sha} — {error_line}");
+    let body = format!(
+        "The build circuit opened for workspace `{}`.\n\n- Commit: `{sha}`\n- First error: `{error_line}`\n\nRepair the build and verify the workspace's `main` branch. This P0 bead exists so Pluck and Explore can continue only with the repair while the circuit is open.",
+        workspace.display()
+    );
+    let labels = ["fix-build", "priority:0"];
+    let label_refs: Vec<&str> = labels.to_vec();
+    let bead_id = store
+        .create_bead(&title, &body, &label_refs)
+        .await
+        .context("failed to create the fix-build circuit repair bead")?;
+    tracing::warn!(
+        workspace = %workspace.display(),
+        sha,
+        bead_id = %bead_id,
+        first_error = %error_line,
+        "created P0 fix-build bead for a failed build gate"
+    );
+    Ok(Some(bead_id))
+}
+
+fn workspace_is_unset(workspace: &Path) -> bool {
+    workspace.as_os_str().is_empty() || workspace == Path::new(".")
+}
+
+fn first_nonempty_line(error: &str) -> String {
+    let mut line = error
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("build gate failed")
+        .to_string();
+    line.truncate(240);
+    line
+}
+
 // ──────────────────────────────────────────────────────────────────────────────
 // TelemetryEventLike (minimal subset for JSONL scanning)
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1144,14 +1216,22 @@ impl super::Strand for SpliceStrand {
 mod tests {
     use super::*;
     use crate::strand::Strand as _;
+    use crate::types::{Bead, BeadStatus};
+    use std::sync::{Arc, Mutex};
 
     /// Stub BeadStore for tests.
-    struct NoOpStore;
+    #[derive(Default)]
+    struct NoOpStore {
+        beads: Arc<Mutex<Vec<Bead>>>,
+        created: Arc<Mutex<Vec<CreatedBead>>>,
+    }
+
+    type CreatedBead = (String, String, Vec<String>);
 
     #[async_trait::async_trait]
     impl BeadStore for NoOpStore {
         async fn list_all(&self) -> Result<Vec<crate::types::Bead>> {
-            Ok(vec![])
+            Ok(self.beads.lock().unwrap().clone())
         }
         async fn ready(
             &self,
@@ -1192,10 +1272,15 @@ mod tests {
         }
         async fn create_bead(
             &self,
-            _title: &str,
-            _body: &str,
-            _labels: &[&str],
+            title: &str,
+            body: &str,
+            labels: &[&str],
         ) -> Result<crate::types::BeadId> {
+            self.created.lock().unwrap().push((
+                title.to_string(),
+                body.to_string(),
+                labels.iter().map(|label| (*label).to_string()).collect(),
+            ));
             Ok(crate::types::BeadId::from("new-bead".to_string()))
         }
         async fn doctor_repair(&self) -> Result<crate::bead_store::RepairReport> {
@@ -1249,6 +1334,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_build_creates_one_p0_fix_bead_and_deduplicates_it() {
+        let store = NoOpStore::default();
+        let workspace = PathBuf::from("/tmp/circuit-workspace");
+
+        let first = ensure_fix_build_bead(
+            &store,
+            &workspace,
+            "deadbeef",
+            "cargo check --all-targets failed\nerror: first useful line",
+        )
+        .await
+        .expect("fix bead is created")
+        .expect("created id");
+        assert_eq!(first, BeadId::from("new-bead".to_string()));
+
+        // Model the newly-created open fix bead in the backing inventory.
+        store.beads.lock().unwrap().push(Bead {
+            id: first.clone(),
+            title: "Fix build".to_string(),
+            body: None,
+            priority: 0,
+            status: BeadStatus::Open,
+            assignee: None,
+            labels: vec!["fix-build".to_string(), "priority:0".to_string()],
+            workspace: PathBuf::from("."),
+            dependencies: Vec::new(),
+            dependents: Vec::new(),
+            comments: Vec::new(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        });
+
+        let reused = ensure_fix_build_bead(&store, &workspace, "other", "another error")
+            .await
+            .expect("existing fix bead is reused")
+            .expect("existing id");
+        assert_eq!(reused, first);
+        let created = store.created.lock().unwrap();
+        assert_eq!(created.len(), 1);
+        assert!(created[0].0.contains("deadbeef"));
+        assert!(created[0].1.contains("cargo check --all-targets failed"));
+        assert_eq!(created[0].2, vec!["fix-build", "priority:0"]);
+    }
+
+    #[tokio::test]
     async fn splice_disabled_returns_no_work() {
         let config = SpliceConfig {
             enabled: false,
@@ -1261,7 +1391,9 @@ mod tests {
             PathBuf::from("/tmp/state"),
             tel,
         );
-        let result = strand.evaluate(&NoOpStore, &HashSet::new()).await;
+        let result = strand
+            .evaluate(&NoOpStore::default(), &HashSet::new())
+            .await;
         assert!(matches!(result, StrandResult::NoWork));
     }
 
@@ -1294,7 +1426,9 @@ mod tests {
 
         let strand = SpliceStrand::new(config, heartbeat_dir, temp_dir.path().join("state"), tel);
 
-        let result = strand.evaluate(&NoOpStore, &HashSet::new()).await;
+        let result = strand
+            .evaluate(&NoOpStore::default(), &HashSet::new())
+            .await;
         assert!(matches!(result, StrandResult::NoWork));
     }
 

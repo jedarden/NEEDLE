@@ -3868,7 +3868,7 @@ pub struct CircuitBreakerConfig {
     #[serde(default = "CircuitBreakerConfig::default_enabled")]
     pub enabled: bool,
 
-    /// Labels that bypass the circuit breaker (default: ["fix-build", "ci-red"]).
+    /// Labels that bypass the circuit breaker (default: ["fix-build"]).
     ///
     /// Beads with these labels are claimable even when the workspace build is failing.
     #[serde(default = "CircuitBreakerConfig::default_labels")]
@@ -3890,7 +3890,7 @@ impl CircuitBreakerConfig {
     }
 
     fn default_labels() -> Vec<String> {
-        vec!["fix-build".to_string(), "ci-red".to_string()]
+        vec!["fix-build".to_string()]
     }
 }
 

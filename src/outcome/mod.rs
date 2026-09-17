@@ -485,6 +485,17 @@ async fn candidate_git_lines(workspace: &std::path::Path, args: &[&str]) -> Opti
     )
 }
 
+fn is_build_gate_failure(gate: &str, reason: &str) -> bool {
+    let gate = gate.to_ascii_lowercase();
+    let reason = reason.to_ascii_lowercase();
+    gate.contains("cargo check")
+        || gate.contains("default_rust")
+        || gate.contains("definition_of_done")
+        || gate.contains("definition-of-done")
+        || reason.contains("cargo check")
+        || reason.contains("definition-of-done")
+}
+
 /// Convert a gate report into the ledger's per-gate entries, ordered by name.
 ///
 /// Gate execution is not individually timed today, so `duration_ms` is 0
@@ -2738,6 +2749,41 @@ impl OutcomeHandler {
         Ok(self.close_verification.verify(bead, &commands).await)
     }
 
+    /// File the single repair bead that lets a red build circuit recover.
+    async fn ensure_build_repair_bead(
+        &self,
+        store: &dyn BeadStore,
+        bead: &Bead,
+        gate: &str,
+        reason: &str,
+    ) {
+        if !is_build_gate_failure(gate, reason) {
+            return;
+        }
+        let workspace = if bead.workspace.as_os_str().is_empty()
+            || bead.workspace == std::path::Path::new(".")
+        {
+            self.config.workspace.default.clone()
+        } else {
+            bead.workspace.clone()
+        };
+        let commit_sha = candidate_git_lines(&workspace, &["rev-parse", "HEAD"])
+            .await
+            .and_then(|lines| lines.into_iter().next())
+            .unwrap_or_else(|| "unknown".to_string());
+        if let Err(error) =
+            crate::strand::splice::ensure_fix_build_bead(store, &workspace, &commit_sha, reason)
+                .await
+        {
+            tracing::error!(
+                bead_id = %bead.id,
+                workspace = %workspace.display(),
+                error = %error,
+                "failed to create the fix-build bead for a red build"
+            );
+        }
+    }
+
     /// Handle gate failure: reopen the bead if it was closed, then release it.
     async fn handle_gate_failure(
         &self,
@@ -2750,7 +2796,14 @@ impl OutcomeHandler {
             .results
             .iter()
             .find(|(_, r)| !r.passed())
-            .map(|(name, r)| (name.clone(), r.failure_reason().unwrap_or("").to_string()))
+            .map(|(name, r)| {
+                let reason = match r {
+                    GateResult::Fail(reason) => reason.clone(),
+                    GateResult::ExecutionError { reason, .. } => reason.clone(),
+                    GateResult::Pass => String::new(),
+                };
+                (name.clone(), reason)
+            })
             .unwrap_or_else(|| ("unknown".to_string(), "unknown error".to_string()));
 
         tracing::warn!(
@@ -2759,6 +2812,9 @@ impl OutcomeHandler {
             reason = %reason,
             "validation gate failed — releasing bead"
         );
+
+        self.ensure_build_repair_bead(store, bead, &failed_gate, &reason)
+            .await;
 
         // Emit verification failure telemetry.
         self.telemetry.emit(
@@ -3150,6 +3206,9 @@ impl OutcomeHandler {
             reason = %reason,
             "gate execution error — releasing bead without incrementing failure count"
         );
+
+        self.ensure_build_repair_bead(store, bead, gate_name, reason)
+            .await;
 
         let mut events = Vec::new();
 

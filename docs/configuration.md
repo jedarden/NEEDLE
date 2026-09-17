@@ -752,6 +752,29 @@ strands:
 - A worker listed in two lanes takes the first lane in configuration order.
 - Live reloadable (Tier A).
 
+### Build circuit breaker
+
+Pluck and Explore read the latest `origin/main` build status before returning
+work from a workspace. A failed Forgejo status in the `iad-ci/<template>`
+context opens that workspace's circuit; while open, only repair-labelled beads
+are claimable. The default is enabled and allows `fix-build` beads:
+
+```yaml
+strands:
+  pluck:
+    circuit_breaker:
+      enabled: true
+      labels: [fix-build]
+```
+
+Pending, missing, or unreachable status data is treated as `unknown`, so it
+does not stop normal work. Forgejo is checked first; when no matching commit
+status exists, NEEDLE falls back to the latest `needle-ci` workflow phase.
+Status results are cached per workspace for 60 seconds. A failed default build
+gate (`scripts/definition-of-done.sh --fast` or `cargo check`) creates one P0
+`fix-build` bead when no repair bead is already open. `needle status` displays
+the circuit state, source, and failing SHA for each known workspace.
+
 ### Explore (Multi-workspace Discovery)
 
 ```yaml

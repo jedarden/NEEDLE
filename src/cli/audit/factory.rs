@@ -1195,6 +1195,8 @@ mod tests {
                 display_name: "verify-fast".to_string(),
                 message: "main: Error (exit code 128)".to_string(),
             }],
+            commit_sha: None,
+            source: Some("test".to_string()),
         }
     }
 

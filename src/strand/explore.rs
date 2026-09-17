@@ -50,6 +50,7 @@ use std::time::Duration;
 
 use super::workspace_health;
 use crate::bead_store::{discover_default, BeadStore, Filters};
+use crate::build_status::{BuildStatusChecker, CircuitDecision, CircuitPolicy};
 use crate::config::ExploreConfig;
 use crate::registry::Registry;
 use crate::telemetry::Telemetry;
@@ -212,6 +213,8 @@ pub struct ExploreStrand {
     /// In-memory on purpose — see `workspace_health` for why it is not
     /// persisted into the stores it is judging.
     quarantine_registry: std::sync::Mutex<workspace_health::QuarantineRegistry>,
+    /// Build circuit policy applied before remote candidates are returned.
+    circuit: Option<CircuitPolicy>,
 }
 
 impl ExploreStrand {
@@ -296,6 +299,7 @@ impl ExploreStrand {
             quarantine_registry: std::sync::Mutex::new(
                 workspace_health::QuarantineRegistry::default(),
             ),
+            circuit: None,
         };
 
         // The construction-time list is held to the same bar as every later
@@ -356,6 +360,7 @@ impl ExploreStrand {
             quarantine_registry: std::sync::Mutex::new(
                 workspace_health::QuarantineRegistry::default(),
             ),
+            circuit: None,
         }
     }
 
@@ -398,6 +403,7 @@ impl ExploreStrand {
             quarantine_registry: std::sync::Mutex::new(
                 workspace_health::QuarantineRegistry::default(),
             ),
+            circuit: None,
         }
     }
 
@@ -422,6 +428,54 @@ impl ExploreStrand {
     pub fn with_lane(mut self, lane: Option<crate::config::PluckLaneConfig>) -> Self {
         self.lane = lane;
         self
+    }
+
+    /// Apply the workspace CI circuit before Explore returns remote work.
+    pub fn with_circuit_breaker(
+        mut self,
+        checker: BuildStatusChecker,
+        labels: Vec<String>,
+    ) -> Self {
+        self.circuit = Some(CircuitPolicy::new(checker, labels));
+        self
+    }
+
+    async fn filter_circuit_candidates(
+        &self,
+        workspace: &Path,
+        candidates: &mut Vec<crate::types::Bead>,
+    ) {
+        let Some(policy) = &self.circuit else {
+            return;
+        };
+        let decision = match policy.decide(workspace, &[]).await {
+            Ok(decision) => decision,
+            Err(error) => {
+                tracing::debug!(
+                    workspace = %workspace.display(),
+                    error = %error,
+                    "Explore circuit status unavailable; retaining normal selection"
+                );
+                return;
+            }
+        };
+        let CircuitDecision::Open(snapshot) = decision else {
+            return;
+        };
+        let skipped = candidates
+            .iter()
+            .filter(|candidate| !policy.label_allowed(&candidate.labels))
+            .count();
+        if skipped > 0 {
+            let _ = self.telemetry.emit(
+                crate::telemetry::EventKind::StrandCircuitOpen {
+                    workspace: workspace.display().to_string(),
+                    sha: snapshot.commit_sha.unwrap_or_else(|| "unknown".to_string()),
+                },
+                Utc::now(),
+            );
+            candidates.retain(|candidate| policy.label_allowed(&candidate.labels));
+        }
     }
 
     /// Whether a bead is claimable by this strand's lane worker.
@@ -1259,7 +1313,9 @@ impl super::Strand for ExploreStrand {
             };
 
             match remote_store.ready(&filters).await {
-                Ok(candidates) => {
+                Ok(mut candidates) => {
+                    self.filter_circuit_candidates(workspace, &mut candidates)
+                        .await;
                     let before_count = candidates.len();
                     let mut candidates = self
                         .admit_candidates(remote_store.as_ref(), candidates, &filters)
@@ -1362,9 +1418,14 @@ impl super::Strand for ExploreStrand {
 
                                 // Re-query ready after cleanup.
                                 match remote_store.ready(&filters).await {
-                                    Ok(retry_candidates) => {
+                                    Ok(mut retry_candidates) => {
                                         // Apply the same candidate guards as the
                                         // first query of this workspace.
+                                        self.filter_circuit_candidates(
+                                            workspace,
+                                            &mut retry_candidates,
+                                        )
+                                        .await;
                                         let retry_before = retry_candidates.len();
                                         let mut retry_candidates = self
                                             .admit_candidates(
