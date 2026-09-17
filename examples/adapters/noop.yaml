@@ -8,7 +8,7 @@ invoke_template: |
   cd {workspace} && bead close {bead_id} --reason 'Quickstart gate fixture completed
   ```verified:
   noop fixture exit=0
-  ```' --fencing-token "$NEEDLE_BEAD_FENCING_TOKEN" --no-auto-flush
+  ```' --no-auto-flush
 timeout_secs: 30
 provider: local
 model: noop
