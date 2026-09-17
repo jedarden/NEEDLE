@@ -9070,6 +9070,18 @@ impl ConfigLoader {
                             );
                         }
                     }
+                    "worker.config_reload_check_interval_secs" => {
+                        if let Ok(v) = value.parse::<u64>() {
+                            config.worker.config_reload_check_interval_secs = v;
+                            sources.insert(config_path, source);
+                        } else {
+                            tracing::warn!(
+                                env_var = %key,
+                                value = %value,
+                                "invalid value for worker.config_reload_check_interval_secs — expected integer"
+                            );
+                        }
+                    }
                     "worker.idle_timeout" => {
                         if let Ok(v) = value.parse::<u64>() {
                             config.worker.idle_timeout = v;
@@ -10514,6 +10526,41 @@ mod config_tests {
         std::env::remove_var(key);
 
         assert_eq!(config.worker.max_workers, 12);
+    }
+
+    #[test]
+    fn config_reload_check_interval_env_override_accepts_valid_value() {
+        let _env_guard = crate::util::test_env::isolate_env();
+        let mut config = Config::default();
+        let mut sources = SourceMap::new();
+
+        let key = "NEEDLE_WORKER__CONFIG_RELOAD_CHECK_INTERVAL_SECS";
+        std::env::set_var(key, "30");
+        ConfigLoader::apply_env_overrides(&mut config, &mut sources);
+
+        assert_eq!(config.worker.config_reload_check_interval_secs, 30);
+        assert!(
+            matches!(
+                sources.get("worker.config_reload_check_interval_secs"),
+                Some(ConfigSource::EnvVar(k)) if k == key
+            ),
+            "source should be EnvVar"
+        );
+    }
+
+    #[test]
+    fn config_reload_check_interval_env_override_ignores_invalid_value() {
+        let _env_guard = crate::util::test_env::isolate_env();
+        let mut config = Config::default();
+        config.worker.config_reload_check_interval_secs = 17;
+        let mut sources = SourceMap::new();
+
+        let key = "NEEDLE_WORKER__CONFIG_RELOAD_CHECK_INTERVAL_SECS";
+        std::env::set_var(key, "not_a_number");
+        ConfigLoader::apply_env_overrides(&mut config, &mut sources);
+
+        assert_eq!(config.worker.config_reload_check_interval_secs, 17);
+        assert!(!sources.contains_key("worker.config_reload_check_interval_secs"));
     }
 
     #[test]

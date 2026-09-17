@@ -112,12 +112,15 @@ version = 1
 # pinning, ladder snapshot, and workspace graph metric coverage.
 # +1 layered config-reload resolution regression (needle-ef7c644f).
 # The acceptance command is `cargo test --lib worker::tests::config_reload_preserves_layered_effective_config`.
+# +2 environment-override contracts (needle-936a29ba): a valid reload polling
+# interval updates the worker config with EnvVar attribution, while an invalid
+# integer preserves the prior value and records no source.
 # +4 post-dispatch audit actor-scoping contracts (needle-29d26e3a): the
 # candidate filter is a private Worker associated function and the audit reads
 # the private dispatch-start timestamp, so the unit tier is the only tier that
 # can reach them. The acceptance command is
 # `cargo test --lib audit_candidates_require audit_never_folds foreign_beads_do_not own_beads_beyond`.
-max_tests = 3846
+max_tests = 3848
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
@@ -273,9 +276,9 @@ reason = "Grandfathered unit-tier debt; replace with an injected boundary."
 [[unit_exception]]
 path = "src/config/mod.rs"
 kind = "global-env"
-max_occurrences = 278
+max_occurrences = 280
 owner = "component:config"
-reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+reason = "Grandfathered unit-tier debt plus two isolated reload-interval environment contracts; replace remaining debt with an injected boundary."
 
 [[unit_exception]]
 path = "src/dispatch/mod.rs"
