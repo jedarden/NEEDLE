@@ -92,8 +92,9 @@ of abandoning an epoch-fenced claim. A v3 state file starts at the prior
 four-worker expansion ceiling, so the four new roamers are probed one per clean
 window rather than enabled together.
 
-The 2026-09-17 Z.ai concurrency experiment moved `glm-tradegraph`,
-`glm53-adc`, and `glm-needle-01` to the Luna adapter without renaming their
-service identifiers. All three were claim-free at the handoff. Keeping their
-identifiers preserves lane bindings and telemetry continuity while making the
-provider change directly comparable and reversible.
+The 2026-09-17 Z.ai concurrency experiment moved three workers to the Luna
+adapter, then renamed their service identities to describe both model and
+harness: `codex-luna-tradegraph`, `codex-luna-adc`, and
+`codex-luna-needle-01`. Existing role suffixes keep the operational purpose
+visible; the `codex-luna-*` prefix prevents dashboards and operators from
+mistaking these workers for Z.ai-backed GLM capacity.

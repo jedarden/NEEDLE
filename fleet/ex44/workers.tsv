@@ -11,10 +11,10 @@ glm-armor	/home/coding/ARMOR	claude-code-glm-5.3-flash	30	true
 glm-mta	/home/coding/mta-my-way	claude-code-glm-5.3-flash	45	true
 glm-pdftract	/home/coding/pdftract	claude-code-glm-5.3	60	true
 glm-spaxel	/home/coding/spaxel	claude-code-glm-5.3-flash	75	true
-glm-tradegraph	/home/coding/.needle/roam-only	codex-gpt-5.6-luna-xhigh	90	true
+codex-luna-tradegraph	/home/coding/.needle/roam-only	codex-gpt-5.6-luna-xhigh	90	true
 glm53-tgplat	/home/coding/tradegraph-platform	claude-code-glm-5.3	105	true
 glm53-cgraph2	/home/coding/commitgraph	claude-code-glm-5.3	120	true
-glm53-adc	/home/coding/.needle/roam-only	codex-gpt-5.6-luna-xhigh	135	true
+codex-luna-adc	/home/coding/.needle/roam-only	codex-gpt-5.6-luna-xhigh	135	true
 glm53-ibkr	/home/coding/ibkr-mcp	claude-code-glm-5.3	150	true
 glm53-irmcp	/home/coding/investment-research-mcp	claude-code-glm-5.3	165	true
 glm-archivist	/home/coding/agent-archivist	claude-code-glm-5.3	180	true
@@ -32,5 +32,5 @@ glm-roam-23	/home/coding/reddit-media-player	claude-code-glm-5.3-flash	90	true
 glm-roam-24	/home/coding/claude-print	claude-code-glm-5.3-flash	120	true
 codex-roam-01	/home/coding/.needle/roam-only	codex-gpt-5.6-luna-xhigh	0	true
 codex-roam-02	/home/coding/.needle/roam-only	codex-gpt-5.6-luna-xhigh	15	true
-glm-needle-01	/home/coding/NEEDLE	codex-gpt-5.6-luna-xhigh	315	false
+codex-luna-needle-01	/home/coding/NEEDLE	codex-gpt-5.6-luna-xhigh	315	false
 claude-needle-01	/home/coding/NEEDLE	claude-print	330	false

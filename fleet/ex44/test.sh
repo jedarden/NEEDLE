@@ -11,13 +11,14 @@ rows=$(awk -F'\t' '$1 !~ /^#/ && NF == 5 {print}' "$MANIFEST")
 [[ "$(wc -l <<<"$rows")" -eq 29 ]]
 [[ "$(cut -f1 <<<"$rows" | sort -u | wc -l)" -eq 29 ]]
 [[ "$(awk -F'\t' '$5 == "true" {n++} END {print n+0}' <<<"$rows")" -eq 27 ]]
-grep -q $'^glm-tradegraph\t/home/coding/.needle/roam-only\t.*\ttrue$' "$MANIFEST"
-grep -q $'^glm53-adc\t/home/coding/.needle/roam-only\t.*\ttrue$' "$MANIFEST"
+grep -q $'^codex-luna-tradegraph\t/home/coding/.needle/roam-only\t.*\ttrue$' "$MANIFEST"
+grep -q $'^codex-luna-adc\t/home/coding/.needle/roam-only\t.*\ttrue$' "$MANIFEST"
 [[ "$(awk -F'\t' '$3 == "codex-gpt-5.6-luna-xhigh" {n++} END {print n+0}' <<<"$rows")" -eq 6 ]]
 grep -q $'^codex-needle-01\t/home/coding/NEEDLE\tcodex-gpt-5.6-luna-xhigh\t0\ttrue$' "$MANIFEST"
-grep -q $'^glm-tradegraph\t/home/coding/.needle/roam-only\tcodex-gpt-5.6-luna-xhigh\t90\ttrue$' "$MANIFEST"
-grep -q $'^glm53-adc\t/home/coding/.needle/roam-only\tcodex-gpt-5.6-luna-xhigh\t135\ttrue$' "$MANIFEST"
-grep -q $'^glm-needle-01\t/home/coding/NEEDLE\tcodex-gpt-5.6-luna-xhigh\t315\tfalse$' "$MANIFEST"
+grep -q $'^codex-luna-tradegraph\t/home/coding/.needle/roam-only\tcodex-gpt-5.6-luna-xhigh\t90\ttrue$' "$MANIFEST"
+grep -q $'^codex-luna-adc\t/home/coding/.needle/roam-only\tcodex-gpt-5.6-luna-xhigh\t135\ttrue$' "$MANIFEST"
+grep -q $'^codex-luna-needle-01\t/home/coding/NEEDLE\tcodex-gpt-5.6-luna-xhigh\t315\tfalse$' "$MANIFEST"
+! grep -Eq $'^(glm-tradegraph|glm53-adc|glm-needle-01)\t' "$MANIFEST"
 grep -q 'NEEDLE_AGENT__EVIDENCE_ROUTING__ENABLED=false' "$SRC_DIR/apply-ex44-fleet.sh"
 grep -q '^  backend: bead-rs$' "$SRC_DIR/roam-home.yaml"
 [[ "$(awk -F'\t' '$3 == "claude-code-glm-5.3" {n++} END {print n+0}' <<<"$rows")" -le 9 ]]
@@ -56,7 +57,7 @@ grep -q 'needle-factory-audit.timer' "$SRC_DIR/apply-ex44-fleet.sh"
 # The activation fragment keeps the lane, the workspace-only codex candidate
 # and the OpenAI cap together: enabling the candidate without the cap is what
 # would let one adapter pull the fleet onto an unbilled-by-us provider.
-grep -q 'workers: \[codex-needle-01, glm-needle-01, claude-needle-01\]' "$SRC_DIR/bootstrap-lane.yaml"
+grep -q 'workers: \[codex-needle-01, codex-luna-needle-01, claude-needle-01\]' "$SRC_DIR/bootstrap-lane.yaml"
 grep -q 'workspace_only_candidates:' "$SRC_DIR/bootstrap-lane.yaml"
 grep -q 'openai:' "$SRC_DIR/bootstrap-lane.yaml"
 

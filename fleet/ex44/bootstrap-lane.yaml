@@ -35,7 +35,7 @@ strands:
     # glm-flash (51%) wins. Adding lane-bound workers keeps all three.
     lanes:
       - label: learning-loop
-        workers: [codex-needle-01, glm-needle-01, claude-needle-01]
+        workers: [codex-needle-01, codex-luna-needle-01, claude-needle-01]
         # `normal`, not `idle`: lane beads still take priority, but when none
         # are READY the worker falls back to ordinary NEEDLE selection.
         # `idle` deadlocked the lane on 2026-09-16: 39 open learning-loop
@@ -69,10 +69,9 @@ agent:
 limits:
   providers:
     # Six codex workers now use this provider: the original codex-needle-01
-    # and codex-roam-01/02 plus the 2026-09-17 conversions glm-tradegraph,
-    # glm53-adc, and glm-needle-01. The identifiers are stable, but provider
-    # limits match the adapter a dispatch actually uses, so all six share this
-    # OpenAI ceiling.
+    # and codex-roam-01/02 plus codex-luna-tradegraph, codex-luna-adc, and
+    # codex-luna-needle-01. Provider limits match the adapter a dispatch
+    # actually uses, so all six share this OpenAI ceiling.
     openai:
       max_concurrent: 10
       requests_per_minute: 60
