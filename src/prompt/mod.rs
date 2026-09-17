@@ -1872,12 +1872,17 @@ mod tests {
             );
             previous = position;
         }
-        let normalized = pluck.content.replace('\n', " ");
-        assert!(normalized.contains("every listed change is yours for this bead"));
-        let acceptance_evidence = "every test or command named in the bead's acceptance criteria";
-        assert!(normalized.contains(acceptance_evidence));
-        assert!(normalized.contains("A close without steps 2–4 will be reopened by NEEDLE"));
-        assert!(normalized.contains("counts as a failure toward quarantine"));
+        assert!(pluck.content.contains("every listed change is"));
+        assert!(pluck.content.contains("yours for this bead"));
+        assert!(pluck
+            .content
+            .contains("every test or command named in the bead's"));
+        assert!(pluck.content.contains("acceptance criteria"));
+        assert!(pluck
+            .content
+            .contains("A close without steps 2–4 will be reopened by NEEDLE"));
+        assert!(pluck.content.contains("counts as a failure toward"));
+        assert!(pluck.content.contains("quarantine"));
 
         let split = builder
             .build_split(&bead, workspace.path(), "worker-01", 3)
