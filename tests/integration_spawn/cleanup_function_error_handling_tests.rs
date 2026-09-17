@@ -523,6 +523,43 @@ mod worst_case_error_scenario_tests {
     }
 
     #[test]
+    fn cleanup_heartbeat_file_handles_removal_failure_without_panic_and_logs_warning() {
+        // Given: A directory at the heartbeat path. `remove_file` cannot remove
+        // a directory, which forces the non-NotFound cleanup error branch even
+        // when the test process runs as root.
+        let temp_dir = TempDir::new().expect("failed to create temp dir");
+        let heartbeat = temp_dir.path().join("heartbeat.json");
+        fs::create_dir(&heartbeat).expect("failed to create heartbeat directory");
+
+        let (logs, _guard) =
+            crate::log_capture_helper::setup_log_capture_with_level(tracing::Level::WARN);
+
+        // When: Cleanup encounters the removal failure.
+        let result = panic::catch_unwind(AssertUnwindSafe(|| {
+            needle::hoop_hooks::cleanup_heartbeat_file(&heartbeat)
+        }));
+
+        // Then: Cleanup is best-effort, never panics, and records the failure.
+        assert!(
+            result.is_ok(),
+            "heartbeat cleanup must not panic when file removal fails"
+        );
+        assert!(
+            result.expect("panic result already checked").is_ok(),
+            "heartbeat cleanup must handle removal failures without returning an error"
+        );
+        assert!(
+            heartbeat.is_dir(),
+            "the directory should remain after remove_file fails"
+        );
+        crate::log_capture_helper::assert_log_level_with_message(
+            &logs,
+            "WARN",
+            "failed to remove heartbeat file during cleanup",
+        );
+    }
+
+    #[test]
     fn cleanup_guard_handles_mixed_valid_and_invalid_paths() {
         // Given: A cleanup guard with mix of valid and invalid paths
         let temp_base = TempDir::new().expect("failed to create temp base");

@@ -142,7 +142,8 @@ contract = 67
 # vocabularies and isolated adapter statistics.
 # The acceptance command is the focused dedicated harness.
 # +10 N-T52 state-directory isolation contracts (needle-e8f408e1).
-e2e = 799
+# +1 heartbeat cleanup removal-failure contract (needle-7721ee7d).
+e2e = 800
 soak = 0
 fuzz = 0
 
@@ -151,7 +152,8 @@ name = "integration_spawn"
 path = "tests/integration_spawn.rs"
 tier = "e2e"
 # +1 N-T46 decomposed row keeps real gate results (needle-16657d72).
-max_tests = 398
+# +1 heartbeat cleanup removal-failure contract (needle-7721ee7d).
+max_tests = 399
 owner = "component:process-integration"
 
 [[harness]]
