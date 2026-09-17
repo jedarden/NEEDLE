@@ -55,7 +55,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
 
-use needle::bead_store::{BeadStore, Filters, RepairReport};
+use needle::bead_store::{BeadStore, Filters, RecoveryReleaseOutcome, RepairReport};
 use needle::claim::Claimer;
 use needle::config::{
     ExploreConfig, LimitsConfig, MendConfig, MitosisConfig, ModelLimits, ProviderLimits,
@@ -68,7 +68,8 @@ use needle::registry::{Registry, WorkerEntry};
 use needle::strand::{ExploreStrand, MendStrand, Strand};
 use needle::telemetry::Telemetry;
 use needle::types::{
-    Bead, BeadId, BeadStatus, ClaimOutcome, ClaimResult, InputMethod, StrandResult, WorkerState,
+    Bead, BeadId, BeadStatus, ClaimOutcome, ClaimResult, ClaimStatus, InputMethod, StrandResult,
+    WorkerState,
 };
 
 const MITOSIS_WORKER_ID: &str = "mitosis-test-worker";
@@ -187,6 +188,43 @@ impl BeadStore for ConcurrentMockStore {
         let mut claims = self.claims.lock().unwrap();
         claims.remove(id.as_ref());
         Ok(())
+    }
+
+    async fn claim_status(&self, id: &BeadId) -> Result<ClaimStatus> {
+        let claims = self.claims.lock().unwrap();
+        let assignee = claims
+            .get(id.as_ref())
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("bead is not claimed: {id}"))?;
+        Ok(ClaimStatus {
+            status: BeadStatus::InProgress,
+            assignee: Some(assignee),
+            revision: Some(1),
+            claim_epoch: Some(1),
+        })
+    }
+
+    async fn release_recovery(
+        &self,
+        id: &BeadId,
+        expected: &ClaimStatus,
+    ) -> Result<RecoveryReleaseOutcome> {
+        let mut claims = self.claims.lock().unwrap();
+        let current = claims
+            .get(id.as_ref())
+            .cloned()
+            .map(|assignee| ClaimStatus {
+                status: BeadStatus::InProgress,
+                assignee: Some(assignee),
+                revision: Some(1),
+                claim_epoch: Some(1),
+            });
+        if current.as_ref() != Some(expected) {
+            return Ok(RecoveryReleaseOutcome::Conflict);
+        }
+        claims.remove(id.as_ref());
+        self.release_count.fetch_add(1, Ordering::Relaxed);
+        Ok(RecoveryReleaseOutcome::Released)
     }
 
     async fn block(&self, _id: &BeadId) -> Result<()> {
@@ -518,6 +556,13 @@ async fn crashed_worker_bead_released_by_peer() {
     );
 
     let store = Arc::new(ConcurrentMockStore::new(vec![make_bead("nd-orphan", 1)]));
+    assert!(matches!(
+        store
+            .claim(&BeadId::from("nd-orphan"), "crashed-worker")
+            .await
+            .unwrap(),
+        ClaimResult::Claimed(_)
+    ));
     let registry = Registry::new(reg_dir.path());
     let telemetry = Telemetry::new("monitor-worker".to_string());
 
@@ -600,6 +645,13 @@ async fn mend_strand_cleans_crashed_peer_returns_work_created() {
     );
 
     let store = Arc::new(ConcurrentMockStore::new(vec![make_bead("nd-stale", 1)]));
+    assert!(matches!(
+        store
+            .claim(&BeadId::from("nd-stale"), "dead-peer")
+            .await
+            .unwrap(),
+        ClaimResult::Claimed(_)
+    ));
     let config = MendConfig::default();
     let registry = Registry::new(reg_dir.path());
     let telemetry = Telemetry::new("mend-worker".to_string());

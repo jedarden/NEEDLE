@@ -5256,6 +5256,8 @@ mod tests {
         let extraction = tempfile::tempdir().unwrap();
         let mut config = Config::default();
         config.worker.enforce_shipped_work = false;
+        config.validation.default_gates.enabled = false;
+        config.validation.fallback_gate = false;
         let mut handler = OutcomeHandler::new(config, helper.telemetry().clone());
         handler.close_verification = close_verification::CloseVerificationRuntime::for_tests(
             runner as Arc<dyn ProcessRunner>,
@@ -5431,6 +5433,11 @@ mod tests {
             .with_close_reason("done\n```verified:\ncargo test --lib exit=0\n```")
             .with_description("## Complete when\n- `go test ./internal/crypto/` passes\n");
         let bead = test_bead(BeadStatus::InProgress);
+        std::fs::write(
+            bead.workspace.join("go.mod"),
+            "module example.test/close-evidence\n",
+        )
+        .unwrap();
 
         let result = handler
             .handle(&store, &bead, &test_output(0), false)

@@ -3776,7 +3776,7 @@ async fn resolution_process_contracts_attempt_ledger_is_once_per_terminal_path()
             .filter(|event| event.event_type == "attempt.resolved")
             .collect();
         assert_eq!(rows.len(), 1, "{case} emitted {} rows", rows.len());
-        assert_eq!(rows[0].data["schema_version"], 1);
+        assert_eq!(rows[0].data["schema_version"], 2);
         assert_eq!(rows[0].data["provisional"], true);
         assert!(rows[0].data["context_manifest_hash"].is_null());
         if case == "gate-failure" {

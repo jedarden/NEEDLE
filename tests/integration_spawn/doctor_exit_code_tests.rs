@@ -185,6 +185,7 @@ fn status_reports_three_transitive_pinned_descendants() {
     if !init_bead_workspace(&fixture, &workspace) {
         return;
     }
+    fs::create_dir_all(fixture.path().join(".config/needle")).unwrap();
     fs::write(
         fixture.path().join(".config/needle/config.yaml"),
         format!("workspace:\n  default: {}\n", workspace.display()),

@@ -382,20 +382,14 @@ async fn checkpoint_roundtrip_handles_single_bead() {
     let recovery_id = super::create_bead(recovery_workspace.path(), "recovery fencing", 1)
         .expect("failed to create recovery fencing bead");
     assert!(matches!(
-        recovery_store
-            .claim(&recovery_id, "abandoned-worker")
-            .await
-            .unwrap(),
-        ClaimResult::Claimed(_)
+        recovery_store.claim_auto("abandoned-worker").await.unwrap(),
+        ClaimResult::Claimed(ref bead) if bead.id == recovery_id
     ));
     let abandoned = recovery_store.claim_status(&recovery_id).await.unwrap();
     recovery_store.release(&recovery_id).await.unwrap();
     assert!(matches!(
-        recovery_store
-            .claim(&recovery_id, "replacement-worker")
-            .await
-            .unwrap(),
-        ClaimResult::Claimed(_)
+        recovery_store.claim_auto("replacement-worker").await.unwrap(),
+        ClaimResult::Claimed(ref bead) if bead.id == recovery_id
     ));
 
     let outcome = recovery_store

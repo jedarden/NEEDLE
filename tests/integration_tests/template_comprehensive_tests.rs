@@ -528,6 +528,9 @@ operations:
   clear_assignee:
     argv: ["custom-clear", "{id}"]
     parse: none
+  clear_manual_block:
+    argv: ["custom-clear-manual-block", "{id}"]
+    parse: none
   reopen:
     argv: ["custom-reopen", "{id}"]
     parse: none
@@ -769,12 +772,17 @@ fn mock_values_for_operation(operation: &str) -> HashMap<&'static str, &'static 
     match operation {
         "ready" => [("limit", "10")].into_iter().collect(),
         "list_all" => [("limit", "100")].into_iter().collect(),
-        "show" | "labels" | "why" => [("id", "test-id")].into_iter().collect(),
-        "release" | "block" | "clear_assignee" | "reopen" => {
-            [("id", "test-id"), ("fencing_token", "7")]
-                .into_iter()
-                .collect()
+        "list_in_progress" | "manual_blocked" => [("limit", "100")].into_iter().collect(),
+        "show" | "labels" | "why" | "clear_manual_block" => {
+            [("id", "test-id")].into_iter().collect()
         }
+        "release" | "block" | "clear_assignee" | "reopen" => [
+            ("id", "test-id"),
+            ("if_revision", "3"),
+            ("fencing_token", "7"),
+        ]
+        .into_iter()
+        .collect(),
         "claim" => [("id", "test-id"), ("actor", "worker-01")]
             .into_iter()
             .collect(),

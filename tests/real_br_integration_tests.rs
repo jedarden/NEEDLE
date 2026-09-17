@@ -505,8 +505,12 @@ async fn real_bead_rs_crashed_worker_bead_released_by_peer() {
     // Create a bead and manually claim it as a "crashed" worker.
     let bead_id = create_bead(workspace.path(), "orphan-bead", 1).unwrap();
 
-    // Claim the bead as crashed-worker.
-    let _ = store.claim(&bead_id, "crashed-worker").await.unwrap();
+    // Claim atomically so even the oldest supported bead-rs build records the
+    // fencing epoch that recovery must present.
+    assert!(matches!(
+        store.claim_auto("crashed-worker").await.unwrap(),
+        ClaimResult::Claimed(ref bead) if bead.id == bead_id
+    ));
 
     // Write a stale heartbeat for the crashed worker.
     let heartbeat_data = needle::health::HeartbeatData {
@@ -701,7 +705,10 @@ async fn real_bead_rs_mend_cleans_crashed_peer() {
 
     // Create and claim a bead as a "crashed" worker.
     let bead_id = create_bead(workspace.path(), "stale-claim-bead", 1).unwrap();
-    let _ = store.claim(&bead_id, "dead-peer").await.unwrap();
+    assert!(matches!(
+        store.claim_auto("dead-peer").await.unwrap(),
+        ClaimResult::Claimed(ref bead) if bead.id == bead_id
+    ));
 
     // Write stale heartbeat for crashed worker.
     let heartbeat_data = needle::health::HeartbeatData {
@@ -2479,7 +2486,7 @@ fn saturated_host_worker_stays_resident_until_load_clears() -> Result<()> {
     std::fs::write(
         adapters.join("sat-agent.yaml"),
         format!(
-            "name: sat-agent\ndescription: deterministic closer for the saturated-host fixture\nagent_cli: /bin/true\ninvoke_template: \"cd {{workspace}} && {} close {{bead_id}} --reason 'closed by saturated-host fixture'\"\ntimeout_secs: 30\nprovider: local\nmodel: e2e\n",
+            "name: sat-agent\ndescription: deterministic closer for the saturated-host fixture\nagent_cli: /bin/true\ninvoke_template: \"cd {{workspace}} && {} close {{bead_id}} --reason 'closed by saturated-host fixture\\n\\n```verified:\\ntrue exit=0\\n```' --fencing-token $NEEDLE_BEAD_FENCING_TOKEN --no-auto-flush\"\ntimeout_secs: 30\nprovider: local\nmodel: e2e\n",
             pinned_bead.display()
         ),
     )?;
