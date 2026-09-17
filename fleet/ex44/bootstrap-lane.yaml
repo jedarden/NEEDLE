@@ -74,7 +74,7 @@ limits:
     # one block here worth applying on its own, independently of the lane.
     # Limits match on the provider of the adapter a dispatch actually uses.
     openai:
-      max_concurrent: 2
+      max_concurrent: 10
       requests_per_minute: 60
 
 audit:
