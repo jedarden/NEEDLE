@@ -402,6 +402,62 @@ stack join), git-activity-exporter and argo-workflows-exporter (join sources),
 dashboard-site (factory panel), agent-transcript-archive (episode
 materialization), jeds-curated-skills and utilities (operator-side loop).
 
+#### 4.4.1 Interim fallback validation gate for unguarded workspaces
+
+The shipped gate path closes the old gap where a workspace with no verifier
+could be treated as verified from the agent's exit code alone. A workspace
+whose `.needle.yaml` declares neither `gates:` nor legacy `verification:` gets
+the built-in no-explicit-gate resolution. An explicit `gates: []` or
+`verification: []` is still an opt-out. The language-default resolver may
+produce a `default_*` gate first; when it produces none, the interim fallback
+gate selects its verifier from the workspace files in this exact order:
+
+1. `scripts/definition-of-done.sh` — run that script.
+2. `go.mod` — `go build ./... && go vet ./... && go test -short ./...`.
+3. `Cargo.toml` — `cargo build --all-targets && cargo test`.
+4. `package.json` with a non-empty `scripts.test` — `npm test`.
+5. `pyproject.toml` or `pytest.ini` — `pytest -q`.
+
+The selected command runs in a clean extraction made from `git archive HEAD`,
+under the standard gate timeout and stderr limit. A command failure is a
+verification failure; failure to create the extraction, spawn the command, or
+finish before the timeout is an execution error and does not become task
+failure evidence. The limits are the host-level
+`validation.outcome_timeout_seconds` (default `50` seconds) and
+`validation.stderr_cap_bytes` (default `4096` bytes).
+
+If no verifier is selected, the extraction's source workspace must have an
+empty `git status --porcelain --untracked-files=all` after NEEDLE's normal
+`.beads/` and `.needle-predispatch-sha` bookkeeping noise is ignored. The
+extraction is archive-only and has no `.git`, so this porcelain check is made
+in that source workspace; the invariant is that the committed state copied
+into the extraction is the whole dispatch. An empty result passes on the
+agent's exit code alone but emits one counted `WARN` and the
+`gate.no_verifier` telemetry event (`reason: not_detected`). Dirty state fails
+the `fallback_clean_tree` gate.
+
+The fallback is armed by default. The approximately 60 currently unguarded
+workspaces therefore need no config change: the rollout inventory enumerated
+the known workspace roots, read each `.needle.yaml`, and counted roots with
+neither `gates:` nor `verification:` and no explicit
+`validation.fallback_gate: false`. The number is a rounded inventory snapshot,
+not a hard-coded workspace list. The per-workspace opt-out is:
+
+```yaml
+validation:
+  fallback_gate: false
+```
+
+`validation.fallback_gate` is the only `validation.*` key resolved from a
+workspace file; absent means the host-level default, and an explicit workspace
+value wins. Every dispatch logs whether the fallback was armed or opted out.
+
+This built-in fallback is explicitly **INTERIM**. The
+`needle-d1b2ee0d` runner is the replacement mechanism. In particular,
+`scripts/definition-of-done.sh` is the hand-off for repositories that already
+declare their own Definition of Done; the runner is intended to replace this
+fallback gate rather than add another permanent gate layer.
+
 ### 4.5 Lessons of 2026-09-02 (revision 23)
 
 The first dispatches against section 4.4 produced two incidents and a lost

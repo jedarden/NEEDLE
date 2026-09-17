@@ -70,6 +70,51 @@ worker:
   enforce_shipped_work: false
 ```
 
+**Built-in validation gate for unguarded workspaces:** A workspace that declares
+neither `gates:` nor legacy `verification:` enters NEEDLE's built-in validation
+path. An explicit `gates: []` or `verification: []` remains an opt-out. If the
+separate language-default resolver supplies a `default_*` gate, that gate runs;
+otherwise the interim fallback gate selects a verifier from the committed
+workspace in this order:
+
+1. `scripts/definition-of-done.sh` — run the workspace's own Definition of
+   Done script.
+2. `go.mod` — `go build ./... && go vet ./... && go test -short ./...`.
+3. `Cargo.toml` — `cargo build --all-targets && cargo test`.
+4. `package.json` with a non-empty `scripts.test` — `npm test`.
+5. `pyproject.toml` or `pytest.ini` — `pytest -q`.
+
+The selected command runs in a clean `git archive HEAD` extraction, so it
+judges committed state rather than the shared checkout. If no verifier is
+selected, the source workspace's `git status --porcelain --untracked-files=all`
+must be empty (the archive itself has no `.git`); `.beads/` and
+`.needle-predispatch-sha` bookkeeping noise is ignored. A clean result passes
+on the agent's exit code alone and emits one counted `WARN`, `gate.no_verifier`,
+with reason `not_detected`. Dirty state fails the fallback gate. Extraction,
+spawn, and timeout failures are gate execution errors; a non-zero verifier
+result is an ordinary verification failure.
+
+The fallback uses the host validation limits `validation.stderr_cap_bytes`
+(default `4096`) and `validation.outcome_timeout_seconds` (default `50`). It is
+armed by default, which covers the approximately 60 currently unguarded
+workspaces without a config change. That estimate came from the rollout
+inventory: enumerate the known workspace roots, inspect each `.needle.yaml`,
+and count roots with neither `gates:` nor `verification:` and no explicit
+`validation.fallback_gate: false`; it is a snapshot, not a hard-coded allowlist.
+Every dispatch logs whether the fallback is armed. A workspace can opt out in
+its own `.needle.yaml`:
+
+```yaml
+validation:
+  fallback_gate: false
+```
+
+The host-level `validation.fallback_gate` sets the default and the workspace
+value wins. This fallback is the **INTERIM** mechanism. The
+`needle-d1b2ee0d` runner is the planned replacement: the fallback's
+`scripts/definition-of-done.sh` hand-off exists to bridge unguarded workspaces
+until that runner replaces this gate.
+
 **Build from source** (Rust 1.85+; NEEDLE pins its toolchain in `rust-toolchain.toml`):
 
 ```bash
