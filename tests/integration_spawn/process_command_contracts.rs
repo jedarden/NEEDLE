@@ -802,7 +802,11 @@ async fn shipped_work_distinguishes_pushed_unpushed_and_missing_upstreams() {
         UpstreamStatus::Present(_)
     ));
 
-    repo.commit("work.rs", "fn work() {}\n", "unpushed work");
+    repo.commit(
+        "work.rs",
+        "fn work() {}\n// unpushed work\n",
+        "unpushed work",
+    );
     let result = verify_shipped_work(&bead, repo.path(), &store, Some(&snapshot))
         .await
         .unwrap();
