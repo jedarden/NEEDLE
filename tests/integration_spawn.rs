@@ -35,6 +35,8 @@ mod cleanup_function_error_handling_tests;
 mod cleanup_liveness_regression;
 #[path = "integration_spawn/cli_integration.rs"]
 mod cli_integration;
+#[path = "integration_spawn/commit_hook_dirty_files.rs"]
+mod commit_hook_dirty_files;
 #[path = "integration_spawn/concurrent_startup_test.rs"]
 mod concurrent_startup_test;
 #[path = "integration_spawn/config_cli_tests.rs"]

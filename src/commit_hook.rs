@@ -134,7 +134,7 @@ async fn get_staged_paths(workspace: &str) -> Result<Vec<String>> {
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(10),
         Command::new("git")
-            .args(["-C", workspace, "diff", "--name-only", "--cached"])
+            .args(["-C", workspace, "diff", "--name-only", "--cached", "-z"])
             .kill_on_drop(true)
             .output(),
     )
@@ -145,11 +145,11 @@ async fn get_staged_paths(workspace: &str) -> Result<Vec<String>> {
         anyhow::bail!("git diff failed in {}", workspace);
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(stdout
-        .lines()
-        .map(|line| line.trim().to_string())
-        .filter(|line| !line.is_empty())
+    Ok(output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| String::from_utf8_lossy(path).into_owned())
         .collect())
 }
 
@@ -160,7 +160,7 @@ async fn get_staged_blob_hash(workspace: &str, path: &str) -> Result<String> {
     let output = tokio::time::timeout(
         std::time::Duration::from_secs(10),
         Command::new("git")
-            .args(["-C", workspace, "ls-files", "-s", path])
+            .args(["-C", workspace, "ls-files", "-s", "--", path])
             .kill_on_drop(true)
             .output(),
     )

@@ -49,6 +49,7 @@ pub struct PreDispatch {
     ///
     /// Used by the commit hook to detect when an agent sweeps in another
     /// worker's in-flight edit without modifying it.
+    #[serde(default)]
     pub dirty_files: Vec<DirtyFile>,
     /// Wall-clock moment the snapshot was taken, when known.
     ///
@@ -236,13 +237,16 @@ pub async fn clear_if_own_in(root: &Path, workspace: &Path, bead_id: &BeadId, to
 async fn capture_dirty_files(workspace: &Path) -> Option<Vec<DirtyFile>> {
     let workspace = workspace.to_path_buf();
 
-    // Run git status --porcelain to get all dirty files (tracked and untracked)
+    // Run porcelain status with one NUL-delimited record per path. The
+    // `--untracked-files=all` form matters for untracked directories: the
+    // commit hook compares paths, so recording only the directory would not
+    // protect a later `git add` of one of its files.
     let output = spawn_with_etxtbsy_retry(
         || {
             let workspace = workspace.clone();
             async move {
                 tokio::process::Command::new("git")
-                    .args(["status", "--porcelain"])
+                    .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
                     .current_dir(&workspace)
                     .kill_on_drop(true)
                     .output()
@@ -259,16 +263,16 @@ async fn capture_dirty_files(workspace: &Path) -> Option<Vec<DirtyFile>> {
         return None;
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
     let mut dirty_files = Vec::new();
 
-    for line in stdout.lines() {
-        if line.len() < 4 {
+    for record in output.stdout.split(|byte| *byte == 0) {
+        let record = String::from_utf8_lossy(record);
+        if record.len() < 4 {
             continue; // Skip malformed lines
         }
 
-        let status = &line[..2];
-        let path = line[3..].trim();
+        let status = &record[..2];
+        let path = &record[3..];
 
         // Skip .beads/ and .needle-predispatch-sha - they have their own handling
         if path.starts_with(".beads/") || path == ".needle-predispatch-sha" {
@@ -312,7 +316,7 @@ async fn git_hash_object(workspace: &Path, path: &str) -> Option<String> {
             async move {
                 // Use git hash-object with the file path directly
                 tokio::process::Command::new("git")
-                    .args(["hash-object", path])
+                    .args(["hash-object", "--", path])
                     .current_dir(&workspace)
                     .kill_on_drop(true)
                     .output()
