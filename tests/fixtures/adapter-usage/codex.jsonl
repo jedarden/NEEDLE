@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"thread-nt51"}
+{"type":"turn.completed","model":"gpt-4","usage":{"input_tokens":1200,"cached_input_tokens":800,"output_tokens":450}}
+{"type":"item.completed","item":{"type":"agent_message","text":"first turn"}}
+{"type":"turn.completed","model":"gpt-4","usage":{"input_tokens":300,"cached_input_tokens":100,"output_tokens":50}}

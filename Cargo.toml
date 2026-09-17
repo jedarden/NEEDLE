@@ -185,6 +185,11 @@ path = "tests/nt50_exception_lessons.rs"
 harness = true
 
 [[test]]
+name = "nt51_adapter_usage_capture"
+path = "tests/nt51_adapter_usage_capture.rs"
+harness = true
+
+[[test]]
 name = "nt51_gateway_health"
 path = "tests/nt51_gateway_health.rs"
 harness = true

@@ -645,6 +645,7 @@ fn make_adapter(name: &str) -> AgentAdapter {
         provider: None,
         model: None,
         token_extraction: needle::dispatch::TokenExtraction::None,
+        usage_format: None,
         output_transform: None,
         harness: None,
         harness_version: None,

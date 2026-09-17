@@ -1,0 +1,4 @@
+{"type":"step_start","part":{"type":"step-start"}}
+{"type":"step_finish","part":{"tokens":{"input":1000,"output":100,"reasoning":50,"cache":{"read":200,"write":10}}}}
+{"type":"text","part":{"text":"done"}}
+{"type":"step_finish","part":{"tokens":{"input":500,"output":40,"reasoning":10,"cache":{"read":25,"write":5}}}}

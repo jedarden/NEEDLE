@@ -587,6 +587,49 @@ pub enum TimeoutPolicy {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// UsageFormat
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Which stream format an adapter reports usage in (N-T51).
+///
+/// The adapter declares its native event vocabulary so captured output can be
+/// replayed for killed, crashed, or interrupted attempts. Unknown formats have
+/// no extractor and remain uncosted: unknown is not free.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UsageFormat {
+    /// Claude Code stream-json messages and stream events.
+    ClaudeStreamJson,
+    /// Codex CLI `codex exec --json` thread events.
+    CodexJsonl,
+    /// OpenCode `--format json` step events.
+    OpencodeJsonl,
+    /// oh-my-pi JSON message events.
+    OmpJsonl,
+    /// No known usage extractor.
+    #[default]
+    Unknown,
+}
+
+impl UsageFormat {
+    /// Infer the format for legacy adapter definitions that predate N-T51.
+    pub fn for_agent_cli(agent_cli: &str) -> Self {
+        let cli = agent_cli.trim().to_ascii_lowercase();
+        if cli == "codex" || cli.starts_with("codex-") {
+            Self::CodexJsonl
+        } else if cli == "opencode" || cli.starts_with("opencode-") {
+            Self::OpencodeJsonl
+        } else if cli == "omp" || cli.starts_with("omp-") || cli.starts_with("oh-my-pi") {
+            Self::OmpJsonl
+        } else if cli == "claude" || cli.starts_with("claude-") {
+            Self::ClaudeStreamJson
+        } else {
+            Self::Unknown
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // AgentAdapter
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -646,6 +689,10 @@ pub struct AgentAdapter {
     /// How to extract token usage from agent output.
     #[serde(default)]
     pub token_extraction: TokenExtraction,
+    /// Native stream vocabulary used to recover usage when no result envelope
+    /// exists. Missing values retain legacy CLI-based inference.
+    #[serde(default)]
+    pub usage_format: Option<UsageFormat>,
     /// Optional binary/script to normalize agent stdout into universal JSONL.
     ///
     /// When set, the named binary is invoked with the raw agent stdout piped to
@@ -674,6 +721,12 @@ fn default_input_method() -> InputMethod {
 }
 
 impl AgentAdapter {
+    /// Resolve the stream vocabulary for this adapter.
+    pub fn effective_usage_format(&self) -> UsageFormat {
+        self.usage_format
+            .unwrap_or_else(|| UsageFormat::for_agent_cli(&self.agent_cli))
+    }
+
     /// Effective timeout as a `Duration`, falling back to the global config.
     pub fn effective_timeout(&self, global_timeout_secs: u64) -> Duration {
         let secs = if self.timeout_secs > 0 {
@@ -826,6 +879,7 @@ fn builtin_claude_sonnet() -> AgentAdapter {
         provider: Some("anthropic".to_string()),
         model: Some("claude-sonnet-4-6".to_string()),
         token_extraction: TokenExtraction::None,
+        usage_format: Some(UsageFormat::ClaudeStreamJson),
         output_transform: Some("needle-transform-claude".to_string()),
         harness: Some("needle".to_string()),
         harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
@@ -856,6 +910,7 @@ fn builtin_claude() -> AgentAdapter {
         provider: Some("anthropic".to_string()),
         model: Some("claude-sonnet-4-6".to_string()),
         token_extraction: TokenExtraction::None,
+        usage_format: Some(UsageFormat::ClaudeStreamJson),
         output_transform: Some("needle-transform-claude".to_string()),
         harness: Some("needle".to_string()),
         harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
@@ -883,6 +938,7 @@ fn builtin_claude_opus() -> AgentAdapter {
         provider: Some("anthropic".to_string()),
         model: Some("claude-opus-4-6".to_string()),
         token_extraction: TokenExtraction::None,
+        usage_format: Some(UsageFormat::ClaudeStreamJson),
         output_transform: Some("needle-transform-claude".to_string()),
         harness: Some("needle".to_string()),
         harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
@@ -909,6 +965,7 @@ fn builtin_opencode() -> AgentAdapter {
         provider: None,
         model: None,
         token_extraction: TokenExtraction::None,
+        usage_format: Some(UsageFormat::OpencodeJsonl),
         output_transform: None,
         harness: Some("needle".to_string()),
         harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
@@ -939,6 +996,7 @@ fn builtin_codex() -> AgentAdapter {
         provider: Some("openai".to_string()),
         model: Some("gpt-5.6-terra".to_string()),
         token_extraction: TokenExtraction::None,
+        usage_format: Some(UsageFormat::CodexJsonl),
         output_transform: Some("needle-transform-codex".to_string()),
         harness: Some("needle".to_string()),
         harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
@@ -971,6 +1029,7 @@ fn builtin_aider() -> AgentAdapter {
             input_group: 1,
             output_group: 2,
         },
+        usage_format: None,
         output_transform: None,
         harness: Some("needle".to_string()),
         harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
@@ -993,6 +1052,7 @@ fn builtin_generic() -> AgentAdapter {
         provider: None,
         model: None,
         token_extraction: TokenExtraction::None,
+        usage_format: None,
         output_transform: None,
         harness: Some("needle".to_string()),
         harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
@@ -3187,6 +3247,7 @@ mod tests {
             provider: None,
             model: None,
             token_extraction: TokenExtraction::None,
+            usage_format: None,
             output_transform: None,
             harness: None,
             harness_version: None,

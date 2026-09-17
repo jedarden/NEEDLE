@@ -1,0 +1,4 @@
+{"type":"message_start","message":{"role":"assistant","usage":{"input":0,"output":0}}}
+{"type":"message_end","message":{"role":"assistant","model":"gpt-4","usage":{"input":1000,"output":100,"cacheRead":200,"cacheWrite":10,"totalTokens":1100}}}
+{"type":"turn_end","message":{"role":"assistant","usage":{"input":1000,"output":100,"cacheRead":200,"cacheWrite":10,"totalTokens":1100}}}
+{"type":"message_end","message":{"role":"assistant","model":"gpt-4","usage":{"input":500,"output":40,"cacheRead":25,"cacheWrite":5,"totalTokens":540}}}

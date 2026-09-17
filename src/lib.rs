@@ -2,6 +2,7 @@
 //!
 //! Library crate exposing the public API for integration tests and embedding.
 
+pub mod adapter_usage;
 pub mod agent_event;
 pub mod attempt_accounting;
 pub mod attempt_archive;

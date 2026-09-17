@@ -125,9 +125,11 @@ contract = 67
 # +6 candidate-lesson contracts, N-T50 (needle-75368add); the acceptance
 # command is the focused dedicated harness.
 # +4 N-T51 gateway-health contracts exercise provider-keyed degradation and recovery.
+# +4 N-T51 adapter-usage capture contracts exercise the three native JSONL
+# vocabularies and isolated adapter statistics.
 # The acceptance command is the focused dedicated harness.
 # +10 N-T52 state-directory isolation contracts (needle-e8f408e1).
-e2e = 793
+e2e = 797
 soak = 0
 fuzz = 0
 
@@ -190,6 +192,13 @@ path = "tests/nt50_exception_lessons.rs"
 tier = "e2e"
 max_tests = 6
 owner = "component:attempt-history"
+
+[[harness]]
+name = "nt51_adapter_usage_capture"
+path = "tests/nt51_adapter_usage_capture.rs"
+tier = "e2e"
+max_tests = 4
+owner = "component:attempt-accounting"
 
 [[harness]]
 name = "nt51_gateway_health"

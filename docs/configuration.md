@@ -398,6 +398,19 @@ agent:
   adapters_dir: ~/.config/needle/adapters
 ```
 
+### Stream usage format
+
+Adapters that emit per-turn usage can declare the stream vocabulary used for
+cost accounting. Supported values are `claude_stream_json`, `codex_jsonl`,
+`opencode_jsonl`, and `omp_jsonl`. An omitted or `unknown` format has no usage
+extractor and remains `costed: false` when no result envelope supplies cost.
+
+```yaml
+name: codex-agent
+agent_cli: codex
+usage_format: codex_jsonl
+```
+
 ### Process Timeouts: Idle vs Hard Deadline
 
 NEEDLE supports two complementary timeout mechanisms for agent processes:

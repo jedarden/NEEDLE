@@ -225,6 +225,7 @@ fn process_contract_adapter(name: &str, template: &str) -> AgentAdapter {
         provider: None,
         model: None,
         token_extraction: TokenExtraction::None,
+        usage_format: None,
         output_transform: None,
         harness: None,
         harness_version: None,

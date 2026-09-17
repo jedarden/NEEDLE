@@ -79,6 +79,7 @@ fn make_mock_adapters() -> HashMap<String, AgentAdapter> {
             provider: Some("anthropic".to_string()),
             model: None, // Model is filled in at runtime
             token_extraction: needle::dispatch::TokenExtraction::None,
+            usage_format: None,
             output_transform: Some("needle-transform-claude".to_string()),
             harness: Some("needle".to_string()),
             harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
@@ -102,6 +103,7 @@ fn make_mock_adapters() -> HashMap<String, AgentAdapter> {
             provider: Some("anthropic".to_string()),
             model: None,
             token_extraction: needle::dispatch::TokenExtraction::None,
+            usage_format: None,
             output_transform: None,
             harness: Some("needle".to_string()),
             harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
