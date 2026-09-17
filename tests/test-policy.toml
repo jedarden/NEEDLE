@@ -114,7 +114,9 @@ max_tests = 3835
 # +1 source-level guard for in-process Worker/Explore isolation
 # (needle-3e6b4ef0).
 # +5 fail-closed pre-spawn claim verification gate (needle-40ca2f6e).
-push = 657
+# +5 fallback-gate branch, opt-out, telemetry, and failed-verification
+# contracts (needle-63cf0472).
+push = 662
 contract = 67
 # +16 literal test attributes for Cargo execution isolation (needle-b31fcb27):
 # seven integration cases plus nine nested-Cargo fixture tests embedded in source.
@@ -166,7 +168,9 @@ tier = "push"
 # +5 fail-closed pre-spawn claim verification gate (needle-40ca2f6e): four
 # injected-failure zero-spawn cases plus the sentinel control, beside the
 # existing atomic_spawn_verification suites.
-max_tests = 111
+# +5 fallback-gate branch, opt-out, telemetry, and failed-verification
+# contracts (needle-63cf0472).
+max_tests = 116
 owner = "component:pluck-mend-explore"
 
 [[harness]]
