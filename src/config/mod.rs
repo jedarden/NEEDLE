@@ -8721,8 +8721,10 @@ pub struct CliOverrides {
     pub workspace: Option<PathBuf>,
     pub worker_name: Option<String>,
     pub agent_binary: Option<String>,
+    pub agent_timeout: Option<u64>,
     pub max_workers: Option<u32>,
     pub explore_workspace_root: Option<PathBuf>,
+    pub self_modification_hot_reload: Option<bool>,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -9340,6 +9342,10 @@ impl ConfigLoader {
             config.agent.default = agent;
             sources.insert("agent.default".to_string(), ConfigSource::CliOverride);
         }
+        if let Some(timeout) = overrides.agent_timeout {
+            config.agent.timeout = timeout;
+            sources.insert("agent.timeout".to_string(), ConfigSource::CliOverride);
+        }
         if let Some(n) = overrides.max_workers {
             config.worker.max_workers = n;
             sources.insert("worker.max_workers".to_string(), ConfigSource::CliOverride);
@@ -9348,6 +9354,13 @@ impl ConfigLoader {
             config.strands.explore.workspace_root = explore_root;
             sources.insert(
                 "explore.workspace_root".to_string(),
+                ConfigSource::CliOverride,
+            );
+        }
+        if let Some(hot_reload) = overrides.self_modification_hot_reload {
+            config.self_modification.hot_reload = hot_reload;
+            sources.insert(
+                "self_modification.hot_reload".to_string(),
                 ConfigSource::CliOverride,
             );
         }
@@ -9362,15 +9375,29 @@ impl ConfigLoader {
     /// came from. The source map only contains entries for values that were
     /// overridden from their defaults.
     pub fn load_resolved(workspace_root: &Path, cli: CliOverrides) -> Result<(Config, SourceMap)> {
+        let global_path = dirs_or_home(".config/needle/config.yaml");
+        Self::load_resolved_from_path(&global_path, workspace_root, cli)
+    }
+
+    /// Load the fully resolved configuration from an explicit global path.
+    ///
+    /// This is the same hierarchy as [`Self::load_resolved`]. The explicit
+    /// path lets a running worker resolve the exact file whose fingerprint
+    /// triggered a reload, and gives tests a process-local file without
+    /// changing `HOME`.
+    pub fn load_resolved_from_path(
+        global_path: &Path,
+        workspace_root: &Path,
+        cli: CliOverrides,
+    ) -> Result<(Config, SourceMap)> {
         let mut sources = SourceMap::new();
 
         // Layer 1 + 2: defaults + global config.
-        let global_path = dirs_or_home(".config/needle/config.yaml");
-        let mut config = Self::load_from_path(&global_path)?;
+        let mut config = Self::load_from_path(global_path)?;
 
         // Track which fields came from global config (if file existed).
         if global_path.exists() {
-            let source = ConfigSource::GlobalFile(global_path);
+            let source = ConfigSource::GlobalFile(global_path.to_path_buf());
             // Mark all top-level sections as from global.
             for key in &[
                 "agent.default",

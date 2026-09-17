@@ -110,7 +110,9 @@ version = 1
 # creation/deduplication. These are in-process and belong in the unit tier.
 # +3 status/doctor dependency-graph contracts (needle-e896b565): transitive
 # pinning, ladder snapshot, and workspace graph metric coverage.
-max_tests = 3838
+# +1 layered config-reload resolution regression (needle-ef7c644f).
+# The acceptance command is `cargo test --lib worker::tests::config_reload_preserves_layered_effective_config`.
+max_tests = 3839
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

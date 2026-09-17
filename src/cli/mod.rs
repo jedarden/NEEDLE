@@ -17,9 +17,7 @@ use chrono::{DateTime, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::bead_store::{spawn_with_etxtbsy_retry_sync_child, BeadStore};
-use crate::config::{
-    CliOverrides, Config, ConfigLoader, ConfigSource, SourceMap, StdoutSinkConfig,
-};
+use crate::config::{CliOverrides, Config, ConfigLoader, SourceMap, StdoutSinkConfig};
 use crate::dispatch;
 use crate::health::{HealthMonitor, HeartbeatData};
 use crate::log_prune;
@@ -850,19 +848,12 @@ fn cmd_run(
     let cli_overrides = CliOverrides {
         workspace: Some(workspace_root.clone()),
         agent_binary: agent.clone(),
+        agent_timeout: timeout,
         max_workers: None,
+        self_modification_hot_reload: hot_reload,
         ..Default::default()
     };
-    let (mut config, mut sources) = ConfigLoader::load_resolved(&workspace_root, cli_overrides)?;
-
-    if let Some(t) = timeout {
-        config.agent.timeout = t;
-        sources.insert("agent.timeout".to_string(), ConfigSource::CliOverride);
-    }
-
-    if let Some(hr) = hot_reload {
-        config.self_modification.hot_reload = hr;
-    }
+    let (config, sources) = ConfigLoader::load_resolved(&workspace_root, cli_overrides)?;
 
     if resume {
         // Hot-reload resume: inherit worker identity from --identifier,

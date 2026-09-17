@@ -5897,8 +5897,13 @@ impl Worker {
     /// The returned candidate is owned and remains separate from `self.config`
     /// so callers can validate it before performing an all-or-nothing swap.
     fn load_validated_config_candidate(&self, path: &Path) -> Option<Config> {
-        let candidate = match ConfigLoader::load_from_path(path) {
-            Ok(candidate) => candidate,
+        let workspace = self.config.workspace.default.clone();
+        let candidate = match ConfigLoader::load_resolved_from_path(
+            path,
+            &workspace,
+            self.reload_cli_overrides(),
+        ) {
+            Ok((candidate, _)) => candidate,
             Err(error) => {
                 self.reject_config_reload(vec![
                     "candidate could not be loaded; see the worker warning for details".to_string(),
@@ -5928,6 +5933,36 @@ impl Worker {
         }
 
         Some(candidate)
+    }
+
+    /// Reconstruct the process's immutable CLI layer from its boot source map.
+    ///
+    /// Reloading must resolve the same stack as startup. Reading the global
+    /// YAML alone silently drops per-worker `--workspace`, `--agent`, timeout,
+    /// and hot-reload selections. The source map distinguishes those values
+    /// from file or environment values so a real file edit can still replace
+    /// everything that was not pinned by the launching command.
+    fn reload_cli_overrides(&self) -> CliOverrides {
+        let came_from_cli = |key: &str| {
+            matches!(
+                self.config_sources.get(key),
+                Some(ConfigSource::CliOverride)
+            )
+        };
+
+        CliOverrides {
+            workspace: came_from_cli("workspace.default")
+                .then(|| self.config.workspace.default.clone()),
+            worker_name: None,
+            agent_binary: came_from_cli("agent.default").then(|| self.config.agent.default.clone()),
+            agent_timeout: came_from_cli("agent.timeout").then_some(self.config.agent.timeout),
+            max_workers: came_from_cli("worker.max_workers")
+                .then_some(self.config.worker.max_workers),
+            explore_workspace_root: came_from_cli("explore.workspace_root")
+                .then(|| self.config.strands.explore.workspace_root.clone()),
+            self_modification_hot_reload: came_from_cli("self_modification.hot_reload")
+                .then_some(self.config.self_modification.hot_reload),
+        }
     }
 
     /// Emit a reload rejection without allowing telemetry failure to stop the
@@ -7119,18 +7154,12 @@ impl Worker {
     /// labels while refreshing file/env annotations for newly applied values.
     fn reload_source_map(&self) -> SourceMap {
         let workspace = self.config.workspace.default.clone();
-        let mut refreshed = ConfigLoader::load_resolved(
-            &workspace,
-            CliOverrides {
-                workspace: Some(workspace.clone()),
-                ..Default::default()
-            },
-        )
-        .map(|(_, sources)| sources)
-        .unwrap_or_else(|error| {
-            tracing::warn!(error = %error, "failed to refresh live config source annotations");
-            self.config_sources.clone()
-        });
+        let mut refreshed = ConfigLoader::load_resolved(&workspace, self.reload_cli_overrides())
+            .map(|(_, sources)| sources)
+            .unwrap_or_else(|error| {
+                tracing::warn!(error = %error, "failed to refresh live config source annotations");
+                self.config_sources.clone()
+            });
 
         for (key, source) in &self.config_sources {
             if matches!(source, ConfigSource::CliOverride) {
@@ -8459,6 +8488,93 @@ mod tests {
 
         assert_eq!(candidate.worker.max_workers, 2);
         assert_eq!(worker.config.worker.max_workers, running_max_workers);
+    }
+
+    #[test]
+    fn config_reload_preserves_layered_effective_config() {
+        let _env_lock = crate::util::test_env::isolate_env();
+        let workspace = tempfile::tempdir().unwrap();
+        let global_dir = tempfile::tempdir().unwrap();
+        let global_path = global_dir.path().join("config.yaml");
+
+        std::fs::write(
+            workspace.path().join(".needle.yaml"),
+            "agent:\n  timeout: 777\nbead_cli:\n  backend: bead-rs\n",
+        )
+        .unwrap();
+        let initial_global = "# initial configuration\nagent:\n  default: global-agent\nworker:\n  max_workers: 3\nbudget:\n  warn_usd: 1.0\n";
+        std::fs::write(&global_path, initial_global).unwrap();
+
+        // The service launcher receives these selections from its environment
+        // and passes them as CLI arguments to `needle run`. They are the
+        // highest-precedence layer and must survive every later file reload.
+        let cli = CliOverrides {
+            workspace: Some(workspace.path().to_path_buf()),
+            agent_binary: Some("selected-agent".to_string()),
+            self_modification_hot_reload: Some(false),
+            ..Default::default()
+        };
+        let (boot_config, boot_sources) =
+            ConfigLoader::load_resolved_from_path(&global_path, workspace.path(), cli).unwrap();
+        let telemetry = Telemetry::new("layered-config-reload-test".to_string());
+        let mut worker = Worker::new_with_telemetry_and_sources(
+            boot_config,
+            "layered-reload".to_string(),
+            Arc::new(MockStore::empty()),
+            telemetry,
+            boot_sources,
+        );
+
+        // A comment-only edit changes the file fingerprint, but resolving it
+        // through the same layers as boot must yield no semantic delta.
+        std::fs::write(
+            &global_path,
+            initial_global.replace("# initial", "# comment-only edit to initial"),
+        )
+        .unwrap();
+        let comment_candidate = worker
+            .load_validated_config_candidate(&global_path)
+            .expect("comment-only candidate should resolve and validate");
+
+        assert_eq!(comment_candidate.agent.default, "selected-agent");
+        assert_eq!(comment_candidate.agent.timeout, 777);
+        assert_eq!(comment_candidate.workspace.default, workspace.path());
+        assert_eq!(
+            comment_candidate.bead_cli.backend,
+            worker.config.bead_cli.backend
+        );
+        assert!(worker
+            .config
+            .changed_restart_required_keys(&comment_candidate)
+            .is_empty());
+        assert!(worker.apply_tier_a_config(&comment_candidate).is_empty());
+
+        // A real live-tier edit is still visible through the preserved
+        // higher-precedence and workspace layers, and only that key applies.
+        std::fs::write(
+            &global_path,
+            initial_global.replace("warn_usd: 1.0", "warn_usd: 2.0"),
+        )
+        .unwrap();
+        let live_candidate = worker
+            .load_validated_config_candidate(&global_path)
+            .expect("live-tier candidate should resolve and validate");
+        assert_eq!(live_candidate.agent.default, "selected-agent");
+        assert_eq!(live_candidate.agent.timeout, 777);
+        assert_eq!(live_candidate.workspace.default, workspace.path());
+        assert_eq!(
+            live_candidate.bead_cli.backend,
+            worker.config.bead_cli.backend
+        );
+        assert!(worker
+            .config
+            .changed_restart_required_keys(&live_candidate)
+            .is_empty());
+        assert_eq!(
+            worker.apply_tier_a_config(&live_candidate),
+            vec!["budget.warn_usd".to_string()]
+        );
+        assert_eq!(worker.config.budget.warn_usd, 2.0);
     }
 
     #[test]
