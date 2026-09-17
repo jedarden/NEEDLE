@@ -305,11 +305,14 @@ pub fn normalize_output(output: &str) -> String {
         compiled(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?")
     });
     let hex_id = HEX_ID.get_or_init(|| compiled(r"\b[0-9a-fA-F]{7,64}\b"));
-    // Two or more segments always; a single segment only when it carries a
-    // dot, digit, or underscore — so `scripts/definition-of-done.sh`
-    // collapses but the slash in "and/or" does not.
+    // Absolute paths, explicit relative paths, and relative paths whose
+    // final segment has a path marker are scrubbed. The final-segment guard
+    // keeps prose such as "and/or" intact while still collapsing common gate
+    // paths such as `scripts/check.sh` and `src/lib.rs`.
     let path = PATH.get_or_init(|| {
-        compiled(r"(?:/[A-Za-z0-9._@+-]+){2,}|/[A-Za-z0-9._@+-]*[._0-9][A-Za-z0-9._@+-]*")
+        compiled(
+            r#"(?:/[A-Za-z0-9._@+-]+){2,}|/[A-Za-z0-9._@+-]*[._0-9][A-Za-z0-9._@+-]*|(?P<prefix>^|[\s(\"'=,:])(?:(?:\./|\.\./)[A-Za-z0-9._@+-]+(?:/[A-Za-z0-9._@+-]+)*|(?:[A-Za-z0-9._@+-]+/)+[A-Za-z0-9._@+-]*[._0-9-][A-Za-z0-9._@+-]*)"#,
+        )
     });
     let number = NUMBER.get_or_init(|| compiled(r"\b\d+\b"));
     let whitespace = WHITESPACE.get_or_init(|| compiled(r"\s+"));
@@ -322,7 +325,12 @@ pub fn normalize_output(output: &str) -> String {
 
     let normalized = timestamp.replace_all(truncated, "<ts>");
     let normalized = hex_id.replace_all(&normalized, "<id>");
-    let normalized = path.replace_all(&normalized, "<path>");
+    let normalized = path.replace_all(&normalized, |captures: &regex::Captures<'_>| {
+        captures.name("prefix").map_or_else(
+            || "<path>".to_string(),
+            |prefix| format!("{}<path>", prefix.as_str()),
+        )
+    });
     let normalized = number.replace_all(&normalized, "<n>");
     let normalized = whitespace.replace_all(normalized.trim(), " ");
 
@@ -386,6 +394,20 @@ fatal: not a git repository (or any of the parent directories): .git";
             normalize_output("failed: /tmp/.needle-extract-9c8d7e/scripts/check.sh exited 3");
         assert_eq!(pathed_a, pathed_b, "temp paths stripped");
         assert!(!pathed_a.contains('/'), "path gone entirely: {pathed_a}");
+
+        let relative_a = normalize_output("failed: scripts/check.sh at src/lib.rs");
+        let relative_b = normalize_output("failed: scripts/other.sh at tests/main.rs");
+        assert_eq!(relative_a, relative_b, "relative paths must be normalized");
+        assert!(
+            !relative_a.contains('/'),
+            "relative paths must be gone: {relative_a}"
+        );
+
+        let prose = normalize_output("expected and/or received");
+        assert!(
+            prose.contains("and/or"),
+            "prose slash was mistaken for a path: {prose}"
+        );
     }
 
     #[test]
