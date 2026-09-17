@@ -259,9 +259,24 @@ reason = "Grandfathered unit-tier debt; replace with an injected boundary."
 [[unit_exception]]
 path = "src/outcome/mod.rs"
 kind = "global-env"
-max_occurrences = 1
+# +1 concurrent outcome lifecycle contract uses a private environment boundary.
+max_occurrences = 2
 owner = "component:outcome"
 reason = "Grandfathered unit-tier debt; replace with an injected boundary."
+
+[[unit_exception]]
+path = "src/outcome/fallback_verification.rs"
+kind = "process"
+max_occurrences = 1
+owner = "component:outcome"
+reason = "The fallback-verification contract exercises the real subprocess boundary; keep it out of the unit tier."
+
+[[unit_exception]]
+path = "src/outcome/mod.rs"
+kind = "process"
+max_occurrences = 1
+owner = "component:outcome"
+reason = "The outcome lifecycle contract exercises the real subprocess boundary; keep it out of the unit tier."
 
 [[unit_exception]]
 path = "src/outcome/mod.rs"

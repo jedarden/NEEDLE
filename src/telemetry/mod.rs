@@ -446,6 +446,19 @@ pub enum EventKind {
         count: usize,
         paths: Vec<String>,
     },
+    /// A dispatch was accepted with no verifier at all (`gate.no_verifier`):
+    /// the bead's workspace declares no gates and no language default
+    /// applied, so the verdict rested on the agent's exit code alone. The
+    /// dispatch still passes — there is nothing to fail it on — but the
+    /// event counts how much of the fleet runs unverified, which is the
+    /// number an operator needs before declaring gates worth the effort.
+    GateNoVerifier {
+        /// The workspace that resolved to nothing.
+        workspace: String,
+        /// Why nothing ran. The fallback gate uses `not_detected` when no
+        /// `scripts/definition-of-done.sh` or recognized build file exists.
+        reason: String,
+    },
     /// Worker launch was deferred due to resource saturation.
     WorkerLaunchDeferred {
         deferred_count: u64,
@@ -1687,6 +1700,7 @@ impl EventKind {
             EventKind::InitStepCompleted { .. } => "init.step.completed",
             EventKind::WorkerBootTimeout { .. } => "worker.boot.timeout",
             EventKind::GatePathMissing { .. } => "gate.command_missing",
+            EventKind::GateNoVerifier { .. } => "gate.no_verifier",
             EventKind::WorkerLaunchDeferred { .. } => "worker.launch.deferred",
             EventKind::WorkerAdmissionBlocked { .. } => "worker.admission_blocked",
             EventKind::WorkerAdmissionRestored { .. } => "worker.admission_restored",
@@ -1982,6 +1996,7 @@ impl EventKind {
             | EventKind::AuditCompleted { .. }
             | EventKind::AlertDeduplicated { .. }
             | EventKind::GatePathMissing { .. }
+            | EventKind::GateNoVerifier { .. }
             | EventKind::HealthCheck { .. }
             | EventKind::FleetCpuSaturated { .. }
             | EventKind::FleetMemoryLow { .. }
@@ -2172,6 +2187,12 @@ impl EventKind {
                 serde_json::json!({
                     "count": count,
                     "paths": paths
+                })
+            }
+            EventKind::GateNoVerifier { workspace, reason } => {
+                serde_json::json!({
+                    "workspace": workspace,
+                    "reason": reason
                 })
             }
             EventKind::WorkerLaunchDeferred {
@@ -4145,6 +4166,7 @@ impl EventKind {
             | EventKind::Log { .. }
             | EventKind::PluckOrderingDegraded { .. }
             | EventKind::GatePathMissing { .. }
+            | EventKind::GateNoVerifier { .. }
             | EventKind::MendCycleBroken { .. }
             | EventKind::AuditBeadClosedAsVerification { .. }
             | EventKind::AuditBeadDeferredOverBudget { .. }

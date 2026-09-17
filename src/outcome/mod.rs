@@ -32,6 +32,7 @@ use crate::validation::{
 };
 
 pub(crate) mod close_verification;
+pub(crate) mod fallback_verification;
 
 /// Fleet-wide cooling period after an unsuccessful attempt.  The window grows
 /// across consecutive failures so another ready bead can run instead of every
@@ -591,6 +592,11 @@ pub struct OutcomeHandler {
     /// extraction of committed state, before the close is honoured
     /// ([`Self::verify_close_evidence`]).
     close_verification: close_verification::CloseVerificationRuntime,
+    /// Judges a workspace that declares no gates: selects the verifier its
+    /// own files imply and runs it in the clean extraction, or checks the
+    /// tree is clean when nothing applies
+    /// ([`Self::run_fallback_gate`]).
+    fallback_verification: fallback_verification::FallbackVerificationRuntime,
 }
 
 /// Close reason recorded when the shipped-work gate confirms an agent's work
@@ -608,6 +614,7 @@ impl OutcomeHandler {
             attempt_context: Arc::new(std::sync::Mutex::new(None)),
             ledger_row_emitted: Arc::new(std::sync::Mutex::new(None)),
             close_verification: close_verification::CloseVerificationRuntime::production(),
+            fallback_verification: fallback_verification::FallbackVerificationRuntime::production(),
         }
     }
 
@@ -874,15 +881,26 @@ impl OutcomeHandler {
         }
 
         if workspace_gates.is_empty() && workspace_verification.is_empty() {
-            // The bead's workspace declares no gates and its layout implies
-            // none — the dispatch is judged on its own merits, even when the
-            // worker's home workspace gates everything homed there.
-            tracing::debug!(
-                bead_id = %bead.id,
-                workspace = %bead.workspace.display(),
-                "bead's workspace declares no validation gates — running none"
-            );
-            return Ok((true, None));
+            // An explicit empty declaration is an existing workspace opt-out;
+            // leave that path unchanged. The fallback belongs only to a
+            // workspace that declares neither gate format. The dedicated
+            // `validation.fallback_gate` opt-out is a later split-child and
+            // must not be inferred from the older language-default switch.
+            if declared {
+                tracing::debug!(
+                    bead_id = %bead.id,
+                    workspace = %bead.workspace.display(),
+                    "bead's workspace declares no validation gates — running none"
+                );
+                return Ok((true, None));
+            }
+            // Nothing opted out and no language default applied — the
+            // workspace's own files still pick a verifier (needle-66b015d6
+            // part 2): run the built-in fallback gate in the clean extraction
+            // instead of waving the dispatch through. A workspace whose files
+            // select nothing is judged by the clean-tree check inside, which
+            // passes with the counted `not_detected` WARN.
+            return self.run_fallback_gate(bead).await;
         }
         tracing::debug!(
             bead_id = %bead.id,
@@ -975,6 +993,53 @@ impl OutcomeHandler {
         let report = gate.run(bead).await?;
         let all_passed = report.all_passed;
         Ok((all_passed, Some(report)))
+    }
+
+    /// Run the built-in fallback gate for a workspace that declares no gates
+    /// and implies no language default (needle-66b015d6 part 2).
+    ///
+    /// The verifier the workspace's own files select runs in the clean
+    /// extraction of committed state under the standard gate timeout and
+    /// stderr cap. A workspace whose files select nothing passes only when
+    /// its tree is clean — the extraction would otherwise silently drop the
+    /// uncommitted remainder of the dispatch — and that pass is counted by
+    /// `gate.no_verifier`. A failed verdict flows into the ordinary
+    /// failed-verification path; a check that could not run surfaces as a
+    /// `GateResult::ExecutionError`, which routes to the GateError path
+    /// (release, failure-count untouched) per needle-4aaa010c.
+    async fn run_fallback_gate(&self, bead: &Bead) -> Result<(bool, Option<GateReport>)> {
+        let timeout =
+            std::time::Duration::from_secs(self.config.validation.outcome_timeout_seconds);
+        let stderr_cap_bytes = self.config.validation.stderr_cap_bytes;
+        match self
+            .fallback_verification
+            .verify(bead, timeout, stderr_cap_bytes)
+            .await
+        {
+            fallback_verification::FallbackVerdict::Pass(report) => Ok((true, Some(report))),
+            fallback_verification::FallbackVerdict::NoVerifierPass => {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    workspace = %bead.workspace.display(),
+                    reason = "not_detected",
+                    "no verifier for this workspace — dispatch passes on the agent's exit code alone"
+                );
+                if let Err(error) = self.telemetry.emit(
+                    EventKind::GateNoVerifier {
+                        workspace: bead.workspace.display().to_string(),
+                        reason: "not_detected".to_string(),
+                    },
+                    chrono::Utc::now(),
+                ) {
+                    tracing::warn!(error = %error, "failed to emit gate.no_verifier");
+                }
+                Ok((true, None))
+            }
+            fallback_verification::FallbackVerdict::Fail(report) => Ok((false, Some(report))),
+            fallback_verification::FallbackVerdict::ExecutionError(report) => {
+                Ok((false, Some(report)))
+            }
+        }
     }
 
     /// Handle a process output for the given bead.
@@ -5957,6 +6022,456 @@ mod tests {
             "a workspace with no .needle.yaml declares no gates — run none"
         );
         assert_eq!(result.bead_action, BeadAction::Closed);
+    }
+
+    // ── the no-verifier count (plan 4.4 step 6, needle-66b015d6) ──
+    //
+    // A dispatch whose workspace resolves no verifier still passes — there
+    // is nothing to fail it on — but it must never be silently waved
+    // through: every such dispatch WARNs and emits `gate.no_verifier` with
+    // the reason nothing ran.
+
+    async fn no_verifier_outcome_for(
+        handler: &OutcomeHandler,
+        workspace: &tempfile::TempDir,
+    ) -> HandlerResult {
+        let mut bead = test_bead(BeadStatus::InProgress);
+        bead.workspace = workspace.path().to_path_buf();
+        let store = test_store(BeadStatus::Done);
+        handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap()
+    }
+
+    async fn assert_one_no_verifier_event(
+        helper: &crate::telemetry::test_utils::TestHelper,
+        reason: &str,
+    ) {
+        helper.sync().await;
+        let events = helper.events_by_type("gate.no_verifier");
+        assert_eq!(events.len(), 1, "expected exactly one gate.no_verifier");
+        assert_eq!(
+            events[0].data["reason"], reason,
+            "the event must say why nothing ran"
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_with_no_verifier_passes_and_is_counted() {
+        // An empty workspace — no `.needle.yaml`, no build file — resolves
+        // no verifier: the dispatch passes on the exit code alone and the
+        // gap is counted as `not_detected`.
+        let (_guard, _home) = isolated_home();
+        let helper = crate::telemetry::test_utils::TestHelper::new("no-verifier-test");
+        let mut config = Config::default();
+        config.worker.enforce_shipped_work = false;
+        let handler = OutcomeHandler::new(config, helper.telemetry().clone());
+
+        let workspace = tempfile::TempDir::new().unwrap();
+        let result = no_verifier_outcome_for(&handler, &workspace).await;
+
+        assert_eq!(result.outcome, Outcome::Success);
+        assert_eq!(result.bead_action, BeadAction::Closed);
+        assert_one_no_verifier_event(&helper, "not_detected").await;
+    }
+
+    #[tokio::test]
+    async fn explicit_empty_gates_remain_untouched() {
+        // `gates: []` is an existing workspace-level opt-out. This fallback
+        // only applies when neither gate format is declared, so the explicit
+        // opt-out remains a plain successful dispatch with no fallback event.
+        let (_guard, _home) = isolated_home();
+        let helper = crate::telemetry::test_utils::TestHelper::new("no-verifier-empty-test");
+        let mut config = Config::default();
+        config.worker.enforce_shipped_work = false;
+        let handler = OutcomeHandler::new(config, helper.telemetry().clone());
+
+        let workspace = tempfile::TempDir::new().unwrap();
+        std::fs::write(workspace.path().join(".needle.yaml"), "gates: []\n").unwrap();
+        let result = no_verifier_outcome_for(&handler, &workspace).await;
+
+        assert_eq!(result.outcome, Outcome::Success);
+        assert_eq!(result.bead_action, BeadAction::Closed);
+        helper.sync().await;
+        assert!(helper.events_by_type("gate.no_verifier").is_empty());
+    }
+
+    // ── the fallback gate (needle-66b015d6 part 2) ──
+    //
+    // A workspace that declares neither `gates:` nor `verification:`, opted
+    // out of nothing, and whose files select a verifier — or select nothing,
+    // in which case the tree the clean extraction is cut from must be clean.
+
+    /// Commit `files` in a fresh git repo so a dispatch against it has a
+    /// committed state to extract and a tree that `git status` can judge.
+    fn committed_git_workspace(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for (rel, contents) in files {
+            let path = dir.path().join(rel);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(path, contents).unwrap();
+        }
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir.path())
+                .args(["-c", "user.email=needle@example.test"])
+                .args(["-c", "user.name=needle-test"])
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        let init = git(&["init", "-q"]);
+        assert!(
+            init.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+        let add = git(&["add", "-A"]);
+        assert!(
+            add.status.success(),
+            "git add failed: {}",
+            String::from_utf8_lossy(&add.stderr)
+        );
+        let commit = git(&["commit", "-q", "-m", "fixture"]);
+        assert!(
+            commit.status.success(),
+            "git commit failed: {}",
+            String::from_utf8_lossy(&commit.stderr)
+        );
+        dir
+    }
+
+    /// A handler whose fallback runtime runs in the given extraction seam
+    /// with the given runner, so wiring tests need no real child and no real
+    /// git archive.
+    fn fallback_handler_with(
+        helper: &crate::telemetry::test_utils::TestHelper,
+        runner: Arc<dyn crate::process_runner::ProcessRunner>,
+        extraction_dir: Option<std::path::PathBuf>,
+    ) -> OutcomeHandler {
+        let mut config = Config::default();
+        config.worker.enforce_shipped_work = false;
+        let mut handler = OutcomeHandler::new(config, helper.telemetry().clone());
+        handler.fallback_verification =
+            fallback_verification::FallbackVerificationRuntime::for_tests(runner, extraction_dir);
+        handler
+    }
+
+    #[tokio::test]
+    async fn failing_fallback_verifier_reopens_and_releases_with_verification_failed() {
+        let (_guard, _home) = isolated_home();
+        let helper = crate::telemetry::test_utils::TestHelper::new("fallback-verifier-fails");
+        let runner = Arc::new(crate::process_runner::FakeProcessRunner::new());
+        runner.push_output(crate::process_runner::ProcessOutput {
+            success: false,
+            exit_code: Some(3),
+            stdout: b"running\n".to_vec(),
+            stderr: b"definition of done failed\n".to_vec(),
+        });
+        let extraction = tempfile::tempdir().unwrap();
+        let handler = fallback_handler_with(&helper, runner, Some(extraction.path().to_path_buf()));
+
+        // A Python-marker workspace: `default_gates::detect` declines (no
+        // builtin for Python without host config), so the fallback picks
+        // `pytest -q` — which the fake runner fails.
+        let workspace = tempfile::TempDir::new().unwrap();
+        std::fs::write(workspace.path().join("pyproject.toml"), "[project]\n").unwrap();
+        let mut bead = test_bead(BeadStatus::InProgress);
+        bead.workspace = workspace.path().to_path_buf();
+        let store = test_store(BeadStatus::Done);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+
+        assert_eq!(result.outcome, Outcome::Failure);
+        assert!(
+            matches!(result.bead_action, BeadAction::Released(_)),
+            "a failed fallback verifier must release the bead, got {:?}",
+            result.bead_action
+        );
+        assert!(
+            store
+                .actions()
+                .iter()
+                .any(|a| matches!(a, StoreAction::Reopen(_))),
+            "the bead must be reopened, got: {:?}",
+            store.actions()
+        );
+        assert!(
+            store.actions().iter().any(
+                |a| matches!(a, StoreAction::AddLabel(_, label) if label == "verification-failed")
+            ),
+            "the release must carry the verification-failed label, got: {:?}",
+            store.actions()
+        );
+        helper.sync().await;
+        let failed = helper.events_by_type("verification.failed");
+        assert_eq!(failed.len(), 1, "the failure must be reported");
+        assert_eq!(
+            failed[0].data["command"], "fallback_python",
+            "the report must name the fallback gate"
+        );
+    }
+
+    #[tokio::test]
+    async fn gate_less_workspace_with_clean_tree_passes_and_is_counted() {
+        let (_guard, _home) = isolated_home();
+        let helper = crate::telemetry::test_utils::TestHelper::new("fallback-clean-tree");
+        let handler = fallback_handler_with(
+            &helper,
+            Arc::new(crate::process_runner::FakeProcessRunner::new()),
+            None,
+        );
+
+        // Everything committed, no markers anywhere: nothing to run, and the
+        // extraction would carry the whole dispatch — pass, counted.
+        let workspace = committed_git_workspace(&[("README.md", "docs only\n")]);
+        let mut bead = test_bead(BeadStatus::InProgress);
+        bead.workspace = workspace.path().to_path_buf();
+        let store = test_store(BeadStatus::Done);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+
+        assert_eq!(result.outcome, Outcome::Success);
+        assert_eq!(result.bead_action, BeadAction::Closed);
+        assert_one_no_verifier_event(&helper, "not_detected").await;
+        assert!(
+            helper.events_by_type("verification.failed").is_empty(),
+            "a clean pass must not be reported as a verification failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn gate_less_workspace_with_dirty_tree_fails() {
+        let (_guard, _home) = isolated_home();
+        let helper = crate::telemetry::test_utils::TestHelper::new("fallback-dirty-tree");
+        let handler = fallback_handler_with(
+            &helper,
+            Arc::new(crate::process_runner::FakeProcessRunner::new()),
+            None,
+        );
+
+        let workspace = committed_git_workspace(&[("README.md", "docs only\n")]);
+        std::fs::write(workspace.path().join("uncommitted.md"), "never committed\n").unwrap();
+        let mut bead = test_bead(BeadStatus::InProgress);
+        bead.workspace = workspace.path().to_path_buf();
+        let store = test_store(BeadStatus::Done);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+
+        assert_eq!(result.outcome, Outcome::Failure);
+        assert!(
+            matches!(result.bead_action, BeadAction::Released(_)),
+            "a dirty tree must release the bead, got {:?}",
+            result.bead_action
+        );
+        assert!(
+            store
+                .actions()
+                .iter()
+                .any(|a| matches!(a, StoreAction::Reopen(_))),
+            "the bead must be reopened, got: {:?}",
+            store.actions()
+        );
+        helper.sync().await;
+        let failed = helper.events_by_type("verification.failed");
+        assert_eq!(failed.len(), 1);
+        assert_eq!(
+            failed[0].data["command"], "fallback_clean_tree",
+            "the report must name the clean-tree gate"
+        );
+        assert!(
+            failed[0].data["output"]
+                .as_str()
+                .is_some_and(|output| output.contains("uncommitted.md")),
+            "the failure must name the dirty path: {:?}",
+            failed[0].data["output"]
+        );
+    }
+
+    #[tokio::test]
+    async fn fallback_verifier_spawn_failure_takes_the_gate_error_route() {
+        // A verifier that cannot run is not a verdict: release without the
+        // verification-failed label and without a failure-count increment
+        // (needle-4aaa010c).
+        let (_guard, _home) = isolated_home();
+        let helper = crate::telemetry::test_utils::TestHelper::new("fallback-spawn-error");
+        let runner = Arc::new(crate::process_runner::FakeProcessRunner::new());
+        runner.push_error("spawn failed");
+        let extraction = tempfile::tempdir().unwrap();
+        let handler = fallback_handler_with(&helper, runner, Some(extraction.path().to_path_buf()));
+
+        let workspace = tempfile::TempDir::new().unwrap();
+        std::fs::write(workspace.path().join("pytest.ini"), "[pytest]\n").unwrap();
+        let mut bead = test_bead(BeadStatus::InProgress);
+        bead.workspace = workspace.path().to_path_buf();
+        let store = test_store(BeadStatus::Done);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+
+        assert_eq!(result.outcome, Outcome::Failure);
+        assert!(
+            matches!(
+                result.bead_action,
+                BeadAction::Released(ReleaseReason::AgentNotFound)
+            ),
+            "a could-not-run gate releases without a failure-count penalty (the \
+             GateError route's release reason is AgentNotFound by name), got {:?}",
+            result.bead_action
+        );
+        assert!(
+            !store.actions().iter().any(
+                |a| matches!(a, StoreAction::AddLabel(_, label) if label == "verification-failed")
+            ),
+            "an unjudged dispatch must not carry the verification-failed label, got: {:?}",
+            store.actions()
+        );
+    }
+
+    #[tokio::test]
+    async fn fallback_verifier_timeout_and_stderr_cap_are_enforced() {
+        // Real runtime, real child, real extraction: a verifier that outruns
+        // the standard gate timeout (`validation.outcome_timeout_seconds`) is
+        // killed, and the run is a could-not-run GateError, not a verdict.
+        //
+        // `pytest.ini` selects `pytest -q` and no host pytest is depended on:
+        // a stub `pytest` at the front of PATH hangs, so the only way this
+        // dispatch terminates is the timeout. `pytest.ini` is invisible to
+        // `default_gates::detect`, so the dispatch reaches the fallback gate
+        // whichever way that module's marker list is shaped.
+        let (_guard, _home) = isolated_home();
+        let stub_dir = tempfile::tempdir().unwrap();
+        let stub = stub_dir.path().join("pytest");
+        std::fs::write(&stub, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&stub).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&stub, perms).unwrap();
+        let original_path = std::env::var_os("PATH").unwrap_or_default();
+        std::env::set_var(
+            "PATH",
+            format!(
+                "{}:{}",
+                stub_dir.path().display(),
+                original_path.to_string_lossy()
+            ),
+        );
+
+        let helper = crate::telemetry::test_utils::TestHelper::new("fallback-timeout");
+        let mut config = Config::default();
+        config.worker.enforce_shipped_work = false;
+        config.validation.outcome_timeout_seconds = 1;
+        let mut handler = OutcomeHandler::new(config, helper.telemetry().clone());
+        handler.fallback_verification =
+            fallback_verification::FallbackVerificationRuntime::production();
+
+        let workspace = committed_git_workspace(&[("pytest.ini", "[pytest]\n")]);
+
+        let mut bead = test_bead(BeadStatus::InProgress);
+        bead.workspace = workspace.path().to_path_buf();
+        let store = test_store(BeadStatus::Done);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+
+        assert_eq!(result.outcome, Outcome::Failure);
+        assert!(
+            matches!(
+                result.bead_action,
+                BeadAction::Released(ReleaseReason::AgentNotFound)
+            ),
+            "a timed-out verifier could not produce a verdict — the GateError \
+             route releases without a penalty, got {:?}",
+            result.bead_action
+        );
+        helper.sync().await;
+        let errors = helper.events_by_type("gate.execution_error");
+        assert!(
+            errors.iter().any(|e| e.data["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("timed out"))),
+            "the gate execution error must say the verifier timed out: {:?}",
+            errors.iter().map(|e| &e.data).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn gate_less_workspace_with_passing_verifier_closes() {
+        let (_guard, _home) = isolated_home();
+        let helper = crate::telemetry::test_utils::TestHelper::new("fallback-verifier-passes");
+        let runner = Arc::new(crate::process_runner::FakeProcessRunner::new());
+        runner.push_output(crate::process_runner::ProcessOutput::success(
+            b"ok\n".to_vec(),
+        ));
+        let extraction = tempfile::tempdir().unwrap();
+        let handler = fallback_handler_with(&helper, runner, Some(extraction.path().to_path_buf()));
+
+        let workspace = tempfile::TempDir::new().unwrap();
+        std::fs::write(workspace.path().join("pyproject.toml"), "[project]\n").unwrap();
+        let mut bead = test_bead(BeadStatus::InProgress);
+        bead.workspace = workspace.path().to_path_buf();
+        let store = test_store(BeadStatus::Done);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+
+        assert_eq!(result.outcome, Outcome::Success);
+        assert_eq!(result.bead_action, BeadAction::Closed);
+        assert!(
+            helper.events_by_type("gate.no_verifier").is_empty(),
+            "a workspace whose files select a verifier is verified, not counted as unverified"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_opt_out_workspace_never_runs_the_fallback_gate() {
+        // `gates: []` is the workspace's own opt-out: it passes on the exit
+        // code alone even when its files would select a verifier.
+        let (_guard, _home) = isolated_home();
+        let helper = crate::telemetry::test_utils::TestHelper::new("fallback-opt-out");
+        let handler = fallback_handler_with(
+            &helper,
+            Arc::new(crate::process_runner::FakeProcessRunner::new()),
+            None,
+        );
+
+        let workspace = committed_git_workspace(&[
+            (".needle.yaml", "gates: []\n"),
+            ("pyproject.toml", "[project]\n"),
+        ]);
+        let mut bead = test_bead(BeadStatus::InProgress);
+        bead.workspace = workspace.path().to_path_buf();
+        let store = test_store(BeadStatus::Done);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+
+        assert_eq!(result.outcome, Outcome::Success);
+        assert_eq!(result.bead_action, BeadAction::Closed);
+        helper.sync().await;
+        assert!(helper.events_by_type("gate.no_verifier").is_empty());
     }
 
     // ── timeout and resilience tests ──
