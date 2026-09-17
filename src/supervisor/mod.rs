@@ -400,6 +400,9 @@ fn resolve_worker_binary_with_source(override_path: Option<&PathBuf>) -> Resolve
 impl Supervisor {
     /// Create a new supervisor with the given configuration.
     pub fn new(config: SupervisorConfig, needle_config: Config) -> Result<Self> {
+        // Supervisor construction can be called without ConfigLoader. Publish
+        // the configured root before creating its registry and telemetry.
+        crate::state_dir::set_configured(needle_config.paths.state_dir.clone());
         // Resolve and log worker binary path at startup
         let worker_binary = resolve_worker_binary(config.worker_binary_path.clone())
             .context("failed to resolve worker binary path for supervisor")?;
@@ -420,7 +423,8 @@ impl Supervisor {
         .context("failed to initialize bead store for supervisor")?;
 
         // Initialize registry
-        let registry = Registry::default_location(&needle_config.workspace.home);
+        let registry =
+            Registry::default_location(&crate::state_dir::root_for(&needle_config.workspace.home));
 
         // Initialize telemetry
         let qualified_id = "supervisor".to_string();

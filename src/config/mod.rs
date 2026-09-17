@@ -6024,6 +6024,23 @@ impl ConfigTier for TelemetryConfig {
     }
 }
 
+/// Filesystem-root configuration (ADR-030 decision 5, N-T52).
+///
+/// `state_dir` is the single root every persistent state writer resolves
+/// beneath — gate health, provider health, experiments, baseline gates, the
+/// spool, attempt journals, the ledger logs, heartbeats and the registry. It
+/// ships off by default (`None` keeps `$HOME/.needle`); the
+/// `NEEDLE_STATE_DIR` environment variable overrides it, and is what the
+/// test harness sets. Restart-required: the value is published once at load
+/// and writers resolve from it for the life of the process.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PathsConfig {
+    /// Root directory for persistent state. Relative and `~`-prefixed values
+    /// are expanded at load.
+    #[serde(default)]
+    pub state_dir: Option<PathBuf>,
+}
+
 /// Health monitoring configuration (heartbeat, peer detection).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthConfig {
@@ -7392,6 +7409,11 @@ pub struct Config {
     pub prompt: PromptConfig,
     #[serde(default)]
     pub health: HealthConfig,
+    /// Filesystem roots that other config sections derive from. `state_dir`
+    /// is the single root every persistent state writer resolves beneath
+    /// (ADR-030 decision 5, N-T52); `NEEDLE_STATE_DIR` overrides it.
+    #[serde(default)]
+    pub paths: PathsConfig,
     /// Provider/model concurrency and rate limits.
     #[serde(default)]
     pub limits: LimitsConfig,
@@ -7528,6 +7550,10 @@ impl Config {
         // attempt archive spool
         self.attempt_archive.spool_dir = expand_tilde(&self.attempt_archive.spool_dir);
 
+        // single state root (ADR-030 decision 5, N-T52)
+        self.paths.state_dir = expand_tilde_option(&self.paths.state_dir);
+        crate::state_dir::set_configured(self.paths.state_dir.clone());
+
         // strands.pulse.scanners[].command paths are strings, not PathBuf, so skip
 
         // strands.reflect section - no PathBuf fields
@@ -7657,6 +7683,7 @@ impl Config {
         hashes.insert("workspace".to_string(), hash_section(&self.workspace));
         hashes.insert("bead_cli".to_string(), hash_section(&self.bead_cli));
         hashes.insert("health".to_string(), hash_section(&self.health));
+        hashes.insert("paths".to_string(), hash_section(&self.paths));
         hashes.insert(
             "self_modification".to_string(),
             hash_section(&self.self_modification),
@@ -7790,6 +7817,11 @@ impl Config {
             "health.heartbeat_dir",
             self.health.heartbeat_dir,
             other.health.heartbeat_dir
+        );
+        check!(
+            "paths.state_dir",
+            self.paths.state_dir,
+            other.paths.state_dir
         );
 
         // These sections are process-scoped as a whole, so report their
@@ -7958,6 +7990,7 @@ pub fn validate_key_path(key_path: &str) -> Result<(), ConfigError> {
         "telemetry",
         "prompt",
         "health",
+        "paths",
         "limits",
         "pricing",
         "budget",
@@ -7997,6 +8030,7 @@ pub fn validate_key_path(key_path: &str) -> Result<(), ConfigError> {
         "telemetry" => validate_telemetry_field(second, &segments[2..], key_path),
         "prompt" => validate_prompt_field(second, key_path),
         "post_push_ci" => validate_post_push_ci_field(second, key_path),
+        "paths" => validate_paths_field(second, key_path),
         "attempt_archive" => validate_attempt_archive_field(second, &segments[2..], key_path),
         _ => {
             // For other top-level configs, accept any nested field for now
@@ -8027,6 +8061,21 @@ fn validate_post_push_ci_field(field: &str, key_path: &str) -> Result<(), Config
             field.to_string(),
             valid_fields.map(|s| s.to_string()).to_vec(),
             "post_push_ci".to_string(),
+        ))
+    }
+}
+
+/// Validate the central filesystem-root configuration.
+fn validate_paths_field(field: &str, key_path: &str) -> Result<(), ConfigError> {
+    let valid_fields = ["state_dir"];
+    if valid_fields.contains(&field) {
+        Ok(())
+    } else {
+        Err(ConfigError::invalid_segment(
+            key_path.to_string(),
+            field.to_string(),
+            valid_fields.map(str::to_string).to_vec(),
+            "paths".to_string(),
         ))
     }
 }
@@ -9160,6 +9209,7 @@ impl ConfigLoader {
                 "worker.scratch_sweep.ttl_hours",
                 "health.heartbeat_interval_secs",
                 "health.heartbeat_ttl_secs",
+                "paths.state_dir",
                 "verification",
                 "gates",
             ] {
@@ -9424,6 +9474,15 @@ impl ConfigLoader {
             (
                 "health.heartbeat_ttl_secs",
                 config.health.heartbeat_ttl_secs.to_string(),
+            ),
+            (
+                "paths.state_dir",
+                config
+                    .paths
+                    .state_dir
+                    .as_ref()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default(),
             ),
             (
                 "prompt.context_files",

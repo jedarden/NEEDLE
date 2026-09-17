@@ -322,16 +322,8 @@ pub fn workspace_id(workspace: &Path) -> Result<String> {
 
 /// Get the gate health state file path for a workspace.
 pub fn state_file_path(workspace: &Path) -> Result<PathBuf> {
-    let mut base = home_dir();
-
-    base.push(".needle");
-    base.push("state");
-    base.push("gate-health");
-
     let id = workspace_id(workspace)?;
-    base.push(format!("{}.json", id));
-
-    Ok(base)
+    Ok(crate::state_dir::gate_health_dir().join(format!("{}.json", id)))
 }
 
 /// Load gate health state for a workspace.

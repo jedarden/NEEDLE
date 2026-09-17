@@ -1074,6 +1074,22 @@ pub fn compute_attempt_stats(
         if event.event_type != "attempt.resolved" {
             continue;
         }
+        // ADR-030 decision 5 (N-T52): rows written by tests before state
+        // directories were overridden stay in the files until they age out,
+        // but no consumer reads them.
+        let worker = event
+            .data
+            .get("worker")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let workspace = event
+            .data
+            .get("workspace")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if crate::state_dir::is_fixture_row(worker, workspace) {
+            continue;
+        }
         let key_field = match dimension {
             StatsDimension::Adapter => "adapter",
             StatsDimension::Outcome => "outcome",

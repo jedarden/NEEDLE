@@ -124,7 +124,8 @@ contract = 67
 # +4 bounded transcript/gate capture contracts, N-T45 (needle-ab3601e5).
 # +6 candidate-lesson contracts, N-T50 (needle-75368add); the acceptance
 # command is the focused dedicated harness.
-e2e = 779
+# +10 N-T52 state-directory isolation contracts (needle-e8f408e1).
+e2e = 789
 soak = 0
 fuzz = 0
 
@@ -187,6 +188,13 @@ path = "tests/nt50_exception_lessons.rs"
 tier = "e2e"
 max_tests = 6
 owner = "component:attempt-history"
+
+[[harness]]
+name = "nt52_state_dir_isolation"
+path = "tests/nt52_state_dir_isolation.rs"
+tier = "e2e"
+max_tests = 10
+owner = "component:state-isolation"
 
 # These are strict ceilings on existing debt. A new occurrence fails the fast
 # lane; deleting an occurrence makes the corresponding exception stale so the

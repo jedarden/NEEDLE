@@ -2414,15 +2414,11 @@ fn build_sanitizer(config: &Config) -> Option<Arc<Sanitizer>> {
     }
 }
 
-/// Returns `None` if `$HOME` is not set.
+/// The per-bead agent log path, beneath the state root's `logs`
+/// (ADR-030 decision 5). Always resolvable; `Option` preserves the caller's
+/// drain-on-missing shape.
 fn agent_log_path(worker_id: &str, bead_id: &BeadId) -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    Some(
-        PathBuf::from(home)
-            .join(".needle")
-            .join("logs")
-            .join(format!("{}-{}.agent.jsonl", worker_id, bead_id)),
-    )
+    Some(crate::state_dir::logs_dir().join(format!("{}-{}.agent.jsonl", worker_id, bead_id)))
 }
 
 /// Read transform stdout and write each line to the agent log file.

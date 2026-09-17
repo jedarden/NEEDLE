@@ -734,7 +734,7 @@ fn collect_stale_assignee_beads(beads: &[Bead]) -> Vec<BeadId> {
 /// what happened to NEEDLE's own tree) and violates the long-standing contract
 /// that starvation detection does not modify the workspace it is reporting on.
 /// The layout mirrors the harness convention of one directory per workspace
-/// path, slugged: `~/.needle/diagnostics/<slug>/`.
+/// path, slugged: `<state-root>/diagnostics/<slug>/`.
 fn needle_diagnostics_dir(workspace: &str) -> PathBuf {
     let target = if workspace.is_empty() {
         std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
@@ -746,10 +746,7 @@ fn needle_diagnostics_dir(workspace: &str) -> PathBuf {
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    home.join(".needle")
+    crate::state_dir::state_root()
         .join("diagnostics")
         .join(slug.trim_matches('-'))
 }

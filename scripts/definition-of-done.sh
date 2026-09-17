@@ -165,7 +165,7 @@ done
 needle_slow_targets() {
   printf '%s\n' lib integration_spawn integration_tests p2_integration_tests \
     p3_integration_tests real_br_integration_tests escalation_ladder \
-    nt45_failure_evidence_capture nt50_exception_lessons installer
+    nt45_failure_evidence_capture nt50_exception_lessons nt52_state_dir_isolation installer
 }
 
 needle_cargo_selector() {
@@ -179,11 +179,12 @@ needle_cargo_selector() {
     escalation_ladder)         printf '%s\n' --test escalation_ladder ;;
     nt45_failure_evidence_capture) printf '%s\n' --test nt45_failure_evidence_capture ;;
     nt50_exception_lessons) printf '%s\n' --test nt50_exception_lessons ;;
+    nt52_state_dir_isolation) printf '%s\n' --test nt52_state_dir_isolation ;;
     *)                         return 1 ;;
   esac
 }
 
-# An archive contains all nine Cargo test binaries, so archive consumers must
+# An archive contains all ten Cargo test binaries, so archive consumers must
 # select by nextest's stable binary ID rather than passing Cargo target flags
 # (Cargo build options conflict with --archive-file). Equality matchers are
 # deliberate: contains/glob matching could silently run a newly added binary.
@@ -198,6 +199,7 @@ needle_nextest_filter() {
     escalation_ladder)         printf '%s\n' 'binary_id(=needle::escalation_ladder)' ;;
     nt45_failure_evidence_capture) printf '%s\n' 'binary_id(=needle::nt45_failure_evidence_capture)' ;;
     nt50_exception_lessons) printf '%s\n' 'binary_id(=needle::nt50_exception_lessons)' ;;
+    nt52_state_dir_isolation) printf '%s\n' 'binary_id(=needle::nt52_state_dir_isolation)' ;;
     *)                         return 1 ;;
   esac
 }

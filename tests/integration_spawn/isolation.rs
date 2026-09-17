@@ -4,7 +4,7 @@
 //! parallel-safe while every HOME-, XDG-, state-, discovery-, and temp-derived
 //! path stays below one directory that is removed on drop.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus};
@@ -29,6 +29,10 @@ pub fn needle_transform_claude_binary_path() -> std::ffi::OsString {
 /// One isolated filesystem namespace for commands spawned by a test.
 pub struct IsolatedChildEnv {
     root: TempDir,
+    /// The home this process was launched with, captured before any child
+    /// override. The harness guard carries it so a spawned binary can refuse
+    /// a state root that resolves beneath the real home (N-T52).
+    real_home: OsString,
 }
 
 impl IsolatedChildEnv {
@@ -39,7 +43,10 @@ impl IsolatedChildEnv {
             fs::create_dir_all(root.path().join(relative))
                 .unwrap_or_else(|error| panic!("create isolated {relative}: {error}"));
         }
-        Self { root }
+        Self {
+            root,
+            real_home: std::env::var_os("HOME").unwrap_or_default(),
+        }
     }
 
     /// The fixture root. It is also the child's HOME and workspace scan root.
@@ -65,6 +72,10 @@ impl IsolatedChildEnv {
             .env("TMPDIR", self.path().join("tmp"))
             .env("NEEDLE_HOME", self.path().join(".needle"))
             .env("NEEDLE_STATE_DIR", self.path().join(".needle/state"))
+            // ADR-030 decision 5 (N-T52): the spawned binary refuses to run
+            // under a test harness without an isolated state root, and
+            // refuses one beneath the real home captured here.
+            .env("NEEDLE_TEST_HARNESS", &self.real_home)
             .env(
                 "NEEDLE_EVENTS",
                 self.path().join(".needle/state/events.jsonl"),

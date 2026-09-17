@@ -93,9 +93,15 @@ pub fn spool_attempt(
     if !config.enabled {
         return Ok(None);
     }
-    let spool = PathBuf::from(crate::util::expand_tilde(
-        &config.spool_dir.to_string_lossy(),
-    ));
+    // ADR-030 decision 5 (N-T52): while a state-root override is in force the
+    // spool relocates beneath it, so a fixture suite spools nothing into an
+    // operator's configured directory. Without an override the configured
+    // `attempt_archive.spool_dir` decides, as before.
+    let spool = crate::state_dir::spool_dir_under_override().unwrap_or_else(|| {
+        PathBuf::from(crate::util::expand_tilde(
+            &config.spool_dir.to_string_lossy(),
+        ))
+    });
     let host = gethostname::gethostname().to_string_lossy().to_string();
     let day = input
         .recorded_at

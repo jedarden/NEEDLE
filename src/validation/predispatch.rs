@@ -83,11 +83,12 @@ impl PreDispatch {
 }
 
 fn state_root() -> PathBuf {
-    if let Some(home) = std::env::var_os("HOME") {
-        PathBuf::from(home).join(".needle/state/predispatch")
-    } else {
-        std::env::temp_dir().join(".needle/state/predispatch")
-    }
+    // Baseline snapshots are persistent state too. Keep them under the same
+    // root as gate health, logs, and the registry so a fixture cannot leave a
+    // baseline behind in the operator's HOME (ADR-030 decision 5).
+    crate::state_dir::state_root()
+        .join("state")
+        .join("predispatch")
 }
 
 /// Snapshot file for a (workspace, bead) pair, under an explicit state root.

@@ -34,6 +34,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::bead_store::BeadStore;
 use crate::sanitize::Sanitizer;
@@ -789,20 +790,34 @@ impl Default for HistoryLimits {
     }
 }
 
+/// Journal root for `workspace`: the workspace's own `.beads/traces`, or,
+/// while a state-root override is in force (ADR-030 decision 5, N-T52), a
+/// stable per-workspace directory beneath the override — a fixture suite
+/// journaling against any workspace path then stays inside the override. The
+/// hash keeps distinct workspaces distinct and is stable across processes;
+/// every reader and writer resolves through these same functions, so both
+/// sides of an override agree.
+fn journal_root(workspace: &Path) -> PathBuf {
+    if let Some(root) = crate::state_dir::attempt_journals_under_override() {
+        let mut hasher = Sha256::new();
+        hasher.update(workspace.to_string_lossy().as_bytes());
+        let digest = hasher.finalize();
+        let id: String = digest.iter().take(8).map(|b| format!("{b:02x}")).collect();
+        return root.join(id);
+    }
+    workspace.join(".beads").join("traces")
+}
+
 /// Path of the local journal for `bead_id` in `workspace`.
 pub fn history_path(workspace: &Path, bead_id: &BeadId) -> PathBuf {
-    workspace
-        .join(".beads")
-        .join("traces")
+    journal_root(workspace)
         .join(bead_id.as_ref())
         .join("attempts.jsonl")
 }
 
 /// Path of the local candidate-lesson journal for `bead_id` in `workspace`.
 pub fn lessons_path(workspace: &Path, bead_id: &BeadId) -> PathBuf {
-    workspace
-        .join(".beads")
-        .join("traces")
+    journal_root(workspace)
         .join(bead_id.as_ref())
         .join("lessons.jsonl")
 }

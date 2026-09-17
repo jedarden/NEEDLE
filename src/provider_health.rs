@@ -105,12 +105,10 @@ impl ProviderHealthState {
     }
 }
 
-/// Where adapter health files live.
+/// Where adapter health files live: the state root's `provider-health`
+/// (`~/.needle/state/provider-health` by default; ADR-030 decision 5).
 fn state_dir() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    home.join(".needle").join("state").join("provider-health")
+    crate::state_dir::provider_health_dir()
 }
 
 /// Stable file name for an adapter.

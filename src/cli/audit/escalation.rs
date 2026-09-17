@@ -21,9 +21,11 @@ use super::factory::StalledBead;
 use super::Finding;
 use crate::config::Config;
 
-/// Directory holding escalation briefs: `~/.needle/state/escalations`.
+/// Directory holding escalation briefs under the central state root.
 pub fn default_brief_dir(config: &Config) -> PathBuf {
-    config.workspace.home.join("state").join("escalations")
+    crate::state_dir::root_for(&config.workspace.home)
+        .join("state")
+        .join("escalations")
 }
 
 /// A path-safe rendering of a scope.

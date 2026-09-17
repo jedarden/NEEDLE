@@ -225,11 +225,8 @@ impl SpliceStrand {
     /// Format: `<log_dir>/<worker_id>-<session_id>.jsonl`
     fn worker_log_path(&self, worker_id: &str, session_id: &str) -> Option<PathBuf> {
         // Try to get log_dir from the heartbeat record's workspace.
-        // Default to ~/.needle/logs if not configured.
-        let log_dir =
-            std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".needle").join("logs"))?;
-
-        Some(log_dir.join(format!("{}-{}.jsonl", worker_id, session_id)))
+        // Defaults to the state root's `logs` (ADR-030 decision 5).
+        Some(crate::state_dir::logs_dir().join(format!("{}-{}.jsonl", worker_id, session_id)))
     }
 
     /// Read the last N events from a JSONL file.

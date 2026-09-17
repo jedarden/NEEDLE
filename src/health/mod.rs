@@ -175,30 +175,29 @@ pub struct HealthMonitor {
 /// # Behavior
 ///
 /// - If `heartbeat_dir` is absolute, use it directly
-/// - If `heartbeat_dir` is relative, resolve it relative to the current HOME:
-///   - In tests with HomeGuard: HOME is the test temp directory, so we use that
-///   - In production: HOME is the real user home, so we use $HOME/.needle/...
+/// - Otherwise resolve the configured heartbeat location relative to the
+///   state root (ADR-030 decision 5): `<root>/state/heartbeats`, where the
+///   root is `NEEDLE_STATE_DIR`, else the configured `paths.state_dir`, else
+///   the current HOME's `.needle`.
 ///
 /// This respects test isolation by reading the current HOME environment variable
 /// at runtime, rather than using a hardcoded path from config.
-fn resolve_heartbeat_dir(config_home: &Path, heartbeat_dir: Option<PathBuf>) -> PathBuf {
-    let dir = heartbeat_dir.unwrap_or_else(|| PathBuf::from("state").join("heartbeats"));
-
-    // If the directory is absolute, use it as-is
-    if dir.is_absolute() {
-        return dir;
+fn resolve_heartbeat_dir(heartbeat_dir: Option<PathBuf>) -> PathBuf {
+    // The central root is an isolation boundary. Do not let a legacy
+    // absolute heartbeat_dir escape it when NEEDLE_STATE_DIR or
+    // paths.state_dir is configured.
+    if crate::state_dir::override_root().is_some() {
+        return crate::state_dir::heartbeats_dir();
     }
 
-    // For relative paths, resolve relative to the current HOME directory.
-    // This ensures that when tests use HomeGuard to change HOME, we respect
-    // the isolated HOME and write heartbeats to the test's temp directory.
-    if let Ok(current_home) = std::env::var("HOME") {
-        let home = PathBuf::from(current_home);
-        return home.join(".needle").join(dir);
+    if let Some(dir) = heartbeat_dir {
+        // If the directory is absolute, use it as-is
+        if dir.is_absolute() {
+            return dir;
+        }
+        return crate::state_dir::state_root().join(dir);
     }
-
-    // Fallback: use the config home (should rarely happen)
-    config_home.join(dir)
+    crate::state_dir::heartbeats_dir()
 }
 
 impl HealthMonitor {
@@ -220,8 +219,7 @@ impl HealthMonitor {
         _telemetry: Telemetry,
         shutdown: Option<Arc<AtomicBool>>,
     ) -> Self {
-        let heartbeat_dir =
-            resolve_heartbeat_dir(&config.workspace.home, config.health.heartbeat_dir);
+        let heartbeat_dir = resolve_heartbeat_dir(config.health.heartbeat_dir);
         let heartbeat_interval = Duration::from_secs(config.health.heartbeat_interval_secs);
         let heartbeat_ttl = Duration::from_secs(config.health.heartbeat_ttl_secs);
         let qualified_id = format!("{}-{}", config.agent.default, worker_name);

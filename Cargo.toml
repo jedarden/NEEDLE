@@ -184,6 +184,11 @@ name = "nt50_exception_lessons"
 path = "tests/nt50_exception_lessons.rs"
 harness = true
 
+[[test]]
+name = "nt52_state_dir_isolation"
+path = "tests/nt52_state_dir_isolation.rs"
+harness = true
+
 [[bench]]
 name = "sanitize"
 harness = false

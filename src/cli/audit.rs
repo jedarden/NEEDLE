@@ -383,7 +383,7 @@ pub async fn collect_context(config: Config, root: Option<PathBuf>) -> Result<Au
     let window_hours = config.audit.factory.window_hours;
     let window_days = u32::try_from((window_hours + 23) / 24).unwrap_or(1).max(1);
     let ledger = crate::evidence_routing::timestamped_ledger_rows(
-        &config.workspace.home.join("logs"),
+        &crate::state_dir::logs_dir(),
         window_days,
     );
 

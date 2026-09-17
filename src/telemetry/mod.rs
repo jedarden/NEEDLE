@@ -5084,12 +5084,14 @@ impl Telemetry {
         // File sink is created only if enabled in config
         // When disabled, telemetry falls back to stdout/hook sinks only
         if config.file_sink.enabled {
-            // Use configured log_dir if set, otherwise use default
-            let file_sink_result = if let Some(ref log_dir) = config.file_sink.log_dir {
-                FileSink::with_dir(log_dir.clone(), &worker_id, &session_id)
-            } else {
-                FileSink::new(&worker_id, &session_id)
-            };
+            // A central state-root override is an isolation boundary: even a
+            // legacy telemetry.log_dir must not send writes back to HOME.
+            // Without the override, preserve the explicit legacy directory.
+            let log_dir = crate::state_dir::logs_dir_for(
+                config.file_sink.log_dir.as_deref(),
+                &crate::state_dir::state_root(),
+            );
+            let file_sink_result = FileSink::with_dir(log_dir, &worker_id, &session_id);
 
             match file_sink_result {
                 Ok(s) => {

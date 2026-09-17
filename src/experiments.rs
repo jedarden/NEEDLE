@@ -167,12 +167,10 @@ pub fn evaluate(
         .collect()
 }
 
-/// Default receipt directory: `~/.needle/state/experiments`.
+/// Default receipt directory: the state root's `state/experiments`
+/// (`~/.needle/state/experiments` by default; ADR-030 decision 5).
 pub fn default_state_dir() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    home.join(".needle").join("state").join("experiments")
+    crate::state_dir::experiments_dir()
 }
 
 /// Receipt path for one variant.

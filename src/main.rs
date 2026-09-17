@@ -7,6 +7,13 @@ use std::panic;
 use libc::{signal, SIGPIPE, SIG_DFL};
 
 fn main() -> Result<()> {
+    // ADR-030 decision 5 (N-T52): a spawned test harness must carry an
+    // isolated state directory. Refuse before anything can write.
+    if let Err(message) = needle::state_dir::ensure_harness_isolation() {
+        eprintln!("Error: {message}");
+        std::process::exit(1);
+    }
+
     // Install custom panic hook BEFORE any other initialization
     // This ensures we catch BrokenPipe panics from any thread
     let hook = panic::take_hook();

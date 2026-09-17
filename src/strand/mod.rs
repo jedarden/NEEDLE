@@ -144,6 +144,9 @@ impl StrandRunner {
         registry: crate::registry::Registry,
         telemetry: crate::telemetry::Telemetry,
     ) -> Self {
+        // StrandRunner is also constructed directly by embedders and tests;
+        // publish the config value before any strand resolves a state path.
+        crate::state_dir::set_configured(config.paths.state_dir.clone());
         // A reserved lane (`strands.pluck.lanes`) binds this worker to one
         // label for the whole waterfall: Pluck's selection at home and
         // Explore's admission abroad read the same binding, so a lane worker
@@ -152,25 +155,30 @@ impl StrandRunner {
         // change anywhere.
         let lane = config.strands.pluck.lane_for(worker_id).cloned();
 
+        // All host-level strand state follows the single configured root.
+        // `root_for` retains the historical workspace-home fallback when no
+        // central override is active, keeping direct in-process callers
+        // compatible while making NEEDLE_STATE_DIR/paths.state_dir atomic.
+        let state_root = crate::state_dir::root_for(&config.workspace.home);
+        let state_base = state_root.join("state");
+
         let pluck = PluckStrand::with_persistent_records(
             config.strands.pluck.exclude_labels.clone(),
             config.strands.pluck.split_after_failures,
             telemetry.clone(),
-            config.workspace.home.clone(),
+            state_root.clone(),
             config.strands.pluck.persistent_starvation_records,
         )
         .with_quarantine_threshold(config.outcome.quarantine_after_failures)
         .with_lane(lane.clone());
 
-        let heartbeat_dir = config.workspace.home.join("state").join("heartbeats");
+        let heartbeat_dir = state_base.join("heartbeats");
         let heartbeat_ttl = std::time::Duration::from_secs(config.health.heartbeat_ttl_secs);
         let lock_dir = std::env::temp_dir();
-        let log_dir = config
-            .telemetry
-            .file_sink
-            .log_dir
-            .clone()
-            .unwrap_or_else(|| config.workspace.home.join("logs"));
+        let log_dir = crate::state_dir::logs_dir_for(
+            config.telemetry.file_sink.log_dir.as_deref(),
+            &state_root,
+        );
         let retention_days = config.telemetry.file_sink.retention_days;
         let traces_dir = config.workspace.default.join(".beads").join("traces");
         let trace_retention_failed_days = config.strands.learning.trace_retention_failed_days;
@@ -178,7 +186,7 @@ impl StrandRunner {
 
         // Create a new Registry instance pointing to the same path for ExploreStrand.
         // We need to get the state_dir_for_explore before moving registry to MendStrand.
-        let state_fallback = config.workspace.home.join("state");
+        let state_fallback = state_base.clone();
         let state_dir_for_explore = registry.path().parent().unwrap_or(&state_fallback);
         let explore_registry = crate::registry::Registry::new(state_dir_for_explore);
 
@@ -197,11 +205,9 @@ impl StrandRunner {
             trace_retention_success_days,
             config.workspace.default.clone(),
             config.strands.learning.max_learnings,
-            config.workspace.home.join("state"),
+            state_base.clone(),
             config.limits.clone(),
         );
-
-        let state_base = config.workspace.home.join("state");
 
         let explore = ExploreStrand::new(
             config.strands.explore.clone(),
@@ -311,7 +317,7 @@ impl StrandRunner {
         );
 
         // Reconstruct heartbeat_dir for Splice (same path used by Mend).
-        let splice_heartbeat_dir = config.workspace.home.join("state").join("heartbeats");
+        let splice_heartbeat_dir = state_base.join("heartbeats");
         let runner_telemetry = telemetry.clone();
 
         // VALIDATION: Warn loudly if Splice is enabled but report_workspace is unset.

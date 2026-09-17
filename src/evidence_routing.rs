@@ -621,12 +621,10 @@ pub fn poor_workspaces(evidence: &Evidence, config: &EvidenceRoutingConfig) -> V
 }
 
 /// Directory holding poor-workspace receipts:
-/// `~/.needle/state/evidence_routing`.
+/// the state root's `state/evidence_routing`
+/// (`~/.needle/state/evidence_routing` by default; ADR-030 decision 5).
 pub fn default_state_dir() -> std::path::PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    home.join(".needle").join("state").join("evidence_routing")
+    crate::state_dir::evidence_routing_dir()
 }
 
 /// Record a poor workspace for the window containing `now`, returning
@@ -768,6 +766,14 @@ pub fn timestamped_ledger_rows(log_dir: &Path, window_days: u32) -> Vec<LedgerRo
                 .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
                 .map(|ts| ts.with_timezone(&chrono::Utc));
             if let Some(data) = event.get("data").cloned() {
+                // ADR-030 decision 5 (N-T52): rows written by tests before
+                // state directories were overridden stay in the files until
+                // they age out, but no consumer reads them.
+                let worker = data.get("worker").and_then(|v| v.as_str()).unwrap_or("");
+                let workspace = data.get("workspace").and_then(|v| v.as_str()).unwrap_or("");
+                if crate::state_dir::is_fixture_row(worker, workspace) {
+                    continue;
+                }
                 rows.push(LedgerRow { timestamp, data });
             }
         }

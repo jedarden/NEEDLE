@@ -944,7 +944,8 @@ impl ResumeState {
     /// given worker ID. The `worker_id` parameter is the bare NATO name; the
     /// qualified identity is derived from `config.agent.default` + `worker_id`.
     pub fn load(config: &crate::config::Config, worker_id: &str) -> Result<Option<Self>> {
-        let heartbeat_dir = config.workspace.home.join("state").join("heartbeats");
+        let state_root = crate::state_dir::root_for(&config.workspace.home);
+        let heartbeat_dir = state_root.join("state").join("heartbeats");
         let qualified_id = format!("{}-{}", config.agent.default, worker_id);
         let heartbeat_path = heartbeat_dir.join(format!("{}.json", qualified_id));
 
@@ -962,7 +963,7 @@ impl ResumeState {
             .with_context(|| format!("failed to parse heartbeat: {}", heartbeat_path.display()))?;
 
         // Check registry for additional context.
-        let registry = crate::registry::Registry::default_location(&config.workspace.home);
+        let registry = crate::registry::Registry::default_location(&state_root);
         let workers = registry.list().context("failed to list registry")?;
         let entry = workers.iter().find(|w| w.id == qualified_id);
 

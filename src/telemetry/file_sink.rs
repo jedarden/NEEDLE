@@ -50,13 +50,17 @@ pub struct FileSink {
 }
 
 impl FileSink {
-    /// Construct a sink using the default log directory (`~/.needle/logs/`).
+    /// Construct a sink using the default log directory — the state root's
+    /// `logs` (`~/.needle/logs/` by default; ADR-030 decision 5).
     ///
     /// Uses default rotation settings (100 MB max file size, daily rotation).
     pub fn new(worker_id: &str, session_id: &str) -> Result<Self> {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        let log_dir = PathBuf::from(&home).join(".needle").join("logs");
-        Self::with_config(log_dir, worker_id, session_id, DEFAULT_MAX_FILE_SIZE_BYTES)
+        Self::with_config(
+            crate::state_dir::logs_dir(),
+            worker_id,
+            session_id,
+            DEFAULT_MAX_FILE_SIZE_BYTES,
+        )
     }
 
     /// Construct a sink writing to a specific directory with custom size limit.

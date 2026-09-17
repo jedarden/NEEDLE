@@ -1182,12 +1182,10 @@ fn worker_log_writer(
         // Foreground/debug invocation — keep logs on the terminal.
         (BoxMakeWriter::new(std::io::stderr), use_ansi())
     } else {
-        let log_dir = config
-            .telemetry
-            .file_sink
-            .log_dir
-            .clone()
-            .unwrap_or_else(|| config.workspace.home.join("logs"));
+        let log_dir = crate::state_dir::logs_dir_for(
+            config.telemetry.file_sink.log_dir.as_deref(),
+            &config.workspace.home,
+        );
 
         let prefix = sanitize_session_name(&format!("needle-{worker_id}"));
         let path = log_dir.join(format!("{prefix}.log"));
@@ -1501,7 +1499,7 @@ fn run_worker(config: Config, worker_name: String, config_sources: SourceMap) ->
     // above — housekeeping must never be able to fail worker boot, so a
     // sweep error is logged and boot continues regardless.
     match init_step("log_prune", &telemetry, || {
-        run_log_prune(&config.workspace.home.join("logs"), false)
+        run_log_prune(&crate::state_dir::logs_dir(), false)
     }) {
         Ok(report) => record_log_prune_outcome(&telemetry, &report),
         Err(error) => {
@@ -1545,7 +1543,7 @@ fn run_worker(config: Config, worker_name: String, config_sources: SourceMap) ->
     let mut admission_hold =
         crate::rate_limit::AdmissionHold::new(crate::rate_limit::AdmissionHoldConfig::from_env());
     let qualified_worker_id = format!("{}-{}", config.agent.default, worker_name);
-    let registry = Registry::default_location(&config.workspace.home);
+    let registry = Registry::default_location(&crate::state_dir::root_for(&config.workspace.home));
 
     loop {
         let decision = crate::rate_limit::check_launch_admission(
@@ -1839,9 +1837,12 @@ fn launch_in_tmux(
         inner_args.push(hr.to_string());
     }
 
-    // Build stderr log path: ~/.needle/logs/<session_name>.stderr.log
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let stderr_log = format!("{home}/.needle/logs/{session_name}.stderr.log");
+    // Build stderr log path: <state root>/logs/<session_name>.stderr.log
+    // (ADR-030 decision 5).
+    let stderr_log = crate::state_dir::logs_dir()
+        .join(format!("{session_name}.stderr.log"))
+        .to_string_lossy()
+        .to_string();
 
     let inner_cmd = format!(
         "NEEDLE_INNER=1 {} {} 2>> {}",
@@ -2417,7 +2418,8 @@ fn cmd_stop(all: bool, identifier: Option<String>) -> Result<()> {
             };
 
             let config = ConfigLoader::load_global()?;
-            let registry = Registry::default_location(&config.workspace.home);
+            let registry =
+                Registry::default_location(&crate::state_dir::root_for(&config.workspace.home));
             if let Err(e) = registry.deregister(worker_id) {
                 tracing::warn!(
                     worker_id,
@@ -2604,7 +2606,7 @@ fn cmd_list(format: ListFormat) -> Result<()> {
 
     // Reconciliation check: compare process table against registry
     let config = ConfigLoader::load_global()?;
-    let registry = Registry::default_location(&config.workspace.home);
+    let registry = Registry::default_location(&crate::state_dir::root_for(&config.workspace.home));
     let _ = reconcile_process_registry(&discovered, &registry);
 
     // Separate discovered processes into tmux and non-tmux groups
@@ -3470,7 +3472,10 @@ fn cmd_status(
     idle_strands: bool,
 ) -> Result<()> {
     let config = ConfigLoader::load_global()?;
-    let needle_home = config.workspace.home.clone();
+    // Every state view below — registry, heartbeats, gate health, ledger
+    // logs, idle markers — resolves from the single state root (ADR-030
+    // decision 5), so an override relocates the whole status surface.
+    let needle_home = crate::state_dir::root_for(&config.workspace.home);
     let registry = Registry::default_location(&needle_home);
     let workers = registry.list().unwrap_or_default();
     let sessions = list_needle_sessions().unwrap_or_default();
@@ -3941,7 +3946,10 @@ fn cmd_stats(
     use crate::stats::{compute_stats, StatsDimension};
 
     let config = ConfigLoader::load_global()?;
-    let log_dir = config.workspace.home.join("logs");
+    let log_dir = crate::state_dir::logs_dir_for(
+        config.telemetry.file_sink.log_dir.as_deref(),
+        &config.workspace.home,
+    );
 
     let since_dt = since.as_deref().map(telemetry::parse_since).transpose()?;
     let until_dt = until.as_deref().map(telemetry::parse_until).transpose()?;
@@ -4273,8 +4281,7 @@ fn dump_live_config(
 ) -> Result<()> {
     use crate::registry::Registry;
 
-    let needle_home = &config.workspace.home;
-    let registry = Registry::default_location(needle_home);
+    let registry = Registry::default_location(&crate::state_dir::root_for(&config.workspace.home));
 
     let workers = match registry.list() {
         Ok(workers) => workers,
@@ -5664,12 +5671,8 @@ fn doctor_check_disk_space(path: &Path) -> CheckResult {
 }
 
 fn doctor_check_telemetry_logs(config: &Config, needle_home: &Path, repair: bool) -> CheckResult {
-    let log_dir = config
-        .telemetry
-        .file_sink
-        .log_dir
-        .clone()
-        .unwrap_or_else(|| needle_home.join("logs"));
+    let log_dir =
+        crate::state_dir::logs_dir_for(config.telemetry.file_sink.log_dir.as_deref(), needle_home);
     if !log_dir.is_dir() {
         return CheckResult::pass("Telemetry logs", "no log directory yet");
     }
@@ -5808,7 +5811,7 @@ fn cmd_doctor(repair: bool, workspace: Option<PathBuf>, json: bool) -> Result<()
             ..Default::default()
         },
     )?;
-    let needle_home = config.workspace.home.clone();
+    let needle_home = crate::state_dir::root_for(&config.workspace.home);
     let beads_dir = workspace_root.join(".beads");
     let heartbeat_dir = needle_home.join("state").join("heartbeats");
 
@@ -5988,13 +5991,9 @@ fn cmd_logs(
     dry_run: bool,
 ) -> Result<()> {
     let config = ConfigLoader::load_global()?;
-    let needle_home = config.workspace.home.clone();
-    let log_dir = config
-        .telemetry
-        .file_sink
-        .log_dir
-        .clone()
-        .unwrap_or_else(|| needle_home.join("logs"));
+    let needle_home = crate::state_dir::root_for(&config.workspace.home);
+    let log_dir =
+        crate::state_dir::logs_dir_for(config.telemetry.file_sink.log_dir.as_deref(), &needle_home);
 
     if prune {
         return cmd_logs_prune(&log_dir, dry_run);
@@ -6237,11 +6236,10 @@ fn cmd_query(
     format: ListFormat,
 ) -> Result<()> {
     let config = ConfigLoader::load_global()?;
-    let log_dir = config.telemetry.file_sink.log_dir.unwrap_or_else(|| {
-        std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".to_string()))
-            .join(".needle")
-            .join("logs")
-    });
+    let log_dir = crate::state_dir::logs_dir_for(
+        config.telemetry.file_sink.log_dir.as_deref(),
+        &config.workspace.home,
+    );
 
     // Query for aggregate statistics
     let stats = telemetry::compute_stats(&log_dir, worker_id.as_deref())?;
@@ -7397,7 +7395,7 @@ fn cmd_reflect(workspace: Option<PathBuf>, force: bool) -> Result<()> {
             crate::telemetry::Telemetry::new("reflect".to_string())
         });
 
-    let state_dir = config.workspace.home.join("state").join("reflect");
+    let state_dir = crate::state_dir::state_root().join("state").join("reflect");
 
     // Create the extraction agent if configured.
     let agent = if let Some(ref agent_cmd) = config.strands.reflect.extraction_agent {

@@ -255,14 +255,12 @@ fn check_heartbeat_freshness(path: &Path, ttl_secs: u64) -> bool {
 /// }
 /// ```
 pub fn is_supervisor_present() -> bool {
-    // Get the standard default paths
-    let home = std::env::var("HOME").ok();
-    let needle_home = home.as_ref().map(|h| PathBuf::from(h).join(".needle"));
-
-    let heartbeat_path = needle_home
-        .as_ref()
-        .map(|p| p.join("state").join("supervisor-heartbeat.json"));
-    let socket_path = needle_home.as_ref().map(|p| p.join("supervisor.sock"));
+    // Resolve both paths from the central state root. This is primarily a
+    // read-side convenience, but it must not observe a live supervisor when
+    // a fixture has redirected its state directory.
+    let needle_home = crate::state_dir::state_root();
+    let heartbeat_path = Some(needle_home.join("state").join("supervisor-heartbeat.json"));
+    let socket_path = Some(needle_home.join("supervisor.sock"));
 
     // Use 120-second TTL (2 minutes) for supervisor heartbeat freshness
     let ttl_secs = 120;
@@ -891,6 +889,10 @@ impl Worker {
     /// the caller has already created and started telemetry for early boot
     /// diagnostics.
     pub fn new(config: Config, worker_name: String, store: Arc<dyn BeadStore>) -> Self {
+        // Direct embedders may construct Config instead of going through the
+        // loader. Publish its state root before telemetry is created so the
+        // first boot event uses the same root as every later writer.
+        crate::state_dir::set_configured(config.paths.state_dir.clone());
         let qualified_id = format!("{}-{}", config.agent.default, worker_name);
         let telemetry = Telemetry::from_config(qualified_id.clone(), &config.telemetry)
             .unwrap_or_else(|e| {
@@ -916,6 +918,10 @@ impl Worker {
         config_sources: SourceMap,
         booting_emitted: bool,
     ) -> Self {
+        // Keep direct construction and ConfigLoader construction on the same
+        // state-root contract. This is idempotent for loaded configurations
+        // and covers callers that inject an already-created Telemetry.
+        crate::state_dir::set_configured(config.paths.state_dir.clone());
         let qualified_id = format!("{}-{}", config.agent.default, worker_name);
 
         // Workspace configuration is loaded before the worker's telemetry
@@ -939,7 +945,8 @@ impl Worker {
             Utc::now(),
         );
         let strand_start = Instant::now();
-        let strand_registry = Registry::default_location(&config.workspace.home);
+        let state_root = crate::state_dir::root_for(&config.workspace.home);
+        let strand_registry = Registry::default_location(&state_root);
         let strands =
             StrandRunner::from_config(&config, &qualified_id, strand_registry, telemetry.clone());
         let _ = telemetry.emit(
@@ -1110,9 +1117,9 @@ impl Worker {
             chrono::Utc::now(),
         );
         let rate_limiter_start = Instant::now();
-        let registry = Registry::default_location(&config.workspace.home);
-        let rate_limiter =
-            RateLimiter::new(config.limits.clone(), &config.workspace.home.join("state"));
+        let state_root = crate::state_dir::root_for(&config.workspace.home);
+        let registry = Registry::default_location(&state_root);
+        let rate_limiter = RateLimiter::new(config.limits.clone(), &state_root.join("state"));
         let _ = telemetry.emit(
             EventKind::InitStepCompleted {
                 step: "rate_limiter_setup".to_string(),
@@ -5902,7 +5909,8 @@ impl Worker {
             let mut component_config = self.config.clone();
             component_config.strands = candidate.strands.clone();
             let worker_id = self.qualified_id();
-            let registry = Registry::default_location(&component_config.workspace.home);
+            let state_root = crate::state_dir::root_for(&component_config.workspace.home);
+            let registry = Registry::default_location(&state_root);
             let rebuilt = Ok(StrandRunner::from_config(
                 &component_config,
                 &worker_id,
@@ -5971,7 +5979,7 @@ impl Worker {
         if config_values_differ(&self.config.limits, &candidate.limits) {
             let rebuilt = Ok(RateLimiter::new(
                 candidate.limits.clone(),
-                &self.config.workspace.home.join("state"),
+                &crate::state_dir::root_for(&candidate.workspace.home).join("state"),
             ));
 
             if install_rebuilt_component(
@@ -6597,7 +6605,8 @@ impl Worker {
                 // This provides diagnostic information even if telemetry is not flushed
                 // (e.g., if the worker is killed abruptly). The marker file is removed
                 // when the worker exits idle sleep.
-                let state_dir = self.config.workspace.home.join("state");
+                let state_dir =
+                    crate::state_dir::root_for(&self.config.workspace.home).join("state");
                 let idle_marker = state_dir.join(format!(
                     "{}-idle-entered-{}.txt",
                     self.qualified_id(),
@@ -6830,7 +6839,8 @@ impl Worker {
 
                 // Remove the idle marker file and write a completion marker.
                 // This provides diagnostic information even if telemetry is not flushed.
-                let state_dir = self.config.workspace.home.join("state");
+                let state_dir =
+                    crate::state_dir::root_for(&self.config.workspace.home).join("state");
                 let idle_marker = state_dir.join(format!(
                     "{}-idle-entered-{}.txt",
                     self.qualified_id(),
@@ -6967,7 +6977,7 @@ impl Worker {
         self.health.stop();
 
         // Clean up any idle marker files (best-effort).
-        let state_dir = self.config.workspace.home.join("state");
+        let state_dir = crate::state_dir::root_for(&self.config.workspace.home).join("state");
         let qualified_id = self.qualified_id();
         let pid = std::process::id();
         let idle_marker = state_dir.join(format!("{}-idle-entered-{}.txt", qualified_id, pid));
@@ -7363,7 +7373,10 @@ impl Worker {
                 return cache.clone();
             }
         }
-        let log_dir = self.config.workspace.home.join("logs");
+        let log_dir = crate::state_dir::logs_dir_for(
+            self.config.telemetry.file_sink.log_dir.as_deref(),
+            &self.config.workspace.home,
+        );
         let window = self
             .config
             .agent
@@ -7725,13 +7738,10 @@ impl Worker {
         }
 
         // Resolve log directory for scanning.
-        let log_dir = self
-            .config
-            .telemetry
-            .file_sink
-            .log_dir
-            .clone()
-            .unwrap_or_else(|| self.config.workspace.home.join("logs"));
+        let log_dir = crate::state_dir::logs_dir_for(
+            self.config.telemetry.file_sink.log_dir.as_deref(),
+            &self.config.workspace.home,
+        );
         let daily_cost = cost::scan_daily_cost(&log_dir);
 
         match cost::check_budget(daily_cost, &self.config.budget) {

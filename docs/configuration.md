@@ -127,7 +127,8 @@ This guide covers the most commonly used configuration options.
 - `worker.config_reload_check_interval_secs` — **Polling interval for config reloads** (default: 0/disabled)
 
 **Workspace paths:**
-- `workspace.home` — **NEEDLE home directory** for heartbeats and logs
+- `workspace.home` — legacy NEEDLE home fallback for host state
+- `paths.state_dir` — central root for persistent NEEDLE state (restart required)
 - `workspace.default` — Default workspace directory
 
 **Bead CLI backend:**
@@ -150,7 +151,8 @@ This guide covers the most commonly used configuration options.
 | Category | Why Restart Required | Key Examples |
 |----------|---------------------|--------------|
 | **Worker identity** | Process name and PID registry | `worker.identifier_scheme`, `worker.max_workers` |
-| **Workspace paths** | Bead store and heartbeat file locations | `workspace.home`, `workspace.default` |
+| **Workspace paths** | Bead store and workspace selection | `workspace.home`, `workspace.default` |
+| **State paths** | Host-level durable state and isolation root | `paths.state_dir` |
 | **Bead CLI backend** | Store-level decision made at process start | `bead_cli.backend`, `bead_cli.path` |
 | **Runtime shape** | Tokio runtime and tracing stack | Embedded in process startup (no config key) |
 | **Process supervision** | Daemon lifecycle and heartbeat protocol | `supervisor.*`, `health.*` |
@@ -607,7 +609,9 @@ agent:
 
 ## Workspace Configuration
 
-The `workspace` section defines where NEEDLE stores state and which workspace to process.
+The `workspace` section defines the NEEDLE home compatibility fallback and which
+workspace to process. Persistent state writers use the central `paths.state_dir`
+root when configured.
 
 ```yaml
 # ~/.config/needle/config.yaml
@@ -615,7 +619,7 @@ workspace:
   # Default workspace directory (default: current directory)
   default: ~/dev/my-project
 
-  # NEEDLE home directory for heartbeats and logs (default: ~/.needle)
+  # Legacy NEEDLE home fallback (default: ~/.needle)
   home: ~/.needle
 
   # Domain labels for cross-workspace skill sharing (optional)
@@ -624,6 +628,26 @@ workspace:
     - trading
     - api
 ```
+
+### Central state directory
+
+`paths.state_dir` is the single root for host-level persistent state:
+telemetry logs and log-writer files, heartbeats, the worker registry, gate and
+provider health, experiment and routing receipts, attempt journals, and the
+attempt-archive spool. It defaults to `~/.needle` for compatibility and takes
+effect after a process restart.
+
+```yaml
+paths:
+  state_dir: /var/lib/needle
+```
+
+For test harnesses and disposable runs, `NEEDLE_STATE_DIR` overrides the
+configured value. It takes precedence over `paths.state_dir` and `$HOME/.needle`.
+The layout beneath either root is stable: `logs/`, `state/heartbeats/`,
+`state/workers.json`, `state/gate-health/`, `state/provider-health/`,
+`state/experiments/`, `state/evidence_routing/`, `attempt-journals/`, and
+`spool/`.
 
 **Workspace overrides (`.needle.yaml`):**
 
