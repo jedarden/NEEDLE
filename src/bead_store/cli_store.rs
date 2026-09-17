@@ -12,17 +12,34 @@ use serde::Deserialize;
 use std::fmt;
 
 use crate::process_runner::{ProcessRequest, ProcessRunner, TokioProcessRunner};
-use crate::types::{Bead, BeadId, BeadStatus, ClaimResult};
+use crate::types::{Bead, BeadId, BeadStatus, ClaimResult, ClaimStatus};
 
 #[cfg(test)]
 use super::spawn_with_etxtbsy_retry_child;
 use super::{
     execute_create_id_strategy, execute_labels_strategy, validate_strategy_name, BeadBackend,
     BeadOperationSpec, BeadStore, ClaimStrategy, Filters, NewChild, ParseShape, ParsedStrategy,
-    RepairReport,
+    RecoveryReleaseOutcome, RepairReport,
 };
 
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
+
+#[derive(Debug, thiserror::Error)]
+#[error("backend '{backend}' operation '{operation}' exited with code {exit_code}: {stderr}")]
+struct CliOperationFailure {
+    backend: String,
+    operation: String,
+    exit_code: i32,
+    stderr: String,
+}
+
+fn operation_failed_with(error: &anyhow::Error, operation: &str, exit_code: i32) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<CliOperationFailure>()
+            .is_some_and(|failure| failure.operation == operation && failure.exit_code == exit_code)
+    })
+}
 
 /// One descriptor-bound CLI store. The descriptor and binary are inseparable.
 pub struct CliBeadStore {
@@ -240,15 +257,17 @@ impl CliBeadStore {
         values: &HashMap<&'a str, String>,
     ) -> HashMap<&'a str, String> {
         let mut rendered_values = values.clone();
-        if let Some(id) = values.get("id") {
-            if let Some(token) = self
-                .claim_tokens
-                .lock()
-                .unwrap_or_else(|error| error.into_inner())
-                .get(id)
-                .cloned()
-            {
-                rendered_values.insert("fencing_token", token);
+        if !rendered_values.contains_key("fencing_token") {
+            if let Some(id) = values.get("id") {
+                if let Some(token) = self
+                    .claim_tokens
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .get(id)
+                    .cloned()
+                {
+                    rendered_values.insert("fencing_token", token);
+                }
             }
         }
         rendered_values
@@ -322,13 +341,13 @@ impl CliBeadStore {
             )
         })?;
         if !output.success {
-            bail!(
-                "backend '{}' operation '{}' exited with code {}: {}",
-                self.backend.name,
-                name,
-                output.exit_code.unwrap_or(-1),
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
+            return Err(CliOperationFailure {
+                backend: self.backend.name.clone(),
+                operation: name.to_string(),
+                exit_code: output.exit_code.unwrap_or(-1),
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            }
+            .into());
         }
         Ok(stdout)
     }
@@ -975,6 +994,40 @@ impl BeadStore for CliBeadStore {
     async fn release(&self, id: &BeadId) -> Result<()> {
         self.mutate("release", &[("id", id.to_string())]).await
     }
+    async fn release_recovery(
+        &self,
+        id: &BeadId,
+        expected: &ClaimStatus,
+    ) -> Result<RecoveryReleaseOutcome> {
+        if self.backend.name != "bead-rs" {
+            let current = self.claim_status(id).await?;
+            if current != *expected {
+                return Ok(RecoveryReleaseOutcome::Conflict);
+            }
+            self.release(id).await?;
+            return Ok(RecoveryReleaseOutcome::Released);
+        }
+
+        let revision = expected.revision.ok_or_else(|| {
+            anyhow::anyhow!("recovery release for {id} requires an observed revision")
+        })?;
+        let claim_epoch = expected.claim_epoch.ok_or_else(|| {
+            anyhow::anyhow!("recovery release for {id} requires an observed claim epoch")
+        })?;
+        let values = HashMap::from([
+            ("id", id.to_string()),
+            ("if_revision", revision.to_string()),
+            ("fencing_token", claim_epoch.to_string()),
+        ]);
+
+        match self.run_operation("release", &values).await {
+            Ok(_) => Ok(RecoveryReleaseOutcome::Released),
+            Err(error) if operation_failed_with(&error, "release", 4) => {
+                Ok(RecoveryReleaseOutcome::Conflict)
+            }
+            Err(error) => Err(error),
+        }
+    }
     async fn block(&self, id: &BeadId) -> Result<()> {
         self.mutate("block", &[("id", id.to_string())]).await
     }
@@ -1409,6 +1462,7 @@ fn is_optional_placeholder(name: &str) -> bool {
             | "limit"
             | "resolve_reason"
             | "evidence_ref"
+            | "if_revision"
             | "fencing_token"
     )
 }
@@ -1416,9 +1470,9 @@ fn is_optional_placeholder(name: &str) -> bool {
 #[cfg(test)]
 mod process_runner_tests {
     use super::{super::builtin_bead_backends, CliBeadStore};
-    use crate::bead_store::BeadStore as _;
+    use crate::bead_store::{BeadStore as _, RecoveryReleaseOutcome};
     use crate::process_runner::{FakeProcessRunner, ProcessOutput};
-    use crate::types::BeadId;
+    use crate::types::{BeadId, BeadStatus, ClaimStatus};
     use std::sync::Arc;
 
     #[tokio::test]
@@ -1529,8 +1583,8 @@ mod process_runner_tests {
         assert_eq!(requests[0].working_directory(), Some(directory.path()));
     }
 
-    #[test]
-    fn claimed_lifecycle_operations_receive_the_acquired_fencing_token() {
+    #[tokio::test]
+    async fn claimed_and_recovery_operations_use_only_their_own_fencing_tokens() {
         let directory = tempfile::tempdir().unwrap();
         let binary = directory.path().join("fixture-cli");
         std::fs::write(&binary, "fixture").unwrap();
@@ -1538,6 +1592,12 @@ mod process_runner_tests {
             .into_iter()
             .find(|backend| backend.name == "bead-rs")
             .unwrap();
+        let runner = Arc::new(FakeProcessRunner::new());
+        runner.push_output(ProcessOutput::success(Vec::new()));
+        runner.push_output(ProcessOutput::failure(
+            Some(4),
+            b"claim epoch changed".to_vec(),
+        ));
         let store = CliBeadStore::new(
             backend,
             binary,
@@ -1546,13 +1606,20 @@ mod process_runner_tests {
             None,
             None,
         )
-        .unwrap();
+        .unwrap()
+        .with_process_runner(runner.clone());
         store
             .claim_tokens
             .lock()
             .unwrap()
             .insert("needle-fenced".to_string(), "7".to_string());
+        store
+            .claim_tokens
+            .lock()
+            .unwrap()
+            .insert("needle-raced".to_string(), "99".to_string());
 
+        // Claimant-owned mutations receive only the token this store acquired.
         let values = std::collections::HashMap::from([
             ("id", "needle-fenced".to_string()),
             ("reason", "verified".to_string()),
@@ -1569,6 +1636,72 @@ mod process_runner_tests {
                 "7",
             ]
         );
+
+        // Recovery receives the exact guards observed by the recovery caller.
+        let observed = ClaimStatus {
+            status: BeadStatus::InProgress,
+            assignee: Some("dead-worker".to_string()),
+            revision: Some(42),
+            claim_epoch: Some(7),
+        };
+        let outcome = store
+            .release_recovery(&BeadId::from("needle-abandoned"), &observed)
+            .await
+            .unwrap();
+        assert_eq!(outcome, RecoveryReleaseOutcome::Released);
+
+        // A racing owner is reported as a conflict without a retry or token
+        // adoption, even if this store happens to cache a different token.
+        let raced = ClaimStatus {
+            status: BeadStatus::InProgress,
+            assignee: Some("old-worker".to_string()),
+            revision: Some(12),
+            claim_epoch: Some(7),
+        };
+        let outcome = store
+            .release_recovery(&BeadId::from("needle-raced"), &raced)
+            .await
+            .unwrap();
+        assert_eq!(outcome, RecoveryReleaseOutcome::Conflict);
+
+        let requests = runner.requests();
+        assert_eq!(requests.len(), 2, "a conflict must not be retried");
+        assert_eq!(
+            requests[0].arguments(),
+            [
+                "release",
+                "needle-abandoned",
+                "--if-revision",
+                "42",
+                "--fencing-token",
+                "7"
+            ]
+        );
+        assert_eq!(
+            requests[1].arguments(),
+            [
+                "release",
+                "needle-raced",
+                "--if-revision",
+                "12",
+                "--fencing-token",
+                "7"
+            ],
+            "recovery must use its observed token, not the owner-token cache"
+        );
+
+        let unfenced = ClaimStatus {
+            status: BeadStatus::InProgress,
+            assignee: Some("dead-worker".to_string()),
+            revision: Some(42),
+            claim_epoch: None,
+        };
+        let error = store
+            .release_recovery(&BeadId::from("needle-unfenced"), &unfenced)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("observed claim epoch"));
+        assert_eq!(runner.requests().len(), 2, "no unfenced mutation is safe");
     }
 }
 

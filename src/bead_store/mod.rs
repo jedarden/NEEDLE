@@ -30,7 +30,7 @@ use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 
 use crate::process_guard::ProcessGuardSync;
-use crate::types::{Bead, BeadId, BeadStatus, ClaimResult};
+use crate::types::{Bead, BeadId, BeadStatus, ClaimResult, ClaimStatus};
 use tracing::{debug, warn};
 
 // Re-export the implementations so consumers don't need to change their imports
@@ -1321,6 +1321,19 @@ pub struct RepairReport {
     pub fixed: Vec<String>,
 }
 
+/// Result of conditionally releasing a claim observed by a recovery process.
+///
+/// Recovery is deliberately distinct from an owner releasing its own claim:
+/// the caller did not acquire the fencing token and must never adopt a newer
+/// token after losing a race.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryReleaseOutcome {
+    /// The exact claim described by the caller was released.
+    Released,
+    /// The claim changed before the conditional release committed.
+    Conflict,
+}
+
 // ─── NewChild ─────────────────────────────────────────────────────────────────
 
 /// A child bead to create during an atomic split (see [`BeadStore::split_bead`]).
@@ -1494,6 +1507,25 @@ pub trait BeadStore: Send + Sync {
 
     /// Release a claimed bead back to open (e.g., after agent failure).
     async fn release(&self, id: &BeadId) -> Result<()>;
+
+    /// Release an abandoned claim only if it still matches an observed live
+    /// claim state.
+    ///
+    /// Backends with revision and fencing support must override this method
+    /// with an atomic compare-and-release. The default keeps older stores and
+    /// test doubles compatible, but can only provide a best-effort preflight
+    /// comparison before their ordinary release operation.
+    async fn release_recovery(
+        &self,
+        id: &BeadId,
+        expected: &ClaimStatus,
+    ) -> Result<RecoveryReleaseOutcome> {
+        if self.claim_status(id).await? != *expected {
+            return Ok(RecoveryReleaseOutcome::Conflict);
+        }
+        self.release(id).await?;
+        Ok(RecoveryReleaseOutcome::Released)
+    }
 
     /// Quarantine a bead by setting status=blocked (e.g., after it exceeds the
     /// consecutive-failure threshold in `OutcomeConfig::quarantine_after_failures`).

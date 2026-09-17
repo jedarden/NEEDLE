@@ -373,7 +373,8 @@ fn allowed_placeholders(operation: &str) -> &'static [&'static str] {
         "ready" => &["limit", "assignee"],
         "list_all" => &["limit"],
         "show" | "labels" => &["id"],
-        "release" | "block" | "clear_assignee" | "reopen" => &["id", "fencing_token"],
+        "release" => &["id", "if_revision", "fencing_token"],
+        "block" | "clear_assignee" | "reopen" => &["id", "fencing_token"],
         "claim" => &["id", "actor"],
         "claim_auto" => &["actor", "model", "harness", "harness_version"],
         "label_add" | "label_remove" => &["id", "label"],
@@ -607,7 +608,14 @@ fn builtin_bead_rs() -> BeadBackend {
     operations.insert(
         "release".into(),
         operation(
-            &["release", "{id}", "--fencing-token", "{fencing_token}"],
+            &[
+                "release",
+                "{id}",
+                "--if-revision",
+                "{if_revision}",
+                "--fencing-token",
+                "{fencing_token}",
+            ],
             None,
             None,
         ),
@@ -1128,6 +1136,10 @@ mod tests {
         assert_eq!(allowed_placeholders("ready"), &["limit", "assignee"][..]);
         assert_eq!(allowed_placeholders("show"), &["id"][..]);
         assert_eq!(allowed_placeholders("claim"), &["id", "actor"][..]);
+        assert_eq!(
+            allowed_placeholders("release"),
+            &["id", "if_revision", "fencing_token"][..]
+        );
         assert_eq!(
             allowed_placeholders("claim_auto"),
             &["actor", "model", "harness", "harness_version"][..]

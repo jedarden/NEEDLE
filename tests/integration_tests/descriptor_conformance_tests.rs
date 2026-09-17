@@ -220,7 +220,14 @@ async fn bead_rs_release_uses_native_release_subcommand() {
 
     assert_eq!(
         release.argv,
-        ["release", "{id}", "--fencing-token", "{fencing_token}"]
+        [
+            "release",
+            "{id}",
+            "--if-revision",
+            "{if_revision}",
+            "--fencing-token",
+            "{fencing_token}"
+        ]
     );
     assert!(release.strategy.is_none());
 }
