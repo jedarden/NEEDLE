@@ -108,7 +108,9 @@ version = 1
 # +4 circuit-breaker contracts (needle-f74d0110): Forgejo status mapping and
 # repository parsing, fake red/green policy admission, and P0 fix-bead
 # creation/deduplication. These are in-process and belong in the unit tier.
-max_tests = 3835
+# +3 status/doctor dependency-graph contracts (needle-e896b565): transitive
+# pinning, ladder snapshot, and workspace graph metric coverage.
+max_tests = 3838
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
@@ -143,7 +145,9 @@ contract = 67
 # The acceptance command is the focused dedicated harness.
 # +10 N-T52 state-directory isolation contracts (needle-e8f408e1).
 # +1 heartbeat cleanup removal-failure contract (needle-7721ee7d).
-e2e = 800
+# +2 status/doctor process contracts (needle-e896b565): oversized-root doctor
+# exit and transitive status reporting.
+e2e = 802
 soak = 0
 fuzz = 0
 
@@ -153,7 +157,9 @@ path = "tests/integration_spawn.rs"
 tier = "e2e"
 # +1 N-T46 decomposed row keeps real gate results (needle-16657d72).
 # +1 heartbeat cleanup removal-failure contract (needle-7721ee7d).
-max_tests = 399
+# +2 status/doctor integration contracts (needle-e896b565): oversized-root
+# doctor exit and root-to-C transitive pinning.
+max_tests = 401
 owner = "component:process-integration"
 
 [[harness]]

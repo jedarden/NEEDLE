@@ -8,7 +8,7 @@
 //!
 //! Depends on: `worker`, `config`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -26,7 +26,7 @@ use crate::log_prune;
 use crate::rate_limit::RateLimiter;
 use crate::registry::{Registry, WorkerEntry};
 use crate::telemetry::{self, EventKind, Telemetry};
-use crate::types::IdleAction;
+use crate::types::{Bead, BeadStatus, IdleAction};
 use crate::upgrade;
 use crate::worker::Worker;
 
@@ -176,6 +176,10 @@ pub enum CliCommand {
         /// Show cooldown state for idle-time strands (reflect, weave, pulse, unravel).
         #[arg(long)]
         idle_strands: bool,
+
+        /// Show the escalation-ladder histogram for every workspace.
+        #[arg(long)]
+        ladder: bool,
     },
 
     /// View and query telemetry logs.
@@ -610,7 +614,8 @@ pub fn run() -> Result<()> {
             since,
             until,
             idle_strands,
-        } => cmd_status(format, by_worker, cost, since, until, idle_strands),
+            ladder,
+        } => cmd_status(format, by_worker, cost, since, until, idle_strands, ladder),
         CliCommand::Logs {
             follow,
             filter,
@@ -3470,6 +3475,7 @@ fn cmd_status(
     since: Option<String>,
     until: Option<String>,
     idle_strands: bool,
+    ladder: bool,
 ) -> Result<()> {
     let config = ConfigLoader::load_global()?;
     // Every state view below — registry, heartbeats, gate health, ledger
@@ -3548,6 +3554,7 @@ fn cmd_status(
         Duration::from_secs(config.health.heartbeat_ttl_secs),
     );
     let circuit_statuses = collect_circuit_statuses(&config, &workers);
+    let graph_statuses = collect_workspace_graph_statuses(&config, &workers)?;
 
     match format {
         ListFormat::Table => {
@@ -3561,6 +3568,8 @@ fn cmd_status(
                 println!("  Unregistered workers: {} (WARN)", unregistered.len());
             }
             println!();
+
+            print_workspace_graph_statuses(&graph_statuses, ladder);
 
             if !workspace_capacity.is_empty() {
                 println!("Workspace Worker Capacity:");
@@ -3737,6 +3746,10 @@ fn cmd_status(
                 "registered_workers": registered_count,
                 "discovered_workers": discovered_count,
                 "total_beads_processed": total_beads,
+                "workspaces": graph_statuses
+                    .iter()
+                    .map(workspace_graph_status_json)
+                    .collect::<Vec<_>>(),
                 "unregistered_workers": unregistered.len(),
                 "workspace_capacity": workspace_capacity.iter().map(|capacity| {
                     serde_json::json!({
@@ -5241,6 +5254,80 @@ fn doctor_result_for_permanent_deferred_labels(beads: &[crate::types::Bead]) -> 
     .with_fix("bead label remove <ID> --label deferred")
 }
 
+/// Report dependency-tree pressure from the same complete inventory used by
+/// `needle status`. A large root remains a WARN for operator readability, but
+/// it is an exit-code failure because the workspace is not safely unattended.
+fn doctor_check_dependency_graph(store: &std::sync::Arc<dyn BeadStore>) -> CheckResult {
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            return CheckResult::warn(
+                "Dependency graph",
+                format!("unable to create runtime for graph inspection: {error}"),
+            )
+        }
+    };
+    let beads = match runtime.block_on(store.list_all()) {
+        Ok(beads) => beads,
+        Err(error) => {
+            return CheckResult::warn(
+                "Dependency graph",
+                format!("unable to inspect dependency graph: {error}"),
+            )
+        }
+    };
+    let metrics = analyze_workspace_graph(&beads);
+    let oversized: Vec<&BlockedRootStatus> = metrics
+        .roots
+        .iter()
+        .filter(|root| root.pinned > 25)
+        .collect();
+    let no_ready_work = metrics.open > 0 && metrics.ready == 0;
+
+    if oversized.is_empty() && !no_ready_work {
+        return CheckResult::pass(
+            "Dependency graph",
+            format!("{} open bead(s), {} ready", metrics.open, metrics.ready),
+        );
+    }
+
+    let mut details = Vec::new();
+    for root in oversized.iter().take(5) {
+        details.push(format!(
+            "root {} pins {} open descendant(s): {}",
+            root.id, root.pinned, root.title
+        ));
+    }
+    if no_ready_work {
+        details.push(format!(
+            "ready=0 with {} open bead(s); dependency or ladder holds require attention",
+            metrics.open
+        ));
+    }
+
+    CheckResult::warn(
+        "Dependency graph",
+        format!(
+            "{} open bead(s), {} ready, {} root(s) pin more than 25",
+            metrics.open,
+            metrics.ready,
+            oversized.len()
+        ),
+    )
+    .with_detail(details)
+}
+
+fn dependency_graph_requires_exit(results: &[CheckResult]) -> bool {
+    results.iter().any(|result| {
+        result.name == "Dependency graph"
+            && result.status == CheckStatus::Warn
+            && result
+                .detail
+                .iter()
+                .any(|line| line.contains("pins ") && line.contains("open descendant(s)"))
+    })
+}
+
 fn doctor_check_bead_backend(config: &Config) -> CheckResult {
     let (backend, path, source) = match crate::config::resolve_bead_cli(&config.bead_cli) {
         Ok(resolved) => resolved,
@@ -5938,6 +6025,7 @@ fn cmd_doctor(repair: bool, workspace: Option<PathBuf>, json: bool) -> Result<()
             &config.bead_cli,
         ));
         results.push(doctor_check_permanent_deferred_labels(&store));
+        results.push(doctor_check_dependency_graph(&store));
     }
 
     // Worker registry
@@ -6004,7 +6092,11 @@ fn cmd_doctor(repair: bool, workspace: Option<PathBuf>, json: bool) -> Result<()
                 "warn": warns,
                 "fail": fails,
             },
-            "exit_code": if fails > 0 { 1 } else { 0 }
+            "exit_code": if fails > 0 || dependency_graph_requires_exit(&results) {
+                1
+            } else {
+                0
+            }
         });
         println!("{json_output}");
     } else {
@@ -6039,7 +6131,7 @@ fn cmd_doctor(repair: bool, workspace: Option<PathBuf>, json: bool) -> Result<()
     }
 
     // Exit with code 1 if any checks failed.
-    if fails > 0 {
+    if fails > 0 || dependency_graph_requires_exit(&results) {
         std::process::exit(1);
     }
 
@@ -6380,6 +6472,342 @@ fn print_query_stats_table(stats: &telemetry::AggregateStats) {
 
 // Status helpers
 // ──────────────────────────────────────────────────────────────────────────────
+
+/// A bead that keeps other open beads from reaching the ready frontier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BlockedRootStatus {
+    id: String,
+    title: String,
+    pinned: usize,
+}
+
+/// The graph and ladder facts reported for one workspace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceGraphMetrics {
+    open: usize,
+    ready: usize,
+    human: usize,
+    quarantine_rounds: BTreeMap<u32, usize>,
+    roots: Vec<BlockedRootStatus>,
+    ladder: [usize; 5],
+}
+
+/// A status row remains visible even when one workspace cannot be opened. A
+/// fleet status command should identify the unavailable workspace rather than
+/// dropping it from the report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WorkspaceGraphStatus {
+    workspace: String,
+    metrics: Option<WorkspaceGraphMetrics>,
+    error: Option<String>,
+}
+
+/// Compute the transitive open-bead descendants of every bead from a complete
+/// `list_all` projection. Both dependency directions are accepted because
+/// older backends enrich one direction while bead-rs returns lean edges.
+fn analyze_workspace_graph(beads: &[Bead]) -> WorkspaceGraphMetrics {
+    let now = Utc::now();
+    let open_ids: HashSet<String> = beads
+        .iter()
+        .filter(|bead| bead.status == BeadStatus::Open)
+        .map(|bead| bead.id.to_string())
+        .collect();
+    let mut children: HashMap<String, HashSet<String>> = HashMap::new();
+
+    for bead in beads {
+        let bead_id = bead.id.to_string();
+        for dependency in &bead.dependencies {
+            let blocker = dependency.id.to_string();
+            if open_ids.contains(&blocker) && open_ids.contains(&bead_id) {
+                children.entry(blocker).or_default().insert(bead_id.clone());
+            }
+        }
+        for dependent in &bead.dependents {
+            let child = dependent.id.to_string();
+            if open_ids.contains(&bead_id) && open_ids.contains(&child) {
+                children.entry(bead_id.clone()).or_default().insert(child);
+            }
+        }
+    }
+
+    let mut pinned = HashMap::<String, usize>::new();
+    for id in &open_ids {
+        let mut descendants = HashSet::new();
+        collect_open_descendants(id, &children, &mut descendants, &mut HashSet::new());
+        if !descendants.is_empty() {
+            pinned.insert(id.clone(), descendants.len());
+        }
+    }
+
+    let mut roots: Vec<BlockedRootStatus> = beads
+        .iter()
+        .filter_map(|bead| {
+            let count = pinned.get(&bead.id.to_string()).copied()?;
+            Some(BlockedRootStatus {
+                id: bead.id.to_string(),
+                title: bead.title.clone(),
+                pinned: count,
+            })
+        })
+        .collect();
+    roots.sort_by(|left, right| right.pinned.cmp(&left.pinned).then(left.id.cmp(&right.id)));
+
+    let mut quarantine_rounds = BTreeMap::new();
+    let mut human = 0;
+    let mut ladder = [0usize; 5];
+    let mut ready = 0;
+
+    for bead in beads.iter().filter(|bead| bead.status == BeadStatus::Open) {
+        let has_open_blocker = bead
+            .dependencies
+            .iter()
+            .any(|dependency| open_ids.contains(&dependency.id.to_string()));
+        let is_human = bead
+            .labels
+            .iter()
+            .any(|label| label.trim().eq_ignore_ascii_case("human"));
+        let is_quarantined = bead
+            .labels
+            .iter()
+            .any(|label| label.trim().eq_ignore_ascii_case("quarantined"));
+        let quarantine_round = crate::bead_store::quarantine_round(bead);
+        if is_quarantined || quarantine_round.is_some() {
+            *quarantine_rounds
+                .entry(quarantine_round.unwrap_or(0))
+                .or_insert(0) += 1;
+        }
+        if is_human {
+            human += 1;
+        }
+
+        let held = is_human
+            || bead.labels.iter().any(|label| {
+                matches!(
+                    label.trim().to_ascii_lowercase().as_str(),
+                    "deferred" | "blocked" | "escalation" | "manual_blocked" | "manual-blocked"
+                )
+            })
+            || crate::bead_store::active_quarantine_until(bead, now).is_some()
+            || crate::deferral::active_until(bead, now).is_some();
+        if !has_open_blocker && !held {
+            ready += 1;
+        }
+
+        let rung = if is_human {
+            5
+        } else if crate::bead_store::awaiting_analysis_dispatch(bead, now) {
+            4
+        } else if is_quarantined || quarantine_round.is_some() {
+            3
+        } else if bead.labels.iter().any(|label| {
+            matches!(
+                label.trim(),
+                "split-child" | "mitosis-child" | "decomposition-child"
+            )
+        }) {
+            2
+        } else {
+            1
+        };
+        ladder[rung - 1] += 1;
+    }
+
+    WorkspaceGraphMetrics {
+        open: open_ids.len(),
+        ready,
+        human,
+        quarantine_rounds,
+        roots,
+        ladder,
+    }
+}
+
+fn collect_open_descendants(
+    id: &str,
+    children: &HashMap<String, HashSet<String>>,
+    descendants: &mut HashSet<String>,
+    visiting: &mut HashSet<String>,
+) {
+    if !visiting.insert(id.to_string()) {
+        return;
+    }
+
+    if let Some(children_of_id) = children.get(id) {
+        for descendant in children_of_id {
+            if descendants.insert(descendant.clone()) {
+                collect_open_descendants(descendant, children, descendants, visiting);
+            }
+        }
+    }
+    visiting.remove(id);
+}
+
+fn status_workspaces(config: &Config, workers: &[WorkerEntry]) -> Vec<PathBuf> {
+    let mut workspaces = vec![config.workspace.default.clone()];
+    let configured = &config.strands.explore.workspaces;
+    if configured.is_empty() {
+        if let Ok(entries) = std::fs::read_dir(&config.strands.explore.workspace_root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() && path.join(".beads").is_dir() {
+                    workspaces.push(path);
+                }
+            }
+        }
+    } else {
+        workspaces.extend(configured.iter().cloned());
+    }
+    workspaces.extend(workers.iter().map(|worker| worker.workspace.clone()));
+    workspaces.sort_by_key(|path| path.display().to_string());
+    workspaces.dedup();
+    workspaces
+}
+
+fn collect_workspace_graph_statuses(
+    config: &Config,
+    workers: &[WorkerEntry],
+) -> Result<Vec<WorkspaceGraphStatus>> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to create tokio runtime for workspace status")?;
+
+    Ok(status_workspaces(config, workers)
+        .into_iter()
+        .map(|workspace| {
+            let display = workspace.display().to_string();
+            let result = crate::bead_store::discover_default(
+                workspace.clone(),
+                None,
+                Some("needle".to_string()),
+                Some(env!("CARGO_PKG_VERSION").to_string()),
+            )
+            .and_then(|store| {
+                runtime
+                    .block_on(store.list_all())
+                    .map(|beads| analyze_workspace_graph(&beads))
+            });
+            match result {
+                Ok(metrics) => WorkspaceGraphStatus {
+                    workspace: display,
+                    metrics: Some(metrics),
+                    error: None,
+                },
+                Err(error) => WorkspaceGraphStatus {
+                    workspace: display,
+                    metrics: None,
+                    error: Some(format!("{error:#}")),
+                },
+            }
+        })
+        .collect())
+}
+
+fn workspace_graph_status_json(status: &WorkspaceGraphStatus) -> serde_json::Value {
+    let Some(metrics) = &status.metrics else {
+        return serde_json::json!({
+            "workspace": status.workspace,
+            "error": status.error,
+        });
+    };
+    serde_json::json!({
+        "workspace": status.workspace,
+        "open": metrics.open,
+        "ready": metrics.ready,
+        "human": metrics.human,
+        "quarantined": metrics.quarantine_rounds.iter().map(|(round, count)| {
+            (format!("round_{round}"), *count)
+        }).collect::<BTreeMap<_, _>>(),
+        "top_roots": metrics.roots.iter().take(5).map(|root| serde_json::json!({
+            "id": root.id,
+            "title": root.title,
+            "pinned": root.pinned,
+        })).collect::<Vec<_>>(),
+        "ladder": {
+            "rung_1_retry": metrics.ladder[0],
+            "rung_2_decompose": metrics.ladder[1],
+            "rung_3_quarantine": metrics.ladder[2],
+            "rung_4_reanalyze": metrics.ladder[3],
+            "rung_5_human": metrics.ladder[4],
+        },
+    })
+}
+
+fn format_quarantine_rounds(rounds: &BTreeMap<u32, usize>) -> String {
+    if rounds.is_empty() {
+        return "-".to_string();
+    }
+    rounds
+        .iter()
+        .map(|(round, count)| format!("r{round}={count}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn print_workspace_graph_statuses(statuses: &[WorkspaceGraphStatus], ladder: bool) {
+    println!("Workspace Dependency Health:");
+    println!(
+        "{:<42} {:>6} {:>6} {:>6} {:<18}",
+        "WORKSPACE", "OPEN", "READY", "HUMAN", "QUARANTINED"
+    );
+    println!("{}", "-".repeat(84));
+    for status in statuses {
+        let workspace = if status.workspace.len() > 40 {
+            format!("...{}", &status.workspace[status.workspace.len() - 37..])
+        } else {
+            status.workspace.clone()
+        };
+        match &status.metrics {
+            Some(metrics) => println!(
+                "{workspace:<42} {:>6} {:>6} {:>6} {:<18}",
+                metrics.open,
+                metrics.ready,
+                metrics.human,
+                format_quarantine_rounds(&metrics.quarantine_rounds)
+            ),
+            None => println!("{workspace:<42} {:>6} {:>6} {:>6} ERROR", "-", "-", "-"),
+        }
+    }
+    println!();
+
+    println!("Top blocked roots (pinned open descendants):");
+    for status in statuses {
+        if let Some(metrics) = &status.metrics {
+            for root in metrics.roots.iter().take(5) {
+                println!("  {}  {} pinned  — {}", root.id, root.pinned, root.title);
+            }
+        }
+    }
+    if ladder {
+        println!();
+        println!("{}", render_ladder_histogram(statuses));
+    }
+    println!();
+}
+
+fn render_ladder_histogram(statuses: &[WorkspaceGraphStatus]) -> String {
+    let mut output = String::from("Escalation Ladder Histogram\n");
+    output.push_str(
+        "WORKSPACE                                  R1 RETRY  R2 DECOMPOSE  R3 QUARANTINE  R4 RE-ANALYZE  R5 HUMAN\n",
+    );
+    output.push_str(
+        "---------------------------------------------------------------------------------------------------------\n",
+    );
+    for status in statuses {
+        if let Some(metrics) = &status.metrics {
+            output.push_str(&format!(
+                "{:<42} {:>8} {:>13} {:>14} {:>14} {:>8}\n",
+                status.workspace,
+                metrics.ladder[0],
+                metrics.ladder[1],
+                metrics.ladder[2],
+                metrics.ladder[3],
+                metrics.ladder[4]
+            ));
+        }
+    }
+    output.trim_end().to_string()
+}
 
 /// One workspace's live build circuit state for `needle status`.
 struct CircuitStatusRow {
@@ -8343,6 +8771,81 @@ mod tests {
     fn cli_parses_status_json() {
         let cli = Cli::try_parse_from(["needle", "status", "--format", "json"]);
         assert!(cli.is_ok(), "needle status --format json should parse");
+    }
+
+    #[test]
+    fn cli_parses_status_ladder() {
+        let cli = Cli::try_parse_from(["needle", "status", "--ladder"]);
+        assert!(cli.is_ok(), "needle status --ladder should parse");
+        let Ok(Cli {
+            command: CliCommand::Status { ladder, .. },
+        }) = cli
+        else {
+            panic!("expected status command");
+        };
+        assert!(ladder);
+    }
+
+    fn graph_test_bead(id: &str, dependencies: &[&str], labels: &[&str]) -> Bead {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "title": id,
+            "description": null,
+            "priority": 2,
+            "status": "open",
+            "assignee": null,
+            "labels": labels,
+            "source_repo": "/tmp/status-graph-test",
+            "dependencies": dependencies.iter().map(|dependency| serde_json::json!({
+                "id": dependency,
+                "dependency_type": "blocks"
+            })).collect::<Vec<_>>(),
+            "dependents": [],
+            "comments": [],
+            "created_at": "2026-09-01T00:00:00Z",
+            "updated_at": "2026-09-01T00:00:00Z"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn dependency_graph_counts_transitive_pinned_descendants() {
+        // root -> A -> B -> C means each right-hand bead depends on the
+        // blocker to its left.
+        let beads = vec![
+            graph_test_bead("root", &[], &[]),
+            graph_test_bead("A", &["root"], &[]),
+            graph_test_bead("B", &["A"], &[]),
+            graph_test_bead("C", &["B"], &[]),
+        ];
+
+        let metrics = analyze_workspace_graph(&beads);
+        assert_eq!(metrics.roots[0].id, "root");
+        assert_eq!(metrics.roots[0].pinned, 3);
+        assert_eq!(metrics.ready, 1);
+    }
+
+    #[test]
+    fn status_ladder_output_matches_snapshot() {
+        let beads = vec![
+            graph_test_bead("root", &[], &["quarantined", "quarantine-round:1"]),
+            graph_test_bead("A", &["root"], &["split-child"]),
+            graph_test_bead("B", &["A"], &["human"]),
+            graph_test_bead("C", &["B"], &[]),
+        ];
+        let statuses = vec![WorkspaceGraphStatus {
+            workspace: "/fixture/status".to_string(),
+            metrics: Some(analyze_workspace_graph(&beads)),
+            error: None,
+        }];
+
+        assert_eq!(
+            render_ladder_histogram(&statuses),
+            "Escalation Ladder Histogram\n\
+WORKSPACE                                  R1 RETRY  R2 DECOMPOSE  R3 QUARANTINE  R4 RE-ANALYZE  R5 HUMAN\n\
+---------------------------------------------------------------------------------------------------------\n\
+/fixture/status                                   1             1              1              0        1"
+        );
     }
 
     #[test]

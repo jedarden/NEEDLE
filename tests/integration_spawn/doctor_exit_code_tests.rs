@@ -117,6 +117,139 @@ fn doctor_exits_zero_when_healthy() {
 }
 
 #[test]
+fn doctor_exits_nonzero_when_one_root_pins_more_than_twenty_five_beads() {
+    let fixture = IsolatedChildEnv::new();
+    let workspace = fixture.path().join("large-dependency-tree");
+    fs::create_dir_all(&workspace).unwrap();
+    if !init_bead_workspace(&fixture, &workspace) {
+        return;
+    }
+
+    let create = |title: &str| {
+        fixture
+            .command("bead")
+            .args(["create", "--title", title, "--priority", "2"])
+            .current_dir(&workspace)
+            .output()
+            .expect("bead create should run")
+    };
+    let root_output = create("blocked-tree-root");
+    assert!(root_output.status.success(), "root create failed");
+    let root = String::from_utf8_lossy(&root_output.stdout)
+        .trim()
+        .to_string();
+    assert!(!root.is_empty(), "root create returned no id");
+
+    for index in 0..26 {
+        let child_output = create(&format!("blocked-tree-child-{index}"));
+        assert!(child_output.status.success(), "child create failed");
+        let child = String::from_utf8_lossy(&child_output.stdout)
+            .trim()
+            .to_string();
+        let dependency_output = fixture
+            .command("bead")
+            .args(["dep", "add", &child, &root])
+            .current_dir(&workspace)
+            .output()
+            .expect("bead dep add should run");
+        assert!(
+            dependency_output.status.success(),
+            "dependency creation failed: {}",
+            String::from_utf8_lossy(&dependency_output.stderr)
+        );
+    }
+
+    let doctor = fixture
+        .needle()
+        .args(["doctor", "--workspace"])
+        .arg(&workspace)
+        .output()
+        .expect("needle doctor should run");
+    let stdout = String::from_utf8_lossy(&doctor.stdout);
+    assert_eq!(doctor.status.code(), Some(1), "doctor output:\n{stdout}");
+    assert!(
+        stdout.contains("WARN") && stdout.contains("Dependency graph"),
+        "doctor should warn about the oversized root:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("pins 26 open descendant(s)"),
+        "doctor should name the pinned count:\n{stdout}"
+    );
+}
+
+#[test]
+fn status_reports_three_transitive_pinned_descendants() {
+    let fixture = IsolatedChildEnv::new();
+    let workspace = fixture.path().join("status-dependency-tree");
+    fs::create_dir_all(&workspace).unwrap();
+    if !init_bead_workspace(&fixture, &workspace) {
+        return;
+    }
+    fs::write(
+        fixture.path().join(".config/needle/config.yaml"),
+        format!("workspace:\n  default: {}\n", workspace.display()),
+    )
+    .unwrap();
+
+    let create = |title: &str| {
+        let output = fixture
+            .command("bead")
+            .args(["create", "--title", title, "--priority", "2"])
+            .current_dir(&workspace)
+            .output()
+            .expect("bead create should run");
+        assert!(output.status.success(), "bead create failed");
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+    let root = create("root");
+    let mut blocker = root.clone();
+    for title in ["A", "B", "C"] {
+        let child = create(title);
+        let dependency_output = fixture
+            .command("bead")
+            .args(["dep", "add", &child, &blocker])
+            .current_dir(&workspace)
+            .output()
+            .expect("bead dep add should run");
+        assert!(
+            dependency_output.status.success(),
+            "dependency creation failed"
+        );
+        blocker = child;
+    }
+
+    let status = fixture
+        .needle()
+        .args(["status", "--format", "json", "--ladder"])
+        .output()
+        .expect("needle status should run");
+    assert!(
+        status.status.success(),
+        "status failed: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let document: serde_json::Value =
+        serde_json::from_slice(&status.stdout).unwrap_or_else(|error| {
+            panic!(
+                "status --format json must emit one document ({error}):\n{}",
+                String::from_utf8_lossy(&status.stdout)
+            )
+        });
+    let workspace_row = document["workspaces"]
+        .as_array()
+        .and_then(|rows| {
+            rows.iter()
+                .find(|row| row["workspace"] == workspace.display().to_string())
+        })
+        .expect("status should report the fixture workspace");
+    let root_row = workspace_row["top_roots"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|row| row["id"] == root))
+        .expect("status should report the root");
+    assert_eq!(root_row["pinned"], 3);
+}
+
+#[test]
 fn doctor_repair_follows_same_exit_code_rules() {
     let fixture = IsolatedChildEnv::new();
     let workspace = create_test_workspace(fixture.path(), "another-fake-backend-67890");
