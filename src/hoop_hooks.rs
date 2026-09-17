@@ -417,4 +417,147 @@ mod tests {
         assert_eq!(lines[2]["state"], "knot");
         assert_eq!(lines[2]["reason"], "strands exhausted");
     }
+
+    /// Capture `tracing` output written through the default subscriber.
+    ///
+    /// Same shape as the log-capture helper used by the `health` module's
+    /// `cleanup_heartbeat_file` error tests.
+    #[derive(Clone, Default)]
+    struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    struct CapturedLogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLogWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+        type Writer = CapturedLogWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            CapturedLogWriter(self.0.clone())
+        }
+    }
+
+    fn captured_logs_subscriber(captured: &CapturedLogs) -> impl tracing::Subscriber {
+        tracing_subscriber::fmt()
+            .with_writer(captured.clone())
+            .with_ansi(false)
+            .without_time()
+            .finish()
+    }
+
+    /// Test that a removal failure is handled best-effort and logged.
+    ///
+    /// Error-handling contract of `cleanup_heartbeat_file` when `remove_file`
+    /// fails with something other than `NotFound`:
+    /// - must not panic and must not return `Err` (best-effort: a failed
+    ///   cleanup never disrupts shutdown)
+    /// - must log the failure at WARN level so it stays visible
+    ///
+    /// A directory at the heartbeat path makes `remove_file` fail with
+    /// `IsADirectory` (not `NotFound`), exercising the non-fatal error branch.
+    /// Unlike a permission-based simulation this works even when tests run as
+    /// root, so the branch is always covered.
+    #[test]
+    fn cleanup_heartbeat_file_removal_failure_is_best_effort_and_logged() {
+        let captured = CapturedLogs::default();
+
+        tracing::subscriber::with_default(captured_logs_subscriber(&captured), || {
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("heartbeat.json");
+            std::fs::create_dir(&path).unwrap();
+            assert!(path.exists(), "heartbeat path should exist before cleanup");
+
+            let result = cleanup_heartbeat_file(&path);
+
+            assert!(
+                result.is_ok(),
+                "cleanup must return Ok(()) even when removal fails (best-effort), got: {result:?}"
+            );
+            assert!(
+                path.exists(),
+                "directory should still exist after failed cleanup"
+            );
+
+            let logs = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+            assert!(
+                logs.contains("failed to remove heartbeat file during cleanup"),
+                "warning should be logged when removal fails. Got logs: {logs}"
+            );
+            assert!(
+                logs.contains("WARN"),
+                "failure should be logged at WARN level. Got logs: {logs}"
+            );
+        });
+    }
+
+    /// Test that a permission error is handled best-effort and logged.
+    ///
+    /// Same contract as
+    /// [`cleanup_heartbeat_file_removal_failure_is_best_effort_and_logged`],
+    /// exercised through a real permission failure: the heartbeat file exists
+    /// but its parent directory is write-protected, so `remove_file` fails
+    /// with `PermissionDenied`.
+    ///
+    /// Skipped when running as root (root bypasses permission bits), matching
+    /// the guard on the `health` module's permission-denied test.
+    #[test]
+    fn cleanup_heartbeat_file_permission_error_is_best_effort_and_logged() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = TempDir::new().unwrap();
+        let parent = dir.path().join("no-write-dir");
+        std::fs::create_dir_all(&parent).unwrap();
+        let path = parent.join("heartbeat.json");
+        std::fs::write(&path, b"test data").unwrap();
+        assert!(path.exists(), "heartbeat file should exist before cleanup");
+
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        // Verify the directory is actually unwritable. When running as root,
+        // 0o555 doesn't block writes, so skip instead of failing.
+        let probe = parent.join(".write-probe");
+        let unwritable = std::fs::write(&probe, b"x").is_err();
+        let _ = std::fs::remove_file(&probe);
+        if !unwritable {
+            let _ = std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755));
+            return;
+        }
+
+        let captured = CapturedLogs::default();
+
+        tracing::subscriber::with_default(captured_logs_subscriber(&captured), || {
+            let result = cleanup_heartbeat_file(&path);
+
+            // Restore permissions so the TempDir can be cleaned up.
+            let _ = std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755));
+
+            assert!(
+                result.is_ok(),
+                "cleanup must return Ok(()) even when permission is denied (best-effort), got: {result:?}"
+            );
+            assert!(
+                path.exists(),
+                "file should still exist after failed cleanup"
+            );
+
+            let logs = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+            assert!(
+                logs.contains("failed to remove heartbeat file during cleanup"),
+                "warning should be logged when permission is denied. Got logs: {logs}"
+            );
+            assert!(
+                logs.contains("WARN"),
+                "failure should be logged at WARN level. Got logs: {logs}"
+            );
+        });
+    }
 }
