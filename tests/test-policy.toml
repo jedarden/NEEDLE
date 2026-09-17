@@ -108,7 +108,7 @@ version = 1
 # +4 circuit-breaker contracts (needle-f74d0110): Forgejo status mapping and
 # repository parsing, fake red/green policy admission, and P0 fix-bead
 # creation/deduplication. These are in-process and belong in the unit tier.
-max_tests = 3823
+max_tests = 3835
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

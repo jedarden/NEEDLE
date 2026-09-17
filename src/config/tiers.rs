@@ -457,6 +457,9 @@ static TIER_TABLE: &[(&str, ReloadTier)] = &[
     ("gates", ReloadTier::Rebuild),
     ("validation.outcome_timeout_seconds", ReloadTier::Rebuild),
     ("validation.stderr_cap_bytes", ReloadTier::Rebuild),
+    // Host-level default for the built-in fallback gate; a per-workspace
+    // `.needle.yaml` override is resolved at dispatch time, not reloaded.
+    ("validation.fallback_gate", ReloadTier::Rebuild),
     ("validation.default_gates.enabled", ReloadTier::Rebuild),
     ("validation.default_gates.rust", ReloadTier::Rebuild),
     ("validation.default_gates.go", ReloadTier::Rebuild),

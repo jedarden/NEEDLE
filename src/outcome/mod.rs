@@ -930,6 +930,7 @@ impl OutcomeHandler {
             gates: mut workspace_gates,
             verification: workspace_verification,
             declared,
+            fallback_gate: workspace_fallback_gate,
         } = crate::config::gates_for_workspace(&bead.workspace).with_context(|| {
             format!(
                 "failed to load validation gates from the bead's workspace config {}",
@@ -977,6 +978,29 @@ impl OutcomeHandler {
                 );
                 return Ok((true, None));
             }
+            // needle-66b015d6 part 3: the workspace's own
+            // `validation.fallback_gate` decides whether the built-in gate is
+            // armed; absent falls back to the host-level default, which is
+            // armed. The decision is logged on every dispatch so the ledger's
+            // silence for a gate-less workspace is always explainable from the
+            // logs: armed means the built-in gate ran, opted out means the
+            // workspace asked NEEDLE not to.
+            let fallback_armed =
+                workspace_fallback_gate.unwrap_or(self.config.validation.fallback_gate);
+            if !fallback_armed {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    workspace = %bead.workspace.display(),
+                    "validation.fallback_gate is false — built-in fallback gate opted out; \
+                     the dispatch is judged on the agent's exit code alone"
+                );
+                return Ok((true, None));
+            }
+            tracing::info!(
+                bead_id = %bead.id,
+                workspace = %bead.workspace.display(),
+                "bead's workspace declares no gates — built-in fallback gate armed"
+            );
             // Nothing opted out and no language default applied — the
             // workspace's own files still pick a verifier (needle-66b015d6
             // part 2): run the built-in fallback gate in the clean extraction
@@ -6685,6 +6709,222 @@ mod tests {
         assert_eq!(result.bead_action, BeadAction::Closed);
         helper.sync().await;
         assert!(helper.events_by_type("gate.no_verifier").is_empty());
+    }
+
+    /// Run `future` under a capturing tracing subscriber and return its
+    /// output plus everything logged while it ran (needle-66b015d6 part 3:
+    /// the armed/opted-out fallback-gate decision must be visible in the
+    /// dispatch logs, so the wiring tests assert on the log lines).
+    ///
+    /// `#[tokio::test]` polls on the calling thread, so the thread-local
+    /// default subscriber covers everything the future logs.
+    async fn with_captured_logs<F>(future: F) -> (F::Output, String)
+    where
+        F: std::future::Future,
+    {
+        use std::io::Write;
+
+        #[derive(Clone, Default)]
+        struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+        struct CapturedLogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+        impl Write for CapturedLogWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+            type Writer = CapturedLogWriter;
+
+            fn make_writer(&'a self) -> Self::Writer {
+                CapturedLogWriter(self.0.clone())
+            }
+        }
+
+        let captured = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(captured.clone())
+            .with_ansi(false)
+            .without_time()
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let output = future.await;
+        drop(_guard);
+        let logs = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        (output, logs)
+    }
+
+    // ── validation.fallback_gate opt-out (needle-66b015d6 part 3) ──
+
+    #[tokio::test]
+    async fn fallback_gate_false_workspace_skips_builtin_gate_and_logs() {
+        // `validation.fallback_gate: false` opts a gate-less workspace out of
+        // the built-in gate. The fake runner has NO queued response, so a
+        // verifier that ran would bail and fail the dispatch — closing clean
+        // proves the gate never ran, and the captured log shows why.
+        let (_guard, _home) = isolated_home();
+        let helper = crate::telemetry::test_utils::TestHelper::new("fallback-gate-opt-out");
+        let runner = Arc::new(crate::process_runner::FakeProcessRunner::new());
+        let handler = fallback_handler_with(&helper, runner.clone(), None);
+
+        let workspace = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            workspace.path().join(".needle.yaml"),
+            "validation:\n  fallback_gate: false\n",
+        )
+        .unwrap();
+        std::fs::write(workspace.path().join("pyproject.toml"), "[project]\n").unwrap();
+        let mut bead = test_bead(BeadStatus::InProgress);
+        bead.workspace = workspace.path().to_path_buf();
+        let store = test_store(BeadStatus::Done);
+
+        let (result, logs) =
+            with_captured_logs(handler.handle(&store, &bead, &test_output(0), false)).await;
+        let result = result.unwrap();
+
+        assert_eq!(result.outcome, Outcome::Success);
+        assert_eq!(result.bead_action, BeadAction::Closed);
+        assert!(
+            runner.requests().is_empty(),
+            "the opted-out workspace must not run any fallback verifier"
+        );
+        helper.sync().await;
+        assert!(helper.events_by_type("gate.no_verifier").is_empty());
+        assert!(
+            logs.contains("validation.fallback_gate is false"),
+            "the opt-out must be visible in the dispatch logs. Got: {logs}"
+        );
+    }
+
+    #[tokio::test]
+    async fn host_fallback_gate_false_skips_builtin_gate_for_unguarded_workspaces() {
+        // The host-level default arms the gate; turning it off covers every
+        // workspace that does not set the key for itself.
+        let (_guard, _home) = isolated_home();
+        let helper = crate::telemetry::test_utils::TestHelper::new("fallback-host-off");
+        let runner = Arc::new(crate::process_runner::FakeProcessRunner::new());
+        let mut config = Config::default();
+        config.worker.enforce_shipped_work = false;
+        config.validation.fallback_gate = false;
+        let mut handler = OutcomeHandler::new(config, helper.telemetry().clone());
+        handler.fallback_verification =
+            fallback_verification::FallbackVerificationRuntime::for_tests(runner.clone(), None);
+
+        let workspace = tempfile::TempDir::new().unwrap();
+        std::fs::write(workspace.path().join("pyproject.toml"), "[project]\n").unwrap();
+        let mut bead = test_bead(BeadStatus::InProgress);
+        bead.workspace = workspace.path().to_path_buf();
+        let store = test_store(BeadStatus::Done);
+
+        let (result, logs) =
+            with_captured_logs(handler.handle(&store, &bead, &test_output(0), false)).await;
+        let result = result.unwrap();
+
+        assert_eq!(result.outcome, Outcome::Success);
+        assert_eq!(result.bead_action, BeadAction::Closed);
+        assert!(runner.requests().is_empty());
+        assert!(
+            logs.contains("validation.fallback_gate is false"),
+            "the host-level opt-out must log per dispatch. Got: {logs}"
+        );
+    }
+
+    #[tokio::test]
+    async fn fallback_gate_armed_is_logged_and_verifier_runs() {
+        // Absent key + default host config => the gate is armed: the dispatch
+        // log says so and the workspace's verifier actually runs.
+        let (_guard, _home) = isolated_home();
+        let helper = crate::telemetry::test_utils::TestHelper::new("fallback-armed-log");
+        let runner = Arc::new(crate::process_runner::FakeProcessRunner::new());
+        runner.push_output(crate::process_runner::ProcessOutput::success(
+            b"ok\n".to_vec(),
+        ));
+        let extraction = tempfile::tempdir().unwrap();
+        let handler = fallback_handler_with(
+            &helper,
+            runner.clone(),
+            Some(extraction.path().to_path_buf()),
+        );
+
+        let workspace = tempfile::TempDir::new().unwrap();
+        std::fs::write(workspace.path().join("pyproject.toml"), "[project]\n").unwrap();
+        let mut bead = test_bead(BeadStatus::InProgress);
+        bead.workspace = workspace.path().to_path_buf();
+        let store = test_store(BeadStatus::Done);
+
+        let (result, logs) =
+            with_captured_logs(handler.handle(&store, &bead, &test_output(0), false)).await;
+        let result = result.unwrap();
+
+        assert_eq!(result.outcome, Outcome::Success);
+        assert_eq!(result.bead_action, BeadAction::Closed);
+        assert_eq!(
+            runner.requests().len(),
+            1,
+            "the armed fallback gate must run the workspace's verifier"
+        );
+        assert!(
+            logs.contains("built-in fallback gate armed"),
+            "an armed gate must say so in the dispatch logs. Got: {logs}"
+        );
+        assert!(
+            !logs.contains("validation.fallback_gate is false"),
+            "an armed gate must not log an opt-out. Got: {logs}"
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_fallback_gate_true_beats_host_false() {
+        // Per-workspace resolution wins over the host default in both
+        // directions: a workspace that explicitly arms the gate keeps it
+        // even when the host turned it off.
+        let (_guard, _home) = isolated_home();
+        let helper = crate::telemetry::test_utils::TestHelper::new("fallback-ws-true");
+        let runner = Arc::new(crate::process_runner::FakeProcessRunner::new());
+        runner.push_output(crate::process_runner::ProcessOutput::success(
+            b"ok\n".to_vec(),
+        ));
+        let extraction = tempfile::tempdir().unwrap();
+        let mut config = Config::default();
+        config.worker.enforce_shipped_work = false;
+        config.validation.fallback_gate = false;
+        let mut handler = OutcomeHandler::new(config, helper.telemetry().clone());
+        handler.fallback_verification =
+            fallback_verification::FallbackVerificationRuntime::for_tests(
+                runner.clone(),
+                Some(extraction.path().to_path_buf()),
+            );
+
+        let workspace = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            workspace.path().join(".needle.yaml"),
+            "validation:\n  fallback_gate: true\n",
+        )
+        .unwrap();
+        std::fs::write(workspace.path().join("pyproject.toml"), "[project]\n").unwrap();
+        let mut bead = test_bead(BeadStatus::InProgress);
+        bead.workspace = workspace.path().to_path_buf();
+        let store = test_store(BeadStatus::Done);
+
+        let result = handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+
+        assert_eq!(result.outcome, Outcome::Success);
+        assert_eq!(result.bead_action, BeadAction::Closed);
+        assert_eq!(
+            runner.requests().len(),
+            1,
+            "an explicitly armed workspace must run the verifier despite the host default"
+        );
     }
 
     // ── timeout and resilience tests ──

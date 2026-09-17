@@ -111,6 +111,7 @@ This guide covers the most commonly used configuration options.
 - `verification` — Legacy gate commands; resolved the same per-workspace way
 - `validation.outcome_timeout_seconds` — Gate execution timeout
 - `validation.stderr_cap_bytes` — Stderr capture limit
+- `validation.fallback_gate` — Host-level default for the built-in fallback gate (default: armed/true); a workspace opts itself out with `validation.fallback_gate: false` in its own `.needle.yaml` (needle-66b015d6 part 3)
 
 **Attempt archive:**
 - `attempt_archive.*` — Per-attempt transcript/trace/prompt bundling to the local spool (all keys; default off)
@@ -1230,6 +1231,31 @@ validation:
   # Maximum bytes of gate command stderr captured on failure (default: 4096)
   stderr_cap_bytes: 4096
 ```
+
+### Fallback gate opt-out (needle-66b015d6 part 3)
+
+A workspace whose `.needle.yaml` declares no `gates:`/`verification:` and
+implies no language default is judged by the built-in fallback gate. The gate
+is armed by default so the ~60 workspaces with no `validation:` section are
+covered with no config change, and **every dispatch logs whether the gate was
+armed or opted out** — a `WARN` carrying `validation.fallback_gate is false`
+explains a gate-less close from the logs alone.
+
+A workspace opts itself out in its own `.needle.yaml` (resolved per
+bead-workspace at dispatch time, like `gates:`; a non-boolean value fails the
+config parse):
+
+```yaml
+# <workspace>/.needle.yaml
+validation:
+  fallback_gate: false   # skip the built-in gate for this workspace
+```
+
+The host-level `validation.fallback_gate` (global config) sets the default for
+workspaces that do not set the key; an explicit per-workspace value wins in
+either direction. `fallback_gate` is the only `validation` key a workspace may
+set — the rest of the section stays host-level and warns as non-overridable
+workspace config.
 
 ---
 

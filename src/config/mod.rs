@@ -1283,6 +1283,12 @@ pub struct GatesConfig {
     /// is the opt-out from the language default gate; a workspace that says
     /// nothing gets the default (plan section 4.4 step 6).
     pub declared: bool,
+    /// The workspace's own `validation.fallback_gate` value, when its
+    /// `.needle.yaml` sets one (needle-66b015d6 part 3). `None` — the
+    /// common case — defers to the worker's `validation.fallback_gate`
+    /// default, so the ~60 workspaces with no `validation:` section get
+    /// the built-in fallback gate with no config change.
+    pub fallback_gate: Option<bool>,
 }
 
 impl GatesConfig {
@@ -1334,6 +1340,9 @@ pub fn gates_for_workspace(workspace_root: &Path) -> Result<GatesConfig> {
         gates: overrides.gates.unwrap_or_default(),
         verification: overrides.verification.unwrap_or_default(),
         declared,
+        fallback_gate: overrides
+            .validation
+            .and_then(|validation| validation.fallback_gate),
     })
 }
 
@@ -3222,6 +3231,66 @@ path: /path with spaces/to/bead
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("invalid YAML in workspace config"));
+    }
+
+    // ── validation.fallback_gate resolution (needle-66b015d6 part 3) ──
+
+    #[test]
+    fn test_gates_for_workspace_fallback_gate_absent_is_none() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let ws_root = tmp_dir.path();
+
+        // No .needle.yaml at all.
+        let gates = gates_for_workspace(ws_root).unwrap();
+        assert_eq!(gates.fallback_gate, None);
+
+        // A .needle.yaml that says nothing about validation.
+        std::fs::write(ws_root.join(".needle.yaml"), "agent:\n  timeout: 99\n").unwrap();
+        let gates = gates_for_workspace(ws_root).unwrap();
+        assert_eq!(
+            gates.fallback_gate, None,
+            "absent key must defer to the host default, not read as armed or opted out"
+        );
+    }
+
+    #[test]
+    fn test_gates_for_workspace_fallback_gate_parses_explicit_values() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let ws_root = tmp_dir.path();
+
+        std::fs::write(
+            ws_root.join(".needle.yaml"),
+            "validation:\n  fallback_gate: false\n",
+        )
+        .unwrap();
+        let gates = gates_for_workspace(ws_root).unwrap();
+        assert_eq!(gates.fallback_gate, Some(false));
+
+        std::fs::write(
+            ws_root.join(".needle.yaml"),
+            "validation:\n  fallback_gate: true\n",
+        )
+        .unwrap();
+        let gates = gates_for_workspace(ws_root).unwrap();
+        assert_eq!(gates.fallback_gate, Some(true));
+    }
+
+    #[test]
+    fn test_gates_for_workspace_fallback_gate_rejects_non_boolean() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let ws_root = tmp_dir.path();
+
+        std::fs::write(
+            ws_root.join(".needle.yaml"),
+            "validation:\n  fallback_gate: maybe\n",
+        )
+        .unwrap();
+
+        let result = gates_for_workspace(ws_root);
+        assert!(
+            result.is_err(),
+            "a non-boolean validation.fallback_gate must fail the workspace config parse"
+        );
     }
 
     #[test]
@@ -6781,6 +6850,15 @@ pub struct ValidationConfig {
     #[serde(default = "ValidationConfig::default_stderr_cap_bytes")]
     pub stderr_cap_bytes: usize,
 
+    /// Whether the built-in fallback gate runs for a workspace that declares
+    /// no gates and implies no language default (needle-66b015d6 part 3).
+    /// This is the host-level default; a workspace opts itself out with
+    /// `validation.fallback_gate: false` in its own `.needle.yaml`, and the
+    /// opt-out is logged at every dispatch. Default true so workspaces with
+    /// no `validation:` section are covered with no config change.
+    #[serde(default = "ValidationConfig::default_fallback_gate")]
+    pub fallback_gate: bool,
+
     /// Language-default verification gate for workspaces that declare none
     /// (plan section 4.4 step 6).
     #[serde(default)]
@@ -6845,6 +6923,7 @@ impl Default for ValidationConfig {
         ValidationConfig {
             outcome_timeout_seconds: Self::default_outcome_timeout_seconds(),
             stderr_cap_bytes: Self::default_stderr_cap_bytes(),
+            fallback_gate: Self::default_fallback_gate(),
             default_gates: DefaultGatesConfig::default(),
         }
     }
@@ -6856,6 +6935,9 @@ impl ValidationConfig {
     }
     fn default_stderr_cap_bytes() -> usize {
         4096
+    }
+    fn default_fallback_gate() -> bool {
+        true
     }
 }
 
@@ -7199,6 +7281,27 @@ pub struct WorkspaceOverrides {
     /// Workspace-owned bead backend binding.
     #[serde(default)]
     pub bead_cli: Option<BeadCliConfig>,
+    /// Validation fields this workspace may set for itself. Only
+    /// `fallback_gate` is workspace-overridable (needle-66b015d6 part 3);
+    /// the rest of `validation` stays host-level.
+    #[serde(default)]
+    pub validation: Option<WorkspaceValidationOverrides>,
+}
+
+/// Validation fields a workspace may set in its own `.needle.yaml`.
+///
+/// `validation` as a whole is host-level (see `NON_OVERRIDABLE_KEYS`); this
+/// struct is the explicitly enumerated exception surface. A key that appears
+/// here is resolved per bead-workspace at dispatch time, exactly like
+/// `gates:` — never merged into the worker's startup config.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct WorkspaceValidationOverrides {
+    /// Opt the workspace out of the built-in fallback gate
+    /// (needle-66b015d6 part 3). Absent means the host-level
+    /// `validation.fallback_gate` default decides (true unless the operator
+    /// turned it off). A non-boolean value is rejected at parse.
+    #[serde(default)]
+    pub fallback_gate: Option<bool>,
 }
 
 /// Agent fields overridable at the workspace level.
@@ -7399,6 +7502,12 @@ impl AuditLoopConfig {
 ///
 /// Note: `workspace` is intentionally absent — `workspace.labels` IS overridable
 /// per-workspace. The path fields (`default`, `home`) are simply ignored if set.
+///
+/// `validation` stays listed even though `validation.fallback_gate` is now
+/// resolved per-workspace (needle-66b015d6 part 3): the listing governs the
+/// *config-merge* path, and only the granular check in
+/// `non_overridable_keys` exempts a section that carries nothing but the
+/// workspace-overridable sub-keys.
 const NON_OVERRIDABLE_KEYS: &[&str] = &[
     "worker",
     "limits",
@@ -7409,6 +7518,11 @@ const NON_OVERRIDABLE_KEYS: &[&str] = &[
     // The spool is a host resource; archiving is an operator decision per host.
     "attempt_archive",
 ];
+
+/// The `validation` sub-keys a workspace may set for itself. A `validation:`
+/// section carrying only these is workspace config, not a misplaced host
+/// setting; anything else under it still warns as non-overridable.
+const WORKSPACE_OVERRIDABLE_VALIDATION_KEYS: &[&str] = &["fallback_gate"];
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Top-level Config
@@ -8766,7 +8880,11 @@ impl ConfigLoader {
                 .keys()
                 .filter_map(|key| match key {
                     serde_yaml::Value::String(key)
-                        if NON_OVERRIDABLE_KEYS.contains(&key.as_str()) =>
+                        if NON_OVERRIDABLE_KEYS.contains(&key.as_str())
+                            && (key != "validation"
+                                || !Self::validation_section_is_workspace_overridable(
+                                    map.get(key).unwrap_or(&serde_yaml::Value::Null),
+                                )) =>
                     {
                         Some(key.clone())
                     }
@@ -8778,6 +8896,24 @@ impl ConfigLoader {
         keys.sort();
         keys.dedup();
         Ok(keys)
+    }
+
+    /// Whether a workspace's `validation:` section carries only the keys a
+    /// workspace may set for itself. `validation.fallback_gate` is resolved
+    /// per bead-workspace at dispatch time (needle-66b015d6 part 3), so a
+    /// section holding only that key is not "ignored"; anything else under
+    /// `validation` still is, and still warns.
+    fn validation_section_is_workspace_overridable(value: &serde_yaml::Value) -> bool {
+        match value {
+            serde_yaml::Value::Mapping(map) => map.keys().all(|key| {
+                matches!(
+                    key,
+                    serde_yaml::Value::String(key)
+                        if WORKSPACE_OVERRIDABLE_VALIDATION_KEYS.contains(&key.as_str())
+                )
+            }),
+            _ => false,
+        }
     }
 
     /// Apply workspace overrides to a config.
@@ -12534,9 +12670,67 @@ agent:
         assert_eq!(config.validation.stderr_cap_bytes, 4096);
     }
 
+    // ── validation.fallback_gate (needle-66b015d6 part 3) ──
+
+    #[test]
+    fn validation_fallback_gate_defaults_to_armed() {
+        // Absent key => true: the ~60 workspaces with no `validation:`
+        // section get the built-in fallback gate with no config change.
+        assert!(ValidationConfig::default().fallback_gate);
+        let yaml = "agent:\n  default: claude\n";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            config.validation.fallback_gate,
+            "a config without validation.fallback_gate must parse as armed"
+        );
+    }
+
+    #[test]
+    fn validation_fallback_gate_parses_explicit_values() {
+        let yaml = "validation:\n  fallback_gate: true\n";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.validation.fallback_gate);
+
+        let yaml = "validation:\n  fallback_gate: false\n";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(!config.validation.fallback_gate);
+    }
+
+    #[test]
+    fn validation_fallback_gate_rejects_non_boolean() {
+        let yaml = "validation:\n  fallback_gate: \"sometimes\"\n";
+        let result: Result<Config, _> = serde_yaml::from_str(yaml);
+        assert!(
+            result.is_err(),
+            "a non-boolean fallback_gate must be rejected at parse, not coerced"
+        );
+    }
+
     #[test]
     fn validation_is_non_overridable_at_workspace_level() {
         assert!(NON_OVERRIDABLE_KEYS.contains(&"validation"));
+    }
+
+    #[test]
+    fn validation_section_of_only_fallback_gate_is_not_flagged_non_overridable() {
+        // `validation.fallback_gate` is a sanctioned per-workspace key, so a
+        // section carrying only it must not warn as an ignored host setting.
+        let yaml = "validation:\n  fallback_gate: false\n";
+        let keys = ConfigLoader::non_overridable_keys(yaml, Path::new("ws/.needle.yaml")).unwrap();
+        assert!(
+            !keys.contains(&"validation".to_string()),
+            "fallback_gate-only validation section wrongly flagged: {keys:?}"
+        );
+    }
+
+    #[test]
+    fn validation_section_with_host_keys_still_flags_non_overridable() {
+        let yaml = "validation:\n  fallback_gate: false\n  stderr_cap_bytes: 65536\n";
+        let keys = ConfigLoader::non_overridable_keys(yaml, Path::new("ws/.needle.yaml")).unwrap();
+        assert!(
+            keys.contains(&"validation".to_string()),
+            "host-level keys under validation: must still warn: {keys:?}"
+        );
     }
 
     // ── StopConfig tests (GitHub issues jedarden/NEEDLE#21) ──
