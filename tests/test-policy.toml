@@ -97,7 +97,15 @@ version = 1
 # brief path in the bead body, and one Pluck default-exclusion contract in
 # src/strand/pluck.rs. All pure or against a tempdir and an in-memory store.
 # Acceptance command: `cargo test --lib nt60_`.
-max_tests = 3814
+# +5 Phase 19.7 dependency cycle-breaking contracts (needle-af2bb4f0): the
+# A→B→C→A acceptance fixture (newest edge removed, both beads noted,
+# mend.cycle_broken telemetry), second-pass idempotence, the equal-timestamp
+# tie-break on the lexically largest blocked id, an acyclic-graph no-op, and
+# detect_cycles finding each distinct cycle. Private MendStrand helpers; the
+# explicit five-target boundary (tests/cargo-targets) makes the unit tier the
+# cheapest correct home; the acceptance command is
+# `cargo test --lib break_dependency_cycles`.
+max_tests = 3819
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

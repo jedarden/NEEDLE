@@ -2007,28 +2007,16 @@ impl MendStrand {
     ) -> Result<()> {
         let all_beads = store.list_all().await?;
 
-        // Build adjacency list: bead_id -> Vec<blocker_id>
-        let mut graph: std::collections::HashMap<BeadId, Vec<BeadId>> =
-            std::collections::HashMap::new();
-
         // Build a lookup for bead timestamps
         let mut bead_timestamps: std::collections::HashMap<BeadId, DateTime<Utc>> =
             std::collections::HashMap::new();
 
         for bead in &all_beads {
             bead_timestamps.insert(bead.id.clone(), bead.updated_at);
-            for dep in &bead.dependencies {
-                if dep.dependency_type == "blocks" {
-                    graph
-                        .entry(bead.id.clone())
-                        .or_default()
-                        .push(dep.id.clone());
-                }
-            }
         }
 
-        // Detect cycles using DFS
-        let cycles = detect_cycles(&graph);
+        // Detect cycles using DFS over the "blocks" graph (blocked → blocker)
+        let cycles = detect_cycles(&blocks_graph(&all_beads));
 
         if cycles.is_empty() {
             return Ok(());
@@ -2574,6 +2562,30 @@ impl super::Strand for MendStrand {
 // Helpers
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// Build the directed "blocks" graph from bead dependency records.
+///
+/// Each bead's `dependencies` lists its blockers (`BrDependency::id` carries
+/// the serde alias `blocker`), so every `blocks` record yields an edge
+/// blocked → blocker. Non-`blocks` records (e.g. `related`) carry no
+/// readiness semantics and are not graph edges.
+fn blocks_graph(all_beads: &[Bead]) -> std::collections::HashMap<BeadId, Vec<BeadId>> {
+    let mut graph: std::collections::HashMap<BeadId, Vec<BeadId>> =
+        std::collections::HashMap::new();
+
+    for bead in all_beads {
+        for dep in &bead.dependencies {
+            if dep.dependency_type == "blocks" {
+                graph
+                    .entry(bead.id.clone())
+                    .or_default()
+                    .push(dep.id.clone());
+            }
+        }
+    }
+
+    graph
+}
+
 /// Detect cycles in a dependency graph.
 ///
 /// Returns a list of cycles, where each cycle is a vector of bead IDs in order.
@@ -2584,7 +2596,13 @@ fn detect_cycles(graph: &std::collections::HashMap<BeadId, Vec<BeadId>>) -> Vec<
     let mut path = Vec::new();
     let mut path_set = std::collections::HashSet::new();
 
-    for node in graph.keys() {
+    // HashMap iteration order is randomized per process, and the DFS root
+    // order decides which back edges surface as cycles — iterate roots in
+    // lexicographic order so the same graph always yields the same cycles.
+    let mut roots: Vec<&BeadId> = graph.keys().collect();
+    roots.sort_by(|a, b| a.as_ref().cmp(b.as_ref()));
+
+    for node in roots {
         if !visited.contains(node) {
             dfs_cycle_detection(
                 node,
@@ -6255,25 +6273,45 @@ mod tests {
     /// Type alias for the removed dependencies tracking vector.
     type RemovedDeps = Arc<std::sync::Mutex<Vec<(BeadId, BeadId)>>>;
 
+    /// Type alias for the appended-notes tracking vector.
+    type AppendedNotes = Arc<std::sync::Mutex<Vec<(BeadId, String)>>>;
+
     /// Mock bead store that tracks remove_dependency calls.
+    ///
+    /// `remove_dependency` mutates the stored graph (so a second pass observes
+    /// the post-removal state, like the real backend) and `append_notes`
+    /// records `(bead_id, note)` pairs verbatim.
     struct DepTrackingMockStore {
-        all_beads: Vec<Bead>,
+        all_beads: Mutex<Vec<Bead>>,
         /// Records (blocked_id, blocker_id) pairs for remove_dependency calls.
         removed_deps: RemovedDeps,
+        /// Records (bead_id, note text) pairs for append_notes calls.
+        appended_notes: AppendedNotes,
         /// If true, remove_dependency fails.
         removal_fails: bool,
     }
 
     impl DepTrackingMockStore {
         fn new(beads: Vec<Bead>) -> (Self, RemovedDeps) {
+            let (store, removed_deps, _appended_notes) = Self::new_with_notes(beads);
+            (store, removed_deps)
+        }
+
+        /// Stateful variant that also exposes append_notes recording —
+        /// cycle-breaking tests assert on both the mutated graph and the
+        /// note text written to each bead.
+        fn new_with_notes(beads: Vec<Bead>) -> (Self, RemovedDeps, AppendedNotes) {
             let removed_deps = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let appended_notes = Arc::new(std::sync::Mutex::new(Vec::new()));
             (
                 DepTrackingMockStore {
-                    all_beads: beads,
+                    all_beads: Mutex::new(beads),
                     removed_deps: removed_deps.clone(),
+                    appended_notes: appended_notes.clone(),
                     removal_fails: false,
                 },
                 removed_deps,
+                appended_notes,
             )
         }
 
@@ -6289,7 +6327,7 @@ mod tests {
             Ok(vec![])
         }
         async fn list_all(&self) -> Result<Vec<Bead>> {
-            Ok(self.all_beads.clone())
+            Ok(self.all_beads.lock().unwrap().clone())
         }
         async fn show(&self, _id: &BeadId) -> Result<Bead> {
             anyhow::bail!("not implemented in mock")
@@ -6351,6 +6389,27 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((blocked_id.clone(), blocker_id.clone()));
+            // Mutate the stored graph so a re-list observes the removal,
+            // mirroring the real backend. The blocked bead carries the
+            // dependency record, so the edge must exist there.
+            let mut beads = self.all_beads.lock().unwrap();
+            let bead = beads
+                .iter_mut()
+                .find(|bead| &bead.id == blocked_id)
+                .ok_or_else(|| anyhow::anyhow!("bead not found: {}", blocked_id))?;
+            match bead.dependencies.iter().position(|d| &d.id == blocker_id) {
+                Some(pos) => {
+                    bead.dependencies.remove(pos);
+                    Ok(())
+                }
+                None => anyhow::bail!("dependency edge not found: {} → {}", blocked_id, blocker_id),
+            }
+        }
+        async fn append_notes(&self, id: &BeadId, note: &str) -> Result<()> {
+            self.appended_notes
+                .lock()
+                .unwrap()
+                .push((id.clone(), note.to_string()));
             Ok(())
         }
         async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
@@ -6541,6 +6600,235 @@ mod tests {
 
         // Verify summary was not updated.
         assert_eq!(summary.deps_cleaned, 0);
+    }
+
+    // ── Dependency cycle breaking tests (Step 0.5, Phase 19.7) ──────────────────
+
+    /// Open bead with `blocks` dependencies and an `updated_at` set to
+    /// 2026-01-01T`hour`:00:00Z — the hour orders the records by age.
+    fn make_cycle_bead(id: &str, hour: u32, deps: Vec<BrDependency>) -> Bead {
+        let mut bead = make_bead_with_deps(id, BeadStatus::Open, deps);
+        bead.updated_at = Utc.with_ymd_and_hms(2026, 1, 1, hour, 0, 0).unwrap();
+        bead
+    }
+
+    /// The canonical A→B→C→A cycle (A blocked by B, B by C, C by A) with
+    /// per-bead update hours.
+    fn cycle_beads_with_hours(a: u32, b: u32, c: u32) -> Vec<Bead> {
+        vec![
+            make_cycle_bead("needle-a", a, vec![make_dep("needle-b", "open", "blocks")]),
+            make_cycle_bead("needle-b", b, vec![make_dep("needle-c", "open", "blocks")]),
+            make_cycle_bead("needle-c", c, vec![make_dep("needle-a", "open", "blocks")]),
+        ]
+    }
+
+    /// MendStrand wired to a MemorySink telemetry so emitted EventKinds are
+    /// assertable.
+    fn mend_with_telemetry(telemetry: Telemetry) -> MendStrand {
+        MendStrand::new(
+            MendConfig::default(),
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            Duration::from_secs(300),
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            "claude-test-worker".to_string(),
+            Registry::new(tempfile::tempdir().unwrap().path()),
+            telemetry,
+            PathBuf::from("/tmp/needle-test-logs"),
+            0,
+            PathBuf::from("/tmp/test-traces"),
+            30,
+            7,
+            PathBuf::from("/tmp/test-workspace"),
+            80,
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            LimitsConfig::default(),
+        )
+    }
+
+    /// Cycles remaining in the store's live `blocks` graph — the in-process
+    /// equivalent of `bead doctor`'s dependency_graph check.
+    async fn remaining_blocks_graph_cycles(store: &dyn BeadStore) -> Vec<Vec<BeadId>> {
+        let all = store.list_all().await.unwrap();
+        detect_cycles(&blocks_graph(&all))
+    }
+
+    #[tokio::test]
+    async fn break_dependency_cycles_removes_newest_edge_and_notes_both_beads() {
+        // A→B→C→A with A updated most recently (hour 3): the dependency
+        // record on A (A ← B) is the newest, so exactly that edge is removed.
+        let (store, removed_deps, appended_notes) =
+            DepTrackingMockStore::new_with_notes(cycle_beads_with_hours(3, 2, 1));
+        let (telemetry, events) = make_test_telemetry();
+        let mend = mend_with_telemetry(telemetry);
+        let mut summary = MendSummary::default();
+
+        mend.break_dependency_cycles(&store, &mut summary)
+            .await
+            .unwrap();
+
+        // Exactly one edge removed: needle-a ← needle-b.
+        let removed = removed_deps.lock().unwrap();
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].0, BeadId::from("needle-a"));
+        assert_eq!(removed[0].1, BeadId::from("needle-b"));
+
+        // Both endpoint beads carry the Phase 19.7 note.
+        let notes = appended_notes.lock().unwrap();
+        assert_eq!(notes.len(), 2);
+        let expected = "cycle broken (Phase 19.7): removed needle-a ← needle-b";
+        assert!(notes.iter().all(|(id, text)| {
+            text == expected && (id.as_ref() == "needle-a" || id.as_ref() == "needle-b")
+        }));
+
+        // Summary and telemetry agree.
+        assert_eq!(summary.cycles_broken, 1);
+        // Wait for background task to process telemetry events.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        let events = events.lock().unwrap();
+        let cycle_events: Vec<_> = events
+            .iter()
+            .filter(|event| event.event_type == "mend.cycle_broken")
+            .collect();
+        assert_eq!(cycle_events.len(), 1);
+        assert_eq!(
+            cycle_events[0].data["blocked_id"].as_str(),
+            Some("needle-a")
+        );
+        assert_eq!(
+            cycle_events[0].data["blocker_id"].as_str(),
+            Some("needle-b")
+        );
+        assert_eq!(cycle_events[0].data["cycle_len"].as_u64(), Some(3));
+
+        // The store graph itself was mutated: needle-a's record is gone,
+        // needle-b's edge to needle-c survives, and no cycle remains.
+        let all = store.list_all().await.unwrap();
+        let a = all
+            .iter()
+            .find(|bead| bead.id.as_ref() == "needle-a")
+            .unwrap();
+        assert!(a.dependencies.is_empty());
+        let b = all
+            .iter()
+            .find(|bead| bead.id.as_ref() == "needle-b")
+            .unwrap();
+        assert_eq!(b.dependencies.len(), 1);
+        assert!(remaining_blocks_graph_cycles(&store).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn break_dependency_cycles_is_idempotent() {
+        // A second pass over the mutated store must find an acyclic graph:
+        // no further removals, notes, or summary counts.
+        let (store, removed_deps, appended_notes) =
+            DepTrackingMockStore::new_with_notes(cycle_beads_with_hours(3, 2, 1));
+        let (telemetry, _events) = make_test_telemetry();
+        let mend = mend_with_telemetry(telemetry);
+
+        let mut first = MendSummary::default();
+        mend.break_dependency_cycles(&store, &mut first)
+            .await
+            .unwrap();
+        assert_eq!(first.cycles_broken, 1);
+
+        let mut second = MendSummary::default();
+        mend.break_dependency_cycles(&store, &mut second)
+            .await
+            .unwrap();
+        assert_eq!(second.cycles_broken, 0);
+        assert_eq!(removed_deps.lock().unwrap().len(), 1);
+        assert_eq!(appended_notes.lock().unwrap().len(), 2);
+        assert!(remaining_blocks_graph_cycles(&store).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn break_dependency_cycles_tie_breaks_on_lexically_largest_blocked_id() {
+        // Equal updated_at on every bead: the tie-break must pick the edge
+        // whose blocked id is lexically largest — needle-c ← needle-a.
+        let (store, removed_deps, _appended_notes) =
+            DepTrackingMockStore::new_with_notes(cycle_beads_with_hours(2, 2, 2));
+        let (telemetry, _events) = make_test_telemetry();
+        let mend = mend_with_telemetry(telemetry);
+        let mut summary = MendSummary::default();
+
+        mend.break_dependency_cycles(&store, &mut summary)
+            .await
+            .unwrap();
+
+        let removed = removed_deps.lock().unwrap();
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].0, BeadId::from("needle-c"));
+        assert_eq!(removed[0].1, BeadId::from("needle-a"));
+    }
+
+    #[tokio::test]
+    async fn break_dependency_cycles_leaves_acyclic_graph_untouched() {
+        // A ← B ← C chain plus a non-blocks record: no cycle, so no removal,
+        // no note, no telemetry, and every original edge survives.
+        let beads = vec![
+            make_cycle_bead("needle-a", 1, vec![make_dep("needle-b", "open", "blocks")]),
+            make_cycle_bead(
+                "needle-b",
+                1,
+                vec![
+                    make_dep("needle-c", "open", "blocks"),
+                    make_dep("needle-x", "open", "related"),
+                ],
+            ),
+            make_cycle_bead("needle-c", 1, vec![]),
+        ];
+        let (store, removed_deps, appended_notes) = DepTrackingMockStore::new_with_notes(beads);
+        let (telemetry, events) = make_test_telemetry();
+        let mend = mend_with_telemetry(telemetry);
+        let mut summary = MendSummary::default();
+
+        mend.break_dependency_cycles(&store, &mut summary)
+            .await
+            .unwrap();
+
+        assert_eq!(summary.cycles_broken, 0);
+        assert!(removed_deps.lock().unwrap().is_empty());
+        assert!(appended_notes.lock().unwrap().is_empty());
+        // Wait for background task to process telemetry events before
+        // asserting none were emitted.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        assert!(events
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|event| event.event_type != "mend.cycle_broken"));
+
+        let all = store.list_all().await.unwrap();
+        let b = all
+            .iter()
+            .find(|bead| bead.id.as_ref() == "needle-b")
+            .unwrap();
+        assert_eq!(b.dependencies.len(), 2);
+    }
+
+    #[test]
+    fn detect_cycles_finds_each_distinct_cycle() {
+        // Two disjoint 2-cycles and an isolated node: both cycles surface
+        // regardless of HashMap iteration order (roots are sorted).
+        let graph: std::collections::HashMap<BeadId, Vec<BeadId>> = [
+            ("needle-a", vec!["needle-b"]),
+            ("needle-b", vec!["needle-a"]),
+            ("needle-c", vec!["needle-d"]),
+            ("needle-d", vec!["needle-c"]),
+            ("needle-e", vec![]),
+        ]
+        .into_iter()
+        .map(|(k, v)| {
+            (
+                BeadId::from(k),
+                v.into_iter().map(BeadId::from).collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+
+        let cycles = detect_cycles(&graph);
+        assert_eq!(cycles.len(), 2);
+        assert!(cycles.iter().all(|cycle| cycle.len() == 2));
     }
 
     // ── Telemetry event tests ───────────────────────────────────────────────────
