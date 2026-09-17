@@ -1155,17 +1155,25 @@ pub enum EventKind {
     /// An adapter's recent non-gate failures are dominated by one fingerprint
     /// across several beads (N-T23): the provider/adapter is degraded, and
     /// failures carrying that fingerprint are infrastructure, not the bead's.
+    /// `provider` is the health key the degradation is filed under and
+    /// `adapters` carries every adapter known to share it (N-T51) — the
+    /// adapter's own name when it declares no provider.
     ProviderDegraded {
         adapter: String,
+        provider: String,
+        adapters: Vec<String>,
         fingerprint: String,
         summary: String,
         failures: u32,
         distinct_beads: u32,
         bead_id: BeadId,
     },
-    /// A degraded adapter produced a verified success again.
+    /// A degraded adapter produced a verified success again. `provider` and
+    /// `adapters` identify the health group the success restored (N-T51).
     ProviderRestored {
         adapter: String,
+        provider: String,
+        adapters: Vec<String>,
         bead_id: BeadId,
         degraded_duration_secs: u64,
     },
@@ -2898,6 +2906,8 @@ impl EventKind {
             }
             EventKind::ProviderDegraded {
                 adapter,
+                provider,
+                adapters,
                 fingerprint,
                 summary,
                 failures,
@@ -2906,6 +2916,8 @@ impl EventKind {
             } => {
                 serde_json::json!({
                     "adapter": adapter,
+                    "provider": provider,
+                    "adapters": adapters,
                     "fingerprint": fingerprint,
                     "summary": summary,
                     "failures": failures,
@@ -2915,11 +2927,15 @@ impl EventKind {
             }
             EventKind::ProviderRestored {
                 adapter,
+                provider,
+                adapters,
                 bead_id,
                 degraded_duration_secs,
             } => {
                 serde_json::json!({
                     "adapter": adapter,
+                    "provider": provider,
+                    "adapters": adapters,
                     "bead_id": bead_id.as_ref(),
                     "degraded_duration_secs": degraded_duration_secs,
                 })

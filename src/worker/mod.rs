@@ -2499,17 +2499,24 @@ impl Worker {
         if !self.config.workspace_health.adapter_health_enabled {
             return;
         }
-        let adapter = self
-            .resolve_adapter()
-            .map(|a| a.name)
-            .unwrap_or_else(|_| self.config.agent.default.clone());
+        // The keying decision lives with the recording paths in outcome: the
+        // provider only names the health key when the configuration turns
+        // gateway keying on, so the hold reads the same file the failures
+        // land in. An unresolvable adapter cannot know a provider and keeps
+        // its per-adapter key.
+        let provider_keyed = self.config.workspace_health.provider_keyed_health;
+        let (adapter, provider) = match self.resolve_adapter() {
+            Ok(a) => (a.name, provider_keyed.then(|| a.provider.clone()).flatten()),
+            Err(_) => (self.config.agent.default.clone(), None),
+        };
         let cooldown = self.config.workspace_health.adapter_degraded_cooldown_secs;
         let mut announced = false;
         loop {
             if self.shutdown.load(Ordering::SeqCst) {
                 return;
             }
-            let state = match crate::provider_health::degraded_state(&adapter) {
+            let state = match crate::provider_health::degraded_state(&adapter, provider.as_deref())
+            {
                 Ok(Some(state)) => state,
                 Ok(None) => return,
                 Err(e) => {
@@ -7559,11 +7566,28 @@ impl Worker {
             }
         }
         let cache = self.ledger_snapshot();
+        // N-T51: a degraded provider takes its whole adapter group out of
+        // routing at once. The degraded states are expanded against the
+        // dispatcher's configured adapters, so every adapter behind a
+        // degraded gateway — and only those — is excluded from the choice.
+        let provider_keyed = self.config.workspace_health.provider_keyed_health;
+        let known = self.dispatcher.adapter_names().into_iter().map(|name| {
+            let provider = provider_keyed
+                .then(|| {
+                    self.dispatcher
+                        .adapter(name)
+                        .and_then(|a| a.provider.clone())
+                })
+                .flatten();
+            (name.to_string(), provider)
+        });
         let degraded: std::collections::HashSet<String> =
-            crate::provider_health::degraded_adapters()
-                .into_iter()
-                .map(|s| s.adapter)
-                .collect();
+            crate::provider_health::expand_degraded_adapters(
+                &crate::provider_health::degraded_adapters(),
+                known,
+            )
+            .into_iter()
+            .collect();
         let frozen = if is_workspace_unset(&self.current_workspace) {
             None
         } else {

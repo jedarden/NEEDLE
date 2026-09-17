@@ -118,14 +118,14 @@ else
 fi
 
 # ── needle_slow_targets ──────────────────────────────────────────────────────
-assert_lines "target table lists eleven names" 11 needle_slow_targets
+assert_lines "target table lists twelve names" 12 needle_slow_targets
 
 # Exact set, asserted literally: a renamed or dropped target must be caught
 # here rather than silently accepted by every consumer of the table.
-WANT_TABLE="$(printf '%s\n' lib integration_spawn integration_tests p2_integration_tests p3_integration_tests real_br_integration_tests escalation_ladder nt45_failure_evidence_capture nt50_exception_lessons nt52_state_dir_isolation installer)"
+WANT_TABLE="$(printf '%s\n' lib integration_spawn integration_tests p2_integration_tests p3_integration_tests real_br_integration_tests escalation_ladder nt45_failure_evidence_capture nt50_exception_lessons nt51_gateway_health nt52_state_dir_isolation installer)"
 GOT_TABLE="$(needle_slow_targets)"
 if [[ "$GOT_TABLE" == "$WANT_TABLE" ]]; then
-  ok "target table is exactly the ten cargo targets plus installer"
+  ok "target table is exactly the eleven cargo targets plus installer"
 else
   bad "target table drifted (got: $(echo "$GOT_TABLE" | tr '\n' ' '))"
 fi
@@ -140,6 +140,7 @@ assert_selector "real_br selects its target" "--test real_br_integration_tests" 
 assert_selector "escalation ladder selects its target" "--test escalation_ladder" escalation_ladder
 assert_selector "N-T45 selects its target" "--test nt45_failure_evidence_capture" nt45_failure_evidence_capture
 assert_selector "N-T50 selects its target" "--test nt50_exception_lessons" nt50_exception_lessons
+assert_selector "N-T51 selects its target" "--test nt51_gateway_health" nt51_gateway_health
 assert_selector "N-T52 selects its target" "--test nt52_state_dir_isolation" nt52_state_dir_isolation
 assert_fails "unknown target has no selector" needle_cargo_selector nope
 assert_fails "installer is not a cargo target" needle_cargo_selector installer
@@ -154,13 +155,14 @@ assert_nextest_filter "real_br has an exact nextest binary ID" "binary_id(=needl
 assert_nextest_filter "escalation ladder has an exact nextest binary ID" "binary_id(=needle::escalation_ladder)" escalation_ladder
 assert_nextest_filter "N-T45 has an exact nextest binary ID" "binary_id(=needle::nt45_failure_evidence_capture)" nt45_failure_evidence_capture
 assert_nextest_filter "N-T50 has an exact nextest binary ID" "binary_id(=needle::nt50_exception_lessons)" nt50_exception_lessons
+assert_nextest_filter "N-T51 has an exact nextest binary ID" "binary_id(=needle::nt51_gateway_health)" nt51_gateway_health
 assert_nextest_filter "N-T52 has an exact nextest binary ID" "binary_id(=needle::nt52_state_dir_isolation)" nt52_state_dir_isolation
 assert_fails "unknown target has no nextest filter" needle_nextest_filter nope
 assert_fails "installer has no nextest filter" needle_nextest_filter installer
 
 # ── selected_cargo_targets ───────────────────────────────────────────────────
 SLOW_TARGET=""
-assert_lines "default selection is all ten cargo targets" 10 selected_cargo_targets
+assert_lines "default selection is all eleven cargo targets" 11 selected_cargo_targets
 
 WANT_DEFAULT="$(needle_expected_slow_targets | grep -vx installer)"
 GOT_DEFAULT="$(selected_cargo_targets)"
@@ -180,7 +182,7 @@ if (
   needle_slow_targets() {
     printf '%s\n' lib integration_tests p2_integration_tests \
       p3_integration_tests real_br_integration_tests escalation_ladder \
-      nt45_failure_evidence_capture nt50_exception_lessons nt52_state_dir_isolation installer
+      nt45_failure_evidence_capture nt50_exception_lessons nt51_gateway_health nt52_state_dir_isolation installer
   }
   needle_validate_slow_target_coverage
 ) >/dev/null 2>&1; then
@@ -272,10 +274,11 @@ WANT_HARNESSES="$(printf '%s\t%s\n' \
   escalation_ladder tests/escalation_ladder.rs \
   nt45_failure_evidence_capture tests/nt45_failure_evidence_capture.rs \
   nt50_exception_lessons tests/nt50_exception_lessons.rs \
+  nt51_gateway_health tests/nt51_gateway_health.rs \
   nt52_state_dir_isolation tests/nt52_state_dir_isolation.rs)"
 GOT_HARNESSES="$(needle_declared_test_harnesses)"
 if [[ "$GOT_HARNESSES" == "$WANT_HARNESSES" ]]; then
-  ok "Clippy reads the nine declared test harness roots from Cargo.toml"
+  ok "Clippy reads the ten declared test harness roots from Cargo.toml"
 else
   bad "declared test harness parsing drifted (got: $(echo "$GOT_HARNESSES" | tr '\n' ' '))"
 fi

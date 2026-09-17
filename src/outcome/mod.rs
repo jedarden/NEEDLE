@@ -1155,10 +1155,17 @@ impl OutcomeHandler {
         // bead's result — 341 claude-print watchdog kills on 2026-09-10 were
         // booked as bead failures before this existed.
         let attempt_context = self.peek_attempt_context();
+        let attempt_provider = attempt_context.provider.clone();
         let adapter_name = attempt_context.adapter;
         let attempt_actor = attempt_context.actor;
-        let adapter_judgement =
-            self.judge_adapter_health(&adapter_name, bead, &outcome, output, gate_report.as_ref());
+        let adapter_judgement = self.judge_adapter_health(
+            &adapter_name,
+            attempt_provider.as_deref(),
+            bead,
+            &outcome,
+            output,
+            gate_report.as_ref(),
+        );
         let infra_fingerprint = match &adapter_judgement {
             Some(AdapterJudgement::Infrastructure { fingerprint }) => Some(fingerprint.clone()),
             _ => None,
@@ -1260,7 +1267,7 @@ impl OutcomeHandler {
         );
 
         if matches!(outcome, Outcome::Success) {
-            self.note_adapter_success(&adapter_name, bead);
+            self.note_adapter_success(&adapter_name, attempt_provider.as_deref(), bead);
         }
 
         let (bead_action, telemetry_events) =
@@ -1588,6 +1595,7 @@ impl OutcomeHandler {
     fn judge_adapter_health(
         &self,
         adapter: &str,
+        provider: Option<&str>,
         bead: &Bead,
         outcome: &Outcome,
         output: &AgentOutcome,
@@ -1596,6 +1604,15 @@ impl OutcomeHandler {
         if !self.config.workspace_health.adapter_health_enabled || adapter.is_empty() {
             return None;
         }
+        // N-T51: key the health by the adapter's provider only once the
+        // configuration turns gateway keying on; until then the provider is
+        // dropped and every adapter keeps its own state.
+        let keyed_provider = self
+            .config
+            .workspace_health
+            .provider_keyed_health
+            .then_some(provider)
+            .flatten();
         let reason = match outcome {
             Outcome::Failure => {
                 if gate_report.is_some_and(|r| !r.all_passed) {
@@ -1617,6 +1634,7 @@ impl OutcomeHandler {
 
         match crate::provider_health::record_adapter_failure(
             adapter,
+            keyed_provider,
             bead.id.as_ref(),
             &reason,
             &self.config.workspace_health.detector_config(),
@@ -1638,9 +1656,29 @@ impl OutcomeHandler {
                         summary = %summary,
                         "adapter failure fingerprint dominates its window — provider degraded"
                     );
+                    let (provider_name, affected_adapters) =
+                        crate::provider_health::degraded_state(adapter, keyed_provider)
+                            .ok()
+                            .flatten()
+                            .map(|state| {
+                                let provider_name = state.health_key().to_string();
+                                let affected_adapters = self
+                                    .known_provider_adapters(&state)
+                                    .unwrap_or_else(|| state.affected_adapters());
+                                (provider_name, affected_adapters)
+                            })
+                            .unwrap_or_else(|| {
+                                (
+                                    crate::provider_health::resolve_key(keyed_provider, adapter)
+                                        .to_string(),
+                                    vec![adapter.to_string()],
+                                )
+                            });
                     let _ = self.telemetry.emit_try_lock(
                         EventKind::ProviderDegraded {
                             adapter: adapter.to_string(),
+                            provider: provider_name,
+                            adapters: affected_adapters,
                             fingerprint: fingerprint.clone(),
                             summary: summary.clone(),
                             failures: *failures as u32,
@@ -1670,12 +1708,44 @@ impl OutcomeHandler {
         }
     }
 
-    /// A verified success lifts the adapter's degradation (N-T23).
-    fn note_adapter_success(&self, adapter: &str, bead: &Bead) {
+    /// Resolve the configured adapter roster for a provider-health event.
+    /// The state file records members that have reported health, but a
+    /// degradation affects every configured adapter behind the gateway,
+    /// including siblings that have not failed yet. Loading the same built-in
+    /// plus user adapter set as the dispatcher keeps the event's affected list
+    /// complete; an unreadable adapter directory leaves the durable state
+    /// membership as a safe fallback.
+    fn known_provider_adapters(
+        &self,
+        state: &crate::provider_health::ProviderHealthState,
+    ) -> Option<Vec<String>> {
+        let adapters = crate::dispatch::load_adapters(
+            &self.config.agent.adapters_dir,
+            &crate::dispatch::builtin_adapters(),
+        )
+        .ok()?;
+        Some(crate::provider_health::expand_degraded_adapters(
+            std::slice::from_ref(state),
+            adapters
+                .into_values()
+                .map(|adapter| (adapter.name, adapter.provider)),
+        ))
+    }
+
+    /// A verified success lifts the adapter's degradation (N-T23) — and, with
+    /// gateway keying on, the degradation of every adapter behind the same
+    /// provider (N-T51).
+    fn note_adapter_success(&self, adapter: &str, provider: Option<&str>, bead: &Bead) {
         if !self.config.workspace_health.adapter_health_enabled || adapter.is_empty() {
             return;
         }
-        match crate::provider_health::record_adapter_success(adapter) {
+        let keyed_provider = self
+            .config
+            .workspace_health
+            .provider_keyed_health
+            .then_some(provider)
+            .flatten();
+        match crate::provider_health::record_adapter_success(adapter, keyed_provider) {
             Ok(Some(prior)) => {
                 tracing::info!(
                     adapter = %adapter,
@@ -1685,6 +1755,10 @@ impl OutcomeHandler {
                 let _ = self.telemetry.emit_try_lock(
                     EventKind::ProviderRestored {
                         adapter: adapter.to_string(),
+                        provider: prior.health_key().to_string(),
+                        adapters: self
+                            .known_provider_adapters(&prior)
+                            .unwrap_or_else(|| prior.affected_adapters()),
                         bead_id: bead.id.clone(),
                         degraded_duration_secs: prior.degraded_for_secs().unwrap_or(0),
                     },
@@ -5847,7 +5921,7 @@ mod tests {
             .filter(|a| matches!(a, StoreAction::AddLabel(_, l) if l.starts_with("failure-count:")))
             .count();
         assert_eq!(label_adds, 3, "{:?}", store.actions());
-        let state = crate::provider_health::degraded_state(&adapter)
+        let state = crate::provider_health::degraded_state(&adapter, None)
             .unwrap()
             .expect("adapter degraded");
         assert!(state.degraded_fingerprint.is_some());
@@ -5866,10 +5940,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ok.outcome, Outcome::Success);
-        assert!(crate::provider_health::degraded_state(&adapter)
+        assert!(crate::provider_health::degraded_state(&adapter, None)
             .unwrap()
             .is_none());
-        crate::provider_health::clear_state(&adapter).unwrap();
+        crate::provider_health::clear_state(&adapter, None).unwrap();
     }
 
     #[tokio::test]

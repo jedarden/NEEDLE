@@ -6677,6 +6677,20 @@ pub struct WorkspaceHealthConfig {
     /// A verified success on the adapter lifts the degradation immediately.
     #[serde(default = "WorkspaceHealthConfig::default_adapter_degraded_cooldown_secs")]
     pub adapter_degraded_cooldown_secs: u64,
+
+    /// Key provider health by the adapter's configured provider, not the
+    /// adapter (N-T51). When true, every adapter behind one provider — the
+    /// GLM adapters on `zai-proxy`, for instance — shares one degradation: a
+    /// storm on one trips the provider for all of them, their same-shaped
+    /// failures resolve as infrastructure together, a verified success on
+    /// any of them restores the group, and adapter-keyed state files from
+    /// before the flag was enabled migrate into the provider's file without
+    /// losing an active degradation. Adapters that declare no provider keep
+    /// their own state either way. Default: false — per-adapter keying, the
+    /// shipped N-T23 behavior — until the plan's activation order turns it
+    /// on.
+    #[serde(default)]
+    pub provider_keyed_health: bool,
 }
 
 impl Default for WorkspaceHealthConfig {
@@ -6689,6 +6703,7 @@ impl Default for WorkspaceHealthConfig {
             fingerprint_min_distinct_beads: Self::default_fingerprint_min_distinct_beads(),
             adapter_health_enabled: Self::default_adapter_health_enabled(),
             adapter_degraded_cooldown_secs: Self::default_adapter_degraded_cooldown_secs(),
+            provider_keyed_health: false,
         }
     }
 }

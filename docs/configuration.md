@@ -1122,6 +1122,18 @@ adapter lifts the degradation immediately. State lives in
 `~/.needle/state/provider-health/`; `needle stats --by adapter|model|workspace`
 shows the `INFRA` column these resolutions land in.
 
+`provider_keyed_health` (N-T51, default `false`) keys that state by the
+adapter's configured provider instead of the adapter: every adapter behind
+one gateway — the GLM adapters on `zai-proxy`, for instance — shares one
+degradation, so a storm on one trips the provider for all of them, their
+same-shaped failures resolve as infrastructure together, routing evidence
+excludes the whole group at once, and a verified success on any member
+restores it. The `provider.degraded`/`provider.restored` events carry the
+health key and the affected adapters either way. Adapters that declare no
+provider keep their own state under both settings, and adapter-keyed state
+files written before the flag was enabled migrate into the provider's file
+without losing an active degradation.
+
 ```yaml
 workspace_health:
   fingerprint_window_seconds: 7200      # sliding window for both detectors
@@ -1131,6 +1143,7 @@ workspace_health:
   fingerprint_min_distinct_beads: 3     # beads a fingerprint must span
   adapter_health_enabled: true          # N-T23 adapter detector
   adapter_degraded_cooldown_secs: 300   # claim hold after the last degraded failure
+  provider_keyed_health: false          # N-T51: one health per provider, off by default
 ```
 
 ---

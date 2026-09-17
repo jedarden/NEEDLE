@@ -97,7 +97,7 @@ version = 1
 # brief path in the bead body, and one Pluck default-exclusion contract in
 # src/strand/pluck.rs. All pure or against a tempdir and an in-memory store.
 # Acceptance command: `cargo test --lib nt60_`.
-max_tests = 3810
+max_tests = 3814
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
@@ -124,8 +124,10 @@ contract = 67
 # +4 bounded transcript/gate capture contracts, N-T45 (needle-ab3601e5).
 # +6 candidate-lesson contracts, N-T50 (needle-75368add); the acceptance
 # command is the focused dedicated harness.
+# +4 N-T51 gateway-health contracts exercise provider-keyed degradation and recovery.
+# The acceptance command is the focused dedicated harness.
 # +10 N-T52 state-directory isolation contracts (needle-e8f408e1).
-e2e = 789
+e2e = 793
 soak = 0
 fuzz = 0
 
@@ -188,6 +190,13 @@ path = "tests/nt50_exception_lessons.rs"
 tier = "e2e"
 max_tests = 6
 owner = "component:attempt-history"
+
+[[harness]]
+name = "nt51_gateway_health"
+path = "tests/nt51_gateway_health.rs"
+tier = "e2e"
+max_tests = 4
+owner = "component:provider-health"
 
 [[harness]]
 name = "nt52_state_dir_isolation"
