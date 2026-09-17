@@ -46,6 +46,9 @@ Additional fields are event-specific and documented per type below.
 ### Strand Evaluation
 - `strand.evaluated` — A strand evaluation completed
 - `strand.skipped` — A strand was skipped (e.g., due to config)
+- `strand.workspace_at_capacity` — A workspace was skipped because its
+  workspace-owned live-worker cap was reached; payload includes `workspace`,
+  `max_workers`, and `active_workers`
 - `strand.resolve.evaluated` — Resolve strand evaluation
 - `strand.pluck.no_candidate` — Pluck found no local candidate; diagnostic only, waterfall continues
 - `strand.knot.starvation_detected` — terminal starvation verdict after the full strand waterfall

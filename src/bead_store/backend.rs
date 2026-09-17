@@ -373,6 +373,7 @@ fn allowed_placeholders(operation: &str) -> &'static [&'static str] {
     match operation {
         "ready" => &["limit", "assignee"],
         "list_all" => &["limit"],
+        "list_in_progress" => &["limit"],
         "show" | "labels" => &["id"],
         "release" => &["id", "if_revision", "fencing_token"],
         "block" | "clear_assignee" | "reopen" => &["id", "fencing_token"],
@@ -574,6 +575,21 @@ fn builtin_bead_rs() -> BeadBackend {
         "list_all".into(),
         operation(
             &["list", "--json", "--limit", "{limit}"],
+            None,
+            Some(ParseShape::JsonLines),
+        ),
+    );
+    operations.insert(
+        "list_in_progress".into(),
+        operation(
+            &[
+                "list",
+                "--status",
+                "in_progress",
+                "--json",
+                "--limit",
+                "{limit}",
+            ],
             None,
             Some(ParseShape::JsonLines),
         ),

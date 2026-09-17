@@ -1190,6 +1190,12 @@ pub struct PluckStrand {
     circuit: Option<CircuitPolicy>,
     /// Workspace whose local queue Pluck is evaluating.
     circuit_workspace: Option<PathBuf>,
+    /// Home workspace used for workspace-owned worker-capacity admission.
+    workspace: Option<PathBuf>,
+    /// Shared heartbeat directory used to determine which assignees are live.
+    heartbeat_dir: Option<PathBuf>,
+    /// Freshness bound for heartbeat evidence used by capacity admission.
+    heartbeat_ttl: std::time::Duration,
 }
 
 impl PluckStrand {
@@ -1220,6 +1226,9 @@ impl PluckStrand {
             lane: None,
             circuit: None,
             circuit_workspace: None,
+            workspace: None,
+            heartbeat_dir: None,
+            heartbeat_ttl: std::time::Duration::from_secs(300),
         }
     }
 
@@ -1254,6 +1263,9 @@ impl PluckStrand {
             lane: None,
             circuit: None,
             circuit_workspace: None,
+            workspace: None,
+            heartbeat_dir: None,
+            heartbeat_ttl: std::time::Duration::from_secs(300),
         }
     }
 
@@ -1293,6 +1305,9 @@ impl PluckStrand {
             lane: None,
             circuit: None,
             circuit_workspace: None,
+            workspace: None,
+            heartbeat_dir: None,
+            heartbeat_ttl: std::time::Duration::from_secs(300),
         }
     }
 
@@ -1324,6 +1339,22 @@ impl PluckStrand {
     ) -> Self {
         self.circuit = Some(CircuitPolicy::new(checker, labels));
         self.circuit_workspace = Some(workspace);
+        self
+    }
+
+    /// Enable workspace-owned worker-capacity admission for this home queue.
+    ///
+    /// The cap itself is read from the workspace's `.needle.yaml` on each
+    /// evaluation, so a config change applies without rebuilding this strand.
+    pub fn with_workspace_capacity(
+        mut self,
+        workspace: PathBuf,
+        heartbeat_dir: PathBuf,
+        heartbeat_ttl: std::time::Duration,
+    ) -> Self {
+        self.workspace = Some(workspace);
+        self.heartbeat_dir = Some(heartbeat_dir);
+        self.heartbeat_ttl = heartbeat_ttl;
         self
     }
 
@@ -2068,6 +2099,49 @@ impl super::Strand for PluckStrand {
             return StrandResult::Skipped {
                 reason: "no_home_store".to_string(),
             };
+        }
+
+        // Capacity is checked immediately before the ready-queue work. A
+        // worker from another host can therefore occupy the final slot even
+        // when this process has a different host-local max_workers setting.
+        if let (Some(workspace), Some(heartbeat_dir)) =
+            (self.workspace.as_deref(), self.heartbeat_dir.as_deref())
+        {
+            match super::workspace_capacity::check(
+                workspace,
+                store,
+                heartbeat_dir,
+                self.heartbeat_ttl,
+            )
+            .await
+            {
+                Ok(Some(snapshot)) if snapshot.at_capacity() => {
+                    let _ = self.telemetry.emit(
+                        crate::telemetry::EventKind::WorkspaceAtCapacity {
+                            workspace: workspace.display().to_string(),
+                            max_workers: snapshot.max_workers,
+                            active_workers: snapshot.active_workers,
+                        },
+                        Utc::now(),
+                    );
+                    tracing::info!(
+                        workspace = %workspace.display(),
+                        active_workers = snapshot.active_workers,
+                        max_workers = snapshot.max_workers,
+                        "workspace is at its worker capacity; skipping Pluck"
+                    );
+                    return StrandResult::NoWork;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        workspace = %workspace.display(),
+                        error = %error,
+                        "workspace capacity could not be evaluated; skipping Pluck"
+                    );
+                    return StrandResult::Error(StrandError::StoreError(error));
+                }
+            }
         }
 
         // A prompt-driven split is complete when its verified child chain is

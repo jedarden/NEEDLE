@@ -648,6 +648,12 @@ pub struct WorkspaceConfig {
     /// building. Configure per-workspace in `.needle.yaml` under `workspace.labels`.
     #[serde(default)]
     pub labels: Vec<String>,
+
+    /// Maximum number of distinct heartbeat-live workers that may hold
+    /// in-progress beads in this workspace. `None` (and `0`) means unlimited.
+    /// This is resolved from the workspace's own `.needle.yaml`.
+    #[serde(default)]
+    pub max_workers: Option<u32>,
 }
 
 /// Repository-specific authoritative post-push CI selection.
@@ -752,6 +758,7 @@ impl Default for WorkspaceConfig {
             default: Self::default_workspace(),
             home: Self::default_home(),
             labels: Vec::new(),
+            max_workers: None,
         }
     }
 }
@@ -773,13 +780,18 @@ impl ConfigTier for WorkspaceConfig {
 
 /// Workspace-level labels override (`.needle.yaml` `workspace:` section).
 ///
-/// Only `labels` is overridable at the workspace level; the path fields
-/// (`default`, `home`) are resolved globally and cannot be set per-workspace.
+/// `labels` and `max_workers` are overridable at the workspace level; the path
+/// fields (`default`, `home`) are resolved globally and cannot be set
+/// per-workspace.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct WorkspaceLabelsOverride {
     /// Domain labels for this workspace (e.g., `[rust, api, trading]`).
     #[serde(default)]
     pub labels: Vec<String>,
+    /// Number of distinct live worker identities allowed to hold beads in
+    /// this workspace. `None` (and `0`) means unlimited.
+    #[serde(default)]
+    pub max_workers: Option<u32>,
 }
 
 /// Bead CLI backend enumeration.
@@ -7813,6 +7825,11 @@ impl Config {
             other.workspace.default
         );
         check!(
+            "workspace.max_workers",
+            self.workspace.max_workers,
+            other.workspace.max_workers
+        );
+        check!(
             "bead_cli.backend",
             self.bead_cli.backend,
             other.bead_cli.backend
@@ -8225,7 +8242,7 @@ fn validate_routing_field(field: &str, key_path: &str) -> Result<(), ConfigError
 
 /// Validate WorkspaceConfig field names.
 fn validate_workspace_field(field: &str, key_path: &str) -> Result<(), ConfigError> {
-    let valid_fields = ["default", "home", "labels"];
+    let valid_fields = ["default", "home", "labels", "max_workers"];
 
     if !valid_fields.contains(&field) {
         return Err(ConfigError::invalid_segment(
@@ -8841,6 +8858,10 @@ impl ConfigLoader {
             if !ws.labels.is_empty() {
                 config.workspace.labels = ws.labels.clone();
                 sources.insert("workspace.labels".to_string(), source.clone());
+            }
+            if let Some(max_workers) = ws.max_workers {
+                config.workspace.max_workers = Some(max_workers);
+                sources.insert("workspace.max_workers".to_string(), source.clone());
             }
         }
 
@@ -9489,6 +9510,14 @@ impl ConfigLoader {
             (
                 "health.heartbeat_ttl_secs",
                 config.health.heartbeat_ttl_secs.to_string(),
+            ),
+            (
+                "workspace.max_workers",
+                config
+                    .workspace
+                    .max_workers
+                    .map(|max_workers| max_workers.to_string())
+                    .unwrap_or_else(|| "unlimited".to_string()),
             ),
             (
                 "paths.state_dir",
@@ -14348,7 +14377,12 @@ timeout_secs: 60
 
     #[test]
     fn valid_workspace_fields_pass() {
-        let valid_fields = ["workspace.default", "workspace.home", "workspace.labels"];
+        let valid_fields = [
+            "workspace.default",
+            "workspace.home",
+            "workspace.labels",
+            "workspace.max_workers",
+        ];
 
         for field in valid_fields {
             assert!(

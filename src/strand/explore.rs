@@ -495,6 +495,22 @@ impl ExploreStrand {
         self
     }
 
+    /// Check the workspace-owned worker cap using the heartbeat directory
+    /// alongside this strand's registry.
+    async fn workspace_capacity(
+        &self,
+        workspace: &Path,
+        store: &dyn BeadStore,
+    ) -> anyhow::Result<Option<super::workspace_capacity::CapacitySnapshot>> {
+        let heartbeat_dir = self
+            .registry
+            .path()
+            .parent()
+            .map(|state_dir| state_dir.join("heartbeats"))
+            .unwrap_or_else(|| PathBuf::from("state/heartbeats"));
+        super::workspace_capacity::check(workspace, store, &heartbeat_dir, self.heartbeat_ttl).await
+    }
+
     /// Return whether this cycle should perform the remote workspace scan.
     fn should_scan_this_cycle(&self) -> bool {
         self.scan_backoff.lock().unwrap().should_scan()
@@ -1311,6 +1327,43 @@ impl super::Strand for ExploreStrand {
                     continue;
                 }
             };
+
+            // This is the final admission check for a roaming candidate. The
+            // remote store is the workspace's own store, so the status query
+            // counts claims held by workers on every host, not just this one.
+            match self
+                .workspace_capacity(workspace, remote_store.as_ref())
+                .await
+            {
+                Ok(Some(snapshot)) if snapshot.at_capacity() => {
+                    let _ = self.telemetry.emit(
+                        crate::telemetry::EventKind::WorkspaceAtCapacity {
+                            workspace: workspace.display().to_string(),
+                            max_workers: snapshot.max_workers,
+                            active_workers: snapshot.active_workers,
+                        },
+                        Utc::now(),
+                    );
+                    exclusion_reasons.insert("workspace_at_capacity".to_string());
+                    tracing::info!(
+                        workspace = %workspace.display(),
+                        active_workers = snapshot.active_workers,
+                        max_workers = snapshot.max_workers,
+                        "workspace is at its worker capacity; skipping Explore"
+                    );
+                    continue;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    exclusion_reasons.insert("workspace_capacity_error".to_string());
+                    tracing::warn!(
+                        workspace = %workspace.display(),
+                        error = %error,
+                        "workspace capacity could not be evaluated; skipping Explore"
+                    );
+                    continue;
+                }
+            }
 
             match remote_store.ready(&filters).await {
                 Ok(mut candidates) => {

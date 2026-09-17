@@ -1823,6 +1823,7 @@ poll_interval_secs = 12
                 default: workspace.to_path_buf(),
                 home: workspace.to_path_buf(),
                 labels: Vec::new(),
+                max_workers: None,
             },
             worker: WorkerConfig {
                 max_workers: 8,
@@ -1962,6 +1963,7 @@ poll_interval_secs = 12
             default: workspace.to_path_buf(),
             home: workspace.to_path_buf(),
             labels: Vec::new(),
+            max_workers: None,
         };
 
         let worker_config = WorkerConfig {

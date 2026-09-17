@@ -515,6 +515,13 @@ pub enum EventKind {
         strand_name: String,
         reason: String,
     },
+    /// A workspace was not considered for a claim because its workspace-owned
+    /// live-worker cap was already reached.
+    WorkspaceAtCapacity {
+        workspace: String,
+        max_workers: u32,
+        active_workers: usize,
+    },
     ResolveEvaluated {
         bead_id: BeadId,
         decision: String,
@@ -1732,6 +1739,7 @@ impl EventKind {
             EventKind::ConfigWarning { .. } => "config.warning",
             EventKind::StrandEvaluated { .. } => "strand.evaluated",
             EventKind::StrandSkipped { .. } => "strand.skipped",
+            EventKind::WorkspaceAtCapacity { .. } => "strand.workspace_at_capacity",
             EventKind::GenerationGateEvaluated { .. } => "generation.gate_evaluated",
             EventKind::GenerationWorkCreated { .. } => "generation.work_created",
             EventKind::GenerationCreatorFailed { .. } => "generation.creator_failed",
@@ -2011,6 +2019,7 @@ impl EventKind {
             | EventKind::ConfigWarning { .. }
             | EventKind::StrandEvaluated { .. }
             | EventKind::StrandSkipped { .. }
+            | EventKind::WorkspaceAtCapacity { .. }
             | EventKind::GenerationGateEvaluated { .. }
             | EventKind::GenerationWorkCreated { .. }
             | EventKind::GenerationCreatorFailed { .. }
@@ -2287,6 +2296,15 @@ impl EventKind {
             } => {
                 serde_json::json!({ "strand_name": strand_name, "reason": reason })
             }
+            EventKind::WorkspaceAtCapacity {
+                workspace,
+                max_workers,
+                active_workers,
+            } => serde_json::json!({
+                "workspace": workspace,
+                "max_workers": max_workers,
+                "active_workers": active_workers,
+            }),
             EventKind::GenerationGateEvaluated {
                 strand_name,
                 workspace,
@@ -4221,6 +4239,7 @@ impl EventKind {
             | EventKind::GatePathMissing { .. }
             | EventKind::GateNoVerifier { .. }
             | EventKind::MendCycleBroken { .. }
+            | EventKind::WorkspaceAtCapacity { .. }
             | EventKind::AuditBeadClosedAsVerification { .. }
             | EventKind::AuditBeadDeferredOverBudget { .. }
             | EventKind::QuarantineExpired { .. }

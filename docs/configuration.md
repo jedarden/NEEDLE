@@ -640,6 +640,10 @@ workspace:
     - rust
     - trading
     - api
+
+  # Maximum distinct live workers holding in-progress beads (optional)
+  # Omit it, or set it to 0, for unlimited workers.
+  max_workers: 1
 ```
 
 ### Central state directory

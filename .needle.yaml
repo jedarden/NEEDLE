@@ -11,10 +11,6 @@ bead_cli:
   backend: bead-rs
 worker:
   # NEEDLE is build-heavy: one worker, launched with -w /home/coding/NEEDLE.
-  # Roaming workers are excluded via strands.explore.workspaces in the global
-  # config (ADR-015 operational discipline). NOTE: worker.* is not a workspace
-  # override today, so this value documents intent only (see the per-workspace
-  # cap bead filed 2026-08-30).
   max_workers: 1
   launch_stagger_seconds: 2
   idle_timeout: 60
@@ -29,6 +25,9 @@ workspace:
   default: /home/coding/NEEDLE
   home: /home/coding/.needle
   labels: []
+  # Only one live worker identity may hold an in-progress NEEDLE bead across
+  # home and roaming workers.
+  max_workers: 1
 strands:
   pluck:
     exclude_labels: []

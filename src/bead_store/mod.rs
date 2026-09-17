@@ -1378,6 +1378,20 @@ pub trait BeadStore: Send + Sync {
     /// path from `ready()` to avoid v1's false-positive bug.
     async fn list_all(&self) -> Result<Vec<Bead>>;
 
+    /// List beads currently in progress in the workspace.
+    ///
+    /// Backends with a dedicated status-filtered operation should override
+    /// this method. The default keeps older/custom backends compatible by
+    /// filtering their full inventory in memory.
+    async fn list_in_progress(&self) -> Result<Vec<Bead>> {
+        Ok(self
+            .list_all()
+            .await?
+            .into_iter()
+            .filter(|bead| bead.status == BeadStatus::InProgress)
+            .collect())
+    }
+
     /// List the complete inventory with any backend-specific metadata needed
     /// to explain why the ready frontier omitted beads.
     ///

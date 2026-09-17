@@ -17,6 +17,7 @@ pub mod reflect;
 pub mod splice;
 pub mod unravel;
 pub mod weave;
+pub(crate) mod workspace_capacity;
 mod workspace_health;
 
 use std::collections::HashSet;
@@ -167,6 +168,8 @@ impl StrandRunner {
         // compatible while making NEEDLE_STATE_DIR/paths.state_dir atomic.
         let state_root = crate::state_dir::root_for(&config.workspace.home);
         let state_base = state_root.join("state");
+        let heartbeat_dir = state_base.join("heartbeats");
+        let heartbeat_ttl = std::time::Duration::from_secs(config.health.heartbeat_ttl_secs);
 
         let pluck = PluckStrand::with_persistent_records(
             config.strands.pluck.exclude_labels.clone(),
@@ -176,7 +179,12 @@ impl StrandRunner {
             config.strands.pluck.persistent_starvation_records,
         )
         .with_quarantine_threshold(config.outcome.quarantine_after_failures)
-        .with_lane(lane.clone());
+        .with_lane(lane.clone())
+        .with_workspace_capacity(
+            config.workspace.default.clone(),
+            heartbeat_dir.clone(),
+            heartbeat_ttl,
+        );
         let pluck = if let Some(checker) = &circuit_checker {
             pluck.with_circuit_breaker(
                 config.workspace.default.clone(),
@@ -187,8 +195,6 @@ impl StrandRunner {
             pluck
         };
 
-        let heartbeat_dir = state_base.join("heartbeats");
-        let heartbeat_ttl = std::time::Duration::from_secs(config.health.heartbeat_ttl_secs);
         let lock_dir = std::env::temp_dir();
         let log_dir = crate::state_dir::logs_dir_for(
             config.telemetry.file_sink.log_dir.as_deref(),

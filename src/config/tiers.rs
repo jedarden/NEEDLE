@@ -482,6 +482,8 @@ static TIER_TABLE: &[(&str, ReloadTier)] = &[
     ("workspace.home", ReloadTier::RestartRequired),
     ("paths.state_dir", ReloadTier::RestartRequired),
     ("workspace.default", ReloadTier::RestartRequired),
+    // Workspace-owned admission policy (resolved from `.needle.yaml` at claim time)
+    ("workspace.max_workers", ReloadTier::RestartRequired),
     // Bead CLI backend (Tier C - store-level decision, process-scoped)
     ("bead_cli.backend", ReloadTier::RestartRequired),
     ("bead_cli.path", ReloadTier::RestartRequired),

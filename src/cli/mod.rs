@@ -3541,6 +3541,12 @@ fn cmd_status(
             }
         })
         .collect();
+    let workspace_capacity = collect_workspace_capacity_statuses(
+        &config,
+        &workers,
+        &heartbeat_dir,
+        Duration::from_secs(config.health.heartbeat_ttl_secs),
+    );
     let circuit_statuses = collect_circuit_statuses(&config, &workers);
 
     match format {
@@ -3555,6 +3561,17 @@ fn cmd_status(
                 println!("  Unregistered workers: {} (WARN)", unregistered.len());
             }
             println!();
+
+            if !workspace_capacity.is_empty() {
+                println!("Workspace Worker Capacity:");
+                for capacity in &workspace_capacity {
+                    println!(
+                        "  {} {}/{}",
+                        capacity.name, capacity.active_workers, capacity.max_workers
+                    );
+                }
+                println!();
+            }
 
             println!("Build Circuits:");
             println!("{:<42} {:<10} {:<12} SHA", "WORKSPACE", "STATE", "SOURCE");
@@ -3721,6 +3738,14 @@ fn cmd_status(
                 "discovered_workers": discovered_count,
                 "total_beads_processed": total_beads,
                 "unregistered_workers": unregistered.len(),
+                "workspace_capacity": workspace_capacity.iter().map(|capacity| {
+                    serde_json::json!({
+                        "workspace": capacity.workspace,
+                        "name": capacity.name,
+                        "active_workers": capacity.active_workers,
+                        "max_workers": capacity.max_workers,
+                    })
+                }).collect::<Vec<_>>(),
                 "circuits": circuit_statuses.iter().map(|circuit| {
                     serde_json::json!({
                         "workspace": circuit.workspace,
@@ -4445,6 +4470,13 @@ fn config_get_key(config: &Config, key: &str) -> Option<String> {
         "health.heartbeat_ttl_secs" => Some(config.health.heartbeat_ttl_secs.to_string()),
         "workspace.default" => Some(config.workspace.default.display().to_string()),
         "workspace.home" => Some(config.workspace.home.display().to_string()),
+        "workspace.max_workers" => Some(
+            config
+                .workspace
+                .max_workers
+                .map(|max_workers| max_workers.to_string())
+                .unwrap_or_else(|| "unlimited".to_string()),
+        ),
         "telemetry.file_sink.enabled" => Some(config.telemetry.file_sink.enabled.to_string()),
         "prompt.instructions" => Some(
             config
@@ -4487,6 +4519,14 @@ fn config_dump(config: &Config) -> Vec<String> {
         ),
         format!("workspace.default: {}", config.workspace.default.display()),
         format!("workspace.home: {}", config.workspace.home.display()),
+        format!(
+            "workspace.max_workers: {}",
+            config
+                .workspace
+                .max_workers
+                .map(|max_workers| max_workers.to_string())
+                .unwrap_or_else(|| "unlimited".to_string())
+        ),
         format!(
             "health.heartbeat_interval_secs: {}",
             config.health.heartbeat_interval_secs
@@ -6436,6 +6476,113 @@ fn collect_circuit_statuses(config: &Config, workers: &[WorkerEntry]) -> Vec<Cir
                         phase: None,
                     }
                 }
+            }
+        })
+        .collect()
+}
+
+/// Per-worker status information for the status command.
+struct WorkspaceCapacityStatus {
+    workspace: String,
+    name: String,
+    active_workers: usize,
+    max_workers: u32,
+}
+
+/// Collect capacity rows for the home workspace and workspaces currently
+/// known to this worker fleet. Status is best-effort: a store that cannot be
+/// opened falls back to fresh heartbeat claims so the cap remains visible.
+fn collect_workspace_capacity_statuses(
+    config: &Config,
+    workers: &[WorkerEntry],
+    heartbeat_dir: &Path,
+    heartbeat_ttl: Duration,
+) -> Vec<WorkspaceCapacityStatus> {
+    let mut workspaces = vec![config.workspace.default.clone()];
+    for workspace in &config.strands.explore.workspaces {
+        if !workspaces.contains(workspace) {
+            workspaces.push(workspace.clone());
+        }
+    }
+    for worker in workers {
+        if !workspaces.contains(&worker.workspace) {
+            workspaces.push(worker.workspace.clone());
+        }
+    }
+
+    let caps: Vec<(PathBuf, u32)> = workspaces
+        .into_iter()
+        .filter_map(|workspace| {
+            let max_workers =
+                match crate::strand::workspace_capacity::configured_max_workers(&workspace) {
+                    Ok(Some(max_workers)) => max_workers,
+                    Ok(None) => return None,
+                    Err(error) => {
+                        tracing::debug!(
+                            workspace = %workspace.display(),
+                            error = %error,
+                            "workspace capacity config unavailable for status"
+                        );
+                        return None;
+                    }
+                };
+            Some((workspace, max_workers))
+        })
+        .collect();
+
+    if caps.is_empty() {
+        return Vec::new();
+    }
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok();
+
+    caps.into_iter()
+        .map(|(workspace, max_workers)| {
+            let active_workers = runtime
+                .as_ref()
+                .and_then(|runtime| {
+                    let store = crate::bead_store::discover_default(
+                        workspace.clone(),
+                        None,
+                        Some("needle".to_string()),
+                        Some(env!("CARGO_PKG_VERSION").to_string()),
+                    )
+                    .ok()?;
+                    let in_progress = runtime.block_on(store.list_in_progress()).ok()?;
+                    crate::strand::workspace_capacity::count_live_assignees(
+                        &in_progress,
+                        heartbeat_dir,
+                        heartbeat_ttl,
+                    )
+                    .ok()
+                })
+                .unwrap_or_else(|| {
+                    HealthMonitor::read_all_heartbeats(heartbeat_dir)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|heartbeat| {
+                            !HealthMonitor::is_stale(heartbeat, heartbeat_ttl)
+                                && heartbeat.current_bead.is_some()
+                                && heartbeat.workspace == workspace
+                        })
+                        .map(|heartbeat| heartbeat.qualified_id)
+                        .collect::<HashSet<_>>()
+                        .len()
+                });
+            let workspace_display = workspace.display().to_string();
+            let name = workspace
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(&workspace_display)
+                .to_ascii_uppercase();
+            WorkspaceCapacityStatus {
+                workspace: workspace_display,
+                name,
+                active_workers,
+                max_workers,
             }
         })
         .collect()

@@ -623,6 +623,26 @@ impl BeadStore for CliBeadStore {
         self.parse_beads("list_all", &stdout)
     }
 
+    async fn list_in_progress(&self) -> Result<Vec<Bead>> {
+        // The operation is optional so descriptors written before workspace
+        // capacity support continue to work through the trait's compatible
+        // full-inventory fallback.
+        if self.operation("list_in_progress").is_ok() {
+            let limit = if self.has_quirk("limit_zero_returns_empty_set") {
+                "999999"
+            } else {
+                "0"
+            };
+            let values = HashMap::from([("limit", limit.to_string())]);
+            let stdout = self.run_operation("list_in_progress", &values).await?;
+            return self.parse_beads("list_in_progress", &stdout);
+        }
+
+        let mut beads = self.list_all().await?;
+        beads.retain(|bead| bead.status == BeadStatus::InProgress);
+        Ok(beads)
+    }
+
     async fn starvation_inventory(&self) -> Result<Vec<Bead>> {
         let limit = if self.has_quirk("limit_zero_returns_empty_set") {
             "999999"
