@@ -1959,7 +1959,7 @@ mod tests {
                 ..Default::default()
             },
             Telemetry::new("test".to_string()),
-            lock_dir.to_path_buf(),
+            lock_dir.path().to_path_buf(),
         ));
         let store = RecordingStore::new(workspace);
 
