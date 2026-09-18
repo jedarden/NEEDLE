@@ -6589,6 +6589,16 @@ impl Worker {
             );
         }
 
+        // Configuration reload is a separate mechanism from binary hot reload.
+        // Idle workers may remain EXHAUSTED indefinitely and never pass through
+        // LOGGING, so this safe boundary must poll the global config as well.
+        if let Err(e) = self.check_config_reload().await {
+            tracing::warn!(
+                error = %e,
+                "configuration reload check failed while exhausted, continuing with current config"
+            );
+        }
+
         self.telemetry.emit(
             EventKind::WorkerExhausted {
                 cycle_count: self.beads_processed,
@@ -11577,6 +11587,51 @@ mod tests {
 
         let result = worker.handle_exhausted().await.unwrap();
         assert_eq!(result, WorkerState::Stopped);
+    }
+
+    #[tokio::test]
+    async fn handle_exhausted_polls_and_applies_config_reload() {
+        let _env_lock = crate::util::test_env::isolate_env_admitted();
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        std::env::set_var("HOME", home.path());
+
+        let config_path = home.path().join(".config/needle/config.yaml");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+
+        let mut config = valid_test_config();
+        config.worker.config_reload_check_interval_secs = 60;
+        config.worker.idle_action = IdleAction::Exit;
+        config.worker.allow_exit_without_supervisor = true;
+        config.worker.enforce_shipped_work = false;
+        config.workspace.home = home.path().join(".needle");
+        config.workspace.default = workspace.path().to_path_buf();
+        config.self_modification.hot_reload = false;
+        config.strands.explore.enabled = false;
+        config.strands.explore.workspace_root = workspace.path().to_path_buf();
+        config.strands.explore.workspaces = Vec::new();
+
+        std::fs::write(&config_path, serde_yaml::to_string(&config).unwrap()).unwrap();
+        let mut worker = Worker::new(
+            config.clone(),
+            "config-reload-exhausted".to_string(),
+            Arc::new(MockStore::empty()),
+        );
+        worker.boot().await.unwrap();
+
+        let mut candidate = config;
+        candidate.worker.max_claim_retries += 1;
+        std::fs::write(&config_path, serde_yaml::to_string(&candidate).unwrap()).unwrap();
+
+        worker.state = WorkerState::Exhausted;
+        let terminal_state = worker.handle_exhausted().await.unwrap();
+
+        assert_eq!(terminal_state, WorkerState::Stopped);
+        assert_eq!(
+            worker.config.worker.max_claim_retries, candidate.worker.max_claim_retries,
+            "an exhausted worker must apply live config without processing a bead"
+        );
+        assert_eq!(worker.config_reload_generation, 1);
     }
 
     #[tokio::test(start_paused = true)]

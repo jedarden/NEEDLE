@@ -120,7 +120,7 @@ version = 1
 # the private dispatch-start timestamp, so the unit tier is the only tier that
 # can reach them. The acceptance command is
 # `cargo test --lib audit_candidates_require audit_never_folds foreign_beads_do_not own_beads_beyond`.
-max_tests = 3848
+max_tests = 3849
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
@@ -472,9 +472,9 @@ reason = "Grandfathered unit-tier debt; replace with an injected boundary."
 [[unit_exception]]
 path = "src/worker/mod.rs"
 kind = "global-env"
-max_occurrences = 14
+max_occurrences = 15
 owner = "component:worker"
-reason = "Twelve grandfathered occurrences plus two test-only safeguards under the repository-wide environment lock: one neutralizes the host-dependent admission probe, and one pins the historical gate-failure regression beneath a private HOME."
+reason = "Twelve grandfathered occurrences plus three test-only safeguards under the repository-wide environment lock: one neutralizes the host-dependent admission probe, one pins the historical gate-failure regression beneath a private HOME, and one proves exhausted-worker reload from a private HOME."
 
 # Files under tests/ that are not compiled into a Rust harness are still test
 # assets. Each must match a rule with a durable component owner.
