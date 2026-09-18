@@ -70,39 +70,38 @@ worker:
   enforce_shipped_work: false
 ```
 
-**Built-in validation gate for unguarded workspaces:** A workspace that declares
-neither `gates:` nor legacy `verification:` enters NEEDLE's built-in validation
-path. An explicit `gates: []` or `verification: []` remains an opt-out. If the
-separate language-default resolver supplies a `default_*` gate, that gate runs;
-otherwise the interim fallback gate selects a verifier from the committed
-workspace in this order:
+**Built-in validation gate for unguarded workspaces:** A workspace whose own
+`.needle.yaml` declares neither `gates:` nor legacy `verification:` enters the
+no-explicit-gate path. An explicit `gates: []` or `verification: []` remains an
+opt-out. NEEDLE first lets the language-default resolver supply a `default_*`
+gate; only when it supplies none does the shipped **interim fallback gate**
+select a verifier from the committed workspace, in this exact order:
 
-1. `scripts/definition-of-done.sh` — run the workspace's own Definition of
-   Done script.
-2. `go.mod` — `go build ./... && go vet ./... && go test -short ./...`.
-3. `Cargo.toml` — `cargo build --all-targets && cargo test`.
-4. `package.json` with a non-empty `scripts.test` — `npm test`.
-5. `pyproject.toml` or `pytest.ini` — `pytest -q`.
+1. `scripts/definition-of-done.sh` — run `scripts/definition-of-done.sh`.
+2. `go.mod` — run `go build ./... && go vet ./... && go test -short ./...`.
+3. `Cargo.toml` — run `cargo build --all-targets && cargo test`.
+4. `package.json` with a non-empty `scripts.test` — run `npm test`.
+5. `pyproject.toml` — run `pytest -q`.
+6. `pytest.ini` — run `pytest -q`.
 
 The selected command runs in a clean `git archive HEAD` extraction, so it
 judges committed state rather than the shared checkout. If no verifier is
-selected, the source workspace's `git status --porcelain --untracked-files=all`
-must be empty (the archive itself has no `.git`); `.beads/` and
-`.needle-predispatch-sha` bookkeeping noise is ignored. A clean result passes
-on the agent's exit code alone and emits one counted `WARN`, `gate.no_verifier`,
-with reason `not_detected`. Dirty state fails the fallback gate. Extraction,
-spawn, and timeout failures are gate execution errors; a non-zero verifier
-result is an ordinary verification failure.
+selected, NEEDLE checks the source workspace with
+`git status --porcelain --untracked-files=all` (the archive has no `.git`),
+ignoring `.beads/` and `.needle-predispatch-sha` bookkeeping noise. A clean
+status passes on the agent's exit code alone and emits one counted `WARN`,
+`gate.no_verifier`, with reason `not_detected`; uncommitted work fails the
+fallback gate. Extraction, spawn, and timeout failures are gate execution
+errors; a non-zero verifier result is an ordinary verification failure.
 
-The fallback uses the host validation limits `validation.stderr_cap_bytes`
-(default `4096`) and `validation.outcome_timeout_seconds` (default `50`). It is
-armed by default, which covers the approximately 60 currently unguarded
-workspaces without a config change. That estimate came from the rollout
-inventory: enumerate the known workspace roots, inspect each `.needle.yaml`,
-and count roots with neither `gates:` nor `verification:` and no explicit
-`validation.fallback_gate: false`; it is a snapshot, not a hard-coded allowlist.
-Every dispatch logs whether the fallback is armed. A workspace can opt out in
-its own `.needle.yaml`:
+Fallback command stderr is capped by the host setting
+`validation.stderr_cap_bytes` (default `4096` bytes), and each command is
+bounded by `validation.outcome_timeout_seconds` (default `50` seconds). The
+fallback is armed by default, so every unguarded workspace without an
+override is covered without a per-workspace config change; the rollout count
+is only an inventory snapshot, not a hard-coded allowlist. When fallback
+resolution is reached, the dispatch log records whether it is armed or opted
+out. A workspace can explicitly opt out in its own `.needle.yaml`:
 
 ```yaml
 validation:
@@ -111,9 +110,10 @@ validation:
 
 The host-level `validation.fallback_gate` sets the default and the workspace
 value wins. This fallback is the **INTERIM** mechanism. The
-`needle-d1b2ee0d` runner is the planned replacement: the fallback's
-`scripts/definition-of-done.sh` hand-off exists to bridge unguarded workspaces
-until that runner replaces this gate.
+`needle-d1b2ee0d` runner is its planned replacement. A workspace-local
+`scripts/definition-of-done.sh` is the hand-off for repositories that already
+declare their own Definition of Done; that runner is intended to replace this
+fallback gate rather than add another permanent gate layer.
 
 **Build from source** (Rust 1.85+; NEEDLE pins its toolchain in `rust-toolchain.toml`):
 
