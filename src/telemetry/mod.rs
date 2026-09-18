@@ -767,6 +767,18 @@ pub enum EventKind {
         /// The error chain, flattened for grep-ability.
         detail: String,
     },
+    /// Cleanup of an unverifiable claim was deliberately skipped.
+    ///
+    /// Skipping is fail-safe: when the target store or held credential is not
+    /// usable, the claim remains untouched and lease expiry is responsible for
+    /// recovery. This event makes that choice observable.
+    ClaimCleanupSkipped {
+        bead_id: BeadId,
+        expected_actor: String,
+        stage: String,
+        target_workspace: Option<String>,
+        reason: String,
+    },
 
     // ── Version verification ──
     VersionVerifyStarted {
@@ -1773,6 +1785,7 @@ impl EventKind {
             EventKind::ClaimRecheckSucceeded { .. } => "bead.claim.recheck_succeeded",
             EventKind::ClaimRecheckFailed { .. } => "bead.claim.recheck_failed",
             EventKind::ClaimVerifyError { .. } => "bead.claim.verify_error",
+            EventKind::ClaimCleanupSkipped { .. } => "bead.claim.cleanup_skipped",
             EventKind::VersionVerifyStarted { .. } => "version.verify.started",
             EventKind::VersionVerifySuccess { .. } => "version.verify.success",
             EventKind::VersionVerifyFailed { .. } => "version.verify.failed",
@@ -1942,6 +1955,7 @@ impl EventKind {
             | EventKind::ClaimRecheckSucceeded { bead_id, .. }
             | EventKind::ClaimRecheckFailed { bead_id, .. }
             | EventKind::ClaimVerifyError { bead_id, .. }
+            | EventKind::ClaimCleanupSkipped { bead_id, .. }
             | EventKind::BeadReleased { bead_id, .. }
             | EventKind::BeadReleaseFailed { bead_id, .. }
             | EventKind::BeadCompleted { bead_id, .. }
@@ -3735,6 +3749,19 @@ impl EventKind {
                 "category": category.as_str(),
                 "detail": detail,
             }),
+            EventKind::ClaimCleanupSkipped {
+                bead_id,
+                expected_actor,
+                stage,
+                target_workspace,
+                reason,
+            } => serde_json::json!({
+                "bead_id": bead_id,
+                "expected_actor": expected_actor,
+                "stage": stage,
+                "target_workspace": target_workspace,
+                "reason": reason,
+            }),
             EventKind::ClaimVerifySuccess {
                 bead_id,
                 expected_actor,
@@ -4218,6 +4245,7 @@ impl EventKind {
             | EventKind::ClaimRecheckSucceeded { .. }
             | EventKind::ClaimRecheckFailed { .. }
             | EventKind::ClaimVerifyError { .. }
+            | EventKind::ClaimCleanupSkipped { .. }
             | EventKind::VersionVerifyStarted { .. }
             | EventKind::VersionVerifySuccess { .. }
             | EventKind::VersionVerifyFailed { .. }
