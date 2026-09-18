@@ -3764,6 +3764,10 @@ impl Worker {
                             bead_id: bead_id.clone(),
                             expected_actor: worker_id.clone(),
                             stage: "dispatching".to_string(),
+                            target_workspace: self
+                                .target_store
+                                .as_ref()
+                                .map(|context| context.workspace().display().to_string()),
                             category: crate::telemetry::ClaimVerifyErrorCategory::Identity,
                             detail: format!("{error:#}"),
                         },
@@ -3787,6 +3791,7 @@ impl Worker {
                             bead_id: bead_id.clone(),
                             expected_actor: worker_id.clone(),
                             stage: "dispatching".to_string(),
+                            target_workspace: None,
                             category: crate::telemetry::ClaimVerifyErrorCategory::Identity,
                             detail: format!("{error:#}"),
                         },
@@ -3824,6 +3829,10 @@ impl Worker {
                                 bead_id: bead_id.clone(),
                                 expected_actor: worker_id.clone(),
                                 stage: "dispatching".to_string(),
+                                target_workspace: Some(
+                                    target_store.workspace().display().to_string(),
+                                ),
+                                category: crate::telemetry::ClaimVerifyErrorCategory::ClaimMismatch,
                                 actual_status: format!("{:?}", status.status),
                                 actual_assignee: status
                                     .assignee
@@ -3862,6 +3871,7 @@ impl Worker {
                             bead_id: bead_id.clone(),
                             expected_actor: worker_id.clone(),
                             stage: "dispatching".to_string(),
+                            target_workspace: Some(target_store.workspace().display().to_string()),
                             category: crate::telemetry::ClaimVerifyErrorCategory::classify(&error),
                             detail: format!("{error:#}"),
                         },
@@ -3986,6 +3996,10 @@ impl Worker {
                             bead_id: bead.id.clone(),
                             expected_actor: self.qualified_id(),
                             stage: "dispatch_time".to_string(),
+                            target_workspace: self
+                                .target_store
+                                .as_ref()
+                                .map(|context| context.workspace().display().to_string()),
                             category: crate::telemetry::ClaimVerifyErrorCategory::Identity,
                             detail: format!("{e:#}"),
                         },
@@ -4082,6 +4096,7 @@ impl Worker {
                                     bead_id: bead.id.clone(),
                                     expected_actor: claim_identity.actor.clone(),
                                     stage: "dispatch_time".to_string(),
+                                    target_workspace: None,
                                     category:
                                         crate::telemetry::ClaimVerifyErrorCategory::Identity,
                                     detail: format!("{e:#}"),
@@ -9625,6 +9640,22 @@ mod tests {
         let current = target.show(&bead_id).await.unwrap();
         assert_eq!(current.status, BeadStatus::InProgress);
         assert_eq!(current.assignee.as_deref(), Some("new-worker"));
+        cleanup_unverifiable_claim_context(
+            &telemetry,
+            "worker-1",
+            &bead_id,
+            "pre_spawn",
+            Some(ResolvedStoreContext::new(
+                target.clone(),
+                PathBuf::from("/target"),
+            )),
+            None,
+        )
+        .await;
+        assert_eq!(
+            target.show(&bead_id).await.unwrap().status,
+            BeadStatus::InProgress
+        );
         let events = events.lock().unwrap();
         assert!(events.iter().any(|event| {
             event.event_type == "bead.claim.cleanup_skipped"

@@ -1696,8 +1696,11 @@ impl Dispatcher {
                                 bead_id: bead_id.clone(),
                                 expected_actor: "(unset)".to_string(),
                                 stage: "pre_spawn".to_string(),
+                                target_workspace: Some(workspace.display().to_string()),
                                 category: crate::telemetry::ClaimVerifyErrorCategory::Capability,
-                                detail: format!("{error:#}"),
+                                detail: crate::telemetry::redact_claim_credentials(&format!(
+                                    "{error:#}"
+                                )),
                             },
                             chrono::Utc::now(),
                         );
@@ -1714,8 +1717,11 @@ impl Dispatcher {
                                 bead_id: bead_id.clone(),
                                 expected_actor: "(unset)".to_string(),
                                 stage: "pre_spawn".to_string(),
+                                target_workspace: Some(workspace.display().to_string()),
                                 category: crate::telemetry::ClaimVerifyErrorCategory::Identity,
-                                detail: format!("{error:#}"),
+                                detail: crate::telemetry::redact_claim_credentials(&format!(
+                                    "{error:#}"
+                                )),
                             },
                             chrono::Utc::now(),
                         );
@@ -1772,6 +1778,8 @@ impl Dispatcher {
                                 bead_id: bead_id.clone(),
                                 expected_actor: verify_worker_id.clone(),
                                 stage: "pre_spawn".to_string(),
+                                target_workspace: Some(workspace.display().to_string()),
+                                category: crate::telemetry::ClaimVerifyErrorCategory::ClaimMismatch,
                                 actual_status: format!("{:?}", status.status),
                                 actual_assignee: status
                                     .assignee
@@ -1841,8 +1849,9 @@ impl Dispatcher {
                             bead_id: bead_id.clone(),
                             expected_actor: verify_worker_id.clone(),
                             stage: "pre_spawn".to_string(),
+                            target_workspace: Some(workspace.display().to_string()),
                             category: crate::telemetry::ClaimVerifyErrorCategory::classify(&e),
-                            detail: format!("{e:#}"),
+                            detail: crate::telemetry::redact_claim_credentials(&format!("{e:#}")),
                         },
                         chrono::Utc::now(),
                     );

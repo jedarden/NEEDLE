@@ -708,6 +708,8 @@ impl DecisionExecutor {
                     bead_id: bead_id.clone(),
                     expected_actor: actor.to_string(),
                     stage: "resolve".to_string(),
+                    target_workspace: None,
+                    category: crate::telemetry::ClaimVerifyErrorCategory::ClaimMismatch,
                     actual_status: format!("{:?}", status.status),
                     actual_assignee: status
                         .assignee

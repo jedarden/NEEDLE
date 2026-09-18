@@ -988,14 +988,12 @@ impl Claimer {
                                 .assignee
                                 .clone()
                                 .unwrap_or_else(|| "(none)".to_string()),
+                            target_workspace: target.workspace().display().to_string(),
+                            category: crate::telemetry::ClaimVerifyErrorCategory::ClaimMismatch,
                             failed_fields: failed_fields
                                 .iter()
                                 .map(|field| field.to_string())
                                 .collect(),
-                            expected_revision: expected.revision,
-                            actual_revision: claim_status.revision,
-                            expected_claim_epoch: expected.claim_epoch,
-                            actual_claim_epoch: claim_status.claim_epoch,
                         },
                         chrono::Utc::now(),
                     )?;
@@ -1040,8 +1038,9 @@ impl Claimer {
                         bead_id: bead_id.clone(),
                         expected_actor: expected.actor.clone(),
                         stage: "dispatch_time".to_string(),
+                        target_workspace: Some(target.workspace().display().to_string()),
                         category,
-                        detail: format!("{e:#}"),
+                        detail: crate::telemetry::redact_claim_credentials(&format!("{e:#}")),
                     },
                     chrono::Utc::now(),
                 );
@@ -2568,6 +2567,8 @@ mod tests {
             .to_string()
             .contains("InProgress"));
         assert_eq!(verify_failed.data["actual_assignee"], "attacker-worker");
+        assert_eq!(verify_failed.data["target_workspace"], "/tmp/ws");
+        assert_eq!(verify_failed.data["category"], "claim_mismatch");
         assert_eq!(
             verify_failed.data["failed_fields"],
             serde_json::json!(["assignee"]),
@@ -2662,9 +2663,14 @@ mod tests {
             "success telemetry must name the workspace whose store was verified"
         );
         assert_eq!(
+            verify_success.data["target_workspace"], "/tmp/ws",
+            "success telemetry must expose the target workspace explicitly"
+        );
+        assert_eq!(
             verify_success.data["claim_epoch"], 4,
             "success telemetry must carry the verified claim epoch"
         );
+        assert_eq!(verify_success.data["verified_epoch"], 4);
     }
 
     #[tokio::test]
@@ -2677,8 +2683,9 @@ mod tests {
         // compared, so counting a mismatch would be a lie).
         let bead = make_bead("needle-err-lookup", "/tmp/ws");
         let store = Arc::new(
-            MockBeadStore::new(vec![bead.clone()])
-                .with_claim_status_error("bead not found: needle-err-lookup"),
+            MockBeadStore::new(vec![bead.clone()]).with_claim_status_error(
+                "bead not found: needle-err-lookup fencing_token=secret-token",
+            ),
         );
         let (sink, events) = crate::telemetry::test_utils::MemorySink::new();
         let telemetry = Telemetry::with_sink("test-worker".to_string(), sink);
@@ -2712,6 +2719,7 @@ mod tests {
         assert_eq!(errors[0].bead_id, Some(bead.id.clone()));
         assert_eq!(errors[0].data["expected_actor"], "worker-1");
         assert_eq!(errors[0].data["stage"], "dispatch_time");
+        assert_eq!(errors[0].data["target_workspace"], "/tmp/ws");
         assert_eq!(
             errors[0].data["category"], "lookup",
             "a missing issue must classify as lookup"
@@ -2723,6 +2731,10 @@ mod tests {
                 .contains("bead not found"),
             "detail must carry the error chain for grep-ability"
         );
+        assert!(!errors[0].data["detail"]
+            .as_str()
+            .unwrap()
+            .contains("secret-token"));
 
         assert!(
             !captured
@@ -2754,6 +2766,10 @@ mod tests {
                     "backend 'bead' operation 'show' failed using /usr/bin/bead: \
                      No such file or directory (os error 2)"
                 ),
+                ClaimVerifyErrorCategory::Capability,
+            ),
+            (
+                anyhow::anyhow!("backend 'bead' operation 'show': command not found"),
                 ClaimVerifyErrorCategory::Capability,
             ),
             (

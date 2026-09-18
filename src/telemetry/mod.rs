@@ -310,6 +310,8 @@ impl TryFrom<String> for AttemptOutcome {
 pub enum ClaimVerifyErrorCategory {
     /// The bead could not be found in the queried store.
     Lookup,
+    /// The live claim answered, but did not match the held claim identity.
+    ClaimMismatch,
     /// The store's response could not be parsed.
     Parse,
     /// The claim identity or the store to verify against could not be
@@ -329,6 +331,7 @@ impl ClaimVerifyErrorCategory {
     pub fn as_str(&self) -> &'static str {
         match self {
             ClaimVerifyErrorCategory::Lookup => "lookup",
+            ClaimVerifyErrorCategory::ClaimMismatch => "claim_mismatch",
             ClaimVerifyErrorCategory::Parse => "parse",
             ClaimVerifyErrorCategory::Identity => "identity",
             ClaimVerifyErrorCategory::Capability => "capability",
@@ -346,8 +349,6 @@ impl ClaimVerifyErrorCategory {
         let text = format!("{error:#}").to_lowercase();
         if text.contains("timed out") || text.contains("timeout") {
             ClaimVerifyErrorCategory::Timeout
-        } else if text.contains("not found") || text.contains("no such bead") {
-            ClaimVerifyErrorCategory::Lookup
         } else if text.contains("no such file or directory")
             || text.contains("failed to spawn")
             || text.contains("failed to execute")
@@ -355,6 +356,8 @@ impl ClaimVerifyErrorCategory {
             || text.contains("permission denied")
         {
             ClaimVerifyErrorCategory::Capability
+        } else if text.contains("not found") || text.contains("no such bead") {
+            ClaimVerifyErrorCategory::Lookup
         } else if text.contains("parse")
             || text.contains("expected value")
             || text.contains("serde")
@@ -365,6 +368,19 @@ impl ClaimVerifyErrorCategory {
         } else {
             ClaimVerifyErrorCategory::Backend
         }
+    }
+}
+
+/// Remove claim credentials from free-form verification diagnostics before
+/// they enter telemetry. The structured category, workspace, and mismatch
+/// fields remain useful without making a fencing token recoverable from logs.
+pub(crate) fn redact_claim_credentials(detail: &str) -> String {
+    let pattern = regex::Regex::new(
+        r"(?i)(--fencing-token|fencing[_-]token|claim[_-]epoch|NEEDLE_BEAD_FENCING_TOKEN)(\s*=\s*|\s*:\s*|\s+)([^\s,;]+)",
+    );
+    match pattern {
+        Ok(pattern) => pattern.replace_all(detail, "$1$2[REDACTED]").into_owned(),
+        Err(_) => "[REDACTED VERIFICATION DETAIL]".to_string(),
     }
 }
 
@@ -714,13 +730,13 @@ pub enum EventKind {
         expected_actor: String,
         actual_status: String,
         actual_assignee: String,
+        /// Workspace whose store answered with the mismatching claim.
+        target_workspace: String,
+        /// All live-state mismatches are claim-mismatch failures.
+        category: ClaimVerifyErrorCategory,
         /// Identity fields that failed: a subset of `status`, `assignee`,
         /// `revision`, `claim_epoch`.
         failed_fields: Vec<String>,
-        expected_revision: Option<u64>,
-        actual_revision: Option<u64>,
-        expected_claim_epoch: Option<u64>,
-        actual_claim_epoch: Option<u64>,
     },
     /// A stage-local claim re-check passed.
     ///
@@ -743,6 +759,10 @@ pub enum EventKind {
         expected_actor: String,
         /// Pipeline stage that ran the re-check (`dispatching`, `pre_spawn`).
         stage: String,
+        /// Workspace whose store answered with the mismatching claim.
+        target_workspace: Option<String>,
+        /// A live response that does not match the held identity.
+        category: ClaimVerifyErrorCategory,
         actual_status: String,
         actual_assignee: String,
     },
@@ -762,6 +782,8 @@ pub enum EventKind {
         /// Pipeline stage that ran the verification (`dispatching`,
         /// `dispatch_time`, `pre_spawn`).
         stage: String,
+        /// Workspace whose store was queried, when it was resolved.
+        target_workspace: Option<String>,
         /// Why the verification could not complete.
         category: ClaimVerifyErrorCategory,
         /// The error chain, flattened for grep-ability.
@@ -3713,21 +3735,18 @@ impl EventKind {
                 expected_actor,
                 actual_status,
                 actual_assignee,
+                target_workspace,
+                category,
                 failed_fields,
-                expected_revision,
-                actual_revision,
-                expected_claim_epoch,
-                actual_claim_epoch,
             } => serde_json::json!({
                 "bead_id": bead_id,
                 "expected_actor": expected_actor,
                 "actual_status": actual_status,
                 "actual_assignee": actual_assignee,
+                "target_workspace": target_workspace,
+                "workspace": target_workspace,
+                "category": category.as_str(),
                 "failed_fields": failed_fields,
-                "expected_revision": expected_revision,
-                "actual_revision": actual_revision,
-                "expected_claim_epoch": expected_claim_epoch,
-                "actual_claim_epoch": actual_claim_epoch,
             }),
             EventKind::ClaimVerifyStarted {
                 bead_id,
@@ -3740,14 +3759,16 @@ impl EventKind {
                 bead_id,
                 expected_actor,
                 stage,
+                target_workspace,
                 category,
                 detail,
             } => serde_json::json!({
                 "bead_id": bead_id,
                 "expected_actor": expected_actor,
                 "stage": stage,
+                "target_workspace": target_workspace,
                 "category": category.as_str(),
-                "detail": detail,
+                "detail": redact_claim_credentials(detail),
             }),
             EventKind::ClaimCleanupSkipped {
                 bead_id,
@@ -3760,7 +3781,7 @@ impl EventKind {
                 "expected_actor": expected_actor,
                 "stage": stage,
                 "target_workspace": target_workspace,
-                "reason": reason,
+                "reason": redact_claim_credentials(reason),
             }),
             EventKind::ClaimVerifySuccess {
                 bead_id,
@@ -3771,7 +3792,9 @@ impl EventKind {
                 "bead_id": bead_id,
                 "expected_actor": expected_actor,
                 "workspace": workspace,
+                "target_workspace": workspace,
                 "claim_epoch": claim_epoch,
+                "verified_epoch": claim_epoch,
             }),
             EventKind::ClaimRecheckSucceeded {
                 bead_id,
@@ -3786,12 +3809,16 @@ impl EventKind {
                 bead_id,
                 expected_actor,
                 stage,
+                target_workspace,
+                category,
                 actual_status,
                 actual_assignee,
             } => serde_json::json!({
                 "bead_id": bead_id,
                 "expected_actor": expected_actor,
                 "stage": stage,
+                "target_workspace": target_workspace,
+                "category": category.as_str(),
                 "actual_status": actual_status,
                 "actual_assignee": actual_assignee,
             }),
@@ -6836,11 +6863,9 @@ mod tests {
                     expected_actor: "worker-1".to_string(),
                     actual_status: "in_progress".to_string(),
                     actual_assignee: "worker-1".to_string(),
+                    target_workspace: "/tmp/ws".to_string(),
+                    category: ClaimVerifyErrorCategory::ClaimMismatch,
                     failed_fields: vec!["claim_epoch".to_string()],
-                    expected_revision: Some(9),
-                    actual_revision: Some(9),
-                    expected_claim_epoch: Some(2),
-                    actual_claim_epoch: Some(3),
                 },
                 "bead.claim.verify_failed",
             ),
@@ -6859,6 +6884,8 @@ mod tests {
                     bead_id: BeadId::from("nd-x"),
                     expected_actor: "worker-1".to_string(),
                     stage: "dispatching".to_string(),
+                    target_workspace: Some("/tmp/ws".to_string()),
+                    category: ClaimVerifyErrorCategory::ClaimMismatch,
                     actual_status: "open".to_string(),
                     actual_assignee: "other-worker".to_string(),
                 },
