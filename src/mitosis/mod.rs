@@ -316,6 +316,7 @@ struct MitosisResponse {
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// Evaluates beads for splitting and creates child beads when appropriate.
+#[derive(Clone)]
 pub struct MitosisEvaluator {
     config: MitosisConfig,
     telemetry: Telemetry,
