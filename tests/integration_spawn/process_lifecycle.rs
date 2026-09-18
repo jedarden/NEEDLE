@@ -38,12 +38,6 @@ impl EnvGuard {
         std::env::set_var(key, value);
         Self { key, previous }
     }
-
-    fn remove(key: &'static str) -> Self {
-        let previous = std::env::var_os(key);
-        std::env::remove_var(key);
-        Self { key, previous }
-    }
 }
 
 impl Drop for EnvGuard {
@@ -526,7 +520,6 @@ async fn worker_applies_a_config_change_only_after_the_adapter_child_exits() {
 #[tokio::test]
 async fn worker_rejects_an_invalid_reload_without_failing_its_lifecycle() {
     let _admission = EnvGuard::set("NEEDLE_SKIP_LAUNCH_RESOURCE_CHECK", "1");
-    let _max_workers = EnvGuard::remove("NEEDLE_WORKER__MAX_WORKERS");
     let home = tempfile::tempdir().expect("create isolated worker home");
     let workspace = tempfile::tempdir().expect("create isolated workspace");
     std::fs::create_dir(workspace.path().join(".beads")).unwrap();
