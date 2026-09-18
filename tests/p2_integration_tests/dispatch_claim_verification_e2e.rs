@@ -562,31 +562,43 @@ fn subprocess_claim_verification_routes_remote_collisions_and_local_work() {
 
 #[test]
 fn subprocess_claim_verification_failure_matrix_spawns_zero_agents() {
-    for mode in [
-        FixtureMode::IssueNotFound,
-        FixtureMode::WrongBackendIdentity,
-        FixtureMode::MalformedJson,
-        FixtureMode::Timeout,
-        FixtureMode::UnavailableCli,
+    assert_failure_matrix_spawns_zero_agents();
+}
+
+/// Run the failure fixtures from another p2 module as well.  Keeping the
+/// fixture runner here makes the subprocess setup single-sourced while the
+/// fail-closed acceptance filter can exercise the same real-binary matrix.
+pub(super) fn assert_failure_matrix_spawns_zero_agents() {
+    for layout in [
+        FixtureLayout::CollidingRemote,
+        FixtureLayout::NonCollidingRemote,
     ] {
-        let fixture = Fixture::new(FixtureLayout::CollidingRemote);
-        let output = fixture.run(mode);
-        assert!(
-            !output.status.success(),
-            "{mode:?}: failure mode must fail the worker subprocess\nstdout={}\nstderr={}\nevents={:?}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
-            fixture.telemetry()
-        );
-        assert_no_agent_spawn(&fixture);
-        if mode != FixtureMode::WrongBackendIdentity && mode != FixtureMode::UnavailableCli {
+        for mode in [
+            FixtureMode::IssueNotFound,
+            FixtureMode::WrongBackendIdentity,
+            FixtureMode::MalformedJson,
+            FixtureMode::Timeout,
+            FixtureMode::UnavailableCli,
+        ] {
+            let fixture = Fixture::new(layout);
+            let output = fixture.run(mode);
             assert!(
-                fixture.has_event("bead.claim.verify_error"),
-                "{mode:?}: verification failure must emit bead.claim.verify_error\nstdout={}\nstderr={}\nevents={:?}",
+                !output.status.success(),
+                "{layout:?}/{mode:?}: failure mode must fail the worker subprocess\nstdout={}\nstderr={}\nevents={:?}",
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr),
                 fixture.telemetry()
             );
+            assert_no_agent_spawn(&fixture);
+            if mode != FixtureMode::WrongBackendIdentity && mode != FixtureMode::UnavailableCli {
+                assert!(
+                    fixture.has_event("bead.claim.verify_error"),
+                    "{layout:?}/{mode:?}: verification failure must emit bead.claim.verify_error\nstdout={}\nstderr={}\nevents={:?}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                    fixture.telemetry()
+                );
+            }
         }
     }
 }

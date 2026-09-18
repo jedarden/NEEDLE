@@ -531,6 +531,10 @@ async fn pre_spawn_control_with_matching_claim_spawns() {
 
     assert_context_uses_selected_target_store_and_claim_identity().await;
     assert_context_rejects_moved_claim_identity_from_target_store().await;
+
+    // Keep the real-binary failure fixtures under the fail-closed acceptance
+    // filter without adding another harness test budget entry.
+    super::dispatch_claim_verification_e2e::assert_failure_matrix_spawns_zero_agents();
 }
 
 /// Selection and claim hand the exact remote store plus the claim-time
