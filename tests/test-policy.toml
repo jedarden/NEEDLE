@@ -137,7 +137,8 @@ max_tests = 3862
 # +5 fail-closed pre-spawn claim verification gate (needle-40ca2f6e).
 # +5 fallback-gate branch, opt-out, telemetry, and failed-verification
 # contracts (needle-63cf0472).
-push = 662
+# +3 end-to-end claim-verification subprocess matrix tests (needle-653ec4be).
+push = 665
 contract = 67
 # +16 literal test attributes for Cargo execution isolation (needle-b31fcb27):
 # seven integration cases plus nine nested-Cargo fixture tests embedded in source.
@@ -197,7 +198,8 @@ tier = "push"
 # existing atomic_spawn_verification suites.
 # +5 fallback-gate branch, opt-out, telemetry, and failed-verification
 # contracts (needle-63cf0472).
-max_tests = 116
+# +3 end-to-end claim-verification subprocess matrix tests (needle-653ec4be).
+max_tests = 119
 owner = "component:pluck-mend-explore"
 
 [[harness]]

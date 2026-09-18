@@ -26,6 +26,8 @@ mod claim_cycle_span_depth_regression;
 mod claim_strategies;
 #[path = "p2_integration_tests/cli_bead_store_engine.rs"]
 mod cli_bead_store_engine;
+#[path = "p2_integration_tests/dispatch_claim_verification_e2e.rs"]
+mod dispatch_claim_verification_e2e;
 #[path = "p2_integration_tests/double_dispatch_prevention.rs"]
 mod double_dispatch_prevention;
 #[path = "p2_integration_tests/fail_closed_verification.rs"]
