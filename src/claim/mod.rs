@@ -311,6 +311,19 @@ impl ClaimIdentity {
         })
     }
 
+    /// Convert this held identity into the full conditional-release guard.
+    ///
+    /// The recovery path must use exactly the identity captured at claim time;
+    /// it must never replace missing fields with a later store read.
+    pub fn as_claim_status(&self) -> ClaimStatus {
+        ClaimStatus {
+            status: BeadStatus::InProgress,
+            assignee: Some(self.actor.clone()),
+            revision: self.revision,
+            claim_epoch: self.claim_epoch,
+        }
+    }
+
     /// The identity fields that fail to match a live [`ClaimStatus`].
     ///
     /// `revision` and `claim_epoch` must match exactly when both sides are

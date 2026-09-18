@@ -30,11 +30,11 @@ use tracing::Instrument;
 #[cfg(unix)]
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering as AtomicOrdering};
 
-use crate::bead_store::BeadStore;
+use crate::bead_store::{BeadStore, RecoveryReleaseOutcome};
 use crate::build_status::BuildStatusChecker;
 use crate::canary::CanaryRunner;
 use crate::ci::{self, RegistrationResult};
-use crate::claim::{CircuitGate, ClaimIdentity, Claimer};
+use crate::claim::{CircuitGate, ClaimIdentity, Claimer, ResolvedStoreContext};
 use crate::clock::{Clock, TokioClock};
 use crate::commit_hook;
 use crate::config::{CliOverrides, Config, ConfigLoader, ConfigSource, SourceMap};
@@ -845,6 +845,81 @@ pub struct Worker {
     /// Spawn-path binary metadata recorded at boot time.
     /// Used to detect in-place binary modifications during worker lifecycle.
     spawn_path_metadata: Option<crate::spawn_path::BinaryMetadata>,
+}
+
+/// Release an unverifiable claim only through the exact store and identity
+/// held by this dispatch cycle.
+///
+/// A missing context, rejected credential, unreachable store, timeout, or
+/// compare-and-release conflict leaves the claim untouched. Lease expiry is
+/// the safe recovery mechanism in each of those cases.
+async fn cleanup_unverifiable_claim_context(
+    telemetry: &Telemetry,
+    fallback_actor: &str,
+    bead_id: &BeadId,
+    stage: &str,
+    target_store: Option<ResolvedStoreContext>,
+    claim_identity: Option<ClaimIdentity>,
+) {
+    let expected_actor = claim_identity
+        .as_ref()
+        .map(|identity| identity.actor.clone())
+        .unwrap_or_else(|| fallback_actor.to_string());
+    let target_workspace = target_store
+        .as_ref()
+        .map(|context| context.workspace().display().to_string());
+    let emit_skipped = |reason: String| {
+        let _ = telemetry.emit(
+            EventKind::ClaimCleanupSkipped {
+                bead_id: bead_id.clone(),
+                expected_actor: expected_actor.clone(),
+                stage: stage.to_string(),
+                target_workspace: target_workspace.clone(),
+                reason,
+            },
+            Utc::now(),
+        );
+    };
+
+    let Some(target_store) = target_store else {
+        emit_skipped("resolved target store context is unavailable".to_string());
+        return;
+    };
+    let Some(claim_identity) = claim_identity else {
+        emit_skipped("held claim identity is unavailable".to_string());
+        return;
+    };
+
+    let expected = claim_identity.as_claim_status();
+    let store = target_store.store();
+    match tokio::time::timeout(
+        Duration::from_secs(30),
+        store.release_recovery(bead_id, &expected),
+    )
+    .await
+    {
+        Ok(Ok(RecoveryReleaseOutcome::Released)) => {
+            tracing::info!(
+                bead_id = %bead_id,
+                workspace = %target_store.workspace().display(),
+                "conditionally released unverifiable claim through its target store"
+            );
+        }
+        Ok(Ok(RecoveryReleaseOutcome::Conflict)) => {
+            emit_skipped(
+                "claim identity changed before conditional release; leaving current claim untouched"
+                    .to_string(),
+            );
+        }
+        Ok(Err(error)) => {
+            emit_skipped(format!(
+                "target-store conditional release failed: {error:#}"
+            ));
+        }
+        Err(_) => {
+            emit_skipped("target-store conditional release timed out".to_string());
+        }
+    }
 }
 
 impl Worker {
@@ -2792,6 +2867,26 @@ impl Worker {
         })
     }
 
+    /// Attempt fail-safe cleanup using only the target store and claim
+    /// identity captured for this dispatch cycle.
+    async fn cleanup_unverifiable_claim(
+        &self,
+        bead_id: &BeadId,
+        stage: &str,
+        target_store: Option<&ResolvedStoreContext>,
+        claim_identity: Option<&ClaimIdentity>,
+    ) {
+        cleanup_unverifiable_claim_context(
+            &self.telemetry,
+            &self.qualified_id(),
+            bead_id,
+            stage,
+            target_store.cloned(),
+            claim_identity.cloned(),
+        )
+        .await;
+    }
+
     /// Compute a jittered backoff duration between idle_backoff_min and idle_backoff_max.
     ///
     /// This provides randomized delays within the configured range to prevent
@@ -3651,102 +3746,139 @@ impl Worker {
         // This ensures the bead is still properly claimed by this worker and
         // hasn't been released, reassigned, or modified by another process.
         if let Some(ref bead) = self.current_bead {
+            let bead_id = bead.id.clone();
+            let worker_id = self.qualified_id();
+            let claim_identity = match Self::resolve_claim_identity(&self.claim_identity, &bead_id)
             {
-                let store = &self.store;
-                let bead_id = bead.id.clone();
-                let worker_id = self.qualified_id();
-
-                match store.claim_status(&bead_id).await {
-                    Ok(status) => {
-                        // Verify the bead is still in_progress and assigned to this worker.
-                        let is_valid_claim = status.status == crate::types::BeadStatus::InProgress
-                            && status.assignee.as_deref() == Some(&worker_id);
-
-                        if !is_valid_claim {
-                            // Bead is not properly claimed — either released, reassigned, or wrong assignee.
-                            let reason = if status.status != crate::types::BeadStatus::InProgress {
-                                format!("bead status is {:?}, not in_progress", status.status)
-                            } else {
-                                format!(
-                                    "bead assigned to {:?}, not this worker ({})",
-                                    status.assignee, worker_id
-                                )
-                            };
-
-                            tracing::warn!(
-                                bead_id = %bead_id.as_ref(),
-                                current_status = ?status.status,
-                                current_assignee = ?status.assignee,
-                                expected_worker = %worker_id,
-                                verification_result = "failed",
-                                reason = %reason,
-                                "claim verification failed at dispatch — bead not properly claimed"
-                            );
-
-                            self.telemetry.emit(
-                                EventKind::ClaimRecheckFailed {
-                                    bead_id: bead_id.clone(),
-                                    expected_actor: worker_id.clone(),
-                                    stage: "dispatching".to_string(),
-                                    actual_status: format!("{:?}", status.status),
-                                    actual_assignee: status
-                                        .assignee
-                                        .unwrap_or_else(|| "none".to_string()),
-                                },
-                                chrono::Utc::now(),
-                            )?;
-
-                            bail!("claim verification failed: {}", reason);
-                        }
-
-                        tracing::debug!(
-                            bead_id = %bead_id.as_ref(),
+                Ok(identity) => identity,
+                Err(error) => {
+                    self.cleanup_unverifiable_claim(
+                        &bead_id,
+                        "dispatching",
+                        self.target_store.as_ref(),
+                        None,
+                    )
+                    .await;
+                    let _ = self.telemetry.emit(
+                        EventKind::ClaimVerifyError {
+                            bead_id: bead_id.clone(),
+                            expected_actor: worker_id.clone(),
+                            stage: "dispatching".to_string(),
+                            category: crate::telemetry::ClaimVerifyErrorCategory::Identity,
+                            detail: format!("{error:#}"),
+                        },
+                        chrono::Utc::now(),
+                    );
+                    return Err(error);
+                }
+            };
+            let target_store = match Self::resolve_target_store(&self.target_store, &bead_id) {
+                Ok(target_store) => target_store,
+                Err(error) => {
+                    self.cleanup_unverifiable_claim(
+                        &bead_id,
+                        "dispatching",
+                        None,
+                        Some(&claim_identity),
+                    )
+                    .await;
+                    let _ = self.telemetry.emit(
+                        EventKind::ClaimVerifyError {
+                            bead_id: bead_id.clone(),
+                            expected_actor: worker_id.clone(),
+                            stage: "dispatching".to_string(),
+                            category: crate::telemetry::ClaimVerifyErrorCategory::Identity,
+                            detail: format!("{error:#}"),
+                        },
+                        chrono::Utc::now(),
+                    );
+                    return Err(error);
+                }
+            };
+            let store = target_store.store();
+            match store.claim_status(&bead_id).await {
+                Ok(status) => {
+                    let failed_fields = claim_identity.mismatches(&status);
+                    if !failed_fields.is_empty() {
+                        let reason =
+                            format!("claim identity mismatch in fields {:?}", failed_fields);
+                        tracing::warn!(
+                            bead_id = %bead_id,
                             current_status = ?status.status,
                             current_assignee = ?status.assignee,
-                            revision = ?status.revision,
-                            verification_result = "passed",
-                            "claim verification passed — dispatching agent"
+                            expected_worker = %worker_id,
+                            failed_fields = ?failed_fields,
+                            verification_result = "failed",
+                            reason = %reason,
+                            "claim verification failed at dispatch — bead not properly claimed"
                         );
-
-                        // Stage re-check, not `ClaimVerifySuccess`: that name is
-                        // reserved for the canonical dispatch-time verification in
-                        // `Claimer::verify_claim_at_dispatch`, keeping
-                        // `verify_started`/`verify_success` 1:1 (issue #20).
+                        self.cleanup_unverifiable_claim(
+                            &bead_id,
+                            "dispatching",
+                            Some(target_store),
+                            Some(&claim_identity),
+                        )
+                        .await;
                         self.telemetry.emit(
-                            EventKind::ClaimRecheckSucceeded {
+                            EventKind::ClaimRecheckFailed {
                                 bead_id: bead_id.clone(),
                                 expected_actor: worker_id.clone(),
                                 stage: "dispatching".to_string(),
+                                actual_status: format!("{:?}", status.status),
+                                actual_assignee: status
+                                    .assignee
+                                    .unwrap_or_else(|| "none".to_string()),
                             },
                             chrono::Utc::now(),
                         )?;
+                        bail!("claim verification failed: {}", reason);
                     }
-                    Err(e) => {
-                        tracing::error!(
-                            bead_id = %bead_id.as_ref(),
-                            error = %e,
-                            "failed to verify claim status against live store — aborting dispatch"
-                        );
-                        // The query failed, so the live claim is unknown —
-                        // fail closed before any child process can be
-                        // created. One emission per failed verification; the
-                        // canonical check later in the pipeline will not run.
-                        let _ = self.telemetry.emit(
-                            EventKind::ClaimVerifyError {
-                                bead_id: bead_id.clone(),
-                                expected_actor: worker_id.clone(),
-                                stage: "dispatching".to_string(),
-                                category: crate::telemetry::ClaimVerifyErrorCategory::classify(&e),
-                                detail: format!("{e:#}"),
-                            },
-                            chrono::Utc::now(),
-                        );
-                        bail!(
-                            "claim verification query failed for bead {}: {}",
-                            bead_id,
-                            e
-                        );
-                    }
+
+                    tracing::debug!(
+                        bead_id = %bead_id,
+                        current_status = ?status.status,
+                        current_assignee = ?status.assignee,
+                        revision = ?status.revision,
+                        verification_result = "passed",
+                        "claim verification passed — dispatching agent"
+                    );
+                    self.telemetry.emit(
+                        EventKind::ClaimRecheckSucceeded {
+                            bead_id: bead_id.clone(),
+                            expected_actor: worker_id.clone(),
+                            stage: "dispatching".to_string(),
+                        },
+                        chrono::Utc::now(),
+                    )?;
+                }
+                Err(error) => {
+                    tracing::error!(
+                        bead_id = %bead_id,
+                        error = %error,
+                        "failed to verify claim status against target store — aborting dispatch"
+                    );
+                    let _ = self.telemetry.emit(
+                        EventKind::ClaimVerifyError {
+                            bead_id: bead_id.clone(),
+                            expected_actor: worker_id.clone(),
+                            stage: "dispatching".to_string(),
+                            category: crate::telemetry::ClaimVerifyErrorCategory::classify(&error),
+                            detail: format!("{error:#}"),
+                        },
+                        chrono::Utc::now(),
+                    );
+                    self.cleanup_unverifiable_claim(
+                        &bead_id,
+                        "dispatching",
+                        Some(target_store),
+                        Some(&claim_identity),
+                    )
+                    .await;
+                    bail!(
+                        "claim verification query failed for bead {}: {}",
+                        bead_id,
+                        error
+                    );
                 }
             }
         }
@@ -3840,6 +3972,15 @@ impl Worker {
                     // Failed precondition: without the claim-time identity the
                     // dispatch cannot verify anything, so abort before any
                     // child process is created (fail closed).
+                    cleanup_unverifiable_claim_context(
+                        &self.telemetry,
+                        &self.qualified_id(),
+                        &bead.id,
+                        "dispatch_time",
+                        self.target_store.clone(),
+                        None,
+                    )
+                    .await;
                     let _ = self.telemetry.emit(
                         EventKind::ClaimVerifyError {
                             bead_id: bead.id.clone(),
@@ -3853,6 +3994,9 @@ impl Worker {
                     return Err(e);
                 }
             };
+            let cleanup_telemetry = self.telemetry.clone();
+            let cleanup_target_store = self.target_store.clone();
+            let cleanup_fallback_actor = self.qualified_id();
             let (result, exec_tokens, token, dirty_paths) = async {
                 // Snapshot workspace HEAD + the bead's notes before the agent
                 // runs, so the shipped-work gate has a baseline to judge the
@@ -3910,7 +4054,7 @@ impl Worker {
                 // a missing context aborts rather than downgrading to the home
                 // store (needle-828a425c).
                 let target_store =
-                    match Self::resolve_target_store(&self.target_store, &bead.id) {
+                    match Self::resolve_target_store(&cleanup_target_store, &bead.id) {
                         Ok(target_store) => target_store,
                         Err(e) => {
                             // Failed precondition: the claim cannot be
@@ -3918,7 +4062,22 @@ impl Worker {
                             // so abort before any child process is created
                             // (fail closed — never a downgrade to the home
                             // store, needle-828a425c).
-                            let _ = self.telemetry.emit(
+                            cleanup_unverifiable_claim_context(
+                                &cleanup_telemetry,
+                                &cleanup_fallback_actor,
+                                &bead.id,
+                                "dispatch_time",
+                                None,
+                                Some(claim_identity.clone()),
+                            )
+                            .await;
+                            crate::validation::predispatch::clear_if_own(
+                                dispatch_ws,
+                                &bead.id,
+                                predispatch_token.as_deref(),
+                            )
+                            .await;
+                            let _ = cleanup_telemetry.emit(
                                 EventKind::ClaimVerifyError {
                                     bead_id: bead.id.clone(),
                                     expected_actor: claim_identity.actor.clone(),
@@ -3935,16 +4094,35 @@ impl Worker {
                             )));
                         }
                     };
-                let is_valid = self
+                let is_valid = match self
                     .claimer
                     .verify_claim_at_dispatch(target_store, &bead.id, &claim_identity)
                     .await
-                    .with_context(|| {
-                        format!(
+                {
+                    Ok(is_valid) => is_valid,
+                    Err(error) => {
+                        let error = error.context(format!(
                             "dispatch-time claim verification failed for bead {}",
                             bead.id
+                        ));
+                        cleanup_unverifiable_claim_context(
+                            &cleanup_telemetry,
+                            &cleanup_fallback_actor,
+                            &bead.id,
+                            "dispatch_time",
+                            Some((*target_store).clone()),
+                            Some(claim_identity.clone()),
                         )
-                    })?;
+                        .await;
+                        crate::validation::predispatch::clear_if_own(
+                            dispatch_ws,
+                            &bead.id,
+                            predispatch_token.as_deref(),
+                        )
+                        .await;
+                        return Err(error);
+                    }
+                };
 
                 if !is_valid {
                     // Bead is not assigned to this worker - abort dispatch.
@@ -3955,14 +4133,15 @@ impl Worker {
                         "dispatch-time claim verification failed: bead not assigned to this worker, aborting dispatch and releasing back to ready state"
                     );
 
-                    // Release the bead back to open status
-                    if let Err(e) = self.store.release(&bead.id).await {
-                        tracing::error!(
-                            bead_id = %bead.id,
-                            error = %e,
-                            "failed to release bead after dispatch-time verification failure"
-                        );
-                    }
+                    cleanup_unverifiable_claim_context(
+                        &cleanup_telemetry,
+                        &cleanup_fallback_actor,
+                        &bead.id,
+                        "dispatch_time",
+                        Some((*target_store).clone()),
+                        Some(claim_identity.clone()),
+                    )
+                    .await;
 
                     // No failure telemetry here: `verify_claim_at_dispatch` already
                     // emitted `bead.claim.verify_failed` with the live status and
@@ -3988,10 +4167,32 @@ impl Worker {
                 }
 
                 self.exec_started_at = Some(self.clock.now());
-                let result = self
+                let result = match self
                     .dispatcher
                     .dispatch(&bead.id, &prompt, &adapter, dispatch_ws)
-                    .await?;
+                    .await
+                {
+                    Ok(result) => result,
+                    Err(error) if dispatch::is_claim_verification_error(&error) => {
+                        cleanup_unverifiable_claim_context(
+                            &cleanup_telemetry,
+                            &cleanup_fallback_actor,
+                            &bead.id,
+                            "pre_spawn",
+                            cleanup_target_store.clone(),
+                            Some(claim_identity.clone()),
+                        )
+                        .await;
+                        crate::validation::predispatch::clear_if_own(
+                            dispatch_ws,
+                            &bead.id,
+                            predispatch_token.as_deref(),
+                        )
+                        .await;
+                        return Err(error);
+                    }
+                    Err(error) => return Err(error),
+                };
 
                 // Set span status based on exit code: 0 = Ok, non-zero = Error
                 if result.exit_code != 0 {
@@ -8093,10 +8294,24 @@ fn report_restart_required_config(telemetry: &Telemetry, keys: Vec<String>) {
 mod tests {
     use super::*;
     use crate::bead_store::{BeadStore, Filters, RepairReport};
+    use crate::telemetry::{Sink, TelemetryEvent};
     use crate::types::{Bead, BeadId, BeadStatus, ClaimResult};
     use async_trait::async_trait;
     use std::io::Write;
     use std::sync::Mutex;
+
+    struct RecordingTelemetrySink(Arc<Mutex<Vec<TelemetryEvent>>>);
+
+    impl Sink for RecordingTelemetrySink {
+        fn accept(&self, event: &TelemetryEvent) -> Result<()> {
+            self.0.lock().unwrap().push(event.clone());
+            Ok(())
+        }
+
+        fn flush(&self, _deadline: Duration) -> Result<()> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn zero_split_threshold_disables_worker_split_mode() {
@@ -9275,8 +9490,8 @@ mod tests {
 
     // ── Tests for resolve_target_store (needle-828a425c) ──
 
-    #[test]
-    fn resolve_target_store_returns_the_captured_context_unchanged() {
+    #[tokio::test]
+    async fn resolve_target_store_returns_the_captured_context_unchanged() {
         // The context captured at selection must come back with the exact
         // store handle it was built with — pointer-identical, never
         // reconstructed from a path and never swapped for the home store.
@@ -9294,10 +9509,45 @@ mod tests {
             "resolved store must be the exact handle captured at selection"
         );
         assert_eq!(resolved.workspace(), Path::new("/target-ws"));
+
+        let bead_id = BeadId::from("needle-cleanup-target");
+        let mut target_bead = make_test_bead(bead_id.as_ref());
+        target_bead.status = BeadStatus::InProgress;
+        target_bead.assignee = Some("worker-1".to_string());
+        let mut home_bead = target_bead.clone();
+        home_bead.assignee = Some("home-worker".to_string());
+        let target = Arc::new(MockStore::new(vec![target_bead]));
+        let home = Arc::new(MockStore::new(vec![home_bead]));
+        let telemetry = Telemetry::with_sink(
+            "cleanup-target-test".to_string(),
+            RecordingTelemetrySink(Arc::new(Mutex::new(Vec::new()))),
+        );
+        cleanup_unverifiable_claim_context(
+            &telemetry,
+            "worker-1",
+            &bead_id,
+            "dispatch_time",
+            Some(ResolvedStoreContext::new(
+                target.clone(),
+                PathBuf::from("/target"),
+            )),
+            Some(ClaimIdentity {
+                actor: "worker-1".to_string(),
+                revision: None,
+                claim_epoch: None,
+            }),
+        )
+        .await;
+        let released = target.show(&bead_id).await.unwrap();
+        assert_eq!(released.status, BeadStatus::Open);
+        assert_eq!(released.assignee, None);
+        let untouched_home = home.show(&bead_id).await.unwrap();
+        assert_eq!(untouched_home.status, BeadStatus::InProgress);
+        assert_eq!(untouched_home.assignee.as_deref(), Some("home-worker"));
     }
 
-    #[test]
-    fn resolve_target_store_rejects_a_missing_context_instead_of_falling_back() {
+    #[tokio::test]
+    async fn resolve_target_store_rejects_a_missing_context_instead_of_falling_back() {
         // A missing context must abort with a clear error naming the refusal —
         // verification never downgrades to the home store, where a colliding
         // bead ID could answer for the target bead.
@@ -9317,6 +9567,47 @@ mod tests {
             message.contains("home store"),
             "error must state the home-store fallback was refused, got: {message}"
         );
+
+        let bead_id = BeadId::from("needle-cleanup-conflict");
+        let mut changed = make_test_bead(bead_id.as_ref());
+        changed.status = BeadStatus::InProgress;
+        changed.assignee = Some("new-worker".to_string());
+        let target = Arc::new(MockStore::new(vec![changed]));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let telemetry = Telemetry::with_sink(
+            "cleanup-conflict-test".to_string(),
+            RecordingTelemetrySink(events.clone()),
+        );
+        cleanup_unverifiable_claim_context(
+            &telemetry,
+            "worker-1",
+            &bead_id,
+            "pre_spawn",
+            Some(ResolvedStoreContext::new(
+                target.clone(),
+                PathBuf::from("/target"),
+            )),
+            Some(ClaimIdentity {
+                actor: "worker-1".to_string(),
+                revision: None,
+                claim_epoch: None,
+            }),
+        )
+        .await;
+        telemetry
+            .force_flush_async(Duration::from_secs(1))
+            .await
+            .unwrap();
+        let current = target.show(&bead_id).await.unwrap();
+        assert_eq!(current.status, BeadStatus::InProgress);
+        assert_eq!(current.assignee.as_deref(), Some("new-worker"));
+        let events = events.lock().unwrap();
+        assert!(events.iter().any(|event| {
+            event.event_type == "bead.claim.cleanup_skipped"
+                && event.data["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.contains("identity changed"))
+        }));
     }
 
     #[test]

@@ -1158,6 +1158,36 @@ pub fn load_adapters(
 // Dispatcher
 // ──────────────────────────────────────────────────────────────────────────────
 
+/// Marker carried by errors raised by the last claim check before process
+/// spawn. The worker uses it to run claim cleanup through the held target-store
+/// context rather than treating a verification abort as an ordinary dispatch
+/// failure.
+#[derive(Debug)]
+struct ClaimVerificationError {
+    detail: String,
+}
+
+impl std::fmt::Display for ClaimVerificationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.detail.fmt(formatter)
+    }
+}
+
+impl std::error::Error for ClaimVerificationError {}
+
+fn claim_verification_error(detail: impl Into<String>) -> anyhow::Error {
+    anyhow::Error::new(ClaimVerificationError {
+        detail: detail.into(),
+    })
+}
+
+/// Whether an error came from the dispatcher's final pre-spawn claim check.
+pub fn is_claim_verification_error(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.downcast_ref::<ClaimVerificationError>().is_some())
+}
+
 /// Executes agent processes for claimed beads.
 pub struct Dispatcher {
     adapters: HashMap<String, AgentAdapter>,
@@ -1556,7 +1586,7 @@ impl Dispatcher {
                         },
                         chrono::Utc::now(),
                     );
-                    return Err(error);
+                    return Err(claim_verification_error(format!("{error:#}")));
                 }
                 (Some(_), None) => {
                     let error = anyhow::anyhow!(
@@ -1574,7 +1604,7 @@ impl Dispatcher {
                         },
                         chrono::Utc::now(),
                     );
-                    return Err(error);
+                    return Err(claim_verification_error(format!("{error:#}")));
                 }
             };
         {
@@ -1617,7 +1647,10 @@ impl Dispatcher {
                             chrono::Utc::now(),
                         );
 
-                        return Err(anyhow::anyhow!("claim verification failed: {}", reason));
+                        return Err(claim_verification_error(format!(
+                            "claim verification failed: {}",
+                            reason
+                        )));
                     }
 
                     // bead-rs treats the claim epoch as the credential for
@@ -1669,11 +1702,10 @@ impl Dispatcher {
                         },
                         chrono::Utc::now(),
                     );
-                    return Err(anyhow::anyhow!(
+                    return Err(claim_verification_error(format!(
                         "claim verification query failed for bead {}: {}",
-                        bead_id,
-                        e
-                    ));
+                        bead_id, e
+                    )));
                 }
             }
         }
