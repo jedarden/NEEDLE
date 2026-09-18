@@ -49,6 +49,8 @@ use crate::rate_limit::{
     AdmissionHoldConfig, BlockedObservation, RateLimiter, ResourceProbe,
 };
 use crate::registry::{LiveConfigSnapshot, Registry, WorkerEntry};
+use crate::resolve::executor::{AppliedDecision, DecisionExecutor, ReleaseCause};
+use crate::resolve::{ResolveContext, Resolver};
 use crate::routing;
 use crate::span::ScopeGuard;
 use crate::strand::StrandRunner;
@@ -777,6 +779,15 @@ pub struct Worker {
     built_prompt: Option<BuiltPrompt>,
     current_strand: Option<String>,
     exec_output: Option<(AgentOutcome, bool)>,
+    /// The completed Pluck process output retained until the post-dispatch
+    /// claim check runs after the normal terminal action has been applied.
+    last_agent_outcome: Option<(AgentOutcome, bool)>,
+    /// True only while the dispatched Pluck process is still running. Resolve
+    /// is forbidden from starting while this flag is set.
+    agent_process_active: bool,
+    /// Resolve is an exceptional, once-per-dispatch pass. This guard is reset
+    /// when SELECTING starts the next cycle.
+    post_dispatch_resolution_attempted: bool,
     /// When agent execution began — used only to compute `duration_ms` for
     /// the HOOP event tap (Hook 2). Set in `do_execute`, consumed in
     /// `do_handle`.
@@ -1311,6 +1322,9 @@ impl Worker {
             built_prompt: None,
             current_strand: None,
             exec_output: None,
+            last_agent_outcome: None,
+            agent_process_active: false,
+            post_dispatch_resolution_attempted: false,
             dispatch_started_at: None,
             exec_started_at: None,
             last_effort: None,
@@ -1731,6 +1745,7 @@ impl Worker {
                 WorkerState::Handling => {
                     let action = self.do_handle().instrument(lifecycle_span.clone()).await;
                     self.apply_bead_action(action).await?;
+                    self.run_post_dispatch_resolution().await?;
                 }
                 WorkerState::Logging => {
                     // LOGGING is the one synchronous handler, so it scopes the
@@ -2442,6 +2457,9 @@ impl Worker {
         self.race_lost_this_cycle.clear();
         self.current_bead = None;
         self.current_strand = None;
+        self.last_agent_outcome = None;
+        self.agent_process_active = false;
+        self.post_dispatch_resolution_attempted = false;
         self.health.update_strand(None);
 
         // Restore home store if it was swapped for a remote workspace.
@@ -4190,7 +4208,8 @@ impl Worker {
                     DispatchContext::new((*target_store).clone(), claim_identity.clone());
 
                 self.exec_started_at = Some(self.clock.now());
-                let result = match self
+                self.agent_process_active = true;
+                let dispatch_result = self
                     .dispatcher
                     .dispatch_with_context(
                         &bead.id,
@@ -4199,8 +4218,9 @@ impl Worker {
                         dispatch_ws,
                         &dispatch_context,
                     )
-                    .await
-                {
+                    .await;
+                self.agent_process_active = false;
+                let result = match dispatch_result {
                     Ok(result) => result,
                     Err(error) if dispatch::is_claim_verification_error(&error) => {
                         cleanup_unverifiable_claim_context(
@@ -4285,6 +4305,7 @@ impl Worker {
                 stderr: "interrupted before execution".to_string(),
             },
         };
+        self.last_agent_outcome = Some((output.clone(), was_interrupted));
 
         // Extract tokens and compute cost for effort tracking. The agent's
         // own result envelope fills in tokens the configured extractor missed
@@ -5093,6 +5114,327 @@ impl Worker {
         heartbeat_task.abort();
 
         handler_result.bead_action
+    }
+
+    /// Run the exceptional post-Pluck Resolve pass, if the normal outcome
+    /// action left this dispatch's claim in place.
+    ///
+    /// The check deliberately happens after [`Self::apply_bead_action`].
+    /// Outcome handlers return actions rather than mutating the lifecycle, so
+    /// checking before that choke point would incorrectly invoke Resolve for
+    /// every ordinary release. At this point the agent process has been
+    /// awaited, the normal action has run, and only an actually stranded claim
+    /// can enter this path.
+    async fn run_post_dispatch_resolution(&mut self) -> Result<()> {
+        if self.post_dispatch_resolution_attempted {
+            return Ok(());
+        }
+
+        let Some(bead) = self.current_bead.as_ref().cloned() else {
+            return Ok(());
+        };
+        let Some((output, was_interrupted)) = self.last_agent_outcome.as_ref().cloned() else {
+            // There is no completed Pluck process to resolve. This can occur
+            // only in a direct state-machine fixture or after an earlier
+            // recovery path, so leave the lifecycle to that path.
+            return Ok(());
+        };
+
+        self.post_dispatch_resolution_attempted = true;
+
+        if self.agent_process_active {
+            tracing::error!(
+                bead_id = %bead.id,
+                "post-dispatch resolution reached while the Pluck process is still active"
+            );
+            return self
+                .record_resolution_failure(&bead, "agent_process_active", 0)
+                .await;
+        }
+
+        let claim_status =
+            match tokio::time::timeout(Duration::from_secs(30), self.store.claim_status(&bead.id))
+                .await
+            {
+                Ok(Ok(status)) => status,
+                Ok(Err(error)) => {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        error = %error,
+                        "post-dispatch claim check failed"
+                    );
+                    return self
+                        .record_resolution_failure(&bead, "claim_status_failed", 0)
+                        .await;
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        "post-dispatch claim check timed out"
+                    );
+                    return self
+                        .record_resolution_failure(&bead, "claim_status_timeout", 0)
+                        .await;
+                }
+            };
+
+        if claim_status.status != BeadStatus::InProgress
+            || claim_status.assignee.as_deref() != Some(self.qualified_id().as_str())
+        {
+            // The agent or the normal handler already completed the lifecycle,
+            // or another worker owns it now. This dispatch must not mutate it.
+            return Ok(());
+        }
+
+        // Interrupted outcomes have an unambiguous release policy. Resolve is
+        // reserved for an ambiguous claimed bead, but the postcondition still
+        // requires a best-effort release if the normal action left the claim.
+        if was_interrupted {
+            return self
+                .release_claim_after_post_dispatch_failure(&bead, "post_dispatch_interrupted")
+                .await;
+        }
+
+        let current =
+            match tokio::time::timeout(Duration::from_secs(30), self.store.show(&bead.id)).await {
+                Ok(Ok(current)) => current,
+                Ok(Err(error)) => {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        error = %error,
+                        "post-dispatch could not refresh the claimed bead"
+                    );
+                    return self
+                        .record_resolution_failure(&bead, "bead_refresh_failed", 0)
+                        .await;
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        "post-dispatch bead refresh timed out"
+                    );
+                    return self
+                        .record_resolution_failure(&bead, "bead_refresh_timeout", 0)
+                        .await;
+                }
+            };
+
+        if !self.config.strands.resolve.enabled {
+            tracing::warn!(
+                bead_id = %bead.id,
+                "Resolve is disabled while the completed dispatch still owns its bead"
+            );
+            return self
+                .record_resolution_failure(&current, "resolve_disabled", 0)
+                .await;
+        }
+
+        let started_at = self.dispatch_started_at.unwrap_or_else(Utc::now);
+        let duration = self
+            .last_effort
+            .as_ref()
+            .map(|effort| self.clock.elapsed_since(effort.cycle_start))
+            .unwrap_or_default();
+        let resolve_started = Instant::now();
+        let context = ResolveContext::new(
+            &current,
+            output.exit_code,
+            output.stdout,
+            output.stderr,
+            duration,
+            started_at,
+            was_interrupted,
+        );
+        let resolver = Resolver::with_config(
+            self.prompt_builder.clone(),
+            self.config.strands.resolve.clone(),
+        )
+        .with_telemetry(self.telemetry.clone());
+        let resolve_timeout =
+            Duration::from_secs(self.config.strands.resolve.timeout_secs.saturating_add(30));
+        let decision =
+            match tokio::time::timeout(resolve_timeout, resolver.resolve_strict(&context)).await {
+                Ok(Ok(decision)) => decision,
+                Ok(Err(error)) => {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        error = %error,
+                        "Resolve failed after the Pluck process ended"
+                    );
+                    return self
+                        .record_resolution_failure(
+                            &current,
+                            if error.to_string().contains("timed out") {
+                                "resolver_timeout"
+                            } else if error.to_string().contains("parse")
+                                || error.to_string().contains("validation")
+                            {
+                                "resolver_invalid_output"
+                            } else {
+                                "resolver_failed"
+                            },
+                            resolve_started.elapsed().as_millis() as u64,
+                        )
+                        .await;
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        "Resolve timed out after the Pluck process ended"
+                    );
+                    return self
+                        .record_resolution_failure(
+                            &current,
+                            "resolver_timeout",
+                            resolve_started.elapsed().as_millis() as u64,
+                        )
+                        .await;
+                }
+            };
+
+        let executor = DecisionExecutor::new(self.config.clone(), self.telemetry.clone())
+            .with_mitosis(self.mitosis_evaluator.clone());
+        let fallback = self.pre_dispatch_head.as_ref().map(|head| {
+            crate::validation::predispatch::PreDispatch {
+                head_sha: Some(head.clone()),
+                notes_hash: None,
+                dirty_files: Vec::new(),
+                captured_at: None,
+            }
+        });
+        let applied = match executor
+            .apply(
+                self.store.as_ref(),
+                &current,
+                &decision,
+                &self.qualified_id(),
+                fallback.as_ref(),
+            )
+            .await
+        {
+            Ok(applied) => applied,
+            Err(error) => {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    error = %error,
+                    "Resolve decision could not be applied"
+                );
+                return self
+                    .record_resolution_failure(
+                        &current,
+                        "resolver_action_failed",
+                        resolve_started.elapsed().as_millis() as u64,
+                    )
+                    .await;
+            }
+        };
+
+        if matches!(
+            applied,
+            AppliedDecision::Released(ReleaseCause::MutationFailed)
+        ) {
+            return self
+                .record_resolution_failure(
+                    &current,
+                    "resolver_action_failed",
+                    resolve_started.elapsed().as_millis() as u64,
+                )
+                .await;
+        }
+
+        self.last_outcome = Some(format!("resolve:{}", decision.as_str()));
+        let _ = self.telemetry.emit_try_lock(
+            EventKind::ResolveEvaluated {
+                bead_id: current.id,
+                decision: decision.as_str().to_string(),
+                evidence: "decision_applied".to_string(),
+                duration_ms: resolve_started.elapsed().as_millis() as u64,
+            },
+            Utc::now(),
+        );
+        Ok(())
+    }
+
+    /// Record a failed Resolve pass and enforce the lifecycle postcondition.
+    async fn record_resolution_failure(
+        &mut self,
+        bead: &Bead,
+        reason: &str,
+        duration_ms: u64,
+    ) -> Result<()> {
+        self.last_outcome = Some("resolution_failed".to_string());
+        let _ = self.telemetry.emit_try_lock(
+            EventKind::ResolveEvaluated {
+                bead_id: bead.id.clone(),
+                decision: "resolution_failed".to_string(),
+                evidence: reason.to_string(),
+                duration_ms,
+            },
+            Utc::now(),
+        );
+        let _ = self.telemetry.emit_try_lock(
+            EventKind::OutcomeHandled {
+                bead_id: bead.id.clone(),
+                outcome: "resolution_failed".to_string(),
+                action: "release".to_string(),
+            },
+            Utc::now(),
+        );
+        self.release_claim_after_post_dispatch_failure(bead, "resolution_failed")
+            .await
+    }
+
+    /// Release only if the live claim is still owned by this dispatching
+    /// worker. An error is returned when the bead is still ours but the
+    /// fallback could not release it; the state machine then cannot advance to
+    /// SELECTING with a dangling claim.
+    async fn release_claim_after_post_dispatch_failure(
+        &self,
+        bead: &Bead,
+        reason: &str,
+    ) -> Result<()> {
+        let status =
+            tokio::time::timeout(Duration::from_secs(30), self.store.claim_status(&bead.id))
+                .await
+                .context("post-dispatch release claim check timed out")??;
+        if status.status != BeadStatus::InProgress
+            || status.assignee.as_deref() != Some(self.qualified_id().as_str())
+        {
+            return Ok(());
+        }
+
+        match tokio::time::timeout(Duration::from_secs(30), self.store.release(&bead.id)).await {
+            Ok(Ok(())) => {
+                let _ = self.telemetry.emit_try_lock(
+                    EventKind::BeadReleased {
+                        bead_id: bead.id.clone(),
+                        reason: reason.to_string(),
+                    },
+                    Utc::now(),
+                );
+                Ok(())
+            }
+            Ok(Err(error)) => {
+                let _ = self.telemetry.emit_try_lock(
+                    EventKind::BeadReleaseFailed {
+                        bead_id: bead.id.clone(),
+                        reason: reason.to_string(),
+                    },
+                    Utc::now(),
+                );
+                Err(error).context("post-dispatch resolution fallback release failed")
+            }
+            Err(_) => {
+                let _ = self.telemetry.emit_try_lock(
+                    EventKind::BeadReleaseFailed {
+                        bead_id: bead.id.clone(),
+                        reason: reason.to_string(),
+                    },
+                    Utc::now(),
+                );
+                bail!("post-dispatch resolution fallback release timed out")
+            }
+        }
     }
 
     /// The beads this worker's post-dispatch audit may act on: beads created

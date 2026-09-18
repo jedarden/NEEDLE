@@ -594,6 +594,42 @@ impl Resolver {
         decision
     }
 
+    /// Resolve a Pluck outcome without converting failures into a fallback
+    /// decision.
+    ///
+    /// The public [`Self::resolve`] API is retained for callers that want the
+    /// historical safe-retry fallback.  The worker's post-dispatch path needs
+    /// to distinguish a real `retry` decision from a timeout, process crash,
+    /// prompt failure, or invalid response so it can record
+    /// `resolution_failed` and release the claim instead of applying a made-up
+    /// lifecycle decision.
+    pub async fn resolve_strict(&self, context: &ResolveContext<'_>) -> Result<ResolveDecision> {
+        self.verify_binary_identity_before_agent()
+            .map_err(|error| {
+                anyhow::anyhow!("resolve binary identity verification failed: {error}")
+            })?;
+
+        let evidence = match &context.evidence {
+            Some(bundle) => bundle.clone(),
+            None => {
+                evidence::capture(
+                    &context.bead.workspace,
+                    context.bead,
+                    context.exit_code,
+                    &context.stdout,
+                    &context.stderr,
+                    context.was_interrupted,
+                )
+                .await
+            }
+        };
+
+        let mut prompt = self.build_prompt(context)?;
+        evidence::append_evidence(&mut prompt, &evidence);
+        let response_text = self.invoke_resolve_agent(&prompt).await?;
+        self.parse_and_validate_response(&response_text)
+    }
+
     /// Invoke the resolve agent with the given prompt.
     ///
     /// Returns the agent's raw text response or an error.
@@ -611,6 +647,9 @@ impl Resolver {
         let timeout = Duration::from_secs(self.config.timeout_secs);
         let output = tokio::time::timeout(timeout, async {
             let child = AsyncCommand::new("claude")
+                // A resolver timeout must not leave its child agent running
+                // while the worker applies the fallback release.
+                .kill_on_drop(true)
                 .arg("--message")
                 .arg(prompt)
                 .stdout(Stdio::piped())
