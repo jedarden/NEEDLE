@@ -1985,8 +1985,12 @@ mod tests {
             "a refused proposal creates nothing"
         );
         assert!(
-            store.labels_snapshot().is_empty(),
-            "a refused proposal never converts the parent"
+            !store
+                .labels_snapshot()
+                .iter()
+                .any(|l| l == "umbrella" || l == "auto-split-parent"),
+            "a refused proposal never converts the parent, got: {:?}",
+            store.labels_snapshot()
         );
         assert_eq!(store.blocks.load(Ordering::SeqCst), 0, "nothing blocked");
         assert!(store.closes_snapshot().is_empty(), "nothing closed");

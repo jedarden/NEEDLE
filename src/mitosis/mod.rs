@@ -1240,6 +1240,15 @@ impl MitosisEvaluator {
             }
         }
 
+        // Nothing survived the cap: there is no chain to wire, and the
+        // parent must never be converted to an umbrella over zero children —
+        // an open parent wearing `umbrella` with no chain is exactly the
+        // shape `verified_completed_split` closes as a completed split. The
+        // caller refuses on the empty return.
+        if created.is_empty() {
+            return Ok(created);
+        }
+
         // The parent depends on exactly one bead: the last child of the
         // chain. `verified_completed_split` walks the chain from there.
         if let Some(last) = created.last().cloned() {
