@@ -6,6 +6,7 @@
 //! their invocations and exit deterministically. This keeps the tests
 //! hermetic: no registry, package index, network, or operator HOME is used.
 
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -16,10 +17,13 @@ use chrono::Utc;
 
 use needle::bead_store::{BeadStore, Filters, RepairReport};
 use needle::config::Config;
+use needle::dispatch::{AgentAdapter, Dispatcher, TokenExtraction};
 use needle::outcome::OutcomeHandler;
+use needle::prompt::BuiltPrompt;
 use needle::telemetry::Telemetry;
 use needle::types::{
-    AgentOutcome, Bead, BeadAction, BeadId, BeadStatus, ClaimResult, ClaimStatus, ReleaseReason,
+    AgentOutcome, Bead, BeadAction, BeadId, BeadStatus, ClaimResult, ClaimStatus, InputMethod,
+    ReleaseReason,
 };
 use needle::validation::fallback::{select_verifier, MarkerVerifier, Verifier};
 
@@ -38,6 +42,7 @@ struct IsolatedEnvironment {
     previous_cargo_home: Option<OsString>,
     previous_cargo_target_dir: Option<OsString>,
     previous_cargo_net_offline: Option<OsString>,
+    previous_explore_workspace_root: Option<OsString>,
 }
 
 impl IsolatedEnvironment {
@@ -51,11 +56,17 @@ impl IsolatedEnvironment {
         let previous_cargo_home = std::env::var_os("CARGO_HOME");
         let previous_cargo_target_dir = std::env::var_os("CARGO_TARGET_DIR");
         let previous_cargo_net_offline = std::env::var_os("CARGO_NET_OFFLINE");
+        let previous_explore_workspace_root =
+            std::env::var_os("NEEDLE_STRANDS__EXPLORE__WORKSPACE_ROOT");
 
         std::env::set_var("HOME", home.path());
         std::env::set_var("CARGO_HOME", home.path().join("cargo-home"));
         std::env::set_var("CARGO_TARGET_DIR", home.path().join("cargo-target"));
         std::env::set_var("CARGO_NET_OFFLINE", "true");
+        std::env::set_var(
+            "NEEDLE_STRANDS__EXPLORE__WORKSPACE_ROOT",
+            home.path().join("explore-root"),
+        );
 
         if with_tool_shims {
             let shim_dir = home.path().join("tool-shims");
@@ -79,6 +90,7 @@ impl IsolatedEnvironment {
             previous_cargo_home,
             previous_cargo_target_dir,
             previous_cargo_net_offline,
+            previous_explore_workspace_root,
         }
     }
 
@@ -98,6 +110,10 @@ impl Drop for IsolatedEnvironment {
         restore_env("CARGO_HOME", self.previous_cargo_home.take());
         restore_env("CARGO_TARGET_DIR", self.previous_cargo_target_dir.take());
         restore_env("CARGO_NET_OFFLINE", self.previous_cargo_net_offline.take());
+        restore_env(
+            "NEEDLE_STRANDS__EXPLORE__WORKSPACE_ROOT",
+            self.previous_explore_workspace_root.take(),
+        );
     }
 }
 
@@ -262,10 +278,15 @@ fn bead(workspace: &Path, id: &str) -> Bead {
 }
 
 fn config_without_default_gates() -> Config {
+    config_with_fallback_settings(30, 4096)
+}
+
+fn config_with_fallback_settings(timeout_seconds: u64, stderr_cap_bytes: usize) -> Config {
     let mut config = Config::default();
     config.worker.enforce_shipped_work = false;
     config.validation.default_gates.enabled = false;
-    config.validation.outcome_timeout_seconds = 30;
+    config.validation.outcome_timeout_seconds = timeout_seconds;
+    config.validation.stderr_cap_bytes = stderr_cap_bytes;
     config
 }
 
@@ -298,6 +319,44 @@ fn install_tool_shim(environment: &IsolatedEnvironment, name: &str, log: &Path, 
         use std::os::unix::fs::PermissionsExt;
         permissions.set_mode(0o755);
         std::fs::set_permissions(path, permissions).expect("shim executable");
+    }
+}
+
+fn install_failing_tool_shim(
+    environment: &IsolatedEnvironment,
+    name: &str,
+    stderr: &str,
+    exit: i32,
+) {
+    let script = format!(
+        "#!/bin/sh\nprintf '%s' '{}' >&2\nexit {}\n",
+        stderr.replace('\'', "'\\''"),
+        exit
+    );
+    let path = environment.shim_dir().join(name);
+    write_file(&environment.shim_dir(), name, &script);
+    let mut permissions = std::fs::metadata(&path)
+        .expect("failing shim metadata")
+        .permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).expect("failing shim executable");
+    }
+}
+
+fn install_sleeping_tool_shim(environment: &IsolatedEnvironment, name: &str) {
+    let path = environment.shim_dir().join(name);
+    write_file(&environment.shim_dir(), name, "#!/bin/sh\nexec sleep 30\n");
+    let mut permissions = std::fs::metadata(&path)
+        .expect("sleeping shim metadata")
+        .permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).expect("sleeping shim executable");
     }
 }
 
@@ -546,6 +605,123 @@ async fn fallback_marker_commands_are_selected_and_executed_in_clean_extractions
             );
         }
     }
+
+    assert_fallback_failed_verifier_captures_and_caps_stderr(&environment).await;
+    assert_fallback_verifier_timeout_is_released_as_execution_error(&environment).await;
+}
+
+async fn assert_fallback_failed_verifier_captures_and_caps_stderr(
+    environment: &IsolatedEnvironment,
+) {
+    let log = environment.home().join("stderr.log");
+    install_failing_tool_shim(environment, "go", "0123456789abcdef", 23);
+    let workspace = marker_fixture("go", &log);
+    let store = OutcomeStore::new(bead(workspace.path(), "stderr-failure"));
+    let log_dir = tempfile::tempdir().expect("stderr telemetry directory");
+    let telemetry = Telemetry::with_log_dir(WORKER.to_string(), log_dir.path());
+    telemetry.start();
+    let mut config = config_with_fallback_settings(30, 8);
+    config.validation.stderr_cap_bytes = 8;
+    let handler = OutcomeHandler::new(config, telemetry.clone());
+
+    let result = handler
+        .handle(
+            &store,
+            &bead(workspace.path(), "stderr-failure"),
+            &AgentOutcome {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+            false,
+        )
+        .await
+        .expect("stderr fallback handler");
+    telemetry
+        .force_flush_async(std::time::Duration::from_secs(2))
+        .await
+        .expect("stderr telemetry flush");
+    let events = read_telemetry(log_dir.path());
+    telemetry.shutdown().await;
+
+    assert_eq!(result.outcome, needle::types::Outcome::Failure);
+    assert_eq!(
+        result.bead_action,
+        BeadAction::Released(ReleaseReason::GateFailed)
+    );
+    let actions = store.actions();
+    assert!(
+        actions.contains(&StoreAction::Reopen),
+        "reopen action: {actions:?}"
+    );
+    assert!(actions.contains(&StoreAction::AddLabel("verification-failed".into())));
+
+    let failures = telemetry_rows(&events, "verification.failed");
+    assert_eq!(failures.len(), 1);
+    let output = failures[0]["data"]["output"]
+        .as_str()
+        .expect("failure telemetry output");
+    assert!(output.contains("fallback verifier"), "output: {output}");
+    assert!(
+        output.contains("01234567\n… [truncated at 8 bytes]"),
+        "stderr must be capped at the configured byte limit: {output}"
+    );
+    assert!(
+        !output.contains("89abcdef"),
+        "uncapped stderr leaked: {output}"
+    );
+}
+
+async fn assert_fallback_verifier_timeout_is_released_as_execution_error(
+    environment: &IsolatedEnvironment,
+) {
+    install_sleeping_tool_shim(environment, "pytest");
+    let log = environment.home().join("timeout.log");
+    let workspace = marker_fixture("python-pytest-ini", &log);
+    let store = OutcomeStore::new(bead(workspace.path(), "timeout-failure"));
+    let log_dir = tempfile::tempdir().expect("timeout telemetry directory");
+    let telemetry = Telemetry::with_log_dir(WORKER.to_string(), log_dir.path());
+    telemetry.start();
+    let handler = OutcomeHandler::new(config_with_fallback_settings(1, 4096), telemetry.clone());
+
+    let result = handler
+        .handle(
+            &store,
+            &bead(workspace.path(), "timeout-failure"),
+            &AgentOutcome {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+            false,
+        )
+        .await
+        .expect("timeout fallback handler");
+    telemetry
+        .force_flush_async(std::time::Duration::from_secs(2))
+        .await
+        .expect("timeout telemetry flush");
+    let events = read_telemetry(log_dir.path());
+    telemetry.shutdown().await;
+
+    assert_eq!(result.outcome, needle::types::Outcome::Failure);
+    assert_eq!(
+        result.bead_action,
+        BeadAction::Released(ReleaseReason::AgentNotFound)
+    );
+    let actions = store.actions();
+    assert!(
+        !actions.contains(&StoreAction::AddLabel("verification-failed".into())),
+        "a timeout is an execution error, not a failed verification: {actions:?}"
+    );
+    let errors = telemetry_rows(&events, "gate.execution_error");
+    assert_eq!(errors.len(), 1);
+    assert!(
+        errors[0]["data"]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("timed out")),
+        "timeout reason should be recorded: {errors:?}"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -721,6 +897,119 @@ async fn gate_less_committed_compile_failure_reopens_and_releases_with_verificat
             .as_str()
             .is_some_and(|output| output.contains("cargo build --all-targets")),
         "failure telemetry should carry the selected verifier output"
+    );
+
+    assert_armor_no_config_dispatch_reopens_non_compiling_commit(&_environment).await;
+}
+
+async fn assert_armor_no_config_dispatch_reopens_non_compiling_commit(
+    _environment: &IsolatedEnvironment,
+) {
+    let workspace = tempfile::tempdir().expect("ARMOR fixture");
+    write_file(
+        workspace.path(),
+        "go.mod",
+        "module github.com/jedarden/armor\n\ngo 1.20\n",
+    );
+    write_file(
+        workspace.path(),
+        "cmd/armor/main.go",
+        "package main\n\nfunc main() { var _ int = \"not an int\" }\n",
+    );
+    commit_fixture(workspace.path(), &["go.mod", "cmd/armor/main.go"]);
+    assert!(!workspace.path().join(".needle.yaml").exists());
+
+    let bead = bead(workspace.path(), "armor-no-config");
+    let store = Arc::new(OutcomeStore::new(bead.clone()));
+    let log_dir = tempfile::tempdir().expect("ARMOR telemetry directory");
+    let telemetry = Telemetry::with_log_dir(WORKER.to_string(), log_dir.path());
+    telemetry.start();
+
+    let adapter = AgentAdapter {
+        name: "armor-agent-fixture".to_string(),
+        description: None,
+        agent_cli: "fixture-agent".to_string(),
+        version_command: None,
+        input_method: InputMethod::Stdin,
+        invoke_template: "printf 'agent completed\\n'".to_string(),
+        environment: HashMap::new(),
+        timeout_secs: 5,
+        idle_timeout_secs: 0,
+        hard_timeout_secs: 0,
+        provider: None,
+        model: None,
+        token_extraction: TokenExtraction::None,
+        usage_format: None,
+        output_transform: None,
+        harness: None,
+        harness_version: None,
+    };
+    let mut adapters = HashMap::new();
+    adapters.insert(adapter.name.clone(), adapter);
+    let dispatcher = Dispatcher::with_adapters(adapters, telemetry.clone(), 5)
+        .with_bead_store(store.clone())
+        .with_worker_id(WORKER.to_string());
+    let prompt = BuiltPrompt {
+        content: "ARMOR no-config dispatch fixture".to_string(),
+        hash: "armor-fixture-prompt".to_string(),
+        token_estimate: 5,
+        template_name: "armor-fixture".to_string(),
+        template_version: "1".to_string(),
+    };
+    let execution = dispatcher
+        .dispatch(
+            &bead.id,
+            &prompt,
+            dispatcher
+                .adapter("armor-agent-fixture")
+                .expect("fixture adapter"),
+            workspace.path(),
+        )
+        .await
+        .expect("fixture agent dispatch");
+    drop(dispatcher);
+
+    assert_eq!(execution.exit_code, 0);
+    let handler = OutcomeHandler::new(config_without_default_gates(), telemetry.clone());
+    let result = handler
+        .handle(
+            store.as_ref(),
+            &bead,
+            &AgentOutcome {
+                exit_code: execution.exit_code,
+                stdout: execution.stdout,
+                stderr: execution.stderr,
+            },
+            false,
+        )
+        .await
+        .expect("ARMOR fallback handler");
+    telemetry
+        .force_flush_async(std::time::Duration::from_secs(2))
+        .await
+        .expect("ARMOR telemetry flush");
+    let events = read_telemetry(log_dir.path());
+    telemetry.shutdown().await;
+
+    assert_eq!(result.outcome, needle::types::Outcome::Failure);
+    assert_eq!(
+        result.bead_action,
+        BeadAction::Released(ReleaseReason::GateFailed)
+    );
+    let actions = store.actions();
+    assert!(
+        actions.contains(&StoreAction::Reopen),
+        "reopen action: {actions:?}"
+    );
+    assert!(actions.contains(&StoreAction::AddLabel("verification-failed".into())));
+    let failures = telemetry_rows(&events, "verification.failed");
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0]["data"]["command"], "fallback_go");
+    assert!(
+        failures[0]["data"]["output"]
+            .as_str()
+            .is_some_and(|output| output.contains("go build ./...")),
+        "ARMOR failure should identify the Go fallback command: {failures:?}"
     );
 }
 
