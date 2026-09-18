@@ -14,8 +14,6 @@ use std::fmt;
 use crate::process_runner::{ProcessRequest, ProcessRunner, TokioProcessRunner};
 use crate::types::{Bead, BeadId, BeadStatus, ClaimResult, ClaimStatus};
 
-#[cfg(test)]
-use super::spawn_with_etxtbsy_retry_child;
 use super::{
     execute_create_id_strategy, execute_labels_strategy, validate_strategy_name, BeadBackend,
     BeadOperationSpec, BeadStore, ClaimStrategy, Filters, NewChild, ParseShape, ParsedStrategy,
@@ -348,60 +346,6 @@ impl CliBeadStore {
                 stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
             }
             .into());
-        }
-        Ok(stdout)
-    }
-
-    #[cfg(test)]
-    async fn run_argv_with_spawn<F, Fut>(
-        &self,
-        name: &str,
-        timeout_secs: u64,
-        spawn_fn: F,
-    ) -> Result<String>
-    where
-        F: Fn() -> Fut,
-        Fut: std::future::Future<Output = std::io::Result<tokio::process::Child>>,
-    {
-        let child = spawn_with_etxtbsy_retry_child(spawn_fn, 5, 20)
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to spawn backend '{}' operation '{}' using {}",
-                    self.backend.name,
-                    name,
-                    self.binary.display()
-                )
-            })?;
-        let output =
-            tokio::time::timeout(Duration::from_secs(timeout_secs), child.wait_with_output())
-                .await
-                .with_context(|| {
-                    format!(
-                        "backend '{}' operation '{}' timed out after {}s",
-                        self.backend.name, name, timeout_secs
-                    )
-                })?
-                .with_context(|| {
-                    format!(
-                        "backend '{}' operation '{}' failed",
-                        self.backend.name, name
-                    )
-                })?;
-        let stdout = String::from_utf8(output.stdout).with_context(|| {
-            format!(
-                "backend '{}' operation '{}' stdout was not UTF-8",
-                self.backend.name, name
-            )
-        })?;
-        if !output.status.success() {
-            bail!(
-                "backend '{}' operation '{}' exited with code {}: {}",
-                self.backend.name,
-                name,
-                output.status.code().unwrap_or(-1),
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
         }
         Ok(stdout)
     }
@@ -1473,24 +1417,6 @@ impl CliBeadStore {
         Ok(())
     }
 
-    #[cfg(test)]
-    async fn run_bf_update_batch_with_spawn<F, Fut>(
-        &self,
-        id: &BeadId,
-        status: Option<&str>,
-        assignee: Option<&str>,
-        spawn_fn: F,
-    ) -> Result<()>
-    where
-        F: Fn() -> Fut,
-        Fut: std::future::Future<Output = std::io::Result<tokio::process::Child>>,
-    {
-        let _args = bf_update_batch_args(id, status, assignee)?;
-        self.run_argv_with_spawn("batch_update", DEFAULT_TIMEOUT_SECS, spawn_fn)
-            .await?;
-        Ok(())
-    }
-
     /// Attempt public-CLI recovery, escalating from doctor repair to the
     /// backend-specific checkpoint rebuild path.
     pub async fn recover_db(&self) -> super::RecoveryOutcome {
@@ -1785,58 +1711,6 @@ mod process_runner_tests {
             .unwrap_err();
         assert!(error.to_string().contains("observed claim epoch"));
         assert_eq!(runner.requests().len(), 2, "no unfenced mutation is safe");
-    }
-}
-
-#[cfg(test)]
-mod bf_batch_retry_tests {
-    use super::{super::builtin_bead_backends, CliBeadStore};
-    use crate::types::BeadId;
-    use std::io;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Arc;
-
-    fn test_store() -> (tempfile::TempDir, CliBeadStore) {
-        let directory = tempfile::tempdir().unwrap();
-        let binary = directory.path().join("fixture-cli");
-        std::fs::write(&binary, "fixture").unwrap();
-        let backend = builtin_bead_backends().into_iter().next().unwrap();
-        let store = CliBeadStore::new(
-            backend,
-            binary,
-            directory.path().to_path_buf(),
-            None,
-            None,
-            None,
-        )
-        .unwrap();
-        (directory, store)
-    }
-
-    #[tokio::test]
-    async fn run_bf_batch_returns_mock_etxtbsy_after_retry_exhaustion() {
-        let (_directory, store) = test_store();
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let attempts_for_spawn = Arc::clone(&attempts);
-
-        let result = store
-            .run_bf_update_batch_with_spawn(
-                &BeadId::from("batch-retry-exhausted"),
-                Some("in_progress"),
-                Some("worker-a"),
-                move || {
-                    attempts_for_spawn.fetch_add(1, Ordering::SeqCst);
-                    async { Err::<tokio::process::Child, _>(io::Error::from_raw_os_error(26)) }
-                },
-            )
-            .await;
-
-        let error = result.expect_err("persistent ETXTBSY should exhaust retries");
-        let io_error = error
-            .downcast_ref::<io::Error>()
-            .expect("batch error should retain the spawn IO error");
-        assert_eq!(io_error.raw_os_error(), Some(26));
-        assert_eq!(attempts.load(Ordering::SeqCst), 5);
     }
 }
 
