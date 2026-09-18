@@ -295,7 +295,7 @@ mod tests {
     // ── marker order and the command helper ──
 
     #[test]
-    fn go_mod_outranks_cargo_toml() {
+    fn marker_priority_follows_declared_order() {
         // The parent bead's priority order names go.mod before Cargo.toml.
         let dir = with_files(&[
             ("go.mod", "module example.com/x\n"),
@@ -309,6 +309,50 @@ mod tests {
                 command: "go build ./... && go vet ./... && go test -short ./...",
             })
         );
+
+        let cases = [
+            (
+                &[
+                    ("Cargo.toml", "[package]\n"),
+                    ("package.json", r#"{"scripts":{"test":"npm test"}}"#),
+                    ("pyproject.toml", "[project]\nname = \"x\"\n"),
+                    ("pytest.ini", "[pytest]\n"),
+                ][..],
+                Verifier::Marker(MarkerVerifier {
+                    language: "rust",
+                    evidence: "Cargo.toml",
+                    command: RUST_COMMAND,
+                }),
+            ),
+            (
+                &[
+                    ("package.json", r#"{"scripts":{"test":"npm test"}}"#),
+                    ("pyproject.toml", "[project]\nname = \"x\"\n"),
+                    ("pytest.ini", "[pytest]\n"),
+                ][..],
+                Verifier::Marker(MarkerVerifier {
+                    language: "node",
+                    evidence: "package.json",
+                    command: NODE_COMMAND,
+                }),
+            ),
+            (
+                &[
+                    ("pyproject.toml", "[project]\nname = \"x\"\n"),
+                    ("pytest.ini", "[pytest]\n"),
+                ][..],
+                Verifier::Marker(MarkerVerifier {
+                    language: "python",
+                    evidence: "pyproject.toml",
+                    command: PYTHON_COMMAND,
+                }),
+            ),
+        ];
+
+        for (files, expected) in cases {
+            let dir = with_files(files);
+            assert_eq!(select_verifier(dir.path()), expected);
+        }
     }
 
     #[test]
