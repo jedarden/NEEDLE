@@ -6,7 +6,11 @@
 //! - Invalid key paths raise InvalidKeyPath errors with proper context
 //! - Both top-level and nested access patterns on live config structures
 
-use needle::config::{validate_key_path, Config};
+use needle::config::{validate_key_path, CliOverrides, Config, ConfigLoader};
+use serial_test::serial;
+use std::fs;
+use std::path::{Path, PathBuf};
+use tempfile::TempDir;
 
 /// Helper to create a default Config instance for testing.
 fn test_config() -> Config {
@@ -21,6 +25,130 @@ fn custom_config() -> Config {
     config.agent.default = "test-agent".to_string();
     config.worker.idle_timeout = 120;
     config
+}
+
+fn write_config(root: &Path, name: &str, contents: &str) -> PathBuf {
+    let path = root.join(name);
+    fs::write(&path, contents).expect("failed to write test configuration");
+    path
+}
+
+/// Exercise the real loader rather than only calling `Config::expand_tildes`.
+fn assert_config_loader_expands_tildes(home: &Path) {
+    let files = TempDir::new().expect("failed to create config fixture directory");
+    let config_path = write_config(
+        files.path(),
+        "config.yaml",
+        r#"
+workspace:
+  default: ~/workspace
+strands:
+  explore:
+    workspace_root: ~/explore
+    workspaces:
+      - ~/explore/one
+      - ~/explore/two
+  weave:
+    exclude_workspaces:
+      - ~/private
+supervisor:
+  socket_path: ~/run/supervisor.sock
+prompt:
+  context_files:
+    - ~/context/instructions.md
+"#,
+    );
+
+    let config = ConfigLoader::load_from_path(&config_path).expect("failed to load config");
+
+    assert_eq!(config.workspace.default, home.join("workspace"));
+    assert_eq!(config.strands.explore.workspace_root, home.join("explore"));
+    assert_eq!(
+        config.strands.explore.workspaces,
+        vec![home.join("explore/one"), home.join("explore/two")]
+    );
+    assert_eq!(
+        config.strands.weave.exclude_workspaces,
+        vec![home.join("private")]
+    );
+    assert_eq!(
+        config.supervisor.socket_path,
+        Some(home.join("run/supervisor.sock"))
+    );
+    assert_eq!(
+        config.prompt.context_files,
+        vec![home.join("context/instructions.md")]
+    );
+}
+
+/// Exercise expansion after the global/workspace/CLI configuration layers merge.
+fn assert_resolved_config_expands_tildes_after_merges(home: &Path) {
+    let files = TempDir::new().expect("failed to create config fixture directory");
+    let workspace = files.path().join("workspace");
+    fs::create_dir(&workspace).expect("failed to create workspace fixture");
+
+    let global_path = write_config(
+        files.path(),
+        "global.yaml",
+        r#"
+workspace:
+  default: ~/global-workspace
+strands:
+  explore:
+    workspace_root: ~/global-explore
+    workspaces:
+      - ~/global-explore/one
+supervisor:
+  socket_path: ~/global-run/supervisor.sock
+"#,
+    );
+    write_config(
+        &workspace,
+        ".needle.yaml",
+        r#"
+prompt:
+  context_files:
+    - ~/workspace-context/instructions.md
+strands:
+  weave:
+    exclude_workspaces:
+      - ~/workspace-private
+"#,
+    );
+
+    let cli = CliOverrides {
+        workspace: Some(PathBuf::from("~/cli-workspace")),
+        explore_workspace_root: Some(PathBuf::from("~/cli-explore")),
+        ..Default::default()
+    };
+    let (config, sources) = ConfigLoader::load_resolved_from_path(&global_path, &workspace, cli)
+        .expect("failed to load resolved config");
+
+    assert_eq!(config.workspace.default, home.join("cli-workspace"));
+    assert_eq!(
+        config.strands.explore.workspace_root,
+        home.join("cli-explore")
+    );
+    assert_eq!(
+        config.strands.explore.workspaces,
+        vec![home.join("global-explore/one")]
+    );
+    assert_eq!(
+        config.strands.weave.exclude_workspaces,
+        vec![home.join("workspace-private")]
+    );
+    assert_eq!(
+        config.prompt.context_files,
+        vec![home.join("workspace-context/instructions.md")]
+    );
+    assert_eq!(
+        config.supervisor.socket_path,
+        Some(home.join("global-run/supervisor.sock"))
+    );
+    assert!(matches!(
+        sources.get("workspace.default"),
+        Some(needle::config::ConfigSource::CliOverride)
+    ));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -49,13 +177,18 @@ fn valid_top_level_worker_field() {
 }
 
 #[test]
+#[serial]
 fn valid_top_level_workspace_field() {
+    let home = super::isolation::setup_isolated_home().expect("failed to isolate HOME");
     let config = test_config();
     let result = validate_key_path("workspace");
     assert!(result.is_ok(), "workspace is a valid top-level field");
 
     // Verify the field exists
     assert!(!config.workspace.home.as_os_str().is_empty());
+
+    assert_config_loader_expands_tildes(home.path());
+    assert_resolved_config_expands_tildes_after_merges(home.path());
 }
 
 #[test]
