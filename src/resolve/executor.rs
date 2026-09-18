@@ -779,6 +779,12 @@ impl DecisionExecutor {
         actor: &str,
         reason: &str,
     ) -> Result<AppliedDecision> {
+        // Failure accounting is itself a lifecycle mutation. Re-check before
+        // touching labels so a dispatch that lost its claim while the gate or
+        // shipped-work check ran cannot penalize a new owner.
+        if !self.ensure_owned(store, &bead.id, actor).await? {
+            return Ok(AppliedDecision::OwnershipLost);
+        }
         let count = self
             .outcome
             .increment_failure_count(store, bead)
@@ -1420,6 +1426,37 @@ mod tests {
                 .iter()
                 .any(|l| l == "failure-count:1"),
             "a false close increments the failure count"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_releases_with_failure_count_when_configured_gate_fails() {
+        let (_dir, workspace) = temp_workspace();
+        std::fs::write(
+            workspace.join(".needle.yaml"),
+            "gates:\n  - type: command\n    commands:\n      - 'false'\n    run_in: workspace\n",
+        )
+        .expect("write gate configuration");
+        // The configured gate rejects before shipped-work verification can
+        // close the bead, even though the bead carries work evidence.
+        let store = RecordingStore::new(workspace).with_stored_notes("did the work");
+
+        let applied = apply(&executor(), &store, &complete_decision())
+            .await
+            .expect("gate rejection releases, does not error");
+
+        assert_eq!(applied, AppliedDecision::Released(ReleaseCause::Rejected));
+        assert!(
+            store.closes_snapshot().is_empty(),
+            "a failed configured gate must prevent close"
+        );
+        assert_eq!(store.released(), 1);
+        assert!(
+            store
+                .labels_snapshot()
+                .iter()
+                .any(|label| label == "failure-count:1"),
+            "a judged gate failure increments the failure count"
         );
     }
 
