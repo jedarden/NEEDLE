@@ -386,6 +386,7 @@ impl Fixture {
             .current_dir(&self.workspace)
             .env("HOME", &self.home)
             .env("PATH", path)
+            .env_remove("NEEDLE_WORKER__MAX_WORKERS")
             .env("NEEDLE_INNER", "1")
             .env("ANALYSIS_LOG", &self.analysis_log)
             .args([
