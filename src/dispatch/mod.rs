@@ -1228,6 +1228,9 @@ pub struct Dispatcher {
     adapters: HashMap<String, AgentAdapter>,
     telemetry: Telemetry,
     global_timeout_secs: u64,
+    /// Host-level fallback-gate default used when the target workspace does
+    /// not explicitly set `validation.fallback_gate`.
+    fallback_gate_default: bool,
     /// Sanitizer applied to all trace content before writing to disk.
     /// `None` when trace sanitization is disabled in config.
     sanitizer: Option<Arc<Sanitizer>>,
@@ -1260,6 +1263,7 @@ impl Dispatcher {
             adapters,
             telemetry,
             global_timeout_secs: config.agent.timeout,
+            fallback_gate_default: config.validation.fallback_gate,
             sanitizer,
             tsnet_registry,
             tsnet_config,
@@ -1278,6 +1282,7 @@ impl Dispatcher {
             adapters,
             telemetry,
             global_timeout_secs,
+            fallback_gate_default: true,
             sanitizer: None,
             tsnet_registry: None,
             tsnet_config: TsnetConfig::default(),
@@ -1382,6 +1387,33 @@ impl Dispatcher {
         config.agent.default.clone()
     }
 
+    /// Resolve the fallback-gate setting for the workspace named by this
+    /// dispatch. The workspace value wins over the host default; a workspace
+    /// that does not provide the setting inherits the default-enabled policy.
+    ///
+    /// A malformed workspace config is reported here and remains subject to
+    /// the normal validation-config error path after a successful agent run.
+    /// Keeping dispatch logging total means every dispatch still records the
+    /// host policy even when the workspace setting cannot be parsed.
+    fn fallback_gate_for_dispatch(&self, workspace: &Path) -> bool {
+        if workspace.as_os_str().is_empty() || workspace.is_relative() {
+            return self.fallback_gate_default;
+        }
+
+        match crate::config::gates_for_workspace(workspace) {
+            Ok(gates) => gates.fallback_gate.unwrap_or(self.fallback_gate_default),
+            Err(error) => {
+                tracing::warn!(
+                    workspace = %workspace.display(),
+                    error = %error,
+                    fallback_gate = self.fallback_gate_default,
+                    "could not resolve workspace validation.fallback_gate; logging host default"
+                );
+                self.fallback_gate_default
+            }
+        }
+    }
+
     /// Execute the agent process for a bead.
     ///
     /// 1. Writes the prompt to a temp file
@@ -1450,10 +1482,12 @@ impl Dispatcher {
         // Log timeout policy for this dispatch
         let timeout_policy = adapter.timeout_policy();
         let timeout_desc = adapter.timeout_description(self.global_timeout_secs);
+        let fallback_gate = self.fallback_gate_for_dispatch(workspace);
         tracing::debug!(
             adapter = %adapter.name,
             timeout_policy = ?timeout_policy,
             timeout_config = %timeout_desc,
+            fallback_gate = ?fallback_gate,
             "dispatching agent with timeout policy"
         );
 
