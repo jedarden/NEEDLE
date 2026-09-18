@@ -6667,38 +6667,44 @@ mod tests {
             .unwrap();
 
         // Exactly one edge removed: needle-a ← needle-b.
-        let removed = removed_deps.lock().unwrap();
-        assert_eq!(removed.len(), 1);
-        assert_eq!(removed[0].0, BeadId::from("needle-a"));
-        assert_eq!(removed[0].1, BeadId::from("needle-b"));
+        {
+            let removed = removed_deps.lock().unwrap();
+            assert_eq!(removed.len(), 1);
+            assert_eq!(removed[0].0, BeadId::from("needle-a"));
+            assert_eq!(removed[0].1, BeadId::from("needle-b"));
+        }
 
         // Both endpoint beads carry the Phase 19.7 note.
-        let notes = appended_notes.lock().unwrap();
-        assert_eq!(notes.len(), 2);
-        let expected = "cycle broken (Phase 19.7): removed needle-a ← needle-b";
-        assert!(notes.iter().all(|(id, text)| {
-            text == expected && (id.as_ref() == "needle-a" || id.as_ref() == "needle-b")
-        }));
+        {
+            let notes = appended_notes.lock().unwrap();
+            assert_eq!(notes.len(), 2);
+            let expected = "cycle broken (Phase 19.7): removed needle-a ← needle-b";
+            assert!(notes.iter().all(|(id, text)| {
+                text == expected && (id.as_ref() == "needle-a" || id.as_ref() == "needle-b")
+            }));
+        }
 
         // Summary and telemetry agree.
         assert_eq!(summary.cycles_broken, 1);
         // Wait for background task to process telemetry events.
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        let events = events.lock().unwrap();
-        let cycle_events: Vec<_> = events
-            .iter()
-            .filter(|event| event.event_type == "mend.cycle_broken")
-            .collect();
-        assert_eq!(cycle_events.len(), 1);
-        assert_eq!(
-            cycle_events[0].data["blocked_id"].as_str(),
-            Some("needle-a")
-        );
-        assert_eq!(
-            cycle_events[0].data["blocker_id"].as_str(),
-            Some("needle-b")
-        );
-        assert_eq!(cycle_events[0].data["cycle_len"].as_u64(), Some(3));
+        {
+            let events = events.lock().unwrap();
+            let cycle_events: Vec<_> = events
+                .iter()
+                .filter(|event| event.event_type == "mend.cycle_broken")
+                .collect();
+            assert_eq!(cycle_events.len(), 1);
+            assert_eq!(
+                cycle_events[0].data["blocked_id"].as_str(),
+                Some("needle-a")
+            );
+            assert_eq!(
+                cycle_events[0].data["blocker_id"].as_str(),
+                Some("needle-b")
+            );
+            assert_eq!(cycle_events[0].data["cycle_len"].as_u64(), Some(3));
+        }
 
         // The store graph itself was mutated: needle-a's record is gone,
         // needle-b's edge to needle-c survives, and no cycle remains.
