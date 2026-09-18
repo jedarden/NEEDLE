@@ -3796,7 +3796,7 @@ impl Worker {
                 }
             };
             let store = target_store.store();
-            match store.claim_status(&bead_id).await {
+            match crate::claim::claim_status_with_timeout(store.as_ref(), &bead_id).await {
                 Ok(status) => {
                     let failed_fields = claim_identity.mismatches(&status);
                     if !failed_fields.is_empty() {

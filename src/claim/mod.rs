@@ -28,6 +28,13 @@ const FLOCK_TIMEOUT: Duration = Duration::from_secs(10);
 /// Flock poll interval: time between lock acquisition attempts.
 const FLOCK_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+/// Maximum time a live claim verification may wait for the target backend.
+///
+/// Verification is a precondition for spawning an agent. An unavailable or
+/// hung backend must therefore fail closed instead of holding the dispatch
+/// at an unbounded await.
+pub(crate) const CLAIM_VERIFICATION_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Number of consecutive claim errors before marking a bead suspect.
 const CLAIM_ERROR_THRESHOLD: u32 = 3;
 
@@ -38,6 +45,25 @@ const CLAIM_ERROR_THRESHOLD: u32 = 3;
 /// budget rather than a claim-attempt count.  The backend is checked before
 /// each mutation whenever it exposes event history.
 const MAX_CLAIM_EVENTS_PER_BEAD: u32 = 100;
+
+/// Read a claim status with the bounded timeout used by every verification
+/// stage. Keeping this at the store boundary prevents one caller from
+/// accidentally treating a hung target backend as an unverifiable-but-safe
+/// success path.
+pub(crate) async fn claim_status_with_timeout(
+    store: &dyn BeadStore,
+    bead_id: &BeadId,
+) -> Result<ClaimStatus> {
+    tokio::time::timeout(CLAIM_VERIFICATION_TIMEOUT, store.claim_status(bead_id))
+        .await
+        .map_err(|_| {
+            anyhow!(
+                "claim verification query timed out after {}s for bead {}",
+                CLAIM_VERIFICATION_TIMEOUT.as_secs(),
+                bead_id
+            )
+        })?
+}
 
 /// Claim-time circuit breaker for a workspace whose build is failing.
 ///
@@ -293,7 +319,7 @@ impl ClaimIdentity {
     /// claim: an identity captured from a foreign or released claim would
     /// verify nothing at dispatch.
     pub async fn capture(store: &dyn BeadStore, bead_id: &BeadId, actor: &str) -> Result<Self> {
-        let live = store.claim_status(bead_id).await?;
+        let live = claim_status_with_timeout(store, bead_id).await?;
         anyhow::ensure!(
             live.status == BeadStatus::InProgress,
             "cannot capture claim identity for {bead_id}: bead is {:?}, not in_progress",
@@ -935,7 +961,7 @@ impl Claimer {
 
         // Use claim_status to query the resolved target store with revision
         // and claim-epoch information
-        match target.store().claim_status(bead_id).await {
+        match claim_status_with_timeout(target.store().as_ref(), bead_id).await {
             Ok(claim_status) => {
                 let failed_fields = expected.mismatches(&claim_status);
                 let is_valid = failed_fields.is_empty();

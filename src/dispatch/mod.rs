@@ -121,7 +121,7 @@ use tokio::sync::watch;
 
 use crate::bead_store::spawn_with_etxtbsy_retry_child;
 use crate::bead_store::BeadStore;
-use crate::claim::{ClaimIdentity, ResolvedStoreContext};
+use crate::claim::{claim_status_with_timeout, ClaimIdentity, ResolvedStoreContext};
 use crate::config::Config;
 use crate::process_guard::{ProcessGroupKillGuard, ProcessGuard};
 use crate::prompt::BuiltPrompt;
@@ -1690,7 +1690,7 @@ impl Dispatcher {
                 }
             };
         {
-            match verify_store.claim_status(bead_id).await {
+            match claim_status_with_timeout(verify_store.as_ref(), bead_id).await {
                 Ok(status) => {
                     let failed_fields = expected_identity
                         .as_ref()
