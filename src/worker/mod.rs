@@ -11489,6 +11489,18 @@ mod tests {
         worker.current_bead = Some(bead);
         worker.state = WorkerState::Dispatching;
 
+        // Direct dispatch fixtures must provide the same claim-time context
+        // that production selection records before dispatch verification.
+        worker.target_store = Some(crate::claim::ResolvedStoreContext::new(
+            worker.store.clone(),
+            worker.config.workspace.default.clone(),
+        ));
+        worker.claim_identity = Some(ClaimIdentity {
+            actor: worker.qualified_id(),
+            revision: None,
+            claim_epoch: None,
+        });
+
         let error = worker
             .do_dispatch()
             .await
