@@ -1,0 +1,8 @@
+# These four findings are the same non-secret 8-character checkpoint values
+# duplicated in the two bead-rs generation objects. Keep the ignores pinned to
+# the introducing commit, exact object paths, rule, and line so unrelated
+# findings remain visible to the pre-receive scan.
+b4b5211aa02f553910d1978aa48b747b5ac2f3c8:.beads/checkpoint/objects/a56ccf0d877d40a9e723df5f7b2c9bb25ff092ca74a811dd5f40fdd28e01d66e.jsonl:generic-api-key:1730
+b4b5211aa02f553910d1978aa48b747b5ac2f3c8:.beads/checkpoint/objects/a56ccf0d877d40a9e723df5f7b2c9bb25ff092ca74a811dd5f40fdd28e01d66e.jsonl:generic-api-key:15579
+b4b5211aa02f553910d1978aa48b747b5ac2f3c8:.beads/checkpoint/objects/da2a9efaa2e6d7999306e6e0160434f160106ca95415b80cfe38bf97a7ef2b9d.jsonl:generic-api-key:1730
+b4b5211aa02f553910d1978aa48b747b5ac2f3c8:.beads/checkpoint/objects/da2a9efaa2e6d7999306e6e0160434f160106ca95415b80cfe38bf97a7ef2b9d.jsonl:generic-api-key:15579
