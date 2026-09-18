@@ -120,7 +120,16 @@ version = 1
 # the private dispatch-start timestamp, so the unit tier is the only tier that
 # can reach them. The acceptance command is
 # `cargo test --lib audit_candidates_require audit_never_folds foreign_beads_do_not own_beads_beyond`.
-max_tests = 3848
+# +13 split-decision execution contracts (needle-4f66923a): the chained
+# umbrella split application (split-child labels, sequential chain, umbrella
+# parent, block-after-split), ownership lost immediately before child
+# creation, three mid-wiring compensation paths (create_bead, chain edge,
+# umbrella label, plus partial umbrella-label rollback), the mitosis
+# max_children refusal at the executor boundary, and three cross-decision
+# races (complete vs split, split vs complete, retry vs split). All
+# in-process against recording stores.
+# Acceptance command: `cargo test --lib resolve::executor::split_`
+max_tests = 3861
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

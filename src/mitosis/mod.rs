@@ -1038,9 +1038,10 @@ impl MitosisEvaluator {
     /// This is the guarded application half of `ResolveDecision::Split`: the
     /// proposal titles are validated by the same rules the resolver uses,
     /// deduplicated against the parent's existing children, its whole
-    /// lineage, and each other, and the survivors are created through the
-    /// atomic [`Self::create_children`] path with its standard label, cap,
-    /// and dependency policy. A proposal is never created raw.
+    /// lineage, and each other, and the survivors are created through
+    /// [`Self::create_chained_children`] — the manual Auto-Split contract
+    /// (sequential chain, umbrella parent), not the timeout-mitosis wiring.
+    /// A proposal is never created raw.
     ///
     /// Returns what happened rather than creating beads unconditionally:
     /// [`SplitApplication::FullyDeduplicated`] means every proposal was
@@ -1121,22 +1122,239 @@ impl MitosisEvaluator {
             })
             .collect();
 
-        match self.create_children(store, parent, &proposed).await? {
-            MitosisResult::Split { children } => Ok(SplitApplication::Applied {
-                created: children.len(),
-                deduped,
-            }),
-            MitosisResult::NotSplittable | MitosisResult::OutOfScope => {
-                // create_children cannot produce these verdicts for a
-                // non-empty proposal; refuse rather than guess at intent.
-                Ok(SplitApplication::Refused {
-                    reason: "mitosis returned a non-split verdict for a non-empty proposal"
-                        .to_string(),
-                })
+        let children = self
+            .create_chained_children(store, parent, &proposed)
+            .await?;
+        if children.is_empty() {
+            // Only reachable when the max_children cap leaves nothing to
+            // create; a non-empty proposal otherwise always creates at least
+            // one child.
+            return Ok(SplitApplication::Refused {
+                reason: format!(
+                    "mitosis max_children cap ({}) leaves nothing to create",
+                    self.config.max_children
+                ),
+            });
+        }
+        let created_count = children.len();
+        self.telemetry.emit(
+            EventKind::MitosisSplit {
+                parent_id: parent.id.clone(),
+                children_created: created_count as u32,
+                children_skipped: deduped as u32,
+                child_ids: children,
+            },
+            chrono::Utc::now(),
+        )?;
+        Ok(SplitApplication::Applied {
+            created: created_count,
+            deduped,
+        })
+    }
+
+    /// Create the surviving proposals as a chained umbrella split — the
+    /// executor's half of the manual Auto-Split contract (the `split` prompt
+    /// template in `crate::prompt`):
+    ///
+    /// - every child carries `split-child` and the `parent-{id}` scope label
+    ///   alongside Mitosis's depth/root/stitch labels, so Mend's
+    ///   orphaned-split-child sweep and [`verified_completed_split`]'s
+    ///   explicit provenance proof both recognize it;
+    /// - the children are chained sequentially (each child is blocked by its
+    ///   predecessor), so the fleet works them in proposal order;
+    /// - the parent ends up depending on exactly one bead — the last child —
+    ///   labelled `umbrella` + `auto-split-parent`: the exact shape
+    ///   [`Self::reconcile_completed_split_parents`] requires to close the
+    ///   parent once the chain completes. The timeout-mitosis wiring (every
+    ///   child a direct blocker of the parent) is deliberately not used here:
+    ///   it leaves the parent with more than one dependency, which can never
+    ///   reconcile.
+    ///
+    /// The shipped bead-rs backend has no transactional batch (its split
+    /// strategy is `sequential`), so each child is one `create_bead` with the
+    /// chain edge added as its successor lands. A failure partway through is
+    /// compensated, not abandoned: every child this call created is closed
+    /// with a reason naming the aborted split, so no orphaned half-chain
+    /// reaches the frontier. If a compensation close fails too, the error
+    /// names the child IDs — Mend's orphaned-split-child sweep is the
+    /// backstop for those. The caller releases the parent either way.
+    async fn create_chained_children(
+        &self,
+        store: &dyn BeadStore,
+        parent: &Bead,
+        proposed: &[ProposedChild],
+    ) -> Result<Vec<BeadId>> {
+        // Same cap as the timeout-mitosis path.
+        let max_children = self.config.max_children as usize;
+        let proposed = if proposed.len() > max_children {
+            tracing::warn!(
+                parent_id = %parent.id,
+                proposed = proposed.len(),
+                truncated_to = max_children,
+                "resolve split proposal exceeded max_children cap"
+            );
+            &proposed[..max_children]
+        } else {
+            proposed
+        };
+
+        // The manual contract's `split-child` + parent-scope pair, plus the
+        // Mitosis bookkeeping labels the timeout path also applies (depth,
+        // lineage root, stitch inheritance).
+        let parent_label = format!("parent-{}", parent.id);
+        let depth_label = format!("mitosis-depth:{}", parse_mitosis_depth(parent) + 1);
+        let root_label = extract_root_label(parent);
+        let stitch_labels = crate::types::extract_stitch_prefixed_labels(&parent.labels);
+        let mut labels: Vec<&str> =
+            vec![SPLIT_CHILD_LABEL, &parent_label, &depth_label, &root_label];
+        labels.extend(stitch_labels.iter().map(String::as_str));
+
+        let mut created: Vec<BeadId> = Vec::with_capacity(proposed.len());
+        for child in proposed {
+            let previous = created.last().cloned();
+            let child_id = match store
+                .create_bead(&child.title, &child.body, &labels)
+                .await
+                .with_context(|| format!("failed to create chained child {}", child.title))
+            {
+                Ok(child_id) => child_id,
+                Err(error) => {
+                    return Err(self
+                        .abandon_chained_split(store, parent, &created, error)
+                        .await)
+                }
+            };
+            created.push(child_id.clone());
+            // Chain edge: child N is blocked by child N-1, so proposal order
+            // becomes execution order.
+            if let Some(previous) = previous {
+                if let Err(error) = store
+                    .add_dependency(&previous, &child_id)
+                    .await
+                    .with_context(|| format!("failed to chain {previous} -> {child_id}"))
+                {
+                    return Err(self
+                        .abandon_chained_split(store, parent, &created, error)
+                        .await);
+                }
             }
-            MitosisResult::Skipped { reason } => Ok(SplitApplication::Refused {
-                reason: format!("mitosis skipped the proposal: {reason}"),
-            }),
+        }
+
+        // The parent depends on exactly one bead: the last child of the
+        // chain. `verified_completed_split` walks the chain from there.
+        if let Some(last) = created.last().cloned() {
+            if let Err(error) = store
+                .add_dependency(&last, &parent.id)
+                .await
+                .with_context(|| format!("failed to link {last} as the umbrella blocker"))
+            {
+                return Err(self
+                    .abandon_chained_split(store, parent, &created, error)
+                    .await);
+            }
+        }
+
+        // Umbrella conversion comes last: until both labels land, the parent
+        // is an ordinary blocked bead, never a reconcilable umbrella.
+        for label in [UMBRELLA_LABEL, AUTO_SPLIT_PARENT_LABEL] {
+            if let Err(error) = store
+                .add_label(&parent.id, label)
+                .await
+                .with_context(|| format!("failed to label the parent {label}"))
+            {
+                return Err(self
+                    .abandon_chained_split(store, parent, &created, error)
+                    .await);
+            }
+        }
+
+        for (child_id, child) in created.iter().zip(proposed.iter()) {
+            tracing::info!(
+                parent_id = %parent.id,
+                child_id = %child_id,
+                child_title = %child.title,
+                "created chained resolve-split child"
+            );
+        }
+        Ok(created)
+    }
+
+    /// Compensate an aborted chained split by closing every child it already
+    /// created, so a mid-creation failure leaves no orphaned half-chain on
+    /// the frontier, and by taking back any umbrella label that had already
+    /// landed on the parent. The labels are applied last, so only a failure
+    /// between the two `add_label` calls can leave one behind — but an open
+    /// parent wearing [`UMBRELLA_LABEL`] and depending on a chain that no
+    /// longer exists is the exact shape [`verified_completed_split`] walks,
+    /// and through its non-explicit path (no [`AUTO_SPLIT_PARENT_LABEL`],
+    /// failure-count label present) it would close the parent as a
+    /// *completed* split whose work never happened. Best-effort throughout:
+    /// a child whose compensation close also fails, or a label that will not
+    /// come off, is named in the returned error context.
+    async fn abandon_chained_split(
+        &self,
+        store: &dyn BeadStore,
+        parent: &Bead,
+        created: &[BeadId],
+        cause: anyhow::Error,
+    ) -> anyhow::Error {
+        if created.is_empty() {
+            return cause;
+        }
+        tracing::warn!(
+            parent_id = %parent.id,
+            children = ?created,
+            error = %cause,
+            "resolve split failed mid-creation — closing the children it created"
+        );
+        let reason = format!(
+            "resolve split of {} aborted mid-creation; compensating close of its \
+             partial chain",
+            parent.id
+        );
+        let mut unclosed: Vec<BeadId> = Vec::new();
+        for child_id in created {
+            if let Err(error) = store.close(child_id, &reason).await {
+                tracing::error!(
+                    child_id = %child_id,
+                    error = %error,
+                    "compensating close of an aborted split child failed"
+                );
+                unclosed.push(child_id.clone());
+            }
+        }
+        let mut unremoved: Vec<&str> = Vec::new();
+        for label in [UMBRELLA_LABEL, AUTO_SPLIT_PARENT_LABEL] {
+            if let Err(error) = store.remove_label(&parent.id, label).await {
+                tracing::error!(
+                    parent_id = %parent.id,
+                    label,
+                    error = %error,
+                    "umbrella-label rollback of an aborted split failed"
+                );
+                unremoved.push(label);
+            }
+        }
+        if !unremoved.is_empty() {
+            return cause.context(format!(
+                "umbrella labels {} could not be removed from the parent, which still \
+                 reads as a split umbrella; Mend's orphaned-split-child sweep will \
+                 re-triage its children",
+                unremoved.join(", ")
+            ));
+        }
+        if unclosed.is_empty() {
+            cause
+        } else {
+            cause.context(format!(
+                "children {} could not be compensated and are still open; Mend's \
+                 orphaned-split-child sweep will re-triage them",
+                unclosed
+                    .iter()
+                    .map(|id| id.as_ref())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
         }
     }
 
@@ -1984,6 +2202,12 @@ mod tests {
         removed_labels: Mutex<Vec<(BeadId, String)>>,
         created: Mutex<Vec<(String, String)>>,
         deps_added: Mutex<Vec<(String, String)>>,
+        /// Labels applied through `add_label` as `(bead id, label)` — the
+        /// umbrella conversion of a chained split's parent shows up here.
+        labels_added: Mutex<Vec<(String, String)>>,
+        /// Labels each created bead was proposed with, as `(id, labels)` in
+        /// creation order.
+        created_labels: Mutex<Vec<(String, Vec<String>)>>,
         /// Served by `claim_status` when set; derived from `show` otherwise.
         /// Dispatch-time verification must pass for the dispatcher to spawn,
         /// so dispatch tests set an `in_progress` claim for the wired worker.
@@ -2003,6 +2227,8 @@ mod tests {
                 removed_labels: Mutex::new(Vec::new()),
                 created: Mutex::new(Vec::new()),
                 deps_added: Mutex::new(Vec::new()),
+                labels_added: Mutex::new(Vec::new()),
+                created_labels: Mutex::new(Vec::new()),
                 claim_status: Mutex::new(None),
                 barrier: Mutex::new(None),
             }
@@ -2030,6 +2256,16 @@ mod tests {
         fn with_existing_children(mut self, children: Vec<Bead>) -> Self {
             self.existing_children = children;
             self
+        }
+
+        /// `(bead id, label)` pairs applied through `add_label`.
+        fn labels_added_snapshot(&self) -> Vec<(String, String)> {
+            self.labels_added.lock().unwrap().clone()
+        }
+
+        /// Labels each created bead was proposed with, in creation order.
+        fn created_labels_snapshot(&self) -> Vec<(String, Vec<String>)> {
+            self.created_labels.lock().unwrap().clone()
         }
 
         fn with_reconciliation_inventory(self, inventory: Vec<Bead>) -> Self {
@@ -2195,7 +2431,11 @@ mod tests {
             }
             Ok(self.labels.clone())
         }
-        async fn add_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
+        async fn add_label(&self, id: &BeadId, label: &str) -> Result<()> {
+            self.labels_added
+                .lock()
+                .unwrap()
+                .push((id.to_string(), label.to_string()));
             Ok(())
         }
         async fn remove_label(&self, id: &BeadId, label: &str) -> Result<()> {
@@ -2212,12 +2452,16 @@ mod tests {
                 .push((id.clone(), label.to_string()));
             Ok(())
         }
-        async fn create_bead(&self, title: &str, body: &str, _labels: &[&str]) -> Result<BeadId> {
+        async fn create_bead(&self, title: &str, body: &str, labels: &[&str]) -> Result<BeadId> {
             self.created
                 .lock()
                 .unwrap()
                 .push((title.to_string(), body.to_string()));
             let id = format!("child-{:03}", self.created.lock().unwrap().len());
+            self.created_labels.lock().unwrap().push((
+                id.clone(),
+                labels.iter().map(|l| (*l).to_string()).collect(),
+            ));
             Ok(BeadId::from(id))
         }
         async fn add_dependency(&self, blocker_id: &BeadId, blocked_id: &BeadId) -> Result<()> {
@@ -3225,6 +3469,148 @@ End of response."#;
             .unwrap();
 
         assert!(matches!(result, MitosisResult::Skipped { .. }));
+    }
+
+    // ── apply_split_proposals: the guarded split boundary ────────────────
+
+    /// An evaluator at the shipped defaults: these tests exercise the
+    /// proposal boundary (validate, dedup, chain), not the knobs.
+    fn proposal_evaluator(tag: &str) -> (MitosisEvaluator, tempfile::TempDir) {
+        let ws_tmp = tempfile::tempdir().expect("workspace tempdir");
+        let evaluator = MitosisEvaluator::new(
+            MitosisConfig::default(),
+            Telemetry::new(tag.to_string()),
+            ws_tmp.path().to_path_buf(),
+        );
+        (evaluator, ws_tmp)
+    }
+
+    #[tokio::test]
+    async fn apply_split_rejects_an_invalid_proposal_without_side_effects() {
+        let (evaluator, _ws) = proposal_evaluator("split-apply-invalid");
+        let store = MockStore::new();
+        let parent = test_bead();
+
+        // Eleven titles is one past the resolver's own child-count cap. The
+        // re-validation at this boundary must refuse before any store call —
+        // the refusal leaves the store exactly as it found it.
+        let application = evaluator
+            .apply_split_proposals(
+                &store,
+                &parent,
+                &(1..=11).map(|n| format!("Child {n}")).collect::<Vec<_>>(),
+                "analysis",
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(application, SplitApplication::Refused { .. }),
+            "an over-cap proposal is refused, got {application:?}"
+        );
+        let state = store.lock_state();
+        assert!(state.created.is_empty(), "nothing was created");
+        assert!(state.deps_added.is_empty(), "no chain edges either");
+        drop(state);
+        assert!(
+            store.labels_added_snapshot().is_empty(),
+            "no umbrella conversion on a refused proposal"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_split_dedupes_then_chains_the_survivor_under_an_umbrella() {
+        let (evaluator, _ws) = proposal_evaluator("split-apply-dedup-chain");
+        let parent = test_bead();
+        // One proposed title already exists as a child, and a second is the
+        // same title in a different case — both fold away before creation.
+        let store = MockStore::new()
+            .with_existing_children(vec![existing_child("Add the parser", "parent-001")]);
+
+        let application = evaluator
+            .apply_split_proposals(
+                &store,
+                &parent,
+                &[
+                    "Add the parser".to_string(),
+                    "add THE parser".to_string(),
+                    "Add the serializer".to_string(),
+                ],
+                "analysis",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            application,
+            SplitApplication::Applied {
+                created: 1,
+                deduped: 2
+            },
+            "one survivor, two folded"
+        );
+        let state = store.lock_state();
+        assert_eq!(
+            state
+                .created
+                .iter()
+                .map(|(title, _)| title.clone())
+                .collect::<Vec<_>>(),
+            vec!["Add the serializer".to_string()],
+            "only the uncovered title is created"
+        );
+        assert_eq!(
+            *state.deps_added,
+            vec![("child-001".to_string(), parent.id.to_string())],
+            "a single-child chain blocks the parent directly"
+        );
+        drop(state);
+        let child_labels = store.created_labels_snapshot();
+        assert_eq!(child_labels.len(), 1);
+        let (id, labels) = &child_labels[0];
+        assert_eq!(id, "child-001");
+        for label in ["split-child", "parent-parent-001"] {
+            assert!(
+                labels.iter().any(|l| l == label),
+                "the child carries {label}, got {labels:?}"
+            );
+        }
+        let added = store.labels_added_snapshot();
+        for label in ["umbrella", "auto-split-parent"] {
+            assert!(
+                added
+                    .iter()
+                    .any(|(bead, l)| bead == parent.id.as_ref() && l == label),
+                "the parent carries {label}, got {added:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_split_fully_covered_by_existing_children_creates_nothing() {
+        let (evaluator, _ws) = proposal_evaluator("split-apply-covered");
+        let parent = test_bead();
+        let store = MockStore::new()
+            .with_existing_children(vec![existing_child("Add the parser", "parent-001")]);
+
+        let application = evaluator
+            .apply_split_proposals(&store, &parent, &["add the PARSER".to_string()], "analysis")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            application,
+            SplitApplication::FullyDeduplicated { covered: 1 },
+            "the only proposal was already covered"
+        );
+        let state = store.lock_state();
+        assert!(state.created.is_empty(), "coverage creates no bead");
+        assert!(state.deps_added.is_empty(), "and no chain edge");
+        drop(state);
+        assert!(
+            store.labels_added_snapshot().is_empty(),
+            "and no umbrella conversion"
+        );
     }
 
     /// Create a bead that looks like an existing mitosis child of a parent.

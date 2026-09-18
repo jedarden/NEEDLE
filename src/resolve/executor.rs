@@ -29,8 +29,9 @@
 //!   run is not a gate that failed).
 //! - **Split proposals go through Mitosis.** Child proposals are validated,
 //!   deduplicated against the parent's existing children and lineage, capped,
-//!   and created through the atomic [`BeadStore::split_bead`] path with the
-//!   standard parent/child dependency policy — never created raw.
+//!   and created as a sequential `split-child` chain under an
+//!   umbrella-labelled parent — the manual Auto-Split contract, never
+//!   created raw.
 //!
 //! # Contract
 //!
@@ -576,7 +577,9 @@ impl DecisionExecutor {
     // ──────────────────────────────────────────────────────────────────────
 
     /// Send the child proposal through Mitosis validation and deduplication,
-    /// then apply the parent/child dependency policy.
+    /// then apply the parent/child dependency policy. Ownership is re-checked
+    /// immediately before child creation begins, so a dispatch that lost its
+    /// claim while validating creates nothing.
     async fn apply_split(
         &self,
         store: &dyn BeadStore,
@@ -613,6 +616,15 @@ impl DecisionExecutor {
                 .fail_safely(store, bead, actor, "split unavailable", error)
                 .await);
         };
+
+        // Ownership once more, immediately before children start being
+        // created: everything since the entry check was read-only, and child
+        // creation is the mutation a stale dispatch must not begin. (The
+        // check cannot cover the creation loop itself — the backend has no
+        // fence — but it narrows the window to the loop's own duration.)
+        if !self.ensure_owned(store, &bead.id, actor).await? {
+            return Ok(AppliedDecision::OwnershipLost);
+        }
 
         let application = mitosis
             .apply_split_proposals(store, bead, child_titles, evidence)
@@ -902,6 +914,7 @@ mod tests {
     use super::*;
     use crate::bead_store::Filters;
     use crate::types::{BeadId, ClaimResult};
+    use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Mutex, Mutex as StateMutex};
@@ -913,6 +926,10 @@ mod tests {
         /// After this many `claim_status` reads, reassign the bead to another
         /// worker — a deterministic ownership race.
         flip_assignee_after: Option<usize>,
+        /// On the `claim_status` read with this 0-based index, another
+        /// worker's *complete* decision wins the race and closes the bead
+        /// mid-flight.
+        closed_by_winner_after_read: Option<usize>,
         claim_reads: AtomicUsize,
         notes: Mutex<Vec<String>>,
         releases: AtomicUsize,
@@ -920,11 +937,23 @@ mod tests {
         closes: Mutex<Vec<String>>,
         labels: Mutex<Vec<String>>,
         created_children: Mutex<Vec<String>>,
+        /// The split path's children, keyed by id: labels and (once
+        /// compensated) the close reason.
+        child_beads: StateMutex<HashMap<String, ChildBead>>,
         dependencies: Mutex<Vec<(String, String)>>,
         fail_append_notes: bool,
         fail_release: bool,
         fail_block: bool,
         fail_close: bool,
+        /// `create_bead` fails once this many children already exist.
+        fail_create_after: Option<usize>,
+        /// A *parent* `add_label` fails once this many parent labels have
+        /// already landed — the second umbrella label failing after the
+        /// first applied.
+        fail_parent_label_after: Option<usize>,
+        /// Armed once: the next store op of this kind fails — `"dep"` fails
+        /// the next `add_dependency`, `"label"` the next parent `add_label`.
+        armed_failure: StateMutex<Option<&'static str>>,
         /// What `notes()` reports — the shipped-work gate reads it.
         stored_notes: String,
         /// Beads beyond the parent that `list_all` reports — existing mitosis
@@ -932,6 +961,17 @@ mod tests {
         extra_beads: Vec<Bead>,
         workspace: PathBuf,
     }
+
+    /// A child bead the split path created through this store.
+    #[derive(Clone, Debug, Default)]
+    struct ChildBead {
+        labels: Vec<String>,
+        /// Set by the compensating close of an aborted split.
+        closed: Option<String>,
+    }
+
+    /// The bead id every `RecordingStore` models (`RecordingStore::bead`).
+    const PARENT_ID: &str = "needle-exec";
 
     #[derive(Clone, Debug)]
     struct ClaimState {
@@ -947,6 +987,7 @@ mod tests {
                     assignee: Some("worker-a".to_string()),
                 }),
                 flip_assignee_after: None,
+                closed_by_winner_after_read: None,
                 claim_reads: AtomicUsize::new(0),
                 notes: Mutex::new(Vec::new()),
                 releases: AtomicUsize::new(0),
@@ -954,15 +995,48 @@ mod tests {
                 closes: Mutex::new(Vec::new()),
                 labels: Mutex::new(Vec::new()),
                 created_children: Mutex::new(Vec::new()),
+                child_beads: StateMutex::new(HashMap::new()),
                 dependencies: Mutex::new(Vec::new()),
                 fail_append_notes: false,
                 fail_release: false,
                 fail_block: false,
                 fail_close: false,
+                fail_create_after: None,
+                fail_parent_label_after: None,
+                armed_failure: StateMutex::new(None),
                 stored_notes: String::new(),
                 extra_beads: Vec::new(),
                 workspace,
             }
+        }
+
+        /// `create_bead` fails once `count` children already exist — a
+        /// deterministic mid-creation failure.
+        fn failing_create_after(mut self, count: usize) -> Self {
+            self.fail_create_after = Some(count);
+            self
+        }
+
+        /// A parent `add_label` fails once `count` parent labels have already
+        /// landed — the second umbrella label failing after the first applied.
+        fn failing_parent_label_after(mut self, count: usize) -> Self {
+            self.fail_parent_label_after = Some(count);
+            self
+        }
+
+        /// Arm a one-shot failure: the next `add_dependency` (`"dep"`) or
+        /// parent `add_label` (`"label"`) fails.
+        fn arm_failure(self, kind: &'static str) -> Self {
+            *self.armed_failure.lock().unwrap() = Some(kind);
+            self
+        }
+
+        /// A concurrent complete decision wins the race: on the
+        /// `claim_status` read with 0-based index `n`, the bead is closed by
+        /// its (new) owner.
+        fn closed_by_winner_after_n_reads(mut self, n: usize) -> Self {
+            self.closed_by_winner_after_read = Some(n);
+            self
         }
 
         /// Seed an existing bead that `list_all` reports — e.g. a mitosis
@@ -1005,6 +1079,54 @@ mod tests {
 
         fn children_snapshot(&self) -> Vec<String> {
             self.created_children.lock().unwrap().clone()
+        }
+
+        fn deps_snapshot(&self) -> Vec<(String, String)> {
+            self.dependencies.lock().unwrap().clone()
+        }
+
+        /// Labels the split path gave the child with this id.
+        fn child_labels(&self, id: &str) -> Vec<String> {
+            self.child_beads
+                .lock()
+                .unwrap()
+                .get(id)
+                .map(|child| child.labels.clone())
+                .unwrap_or_default()
+        }
+
+        /// Close reasons recorded for child beads — the compensating closes
+        /// of an aborted split.
+        fn child_close_reasons(&self) -> Vec<String> {
+            self.child_beads
+                .lock()
+                .unwrap()
+                .values()
+                .filter_map(|child| child.closed.clone())
+                .collect()
+        }
+
+        /// Child beads still open — a compensated split leaves none.
+        fn open_child_ids(&self) -> Vec<String> {
+            self.child_beads
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(_, child)| child.closed.is_none())
+                .map(|(id, _)| id.clone())
+                .collect()
+        }
+
+        /// Consume the armed one-shot failure: `Ok(())` to proceed, `Err` to
+        /// fail the calling op.
+        fn take_armed_failure(&self, kind: &str) -> Result<()> {
+            let mut armed = self.armed_failure.lock().unwrap();
+            let matches = armed.as_deref() == Some(kind);
+            if matches {
+                *armed = None;
+                anyhow::bail!("injected {kind} failure");
+            }
+            Ok(())
         }
     }
 
@@ -1054,6 +1176,11 @@ mod tests {
                 let mut claim = self.claim.lock().unwrap();
                 claim.assignee = Some("worker-b".to_string());
             }
+            if Some(n) == self.closed_by_winner_after_read {
+                let mut claim = self.claim.lock().unwrap();
+                claim.status = BeadStatus::Done;
+                claim.assignee = None;
+            }
             let claim = self.claim.lock().unwrap();
             Ok(crate::types::ClaimStatus {
                 status: claim.status.clone(),
@@ -1098,7 +1225,15 @@ mod tests {
         async fn reopen(&self, _id: &BeadId) -> Result<()> {
             Ok(())
         }
-        async fn close(&self, _id: &BeadId, reason: &str) -> Result<()> {
+        async fn close(&self, id: &BeadId, reason: &str) -> Result<()> {
+            if id.as_ref() != PARENT_ID {
+                // A child bead — the compensating close of an aborted split.
+                // Never touches the parent's claim state.
+                if let Some(child) = self.child_beads.lock().unwrap().get_mut(id.as_ref()) {
+                    child.closed = Some(reason.to_string());
+                }
+                return Ok(());
+            }
             if self.fail_close {
                 anyhow::bail!("close failed (injected)");
             }
@@ -1117,7 +1252,19 @@ mod tests {
         async fn labels(&self, _id: &BeadId) -> Result<Vec<String>> {
             Ok(self.labels_snapshot())
         }
-        async fn add_label(&self, _id: &BeadId, label: &str) -> Result<()> {
+        async fn add_label(&self, id: &BeadId, label: &str) -> Result<()> {
+            if id.as_ref() != PARENT_ID {
+                if let Some(child) = self.child_beads.lock().unwrap().get_mut(id.as_ref()) {
+                    child.labels.push(label.to_string());
+                }
+                return Ok(());
+            }
+            self.take_armed_failure("label")?;
+            if let Some(limit) = self.fail_parent_label_after {
+                if self.labels.lock().unwrap().len() >= limit {
+                    anyhow::bail!("parent label failed (injected after {limit} labels)");
+                }
+            }
             self.labels.lock().unwrap().push(label.to_string());
             Ok(())
         }
@@ -1125,17 +1272,28 @@ mod tests {
             self.labels.lock().unwrap().retain(|l| l != label);
             Ok(())
         }
-        async fn create_bead(&self, title: &str, _body: &str, _labels: &[&str]) -> Result<BeadId> {
+        async fn create_bead(&self, title: &str, _body: &str, labels: &[&str]) -> Result<BeadId> {
+            if let Some(limit) = self.fail_create_after {
+                if self.child_beads.lock().unwrap().len() >= limit {
+                    anyhow::bail!("create failed (injected after {limit} children)");
+                }
+            }
+            let id = format!("child-{}", self.child_beads.lock().unwrap().len() + 1);
+            self.child_beads.lock().unwrap().insert(
+                id.clone(),
+                ChildBead {
+                    labels: labels.iter().map(|l| l.to_string()).collect(),
+                    closed: None,
+                },
+            );
             self.created_children
                 .lock()
                 .unwrap()
                 .push(title.to_string());
-            Ok(BeadId::from(format!(
-                "child-{}",
-                self.created_children.lock().unwrap().len()
-            )))
+            Ok(BeadId::from(id))
         }
         async fn add_dependency(&self, blocker_id: &BeadId, blocked_id: &BeadId) -> Result<()> {
+            self.take_armed_failure("dep")?;
             self.dependencies
                 .lock()
                 .unwrap()
@@ -1545,9 +1703,18 @@ mod tests {
         assert!(children.contains(&"Add the parser".to_string()));
         assert!(children.contains(&"Add the serializer".to_string()));
         assert_eq!(
-            store.dependencies.lock().unwrap().len(),
-            2,
-            "each child blocks the parent (dependency policy)"
+            store.deps_snapshot(),
+            vec![
+                ("child-1".to_string(), "child-2".to_string()),
+                ("child-2".to_string(), PARENT_ID.to_string()),
+            ],
+            "children chained sequentially, the parent depends on the last one"
+        );
+        let parent_labels = store.labels_snapshot();
+        assert!(
+            parent_labels.contains(&"umbrella".to_string())
+                && parent_labels.contains(&"auto-split-parent".to_string()),
+            "the parent was converted to an umbrella, got: {parent_labels:?}"
         );
         assert_eq!(
             store.blocks.load(Ordering::SeqCst),
@@ -1555,6 +1722,54 @@ mod tests {
             "parent blocked pending children"
         );
         assert_eq!(store.released(), 0);
+    }
+
+    #[tokio::test]
+    async fn split_children_carry_the_split_child_label_chain_wide() {
+        // The manual Auto-Split contract's exact labels: every child is a
+        // `split-child` scoped to its parent — what Mend's orphaned-
+        // split-child sweep and verified_completed_split's explicit
+        // provenance proof both key on.
+        let (_dir, workspace) = temp_workspace();
+        let lock_dir = tempfile::tempdir().expect("lock tempdir");
+        let store = RecordingStore::new(workspace);
+        let executor = executor_with_mitosis(lock_dir.path());
+
+        let applied = apply(
+            &executor,
+            &store,
+            &split_decision(
+                "needle-exec",
+                &["Add the parser", "Add the serializer", "Add the CLI"],
+            ),
+        )
+        .await
+        .expect("split applies");
+
+        assert!(
+            matches!(applied, AppliedDecision::Split { created: 3, .. }),
+            "three children created, got {applied:?}"
+        );
+        for child_id in ["child-1", "child-2", "child-3"] {
+            let labels = store.child_labels(child_id);
+            assert!(
+                labels.contains(&"split-child".to_string()),
+                "{child_id} carries split-child, got: {labels:?}"
+            );
+            assert!(
+                labels.contains(&"parent-needle-exec".to_string()),
+                "{child_id} carries the parent scope label, got: {labels:?}"
+            );
+        }
+        assert_eq!(
+            store.deps_snapshot(),
+            vec![
+                ("child-1".to_string(), "child-2".to_string()),
+                ("child-2".to_string(), "child-3".to_string()),
+                ("child-3".to_string(), PARENT_ID.to_string()),
+            ],
+            "a three-child chain with the parent on the terminal child only"
+        );
     }
 
     fn existing_parser_child() -> Bead {
@@ -1728,6 +1943,383 @@ mod tests {
             1,
             "safely released, never left in_progress"
         );
+    }
+
+    #[tokio::test]
+    async fn split_refused_by_mitosis_creates_nothing_and_releases() {
+        let (_dir, workspace) = temp_workspace();
+        let lock_dir = tempfile::tempdir().expect("lock tempdir");
+        // Entry validation passed the decision through, but the mitosis
+        // boundary refuses it anyway: a max_children cap of 0 leaves nothing
+        // to create. The executor's Refused arm must release the parent
+        // without creating a child, blocking, or labelling anything.
+        let executor = executor().with_mitosis(MitosisEvaluator::new(
+            crate::config::MitosisConfig {
+                max_children: 0,
+                ..Default::default()
+            },
+            Telemetry::new("test".to_string()),
+            lock_dir.to_path_buf(),
+        ));
+        let store = RecordingStore::new(workspace);
+
+        let result = apply(
+            &executor,
+            &store,
+            &split_decision("needle-exec", &["Add the parser", "Add the serializer"]),
+        )
+        .await;
+
+        let error = result.expect_err("a refused split is a resolution failure");
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("split proposal refused"),
+            "the error explains the refusal, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("max_children cap (0)"),
+            "the refusal names the cap that caused it, got: {rendered}"
+        );
+        assert!(
+            store.children_snapshot().is_empty(),
+            "a refused proposal creates nothing"
+        );
+        assert!(
+            store.labels_snapshot().is_empty(),
+            "a refused proposal never converts the parent"
+        );
+        assert_eq!(store.blocks.load(Ordering::SeqCst), 0, "nothing blocked");
+        assert!(store.closes_snapshot().is_empty(), "nothing closed");
+        assert_eq!(
+            store.released(),
+            1,
+            "safely released, never left in_progress"
+        );
+    }
+
+    #[tokio::test]
+    async fn split_ownership_lost_before_creation_creates_nothing() {
+        let (_dir, workspace) = temp_workspace();
+        let lock_dir = tempfile::tempdir().expect("lock tempdir");
+        // Read 0 is the entry check; read 1 is the re-check immediately
+        // before children start being created. The bead is reassigned in
+        // between: the losing split must not create a single child.
+        let store = RecordingStore::new(workspace).flips_to_foreign_owner_after_n_reads(1);
+        let executor = executor_with_mitosis(lock_dir.path());
+
+        let applied = apply(
+            &executor,
+            &store,
+            &split_decision(
+                "needle-exec",
+                &["Add the parser", "Add the serializer", "Add the CLI"],
+            ),
+        )
+        .await
+        .expect("a lost race is a normal outcome");
+
+        assert_eq!(applied, AppliedDecision::OwnershipLost);
+        assert!(
+            store.children_snapshot().is_empty(),
+            "a stale dispatch must not create children"
+        );
+        assert_eq!(store.blocks.load(Ordering::SeqCst), 0, "nothing blocked");
+        assert_eq!(store.released(), 0, "never release someone else's claim");
+    }
+
+    #[tokio::test]
+    async fn split_creation_failure_compensates_and_releases_the_parent() {
+        let (_dir, workspace) = temp_workspace();
+        let lock_dir = tempfile::tempdir().expect("lock tempdir");
+        // The second create fails: child-1 exists with no chain edge yet.
+        // The aborted split must close child-1 and the executor must release
+        // the parent — no orphaned half-split state anywhere.
+        let store = RecordingStore::new(workspace).failing_create_after(1);
+        let executor = executor_with_mitosis(lock_dir.path());
+
+        let applied = apply(
+            &executor,
+            &store,
+            &split_decision(
+                "needle-exec",
+                &["Add the parser", "Add the serializer", "Add the CLI"],
+            ),
+        )
+        .await
+        .expect("the compensation succeeded, so the outcome is terminal");
+
+        assert_eq!(
+            applied,
+            AppliedDecision::Released(ReleaseCause::MutationFailed),
+            "a mid-creation failure ends in the safety release"
+        );
+        assert_eq!(
+            store.children_snapshot().len(),
+            1,
+            "only the first child was created before the failure"
+        );
+        assert_eq!(
+            store.child_close_reasons().len(),
+            1,
+            "the created child was compensated"
+        );
+        assert!(
+            store.open_child_ids().is_empty(),
+            "no orphaned half-split children remain open"
+        );
+        assert_eq!(store.released(), 1, "the parent was not left in_progress");
+        assert_eq!(store.blocks.load(Ordering::SeqCst), 0, "nothing blocked");
+        assert!(
+            !store
+                .labels_snapshot()
+                .iter()
+                .any(|l| l == "umbrella" || l == "auto-split-parent"),
+            "an aborted split does not convert the parent to an umbrella"
+        );
+    }
+
+    #[tokio::test]
+    async fn split_chain_failure_compensates_the_whole_partial_chain() {
+        let (_dir, workspace) = temp_workspace();
+        let lock_dir = tempfile::tempdir().expect("lock tempdir");
+        // The first chain edge (child-1 -> child-2) fails after both children
+        // were created: both must be compensated.
+        let store = RecordingStore::new(workspace).arm_failure("dep");
+        let executor = executor_with_mitosis(lock_dir.path());
+
+        let applied = apply(
+            &executor,
+            &store,
+            &split_decision(
+                "needle-exec",
+                &["Add the parser", "Add the serializer", "Add the CLI"],
+            ),
+        )
+        .await
+        .expect("the compensation succeeded, so the outcome is terminal");
+
+        assert_eq!(
+            applied,
+            AppliedDecision::Released(ReleaseCause::MutationFailed)
+        );
+        assert_eq!(store.children_snapshot().len(), 2);
+        assert_eq!(
+            store.child_close_reasons().len(),
+            2,
+            "both children of the partial chain were compensated"
+        );
+        assert!(store.open_child_ids().is_empty());
+        assert!(store.deps_snapshot().is_empty(), "no edge was committed");
+        assert_eq!(store.released(), 1);
+        assert_eq!(store.blocks.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn split_umbrella_label_failure_compensates_after_full_wiring() {
+        let (_dir, workspace) = temp_workspace();
+        let lock_dir = tempfile::tempdir().expect("lock tempdir");
+        // Everything wires, then the first umbrella label fails. The split is
+        // still aborted: without both labels the parent would be an
+        // ordinary bead wearing an unexplained chain, so the children go.
+        let store = RecordingStore::new(workspace).arm_failure("label");
+        let executor = executor_with_mitosis(lock_dir.path());
+
+        let applied = apply(
+            &executor,
+            &store,
+            &split_decision(
+                "needle-exec",
+                &["Add the parser", "Add the serializer", "Add the CLI"],
+            ),
+        )
+        .await
+        .expect("the compensation succeeded, so the outcome is terminal");
+
+        assert_eq!(
+            applied,
+            AppliedDecision::Released(ReleaseCause::MutationFailed)
+        );
+        assert_eq!(store.deps_snapshot().len(), 3, "the chain itself wired");
+        assert_eq!(
+            store.child_close_reasons().len(),
+            3,
+            "all three children were compensated"
+        );
+        assert!(store.open_child_ids().is_empty());
+        assert!(
+            !store
+                .labels_snapshot()
+                .iter()
+                .any(|l| l == "umbrella" || l == "auto-split-parent"),
+            "a half-labelled parent is not left behind"
+        );
+        assert_eq!(store.released(), 1);
+        assert_eq!(store.blocks.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn split_partial_umbrella_conversion_is_rolled_back() {
+        let (_dir, workspace) = temp_workspace();
+        let lock_dir = tempfile::tempdir().expect("lock tempdir");
+        // `umbrella` lands, then `auto-split-parent` fails. The compensation
+        // must take the applied label back off: an open parent wearing
+        // `umbrella` and depending on its (now closed) last child is the
+        // exact shape `verified_completed_split` walks — through the
+        // non-explicit path (no auto-split-parent label, failure-count label
+        // present) it would close the parent as a *completed* split whose
+        // work never happened.
+        let store = RecordingStore::new(workspace).failing_parent_label_after(1);
+        let executor = executor_with_mitosis(lock_dir.path());
+
+        let applied = apply(
+            &executor,
+            &store,
+            &split_decision(
+                "needle-exec",
+                &["Add the parser", "Add the serializer", "Add the CLI"],
+            ),
+        )
+        .await
+        .expect("the compensation succeeded, so the outcome is terminal");
+
+        assert_eq!(
+            applied,
+            AppliedDecision::Released(ReleaseCause::MutationFailed)
+        );
+        assert!(
+            !store
+                .labels_snapshot()
+                .iter()
+                .any(|l| l == "umbrella" || l == "auto-split-parent"),
+            "the applied umbrella label was rolled back, got {:?}",
+            store.labels_snapshot()
+        );
+        assert_eq!(
+            store.child_close_reasons().len(),
+            3,
+            "all three children were compensated"
+        );
+        assert!(store.open_child_ids().is_empty());
+        assert_eq!(store.released(), 1);
+        assert_eq!(store.blocks.load(Ordering::SeqCst), 0);
+    }
+
+    // ── cross-decision races ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn complete_loses_to_a_won_split_and_mutates_nothing() {
+        let (_dir, workspace) = temp_workspace();
+        let lock_dir = tempfile::tempdir().expect("lock tempdir");
+        let store = RecordingStore::new(workspace);
+        let executor = executor_with_mitosis(lock_dir.path());
+
+        // The split decision wins: children created, parent blocked.
+        let won = apply(
+            &executor,
+            &store,
+            &split_decision("needle-exec", &["Add the parser", "Add the serializer"]),
+        )
+        .await
+        .expect("the winning split applies");
+        assert!(matches!(won, AppliedDecision::Split { .. }));
+
+        // A stale complete dispatch — still holding the pre-split snapshot —
+        // now applies. The bead is Deferred (and unowned in the real store);
+        // exactly one decision may mutate it: the complete must lose without
+        // closing or releasing anything.
+        let stale_bead = store.bead();
+        let applied = executor
+            .apply(&store, &stale_bead, &complete_decision(), "worker-a", None)
+            .await
+            .expect("a lost race is a normal outcome, not an error");
+
+        assert_eq!(applied, AppliedDecision::OwnershipLost);
+        assert!(
+            store.closes_snapshot().is_empty(),
+            "the loser must not close a bead the winner blocked"
+        );
+        assert_eq!(
+            store.released(),
+            0,
+            "the loser releases safely: never someone else's claim"
+        );
+        assert_eq!(
+            store.children_snapshot().len(),
+            2,
+            "the winner's children stand untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn split_loses_to_a_won_complete_and_creates_nothing() {
+        let (_dir, workspace) = temp_workspace();
+        let lock_dir = tempfile::tempdir().expect("lock tempdir");
+        // The complete decision wins mid-flight: the bead is closed (Done) by
+        // its owner exactly at the split's pre-creation re-check (read 1).
+        let store = RecordingStore::new(workspace).closed_by_winner_after_n_reads(1);
+        let executor = executor_with_mitosis(lock_dir.path());
+
+        let applied = apply(
+            &executor,
+            &store,
+            &split_decision("needle-exec", &["Add the parser", "Add the serializer"]),
+        )
+        .await
+        .expect("a lost race is a normal outcome, not an error");
+
+        assert_eq!(applied, AppliedDecision::OwnershipLost);
+        assert!(
+            store.children_snapshot().is_empty(),
+            "the losing split creates no children on a closed bead"
+        );
+        assert_eq!(store.blocks.load(Ordering::SeqCst), 0);
+        assert_eq!(store.released(), 0, "never release someone else's claim");
+        assert_eq!(
+            store.closes_snapshot().len(),
+            0,
+            "the split did not close anything either"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_loses_to_a_won_split_and_touches_nothing() {
+        let (_dir, workspace) = temp_workspace();
+        let lock_dir = tempfile::tempdir().expect("lock tempdir");
+        let store = RecordingStore::new(workspace);
+        let executor = executor_with_mitosis(lock_dir.path());
+
+        // The split wins: the parent is blocked pending its chain.
+        let won = apply(
+            &executor,
+            &store,
+            &split_decision("needle-exec", &["Add the parser", "Add the serializer"]),
+        )
+        .await
+        .expect("the winning split applies");
+        assert!(matches!(won, AppliedDecision::Split { .. }));
+
+        // A stale retry dispatch applies against the post-split store: it
+        // must lose at the entry ownership check without recording guidance,
+        // incrementing failure accounting, or releasing.
+        let stale_bead = store.bead();
+        let applied = executor
+            .apply(&store, &stale_bead, &retry_decision(), "worker-a", None)
+            .await
+            .expect("a lost race is a normal outcome, not an error");
+
+        assert_eq!(applied, AppliedDecision::OwnershipLost);
+        assert!(
+            store.notes_snapshot().is_empty(),
+            "no guidance note on a bead the winner blocked"
+        );
+        assert!(
+            !store
+                .labels_snapshot()
+                .iter()
+                .any(|l| l.starts_with("failure-count:")),
+            "no failure accounting on a foreign claim"
+        );
+        assert_eq!(store.released(), 0, "never release someone else's claim");
     }
 
     // ── shared contract ──────────────────────────────────────────────────
