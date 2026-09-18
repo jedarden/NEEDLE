@@ -1,0 +1,10 @@
+# Re-expose the NEEDLE-scoped gitleaks configuration at the repo root.
+#
+# gitleaks auto-discovers only a repo-root .gitleaks.toml; the actual rules
+# (the stock default set plus the NEEDLE nonsecret API-digest allowance) live
+# in config/gitleaks.toml. Forgejo's pre-receive secret scan declined
+# checkpoint pushes because a plain `gitleaks detect` never saw that config
+# (needle-d251ccdb, recurrence of needle-27ec0073). This file must stay a
+# pure re-exposure: extend the canonical config, never duplicate or weaken it.
+[extend]
+extPaths = ["config/gitleaks.toml"]
