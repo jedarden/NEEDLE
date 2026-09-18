@@ -129,7 +129,7 @@ version = 1
 # races (complete vs split, split vs complete, retry vs split). All
 # in-process against recording stores.
 # Acceptance command: `cargo test --lib resolve::executor::split_`
-max_tests = 3861
+max_tests = 3862
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
@@ -481,9 +481,9 @@ reason = "Grandfathered unit-tier debt; replace with an injected boundary."
 [[unit_exception]]
 path = "src/worker/mod.rs"
 kind = "global-env"
-max_occurrences = 14
+max_occurrences = 15
 owner = "component:worker"
-reason = "Twelve grandfathered occurrences plus two test-only safeguards under the repository-wide environment lock: one neutralizes the host-dependent admission probe, and one pins the historical gate-failure regression beneath a private HOME."
+reason = "Twelve grandfathered occurrences plus three test-only safeguards under the repository-wide environment lock: one neutralizes the host-dependent admission probe, one pins the historical gate-failure regression beneath a private HOME, and one proves exhausted-worker reload from a private HOME."
 
 # Files under tests/ that are not compiled into a Rust harness are still test
 # assets. Each must match a rule with a durable component owner.
