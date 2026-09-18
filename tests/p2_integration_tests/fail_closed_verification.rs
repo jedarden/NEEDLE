@@ -17,7 +17,8 @@ use async_trait::async_trait;
 use tempfile::TempDir;
 
 use needle::bead_store::{BeadStore, Filters, RepairReport};
-use needle::dispatch::{AgentAdapter, Dispatcher, TokenExtraction};
+use needle::claim::{ClaimIdentity, ResolvedStoreContext};
+use needle::dispatch::{AgentAdapter, DispatchContext, Dispatcher, TokenExtraction};
 use needle::prompt::BuiltPrompt;
 use needle::telemetry::Telemetry;
 use needle::types::{Bead, BeadId, BeadStatus, ClaimResult, ClaimStatus};
@@ -224,7 +225,7 @@ fn probe_adapter() -> AgentAdapter {
         },
         // Any spawn appends to the sentinel file in the workspace — the
         // observable a zero-spawn assertion reads.
-        invoke_template: "echo spawned >> {workspace}/spawned.txt".to_string(),
+        invoke_template: "printf '%s:%s\\n' \"${NEEDLE_BEAD_REVISION:-missing}\" \"${NEEDLE_BEAD_FENCING_TOKEN:-missing}\" >> {workspace}/claim-context.txt; echo spawned >> {workspace}/spawned.txt".to_string(),
         environment: HashMap::new(),
         timeout_secs: 0,
         idle_timeout_secs: 0,
@@ -309,6 +310,53 @@ async fn run_gate(outcome: ProbeOutcome, wire_store: bool, wire_worker: bool) ->
 
     drop(dispatcher);
     // Give the telemetry writer thread time to drain the channel to disk.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    GateOutcome {
+        workspace,
+        telemetry: telemetry_log,
+        dispatch,
+    }
+}
+
+/// Drive the explicit worker dispatch context through the final pre-spawn
+/// gate while deliberately wiring a colliding home store into the dispatcher.
+/// A home-store fallback would reject this dispatch; only the selected target
+/// store carries the matching claim identity.
+async fn run_context_gate(home: ProbeOutcome, target: ProbeOutcome) -> GateOutcome {
+    let workspace = TempDir::new().expect("create probe workspace");
+    let telemetry_log = TelemetryLog::new();
+    let telemetry = telemetry_log.telemetry();
+
+    let mut adapters = HashMap::new();
+    let adapter = probe_adapter();
+    adapters.insert(adapter.name.clone(), adapter);
+
+    let target_store = Arc::new(ProbeStore::new(target));
+    let dispatcher = Dispatcher::with_adapters(adapters, telemetry, 3600)
+        .with_bead_store(Arc::new(ProbeStore::new(home)))
+        .with_worker_id(WORKER_ID.to_string());
+    let context = DispatchContext::new(
+        ResolvedStoreContext::new(target_store, workspace.path().to_path_buf()),
+        ClaimIdentity {
+            actor: WORKER_ID.to_string(),
+            revision: Some(7),
+            claim_epoch: Some(2),
+        },
+    );
+
+    let bead_id = BeadId::from("needle-fail-closed-context");
+    let dispatch = dispatcher
+        .dispatch_with_context(
+            &bead_id,
+            &probe_prompt(),
+            dispatcher.adapter("fail-closed-probe").unwrap(),
+            workspace.path(),
+            &context,
+        )
+        .await;
+
+    drop(dispatcher);
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     GateOutcome {
@@ -480,4 +528,58 @@ async fn pre_spawn_control_with_matching_claim_spawns() {
         "a passed pre-spawn verification records exactly one recheck_succeeded"
     );
     assert_eq!(outcome.count("bead.claim.verify_error"), 0);
+
+    assert_context_uses_selected_target_store_and_claim_identity().await;
+    assert_context_rejects_moved_claim_identity_from_target_store().await;
+}
+
+/// Selection and claim hand the exact remote store plus the claim-time
+/// revision/epoch to dispatch. The dispatcher is intentionally configured with
+/// a colliding home store that would fail verification if it were consulted.
+async fn assert_context_uses_selected_target_store_and_claim_identity() {
+    let outcome = run_context_gate(
+        ProbeOutcome::Live(ClaimStatus {
+            status: BeadStatus::InProgress,
+            assignee: Some("home-collision".to_string()),
+            revision: Some(99),
+            claim_epoch: Some(99),
+        }),
+        ProbeOutcome::Live(claimed_status(WORKER_ID)),
+    )
+    .await;
+
+    let result = outcome
+        .dispatch
+        .as_ref()
+        .expect("the selected target store claim must pass verification");
+    assert_eq!(result.exit_code, 0);
+    assert!(outcome.spawned(), "the target-store dispatch must spawn");
+    assert_eq!(
+        std::fs::read_to_string(outcome.workspace.path().join("claim-context.txt"))
+            .expect("probe should record claim context")
+            .trim(),
+        "7:2",
+        "the claim-time revision and fencing epoch must reach the child"
+    );
+    assert_eq!(outcome.count("bead.claim.recheck_succeeded"), 1);
+}
+
+/// A target store that still names this worker is not enough when its revision
+/// or claim epoch moved after claim. The context must make the pre-spawn gate
+/// fail closed instead of adopting the newer live credential.
+async fn assert_context_rejects_moved_claim_identity_from_target_store() {
+    let outcome = run_context_gate(
+        ProbeOutcome::Live(claimed_status(WORKER_ID)),
+        ProbeOutcome::Live(ClaimStatus {
+            status: BeadStatus::InProgress,
+            assignee: Some(WORKER_ID.to_string()),
+            revision: Some(8),
+            claim_epoch: Some(3),
+        }),
+    )
+    .await;
+
+    assert!(outcome.dispatch.is_err());
+    assert!(!outcome.spawned());
+    assert_eq!(outcome.count("bead.claim.recheck_failed"), 1);
 }

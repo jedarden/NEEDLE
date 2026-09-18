@@ -39,7 +39,7 @@ use crate::clock::{Clock, TokioClock};
 use crate::commit_hook;
 use crate::config::{CliOverrides, Config, ConfigLoader, ConfigSource, SourceMap};
 use crate::cost::{self, BudgetCheck, EffortData};
-use crate::dispatch::{self, Dispatcher};
+use crate::dispatch::{self, DispatchContext, Dispatcher};
 use crate::health::HealthMonitor;
 use crate::mitosis::MitosisEvaluator;
 use crate::outcome::OutcomeHandler;
@@ -4166,10 +4166,24 @@ impl Worker {
                     );
                 }
 
+                // Carry the exact store selected before claim together with
+                // the identity captured after claim into the dispatcher's
+                // final pre-spawn gate. The dispatcher must not reconstruct
+                // either value from the workspace path or its home-store
+                // compatibility fields.
+                let dispatch_context =
+                    DispatchContext::new((*target_store).clone(), claim_identity.clone());
+
                 self.exec_started_at = Some(self.clock.now());
                 let result = match self
                     .dispatcher
-                    .dispatch(&bead.id, &prompt, &adapter, dispatch_ws)
+                    .dispatch_with_context(
+                        &bead.id,
+                        &prompt,
+                        &adapter,
+                        dispatch_ws,
+                        &dispatch_context,
+                    )
                     .await
                 {
                     Ok(result) => result,
