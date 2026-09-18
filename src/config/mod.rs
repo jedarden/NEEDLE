@@ -12781,6 +12781,31 @@ agent:
     }
 
     #[test]
+    fn validation_fallback_gate_serialization_roundtrips() {
+        // An operator opt-out must survive a serialize -> parse round trip
+        // (config rewrite, telemetry snapshot) without silently re-arming,
+        // and the serialized form must name the key explicitly rather than
+        // relying on the serde default to paper over it.
+        let opted_out = ValidationConfig {
+            fallback_gate: false,
+            ..ValidationConfig::default()
+        };
+        let yaml = serde_yaml::to_string(&opted_out).unwrap();
+        assert!(
+            yaml.contains("fallback_gate: false"),
+            "serialized opt-out must carry the key: {yaml}"
+        );
+        let parsed: ValidationConfig = serde_yaml::from_str(&yaml).unwrap();
+        assert!(!parsed.fallback_gate, "round trip re-armed the opt-out");
+
+        let yaml = serde_yaml::to_string(&ValidationConfig::default()).unwrap();
+        assert!(
+            yaml.contains("fallback_gate: true"),
+            "serialized default must be explicitly armed: {yaml}"
+        );
+    }
+
+    #[test]
     fn validation_is_non_overridable_at_workspace_level() {
         assert!(NON_OVERRIDABLE_KEYS.contains(&"validation"));
     }
