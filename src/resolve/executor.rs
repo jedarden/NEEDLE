@@ -1058,6 +1058,11 @@ mod tests {
             self
         }
 
+        fn with_labels(mut self, labels: &[&str]) -> Self {
+            self.labels = Mutex::new(labels.iter().map(|label| (*label).to_string()).collect());
+            self
+        }
+
         /// Hand the bead to `worker-b` on the `claim_status` read whose
         /// 0-based index is `n` — a deterministic ownership race. Reads: 0 is
         /// the executor's entry check; later reads are its re-checks before
@@ -1401,6 +1406,8 @@ mod tests {
         );
         assert_eq!(store.released(), 0, "nothing released");
         assert_eq!(store.blocks.load(Ordering::SeqCst), 0, "nothing blocked");
+
+        complete_verified_success_resets_failure_accounting().await;
     }
 
     #[tokio::test]
@@ -1458,6 +1465,56 @@ mod tests {
                 .any(|label| label == "failure-count:1"),
             "a judged gate failure increments the failure count"
         );
+
+        complete_race_before_rejection_accounting_does_not_penalize_new_owner().await;
+    }
+
+    async fn complete_race_before_rejection_accounting_does_not_penalize_new_owner() {
+        let (_dir, workspace) = temp_workspace();
+        std::fs::write(
+            workspace.join(".needle.yaml"),
+            "gates:\n  - type: command\n    commands:\n      - 'false'\n    run_in: workspace\n",
+        )
+        .expect("write gate configuration");
+        // The entry check passes; the re-check in reject_release observes the
+        // handoff before failure accounting or release can touch the bead.
+        let store = RecordingStore::new(workspace)
+            .with_stored_notes("did the work")
+            .flips_to_foreign_owner_after_n_reads(1);
+
+        let applied = apply(&executor(), &store, &complete_decision())
+            .await
+            .expect("a lost race is a normal outcome");
+
+        assert_eq!(applied, AppliedDecision::OwnershipLost);
+        assert!(store.closes_snapshot().is_empty());
+        assert!(store
+            .labels_snapshot()
+            .iter()
+            .all(|label| !label.starts_with("failure-count:")));
+        assert_eq!(store.released(), 0, "never release the new owner's claim");
+    }
+
+    async fn complete_verified_success_resets_failure_accounting() {
+        let (_dir, workspace) = temp_workspace();
+        let store = RecordingStore::new(workspace)
+            .with_stored_notes("did the work")
+            .with_labels(&[
+                "failure-count:3",
+                "quarantine-until:2099-01-01T00:00:00Z",
+                "quarantine-round:3",
+            ]);
+
+        let applied = apply(&executor(), &store, &complete_decision())
+            .await
+            .expect("verified complete should close");
+
+        assert_eq!(applied, AppliedDecision::Completed);
+        assert!(store.labels_snapshot().iter().all(|label| {
+            !label.starts_with("failure-count:")
+                && !label.starts_with("quarantine-until:")
+                && !label.starts_with("quarantine-round:")
+        }));
     }
 
     #[tokio::test]
@@ -1590,6 +1647,8 @@ mod tests {
             1,
             "the essential transition still happened"
         );
+
+        retry_release_failure_is_reported_after_accounting().await;
     }
 
     #[tokio::test]
@@ -1636,6 +1695,22 @@ mod tests {
                 .any(|l| l == "failure-count:1"),
             "accounting already applied before the race window"
         );
+    }
+
+    async fn retry_release_failure_is_reported_after_accounting() {
+        let (_dir, workspace) = temp_workspace();
+        let mut store = RecordingStore::new(workspace);
+        store.fail_release = true;
+
+        let result = apply(&executor(), &store, &retry_decision()).await;
+
+        let error = result.expect_err("release failure must surface to the caller");
+        assert!(format!("{error:#}").contains("failed to release bead"));
+        assert!(store
+            .labels_snapshot()
+            .iter()
+            .any(|label| label == "failure-count:1"));
+        assert_eq!(store.released(), 0);
     }
 
     // ── blocked ──────────────────────────────────────────────────────────
@@ -1688,6 +1763,8 @@ mod tests {
         );
         assert_eq!(store.released(), 1, "the bead was not left in_progress");
         assert_eq!(store.blocks.load(Ordering::SeqCst), 0);
+
+        blocked_release_failure_is_reported_after_block_mutation_fails().await;
     }
 
     #[tokio::test]
@@ -1702,6 +1779,39 @@ mod tests {
         assert_eq!(applied, AppliedDecision::OwnershipLost);
         assert!(store.notes_snapshot().is_empty());
         assert_eq!(store.blocks.load(Ordering::SeqCst), 0);
+
+        blocked_race_before_block_does_not_block_the_new_owner().await;
+    }
+
+    async fn blocked_race_before_block_does_not_block_the_new_owner() {
+        let (_dir, workspace) = temp_workspace();
+        // The prerequisite note is allowed to land while this worker still
+        // owns the bead; the second ownership check must fence the state
+        // transition itself after the handoff.
+        let store = RecordingStore::new(workspace).flips_to_foreign_owner_after_n_reads(1);
+
+        let applied = apply(&executor(), &store, &blocked_decision())
+            .await
+            .expect("a lost race is a normal outcome");
+
+        assert_eq!(applied, AppliedDecision::OwnershipLost);
+        assert_eq!(store.notes_snapshot().len(), 1, "prerequisite was recorded");
+        assert_eq!(store.blocks.load(Ordering::SeqCst), 0);
+        assert_eq!(store.released(), 0, "never release the new owner's claim");
+    }
+
+    async fn blocked_release_failure_is_reported_after_block_mutation_fails() {
+        let (_dir, workspace) = temp_workspace();
+        let mut store = RecordingStore::new(workspace);
+        store.fail_block = true;
+        store.fail_release = true;
+
+        let result = apply(&executor(), &store, &blocked_decision()).await;
+
+        let error = result.expect_err("an unsafe release failure must surface");
+        assert!(format!("{error:#}").contains("safety release failed"));
+        assert_eq!(store.blocks.load(Ordering::SeqCst), 0);
+        assert_eq!(store.released(), 0);
     }
 
     // ── split ────────────────────────────────────────────────────────────
@@ -1899,6 +2009,32 @@ mod tests {
         assert!(store.children_snapshot().is_empty(), "no child created");
         assert_eq!(store.blocks.load(Ordering::SeqCst), 0, "parent not blocked");
         assert_eq!(store.released(), 1);
+
+        split_fully_deduplicated_race_does_not_release_after_handoff().await;
+    }
+
+    async fn split_fully_deduplicated_race_does_not_release_after_handoff() {
+        let (_dir, workspace) = temp_workspace();
+        let lock_dir = tempfile::tempdir().expect("lock tempdir");
+        // Reads: entry, pre-creation, then the release guard after Mitosis
+        // proves that every proposal is already covered.
+        let store = RecordingStore::new(workspace)
+            .with_existing_child(existing_parser_child())
+            .flips_to_foreign_owner_after_n_reads(2);
+        let executor = executor_with_mitosis(lock_dir.path());
+
+        let applied = apply(
+            &executor,
+            &store,
+            &split_decision("needle-exec", &["Add the parser"]),
+        )
+        .await
+        .expect("a lost race is a normal outcome");
+
+        assert_eq!(applied, AppliedDecision::OwnershipLost);
+        assert!(store.children_snapshot().is_empty());
+        assert_eq!(store.released(), 0, "never release the new owner's claim");
+        assert_eq!(store.blocks.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
@@ -1980,6 +2116,8 @@ mod tests {
             1,
             "safely released, never left in_progress"
         );
+
+        split_with_empty_child_title_is_rejected_before_mitosis().await;
     }
 
     #[tokio::test]
@@ -2038,6 +2176,21 @@ mod tests {
         );
     }
 
+    async fn split_with_empty_child_title_is_rejected_before_mitosis() {
+        let (_dir, workspace) = temp_workspace();
+        let lock_dir = tempfile::tempdir().expect("lock tempdir");
+        let store = RecordingStore::new(workspace);
+        let executor = executor_with_mitosis(lock_dir.path());
+
+        let result = apply(&executor, &store, &split_decision("needle-exec", &["   "])).await;
+
+        let error = result.expect_err("malformed split must be refused");
+        assert!(format!("{error:#}").contains("validation"));
+        assert!(store.children_snapshot().is_empty());
+        assert_eq!(store.blocks.load(Ordering::SeqCst), 0);
+        assert_eq!(store.released(), 1, "refusal safely releases the claim");
+    }
+
     #[tokio::test]
     async fn split_ownership_lost_before_creation_creates_nothing() {
         let (_dir, workspace) = temp_workspace();
@@ -2066,6 +2219,31 @@ mod tests {
         );
         assert_eq!(store.blocks.load(Ordering::SeqCst), 0, "nothing blocked");
         assert_eq!(store.released(), 0, "never release someone else's claim");
+
+        split_race_before_parent_block_does_not_block_the_new_owner().await;
+    }
+
+    async fn split_race_before_parent_block_does_not_block_the_new_owner() {
+        let (_dir, workspace) = temp_workspace();
+        let lock_dir = tempfile::tempdir().expect("lock tempdir");
+        // Mitosis has created and wired the children. The winner closes the
+        // parent before the executor's final ownership guard, so the losing
+        // split must not block or release that new owner.
+        let store = RecordingStore::new(workspace).closed_by_winner_after_n_reads(2);
+        let executor = executor_with_mitosis(lock_dir.path());
+
+        let applied = apply(
+            &executor,
+            &store,
+            &split_decision("needle-exec", &["Add the parser", "Add the serializer"]),
+        )
+        .await
+        .expect("a lost race is a normal outcome");
+
+        assert_eq!(applied, AppliedDecision::OwnershipLost);
+        assert_eq!(store.children_snapshot().len(), 2);
+        assert_eq!(store.blocks.load(Ordering::SeqCst), 0);
+        assert_eq!(store.released(), 0, "never release the new owner's claim");
     }
 
     #[tokio::test]
