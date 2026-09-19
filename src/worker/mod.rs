@@ -5452,35 +5452,61 @@ impl Worker {
             .await
     }
 
-    /// Release only if the live claim is still owned by this dispatching
-    /// worker. An error is returned when the bead is still ours but the
-    /// fallback could not release it; the state machine then cannot advance to
-    /// SELECTING with a dangling claim.
+    /// Release only with the target store and credential held by this
+    /// dispatch cycle.
+    ///
+    /// The target store is deliberately not reconstructed from `self.store`:
+    /// a worker can roam between workspaces, and a bead ID can collide with a
+    /// different bead in the home store. Likewise, a later live read is not a
+    /// release credential — accepting it would turn a release/re-claim race
+    /// into a blind release. When either held value is unavailable, leave the
+    /// claim untouched for lease expiry and make that decision observable.
     async fn release_claim_after_post_dispatch_failure(
         &self,
         bead: &Bead,
         reason: &str,
     ) -> Result<()> {
-        let status =
-            tokio::time::timeout(Duration::from_secs(30), self.store.claim_status(&bead.id))
-                .await
-                .context("post-dispatch release claim check timed out")??;
-        if !self.claim_belongs_to_dispatch(&status) {
-            return Ok(());
-        }
-
-        // Prefer the claim-time fencing identity. If a direct state-machine
-        // fixture has no identity, use the just-read live status as the
-        // fallback guard; production dispatches always capture the identity
-        // before spawning the agent.
-        let expected = self
+        let expected_actor = self
             .claim_identity
             .as_ref()
-            .map(ClaimIdentity::as_claim_status)
-            .unwrap_or(status);
+            .map(|identity| identity.actor.clone())
+            .unwrap_or_else(|| self.qualified_id());
+        let target_workspace = self
+            .target_store
+            .as_ref()
+            .map(|context| context.workspace().display().to_string());
+
+        let emit_cleanup_skipped = |reason: String| {
+            let _ = self.telemetry.emit_try_lock(
+                EventKind::ClaimCleanupSkipped {
+                    bead_id: bead.id.clone(),
+                    expected_actor: expected_actor.clone(),
+                    stage: "post_dispatch".to_string(),
+                    target_workspace: target_workspace.clone(),
+                    reason,
+                },
+                Utc::now(),
+            );
+        };
+
+        let Some(target_store) = self.target_store.as_ref() else {
+            emit_cleanup_skipped(
+                "resolved target store context is unavailable; leaving claim untouched".to_string(),
+            );
+            return Ok(());
+        };
+        let Some(claim_identity) = self.claim_identity.as_ref() else {
+            emit_cleanup_skipped(
+                "held claim identity is unavailable; leaving claim untouched".to_string(),
+            );
+            return Ok(());
+        };
+
+        let expected = claim_identity.as_claim_status();
+        let store = target_store.store();
         match tokio::time::timeout(
             Duration::from_secs(30),
-            self.store.release_recovery(&bead.id, &expected),
+            store.release_recovery(&bead.id, &expected),
         )
         .await
         {
