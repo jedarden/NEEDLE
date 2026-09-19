@@ -1732,7 +1732,44 @@ impl Dispatcher {
                     }
                 }
             };
+        let verify_workspace = dispatch_context
+            .map(|context| context.target_store().workspace().to_path_buf())
+            .unwrap_or_else(|| workspace.to_path_buf());
         {
+            // Revalidate the backend contract through the exact store handle
+            // that owns this claim before reading claim state. A roaming
+            // dispatch must never substitute its home store here.
+            if let Err(error) = tokio::time::timeout(
+                crate::claim::CLAIM_VERIFICATION_TIMEOUT,
+                verify_store.validate_for_dispatch(),
+            )
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "target backend validation timed out after {}s for workspace {}",
+                    crate::claim::CLAIM_VERIFICATION_TIMEOUT.as_secs(),
+                    verify_workspace.display()
+                )
+            })
+            .and_then(|result| result)
+            {
+                let _ = self.telemetry.emit(
+                    crate::telemetry::EventKind::ClaimVerifyError {
+                        bead_id: bead_id.clone(),
+                        expected_actor: verify_worker_id.clone(),
+                        stage: "pre_spawn".to_string(),
+                        target_workspace: Some(verify_workspace.display().to_string()),
+                        category: crate::telemetry::ClaimVerifyErrorCategory::Capability,
+                        detail: crate::telemetry::redact_claim_credentials(&format!("{error:#}")),
+                    },
+                    chrono::Utc::now(),
+                );
+                return Err(claim_verification_error(format!(
+                    "claim verification backend validation failed for bead {}: {error}",
+                    bead_id
+                )));
+            }
+
             match claim_status_with_timeout(verify_store.as_ref(), bead_id).await {
                 Ok(status) => {
                     let failed_fields = expected_identity
@@ -1781,7 +1818,7 @@ impl Dispatcher {
                                 bead_id: bead_id.clone(),
                                 expected_actor: verify_worker_id.clone(),
                                 stage: "pre_spawn".to_string(),
-                                target_workspace: Some(workspace.display().to_string()),
+                                target_workspace: Some(verify_workspace.display().to_string()),
                                 category: crate::telemetry::ClaimVerifyErrorCategory::ClaimMismatch,
                                 actual_status: format!("{:?}", status.status),
                                 actual_assignee: status
@@ -1852,7 +1889,7 @@ impl Dispatcher {
                             bead_id: bead_id.clone(),
                             expected_actor: verify_worker_id.clone(),
                             stage: "pre_spawn".to_string(),
-                            target_workspace: Some(workspace.display().to_string()),
+                            target_workspace: Some(verify_workspace.display().to_string()),
                             category: crate::telemetry::ClaimVerifyErrorCategory::classify(&e),
                             detail: crate::telemetry::redact_claim_credentials(&format!("{e:#}")),
                         },

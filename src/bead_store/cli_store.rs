@@ -541,6 +541,43 @@ impl BeadStore for CliBeadStore {
             .error_contains_any(message, &self.backend.error_markers.sync_conflict)
     }
 
+    async fn validate_for_dispatch(&self) -> Result<()> {
+        // The store is bound to bead-rs at construction time, but the binary
+        // may be replaced while a worker is between claim and spawn. Probe
+        // the exact binary and target workspace again at the final gate so a
+        // changed identity or capability set cannot authorize an agent.
+        let binary = self.binary.clone();
+        let workspace = self.workspace.clone();
+        let backend_name = self.backend.name.clone();
+        tokio::task::spawn_blocking(move || {
+            if backend_name != "bead-rs" {
+                bail!(
+                    "unsupported target backend '{}' for dispatch verification",
+                    backend_name
+                );
+            }
+
+            super::verify_backend_identity(&crate::config::Backend::Bead, &binary, &workspace)
+                .with_context(|| {
+                    format!(
+                        "target backend identity validation failed for workspace {}",
+                        workspace.display()
+                    )
+                })?;
+            super::verify_bead_rs_capabilities(&binary, &workspace)
+                .map(|_| ())
+                .with_context(|| {
+                    format!(
+                        "target backend capability validation failed for workspace {}",
+                        workspace.display()
+                    )
+                })
+        })
+        .await
+        .context("target backend validation task failed")??;
+        Ok(())
+    }
+
     async fn ready(&self, filters: &Filters) -> Result<Vec<Bead>> {
         // Apply limit workaround only if backend has the quirk
         let limit = if self.has_quirk("limit_zero_returns_empty_set") {

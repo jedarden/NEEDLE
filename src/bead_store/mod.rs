@@ -1589,6 +1589,18 @@ pub trait BeadStore: Send + Sync {
         })
     }
 
+    /// Validate that this store still belongs to the backend contract that
+    /// opened it before a child process is created.
+    ///
+    /// In-memory stores and test doubles have no external backend contract, so
+    /// the default is a successful no-op. CLI-backed stores override this with
+    /// an identity and capability probe against their own configured target
+    /// workspace. The dispatch gate calls this on the carried target store;
+    /// callers must not substitute a home store when it fails.
+    async fn validate_for_dispatch(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Attempt to atomically claim a bead (set status=in_progress, assignee=actor).
     ///
     /// Returns a `ClaimResult` describing the outcome:
