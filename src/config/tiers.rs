@@ -92,6 +92,10 @@ fn assert_all_config_fields_have_tiers(config: &Config) {
         ref transitions,
         ref audit,
 
+        // Tier A: read once per `needle improve` invocation, so a change is
+        // live for the next run with no restart (ADR-029, N-T53-N-T56).
+        ref improvements,
+
         // Central filesystem roots (state_dir is published once at load; a
         // change needs a restart — N-T52, ADR-030 decision 5)
         ref paths,
@@ -106,6 +110,7 @@ fn assert_all_config_fields_have_tiers(config: &Config) {
     let _ = post_push_ci.reload_tier();
     let _ = stop.reload_tier();
     let _ = audit.reload_tier();
+    let _ = improvements.reload_tier();
 
     // Verify tier B assignments
     let _ = telemetry.reload_tier();

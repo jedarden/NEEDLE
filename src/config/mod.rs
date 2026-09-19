@@ -7331,6 +7331,90 @@ pub struct WorkspaceStrandsOverrides {
 // `needle audit` configuration (plan section 4.11; N-T57, N-T58, N-T60)
 // ──────────────────────────────────────────────────────────────────────────────
 
+// ──────────────────────────────────────────────────────────────────────────────
+// Improvement loop configuration (ADR-029, plan section 4.10; N-T53-N-T56)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// Admission policy for the improvement loop.
+///
+/// The defaults are the plan's activation order, not a convenience: shadow on,
+/// Gate D closed, one admitted proposal per day. Turning the loop on is an
+/// operator decision made here, and every field is read once per run.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImprovementsAdmissionConfig {
+    /// Decide everything, admit nothing. The plan's first activation step.
+    #[serde(default = "ImprovementsAdmissionConfig::default_shadow")]
+    pub shadow: bool,
+    /// Proposals admitted per day.
+    #[serde(default = "ImprovementsAdmissionConfig::default_per_day")]
+    pub per_day: usize,
+    /// Admitted proposals that may be open before backpressure applies.
+    #[serde(default = "ImprovementsAdmissionConfig::default_max_open_admitted")]
+    pub max_open_admitted: usize,
+    /// Whether Gate D has been accepted. Until then L5 is refused.
+    ///
+    /// Setting this true does not itself satisfy Gate D - the plan's section 9
+    /// evidence does. It is the switch an operator throws *after* that evidence
+    /// exists, and ADR-027 forbids any automatic change from throwing it.
+    #[serde(default)]
+    pub gate_d_satisfied: bool,
+}
+
+impl ImprovementsAdmissionConfig {
+    fn default_shadow() -> bool {
+        true
+    }
+    fn default_per_day() -> usize {
+        1
+    }
+    fn default_max_open_admitted() -> usize {
+        3
+    }
+}
+
+impl Default for ImprovementsAdmissionConfig {
+    fn default() -> Self {
+        ImprovementsAdmissionConfig {
+            shadow: Self::default_shadow(),
+            per_day: Self::default_per_day(),
+            max_open_admitted: Self::default_max_open_admitted(),
+            gate_d_satisfied: false,
+        }
+    }
+}
+
+/// Configuration for the measured improvement loop.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImprovementsConfig {
+    /// Whether the loop runs at all. Off by default.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Days of attempt ledger each run generates from.
+    #[serde(default = "ImprovementsConfig::default_window_days")]
+    pub window_days: u32,
+    /// Admission policy.
+    #[serde(default)]
+    pub admission: ImprovementsAdmissionConfig,
+}
+
+impl ImprovementsConfig {
+    fn default_window_days() -> u32 {
+        7
+    }
+}
+
+impl Default for ImprovementsConfig {
+    fn default() -> Self {
+        ImprovementsConfig {
+            enabled: false,
+            window_days: Self::default_window_days(),
+            admission: ImprovementsAdmissionConfig::default(),
+        }
+    }
+}
+
 /// Thresholds and budgets for `needle audit`.
 ///
 /// Everything here is read once per invocation of a one-shot command; no
@@ -7381,6 +7465,15 @@ impl AuditConfig {
     /// workspace happened to sort first.
     pub fn default_home_workspace() -> PathBuf {
         WorkspaceConfig::default_workspace()
+    }
+}
+
+impl ConfigTier for ImprovementsConfig {
+    fn reload_tier(&self) -> ReloadTier {
+        // Tier A: `needle improve` is a one-shot command that loads config and
+        // exits. No worker holds one of these values, so a change is in force
+        // for the next run.
+        ReloadTier::Live
     }
 }
 
@@ -7613,6 +7706,9 @@ pub struct Config {
     /// `needle audit` thresholds and budgets (N-T57, N-T58, N-T60).
     #[serde(default)]
     pub audit: AuditConfig,
+    /// Measured improvement loop (ADR-029, N-T53-N-T56).
+    #[serde(default)]
+    pub improvements: ImprovementsConfig,
 }
 
 impl Config {

@@ -101,7 +101,7 @@ pub struct SubmissionContext<'a> {
 /// in-memory stores in a test without going near a real workspace.
 pub async fn submit(
     ctx: &SubmissionContext<'_>,
-    open_store: &dyn Fn(&Path) -> Result<Box<dyn BeadStore>>,
+    open_store: &dyn Fn(&Path) -> Result<std::sync::Arc<dyn BeadStore>>,
     journal: &Path,
 ) -> Result<(GeneratedProposals, Vec<AdmissionRecord>, SubmissionSummary)> {
     let generated = generate(ctx.rows, &ctx.thresholds, ctx.now);

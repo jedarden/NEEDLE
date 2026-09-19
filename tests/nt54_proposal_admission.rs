@@ -267,8 +267,8 @@ impl Harness {
         };
 
         let store = self.store.clone();
-        let open = move |_: &Path| -> Result<Box<dyn BeadStore>> {
-            Ok(Box::new(SharedStore(store.clone())))
+        let open = move |_: &Path| -> Result<std::sync::Arc<dyn BeadStore>> {
+            Ok(std::sync::Arc::new(SharedStore(store.clone())))
         };
 
         let (_, _, summary) = submit(&ctx, &open, &self.journal()).await?;
