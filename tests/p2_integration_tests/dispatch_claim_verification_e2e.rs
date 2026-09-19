@@ -245,6 +245,46 @@ impl Fixture {
             .iter()
             .any(|event| event["event_type"] == event_type)
     }
+
+    fn bead_record(&self, workspace: &Path, bead_id: &str) -> Value {
+        let output = run_checked(
+            bead_command(&self.bead_binary, workspace, self.root.path())
+                .args(["show", bead_id, "--json"]),
+            "read fixture bead state",
+        );
+        let records: Vec<Value> = serde_json::from_slice(&output.stdout)
+            .expect("bead show --json must return a JSON array");
+        records
+            .into_iter()
+            .next()
+            .expect("bead show --json must return the requested bead")
+    }
+
+    fn assert_open_and_unassigned(&self, workspace: &Path, bead_id: &str) {
+        let record = self.bead_record(workspace, bead_id);
+        assert_eq!(record["status"], "open", "bead must be released for retry");
+        assert_eq!(
+            record["assignee"],
+            Value::Null,
+            "released bead must be unassigned"
+        );
+    }
+
+    fn assert_claim_verification_error(&self, workspace: &Path) {
+        let event = self
+            .telemetry()
+            .into_iter()
+            .find(|event| event["event_type"] == "bead.claim.verify_error")
+            .expect("failed claim verification must emit structured telemetry");
+        assert_eq!(event["data"]["stage"], "dispatching");
+        assert_eq!(
+            event["data"]["target_workspace"],
+            workspace.display().to_string(),
+            "verification telemetry must identify the store that was queried"
+        );
+        assert_eq!(event["data"]["category"], "lookup");
+        assert!(event["data"]["detail"].is_string());
+    }
 }
 
 fn native_bead_binary() -> PathBuf {
@@ -558,6 +598,52 @@ fn subprocess_claim_verification_routes_remote_collisions_and_local_work() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(local.marker_lines(&local.home_workspace), 1);
+    let local_success = local
+        .telemetry()
+        .into_iter()
+        .find(|event| {
+            event["event_type"] == "bead.claim.verify_success"
+                && event["data"]["workspace"] == local.home_workspace.display().to_string()
+        })
+        .expect("local dispatch must emit target workspace verification telemetry");
+    assert!(local_success["data"]["claim_epoch"].as_u64().is_some());
+}
+
+#[test]
+fn subprocess_unverifiable_cleanup_uses_held_target_store_for_local_and_remote() {
+    let local = Fixture::new(FixtureLayout::Local);
+    let output = local.run(FixtureMode::IssueNotFound);
+    assert!(
+        !output.status.success(),
+        "local unverifiable claim must abort"
+    );
+    assert_no_agent_spawn(&local);
+    local.assert_open_and_unassigned(&local.home_workspace, &local.home_bead_id);
+    local.assert_claim_verification_error(&local.home_workspace);
+
+    let remote = Fixture::new(FixtureLayout::CollidingRemote);
+    let output = remote.run(FixtureMode::IssueNotFound);
+    assert!(
+        !output.status.success(),
+        "remote unverifiable claim must abort"
+    );
+    assert_no_agent_spawn(&remote);
+    let remote_workspace = remote
+        .remote_workspace
+        .as_ref()
+        .expect("colliding fixture must have a remote workspace");
+    let remote_bead_id = remote
+        .remote_bead_id
+        .as_ref()
+        .expect("colliding fixture must have a remote bead");
+    remote.assert_open_and_unassigned(remote_workspace, remote_bead_id);
+
+    // The same ID exists in the worker's home store, but cleanup must use the
+    // held target-store handle and credential instead of touching that copy.
+    let home_record = remote.bead_record(&remote.home_workspace, &remote.home_bead_id);
+    assert_eq!(home_record["status"], "closed");
+    assert_eq!(home_record["assignee"], Value::Null);
+    remote.assert_claim_verification_error(remote_workspace);
 }
 
 #[test]
