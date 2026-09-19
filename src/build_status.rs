@@ -1222,22 +1222,10 @@ mod tests {
         // environment, so `CARGO_MANIFEST_DIR` has no `.git` directory or
         // remote to inspect.
         let workspace = tempfile::tempdir().expect("create Git workspace fixture");
-        for path in [
-            ".git/hooks",
-            ".git/info",
-            ".git/objects/info",
-            ".git/objects/pack",
-            ".git/refs/heads",
-            ".git/refs/tags",
-        ] {
-            std::fs::create_dir_all(workspace.path().join(path))
-                .expect("create Git metadata fixture");
-        }
-        std::fs::write(workspace.path().join(".git/HEAD"), "ref: refs/heads/main\n")
-            .expect("write Git HEAD fixture");
+        std::fs::create_dir(workspace.path().join(".git")).expect("create Git metadata fixture");
         std::fs::write(
             workspace.path().join(".git/config"),
-            "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n\tlogallrefupdates = true\n[remote \"origin\"]\n\turl = file:///nonexistent/NEEDLE.git\n",
+            "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://git.ardenone.com/jedarden/NEEDLE.git\n",
         )
         .expect("write Git remote fixture");
         let workspace = workspace.path();
