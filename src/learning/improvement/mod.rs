@@ -20,12 +20,14 @@
 //! | Ranking | 4.10 | `needle-29f396d3` | [`scoring`] |
 //! | Admission | 4.10 | `needle-43c0d818`, `needle-f754b4cb` | [`admission`] |
 //! | Generate | 4.10 step 2 | `needle-908c1f25` (N-T53) | [`generator`] |
+//! | Measure | 4.10 step 5 | `needle-c4e6424a` (N-T55) | [`receipts`] |
 
 pub mod admission;
 pub mod envelope;
 pub mod executable;
 pub mod generator;
 pub mod impact;
+pub mod receipts;
 pub mod scoring;
 
 pub use admission::{
@@ -47,6 +49,12 @@ pub use generator::{
 pub use impact::{
     Band, Confidence, EffortEstimate, ImpactContract, ProducerEvidence, WorkspaceImpactProfile,
     IMPACT_CONTRACT_SCHEMA_VERSION,
+};
+pub use receipts::{
+    append as append_receipt, decide as decide_receipt, measure as measure_cohort,
+    read_all as read_receipts, receipts_path, revert_proposal, Cohort, CohortMeasures,
+    Contamination, ImpactReceipt, ReceiptDecision, ReceiptThresholds,
+    IMPACT_RECEIPT_SCHEMA_VERSION, RECEIPT_REF_NAMESPACE,
 };
 pub use scoring::{
     rank, score, ScoreComponents, ScoredProposal, ScoringPolicy, SCORING_POLICY_VERSION,

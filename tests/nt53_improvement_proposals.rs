@@ -348,6 +348,37 @@ fn three_failures_with_different_reasons_are_three_problems_not_one_class() {
 }
 
 #[test]
+fn repeated_decompositions_are_not_repeated_failures() {
+    // ADR-030: a decomposed attempt split its bead instead of delivering it
+    // and earns neither success nor failure credit. Against the live ledger
+    // this miscounted six beads that had correctly been broken up, and told
+    // the fleet to stop "failing" at them.
+    let rows: Vec<LedgerRow> = (0..7)
+        .map(|n| {
+            row(
+                "NEEDLE",
+                "a",
+                "decomposed",
+                "bf-az0okb",
+                &format!("a{n}"),
+                "decomposed:split_template",
+                Some(1.0),
+                13,
+            )
+        })
+        .collect();
+
+    let generated = generate(&rows, &GeneratorThresholds::default(), now());
+    assert!(
+        !generated
+            .proposals
+            .iter()
+            .any(|p| p.evidence_class == EvidenceClass::RepeatedIdenticalFailures),
+        "seven decompositions are seven splits, not seven failures"
+    );
+}
+
+#[test]
 fn an_adapter_below_the_evidence_floor_does_not_produce_a_regret_proposal() {
     let mut rows = Vec::new();
     // Only five attempts each: below the floor of twenty.

@@ -62,6 +62,8 @@ RUN mkdir -p src/bin benches tests && \
     echo "fn main() {}" > tests/nt07_admission_policy.rs && \
     echo "fn main() {}" > tests/nt07_admission_budgets.rs && \
     echo "fn main() {}" > tests/nt53_improvement_proposals.rs && \
+    echo "fn main() {}" > tests/nt55_impact_receipts.rs && \
+    echo "fn main() {}" > tests/nt56_improvements_cli.rs && \
     echo "fn main() {}" > tests/nt07_proposal_contract.rs && \
     echo "fn main() {}" > tests/nt07_impact_contract.rs && \
     echo "fn main() {}" > tests/nt07_impact_scoring.rs && \
@@ -85,6 +87,8 @@ RUN mkdir -p src/bin benches tests && \
       --test nt07_admission_policy \
       --test nt07_admission_budgets \
       --test nt53_improvement_proposals \
+      --test nt55_impact_receipts \
+      --test nt56_improvements_cli \
       --test nt07_proposal_contract \
       --test nt07_impact_contract \
       --test nt07_impact_scoring \
@@ -110,7 +114,7 @@ RUN mkdir -p src/bin benches tests && \
       printf '%s\n' 'nextest_profile=ci'; \
       printf '%s\n' 'features=default'; \
       printf 'target_triple=%s\n' "$target_triple"; \
-      printf '%s\n' 'target_set=lib,integration_spawn,integration_tests,p2_integration_tests,p3_integration_tests,real_br_integration_tests,escalation_ladder,nt45_failure_evidence_capture,nt50_exception_lessons,nt51_adapter_usage_capture,nt51_gateway_health,nt52_state_dir_isolation,nt07_admission_policy,nt07_admission_budgets,nt53_improvement_proposals,nt07_proposal_contract,nt07_impact_contract,nt07_impact_scoring,nt07_executable_admission'; \
+      printf '%s\n' 'target_set=lib,integration_spawn,integration_tests,p2_integration_tests,p3_integration_tests,real_br_integration_tests,escalation_ladder,nt45_failure_evidence_capture,nt50_exception_lessons,nt51_adapter_usage_capture,nt51_gateway_health,nt52_state_dir_isolation,nt07_admission_policy,nt07_admission_budgets,nt53_improvement_proposals,nt55_impact_receipts,nt56_improvements_cli,nt07_proposal_contract,nt07_impact_contract,nt07_impact_scoring,nt07_executable_admission'; \
       printf '%s\n' 'workspace_root=/workspace'; \
       printf '%s\n' 'target_dir=/opt/needle-ci-target'; \
       printf '%s\n' 'cargo_build_jobs=2'; \

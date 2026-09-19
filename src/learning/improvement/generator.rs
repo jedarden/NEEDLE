@@ -199,7 +199,14 @@ fn repeated_identical_failures(
             .iter()
             .filter(|row| {
                 let outcome = field(row, "outcome");
-                outcome != VERIFIED_SUCCESS && outcome != INFRASTRUCTURE_FAILURE
+                // Decomposed is not a failure (ADR-030): the attempt split its
+                // bead instead of delivering it, which earns neither success
+                // nor failure credit. Counting it here produced six proposals
+                // against the live ledger telling the fleet to stop "failing"
+                // at work it had correctly decided to break up.
+                outcome != VERIFIED_SUCCESS
+                    && outcome != INFRASTRUCTURE_FAILURE
+                    && outcome != crate::attempt_accounting::DECOMPOSED
             })
             .collect();
         if failures.len() < thresholds.repeated_failure_min {

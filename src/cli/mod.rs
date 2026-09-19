@@ -31,6 +31,7 @@ use crate::upgrade;
 use crate::worker::Worker;
 
 pub mod audit;
+pub mod improvements;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // NATO alphabet for worker identifiers
@@ -531,6 +532,21 @@ pub enum CliCommand {
         #[arg(long)]
         file_beads: bool,
     },
+
+    /// Show the improvement loop: proposals, decisions, receipts and trend.
+    ///
+    /// Read-only (ADR-029 step 6). Under ADR-029 the operator reads receipts
+    /// rather than curating proposals, so this is the surface that makes the
+    /// loop auditable. It writes nothing and works from persisted state.
+    Improvements {
+        /// Emit the machine-readable report instead of the operator view.
+        #[arg(long)]
+        json: bool,
+
+        /// Days of attempt ledger to regenerate proposals over.
+        #[arg(long, default_value_t = improvements::DEFAULT_WINDOW_DAYS)]
+        window_days: u32,
+    },
 }
 
 /// Output format for the list command.
@@ -676,6 +692,7 @@ pub fn run() -> Result<()> {
             emit_telemetry,
             file_beads,
         } => cmd_audit(json, root, emit_telemetry, file_beads),
+        CliCommand::Improvements { json, window_days } => cmd_improvements(json, window_days),
         CliCommand::Query {
             worker_id,
             since,
@@ -689,6 +706,22 @@ pub fn run() -> Result<()> {
 // ──────────────────────────────────────────────────────────────────────────────
 // Command handlers
 // ──────────────────────────────────────────────────────────────────────────────
+
+/// `needle improvements` — the read-only view of the improvement loop.
+///
+/// Exits 0 whichever way the loop is going: this is a report, not a gate. An
+/// operator asking what the loop did must not have to interpret an exit code
+/// to find out that it did nothing.
+fn cmd_improvements(json: bool, window_days: u32) -> Result<()> {
+    let config = crate::config::ConfigLoader::load_global().unwrap_or_default();
+    let report = improvements::collect(&config, window_days, chrono::Utc::now())?;
+    if json {
+        println!("{}", improvements::render_json(&report)?);
+    } else {
+        print!("{}", improvements::render_human(&report));
+    }
+    Ok(())
+}
 
 /// `needle audit` — reconcile state at rest and report what it finds.
 ///
