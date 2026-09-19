@@ -17,6 +17,8 @@
 //! Depends on: `types`.
 
 pub mod backend;
+/// Runtime backend capability snapshots and N-T11 transition gates.
+pub mod capabilities;
 mod cli_store;
 mod strategies;
 mod sync_guard;
@@ -199,6 +201,54 @@ pub fn open_configured(
     harness: Option<String>,
     harness_version: Option<String>,
 ) -> Result<Arc<dyn BeadStore>> {
+    // Keep the historical public signature compatible while ensuring every
+    // production store open observes the host-level transition policy. The
+    // workspace file only supplies backend identity; authority-changing
+    // transition switches come from the resolved global config.
+    let transitions = crate::config::ConfigLoader::load_resolved(
+        &workspace,
+        crate::config::CliOverrides {
+            workspace: Some(workspace.clone()),
+            ..Default::default()
+        },
+    )
+    .with_context(|| {
+        format!(
+            "failed to load transition policy for workspace {}",
+            workspace.display()
+        )
+    })?
+    .0
+    .transitions;
+
+    open_configured_with_transitions(
+        config,
+        workspace,
+        model,
+        harness,
+        harness_version,
+        &transitions,
+    )
+}
+
+/// Open a configured backend after negotiating the transition capabilities
+/// required by `transitions`.
+///
+/// This explicit variant is used by callers that already resolved config. The
+/// compatibility wrapper above resolves the same global policy for older
+/// callers, while tests and embedders can pass a policy without mutating
+/// process-wide configuration.
+pub fn open_configured_with_transitions(
+    config: &crate::config::BeadCliConfig,
+    workspace: PathBuf,
+    model: Option<String>,
+    harness: Option<String>,
+    harness_version: Option<String>,
+    transitions: &crate::config::TransitionsConfig,
+) -> Result<Arc<dyn BeadStore>> {
+    transitions
+        .validate()
+        .map_err(|error| anyhow::anyhow!("invalid transition configuration: {error}"))?;
     if matches!(config.backend, crate::config::BeadBackend::Auto) {
         bail!(
             "workspace {} has no authoritative bead backend binding; set bead_cli.backend in {}",
@@ -216,7 +266,11 @@ pub fn open_configured(
         })?;
     verify_backend_identity(&backend, &binary, &workspace)?;
     let attempt_outcome_supported = if backend == crate::config::Backend::Bead {
-        verify_bead_rs_capabilities(&binary, &workspace)?
+        let (runtime_capabilities, attempt_outcome_supported) =
+            verify_bead_rs_capabilities(&binary, &workspace)?;
+        runtime_capabilities
+            .ensure_transition_support(&capabilities::enabled_plan_transitions(transitions))?;
+        attempt_outcome_supported
     } else {
         false
     };
@@ -422,9 +476,13 @@ fn derive_expected_backend_from_filename(binary: &Path) -> String {
         .to_string()
 }
 
-/// Probe and validate the bead-rs capability document. Returns whether the
-/// backend advertises `attempt_outcome.supported` (the `resolve` command).
-fn verify_bead_rs_capabilities(binary: &Path, workspace: &Path) -> Result<bool> {
+/// Probe and validate the bead-rs capability document. Returns the exact
+/// normalized runtime snapshot together with whether the backend advertises
+/// `attempt_outcome.supported` (the `resolve` command).
+fn verify_bead_rs_capabilities(
+    binary: &Path,
+    workspace: &Path,
+) -> Result<(capabilities::BeadRuntimeCapabilities, bool)> {
     // Derive expected backend from binary filename BEFORE probing capabilities
     let expected_backend = derive_expected_backend_from_filename(binary);
 
@@ -454,6 +512,8 @@ fn verify_bead_rs_capabilities(binary: &Path, workspace: &Path) -> Result<bool> 
     }
     let capabilities: serde_json::Value = serde_json::from_slice(&output.stdout)
         .with_context(|| format!("invalid bead-rs capability JSON from {}", binary.display()))?;
+    let runtime_capabilities = capabilities::parse_runtime_capabilities(&capabilities)
+        .with_context(|| format!("invalid capability snapshot from {}", binary.display()))?;
 
     // Extract actual backend from capabilities response
     let actual_backend = capabilities
@@ -582,7 +642,7 @@ fn verify_bead_rs_capabilities(binary: &Path, workspace: &Path) -> Result<bool> 
     let attempt_outcome_supported = capabilities["attempt_outcome"]["supported"]
         .as_bool()
         .unwrap_or(false);
-    Ok(attempt_outcome_supported)
+    Ok((runtime_capabilities, attempt_outcome_supported))
 }
 
 /// Load a target workspace's configuration and open only its explicitly bound

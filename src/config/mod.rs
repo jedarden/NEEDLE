@@ -7610,6 +7610,8 @@ const NON_OVERRIDABLE_KEYS: &[&str] = &[
     "stop",
     // The spool is a host resource; archiving is an operator decision per host.
     "attempt_archive",
+    // Authority-changing transitions are host-level operator policy.
+    "transitions",
 ];
 
 /// The `validation` sub-keys a workspace may set for itself. A `validation:`
@@ -8246,6 +8248,7 @@ pub fn validate_key_path(key_path: &str) -> Result<(), ConfigError> {
         "validation",
         "post_push_ci",
         "attempt_archive",
+        "transitions",
         "audit",
     ];
 
@@ -8274,12 +8277,56 @@ pub fn validate_key_path(key_path: &str) -> Result<(), ConfigError> {
         "post_push_ci" => validate_post_push_ci_field(second, key_path),
         "paths" => validate_paths_field(second, key_path),
         "attempt_archive" => validate_attempt_archive_field(second, &segments[2..], key_path),
+        "transitions" => validate_transitions_field(second, &segments[2..], key_path),
         _ => {
             // For other top-level configs, accept any nested field for now
             // This can be extended later with specific validation
             Ok(())
         }
     }
+}
+
+/// Validate the versioned authority-transition switches.
+fn validate_transitions_field(
+    field: &str,
+    rest: &[&str],
+    key_path: &str,
+) -> Result<(), ConfigError> {
+    let valid_fields = [
+        "version",
+        "attempt",
+        "resolution",
+        "learning",
+        "fenced_claim",
+    ];
+    if !valid_fields.contains(&field) {
+        return Err(ConfigError::new(
+            key_path.to_string(),
+            format!(
+                "unknown transitions field '{}'. Valid fields are: {}",
+                field,
+                valid_fields.join(", ")
+            ),
+        ));
+    }
+
+    if matches!(
+        field,
+        "attempt" | "resolution" | "learning" | "fenced_claim"
+    ) {
+        if rest.len() != 1 || rest[0] != "enabled" {
+            return Err(ConfigError::new(
+                key_path.to_string(),
+                format!("transitions.{field} accepts only the nested 'enabled' field"),
+            ));
+        }
+    } else if !rest.is_empty() {
+        return Err(ConfigError::new(
+            key_path.to_string(),
+            format!("transitions.{field} has no nested fields"),
+        ));
+    }
+    Ok(())
 }
 
 /// Validate PostPushCiConfig field names used by runtime overrides.
@@ -8854,6 +8901,10 @@ impl ConfigLoader {
         let mut config: Config = serde_yaml::from_str(&text)
             .with_context(|| format!("invalid YAML in config file: {}", path.display()))?;
         config.expand_tildes();
+        config
+            .transitions
+            .validate()
+            .map_err(|error| anyhow::anyhow!("invalid transition configuration: {error}"))?;
         Ok(config)
     }
 
@@ -9519,6 +9570,7 @@ impl ConfigLoader {
                 "paths.state_dir",
                 "verification",
                 "gates",
+                "transitions",
             ] {
                 sources.insert((*key).to_string(), source.clone());
             }
@@ -9537,6 +9589,11 @@ impl ConfigLoader {
 
         // Expand all tildes after all overrides are applied.
         config.expand_tildes();
+
+        config
+            .transitions
+            .validate()
+            .map_err(|error| anyhow::anyhow!("invalid transition configuration: {error}"))?;
 
         Ok((config, sources))
     }
@@ -9729,6 +9786,10 @@ impl ConfigLoader {
             }
         }
 
+        if let Err(message) = config.transitions.validate() {
+            errors.push(ConfigError::new("transitions.version".to_string(), message));
+        }
+
         errors
     }
 
@@ -9874,6 +9935,26 @@ impl ConfigLoader {
             (
                 "attempt_archive.prune_local_after_spool",
                 config.attempt_archive.prune_local_after_spool.to_string(),
+            ),
+            (
+                "transitions.version",
+                config.transitions.version.to_string(),
+            ),
+            (
+                "transitions.attempt.enabled",
+                config.transitions.attempt.enabled.to_string(),
+            ),
+            (
+                "transitions.resolution.enabled",
+                config.transitions.resolution.enabled.to_string(),
+            ),
+            (
+                "transitions.learning.enabled",
+                config.transitions.learning.enabled.to_string(),
+            ),
+            (
+                "transitions.fenced_claim.enabled",
+                config.transitions.fenced_claim.enabled.to_string(),
             ),
         ];
 
@@ -11850,6 +11931,41 @@ worker:
         );
         // Workspace should still win for agent.timeout (CLI didn't override it).
         assert_eq!(config.agent.timeout, 777);
+
+        // N-T11: legacy configs default every authority-changing transition off.
+        assert_eq!(config.transitions, TransitionsConfig::default());
+        assert!(!config.transitions.any_enabled());
+
+        let yaml = r#"
+transitions:
+  version: 1
+  attempt: { enabled: true }
+  resolution: { enabled: true }
+  learning: { enabled: false }
+  fenced_claim: { enabled: true }
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.transitions.attempt.enabled);
+        assert!(config.transitions.resolution.enabled);
+        assert!(!config.transitions.learning.enabled);
+        assert!(config.transitions.fenced_claim.enabled);
+        assert!(config.transitions.validate().is_ok());
+
+        for key in [
+            "transitions.version",
+            "transitions.attempt.enabled",
+            "transitions.resolution.enabled",
+            "transitions.learning.enabled",
+            "transitions.fenced_claim.enabled",
+        ] {
+            assert!(validate_key_path(key).is_ok(), "{key} should be valid");
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "transitions:\n  version: 2\n").unwrap();
+        let error = ConfigLoader::load_from_path(&path).expect_err("version 2 must fail closed");
+        assert!(error.to_string().contains("transitions.version 2"));
     }
 
     // ── dump_with_sources coverage ──
