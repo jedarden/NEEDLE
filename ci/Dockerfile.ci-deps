@@ -50,6 +50,7 @@ RUN mkdir -p src/bin benches tests && \
     echo "fn main() {}" > benches/sanitize.rs && \
     echo "fn main() {}" > tests/integration_spawn.rs && \
     echo "fn main() {}" > tests/integration_tests.rs && \
+    echo "fn main() {}" > tests/nt07_proposal_contract.rs && \
     echo "fn main() {}" > tests/nt45_failure_evidence_capture.rs && \
     echo "fn main() {}" > tests/nt50_exception_lessons.rs && \
     echo "fn main() {}" > tests/nt51_adapter_usage_capture.rs && \
@@ -66,6 +67,7 @@ RUN mkdir -p src/bin benches tests && \
       --lib \
       --test integration_spawn \
       --test integration_tests \
+      --test nt07_proposal_contract \
       --test nt45_failure_evidence_capture \
       --test nt50_exception_lessons \
       --test nt51_adapter_usage_capture \

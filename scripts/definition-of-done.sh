@@ -167,7 +167,7 @@ needle_slow_targets() {
     p3_integration_tests real_br_integration_tests escalation_ladder \
     nt45_failure_evidence_capture nt50_exception_lessons nt51_adapter_usage_capture \
     nt51_gateway_health \
-    nt52_state_dir_isolation installer
+    nt52_state_dir_isolation nt07_proposal_contract installer
 }
 
 needle_cargo_selector() {
@@ -184,6 +184,7 @@ needle_cargo_selector() {
     nt51_adapter_usage_capture) printf '%s\n' --test nt51_adapter_usage_capture ;;
     nt51_gateway_health) printf "%s\n" --test nt51_gateway_health ;;
     nt52_state_dir_isolation) printf '%s\n' --test nt52_state_dir_isolation ;;
+    nt07_proposal_contract) printf '%s\n' --test nt07_proposal_contract ;;
     *)                         return 1 ;;
   esac
 }
@@ -206,6 +207,7 @@ needle_nextest_filter() {
     nt51_adapter_usage_capture) printf '%s\n' 'binary_id(=needle::nt51_adapter_usage_capture)' ;;
     nt51_gateway_health) printf "%s\n" "binary_id(=needle::nt51_gateway_health)" ;;
     nt52_state_dir_isolation) printf '%s\n' 'binary_id(=needle::nt52_state_dir_isolation)' ;;
+    nt07_proposal_contract) printf '%s\n' 'binary_id(=needle::nt07_proposal_contract)' ;;
     *)                         return 1 ;;
   esac
 }

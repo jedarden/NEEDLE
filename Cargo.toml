@@ -199,6 +199,11 @@ name = "nt52_state_dir_isolation"
 path = "tests/nt52_state_dir_isolation.rs"
 harness = true
 
+[[test]]
+name = "nt07_proposal_contract"
+path = "tests/nt07_proposal_contract.rs"
+harness = true
+
 [[bench]]
 name = "sanitize"
 harness = false

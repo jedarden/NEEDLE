@@ -9,6 +9,15 @@
 //! Each workspace can maintain a `.beads/learnings.md` file that captures
 //! learnings from completed beads. These are automatically injected into prompts
 //! to inform future work.
+//!
+//! ## Improvement loop
+//!
+//! [`improvement`] holds the measured autonomous improvement loop (ADR-029):
+//! the typed proposal envelope, the admission policy, the generator that reads
+//! the attempt ledger, and the impact receipts that decide whether an admitted
+//! change is kept.
+
+pub mod improvement;
 
 use std::path::{Path, PathBuf};
 

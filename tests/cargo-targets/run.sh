@@ -13,6 +13,7 @@ EXPECTED_TARGETS="$(printf '%s\n' \
   escalation_ladder \
   integration_spawn \
   integration_tests \
+  nt07_proposal_contract \
   nt45_failure_evidence_capture \
   nt50_exception_lessons \
   nt51_adapter_usage_capture \
