@@ -1,0 +1,20 @@
+{
+  "event_type": "attempt.resolved",
+  "schema_version": 1,
+  "attempt_id": "017f22e2-79b0-7cc3-98c4-dc0c0c07398f",
+  "provisional": true,
+  "bead_id": "needle-dcebc961",
+  "workspace": "/home/coding/NEEDLE",
+  "worker": "claude-print-claude-needle-01",
+  "adapter": "claude-code-glm-4.7",
+  "prompt_template": "pluck",
+  "template_version": "pluck-default",
+  "gate_results": [
+    { "name": "fmt", "status": "pass", "duration_ms": 0 }
+  ],
+  "outcome": "success",
+  "requested_action": "Completed",
+  "commits": ["24f76cff7c1b0d944825243dd4618ac6cd9a58be"],
+  "duration_ms": 45000,
+  "exit_code": 0
+}
