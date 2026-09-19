@@ -5130,6 +5130,13 @@ impl Worker {
             return Ok(());
         }
 
+        // Resolve is the recovery path for Pluck dispatches that leave their
+        // claim behind. Other strands have their own lifecycle semantics and
+        // must not be reclassified by the Pluck-specific resolver.
+        if self.current_strand.as_deref() != Some("pluck") {
+            return Ok(());
+        }
+
         let Some(bead) = self.current_bead.as_ref().cloned() else {
             return Ok(());
         };
