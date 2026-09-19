@@ -1759,7 +1759,7 @@ impl Dispatcher {
                         expected_actor: verify_worker_id.clone(),
                         stage: "pre_spawn".to_string(),
                         target_workspace: Some(verify_workspace.display().to_string()),
-                        category: crate::telemetry::ClaimVerifyErrorCategory::Capability,
+                        category: crate::telemetry::ClaimVerifyErrorCategory::classify(&error),
                         detail: crate::telemetry::redact_claim_credentials(&format!("{error:#}")),
                     },
                     chrono::Utc::now(),

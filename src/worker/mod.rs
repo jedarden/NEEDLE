@@ -3089,19 +3089,85 @@ impl Worker {
                 // claim landed in. This snapshot must be taken now, not just
                 // before dispatch: a release/re-claim by the same actor can
                 // otherwise look indistinguishable from the original claim.
-                let target_store = Self::resolve_target_store(&self.target_store, &bead.id)
-                    .with_context(|| {
-                        format!("failed to capture claim identity for bead {}", bead.id)
-                    })?;
-                let identity = ClaimIdentity::capture(
+                let target_store = match Self::resolve_target_store(&self.target_store, &bead.id) {
+                    Ok(target_store) => target_store,
+                    Err(error) => {
+                        let error = error.context(format!(
+                            "failed to capture claim identity for bead {}",
+                            bead.id
+                        ));
+                        cleanup_unverifiable_claim_context(
+                            &self.telemetry,
+                            &self.qualified_id(),
+                            &bead.id,
+                            "claim_capture",
+                            self.target_store.clone(),
+                            None,
+                        )
+                        .await;
+                        let _ = self.telemetry.emit(
+                            EventKind::ClaimVerifyError {
+                                bead_id: bead.id.clone(),
+                                expected_actor: self.qualified_id(),
+                                stage: "claim_capture".to_string(),
+                                target_workspace: self
+                                    .target_store
+                                    .as_ref()
+                                    .map(|context| context.workspace().display().to_string()),
+                                category: crate::telemetry::ClaimVerifyErrorCategory::classify(
+                                    &error,
+                                ),
+                                detail: crate::telemetry::redact_claim_credentials(&format!(
+                                    "{error:#}"
+                                )),
+                            },
+                            Utc::now(),
+                        );
+                        return Err(error);
+                    }
+                };
+                let identity = match ClaimIdentity::capture(
                     target_store.store().as_ref(),
                     &bead.id,
                     &self.qualified_id(),
                 )
                 .await
-                .with_context(|| {
-                    format!("failed to capture claim identity for bead {}", bead.id)
-                })?;
+                {
+                    Ok(identity) => identity,
+                    Err(error) => {
+                        let error = error.context(format!(
+                            "failed to capture claim identity for bead {}",
+                            bead.id
+                        ));
+                        cleanup_unverifiable_claim_context(
+                            &self.telemetry,
+                            &self.qualified_id(),
+                            &bead.id,
+                            "claim_capture",
+                            Some(target_store.clone()),
+                            None,
+                        )
+                        .await;
+                        let _ = self.telemetry.emit(
+                            EventKind::ClaimVerifyError {
+                                bead_id: bead.id.clone(),
+                                expected_actor: self.qualified_id(),
+                                stage: "claim_capture".to_string(),
+                                target_workspace: Some(
+                                    target_store.workspace().display().to_string(),
+                                ),
+                                category: crate::telemetry::ClaimVerifyErrorCategory::classify(
+                                    &error,
+                                ),
+                                detail: crate::telemetry::redact_claim_credentials(&format!(
+                                    "{error:#}"
+                                )),
+                            },
+                            Utc::now(),
+                        );
+                        return Err(error);
+                    }
+                };
                 self.claim_identity = Some(identity);
 
                 tracing::info!(bead_id = %bead.id, title = %bead.title, "claimed bead");
@@ -7797,18 +7863,96 @@ impl Worker {
     /// in-progress beads are returned to the open state and can be claimed by
     /// another worker.
     async fn release_current_bead(&mut self, shutdown_reason: &str) {
-        if let Some(ref bead) = self.current_bead {
-            let bead_id = bead.id.clone();
-            tracing::info!(bead_id = %bead_id, reason = %shutdown_reason, "releasing bead on shutdown");
-            let _ = self.store.release(&bead_id).await;
-            // Emit bead.released event for observability
+        let Some(bead) = self.current_bead.as_ref() else {
+            return;
+        };
+        let bead_id = bead.id.clone();
+        let expected_actor = self.qualified_id();
+        let Some(target_store) = self.target_store.as_ref() else {
             let _ = self.telemetry.emit(
-                EventKind::BeadReleased {
-                    bead_id: bead_id.clone(),
-                    reason: shutdown_reason.to_string(),
+                EventKind::ClaimCleanupSkipped {
+                    bead_id,
+                    expected_actor,
+                    stage: "shutdown".to_string(),
+                    target_workspace: None,
+                    reason: "resolved target store context is unavailable; leaving claim untouched"
+                        .to_string(),
                 },
-                chrono::Utc::now(),
+                Utc::now(),
             );
+            return;
+        };
+        let Some(claim_identity) = self.claim_identity.as_ref() else {
+            let _ = self.telemetry.emit(
+                EventKind::ClaimCleanupSkipped {
+                    bead_id,
+                    expected_actor,
+                    stage: "shutdown".to_string(),
+                    target_workspace: Some(target_store.workspace().display().to_string()),
+                    reason: "held claim identity is unavailable; leaving claim untouched"
+                        .to_string(),
+                },
+                Utc::now(),
+            );
+            return;
+        };
+
+        tracing::info!(bead_id = %bead_id, reason = %shutdown_reason, "conditionally releasing bead on shutdown");
+        let expected = claim_identity.as_claim_status();
+        let store = target_store.store();
+        match tokio::time::timeout(
+            Duration::from_secs(30),
+            store.release_recovery(&bead_id, &expected),
+        )
+        .await
+        {
+            Ok(Ok(RecoveryReleaseOutcome::Released)) => {
+                let _ = self.telemetry.emit(
+                    EventKind::BeadReleased {
+                        bead_id,
+                        reason: shutdown_reason.to_string(),
+                    },
+                    Utc::now(),
+                );
+            }
+            Ok(Ok(RecoveryReleaseOutcome::Conflict)) => {
+                let _ = self.telemetry.emit(
+                    EventKind::ClaimCleanupSkipped {
+                        bead_id,
+                        expected_actor,
+                        stage: "shutdown".to_string(),
+                        target_workspace: Some(target_store.workspace().display().to_string()),
+                        reason: "claim identity changed before conditional release; leaving current claim untouched"
+                            .to_string(),
+                    },
+                    Utc::now(),
+                );
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(bead_id = %bead_id, error = %error, "conditional shutdown release failed");
+                let _ = self.telemetry.emit(
+                    EventKind::ClaimCleanupSkipped {
+                        bead_id,
+                        expected_actor,
+                        stage: "shutdown".to_string(),
+                        target_workspace: Some(target_store.workspace().display().to_string()),
+                        reason: format!("target-store conditional release failed: {error:#}"),
+                    },
+                    Utc::now(),
+                );
+            }
+            Err(_) => {
+                let _ = self.telemetry.emit(
+                    EventKind::ClaimCleanupSkipped {
+                        bead_id,
+                        expected_actor,
+                        stage: "shutdown".to_string(),
+                        target_workspace: Some(target_store.workspace().display().to_string()),
+                        reason: "target-store conditional release timed out".to_string(),
+                    },
+                    Utc::now(),
+                );
+            }
         }
     }
 

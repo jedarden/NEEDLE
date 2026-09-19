@@ -349,7 +349,19 @@ impl ClaimVerifyErrorCategory {
         let text = format!("{error:#}").to_lowercase();
         if text.contains("timed out") || text.contains("timeout") {
             ClaimVerifyErrorCategory::Timeout
-        } else if text.contains("no such file or directory")
+        } else if text.contains("no claim-time identity")
+            || text.contains("no resolved store context")
+            || text.contains("no worker identity")
+            || text.contains("backend identity")
+            || text.contains("identity mismatch")
+            || text.contains("identity validation")
+        {
+            ClaimVerifyErrorCategory::Identity
+        } else if text.contains("unsupported capability")
+            || text.contains("capability mismatch")
+            || text.contains("capability validation")
+            || text.contains("unsupported target backend")
+            || text.contains("no such file or directory")
             || text.contains("failed to spawn")
             || text.contains("failed to execute")
             || text.contains("command not found")

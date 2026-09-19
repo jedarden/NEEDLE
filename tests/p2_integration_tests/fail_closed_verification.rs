@@ -36,13 +36,20 @@ enum ProbeOutcome {
 /// Bead store whose `claim_status` serves an injected outcome.
 struct ProbeStore {
     outcome: Mutex<ProbeOutcome>,
+    validation_error: Mutex<Option<String>>,
 }
 
 impl ProbeStore {
     fn new(outcome: ProbeOutcome) -> Self {
         ProbeStore {
             outcome: Mutex::new(outcome),
+            validation_error: Mutex::new(None),
         }
+    }
+
+    fn with_validation_error(self, message: impl Into<String>) -> Self {
+        *self.validation_error.lock().unwrap() = Some(message.into());
+        self
     }
 }
 
@@ -152,6 +159,13 @@ impl BeadStore for ProbeStore {
 
     fn has_valid_store(&self) -> bool {
         true
+    }
+
+    async fn validate_for_dispatch(&self) -> anyhow::Result<()> {
+        if let Some(message) = self.validation_error.lock().unwrap().clone() {
+            anyhow::bail!("{}", message);
+        }
+        Ok(())
     }
 }
 
@@ -282,6 +296,16 @@ impl GateOutcome {
 
 /// Drive one dispatch through the pre-spawn gate with the injected outcome.
 async fn run_gate(outcome: ProbeOutcome, wire_store: bool, wire_worker: bool) -> GateOutcome {
+    run_gate_with_validation(outcome, None, wire_store, wire_worker).await
+}
+
+/// Drive one dispatch through the final backend identity/capability probe.
+async fn run_gate_with_validation(
+    outcome: ProbeOutcome,
+    validation_error: Option<String>,
+    wire_store: bool,
+    wire_worker: bool,
+) -> GateOutcome {
     let workspace = TempDir::new().expect("create probe workspace");
     let telemetry_log = TelemetryLog::new();
     let telemetry = telemetry_log.telemetry();
@@ -292,7 +316,12 @@ async fn run_gate(outcome: ProbeOutcome, wire_store: bool, wire_worker: bool) ->
 
     let mut dispatcher = Dispatcher::with_adapters(adapters, telemetry, 3600);
     if wire_store {
-        dispatcher.set_bead_store(Arc::new(ProbeStore::new(outcome)));
+        let store = ProbeStore::new(outcome);
+        let store = match validation_error {
+            Some(message) => store.with_validation_error(message),
+            None => store,
+        };
+        dispatcher.set_bead_store(Arc::new(store));
     }
     if wire_worker {
         dispatcher = dispatcher.with_worker_id(WORKER_ID.to_string());
@@ -424,6 +453,55 @@ async fn pre_spawn_store_failure_aborts_before_spawn() {
             outcome.verify_error_category().as_deref(),
             Some(expected_category),
             "{label}: telemetry must name the failure category"
+        );
+    }
+
+    // Backend identity and capability probes are also failed preconditions:
+    // neither one may be downgraded into a warning or authorize a child spawn.
+    let cases = [
+        (
+            "wrong backend identity",
+            "target backend identity validation failed: backend identity mismatch",
+            "identity",
+        ),
+        (
+            "unsupported capability",
+            "target backend capability validation failed: unsupported capability atomic_claim",
+            "capability",
+        ),
+    ];
+
+    for (label, message, expected_category) in cases {
+        let outcome = run_gate_with_validation(
+            ProbeOutcome::Live(claimed_status(WORKER_ID)),
+            Some(message.to_string()),
+            true,
+            true,
+        )
+        .await;
+
+        assert!(
+            outcome.dispatch.is_err(),
+            "{label}: backend validation must fail before dispatch"
+        );
+        assert!(
+            !outcome.spawned(),
+            "{label}: failed backend validation must spawn zero child processes"
+        );
+        assert_eq!(
+            outcome.count("bead.claim.verify_error"),
+            1,
+            "{label}: exactly one verify_error emission per validation failure"
+        );
+        assert_eq!(
+            outcome.count("bead.claim.recheck_succeeded"),
+            0,
+            "{label}: failed backend validation must not record a passed re-check"
+        );
+        assert_eq!(
+            outcome.verify_error_category().as_deref(),
+            Some(expected_category),
+            "{label}: telemetry must name the validation failure category"
         );
     }
 }
