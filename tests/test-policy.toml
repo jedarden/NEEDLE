@@ -130,7 +130,10 @@ version = 1
 # in-process against recording stores.
 # Acceptance command: `cargo test --lib resolve::executor::split_`
 # +1 fallback-gate config serialization round-trip (needle-a0a6356a).
-max_tests = 3863
+# +21 adapter heartbeat activity contracts (needle-ded172f0): optional JSON
+# compatibility, scoped reporter intake, stale-attempt rejection, sequence and
+# receive-time safety, bounded wire shape, and coalesced heartbeat emission.
+max_tests = 3884
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

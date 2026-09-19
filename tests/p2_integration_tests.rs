@@ -391,6 +391,8 @@ fn make_heartbeat(worker_id: &str, pid: u32, bead_id: Option<&str>, stale: bool)
         beads_processed: 0,
         session: worker_id.to_string(),
         heartbeat_file: None,
+        // The stale-detection helper does not report adapter activity.
+        activity: None,
         is_idle: false,
         current_task: bead_id.map(|s| s.to_string()),
         model: "claude".to_string(),
@@ -1494,6 +1496,8 @@ fn stale_detection_works_correctly() {
         beads_processed: 0,
         session: "fresh".to_string(),
         heartbeat_file: None,
+        // This fixture models the legacy heartbeat shape.
+        activity: None,
         is_idle: false,
         current_task: None,
         model: "claude".to_string(),
@@ -1511,6 +1515,8 @@ fn stale_detection_works_correctly() {
         beads_processed: 0,
         session: "stale".to_string(),
         heartbeat_file: None,
+        // This fixture models the legacy heartbeat shape.
+        activity: None,
         is_idle: false,
         current_task: Some("nd-x".to_string()),
         model: "claude".to_string(),

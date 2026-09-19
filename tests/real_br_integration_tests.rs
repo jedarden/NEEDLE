@@ -528,6 +528,8 @@ async fn real_bead_rs_crashed_worker_bead_released_by_peer() {
         current_task: Some(bead_id.to_string()),
         model: "test-model".to_string(),
         heartbeat_file: None,
+        // These fixtures intentionally omit optional adapter activity.
+        activity: None,
     };
     let hb_path = hb_dir.path().join("crashed-worker.json");
     std::fs::write(&hb_path, serde_json::to_string(&heartbeat_data).unwrap()).unwrap();
@@ -726,6 +728,8 @@ async fn real_bead_rs_mend_cleans_crashed_peer() {
         current_task: Some(bead_id.to_string()),
         model: "claude-sonnet-4".to_string(),
         heartbeat_file: None,
+        // These fixtures intentionally omit optional adapter activity.
+        activity: None,
     };
     let hb_path = hb_dir.path().join("dead-peer.json");
     std::fs::write(&hb_path, serde_json::to_string(&heartbeat_data).unwrap()).unwrap();
@@ -795,6 +799,8 @@ async fn real_bead_rs_mend_no_stale_peers_returns_no_work() {
         current_task: None,
         model: "claude-sonnet-4".to_string(),
         heartbeat_file: None,
+        // These fixtures intentionally omit optional adapter activity.
+        activity: None,
     };
     let hb_path = hb_dir.path().join("healthy-peer.json");
     std::fs::write(&hb_path, serde_json::to_string(&heartbeat_data).unwrap()).unwrap();
@@ -862,6 +868,8 @@ async fn real_bead_rs_mend_removes_orphaned_heartbeat() {
         current_task: None,
         model: "claude-sonnet-4".to_string(),
         heartbeat_file: None,
+        // These fixtures intentionally omit optional adapter activity.
+        activity: None,
     };
     let hb_path = hb_dir.path().join("claude-ghost-worker.json");
     std::fs::write(&hb_path, serde_json::to_string(&heartbeat_data).unwrap()).unwrap();
@@ -930,6 +938,8 @@ async fn real_bead_rs_mend_keeps_registered_heartbeat() {
         current_task: None,
         model: "claude-sonnet-4".to_string(),
         heartbeat_file: None,
+        // These fixtures intentionally omit optional adapter activity.
+        activity: None,
     };
     let hb_path = hb_dir.path().join("claude-registered-worker.json");
     std::fs::write(&hb_path, serde_json::to_string(&heartbeat_data).unwrap()).unwrap();

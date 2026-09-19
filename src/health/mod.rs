@@ -24,6 +24,10 @@ use crate::config::Config;
 use crate::telemetry::Telemetry;
 use crate::types::{BeadId, WorkerState};
 
+pub mod activity;
+
+pub use activity::{ActivityKind, ActivityReporter, AdapterActivity};
+
 // ──────────────────────────────────────────────────────────────────────────────
 // SupervisorDetectionConfig — configuration for supervisor detection
 // ──────────────────────────────────────────────────────────────────────────────
@@ -102,6 +106,16 @@ pub struct HeartbeatData {
     /// The filename that produced this heartbeat (set during read, not serialized).
     #[serde(skip)]
     pub heartbeat_file: Option<PathBuf>,
+    /// Latest adapter-reported model/tool activity for the dispatch in
+    /// flight, if any.
+    ///
+    /// Optional and backward compatible: heartbeats written before this
+    /// field existed — and workers whose adapters never report activity —
+    /// read back as `None` and serialize without the key, so old readers
+    /// and old files keep working unchanged. See [`activity`] for the
+    /// binding, dedup, and payload rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activity: Option<AdapterActivity>,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -121,6 +135,27 @@ struct SharedHeartbeatState {
     last_strand: Option<String>,
     /// Resolved adapter name — for HOOP Hook 3's `executing` heartbeat state.
     adapter: Option<String>,
+    /// Adapter-reported activity for the dispatch in flight, with its
+    /// attempt/bead binding. See [`activity`] for the intake rules.
+    activity: activity::ActivitySlot,
+}
+
+impl SharedHeartbeatState {
+    /// A shared state with a live emitter's defaults, for activity tests
+    /// that exercise the slot without a full [`HealthMonitor`].
+    #[cfg(test)]
+    fn for_test() -> Self {
+        SharedHeartbeatState {
+            state: WorkerState::Booting,
+            current_bead: None,
+            beads_processed: 0,
+            current_workspace: None,
+            model: String::new(),
+            last_strand: None,
+            adapter: None,
+            activity: activity::ActivitySlot::default(),
+        }
+    }
 }
 
 /// Control messages for the native heartbeat thread.
@@ -241,6 +276,7 @@ impl HealthMonitor {
                 model: config.agent.default.clone(),
                 last_strand: None,
                 adapter: None,
+                activity: activity::ActivitySlot::default(),
             })),
             shutdown: shutdown.unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
             emitter_handle: None,
@@ -354,8 +390,16 @@ impl HealthMonitor {
         workspace: Option<&Path>,
     ) {
         if let Ok(mut guard) = self.shared_state.lock() {
+            let next_bead = current_bead.cloned();
+            if guard.current_bead != next_bead {
+                // A dispatch boundary also invalidates any reporter from the
+                // prior bead. This keeps a late callback from surviving a
+                // state transition even when the caller has not yet called
+                // bind_activity for the successor attempt.
+                guard.activity.clear();
+            }
             guard.state = state.clone();
-            guard.current_bead = current_bead.cloned();
+            guard.current_bead = next_bead;
             guard.current_workspace = workspace.map(|p| p.to_path_buf());
         }
     }
@@ -374,6 +418,63 @@ impl HealthMonitor {
         if let Ok(mut guard) = self.shared_state.lock() {
             guard.adapter = adapter.map(|s| s.to_string());
         }
+    }
+
+    /// Bind adapter activity reporting to a dispatch attempt and return the
+    /// reporter its integration reports through.
+    ///
+    /// Called when a dispatch starts, with the attempt ID minted for it and
+    /// the bead it claims. NEEDLE — not the adapter — binds every reported
+    /// event to this attempt, this bead, and this worker (the reporter only
+    /// ever reaches this worker's own heartbeat slot), assigns the sequence
+    /// number, and stamps the observed time at ingest. Binding resets any
+    /// activity retained from a previous attempt, so a successor attempt's
+    /// heartbeat view starts clean.
+    ///
+    /// Drop the context with [`HealthMonitor::clear_activity`] when the
+    /// dispatch ends; until then a cloned [`ActivityReporter`] whose attempt
+    /// is no longer bound simply loses its events.
+    pub fn bind_activity(&self, attempt_id: String, bead_id: BeadId) -> ActivityReporter {
+        let reporter = ActivityReporter::new(
+            self.shared_state.clone(),
+            attempt_id.clone(),
+            bead_id.clone(),
+        );
+        if let Ok(mut guard) = self.shared_state.lock() {
+            // Do not let a caller bind a reporter to an arbitrary bead, and
+            // do not let a rejected bind erase the live attempt's activity.
+            if guard.current_bead.as_ref() == Some(&bead_id) {
+                guard.activity.bind(attempt_id, bead_id);
+            }
+        }
+        reporter
+    }
+
+    /// Bind activity to the bead currently held by this worker.
+    ///
+    /// This is the preferred dispatch boundary because the bead identity is
+    /// read from NEEDLE's health state rather than supplied by an adapter.
+    /// Returns `None` when the worker is not executing a bead.
+    pub fn bind_current_activity(&self, attempt_id: String) -> Option<ActivityReporter> {
+        let bead_id = self.shared_state.lock().ok()?.current_bead.clone()?;
+        Some(self.bind_activity(attempt_id, bead_id))
+    }
+
+    /// Clear the activity context — the dispatch is over.
+    ///
+    /// After this, every report (including late events from clones of the
+    /// detached attempt's reporter) is dropped until the next
+    /// [`HealthMonitor::bind_activity`].
+    pub fn clear_activity(&self) {
+        if let Ok(mut guard) = self.shared_state.lock() {
+            guard.activity.clear();
+        }
+    }
+
+    /// The adapter activity currently shown in the heartbeat view, if any.
+    pub fn current_activity(&self) -> Option<AdapterActivity> {
+        let guard = self.shared_state.lock().ok()?;
+        guard.activity.latest().cloned()
     }
 
     /// Update the beads_processed count visible to the heartbeat emitter.
@@ -1089,7 +1190,16 @@ impl HealthMonitor {
 
     /// Write a heartbeat file atomically (write temp, then rename).
     fn write_heartbeat(&self) -> Result<()> {
-        let (state, current_bead, beads_processed, current_workspace, model, last_strand, adapter) = {
+        let (
+            state,
+            current_bead,
+            beads_processed,
+            current_workspace,
+            model,
+            last_strand,
+            adapter,
+            activity,
+        ) = {
             let guard = self
                 .shared_state
                 .lock()
@@ -1102,6 +1212,7 @@ impl HealthMonitor {
                 guard.model.clone(),
                 guard.last_strand.clone(),
                 guard.adapter.clone(),
+                guard.activity.latest().cloned(),
             )
         };
 
@@ -1172,6 +1283,7 @@ impl HealthMonitor {
             current_task,
             model,
             heartbeat_file: None,
+            activity,
         };
 
         let path = self.heartbeat_path();
@@ -1533,7 +1645,7 @@ fn emitter_loop(
         }
         elapsed = Duration::ZERO;
 
-        let (state, current_bead, beads_processed, current_workspace, model) =
+        let (state, current_bead, beads_processed, current_workspace, model, activity) =
             match shared_state.lock() {
                 Ok(guard) => (
                     guard.state.clone(),
@@ -1541,6 +1653,7 @@ fn emitter_loop(
                     guard.beads_processed,
                     guard.current_workspace.clone(),
                     guard.model.clone(),
+                    guard.activity.latest().cloned(),
                 ),
                 Err(_) => {
                     // Mutex poisoned — the main thread panicked. Exit.
@@ -1575,6 +1688,7 @@ fn emitter_loop(
             current_task,
             model,
             heartbeat_file: None,
+            activity,
         };
 
         let path = heartbeat_dir.join(format!("{}.json", qualified_id));
@@ -1835,6 +1949,7 @@ mod tests {
             current_task: None,
             model: "claude-sonnet-4".to_string(),
             heartbeat_file: None,
+            activity: None,
         };
         let hb2 = HeartbeatData {
             worker_id: "worker-b".to_string(),
@@ -1851,6 +1966,7 @@ mod tests {
             current_task: Some("nd-x".to_string()),
             model: "claude-sonnet-4".to_string(),
             heartbeat_file: None,
+            activity: None,
         };
 
         std::fs::write(
@@ -1902,6 +2018,7 @@ mod tests {
             current_task: Some("nd-live".to_string()),
             model: "claude-sonnet-4".to_string(),
             heartbeat_file: None,
+            activity: None,
         };
         std::fs::write(
             hb_dir.join("claude-worker-a.json"),
@@ -2029,6 +2146,7 @@ mod tests {
             current_task: None,
             model: "claude-sonnet-4".to_string(),
             heartbeat_file: None,
+            activity: None,
         };
 
         // Fresh heartbeat should not be stale.
@@ -2105,6 +2223,7 @@ mod tests {
             current_task: Some("nd-abc".to_string()),
             model: "claude-sonnet-4".to_string(),
             heartbeat_file: None,
+            activity: None,
         };
 
         let json = serde_json::to_string_pretty(&data).unwrap();
@@ -2147,6 +2266,7 @@ mod tests {
             current_task: None,
             model: "claude-sonnet-4".to_string(),
             heartbeat_file: None,
+            activity: None,
         };
         std::fs::write(
             hb_dir.join("self-worker.json"),
@@ -2191,6 +2311,7 @@ mod tests {
             model: "claude-sonnet-4".to_string(),
             last_strand: None,
             adapter: None,
+            activity: activity::ActivitySlot::default(),
         }));
         let shutdown = Arc::new(AtomicBool::new(false));
 
@@ -2713,6 +2834,7 @@ mod tests {
                 current_task: None,
                 model: "claude-sonnet-4".to_string(),
                 heartbeat_file: None,
+                activity: None,
             };
             let path = hb_dir.join(format!("claude-worker-{}.json", i));
             std::fs::write(path, serde_json::to_string(&hb).unwrap()).unwrap();
@@ -2759,6 +2881,7 @@ mod tests {
             current_task: None,
             model: "claude-sonnet-4".to_string(),
             heartbeat_file: None,
+            activity: None,
         };
         let path = hb_dir.join("claude-worker-2.json");
         std::fs::write(path, serde_json::to_string(&hb).unwrap()).unwrap();
@@ -2805,6 +2928,7 @@ mod tests {
             current_task: None,
             model: "claude-sonnet-4".to_string(),
             heartbeat_file: None,
+            activity: None,
         };
         let path = hb_dir.join("claude-worker-2.json");
         std::fs::write(path, serde_json::to_string(&hb).unwrap()).unwrap();
@@ -2989,6 +3113,7 @@ mod tests {
             current_task: None,
             model: "claude-sonnet-4".to_string(),
             heartbeat_file: None,
+            activity: None,
         };
         std::fs::write(&path, serde_json::to_string(&hb).unwrap()).unwrap();
         assert!(path.exists(), "heartbeat file should exist");
@@ -4258,6 +4383,7 @@ mod tests {
             current_task: None,
             model: "claude-sonnet-4".to_string(),
             heartbeat_file: None,
+            activity: None,
         };
 
         let ttl = Duration::from_secs(300); // 5 minutes
@@ -4289,6 +4415,7 @@ mod tests {
             current_task: None,
             model: "claude-sonnet-4".to_string(),
             heartbeat_file: None,
+            activity: None,
         };
 
         let ttl = Duration::from_secs(300); // 5 minutes
@@ -4320,6 +4447,7 @@ mod tests {
             current_task: None,
             model: "claude-sonnet-4".to_string(),
             heartbeat_file: None,
+            activity: None,
         };
 
         let ttl = Duration::from_secs(300); // 5 minutes
@@ -4369,6 +4497,7 @@ mod tests {
             current_task: Some("nd-abc".to_string()),
             model: "claude-code-glm-5".to_string(),
             heartbeat_file: None,
+            activity: None,
         };
 
         std::fs::write(&path, serde_json::to_string(&hb).unwrap()).unwrap();
@@ -4421,6 +4550,7 @@ mod tests {
             current_task: Some("nd-def".to_string()),
             model: "claude-code-glm-5".to_string(),
             heartbeat_file: None,
+            activity: None,
         };
 
         std::fs::write(&path, serde_json::to_string(&hb).unwrap()).unwrap();
@@ -5116,6 +5246,7 @@ mod tests {
             current_task: Some("needle-abc".to_string()),
             model: "claude-code-glm-5".to_string(),
             heartbeat_file: None,
+            activity: None,
         };
 
         let path = hb_dir.join(format!("{}.json", worker_id));
@@ -5161,6 +5292,7 @@ mod tests {
             current_task: Some("needle-abc".to_string()),
             model: "claude-code-glm-5".to_string(),
             heartbeat_file: None,
+            activity: None,
         };
 
         let path = hb_dir.join(format!("{}.json", worker_id));
@@ -5260,6 +5392,7 @@ mod tests {
             current_task: None,
             model: "claude-code-glm-5".to_string(),
             heartbeat_file: None,
+            activity: None,
         };
 
         let path = hb_dir.join(format!("{}.json", worker_id));
@@ -5306,6 +5439,7 @@ mod tests {
             current_task: None,
             model: "claude-code-glm-5".to_string(),
             heartbeat_file: None,
+            activity: None,
         };
 
         let path = hb_dir.join(format!("{}.json", qualified_id));
@@ -5409,6 +5543,7 @@ mod tests {
             current_task: Some("stale-test".to_string()),
             model: "claude-code-glm-5".to_string(),
             heartbeat_file: None,
+            activity: None,
         };
 
         std::fs::write(
@@ -5443,5 +5578,224 @@ mod tests {
 
         // Clean up
         std::fs::remove_file(&heartbeat_path).unwrap();
+    }
+
+    // ── Adapter activity in the heartbeat (needle-ded172f0) ────────────────
+
+    /// A pre-activity heartbeat JSON, as an older NEEDLE build wrote it.
+    fn legacy_heartbeat_json() -> String {
+        format!(
+            r#"{{
+                "worker_id": "legacy-worker",
+                "qualified_id": "claude-legacy-worker",
+                "pid": {pid},
+                "state": "EXECUTING",
+                "current_bead": "needle-old",
+                "workspace": "/tmp/ws",
+                "last_heartbeat": "{now}",
+                "started_at": "{now}",
+                "beads_processed": 2,
+                "session": "legacy-worker",
+                "is_idle": false,
+                "current_task": "needle-old",
+                "model": "claude-sonnet-4"
+            }}"#,
+            pid = std::process::id(),
+            now = Utc::now().to_rfc3339(),
+        )
+    }
+
+    #[test]
+    fn heartbeat_json_without_activity_field_reads_back_as_none() {
+        let data: HeartbeatData =
+            serde_json::from_str(&legacy_heartbeat_json()).expect("legacy JSON must parse");
+        assert!(
+            data.activity.is_none(),
+            "a heartbeat written before the activity field existed reads back as None"
+        );
+
+        // And re-serializing stays key-compatible with the old format: an
+        // absent record writes no activity key at all.
+        let json = serde_json::to_string(&data).unwrap();
+        assert!(
+            !json.contains("activity"),
+            "a no-activity heartbeat must not gain an activity key, got: {json}"
+        );
+    }
+
+    #[test]
+    fn heartbeat_activity_round_trips_through_json() {
+        let activity = AdapterActivity {
+            attempt_id: "0198abcd-7abc-7def-8abc-abcdefabcdef".to_string(),
+            bead_id: BeadId::from("needle-round"),
+            seq: 41,
+            kind: ActivityKind::ModelCall,
+            observed_at: Utc::now(),
+        };
+        let data: HeartbeatData =
+            serde_json::from_str(&legacy_heartbeat_json()).expect("legacy JSON must parse");
+        let mut with_activity = data;
+        with_activity.activity = Some(activity);
+
+        let json = serde_json::to_string(&with_activity).unwrap();
+        let parsed: HeartbeatData = serde_json::from_str(&json).expect("round trip must parse");
+        let back = parsed.activity.expect("activity survives the round trip");
+        assert_eq!(back.attempt_id, "0198abcd-7abc-7def-8abc-abcdefabcdef");
+        assert_eq!(back.bead_id, BeadId::from("needle-round"));
+        assert_eq!(back.seq, 41);
+        assert_eq!(back.kind, ActivityKind::ModelCall);
+        assert_eq!(
+            back.observed_at,
+            with_activity.activity.unwrap().observed_at
+        );
+    }
+
+    #[test]
+    fn reported_activity_reaches_the_heartbeat_file_and_coalesces() {
+        let _home_guard = isolate_test_home();
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        let config = test_config(&hb_dir);
+        let mut monitor = HealthMonitor::new(
+            config,
+            "activity-test".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        monitor.use_manual_emitter_time();
+        monitor.start_emitter().unwrap();
+
+        monitor.update_state(
+            &WorkerState::Executing,
+            Some(&BeadId::from("needle-hb")),
+            None,
+        );
+        let reporter = monitor
+            .bind_current_activity("attempt-1".to_string())
+            .unwrap();
+
+        // Nothing is written until the emitter ticks — reports only mutate
+        // the in-memory slot, so event volume can never create an I/O storm.
+        assert!(reporter.report(ActivityKind::ModelCall));
+        {
+            let content = std::fs::read_to_string(monitor.heartbeat_path()).unwrap();
+            let data: HeartbeatData = serde_json::from_str(&content).unwrap();
+            assert!(
+                data.activity.is_none(),
+                "no heartbeat write happens between emitter ticks"
+            );
+        }
+
+        assert!(monitor.advance_emitter(Duration::from_secs(1)).unwrap());
+        {
+            let content = std::fs::read_to_string(monitor.heartbeat_path()).unwrap();
+            let data: HeartbeatData = serde_json::from_str(&content).unwrap();
+            let activity = data.activity.expect("activity reaches the heartbeat file");
+            assert_eq!(activity.attempt_id, "attempt-1");
+            assert_eq!(activity.bead_id, BeadId::from("needle-hb"));
+            assert_eq!(activity.kind, ActivityKind::ModelCall);
+            assert_eq!(activity.seq, 0);
+        }
+
+        // High-rate reporting coalesces: 200 reports before one tick leave
+        // exactly one record in the file — the newest accepted one.
+        for _ in 0..200 {
+            reporter.report(ActivityKind::ToolCall);
+        }
+        assert!(monitor.advance_emitter(Duration::from_secs(1)).unwrap());
+        {
+            let content = std::fs::read_to_string(monitor.heartbeat_path()).unwrap();
+            let data: HeartbeatData = serde_json::from_str(&content).unwrap();
+            let activity = data.activity.expect("coalesced activity persists");
+            assert_eq!(activity.seq, 200, "the newest accepted event is retained");
+            assert_eq!(activity.kind, ActivityKind::ToolCall);
+        }
+
+        monitor.stop();
+    }
+
+    #[test]
+    fn clear_activity_drops_the_view_and_rejects_late_reports() {
+        let _home_guard = isolate_test_home();
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        let config = test_config(&hb_dir);
+        let monitor = HealthMonitor::new(
+            config,
+            "clear-test".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        monitor.update_state(
+            &WorkerState::Executing,
+            Some(&BeadId::from("needle-clr")),
+            None,
+        );
+        let reporter = monitor
+            .bind_current_activity("attempt-1".to_string())
+            .unwrap();
+        assert!(reporter.report(ActivityKind::ToolCall));
+        assert!(monitor.current_activity().is_some());
+
+        monitor.clear_activity();
+        assert!(monitor.current_activity().is_none());
+        assert!(
+            !reporter.report(ActivityKind::ModelCall),
+            "a report after the dispatch ended must lose"
+        );
+        assert!(monitor.current_activity().is_none());
+    }
+
+    #[test]
+    fn late_event_from_a_prior_attempt_cannot_refresh_a_successor() {
+        let _home_guard = isolate_test_home();
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        let config = test_config(&hb_dir);
+        let mut monitor = HealthMonitor::new(
+            config,
+            "successor-test".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        monitor.update_state(
+            &WorkerState::Executing,
+            Some(&BeadId::from("needle-b1")),
+            None,
+        );
+        let first = monitor
+            .bind_current_activity("attempt-1".to_string())
+            .unwrap();
+        assert!(first.report(ActivityKind::ModelCall));
+
+        // A successor dispatch on the same worker: binding resets the view.
+        monitor.update_state(
+            &WorkerState::Executing,
+            Some(&BeadId::from("needle-b2")),
+            None,
+        );
+        let second = monitor
+            .bind_current_activity("attempt-2".to_string())
+            .unwrap();
+        assert!(
+            monitor.current_activity().is_none(),
+            "a successor attempt starts with a clean activity view"
+        );
+
+        // The prior attempt's reporter is stale now — even with a huge
+        // sequence number it must lose against the successor's clean slate.
+        assert!(!first.report(ActivityKind::ToolCall));
+        assert!(monitor.current_activity().is_none());
+
+        // The successor reports on its own bead and its own attempt.
+        assert!(second.report(ActivityKind::ToolCall));
+        let activity = monitor.current_activity().expect("successor activity kept");
+        assert_eq!(activity.attempt_id, "attempt-2");
+        assert_eq!(activity.bead_id, BeadId::from("needle-b2"));
+
+        monitor.stop();
     }
 }

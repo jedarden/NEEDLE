@@ -542,6 +542,8 @@ mod tests {
             current_task: bead_id.map(|s| s.to_string()),
             model: "claude-sonnet-4".to_string(),
             heartbeat_file: None,
+            // Peer fixtures remain compatible with adapters without activity.
+            activity: None,
         }
     }
 

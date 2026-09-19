@@ -3162,6 +3162,8 @@ mod tests {
             current_task: bead_id.map(|s| s.to_string()),
             model: "claude-sonnet-4".to_string(),
             heartbeat_file: None,
+            // This fixture models an adapter that does not report activity.
+            activity: None,
         }
     }
 
@@ -5208,6 +5210,8 @@ mod tests {
             current_task: Some("nd-fresh".to_string()),
             model: "claude-sonnet-4".to_string(),
             heartbeat_file: None,
+            // This fixture models an adapter that does not report activity.
+            activity: None,
         };
         write_heartbeat(hb_dir.path(), &fresh_hb);
 
@@ -5279,6 +5283,8 @@ mod tests {
             current_task: Some("nd-qualified".to_string()),
             model: "claude-sonnet-4".to_string(),
             heartbeat_file: None,
+            // This fixture models an adapter that does not report activity.
+            activity: None,
         };
         write_heartbeat(hb_dir.path(), &hb);
 

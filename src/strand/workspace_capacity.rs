@@ -137,6 +137,7 @@ mod tests {
             current_task: None,
             model: String::new(),
             heartbeat_file: None,
+            activity: None,
         }
     }
 

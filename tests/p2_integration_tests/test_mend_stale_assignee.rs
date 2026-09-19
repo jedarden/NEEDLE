@@ -177,6 +177,8 @@ fn make_fresh_heartbeat(
         current_task: current_bead.map(|s| s.to_string()),
         model: "claude-sonnet-4".to_string(),
         heartbeat_file: None,
+        // This fixture models the legacy heartbeat shape.
+        activity: None,
     }
 }
 

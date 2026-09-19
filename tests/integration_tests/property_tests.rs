@@ -298,6 +298,8 @@ proptest! {
             beads_processed: 0,
             session: "test".to_string(),
             heartbeat_file: None,
+            // Property fixtures cover the absent-activity compatibility case.
+            activity: None,
             is_idle: false,
             current_task: None,
             model: "claude".to_string(),
@@ -326,6 +328,8 @@ proptest! {
             beads_processed: 0,
             session: "test".to_string(),
             heartbeat_file: None,
+            // Property fixtures cover the absent-activity compatibility case.
+            activity: None,
             is_idle: false,
             current_task: None,
             model: "claude".to_string(),
