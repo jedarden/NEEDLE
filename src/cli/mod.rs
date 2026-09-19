@@ -31,6 +31,7 @@ use crate::upgrade;
 use crate::worker::Worker;
 
 pub mod audit;
+pub mod improvements;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // NATO alphabet for worker identifiers
@@ -531,6 +532,39 @@ pub enum CliCommand {
         #[arg(long)]
         file_beads: bool,
     },
+
+    /// Run one pass of the improvement loop (ADR-029 steps 2-3).
+    ///
+    /// Generates proposals from the attempt ledger, ranks them, and submits
+    /// them to admission. Shadow by default — the plan's activation order runs
+    /// the generator with proposals visible and none admitted — so turning it
+    /// on is `improvements.admission.shadow: false` in config, never a flag
+    /// here. Refuses to run at all unless `improvements.enabled` is set.
+    Improve {
+        /// Emit the machine-readable summary instead of the operator view.
+        #[arg(long)]
+        json: bool,
+
+        /// Days of attempt ledger to generate from. Defaults to
+        /// `improvements.window_days`.
+        #[arg(long)]
+        window_days: Option<u32>,
+    },
+
+    /// Show the improvement loop: proposals, decisions, receipts and trend.
+    ///
+    /// Read-only (ADR-029 step 6). Under ADR-029 the operator reads receipts
+    /// rather than curating proposals, so this is the surface that makes the
+    /// loop auditable. It writes nothing and works from persisted state.
+    Improvements {
+        /// Emit the machine-readable report instead of the operator view.
+        #[arg(long)]
+        json: bool,
+
+        /// Days of attempt ledger to regenerate proposals over.
+        #[arg(long, default_value_t = improvements::DEFAULT_WINDOW_DAYS)]
+        window_days: u32,
+    },
 }
 
 /// Output format for the list command.
@@ -676,6 +710,8 @@ pub fn run() -> Result<()> {
             emit_telemetry,
             file_beads,
         } => cmd_audit(json, root, emit_telemetry, file_beads),
+        CliCommand::Improvements { json, window_days } => cmd_improvements(json, window_days),
+        CliCommand::Improve { json, window_days } => cmd_improve(json, window_days),
         CliCommand::Query {
             worker_id,
             since,
@@ -689,6 +725,125 @@ pub fn run() -> Result<()> {
 // ──────────────────────────────────────────────────────────────────────────────
 // Command handlers
 // ──────────────────────────────────────────────────────────────────────────────
+
+/// `needle improve` — run one pass of the loop.
+///
+/// Off unless `improvements.enabled`, and shadow unless the operator also
+/// cleared `improvements.admission.shadow`. Both defaults are the plan's
+/// activation order rather than a convenience: a loop that files beads the
+/// first time somebody runs the command is one nobody can safely try.
+fn cmd_improve(json: bool, window_days: Option<u32>) -> Result<()> {
+    let config = crate::config::ConfigLoader::load_global().unwrap_or_default();
+    if !config.improvements.enabled {
+        eprintln!(
+            "improve: the improvement loop is disabled; set improvements.enabled \
+             in ~/.config/needle/config.yaml to run it"
+        );
+        return Ok(());
+    }
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to create the improvement runtime")?;
+    rt.block_on(improve_run(json, window_days, &config))
+}
+
+/// One submission pass.
+async fn improve_run(json: bool, window_days: Option<u32>, config: &Config) -> Result<()> {
+    use crate::improvement_controller::{submit, SubmissionContext};
+    use crate::learning::improvement::{AdmissionPolicy, GeneratorThresholds};
+
+    let window = window_days.unwrap_or(config.improvements.window_days);
+    let rows =
+        crate::evidence_routing::timestamped_ledger_rows(&crate::state_dir::logs_dir(), window);
+
+    // Workspaces are discovered the same way a worker discovers them, so a
+    // proposal's bead lands in the store the people working it already read.
+    let root = &config.strands.explore.workspace_root;
+    let workspaces: std::collections::BTreeMap<String, PathBuf> = audit::discover_workspaces(root)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|entry| (entry.name, entry.path))
+        .collect();
+
+    let policy = AdmissionPolicy {
+        shadow: config.improvements.admission.shadow,
+        per_day: config.improvements.admission.per_day,
+        max_open_admitted: config.improvements.admission.max_open_admitted,
+        gate_d_satisfied: config.improvements.admission.gate_d_satisfied,
+    };
+    let profiles = std::collections::BTreeMap::new();
+    let home = config.audit.home_workspace.clone();
+
+    let ctx = SubmissionContext {
+        rows: &rows,
+        thresholds: GeneratorThresholds::default(),
+        policy,
+        profiles: &profiles,
+        workspaces: &workspaces,
+        home_workspace: &home,
+        now: chrono::Utc::now(),
+    };
+
+    let open = |path: &Path| -> Result<std::sync::Arc<dyn crate::bead_store::BeadStore>> {
+        audit::workspace_store(path)
+    };
+    let journal = improvements::decisions_path();
+    let (generated, records, summary) = submit(&ctx, &open, &journal).await?;
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "window_days": window,
+                "proposals": generated.proposals.len(),
+                "refused_at_construction": generated.refused.len(),
+                "fixture_rows_excluded": generated.fixture_rows_excluded,
+                "decisions": records.len(),
+                "created": summary.created.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                "routed": summary.routed,
+                "refusals": summary.refusals,
+                "shadow": config.improvements.admission.shadow,
+            })
+        );
+    } else {
+        println!(
+            "improve: {} proposal(s) from {window}d of ledger, {} decision(s)",
+            generated.proposals.len(),
+            records.len()
+        );
+        if config.improvements.admission.shadow {
+            println!("improve: shadow mode — nothing was admitted");
+        }
+        for (reason, count) in &summary.refusals {
+            println!("  refused {count} × {reason}");
+        }
+        for id in &summary.created {
+            println!("  filed {id}");
+        }
+        for signature in &summary.routed {
+            println!("  routed {signature} to its owning controller");
+        }
+    }
+    Ok(())
+}
+
+/// `needle improvements` — the read-only view of the improvement loop.
+///
+/// Exits 0 whichever way the loop is going: this is a report, not a gate. An
+/// operator asking what the loop did must not have to interpret an exit code
+/// to find out that it did nothing.
+fn cmd_improvements(json: bool, window_days: u32) -> Result<()> {
+    let config = crate::config::ConfigLoader::load_global().unwrap_or_default();
+    let report = improvements::collect(&config, window_days, chrono::Utc::now())?;
+    if json {
+        println!("{}", improvements::render_json(&report)?);
+    } else {
+        print!("{}", improvements::render_human(&report));
+    }
+    Ok(())
+}
 
 /// `needle audit` — reconcile state at rest and report what it finds.
 ///

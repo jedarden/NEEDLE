@@ -163,28 +163,79 @@ done
 # tests/dod-modes/run.sh rather than copied, so they cannot drift from what
 # actually runs.
 needle_slow_targets() {
-  printf '%s\n' lib integration_spawn integration_tests p2_integration_tests \
-    p3_integration_tests real_br_integration_tests escalation_ladder \
-    nt45_failure_evidence_capture nt50_exception_lessons nt51_adapter_usage_capture \
+  printf '%s
+' lib \
+    integration_spawn \
+    integration_tests \
+    p2_integration_tests \
+    p3_integration_tests \
+    real_br_integration_tests \
+    escalation_ladder \
+    nt45_failure_evidence_capture \
+    nt50_exception_lessons \
+    nt51_adapter_usage_capture \
     nt51_gateway_health \
-    nt52_state_dir_isolation installer
+    nt52_state_dir_isolation \
+    nt07_admission_policy \
+    nt07_admission_budgets \
+    nt53_improvement_proposals \
+    nt54_proposal_admission \
+    nt55_impact_receipts \
+    nt56_improvements_cli \
+    nt07_proposal_contract \
+    nt07_impact_contract \
+    nt07_impact_scoring \
+    nt07_executable_admission \
+    installer
 }
 
 needle_cargo_selector() {
   case "$1" in
-    lib)                       printf '%s\n' --lib ;;
-    integration_spawn)         printf '%s\n' --test integration_spawn ;;
-    integration_tests)         printf '%s\n' --test integration_tests ;;
-    p2_integration_tests)      printf '%s\n' --test p2_integration_tests ;;
-    p3_integration_tests)      printf '%s\n' --test p3_integration_tests ;;
-    real_br_integration_tests) printf '%s\n' --test real_br_integration_tests ;;
-    escalation_ladder)         printf '%s\n' --test escalation_ladder ;;
-    nt45_failure_evidence_capture) printf '%s\n' --test nt45_failure_evidence_capture ;;
-    nt50_exception_lessons) printf '%s\n' --test nt50_exception_lessons ;;
-    nt51_adapter_usage_capture) printf '%s\n' --test nt51_adapter_usage_capture ;;
-    nt51_gateway_health) printf "%s\n" --test nt51_gateway_health ;;
-    nt52_state_dir_isolation) printf '%s\n' --test nt52_state_dir_isolation ;;
-    *)                         return 1 ;;
+    lib) printf '%s
+' --lib ;;
+    integration_spawn) printf '%s
+' --test integration_spawn ;;
+    integration_tests) printf '%s
+' --test integration_tests ;;
+    p2_integration_tests) printf '%s
+' --test p2_integration_tests ;;
+    p3_integration_tests) printf '%s
+' --test p3_integration_tests ;;
+    real_br_integration_tests) printf '%s
+' --test real_br_integration_tests ;;
+    escalation_ladder) printf '%s
+' --test escalation_ladder ;;
+    nt45_failure_evidence_capture) printf '%s
+' --test nt45_failure_evidence_capture ;;
+    nt50_exception_lessons) printf '%s
+' --test nt50_exception_lessons ;;
+    nt51_adapter_usage_capture) printf '%s
+' --test nt51_adapter_usage_capture ;;
+    nt51_gateway_health) printf '%s
+' --test nt51_gateway_health ;;
+    nt52_state_dir_isolation) printf '%s
+' --test nt52_state_dir_isolation ;;
+    nt07_admission_policy) printf '%s
+' --test nt07_admission_policy ;;
+    nt07_admission_budgets) printf '%s
+' --test nt07_admission_budgets ;;
+    nt53_improvement_proposals) printf '%s
+' --test nt53_improvement_proposals ;;
+    nt54_proposal_admission) printf '%s
+' --test nt54_proposal_admission ;;
+    nt55_impact_receipts) printf '%s
+' --test nt55_impact_receipts ;;
+    nt56_improvements_cli) printf '%s
+' --test nt56_improvements_cli ;;
+    nt07_proposal_contract) printf '%s
+' --test nt07_proposal_contract ;;
+    nt07_impact_contract) printf '%s
+' --test nt07_impact_contract ;;
+    nt07_impact_scoring) printf '%s
+' --test nt07_impact_scoring ;;
+    nt07_executable_admission) printf '%s
+' --test nt07_executable_admission ;;
+    *) return 1 ;;
   esac
 }
 
@@ -194,19 +245,51 @@ needle_cargo_selector() {
 # deliberate: contains/glob matching could silently run a newly added binary.
 needle_nextest_filter() {
   case "$1" in
-    lib)                       printf '%s\n' 'binary_id(=needle)' ;;
-    integration_spawn)         printf '%s\n' 'binary_id(=needle::integration_spawn)' ;;
-    integration_tests)         printf '%s\n' 'binary_id(=needle::integration_tests)' ;;
-    p2_integration_tests)      printf '%s\n' 'binary_id(=needle::p2_integration_tests)' ;;
-    p3_integration_tests)      printf '%s\n' 'binary_id(=needle::p3_integration_tests)' ;;
-    real_br_integration_tests) printf '%s\n' 'binary_id(=needle::real_br_integration_tests)' ;;
-    escalation_ladder)         printf '%s\n' 'binary_id(=needle::escalation_ladder)' ;;
-    nt45_failure_evidence_capture) printf '%s\n' 'binary_id(=needle::nt45_failure_evidence_capture)' ;;
-    nt50_exception_lessons) printf '%s\n' 'binary_id(=needle::nt50_exception_lessons)' ;;
-    nt51_adapter_usage_capture) printf '%s\n' 'binary_id(=needle::nt51_adapter_usage_capture)' ;;
-    nt51_gateway_health) printf "%s\n" "binary_id(=needle::nt51_gateway_health)" ;;
-    nt52_state_dir_isolation) printf '%s\n' 'binary_id(=needle::nt52_state_dir_isolation)' ;;
-    *)                         return 1 ;;
+    lib) printf '%s
+' 'binary_id(=needle)' ;;
+    integration_spawn) printf '%s
+' 'binary_id(=needle::integration_spawn)' ;;
+    integration_tests) printf '%s
+' 'binary_id(=needle::integration_tests)' ;;
+    p2_integration_tests) printf '%s
+' 'binary_id(=needle::p2_integration_tests)' ;;
+    p3_integration_tests) printf '%s
+' 'binary_id(=needle::p3_integration_tests)' ;;
+    real_br_integration_tests) printf '%s
+' 'binary_id(=needle::real_br_integration_tests)' ;;
+    escalation_ladder) printf '%s
+' 'binary_id(=needle::escalation_ladder)' ;;
+    nt45_failure_evidence_capture) printf '%s
+' 'binary_id(=needle::nt45_failure_evidence_capture)' ;;
+    nt50_exception_lessons) printf '%s
+' 'binary_id(=needle::nt50_exception_lessons)' ;;
+    nt51_adapter_usage_capture) printf '%s
+' 'binary_id(=needle::nt51_adapter_usage_capture)' ;;
+    nt51_gateway_health) printf '%s
+' 'binary_id(=needle::nt51_gateway_health)' ;;
+    nt52_state_dir_isolation) printf '%s
+' 'binary_id(=needle::nt52_state_dir_isolation)' ;;
+    nt07_admission_policy) printf '%s
+' 'binary_id(=needle::nt07_admission_policy)' ;;
+    nt07_admission_budgets) printf '%s
+' 'binary_id(=needle::nt07_admission_budgets)' ;;
+    nt53_improvement_proposals) printf '%s
+' 'binary_id(=needle::nt53_improvement_proposals)' ;;
+    nt54_proposal_admission) printf '%s
+' 'binary_id(=needle::nt54_proposal_admission)' ;;
+    nt55_impact_receipts) printf '%s
+' 'binary_id(=needle::nt55_impact_receipts)' ;;
+    nt56_improvements_cli) printf '%s
+' 'binary_id(=needle::nt56_improvements_cli)' ;;
+    nt07_proposal_contract) printf '%s
+' 'binary_id(=needle::nt07_proposal_contract)' ;;
+    nt07_impact_contract) printf '%s
+' 'binary_id(=needle::nt07_impact_contract)' ;;
+    nt07_impact_scoring) printf '%s
+' 'binary_id(=needle::nt07_impact_scoring)' ;;
+    nt07_executable_admission) printf '%s
+' 'binary_id(=needle::nt07_executable_admission)' ;;
+    *) return 1 ;;
   esac
 }
 

@@ -56,7 +56,12 @@ tokio = { version = "1", features = ["full"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# float_roundtrip: the default float parser is fast but not exactly
+# round-tripping, so a 17-significant-digit value written to an append-only
+# record reads back as a different f64 (a measured delta of
+# 0.39999999999999997 came back 0.4). Impact receipts are audit records that
+# must read back byte-identical after a restart, so exactness wins here.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 serde_yaml = "0.9"
 
 # CLI
@@ -197,6 +202,56 @@ harness = true
 [[test]]
 name = "nt52_state_dir_isolation"
 path = "tests/nt52_state_dir_isolation.rs"
+harness = true
+
+[[test]]
+name = "nt07_admission_policy"
+path = "tests/nt07_admission_policy.rs"
+harness = true
+
+[[test]]
+name = "nt07_admission_budgets"
+path = "tests/nt07_admission_budgets.rs"
+harness = true
+
+[[test]]
+name = "nt53_improvement_proposals"
+path = "tests/nt53_improvement_proposals.rs"
+harness = true
+
+[[test]]
+name = "nt54_proposal_admission"
+path = "tests/nt54_proposal_admission.rs"
+harness = true
+
+[[test]]
+name = "nt55_impact_receipts"
+path = "tests/nt55_impact_receipts.rs"
+harness = true
+
+[[test]]
+name = "nt56_improvements_cli"
+path = "tests/nt56_improvements_cli.rs"
+harness = true
+
+[[test]]
+name = "nt07_proposal_contract"
+path = "tests/nt07_proposal_contract.rs"
+harness = true
+
+[[test]]
+name = "nt07_impact_contract"
+path = "tests/nt07_impact_contract.rs"
+harness = true
+
+[[test]]
+name = "nt07_impact_scoring"
+path = "tests/nt07_impact_scoring.rs"
+harness = true
+
+[[test]]
+name = "nt07_executable_admission"
+path = "tests/nt07_executable_admission.rs"
 harness = true
 
 [[bench]]

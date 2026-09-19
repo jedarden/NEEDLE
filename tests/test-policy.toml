@@ -140,7 +140,31 @@ max_tests = 3863
 # contracts (needle-63cf0472).
 # +3 end-to-end claim-verification subprocess matrix tests (needle-653ec4be).
 push = 665
-contract = 67
+# +20 N-T07 proposal envelope contracts (needle-2b0a309b): derived-signature
+# identity, construction refusals, and the authority ceiling. The contract tier
+# is the right home — these are pure record properties with no process, no
+# filesystem and no clock, and they are the acceptance command for the bead.
+# +12 N-T07 impact-contract contracts (needle-9c5ee565): operator/producer
+# separation, neutral defaults for unprofiled work, expiry degradation.
+# +10 N-T07 ranking contracts (needle-29f396d3): determinism, the producer
+# ceiling, stale-evidence capping, visibility as tie-break only.
+# +11 N-T07 executability contracts (needle-8c3520f7): the "improve coverage"
+# refusal and the concrete-branch admission.
+# +12 N-T07 admission-decision contracts (needle-43c0d818): a recorded decision
+# per proposal, L5 refused until Gate D, shadow mode deciding without admitting.
+# +11 N-T07 budget/dedup/backpressure contracts (needle-f754b4cb).
+# +14 N-T53 generator contracts (needle-908c1f25): the four evidence classes
+# over a ledger fixture shaped like 2026-09-12..14, the threshold floors,
+# fixture-row exclusion, order-independence, and the ADR-030 regression that
+# repeated decompositions are not repeated failures.
+# +15 N-T55 impact-receipt contracts (needle-c4e6424a): promote/withdraw/hold,
+# the single revert proposal, costed-only measures, append-only durability.
+# +10 N-T56 view contracts (needle-65e66131): deterministic rendering in both
+# formats, unknown-not-zero cost, bounded operator output, no writes on read.
+# +6 N-T54 admission-adapter contracts (needle-e830524d): plan-owned classes
+# file nothing, one signature creates one bead across submissions, budget and
+# shadow refusals are recorded, and the budget survives a restart.
+contract = 188
 # +16 literal test attributes for Cargo execution isolation (needle-b31fcb27):
 # seven integration cases plus nine nested-Cargo fixture tests embedded in source.
 # +1 real-adapter contract for the injectable ProcessRunner (needle-d3f191a3).
@@ -258,6 +282,76 @@ path = "tests/nt52_state_dir_isolation.rs"
 tier = "e2e"
 max_tests = 10
 owner = "component:state-isolation"
+
+[[harness]]
+name = "nt07_proposal_contract"
+path = "tests/nt07_proposal_contract.rs"
+tier = "contract"
+max_tests = 20
+owner = "component:improvement-loop"
+
+[[harness]]
+name = "nt07_impact_contract"
+path = "tests/nt07_impact_contract.rs"
+tier = "contract"
+max_tests = 12
+owner = "component:improvement-loop"
+
+[[harness]]
+name = "nt07_impact_scoring"
+path = "tests/nt07_impact_scoring.rs"
+tier = "contract"
+max_tests = 10
+owner = "component:improvement-loop"
+
+[[harness]]
+name = "nt07_executable_admission"
+path = "tests/nt07_executable_admission.rs"
+tier = "contract"
+max_tests = 11
+owner = "component:improvement-loop"
+
+[[harness]]
+name = "nt07_admission_policy"
+path = "tests/nt07_admission_policy.rs"
+tier = "contract"
+max_tests = 12
+owner = "component:improvement-loop"
+
+[[harness]]
+name = "nt07_admission_budgets"
+path = "tests/nt07_admission_budgets.rs"
+tier = "contract"
+max_tests = 11
+owner = "component:improvement-loop"
+
+[[harness]]
+name = "nt53_improvement_proposals"
+path = "tests/nt53_improvement_proposals.rs"
+tier = "contract"
+max_tests = 14
+owner = "component:improvement-loop"
+
+[[harness]]
+name = "nt54_proposal_admission"
+path = "tests/nt54_proposal_admission.rs"
+tier = "contract"
+max_tests = 6
+owner = "component:improvement-loop"
+
+[[harness]]
+name = "nt55_impact_receipts"
+path = "tests/nt55_impact_receipts.rs"
+tier = "contract"
+max_tests = 15
+owner = "component:improvement-loop"
+
+[[harness]]
+name = "nt56_improvements_cli"
+path = "tests/nt56_improvements_cli.rs"
+tier = "contract"
+max_tests = 10
+owner = "component:improvement-loop"
 
 # These are strict ceilings on existing debt. A new occurrence fails the fast
 # lane; deleting an occurrence makes the corresponding exception stale so the
@@ -501,6 +595,14 @@ owner = "component:shell-verification"
 [[artifact]]
 pattern = "tests/cargo-targets/*"
 owner = "component:cargo-target-policy"
+
+# Shared fixtures for the two admission harnesses. A plain module, not a
+# declared Cargo target: autotests = false means only the explicit [[test]]
+# inventory is built, so this is included by both harnesses rather than
+# discovered as a third.
+[[artifact]]
+pattern = "tests/admission_support/*"
+owner = "component:improvement-loop"
 
 [[artifact]]
 pattern = "tests/nextest-shard-plan/*"

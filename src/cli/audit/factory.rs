@@ -28,12 +28,12 @@ use crate::config::Config;
 use crate::evidence_routing::LedgerRow;
 
 /// Ledger `outcome` value for a verified closure.
-const VERIFIED_SUCCESS: &str = "verified_success";
+pub(crate) const VERIFIED_SUCCESS: &str = "verified_success";
 /// Ledger `outcome` value for an attempt nothing judged.
-const INFRASTRUCTURE_FAILURE: &str = "infrastructure_failure";
+pub(crate) const INFRASTRUCTURE_FAILURE: &str = "infrastructure_failure";
 /// Ledger `outcome` value for an attempt whose time budget expired — the
 /// hour-long exit-124 timeouts F1 and F3 are counting.
-const INDETERMINATE: &str = "indeterminate";
+pub(crate) const INDETERMINATE: &str = "indeterminate";
 
 /// The predicates this group registers, in reporting order.
 pub fn predicates() -> Vec<Box<dyn Predicate>> {
@@ -52,7 +52,7 @@ pub fn predicates() -> Vec<Box<dyn Predicate>> {
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// A ledger row's string field, or `""`.
-fn field<'a>(row: &'a LedgerRow, key: &str) -> &'a str {
+pub(crate) fn field<'a>(row: &'a LedgerRow, key: &str) -> &'a str {
     row.data
         .get(key)
         .and_then(|value| value.as_str())
@@ -63,7 +63,7 @@ fn field<'a>(row: &'a LedgerRow, key: &str) -> &'a str {
 ///
 /// Rows record an absolute path; findings are scoped by directory name so the
 /// same workspace reads the same on two machines whose parent roots differ.
-fn row_workspace(row: &LedgerRow) -> String {
+pub(crate) fn row_workspace(row: &LedgerRow) -> String {
     let raw = field(row, "workspace");
     std::path::Path::new(raw)
         .file_name()
@@ -87,7 +87,7 @@ fn windowed(ctx: &AuditContext) -> Vec<&LedgerRow> {
 
 /// Attempts an adapter or workspace was given a fair chance to win:
 /// everything but infrastructure failures and decompositions (ADR-030).
-fn judged(rows: &[&LedgerRow]) -> u64 {
+pub(crate) fn judged(rows: &[&LedgerRow]) -> u64 {
     rows.iter()
         .filter(|row| {
             let outcome = field(row, "outcome");
@@ -97,7 +97,7 @@ fn judged(rows: &[&LedgerRow]) -> u64 {
 }
 
 /// Verified closures among `rows`.
-fn verified(rows: &[&LedgerRow]) -> u64 {
+pub(crate) fn verified(rows: &[&LedgerRow]) -> u64 {
     rows.iter()
         .filter(|row| field(row, "outcome") == VERIFIED_SUCCESS)
         .count() as u64
@@ -105,7 +105,7 @@ fn verified(rows: &[&LedgerRow]) -> u64 {
 
 /// Verified closures over judged attempts, as a percentage. `None` when
 /// nothing was judged — an unknown rate, never a rate of zero.
-fn yield_points(rows: &[&LedgerRow]) -> Option<f64> {
+pub(crate) fn yield_points(rows: &[&LedgerRow]) -> Option<f64> {
     let judged = judged(rows);
     (judged > 0).then(|| verified(rows) as f64 * 100.0 / judged as f64)
 }
@@ -131,7 +131,7 @@ fn dominant(rows: &[&LedgerRow], key: &str) -> Option<(String, u64)> {
 /// A free function rather than a closure: the call sites hold rows behind
 /// two layers of reference, and only a real signature lets deref coercion
 /// reconcile that at each of them.
-fn costed(row: &LedgerRow) -> bool {
+pub(crate) fn costed(row: &LedgerRow) -> bool {
     row.data
         .get("costed")
         .and_then(|value| value.as_bool())
@@ -139,7 +139,7 @@ fn costed(row: &LedgerRow) -> bool {
 }
 
 /// Distinct non-empty values of `key`, sorted.
-fn distinct(rows: &[&LedgerRow], key: &str) -> Vec<String> {
+pub(crate) fn distinct(rows: &[&LedgerRow], key: &str) -> Vec<String> {
     rows.iter()
         .map(|row| field(row, key))
         .filter(|value| !value.is_empty())
@@ -154,7 +154,7 @@ fn distinct(rows: &[&LedgerRow], key: &str) -> Vec<String> {
 /// The `'a` on both the input slice and the grouped values is what ties a
 /// group's rows to the ledger they were borrowed from rather than to the
 /// slice of references that happened to carry them in.
-fn group_by<'a, K: Ord, F: Fn(&LedgerRow) -> K>(
+pub(crate) fn group_by<'a, K: Ord, F: Fn(&LedgerRow) -> K>(
     rows: &[&'a LedgerRow],
     key: F,
 ) -> BTreeMap<K, Vec<&'a LedgerRow>> {

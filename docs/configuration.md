@@ -1463,6 +1463,86 @@ must never be repaired automatically. They still drive exit code 1, because
 
 ---
 
+## Improvement Loop Configuration
+
+The measured autonomous improvement loop (ADR-029, plan section 4.10). NEEDLE
+proposes its own improvements from the attempt ledger, admits them through an
+explicit policy, and keeps them only when an impact receipt shows the
+acceptance measure actually moved. The operator reads receipts; nobody curates
+proposals.
+
+Every key is read once per `needle improve` invocation, so the section is
+Tier A (live): a change applies to the next run with no restart.
+
+```yaml
+improvements:
+  # Whether the loop runs at all (default: false).
+  #
+  # `needle improve` exits with a message and does nothing while this is
+  # false. `needle improvements` — the read-only view — works regardless,
+  # because seeing what the loop *would* propose must not require enabling it.
+  enabled: false
+
+  # Days of attempt ledger each run generates proposals from (default: 7).
+  window_days: 7
+
+  admission:
+    # Decide everything, admit nothing (default: true).
+    #
+    # This is the plan's first activation step, and it is the default rather
+    # than a convenience: a loop that files beads the first time somebody runs
+    # the command is one nobody can safely try. A shadow run still records a
+    # full decision per proposal, and still distinguishes "would have been
+    # admitted" from "would have been refused anyway", so it tells you what
+    # turning it off would do.
+    shadow: true
+
+    # Proposals admitted per day (default: 1).
+    #
+    # The plan's activation order starts at one admitted L4 proposal per day
+    # and raises it only after two consecutive horizons of net-positive
+    # receipts. The budget is read back from the decision journal, so a
+    # restarted controller cannot admit a second one by forgetting the first.
+    per_day: 1
+
+    # Admitted proposals that may be open before backpressure applies
+    # (default: 3). More proposals into a backed-up factory make the pile
+    # deeper, not the factory faster.
+    max_open_admitted: 3
+
+    # Whether Gate D has been accepted (default: false). Until then, L5
+    # proposals — deploy new policy or code, widen authority, weaken a safety
+    # bound — are refused with a recorded reason.
+    #
+    # Setting this true does not itself satisfy Gate D; the plan's section 9
+    # evidence does. It is the switch an operator throws *after* that evidence
+    # exists, and ADR-027 forbids any automatic change from throwing it.
+    gate_d_satisfied: false
+```
+
+### What the loop writes
+
+Two append-only journals under the state root, both read by
+`needle improvements`:
+
+| Path | Contents |
+| --- | --- |
+| `~/.needle/improvements/decisions.jsonl` | One admission decision per proposal, admitted and refused alike |
+| `~/.needle/improvements/receipts.jsonl` | One impact receipt per judged proposal |
+
+Neither is ever rewritten. A receipt records a decision that was already
+taken, and a rewritable audit trail records what the loop currently believes
+rather than what it did.
+
+### Commands
+
+- `needle improve` — run one pass: generate, rank, admit. Honours the config
+  above.
+- `needle improvements` — read-only view of proposals, decisions, receipts and
+  the rolling fleet trend. Writes nothing and needs no configuration.
+
+---
+
 ## Environment Variable Overrides
 
 Any config field can be overridden via environment variables with the `NEEDLE_` prefix and `__` as separator:
