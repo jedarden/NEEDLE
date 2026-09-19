@@ -200,6 +200,21 @@ path = "tests/nt52_state_dir_isolation.rs"
 harness = true
 
 [[test]]
+name = "nt07_admission_policy"
+path = "tests/nt07_admission_policy.rs"
+harness = true
+
+[[test]]
+name = "nt07_admission_budgets"
+path = "tests/nt07_admission_budgets.rs"
+harness = true
+
+[[test]]
+name = "nt53_improvement_proposals"
+path = "tests/nt53_improvement_proposals.rs"
+harness = true
+
+[[test]]
 name = "nt07_proposal_contract"
 path = "tests/nt07_proposal_contract.rs"
 harness = true

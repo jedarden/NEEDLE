@@ -18,12 +18,20 @@
 //! | Impact contract | 4.10 | `needle-9c5ee565` | [`impact`] |
 //! | Executability | 4.10 | `needle-8c3520f7` | [`executable`] |
 //! | Ranking | 4.10 | `needle-29f396d3` | [`scoring`] |
+//! | Admission | 4.10 | `needle-43c0d818`, `needle-f754b4cb` | [`admission`] |
+//! | Generate | 4.10 step 2 | `needle-908c1f25` (N-T53) | [`generator`] |
 
+pub mod admission;
 pub mod envelope;
 pub mod executable;
+pub mod generator;
 pub mod impact;
 pub mod scoring;
 
+pub use admission::{
+    admit, AdmissionDecision, AdmissionPolicy, AdmissionRecord, AdmissionRoute, AdmissionWorld,
+    RefusalReason, DEFAULT_ADMISSION_PER_DAY, DEFAULT_MAX_OPEN_ADMITTED,
+};
 pub use envelope::{
     AcceptanceMeasure, AuthorityLevel, Direction, EvidenceClass, EvidenceKind, EvidenceRef,
     ImpactMeasure, ImprovementProposal, ProposalRejection, ProposalScope, Rollback,
@@ -31,6 +39,10 @@ pub use envelope::{
 };
 pub use executable::{
     assess as assess_executability, ExecutableProposal, ExecutionPlan, NonExecutable,
+};
+pub use generator::{
+    by_signature, generate, GeneratedProposals, GeneratorThresholds, RefusedProposal,
+    GENERATOR_VERSION,
 };
 pub use impact::{
     Band, Confidence, EffortEstimate, ImpactContract, ProducerEvidence, WorkspaceImpactProfile,

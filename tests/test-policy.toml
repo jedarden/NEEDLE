@@ -150,7 +150,13 @@ push = 665
 # ceiling, stale-evidence capping, visibility as tie-break only.
 # +11 N-T07 executability contracts (needle-8c3520f7): the "improve coverage"
 # refusal and the concrete-branch admission.
-contract = 120
+# +12 N-T07 admission-decision contracts (needle-43c0d818): a recorded decision
+# per proposal, L5 refused until Gate D, shadow mode deciding without admitting.
+# +11 N-T07 budget/dedup/backpressure contracts (needle-f754b4cb).
+# +13 N-T53 generator contracts (needle-908c1f25): the four evidence classes
+# over a ledger fixture shaped like 2026-09-12..14, the threshold floors,
+# fixture-row exclusion and order-independence.
+contract = 156
 # +16 literal test attributes for Cargo execution isolation (needle-b31fcb27):
 # seven integration cases plus nine nested-Cargo fixture tests embedded in source.
 # +1 real-adapter contract for the injectable ProcessRunner (needle-d3f191a3).
@@ -295,6 +301,27 @@ name = "nt07_executable_admission"
 path = "tests/nt07_executable_admission.rs"
 tier = "contract"
 max_tests = 11
+owner = "component:improvement-loop"
+
+[[harness]]
+name = "nt07_admission_policy"
+path = "tests/nt07_admission_policy.rs"
+tier = "contract"
+max_tests = 12
+owner = "component:improvement-loop"
+
+[[harness]]
+name = "nt07_admission_budgets"
+path = "tests/nt07_admission_budgets.rs"
+tier = "contract"
+max_tests = 11
+owner = "component:improvement-loop"
+
+[[harness]]
+name = "nt53_improvement_proposals"
+path = "tests/nt53_improvement_proposals.rs"
+tier = "contract"
+max_tests = 13
 owner = "component:improvement-loop"
 
 # These are strict ceilings on existing debt. A new occurrence fails the fast
@@ -539,6 +566,14 @@ owner = "component:shell-verification"
 [[artifact]]
 pattern = "tests/cargo-targets/*"
 owner = "component:cargo-target-policy"
+
+# Shared fixtures for the two admission harnesses. A plain module, not a
+# declared Cargo target: autotests = false means only the explicit [[test]]
+# inventory is built, so this is included by both harnesses rather than
+# discovered as a third.
+[[artifact]]
+pattern = "tests/admission_support/*"
+owner = "component:improvement-loop"
 
 [[artifact]]
 pattern = "tests/nextest-shard-plan/*"

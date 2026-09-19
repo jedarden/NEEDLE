@@ -13,6 +13,8 @@ EXPECTED_TARGETS="$(printf '%s\n' \
   escalation_ladder \
   integration_spawn \
   integration_tests \
+  nt07_admission_budgets \
+  nt07_admission_policy \
   nt07_executable_admission \
   nt07_impact_contract \
   nt07_impact_scoring \
@@ -22,6 +24,7 @@ EXPECTED_TARGETS="$(printf '%s\n' \
   nt51_adapter_usage_capture \
   nt51_gateway_health \
   nt52_state_dir_isolation \
+  nt53_improvement_proposals \
   p2_integration_tests \
   p3_integration_tests \
   real_br_integration_tests)"
@@ -124,7 +127,7 @@ for marker_fragment in \
   'nextest_profile=ci' \
   'features=default' \
   'target_triple=' \
-  'target_set=lib,integration_spawn,integration_tests,p2_integration_tests,p3_integration_tests,real_br_integration_tests,escalation_ladder,nt45_failure_evidence_capture,nt50_exception_lessons,nt51_adapter_usage_capture,nt51_gateway_health,nt52_state_dir_isolation' \
+  'target_set=lib,integration_spawn,integration_tests,p2_integration_tests,p3_integration_tests,real_br_integration_tests,escalation_ladder,nt45_failure_evidence_capture,nt50_exception_lessons,nt51_adapter_usage_capture,nt51_gateway_health,nt52_state_dir_isolation,nt07_admission_policy,nt07_admission_budgets,nt53_improvement_proposals,nt07_proposal_contract,nt07_impact_contract,nt07_impact_scoring,nt07_executable_admission' \
   'workspace_root=/workspace' \
   'target_dir=/opt/needle-ci-target' \
   'cargo_build_jobs=2'; do
