@@ -1,12 +1,12 @@
 # Mitosis Test Patterns and Workarounds
 
-**Date:** 2026-09-14
-**Bead:** needle-6729ce69 (documents the final state of the mitosis test-fix family)
+**Date:** 2026-09-19
+**Beads:** needle-6729ce69 (test-pattern baseline), needle-ed937f7e (interaction recheck)
 **Verification lineage:** needle-6522fcf4 → needle-12609517 → needle-ad7bd937 →
 needle-2cf1bff9 / needle-899bac1d / needle-a3112b51 → needle-771aeb12 /
 needle-21383ec6 / needle-62f9ef8e → needle-ec1d8479 / needle-12609517 →
 needle-23d823ab → needle-ed937f7e (fixture rework landed as `9ef58ab0`; both
-tiers re-verified green)
+tiers re-verified green; clean-archive interaction recheck on 2026-09-19)
 
 ---
 
@@ -25,10 +25,10 @@ have each produced a real multi-day debugging cycle.
 
 ## What counts as the mitosis test suite
 
-| Tier | Where | What it covers | State 2026-09-14 |
+| Tier | Where | What it covers | State 2026-09-19 |
 |---|---|---|---|
-| Unit | `src/mitosis/mod.rs` `#[cfg(test)]` (+ `src/resolve::executor` split test) | Evaluation gates, dedup, caps (`max_children`/`max_depth`), depth labels, quarantine interplay, child creation | 111/111 pass (`cargo test --lib mitosis`) |
-| P2 integration | `tests/p2_integration_tests.rs`, tests 12–14 + skip paths | `MitosisEvaluator` against mock stores through the real `Dispatcher` | 6/6 pass at HEAD (fixture rework landed as `9ef58ab0`, 2026-09-14 — see [Current state](#current-state)) |
+| Unit | `src/mitosis/mod.rs` `#[cfg(test)]` (+ `src/resolve::executor` split test) | Evaluation gates, dedup, caps (`max_children`/`max_depth`), depth labels, quarantine interplay, child creation | 115/115 pass (`cargo test --lib mitosis`, clean archive) |
+| P2 integration | `tests/p2_integration_tests.rs`, tests 12–14 + skip paths | `MitosisEvaluator` against mock stores through the real `Dispatcher` | 120/120 pass (`cargo test --test p2_integration_tests`, clean archive; fixture rework landed as `9ef58ab0`) |
 | Span-depth regression | `tests/p2_integration_tests/claim_cycle_span_depth_regression.rs` | Claim cycles keep bead span depth constant (shares the dispatcher fixture) | Passes at HEAD (same fix) |
 | Timeout-path policy | `tests/integration_tests/timeout_config_integration*.rs` | `mitosis.timeout_triggered` policy parsing and defaults (disabled by default) | Pass |
 | E2E shell | `tests/e2e/{auto_split,forced_mitosis,failure_counter,failure_counter_persistence}.sh` | Full worker loop through a real workspace | **Blocked — not runnable** (see [Limitations](#remaining-limitations)) |
@@ -68,6 +68,31 @@ no bead store wired for pre-spawn claim verification — refusing to spawn bead 
 The lesson generalizes: **a Dispatcher behavior change is a mitosis-test
 breaking change even when mitosis code is untouched.** The fixtures exercise
 the real dispatch path, on purpose.
+
+## Clean-archive verification (2026-09-19)
+
+The committed `HEAD` was extracted with `git archive` and the focused
+interaction tiers were run from that extraction, so unrelated dirty-checkout
+changes cannot affect the result:
+
+- `cargo test --lib mitosis`: **115 passed, 0 failed**.
+- `cargo test --test p2_integration_tests`: **120 passed, 0 failed**,
+  including `mitosis_splits_multitask_bead_creates_children`,
+  `mitosis_duplicate_split_creates_zero_new_children`,
+  `mitosis_concurrent_workers_flock_serializes`, and
+  `claim_cycle_span_depth_regression`.
+
+The aggregate `scripts/definition-of-done.sh --all` run passed formatting,
+attribution, policy, target-manifest, and clippy checks, and built all test
+targets. Its completed core lanes did not finish green because of unrelated
+host/fixture issues: the library lane had 3,726 passing tests and one
+build-status fixture failure; `integration_spawn` reached 381 passing tests
+and two failures before its 900-second timeout; `integration_tests` had one
+template failure; and `real_br_integration_tests` had two environment/state
+failures. P2 and P3 both passed. The run was stopped before auxiliary lanes
+could start because another worker held the shared cargo target lock. These
+issues are recorded under [Remaining limitations](#remaining-limitations);
+they do not exercise or fail the mitosis interaction paths.
 
 ---
 
@@ -325,6 +350,22 @@ and a `#[tokio::test]`-native timeout on that test is the tripwire, not a fix.
    `max_depth: 2`) still admit ~73 beads from one unsplittable parent
    (needle-3f82395d); a runaway fixture can still create real children if
    pointed at a real store. Mock stores only.
+7. **The full aggregate gate is not green in this clean-archive host run.**
+   `build_status::tests::fake_red_status_allows_only_repair_labels_and_green_is_normal`
+   and `process_command_contracts::archive_and_status_process_contracts_workspace_template`
+   expect a `remote.origin.url` from an archive checkout or hand-written Git
+   metadata; the archive has no `.git`, and the hand-written fixture is not a
+   complete Git repository. `process_lifecycle::worker_rejects_an_invalid_reload_without_failing_its_lifecycle`
+   also exceeded the 900-second integration target timeout. The aggregate
+   `integration_tests` lane separately failed
+   `template_comprehensive_tests::test_full_pipeline_render_all_bead_rs_operations`
+   on an unrendered `{input}` placeholder, while the real bead-rs lane failed
+   `bead_rs_split_fixture_is_correctly_gated_without_transactional_batch`
+   on a capability expectation and
+   `saturated_host_worker_stays_resident_until_load_clears` on quarantine
+   timing. These failures are outside mitosis; use the two focused commands
+   above to verify mitosis until the unrelated fixtures and host-sensitive
+   tests are fixed.
 
 ---
 
