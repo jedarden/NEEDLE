@@ -1,3 +1,7 @@
+[workspace]
+members = ["crates/needle-learning"]
+resolver = "2"
+
 [package]
 name = "needle"
 version = "0.6.6"
@@ -51,6 +55,11 @@ integration = [
 integration-t = []
 
 [dependencies]
+# The learning kernel is an internal, dependency-isolated library.  Keeping it
+# as a normal dependency makes it part of the NEEDLE release artifact while
+# the workspace member also permits direct kernel checks and tests.
+needle-learning = { path = "crates/needle-learning", version = "0.6.6" }
+
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 

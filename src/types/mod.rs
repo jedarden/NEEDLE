@@ -15,6 +15,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 // ──────────────────────────────────────────────────────────────────────────────
+/// Read-only transition adapters into the internal learning kernel.
+pub mod learning;
+
 // BeadId newtype
 // ──────────────────────────────────────────────────────────────────────────────
 

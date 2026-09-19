@@ -289,6 +289,12 @@ trap 'rm -rf -- "$probe_root"' EXIT
 cp "$MANIFEST" "$probe_root/Cargo.toml"
 ln -s "$REPO_ROOT/Cargo.lock" "$probe_root/Cargo.lock"
 ln -s "$REPO_ROOT/src" "$probe_root/src"
+if [[ -f "$REPO_ROOT/crates/needle-learning/Cargo.toml" ]]; then
+  mkdir -p "$probe_root/crates/needle-learning"
+  ln -s "$REPO_ROOT/crates/needle-learning/Cargo.toml" "$probe_root/crates/needle-learning/Cargo.toml"
+  ln -s "$REPO_ROOT/crates/needle-learning/src" "$probe_root/crates/needle-learning/src"
+  ln -s "$REPO_ROOT/crates/needle-learning/tests" "$probe_root/crates/needle-learning/tests"
+fi
 ln -s "$REPO_ROOT/benches" "$probe_root/benches"
 mkdir "$probe_root/tests"
 while IFS= read -r target; do

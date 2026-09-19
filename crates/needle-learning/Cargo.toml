@@ -1,0 +1,13 @@
+[package]
+name = "needle-learning"
+version = "0.6.6"
+edition = "2021"
+rust-version = "1.75"
+description = "Pure in-process learning kernel for NEEDLE"
+license = "MIT"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"

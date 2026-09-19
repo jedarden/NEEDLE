@@ -1368,6 +1368,7 @@ dependencies = [
  "glob",
  "hex",
  "libc",
+ "needle-learning",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry-semantic-conventions",
@@ -1395,6 +1396,14 @@ dependencies = [
  "ureq",
  "uuid",
  "which",
+]
+
+[[package]]
+name = "needle-learning"
+version = "0.6.6"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

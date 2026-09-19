@@ -134,6 +134,9 @@ use crate::trace::{
 use crate::tsnet::{inject_identity_env, IdentityRegistry, TsnetConfig};
 use crate::types::{BeadId, InputMethod};
 
+/// Pure adapters for exporting process observations to the learning kernel.
+pub mod learning;
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Extraction module
 // ──────────────────────────────────────────────────────────────────────────────

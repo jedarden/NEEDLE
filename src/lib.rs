@@ -3,6 +3,9 @@
 //! Library crate exposing the public API for integration tests and embedding.
 
 pub mod adapter_usage;
+/// The pure learning kernel shipped as part of the NEEDLE release.
+pub use needle_learning;
+
 pub mod agent_event;
 pub mod attempt_accounting;
 pub mod attempt_archive;
