@@ -204,6 +204,21 @@ name = "nt07_proposal_contract"
 path = "tests/nt07_proposal_contract.rs"
 harness = true
 
+[[test]]
+name = "nt07_impact_contract"
+path = "tests/nt07_impact_contract.rs"
+harness = true
+
+[[test]]
+name = "nt07_impact_scoring"
+path = "tests/nt07_impact_scoring.rs"
+harness = true
+
+[[test]]
+name = "nt07_executable_admission"
+path = "tests/nt07_executable_admission.rs"
+harness = true
+
 [[bench]]
 name = "sanitize"
 harness = false

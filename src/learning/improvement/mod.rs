@@ -15,11 +15,27 @@
 //! | Stage | Plan | Bead | Here |
 //! | --- | --- | --- | --- |
 //! | Envelope | 4.10 | `needle-2b0a309b` | [`envelope`] |
+//! | Impact contract | 4.10 | `needle-9c5ee565` | [`impact`] |
+//! | Executability | 4.10 | `needle-8c3520f7` | [`executable`] |
+//! | Ranking | 4.10 | `needle-29f396d3` | [`scoring`] |
 
 pub mod envelope;
+pub mod executable;
+pub mod impact;
+pub mod scoring;
 
 pub use envelope::{
     AcceptanceMeasure, AuthorityLevel, Direction, EvidenceClass, EvidenceKind, EvidenceRef,
     ImpactMeasure, ImprovementProposal, ProposalRejection, ProposalScope, Rollback,
     IMPROVEMENT_PROPOSAL_SCHEMA_VERSION, PROPOSAL_REF_NAMESPACE,
+};
+pub use executable::{
+    assess as assess_executability, ExecutableProposal, ExecutionPlan, NonExecutable,
+};
+pub use impact::{
+    Band, Confidence, EffortEstimate, ImpactContract, ProducerEvidence, WorkspaceImpactProfile,
+    IMPACT_CONTRACT_SCHEMA_VERSION,
+};
+pub use scoring::{
+    rank, score, ScoreComponents, ScoredProposal, ScoringPolicy, SCORING_POLICY_VERSION,
 };

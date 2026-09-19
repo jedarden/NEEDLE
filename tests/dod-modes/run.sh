@@ -118,14 +118,14 @@ else
 fi
 
 # ── needle_slow_targets ──────────────────────────────────────────────────────
-assert_lines "target table lists fourteen names" 14 needle_slow_targets
+assert_lines "target table lists seventeen names" 17 needle_slow_targets
 
 # Exact set, asserted literally: a renamed or dropped target must be caught
 # here rather than silently accepted by every consumer of the table.
-WANT_TABLE="$(printf '%s\n' lib integration_spawn integration_tests p2_integration_tests p3_integration_tests real_br_integration_tests escalation_ladder nt45_failure_evidence_capture nt50_exception_lessons nt51_adapter_usage_capture nt51_gateway_health nt52_state_dir_isolation nt07_proposal_contract installer)"
+WANT_TABLE="$(printf '%s\n' lib integration_spawn integration_tests p2_integration_tests p3_integration_tests real_br_integration_tests escalation_ladder nt45_failure_evidence_capture nt50_exception_lessons nt51_adapter_usage_capture nt51_gateway_health nt52_state_dir_isolation nt07_proposal_contract nt07_impact_contract nt07_impact_scoring nt07_executable_admission installer)"
 GOT_TABLE="$(needle_slow_targets)"
 if [[ "$GOT_TABLE" == "$WANT_TABLE" ]]; then
-  ok "target table is exactly the thirteen cargo targets plus installer"
+  ok "target table is exactly the sixteen cargo targets plus installer"
 else
   bad "target table drifted (got: $(echo "$GOT_TABLE" | tr '\n' ' '))"
 fi
@@ -164,7 +164,7 @@ assert_fails "installer has no nextest filter" needle_nextest_filter installer
 
 # ── selected_cargo_targets ───────────────────────────────────────────────────
 SLOW_TARGET=""
-assert_lines "default selection is all thirteen cargo targets" 13 selected_cargo_targets
+assert_lines "default selection is all sixteen cargo targets" 16 selected_cargo_targets
 
 WANT_DEFAULT="$(needle_expected_slow_targets | grep -vx installer)"
 GOT_DEFAULT="$(selected_cargo_targets)"
@@ -185,7 +185,8 @@ if (
     printf '%s\n' lib integration_tests p2_integration_tests \
       p3_integration_tests real_br_integration_tests escalation_ladder \
       nt45_failure_evidence_capture nt50_exception_lessons nt51_adapter_usage_capture \
-      nt51_gateway_health nt52_state_dir_isolation nt07_proposal_contract installer
+      nt51_gateway_health nt52_state_dir_isolation nt07_proposal_contract nt07_impact_contract \
+      nt07_impact_scoring nt07_executable_admission installer
   }
   needle_validate_slow_target_coverage
 ) >/dev/null 2>&1; then
@@ -280,10 +281,13 @@ WANT_HARNESSES="$(printf '%s\t%s\n' \
   nt51_adapter_usage_capture tests/nt51_adapter_usage_capture.rs \
   nt51_gateway_health tests/nt51_gateway_health.rs \
   nt52_state_dir_isolation tests/nt52_state_dir_isolation.rs \
-  nt07_proposal_contract tests/nt07_proposal_contract.rs)"
+  nt07_proposal_contract tests/nt07_proposal_contract.rs \
+  nt07_impact_contract tests/nt07_impact_contract.rs \
+  nt07_impact_scoring tests/nt07_impact_scoring.rs \
+  nt07_executable_admission tests/nt07_executable_admission.rs)"
 GOT_HARNESSES="$(needle_declared_test_harnesses)"
 if [[ "$GOT_HARNESSES" == "$WANT_HARNESSES" ]]; then
-  ok "Clippy reads the twelve declared test harness roots from Cargo.toml"
+  ok "Clippy reads the fifteen declared test harness roots from Cargo.toml"
 else
   bad "declared test harness parsing drifted (got: $(echo "$GOT_HARNESSES" | tr '\n' ' '))"
 fi
