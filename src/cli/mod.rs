@@ -3680,6 +3680,9 @@ fn cmd_status(
     let registered_count = workers.len();
     let discovered_count = discovered.len();
     let total_beads: u64 = workers.iter().map(|w| w.beads_processed).sum();
+    let false_close_counts = telemetry::read_logs(&needle_home.join("logs"), None, None, None)
+        .map(|events| telemetry::compute_false_close_counts(&events))
+        .unwrap_or_default();
 
     // Check heartbeat health for registered workers.
     let heartbeat_dir = needle_home.join("state").join("heartbeats");
@@ -3728,6 +3731,23 @@ fn cmd_status(
             println!("  Total beads processed: {total_beads}");
             if !unregistered.is_empty() {
                 println!("  Unregistered workers: {} (WARN)", unregistered.len());
+            }
+            println!();
+
+            println!("False Closes by Adapter:");
+            println!("{:<28} {:<28} COUNT", "ADAPTER", "MODEL");
+            println!("{}", "-".repeat(68));
+            if false_close_counts.is_empty() {
+                println!("  none");
+            } else {
+                for count in &false_close_counts {
+                    println!(
+                        "{:<28} {:<28} {}",
+                        count.adapter,
+                        count.model.as_deref().unwrap_or("-"),
+                        count.count
+                    );
+                }
             }
             println!();
 
@@ -3908,6 +3928,13 @@ fn cmd_status(
                 "registered_workers": registered_count,
                 "discovered_workers": discovered_count,
                 "total_beads_processed": total_beads,
+                "false_close_counts": false_close_counts.iter().map(|count| {
+                    serde_json::json!({
+                        "adapter": count.adapter,
+                        "model": count.model,
+                        "count": count.count,
+                    })
+                }).collect::<Vec<_>>(),
                 "workspaces": graph_statuses
                     .iter()
                     .map(workspace_graph_status_json)

@@ -22,7 +22,7 @@ use crate::gate_health;
 use crate::quarantine_expiry::{
     capped_exponential_backoff, content_hash_label, QUARANTINE_BASE_SECS, QUARANTINE_MAX_SECS,
 };
-use crate::telemetry::{EventKind, Telemetry};
+use crate::telemetry::{EventKind, FalseCloseClass, Telemetry};
 use crate::types::{
     AgentOutcome, Bead, BeadAction, BeadId, BeadStatus, HandlerResult, Outcome, ReleaseReason,
 };
@@ -63,6 +63,48 @@ fn summary_short(summary: &str) -> &str {
 /// restoration can put the count back where it was before the window opened
 /// rather than wiping a history that predates it.
 const DEGRADED_WINDOW_MARKER_PREFIX: &str = "degraded-window-failure:";
+
+/// Classify the validation failure that caused a closed bead to be reopened.
+/// The gate name is more reliable than free-form output for the built-in
+/// clean-extraction paths; command text fills in the named-test case for
+/// explicit close evidence and configured gates.
+fn false_close_class(gate: &str, reason: &str) -> FalseCloseClass {
+    let reason = reason.to_ascii_lowercase();
+    if gate == fallback_verification::CLEAN_TREE_GATE_NAME
+        || reason.contains("uncommitted")
+        || reason.contains("dirty tree")
+    {
+        return FalseCloseClass::UncommittedDependency;
+    }
+    if gate == close_verification::GATE_NAME
+        && (reason.contains("no verification evidence")
+            || reason.contains("no close reason")
+            || reason.contains("without evidence"))
+    {
+        return FalseCloseClass::NoEvidence;
+    }
+    if gate == "shipped_work"
+        || reason.contains("deliverable")
+        || reason.contains("not done")
+        || reason.contains("blocked")
+    {
+        return FalseCloseClass::DeliverableBlocked;
+    }
+    if gate == close_verification::GATE_NAME
+        && ["cargo test", "go test", "npm test", "pytest", "make test"]
+            .iter()
+            .any(|command| reason.contains(command))
+    {
+        return FalseCloseClass::NamedTestRed;
+    }
+    if gate.starts_with("fallback_") {
+        return FalseCloseClass::NeverCompiled;
+    }
+    if reason.contains("test") {
+        return FalseCloseClass::NamedTestRed;
+    }
+    FalseCloseClass::NeverCompiled
+}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // classify (convenience re-export)
@@ -2981,6 +3023,7 @@ impl OutcomeHandler {
             .is_some_and(gate_health::VerificationRecording::is_infra);
 
         let mut events = Vec::new();
+        let mut false_close_detected = false;
 
         // If the agent already closed the bead, reopen it before releasing.
         // Use timeout to prevent indefinite hang in HANDLING state.
@@ -2991,7 +3034,29 @@ impl OutcomeHandler {
                     "reopening bead closed by agent (verification failed)"
                 );
                 match self.timeout_op(|| store.reopen(&bead.id), "reopen").await {
-                    Ok(_) => {}
+                    Ok(Some(_)) => {
+                        false_close_detected = true;
+                        let attempt = self.peek_attempt_context();
+                        events.push(EventKind::FalseCloseDetected {
+                            bead_id: bead.id.clone(),
+                            workspace: bead.workspace.display().to_string(),
+                            adapter: if attempt.adapter.is_empty() {
+                                "unknown".to_string()
+                            } else {
+                                attempt.adapter
+                            },
+                            model: attempt.model,
+                            class: false_close_class(&failed_gate, &reason),
+                        });
+                    }
+                    Ok(None) => {
+                        events.push(EventKind::WorkerHandlingTimeout {
+                            bead_id: bead.id.clone(),
+                            outcome: "gate_failure".to_string(),
+                            operation: "reopen".to_string(),
+                            error: "timeout after 30s".to_string(),
+                        });
+                    }
                     Err(e) => {
                         tracing::warn!(
                             bead_id = %bead.id,
@@ -3047,7 +3112,7 @@ impl OutcomeHandler {
             .iter()
             .any(|e| matches!(e, EventKind::WorkerHandlingTimeout { .. }));
         let mut action = BeadAction::Released(ReleaseReason::GateFailed);
-        if infra_failure {
+        if infra_failure && !false_close_detected {
             // The gate, not the bead, produced this failure. Release without
             // incrementing the failure count — the same contract as a gate
             // that could not run at all — so no bead can reach quarantine on
@@ -3098,7 +3163,7 @@ impl OutcomeHandler {
         // Add a label indicating verification failure — but not for an
         // infrastructure failure: the bead's work was never judged, and a
         // `verification-failed` label would misrank it in later selection.
-        if !infra_failure {
+        if !infra_failure || false_close_detected {
             if let Err(e) = tokio::time::timeout(
                 std::time::Duration::from_secs(30),
                 store.add_label(&bead.id, "verification-failed"),
@@ -4429,7 +4494,9 @@ impl OutcomeHandler {
     /// Quarantine a bead with an expiring, fleet-visible label window.
     ///
     /// This is called when a bead exceeds the configured failure threshold.
-    /// Emits a BeadQuarantined telemetry event and a FalseCloseDetected event.
+    /// Emits the BeadQuarantined telemetry event. False-close telemetry is
+    /// emitted at the reopen boundary in `handle_gate_failure`, so ordinary
+    /// failed dispatches that reach quarantine are not mislabeled.
     ///
     /// All `br` calls are wrapped in timeouts to prevent indefinite hang in
     /// HANDLING state. Failures are non-fatal — we log and continue.
@@ -4504,22 +4571,12 @@ impl OutcomeHandler {
             .ok_or_else(|| anyhow::anyhow!("timed out pruning old quarantine label"))?;
         }
 
-        let events = vec![
-            EventKind::BeadQuarantined {
-                bead_id: bead.id.clone(),
-                round,
-                until: until.to_rfc3339(),
-                failure_count,
-            },
-            // Keep the pre-existing false-close signal for dashboards and
-            // operators alongside the more specific quarantine event.
-            EventKind::FalseCloseDetected {
-                bead_id: bead.id.clone(),
-                failure_count,
-                threshold,
-                reason: "shipped-work-verification-failed".to_string(),
-            },
-        ];
+        let events = vec![EventKind::BeadQuarantined {
+            bead_id: bead.id.clone(),
+            round,
+            until: until.to_rfc3339(),
+            failure_count,
+        }];
 
         Ok(events)
     }
@@ -5774,42 +5831,37 @@ mod tests {
         config.worker.enforce_shipped_work = true;
         let handler = test_handler_with_config(config);
 
-        // First attempt: bead has failure-count:2, closes with no shipped work
-        let store =
-            MockBeadStore::new(BeadStatus::Done).with_labels(vec!["failure-count:2".to_string()]);
-        let bead = test_bead(BeadStatus::InProgress);
+        for prior_count in 0..3 {
+            let labels = (prior_count > 0)
+                .then(|| format!("failure-count:{prior_count}"))
+                .into_iter()
+                .collect();
+            let store = MockBeadStore::new(BeadStatus::Done).with_labels(labels);
+            let bead = test_bead(BeadStatus::InProgress);
+            let result = handler
+                .handle(&store, &bead, &test_output(0), false)
+                .await
+                .unwrap();
 
-        let result = handler
-            .handle(&store, &bead, &test_output(0), false)
-            .await
-            .unwrap();
-
-        // Should quarantine because shipped-work check fails
-        assert_eq!(result.bead_action, BeadAction::Quarantined);
-        let actions = store.actions();
-        assert!(actions
-            .iter()
-            .any(|a| matches!(a, StoreAction::AddLabel(_, label) if label == "quarantined")));
-        assert!(actions.iter().any(
-            |a| matches!(a, StoreAction::AddLabel(_, label) if label.starts_with("quarantine-until:"))
-        ));
-        assert!(
-            actions.iter().any(
-                |a| matches!(a, StoreAction::AddLabel(_, label) if label.contains("quarantine:"))
-            ),
-            "quarantine must add a reason label"
-        );
-        assert!(
-            result.telemetry_events.iter().any(|e| matches!(
-                e,
+            assert!(result.telemetry_events.iter().any(|event| matches!(
+                event,
                 EventKind::FalseCloseDetected {
-                    failure_count: 3,
-                    threshold: 3,
+                    class: FalseCloseClass::DeliverableBlocked,
                     ..
                 }
-            )),
-            "must emit FalseCloseDetected with failure_count=3"
-        );
+            )));
+            if prior_count == 2 {
+                assert_eq!(result.bead_action, BeadAction::Quarantined);
+                assert!(store.actions().iter().any(
+                    |action| matches!(action, StoreAction::AddLabel(_, label) if label == "failure-count:3")
+                ));
+                assert!(store.actions().iter().any(
+                    |action| matches!(action, StoreAction::AddLabel(_, label) if label == "quarantined")
+                ));
+            } else {
+                assert!(matches!(result.bead_action, BeadAction::Released(_)));
+            }
+        }
     }
 
     #[tokio::test]

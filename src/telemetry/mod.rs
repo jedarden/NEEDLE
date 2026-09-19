@@ -384,6 +384,42 @@ pub(crate) fn redact_claim_credentials(detail: &str) -> String {
     }
 }
 
+/// The validation failure class for an agent closing work that NEEDLE reopens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FalseCloseClass {
+    NeverCompiled,
+    UncommittedDependency,
+    NamedTestRed,
+    NoEvidence,
+    DeliverableBlocked,
+}
+
+impl FalseCloseClass {
+    pub const ALL: [Self; 5] = [
+        Self::NeverCompiled,
+        Self::UncommittedDependency,
+        Self::NamedTestRed,
+        Self::NoEvidence,
+        Self::DeliverableBlocked,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NeverCompiled => "never_compiled",
+            Self::UncommittedDependency => "uncommitted_dependency",
+            Self::NamedTestRed => "named_test_red",
+            Self::NoEvidence => "no_evidence",
+            Self::DeliverableBlocked => "deliverable_blocked",
+        }
+    }
+}
+
+impl std::fmt::Display for FalseCloseClass {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Typed event variants emitted by all NEEDLE components.
 ///
 /// Every variant maps to a a `TelemetryEvent` with `event_type` matching
@@ -878,14 +914,13 @@ pub enum EventKind {
         bead_id: BeadId,
         analysis: String,
     },
-    /// False close detected: bead appeared closed but shipped-work verification failed.
-    /// This indicates the agent closed the bead without actually shipping work (e.g.,
-    /// a GitHub comment was posted but not verified, causing a repeat loop).
+    /// A validation gate reopened a bead that the agent had already closed.
     FalseCloseDetected {
         bead_id: BeadId,
-        failure_count: u32,
-        threshold: u32,
-        reason: String,
+        workspace: String,
+        adapter: String,
+        model: Option<String>,
+        class: FalseCloseClass,
     },
 
     // ── Agent dispatch ──
@@ -3918,14 +3953,16 @@ impl EventKind {
             }),
             EventKind::FalseCloseDetected {
                 bead_id,
-                failure_count,
-                threshold,
-                reason,
+                workspace,
+                adapter,
+                model,
+                class,
             } => serde_json::json!({
                 "bead_id": bead_id,
-                "failure_count": failure_count,
-                "threshold": threshold,
-                "reason": reason,
+                "workspace": workspace,
+                "adapter": adapter,
+                "model": model,
+                "class": class.as_str(),
             }),
             EventKind::SpawnPathModifiedInPlace {
                 path,
@@ -6450,6 +6487,50 @@ pub struct CostSummary {
     pub total_elapsed_ms: u64,
 }
 
+/// False-close totals grouped by the adapter/model identity that produced
+/// them. The status command uses this as the operator-facing quarantine
+/// signal for adapters that repeatedly close work before it is verified.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FalseCloseCount {
+    pub adapter: String,
+    pub model: Option<String>,
+    pub count: u64,
+}
+
+/// Count false-close events by adapter and model.
+pub fn compute_false_close_counts(events: &[TelemetryEvent]) -> Vec<FalseCloseCount> {
+    let mut counts: std::collections::BTreeMap<(String, Option<String>), u64> =
+        std::collections::BTreeMap::new();
+    for event in events {
+        if event.event_type != "bead.false_close_detected" {
+            continue;
+        }
+        let adapter = event.data["adapter"]
+            .as_str()
+            .filter(|adapter| !adapter.is_empty())
+            .unwrap_or("unknown")
+            .to_string();
+        let model = event.data["model"].as_str().map(str::to_string);
+        *counts.entry((adapter, model)).or_default() += 1;
+    }
+
+    let mut result: Vec<_> = counts
+        .into_iter()
+        .map(|((adapter, model), count)| FalseCloseCount {
+            adapter,
+            model,
+            count,
+        })
+        .collect();
+    result.sort_by(|a, b| {
+        b.count
+            .cmp(&a.count)
+            .then_with(|| a.adapter.cmp(&b.adapter))
+            .then_with(|| a.model.cmp(&b.model))
+    });
+    result
+}
+
 /// Per-worker cost breakdown from effort events.
 #[derive(Debug, Default)]
 pub struct WorkerCostSummary {
@@ -8796,8 +8877,71 @@ mod tests {
         assert!(!filter.matches(&wrong_type));
     }
 
+    fn assert_false_close_telemetry_contract() {
+        let event = EventKind::FalseCloseDetected {
+            bead_id: BeadId::from("nd-false-close"),
+            workspace: "/tmp/workspace".to_string(),
+            adapter: "claude-code".to_string(),
+            model: Some("claude-sonnet".to_string()),
+            class: FalseCloseClass::NamedTestRed,
+        };
+
+        assert_eq!(event.event_type(), "bead.false_close_detected");
+        assert_eq!(event.to_data()["workspace"], "/tmp/workspace");
+        assert_eq!(event.to_data()["adapter"], "claude-code");
+        assert_eq!(event.to_data()["model"], "claude-sonnet");
+        assert_eq!(event.to_data()["class"], "named_test_red");
+
+        let event = |adapter: &str, model: Option<&str>| TelemetryEvent {
+            timestamp: Utc::now(),
+            event_type: "bead.false_close_detected".to_string(),
+            worker_id: "alpha".to_string(),
+            session_id: "session".to_string(),
+            sequence: 0,
+            bead_id: Some(BeadId::from("nd-false-close")),
+            workspace: None,
+            data: serde_json::json!({
+                "adapter": adapter,
+                "model": model,
+                "class": "no_evidence",
+            }),
+            duration_ms: None,
+            trace_id: None,
+            span_id: None,
+            attempt_id: None,
+        };
+        let counts = compute_false_close_counts(&[
+            event("claude-code", Some("sonnet")),
+            event("claude-code", Some("sonnet")),
+            event("claude-code", Some("opus")),
+            event("codex", None),
+        ]);
+
+        assert_eq!(
+            counts,
+            vec![
+                FalseCloseCount {
+                    adapter: "claude-code".to_string(),
+                    model: Some("sonnet".to_string()),
+                    count: 2,
+                },
+                FalseCloseCount {
+                    adapter: "claude-code".to_string(),
+                    model: Some("opus".to_string()),
+                    count: 1,
+                },
+                FalseCloseCount {
+                    adapter: "codex".to_string(),
+                    model: None,
+                    count: 1,
+                },
+            ]
+        );
+    }
+
     #[test]
     fn compute_cost_summary_aggregates() {
+        assert_false_close_telemetry_contract();
         let events = vec![
             TelemetryEvent {
                 timestamp: Utc::now(),

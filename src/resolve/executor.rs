@@ -150,22 +150,17 @@ pub struct DecisionExecutor {
     /// Whether `complete` must pass shipped-work verification before the
     /// executor closes. Same switch as the dispatch path's gate.
     enforce_shipped_work: bool,
-    /// Failure count at which a bead quarantines; carried into
-    /// `FalseCloseDetected` telemetry for operator context.
-    quarantine_threshold: u32,
 }
 
 impl DecisionExecutor {
     /// Create an executor from the worker's resolved configuration.
     pub fn new(config: Config, telemetry: Telemetry) -> Self {
         let enforce_shipped_work = config.worker.enforce_shipped_work;
-        let quarantine_threshold = config.outcome.quarantine_after_failures;
         DecisionExecutor {
             outcome: OutcomeHandler::new(config, telemetry.clone()),
             telemetry,
             mitosis: None,
             enforce_shipped_work,
-            quarantine_threshold,
         }
     }
 
@@ -779,7 +774,7 @@ impl DecisionExecutor {
         store: &dyn BeadStore,
         bead: &Bead,
         actor: &str,
-        reason: &str,
+        _reason: &str,
     ) -> Result<AppliedDecision> {
         // Failure accounting is itself a lifecycle mutation. Re-check before
         // touching labels so a dispatch that lost its claim while the gate or
@@ -787,20 +782,11 @@ impl DecisionExecutor {
         if !self.ensure_owned(store, &bead.id, actor).await? {
             return Ok(AppliedDecision::OwnershipLost);
         }
-        let count = self
+        let _ = self
             .outcome
             .increment_failure_count(store, bead)
             .await
             .unwrap_or(0);
-        let _ = self.telemetry.emit(
-            EventKind::FalseCloseDetected {
-                bead_id: bead.id.clone(),
-                failure_count: count,
-                threshold: self.quarantine_threshold,
-                reason: reason.to_string(),
-            },
-            Utc::now(),
-        );
         match self
             .release_owned(store, bead, actor, ReleaseCause::Rejected)
             .await
