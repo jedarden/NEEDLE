@@ -1217,7 +1217,30 @@ mod tests {
 
     #[tokio::test]
     async fn fake_red_status_allows_only_repair_labels_and_green_is_normal() {
-        let workspace = Path::new(env!("CARGO_MANIFEST_DIR"));
+        // Keep this test independent of whether the test process came from a
+        // Git checkout. `git archive HEAD` is the required verification
+        // environment, so `CARGO_MANIFEST_DIR` has no `.git` directory or
+        // remote to inspect.
+        let workspace = tempfile::tempdir().expect("create Git workspace fixture");
+        for path in [
+            ".git/hooks",
+            ".git/info",
+            ".git/objects/info",
+            ".git/objects/pack",
+            ".git/refs/heads",
+            ".git/refs/tags",
+        ] {
+            std::fs::create_dir_all(workspace.path().join(path))
+                .expect("create Git metadata fixture");
+        }
+        std::fs::write(workspace.path().join(".git/HEAD"), "ref: refs/heads/main\n")
+            .expect("write Git HEAD fixture");
+        std::fs::write(
+            workspace.path().join(".git/config"),
+            "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n\tlogallrefupdates = true\n[remote \"origin\"]\n\turl = file:///nonexistent/NEEDLE.git\n",
+        )
+        .expect("write Git remote fixture");
+        let workspace = workspace.path();
         let red = CircuitPolicy::new(
             BuildStatusChecker::with_source(60, Arc::new(FixedSource::failing_run())),
             vec!["fix-build".to_string()],
