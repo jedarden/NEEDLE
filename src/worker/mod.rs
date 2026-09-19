@@ -1744,8 +1744,15 @@ impl Worker {
                 }
                 WorkerState::Handling => {
                     let action = self.do_handle().instrument(lifecycle_span.clone()).await;
-                    self.apply_bead_action(action).await?;
-                    self.run_post_dispatch_resolution().await?;
+                    // Always perform the post-dispatch audit, even when the
+                    // ordinary action failed to apply. A failed release is
+                    // precisely one way a completed Pluck can leave its
+                    // claim behind, and Resolve must get a chance to recover
+                    // it before this cycle can reach LOGGING/SELECTING.
+                    let action_result = self.apply_bead_action(action).await;
+                    let resolution_result = self.run_post_dispatch_resolution().await;
+                    action_result?;
+                    resolution_result?;
                 }
                 WorkerState::Logging => {
                     // LOGGING is the one synchronous handler, so it scopes the
@@ -5167,36 +5174,48 @@ impl Worker {
                 bead_id = %bead.id,
                 "post-dispatch resolution reached while the Pluck process is still active"
             );
-            return self
-                .record_resolution_failure(&bead, "agent_process_active", 0)
-                .await;
+            // Do not invoke Resolve, or release a claim, while the agent may
+            // still be mutating the workspace. Returning an error keeps the
+            // worker from advancing to SELECTING with an un-audited claim.
+            bail!("post-dispatch resolution reached while agent process is active");
         }
 
-        let claim_status =
-            match tokio::time::timeout(Duration::from_secs(30), self.store.claim_status(&bead.id))
-                .await
-            {
-                Ok(Ok(status)) => status,
-                Ok(Err(error)) => {
-                    tracing::warn!(
-                        bead_id = %bead.id,
-                        error = %error,
-                        "post-dispatch claim check failed"
-                    );
-                    return self
-                        .record_resolution_failure(&bead, "claim_status_failed", 0)
-                        .await;
-                }
-                Err(_) => {
-                    tracing::warn!(
-                        bead_id = %bead.id,
-                        "post-dispatch claim check timed out"
-                    );
-                    return self
-                        .record_resolution_failure(&bead, "claim_status_timeout", 0)
-                        .await;
-                }
-            };
+        let target_store = match self.target_store.as_ref() {
+            Some(context) => context.store(),
+            None => {
+                return self
+                    .record_resolution_failure(&bead, "target_store_unavailable", 0)
+                    .await;
+            }
+        };
+
+        let claim_status = match tokio::time::timeout(
+            Duration::from_secs(30),
+            target_store.claim_status(&bead.id),
+        )
+        .await
+        {
+            Ok(Ok(status)) => status,
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    error = %error,
+                    "post-dispatch claim check failed"
+                );
+                return self
+                    .record_resolution_failure(&bead, "claim_status_failed", 0)
+                    .await;
+            }
+            Err(_) => {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    "post-dispatch claim check timed out"
+                );
+                return self
+                    .record_resolution_failure(&bead, "claim_status_timeout", 0)
+                    .await;
+            }
+        };
 
         if !self.claim_belongs_to_dispatch(&claim_status) {
             // The agent or the normal handler already completed the lifecycle,
@@ -5213,29 +5232,33 @@ impl Worker {
                 .await;
         }
 
-        let current =
-            match tokio::time::timeout(Duration::from_secs(30), self.store.show(&bead.id)).await {
-                Ok(Ok(current)) => current,
-                Ok(Err(error)) => {
-                    tracing::warn!(
-                        bead_id = %bead.id,
-                        error = %error,
-                        "post-dispatch could not refresh the claimed bead"
-                    );
-                    return self
-                        .record_resolution_failure(&bead, "bead_refresh_failed", 0)
-                        .await;
-                }
-                Err(_) => {
-                    tracing::warn!(
-                        bead_id = %bead.id,
-                        "post-dispatch bead refresh timed out"
-                    );
-                    return self
-                        .record_resolution_failure(&bead, "bead_refresh_timeout", 0)
-                        .await;
-                }
-            };
+        let current = match tokio::time::timeout(
+            Duration::from_secs(30),
+            target_store.show(&bead.id),
+        )
+        .await
+        {
+            Ok(Ok(current)) => current,
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    error = %error,
+                    "post-dispatch could not refresh the claimed bead"
+                );
+                return self
+                    .record_resolution_failure(&bead, "bead_refresh_failed", 0)
+                    .await;
+            }
+            Err(_) => {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    "post-dispatch bead refresh timed out"
+                );
+                return self
+                    .record_resolution_failure(&bead, "bead_refresh_timeout", 0)
+                    .await;
+            }
+        };
 
         if !self.config.strands.resolve.enabled {
             tracing::warn!(
@@ -5322,7 +5345,7 @@ impl Worker {
         });
         let applied = match executor
             .apply(
-                self.store.as_ref(),
+                target_store.as_ref(),
                 &current,
                 &decision,
                 &self.qualified_id(),
@@ -5367,7 +5390,7 @@ impl Worker {
         // still present.
         let post_apply_status = match tokio::time::timeout(
             Duration::from_secs(30),
-            self.store.claim_status(&current.id),
+            target_store.claim_status(&current.id),
         )
         .await
         {
@@ -5493,13 +5516,19 @@ impl Worker {
             emit_cleanup_skipped(
                 "resolved target store context is unavailable; leaving claim untouched".to_string(),
             );
-            return Ok(());
+            bail!(
+                "post-dispatch resolution cannot release {} without its resolved target store",
+                bead.id
+            );
         };
         let Some(claim_identity) = self.claim_identity.as_ref() else {
             emit_cleanup_skipped(
                 "held claim identity is unavailable; leaving claim untouched".to_string(),
             );
-            return Ok(());
+            bail!(
+                "post-dispatch resolution cannot release {} without its held claim identity",
+                bead.id
+            );
         };
 
         let expected = claim_identity.as_claim_status();
