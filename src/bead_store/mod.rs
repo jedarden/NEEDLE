@@ -1910,7 +1910,7 @@ mod tests {
             status: BeadStatus::Open,
             assignee: None,
             labels: Vec::new(),
-            workspace: fixture_root("probe"),
+            workspace: PathBuf::from("/tmp/probe"),
             dependencies: Vec::new(),
             dependents: Vec::new(),
             comments: Vec::new(),
