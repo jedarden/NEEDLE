@@ -56,8 +56,8 @@ use crate::span::ScopeGuard;
 use crate::strand::StrandRunner;
 use crate::telemetry::{EventKind, Telemetry};
 use crate::types::{
-    AgentOutcome, Bead, BeadAction, BeadId, BeadStatus, ClaimResult, IdleAction, Outcome,
-    ReleaseReason, WorkerState,
+    AgentOutcome, Bead, BeadAction, BeadId, BeadStatus, ClaimResult, ClaimStatus, IdleAction,
+    Outcome, ReleaseReason, WorkerState,
 };
 use crate::upgrade::{self, HotReloadCheck};
 use crate::validation::worker_config::{validate_idle_action_config, WorkerConfigValidationResult};
@@ -5125,6 +5125,19 @@ impl Worker {
     /// every ordinary release. At this point the agent process has been
     /// awaited, the normal action has run, and only an actually stranded claim
     /// can enter this path.
+    fn claim_belongs_to_dispatch(&self, status: &ClaimStatus) -> bool {
+        match &self.claim_identity {
+            Some(identity) => identity.mismatches(status).is_empty(),
+            None => {
+                // Production dispatches fail closed before spawning without a
+                // claim-time identity. Keep direct state-machine fixtures
+                // useful while still requiring the live claim to be ours.
+                status.status == BeadStatus::InProgress
+                    && status.assignee.as_deref() == Some(self.qualified_id().as_str())
+            }
+        }
+    }
+
     async fn run_post_dispatch_resolution(&mut self) -> Result<()> {
         if self.post_dispatch_resolution_attempted {
             return Ok(());
@@ -5185,9 +5198,7 @@ impl Worker {
                 }
             };
 
-        if claim_status.status != BeadStatus::InProgress
-            || claim_status.assignee.as_deref() != Some(self.qualified_id().as_str())
-        {
+        if !self.claim_belongs_to_dispatch(&claim_status) {
             // The agent or the normal handler already completed the lifecycle,
             // or another worker owns it now. This dispatch must not mutate it.
             return Ok(());
@@ -5349,6 +5360,56 @@ impl Worker {
                 .await;
         }
 
+        // The executor reports the action it attempted, but the lifecycle
+        // postcondition is about the live store. A backend that accepted a
+        // no-op, or a mutation that raced with another writer, must not let
+        // this completed dispatch return to SELECTING while its own claim is
+        // still present.
+        let post_apply_status = match tokio::time::timeout(
+            Duration::from_secs(30),
+            self.store.claim_status(&current.id),
+        )
+        .await
+        {
+            Ok(Ok(status)) => status,
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    bead_id = %current.id,
+                    error = %error,
+                    "Resolve action postcondition check failed"
+                );
+                return self
+                    .record_resolution_failure(
+                        &current,
+                        "resolver_postcondition_check_failed",
+                        resolve_started.elapsed().as_millis() as u64,
+                    )
+                    .await;
+            }
+            Err(_) => {
+                tracing::warn!(
+                    bead_id = %current.id,
+                    "Resolve action postcondition check timed out"
+                );
+                return self
+                    .record_resolution_failure(
+                        &current,
+                        "resolver_postcondition_check_timeout",
+                        resolve_started.elapsed().as_millis() as u64,
+                    )
+                    .await;
+            }
+        };
+        if self.claim_belongs_to_dispatch(&post_apply_status) {
+            return self
+                .record_resolution_failure(
+                    &current,
+                    "resolver_action_left_claimed",
+                    resolve_started.elapsed().as_millis() as u64,
+                )
+                .await;
+        }
+
         self.last_outcome = Some(format!("resolve:{}", decision.as_str()));
         let _ = self.telemetry.emit_try_lock(
             EventKind::ResolveEvaluated {
@@ -5404,14 +5465,26 @@ impl Worker {
             tokio::time::timeout(Duration::from_secs(30), self.store.claim_status(&bead.id))
                 .await
                 .context("post-dispatch release claim check timed out")??;
-        if status.status != BeadStatus::InProgress
-            || status.assignee.as_deref() != Some(self.qualified_id().as_str())
-        {
+        if !self.claim_belongs_to_dispatch(&status) {
             return Ok(());
         }
 
-        match tokio::time::timeout(Duration::from_secs(30), self.store.release(&bead.id)).await {
-            Ok(Ok(())) => {
+        // Prefer the claim-time fencing identity. If a direct state-machine
+        // fixture has no identity, use the just-read live status as the
+        // fallback guard; production dispatches always capture the identity
+        // before spawning the agent.
+        let expected = self
+            .claim_identity
+            .as_ref()
+            .map(ClaimIdentity::as_claim_status)
+            .unwrap_or(status);
+        match tokio::time::timeout(
+            Duration::from_secs(30),
+            self.store.release_recovery(&bead.id, &expected),
+        )
+        .await
+        {
+            Ok(Ok(RecoveryReleaseOutcome::Released)) => {
                 let _ = self.telemetry.emit_try_lock(
                     EventKind::BeadReleased {
                         bead_id: bead.id.clone(),
@@ -5419,6 +5492,12 @@ impl Worker {
                     },
                     Utc::now(),
                 );
+                Ok(())
+            }
+            Ok(Ok(RecoveryReleaseOutcome::Conflict)) => {
+                // Another writer changed the claim after the preflight read;
+                // conditional recovery correctly leaves that newer claim
+                // untouched.
                 Ok(())
             }
             Ok(Err(error)) => {
