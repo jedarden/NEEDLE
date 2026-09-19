@@ -8,3 +8,13 @@
 # pure re-exposure: extend the canonical config, never duplicate or weaken it.
 [extend]
 extPaths = ["config/gitleaks.toml"]
+
+# Forgejo's pre-receive scan may load this root file without applying the
+# rule-scoped allowance from the extended config.  These checkpoint records
+# contain published SHA256 metadata, not credentials; keep the exception
+# limited to the checkpoint paths and the exact API-digest shape.
+[[allowlists]]
+description = "NEEDLE checkpoint release-digest metadata"
+paths = ['^\\.beads/checkpoint/']
+regexTarget = "match"
+regexes = ['(?i)\\bAPI[ \\t]+digest:[ \\t]*[0-9a-f]{64}\\b']
