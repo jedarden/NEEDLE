@@ -87,6 +87,59 @@ bead is safely released or quarantined, never credited as complete.
 Implementation is complete only when crash-boundary and replay tests prove
 that one attempt produces at most one durable resolution and completion event.
 
+## Post-Pluck reconciliation audit
+
+The legacy post-Pluck graph was audited against this decision on 2026-09-19.
+The graph remains the compatibility path for existing lifecycle behavior; no
+resolver decision, ownership fence, release safety rule, split behavior, or
+operator event is removed merely to make the types look more like ADR-024.
+
+| Legacy surface | ADR-024 mapping and current boundary |
+| --- | --- |
+| `ResolveResponse`, `ResolveDecision`, and `resolve_strict` | A bounded resolver proposal. `Complete`, `Retry`, `Blocked`, and `Split` are requested lifecycle actions, not semantic `AttemptOutcome` values and not authoritative `Resolution` records. Strict parsing and the safe fallback remain required compatibility behavior. |
+| `ResolveContext` | An adapter from dispatch observations (bead, exit, output, duration, interruption, and optional evidence) into the resolver prompt. It is not yet a durable, versioned `ContextManifest`; its fields must not be treated as authoritative provenance. |
+| `resolve::evidence::EvidenceBundle` and its seven sections | The current bounded, sanitized, read-only implementation of the ADR evidence concept: acceptance criteria, dispatch output, Git state, commits/diff, validation, failure history, and trace tail. It is captured for resolution and telemetry, but is not yet a versioned durable record with a manifest identity. |
+| `DecisionExecutor`, `AppliedDecision`, and `ReleaseCause` | The legacy Resolution applier. Ownership checks, validation gates, safe release, split compensation, and authoritative rereads protect the requested action. The result still describes the applied lifecycle action rather than a complete immutable `Resolution`. |
+| `AttemptResolvedFields` and `attempt.resolved` | A provisional attempt ledger observation. It carries the attempt, bead, worker, adapter/model, prompt, gate, outcome, action, exit, commit, cost, and terminal fields. `exit_code` is explicitly observational. Current rows remain `provisional=true`, with no confirmed state or context-manifest hash, so they are not the ADR’s final Resolution. |
+| `bead_store::AttemptResolution` and `ResolveReceipt` | A capability-gated bead-rs adapter and replay receipt for the future atomic contract. Unsupported backends retain the reconciled legacy sequence; these types do not themselves perform the requested lifecycle action. |
+| `ResolutionApplied`, `ResolutionFailed`, and `ResolveEvaluated` | Legacy post-Pluck operator telemetry for the controller/applier path. They remain queryable and are intentionally preserved, but consumers must not use them as proof of an ADR-024 Resolution without the authoritative reread/confirmation fields. |
+| `BeadAction` and `run_post_dispatch_resolution` | `BeadAction` is the normal dispatch postcondition guard: every outcome selects a lifecycle action before mutation. `run_post_dispatch_resolution` is the exceptional post-Pluck reconciliation controller, invoked once after the agent is inactive and the claim fence still holds. Neither is the final ADR reducer. |
+| `attempt_history::AttemptRecord` | Bounded, derived context for a later attempt. It is useful for prompts and failure history but is not an authoritative attempt or resolution ledger. |
+
+The implementation audit sorts the existing work as follows:
+
+- Shipped: `needle-b5793c98` (post-Pluck action graph), `needle-aee9e898`
+  (bounded evidence), `needle-3a6e1ecd` (strict decision schema),
+  `needle-6d057322` (post-Pluck invocation and ownership fence), and
+  `needle-eba55bfc` (telemetry and lifecycle coverage). Their executor and
+  postcondition blockers, including `needle-dc21a48b`, `needle-07174dcf`,
+  `needle-2eff276a`, `needle-6d76f548`, `needle-97397df2`,
+  `needle-62e7d8c1`, `needle-4a99daf3`, `needle-7ef79a8f`, and
+  `needle-d69a4af0`, are closed with their own acceptance evidence.
+- Compatibility by design: the legacy decision vocabulary, executor result,
+  resolution-applied/failed telemetry, and backend capability fallback remain
+  necessary while the versioned ADR types are introduced. `needle-13ad0633`
+  is related fleet self-healing work, not a blocker for this reconciliation.
+- Remaining/conflicting: `needle-3386daef` is not closed. The orphaned
+  exit-zero/no-shipped-work path safely releases the bead, but its handler
+  still reports `Outcome::Success` and the provisional ledger still records
+  `verified_success`; that conflicts with ADR-024's requirement that success
+  requires accepted evidence and confirmed closure. Its old orphan test has
+  not been inverted to assert the semantic failure. The boot-recovery source
+  work from `needle-6d76f548` is shipped, while its parked integration fixture
+  still calls a non-existent `Worker::run_cycle()` and must be rewritten
+  against the actual worker entry point before it can serve as a regression.
+- Not yet implemented by this graph: versioned durable `Attempt`,
+  `ContextManifest`, `ExecutionTrace`, and `Resolution` records; attempt-ID
+  generation before claim; confirmed-state emission after the authoritative
+  reread; and crash-boundary/replay proof of at-most-one durable resolution.
+
+Until that migration lands, consumers must treat provisional attempt rows and
+the legacy post-Pluck events as observations or requested-action telemetry.
+Only a future confirmed, authoritative resolution record may grant completion
+credit. The existing graph continues to own safe lifecycle mutation and all
+of its current behavior while that boundary is migrated.
+
 ## Related
 
 - [Current software-factory plan](../plan/plan.md)
@@ -94,4 +147,3 @@ that one attempt produces at most one durable resolution and completion event.
 - [ADR-020: Verification gates judge committed state](020-verification-gates-judge-committed-state.md)
 - [ADR-023: Gate execution errors are infrastructure](023-gate-execution-errors-are-infrastructure-not-bead-failures.md)
 - bead-rs ADR-011: Atomic idempotent attempt resolution
-
