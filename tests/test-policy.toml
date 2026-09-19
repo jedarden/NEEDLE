@@ -192,7 +192,10 @@ contract = 188
 # +1 heartbeat cleanup removal-failure contract (needle-7721ee7d).
 # +2 status/doctor process contracts (needle-e896b565): oversized-root doctor
 # exit and transitive status reporting.
-e2e = 802
+# +9 post-Pluck Resolve lifecycle scenarios, including isolated resolver
+# process, ownership race, timeout, and telemetry contracts
+# (needle-eba55bfc).
+e2e = 811
 soak = 0
 fuzz = 0
 
@@ -231,7 +234,8 @@ owner = "component:pluck-mend-explore"
 name = "p3_integration_tests"
 path = "tests/p3_integration_tests.rs"
 tier = "e2e"
-max_tests = 372
+# +9 post-Pluck Resolve lifecycle scenarios (needle-eba55bfc).
+max_tests = 381
 owner = "component:weave-unravel-pulse"
 
 [[harness]]

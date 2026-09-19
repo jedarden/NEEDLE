@@ -8699,7 +8699,12 @@ fn validate_splice_field(field: &str, key_path: &str) -> Result<(), ConfigError>
 
 /// Validate ResolveConfig field names.
 fn validate_resolve_field(field: &str, key_path: &str) -> Result<(), ConfigError> {
-    let valid_fields = ["conflict", "max_resolution_attempts"];
+    let valid_fields = [
+        "enabled",
+        "timeout_secs",
+        "custom_template_path",
+        "use_default_template",
+    ];
     if !valid_fields.contains(&field) {
         return Err(ConfigError::new(
             key_path.to_string(),
@@ -14982,8 +14987,10 @@ timeout_secs: 60
             "strands.learning.enabled",
             "strands.splice.report_workspace",
             "strands.splice.max_report_age_secs",
-            "strands.resolve.conflict",
-            "strands.resolve.max_resolution_attempts",
+            "strands.resolve.enabled",
+            "strands.resolve.timeout_secs",
+            "strands.resolve.custom_template_path",
+            "strands.resolve.use_default_template",
         ];
 
         for field in valid_fields {

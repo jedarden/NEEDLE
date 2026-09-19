@@ -56,6 +56,8 @@ mod otlp_runtime_test;
 mod otlp_transport_seam_tests;
 #[path = "p3_integration_tests/post_dispatch_audit_test.rs"]
 mod post_dispatch_audit_test;
+#[path = "p3_integration_tests/post_pluck_resolution.rs"]
+mod post_pluck_resolution;
 #[path = "p3_integration_tests/query_integration_test.rs"]
 mod query_integration_test;
 #[path = "p3_integration_tests/routing_integration.rs"]

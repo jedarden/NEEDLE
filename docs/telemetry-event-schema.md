@@ -55,6 +55,12 @@ Additional fields are event-specific and documented per type below.
 - `strand.pluck.starvation_detected` — legacy compatibility event; no longer emitted by strand selection
 
 ### Bead Processing
+- `bead.resolution.applied` — A post-Pluck Resolve decision reached its
+  expected terminal state. Fields: `bead_id`, `decision`, `action`, and
+  `duration_ms`.
+- `bead.resolution.failed` — Resolve could not be applied, including an
+  invalid response, timeout, action failure, or ownership race. Fields:
+  `bead_id`, `reason`, and `duration_ms`.
 - `bead.claim.attempted` — Worker attempted to claim a bead
 - `bead.claim.succeeded` — Bead claim succeeded
 - `bead.claim.race_lost` — Bead claim lost to another worker

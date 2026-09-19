@@ -62,6 +62,13 @@ This guide covers the most commonly used configuration options.
 - `strands.reflect.*` — Learning and skill capture limits
 - `strands.splice.*` — Live loop detection thresholds
 - `strands.knot.*` — Exhaustion recovery settings
+- `strands.resolve.enabled` — Run post-Pluck decision analysis when the
+  completed dispatch still owns its claim
+- `strands.resolve.timeout_secs` — Maximum seconds for the Resolve agent
+- `strands.resolve.custom_template_path` — Optional custom Resolve prompt
+  template; `~` is expanded relative to `HOME`
+- `strands.resolve.use_default_template` — Use the built-in Resolve prompt
+  when no custom template is configured
 - `strands.mitosis.enabled` — Enable/disable mitosis
 - `strands.mitosis.first_failure_only` — Split only on first failure
 - `strands.mitosis.max_depth` / `strands.mitosis.max_children` — Split-tree caps; together they bound the worst case at `1 + C + C² + … + C^max_depth` beads per parent (73 at the shipped 8 × 2)
@@ -172,6 +179,31 @@ This guide covers the most commonly used configuration options.
 | Switch bead CLI backend | **C** | **Must restart all workers** |
 | Enable config polling | **C** | **Must restart workers** (default: 0/disabled) |
 | Change prompt templates | B | Edit config file; PromptBuilder rebuilt next cycle |
+
+### Post-Pluck Resolve
+
+Resolve is an opt-in decision pass for a Pluck dispatch whose agent process has
+ended but whose bead is still `in_progress` under the dispatching worker. It
+does not run while an agent is active, and a claim-ownership race is treated as
+a failed resolution without mutating the new owner's bead.
+
+```yaml
+strands:
+  resolve:
+    enabled: true
+    timeout_secs: 60
+    custom_template_path: ~/.config/needle/resolve-template.txt
+    use_default_template: false
+```
+
+With the built-in template, leave `custom_template_path` unset and keep
+`use_default_template: true`. A custom template may use `{bead_id}`,
+`{bead_title}`, `{bead_body}`, `{exit_code}`, `{duration}`, `{stdout}`,
+`{stderr}`, `{exit_status}`, and `{was_interrupted}`. `timeout_secs` bounds
+the resolver process; NEEDLE adds a short cleanup margin while applying the
+result and releasing a stranded claim if necessary. The current values are
+available through `needle config --get strands.resolve.timeout_secs` and
+`needle config --dump`.
 
 ### Detecting When Restart Is Required
 

@@ -544,6 +544,21 @@ pub enum EventKind {
         evidence: String,
         duration_ms: u64,
     },
+    /// A post-Pluck Resolve decision was applied and the bead reached the
+    /// expected terminal lifecycle state.
+    ResolutionApplied {
+        bead_id: BeadId,
+        decision: String,
+        action: String,
+        duration_ms: u64,
+    },
+    /// A post-Pluck Resolve attempt could not be applied. The claim may have
+    /// been released by the failure path, or ownership may have changed.
+    ResolutionFailed {
+        bead_id: BeadId,
+        reason: String,
+        duration_ms: u64,
+    },
     /// The low-water generation gate resolved a generator's permit for this
     /// waterfall pass. Emitted once per generator per pass while the gate is
     /// enabled, including the passes where the generator must not run.
@@ -1779,6 +1794,8 @@ impl EventKind {
             EventKind::GenerationCreatorFailed { .. } => "generation.creator_failed",
             EventKind::CycleOutcome { .. } => "cycle.outcome",
             EventKind::ResolveEvaluated { .. } => "strand.resolve.evaluated",
+            EventKind::ResolutionApplied { .. } => "bead.resolution.applied",
+            EventKind::ResolutionFailed { .. } => "bead.resolution.failed",
             EventKind::BeadStoreError { .. } => "bead_store.error",
             EventKind::QueueEmpty => "worker.queue_empty",
             EventKind::PluckStarvationDetected { .. } => "strand.pluck.starvation_detected",
@@ -1997,6 +2014,8 @@ impl EventKind {
             | EventKind::OutcomeHandled { bead_id, .. }
             | EventKind::WorkerHandlingTimeout { bead_id, .. }
             | EventKind::ResolveEvaluated { bead_id, .. }
+            | EventKind::ResolutionApplied { bead_id, .. }
+            | EventKind::ResolutionFailed { bead_id, .. }
             | EventKind::StuckDetected { bead_id, .. }
             | EventKind::StuckReleased { bead_id, .. }
             | EventKind::MendDependencyCleaned { bead_id, .. }
@@ -2390,6 +2409,26 @@ impl EventKind {
                 "bead_id": bead_id,
                 "decision": decision,
                 "evidence": evidence,
+                "duration_ms": duration_ms,
+            }),
+            EventKind::ResolutionApplied {
+                bead_id,
+                decision,
+                action,
+                duration_ms,
+            } => serde_json::json!({
+                "bead_id": bead_id,
+                "decision": decision,
+                "action": action,
+                "duration_ms": duration_ms,
+            }),
+            EventKind::ResolutionFailed {
+                bead_id,
+                reason,
+                duration_ms,
+            } => serde_json::json!({
+                "bead_id": bead_id,
+                "reason": reason,
                 "duration_ms": duration_ms,
             }),
             EventKind::BeadStoreError {
@@ -4096,6 +4135,8 @@ impl EventKind {
             | EventKind::BeadCompleted { duration_ms, .. }
             | EventKind::StrandEvaluated { duration_ms, .. }
             | EventKind::ResolveEvaluated { duration_ms, .. }
+            | EventKind::ResolutionApplied { duration_ms, .. }
+            | EventKind::ResolutionFailed { duration_ms, .. }
             | EventKind::InitStepCompleted { duration_ms, .. }
             | EventKind::EffortRecorded {
                 elapsed_ms: duration_ms,

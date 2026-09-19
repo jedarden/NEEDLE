@@ -3154,6 +3154,20 @@ strands:
     adr_enabled: true
     claude_md_placement: true
 
+  # Post-Pluck decision analysis. Disabled by default; when enabled, Resolve
+  # runs only if the completed Pluck dispatch still owns its bead.
+  resolve:
+    enabled: false
+    # Maximum seconds to wait for the Resolve agent. NEEDLE adds a 30-second
+    # cleanup margin around this deadline before releasing a stranded claim.
+    timeout_secs: 60
+    # Optional file overriding the built-in `resolve` prompt. Supported
+    # placeholders include {{bead_id}}, {{bead_title}}, {{bead_body}}, {{exit_code}},
+    # {{duration}}, {{stdout}}, {{stderr}}, {{exit_status}}, and {{was_interrupted}}.
+    custom_template_path: null
+    # Set false only when custom_template_path points to a complete template.
+    use_default_template: true
+
   # Worker failure documentation.
   splice:
     enabled: true
@@ -4638,6 +4652,19 @@ fn config_get_key(config: &Config, key: &str) -> Option<String> {
                 .map(|max_workers| max_workers.to_string())
                 .unwrap_or_else(|| "unlimited".to_string()),
         ),
+        "strands.resolve.enabled" => Some(config.strands.resolve.enabled.to_string()),
+        "strands.resolve.timeout_secs" => Some(config.strands.resolve.timeout_secs.to_string()),
+        "strands.resolve.custom_template_path" => Some(
+            config
+                .strands
+                .resolve
+                .custom_template_path
+                .as_deref()
+                .map_or_else(String::new, |path| path.display().to_string()),
+        ),
+        "strands.resolve.use_default_template" => {
+            Some(config.strands.resolve.use_default_template.to_string())
+        }
         "telemetry.file_sink.enabled" => Some(config.telemetry.file_sink.enabled.to_string()),
         "prompt.instructions" => Some(
             config
@@ -4687,6 +4714,27 @@ fn config_dump(config: &Config) -> Vec<String> {
                 .max_workers
                 .map(|max_workers| max_workers.to_string())
                 .unwrap_or_else(|| "unlimited".to_string())
+        ),
+        format!(
+            "strands.resolve.enabled: {}",
+            config.strands.resolve.enabled
+        ),
+        format!(
+            "strands.resolve.timeout_secs: {}",
+            config.strands.resolve.timeout_secs
+        ),
+        format!(
+            "strands.resolve.custom_template_path: {}",
+            config
+                .strands
+                .resolve
+                .custom_template_path
+                .as_deref()
+                .map_or_else(String::new, |path| path.display().to_string())
+        ),
+        format!(
+            "strands.resolve.use_default_template: {}",
+            config.strands.resolve.use_default_template
         ),
         format!(
             "health.heartbeat_interval_secs: {}",
@@ -9085,6 +9133,10 @@ WORKSPACE                                  R1 RETRY  R2 DECOMPOSE  R3 QUARANTINE
         assert!(config_get_key(&config, "health.heartbeat_interval_secs").is_some());
         assert!(config_get_key(&config, "workspace.default").is_some());
         assert!(config_get_key(&config, "workspace.home").is_some());
+        assert!(config_get_key(&config, "strands.resolve.enabled").is_some());
+        assert!(config_get_key(&config, "strands.resolve.timeout_secs").is_some());
+        assert!(config_get_key(&config, "strands.resolve.custom_template_path").is_some());
+        assert!(config_get_key(&config, "strands.resolve.use_default_template").is_some());
     }
 
     #[test]
@@ -9104,6 +9156,9 @@ WORKSPACE                                  R1 RETRY  R2 DECOMPOSE  R3 QUARANTINE
         assert!(lines
             .iter()
             .any(|l| l.starts_with("health.heartbeat_ttl_secs:")));
+        assert!(lines
+            .iter()
+            .any(|l| l.starts_with("strands.resolve.timeout_secs:")));
     }
 
     #[test]

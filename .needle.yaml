@@ -100,6 +100,16 @@ strands:
     drift_enabled: true
     adr_enabled: true
     claude_md_placement: true
+  # Post-Pluck resolver. Enable only after reviewing the decision template;
+  # a completed Pluck is resolved only when its claim is still held.
+  resolve:
+    enabled: false
+    timeout_secs: 60
+    # Optional custom prompt; `~` is expanded relative to HOME.
+    custom_template_path: null
+    # Built-in `resolve` template variables include bead context, exit_code,
+    # duration, stdout, stderr, exit_status, and was_interrupted.
+    use_default_template: true
   splice:
     enabled: true
     stale_threshold_secs: 300

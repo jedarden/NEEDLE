@@ -5220,6 +5220,14 @@ impl Worker {
         if !self.claim_belongs_to_dispatch(&claim_status) {
             // The agent or the normal handler already completed the lifecycle,
             // or another worker owns it now. This dispatch must not mutate it.
+            let _ = self.telemetry.emit_try_lock(
+                EventKind::ResolutionFailed {
+                    bead_id: bead.id.clone(),
+                    reason: "ownership_lost".to_string(),
+                    duration_ms: 0,
+                },
+                Utc::now(),
+            );
             return Ok(());
         }
 
@@ -5371,7 +5379,7 @@ impl Worker {
         };
 
         if matches!(
-            applied,
+            &applied,
             AppliedDecision::Released(ReleaseCause::MutationFailed)
         ) {
             return self
@@ -5433,13 +5441,23 @@ impl Worker {
                 .await;
         }
 
+        let duration_ms = resolve_started.elapsed().as_millis() as u64;
         self.last_outcome = Some(format!("resolve:{}", decision.as_str()));
+        let _ = self.telemetry.emit_try_lock(
+            EventKind::ResolutionApplied {
+                bead_id: current.id.clone(),
+                decision: decision.as_str().to_string(),
+                action: applied.as_str().to_string(),
+                duration_ms,
+            },
+            Utc::now(),
+        );
         let _ = self.telemetry.emit_try_lock(
             EventKind::ResolveEvaluated {
                 bead_id: current.id,
                 decision: decision.as_str().to_string(),
                 evidence: "decision_applied".to_string(),
-                duration_ms: resolve_started.elapsed().as_millis() as u64,
+                duration_ms,
             },
             Utc::now(),
         );
@@ -5459,6 +5477,14 @@ impl Worker {
                 bead_id: bead.id.clone(),
                 decision: "resolution_failed".to_string(),
                 evidence: reason.to_string(),
+                duration_ms,
+            },
+            Utc::now(),
+        );
+        let _ = self.telemetry.emit_try_lock(
+            EventKind::ResolutionFailed {
+                bead_id: bead.id.clone(),
+                reason: reason.to_string(),
                 duration_ms,
             },
             Utc::now(),
