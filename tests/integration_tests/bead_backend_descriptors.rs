@@ -32,16 +32,22 @@ fn shipped_descriptor_encodes_the_bead_rs_dialect_and_capabilities() {
         .find(|backend| backend.name == "bead-rs")
         .unwrap();
     assert_eq!(bead.identity_pattern, r"^bead\s");
+    assert_eq!(bead.verified_against, "bead 0.2.6 (commit 8e5839b)");
+    assert_eq!(bead.verified_on, "2026-09-19");
     assert_eq!(
         bead.operations["dep_add"].argv,
         ["dep", "add", "{blocked}", "{blocker}", "--kind", "blocks"]
     );
     assert_eq!(
         bead.operations["split"].strategy.as_deref(),
-        Some("sequential")
+        Some("transactional_batch")
+    );
+    assert_eq!(
+        bead.operations["manifest"].argv,
+        ["manifest", "commit", "--input", "{input}", "--format", "json"]
     );
     assert!(bead.capabilities.atomic_claim);
-    assert!(!bead.capabilities.transactional_batch);
+    assert!(bead.capabilities.transactional_batch);
     assert!(!bead.capabilities.velocity_metadata);
 }
 

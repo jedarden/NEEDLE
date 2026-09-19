@@ -308,7 +308,7 @@ async fn bead_rs_clear_assignee_uses_descriptor_command() {
 
 #[tokio::test]
 #[cfg(unix)]
-async fn bead_rs_split_uses_sequential_create_and_dependency_commands() {
+async fn bead_rs_split_uses_one_manifest_transaction() {
     use needle::bead_store::NewChild;
 
     let root = tempfile::tempdir().unwrap();
@@ -319,7 +319,7 @@ async fn bead_rs_split_uses_sequential_create_and_dependency_commands() {
     let binary = root.path().join("fixture-cli");
     executable(
         &binary,
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> invocations.log\nif [ \"$1\" = create ]; then\n  case \"$3\" in\n    A) printf '%s\\n' bead-child-a ;;\n    B) printf '%s\\n' bead-child-b ;;\n  esac\nfi\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> invocations.log\nif [ \"$1\" = manifest ]; then\n  grep -q '\"resource_keys\":\\[\"resource-a\"\\]' \"$4\" || exit 41\n  grep -q '\"blocked\":\"bead-parent\"' \"$4\" || exit 42\n  grep -q '\"blocker\":\"$needle_child_0\"' \"$4\" || exit 43\n  printf '%s\\n' '{\"manifest_version\":1,\"committed\":true,\"results\":[{\"op\":\"create\",\"issue_id\":\"bead-child-a\"},{\"op\":\"create\",\"issue_id\":\"bead-child-b\"}]}'\nfi\n",
     );
     let store =
         CliBeadStore::new(backend, binary, root.path().to_path_buf(), None, None, None).unwrap();
@@ -330,11 +330,13 @@ async fn bead_rs_split_uses_sequential_create_and_dependency_commands() {
             title: "A",
             body: "body A",
             labels: &labels_a,
+            resource_keys: &["resource-a"],
         },
         NewChild {
             title: "B",
             body: "body B",
             labels: &labels_b,
+            resource_keys: &[],
         },
     ];
 
@@ -347,13 +349,13 @@ async fn bead_rs_split_uses_sequential_create_and_dependency_commands() {
         [BeadId::from("bead-child-a"), BeadId::from("bead-child-b")]
     );
     let invocations = fs::read_to_string(root.path().join("invocations.log")).unwrap();
-    assert_eq!(
-        invocations,
-        "create\n--title\nA\n--description\nbody A\n--label\none\n\
-         dep\nadd\nbead-parent\nbead-child-a\n--kind\nblocks\n\
-         create\n--title\nB\n--description\nbody B\n--label\ntwo\n\
-         dep\nadd\nbead-parent\nbead-child-b\n--kind\nblocks\n"
-    );
+    let invocation: Vec<&str> = invocations.lines().collect();
+    assert_eq!(invocation.first(), Some(&"manifest"));
+    assert_eq!(invocation.get(1), Some(&"commit"));
+    assert_eq!(invocation.get(2), Some(&"--input"));
+    assert!(invocation.contains(&"--format"));
+    assert!(!invocations.contains("create\n"));
+    assert!(!invocations.contains("dep\n"));
 }
 
 #[tokio::test(flavor = "current_thread")]

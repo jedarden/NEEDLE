@@ -1,6 +1,7 @@
 //! Descriptor-driven bead CLI command engine.
 
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -9,6 +10,7 @@ use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use serde::de::{self, SeqAccess, Visitor};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::fmt;
 
 use crate::process_runner::{ProcessRequest, ProcessRunner, TokioProcessRunner};
@@ -55,6 +57,10 @@ pub struct CliBeadStore {
     claim_tokens: std::sync::Mutex<HashMap<String, String>>,
     /// Whether `bead resolve` (attempt-outcome-v1) is available.
     attempt_outcome_supported: bool,
+    /// Whether the selected runtime advertised the bead-rs manifest command.
+    /// A descriptor may require an atomic split while an older binary still
+    /// resolves; that combination must fail closed at split time.
+    manifest_supported: bool,
     process_runner: std::sync::Arc<dyn ProcessRunner>,
 }
 
@@ -71,6 +77,8 @@ impl CliBeadStore {
         if !binary.is_file() {
             bail!("bead backend binary not found at {}", binary.display());
         }
+        let manifest_supported =
+            backend.capabilities.transactional_batch && backend.operations.contains_key("manifest");
         Ok(Self {
             backend,
             binary,
@@ -81,6 +89,7 @@ impl CliBeadStore {
             sync_pause: std::sync::Mutex::new(None),
             claim_tokens: std::sync::Mutex::new(HashMap::new()),
             attempt_outcome_supported: false,
+            manifest_supported,
             process_runner: std::sync::Arc::new(TokioProcessRunner),
         })
     }
@@ -88,6 +97,14 @@ impl CliBeadStore {
     /// Replace the captured-process adapter used for bead CLI operations.
     pub fn with_process_runner(mut self, runner: std::sync::Arc<dyn ProcessRunner>) -> Self {
         self.process_runner = runner;
+        self
+    }
+
+    /// Bind the manifest support observed during the runtime capability probe.
+    /// This is separate from the static descriptor: a newer descriptor must
+    /// not make an older installed binary look atomic by accident.
+    pub fn with_manifest_support(mut self, supported: bool) -> Self {
+        self.manifest_supported = supported;
         self
     }
 
@@ -1153,6 +1170,17 @@ impl BeadStore for CliBeadStore {
             if children.is_empty() {
                 return Ok(Vec::new());
             }
+
+            if self.backend.name == "bead-rs" {
+                if !self.manifest_supported {
+                    bail!(
+                        "backend '{}' requires atomic split materialization, but the selected binary does not advertise the versioned manifest command; refusing to fall back to sequential create/dep operations",
+                        self.backend.name
+                    );
+                }
+                return self.split_bead_via_manifest(parent_id, children).await;
+            }
+
             let mut operations = Vec::with_capacity(children.len() * 2);
             for child in children {
                 operations.push(serde_json::json!({
@@ -1378,6 +1406,75 @@ fn bf_update_batch_args(
 }
 
 impl CliBeadStore {
+    /// Materialize a mitosis graph through bead-rs's R033 manifest contract.
+    ///
+    /// The create operations precede the dependency operations, but all of
+    /// them execute inside one backend transaction. Local references keep
+    /// the real child IDs out of the input while still making the result map
+    /// deterministic and machine-readable.
+    async fn split_bead_via_manifest(
+        &self,
+        parent_id: &BeadId,
+        children: &[NewChild<'_>],
+    ) -> Result<Vec<BeadId>> {
+        let mut operations = Vec::with_capacity(children.len() * 2);
+        for (index, child) in children.iter().enumerate() {
+            let local_id = manifest_child_local_id(index);
+            let unique_ref = manifest_child_unique_ref(parent_id, child, index);
+            operations.push(serde_json::json!({
+                "op": "create",
+                "local_id": local_id,
+                "title": child.title,
+                "description": child.body,
+                "labels": child.labels,
+                "resource_keys": child.resource_keys,
+                "unique_ref": unique_ref,
+            }));
+        }
+        for index in 0..children.len() {
+            operations.push(serde_json::json!({
+                "op": "dep_add",
+                "blocked": parent_id.as_ref(),
+                "blocker": format!("${}", manifest_child_local_id(index)),
+                "kind": "blocks",
+            }));
+        }
+        let manifest = serde_json::json!({
+            "manifest_version": 1,
+            "operations": operations,
+        });
+        let mut input = tempfile::Builder::new()
+            .prefix(".needle-mitosis-")
+            .suffix(".json")
+            .tempfile_in(&self.workspace)
+            .with_context(|| {
+                format!(
+                    "failed to create an atomic split manifest in {}",
+                    self.workspace.display()
+                )
+            })?;
+        serde_json::to_writer(input.as_file_mut(), &manifest)
+            .context("failed to serialize the atomic split manifest")?;
+        input
+            .as_file_mut()
+            .write_all(b"\n")
+            .context("failed to terminate the atomic split manifest")?;
+        input
+            .as_file()
+            .sync_all()
+            .context("failed to sync the atomic split manifest")?;
+        let input_path = input
+            .path()
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("atomic split manifest path is not valid UTF-8"))?
+            .to_string();
+        let stdout = self
+            .run_operation("manifest", &HashMap::from([("input", input_path)]))
+            .await
+            .context("bead-rs atomic split manifest commit failed")?;
+        parse_manifest_created_ids(&stdout, children.len())
+    }
+
     async fn claim_via_batch(&self, id: &BeadId, actor: &str) -> Result<ClaimResult> {
         let shown = self.show(id).await?;
         if shown.status != BeadStatus::Open {
@@ -1433,6 +1530,61 @@ impl CliBeadStore {
             },
         }
     }
+}
+
+fn manifest_child_local_id(index: usize) -> String {
+    format!("needle_child_{index}")
+}
+
+fn manifest_child_unique_ref(parent_id: &BeadId, child: &NewChild<'_>, index: usize) -> String {
+    let mut digest = Sha256::new();
+    digest.update(parent_id.as_ref().as_bytes());
+    digest.update([0]);
+    digest.update(index.to_string().as_bytes());
+    digest.update([0]);
+    digest.update(child.title.as_bytes());
+    digest.update([0]);
+    digest.update(child.body.as_bytes());
+    format!("needle-mitosis:{parent_id}-{:x}", digest.finalize())
+}
+
+fn parse_manifest_created_ids(output: &str, expected: usize) -> Result<Vec<BeadId>> {
+    let report: serde_json::Value = serde_json::from_str(output.trim())
+        .context("bead-rs manifest commit returned non-JSON output")?;
+    if report
+        .get("manifest_version")
+        .and_then(|value| value.as_u64())
+        != Some(1)
+    {
+        bail!("bead-rs manifest result omitted manifest_version=1");
+    }
+    if report.get("committed").and_then(|value| value.as_bool()) != Some(true) {
+        bail!("bead-rs manifest result did not confirm committed=true");
+    }
+    let results = report
+        .get("results")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("bead-rs manifest result omitted results"))?;
+    let mut ids = Vec::with_capacity(expected);
+    for result in results.iter().take(expected) {
+        if result.get("op").and_then(|value| value.as_str()) != Some("create") {
+            bail!("bead-rs manifest result did not return create entries first");
+        }
+        let id = result
+            .get("issue_id")
+            .and_then(|value| value.as_str())
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("bead-rs manifest create result omitted issue_id"))?;
+        ids.push(BeadId::from(id));
+    }
+    if ids.len() != expected {
+        bail!(
+            "bead-rs manifest committed {} child create results; expected {}",
+            ids.len(),
+            expected
+        );
+    }
+    Ok(ids)
 }
 
 fn parse_batch_created_ids(output: &str) -> Vec<BeadId> {

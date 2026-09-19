@@ -944,6 +944,7 @@ impl MitosisEvaluator {
                 title: &child.title,
                 body: &child.body,
                 labels: labels.as_slice(),
+                resource_keys: &[],
             });
         }
 
@@ -1171,14 +1172,16 @@ impl MitosisEvaluator {
     ///   it leaves the parent with more than one dependency, which can never
     ///   reconcile.
     ///
-    /// The shipped bead-rs backend has no transactional batch (its split
-    /// strategy is `sequential`), so each child is one `create_bead` with the
-    /// chain edge added as its successor lands. A failure partway through is
-    /// compensated, not abandoned: every child this call created is closed
-    /// with a reason naming the aborted split, so no orphaned half-chain
-    /// reaches the frontier. If a compensation close fails too, the error
-    /// names the child IDs — Mend's orphaned-split-child sweep is the
-    /// backstop for those. The caller releases the parent either way.
+    /// The bead-rs backend materializes this graph through one versioned
+    /// manifest transaction. Legacy/custom descriptors retain their explicit
+    /// strategy, including sequential behavior where that is the configured
+    /// policy; a descriptor that requires atomic splitting fails closed when
+    /// its runtime does not advertise manifests. If a non-atomic custom path
+    /// needs compensation, every child this call created is closed with a
+    /// reason naming the aborted split, so no orphaned half-chain reaches the
+    /// frontier. If a compensation close fails too, the error names the child
+    /// IDs — Mend's orphaned-split-child sweep is the backstop for those. The
+    /// caller releases the parent either way.
     async fn create_chained_children(
         &self,
         store: &dyn BeadStore,

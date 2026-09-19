@@ -58,11 +58,13 @@ fn children<'a>(labels: &'a [&'a str]) -> [NewChild<'a>; 2] {
             title: "first",
             body: "body one",
             labels,
+            resource_keys: &[],
         },
         NewChild {
             title: "second",
             body: "body two",
             labels,
+            resource_keys: &[],
         },
     ]
 }

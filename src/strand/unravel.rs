@@ -572,6 +572,7 @@ impl super::Strand for UnravelStrand {
                         title,
                         body,
                         labels: label_refs.as_slice(),
+                        resource_keys: &[],
                     })
                     .collect();
 

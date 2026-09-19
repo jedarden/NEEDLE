@@ -1847,11 +1847,13 @@ async fn split_bead_creates_children_and_links_them_with_bead_rs() {
             title: "child one",
             body: "body one",
             labels: &labels,
+            resource_keys: &[],
         },
         NewChild {
             title: "child two",
             body: "body two",
             labels: &labels,
+            resource_keys: &[],
         },
     ];
 

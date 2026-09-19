@@ -58,7 +58,7 @@ The command MUST return a JSON object with the following top-level fields:
     {"schema_ref": "urn:bead-rs:schema:event:native-v1"},
     {"schema_ref": "urn:bead-rs:schema:field-guide:native-v1"}
   ],
-  "commands": ["ref", "data", "query"]
+  "commands": ["ref", "data", "query", "manifest"]
 }
 ```
 
@@ -144,10 +144,13 @@ for schema_ref in [
 ```
 
 #### `commands` (array of strings)
-- **Required values:** All three commands MUST be present
-  - `"ref"` — External reference management (add, remove, list, find)
-  - `"data"` — Bead-attached data storage (set, get, list, remove)
-  - `"query"` — Advanced bead querying and filtering
+- **Required values:** `ref`, `data`, and `query` MUST be present. A runtime
+  using the built-in atomic bead-rs split descriptor must also advertise
+  `manifest`.
+- `"ref"` — External reference management (add, remove, list, find)
+- `"data"` — Bead-attached data storage (set, get, list, remove)
+- `"query"` — Advanced bead querying and filtering
+- `"manifest"` — Versioned all-or-none create/edge transactions for mitosis
 - **Purpose:** Validate that the backend supports core operations beyond basic bead CRUD
 - **Validation:** Each required command must be present in the commands array
 - **Failure mode:** Workspace open fails with "missing command {command}" error
@@ -163,6 +166,11 @@ for command in ["ref", "data", "query"] {
     }
 }
 ```
+
+The manifest command is detected from the runtime snapshot and bound to the
+descriptor's atomic split policy. If it is absent, a bead-rs split fails
+closed; it never silently falls back to sequential creates and dependency
+writes.
 
 **Command capabilities and their operations:**
 
@@ -195,19 +203,20 @@ pub struct BeadBackendCapabilities {
 }
 ```
 
-### bead-rs (verified against v0.1.3)
+### bead-rs (verified against v0.2.6, commit 8e5839b)
 
 ```rust
 capabilities: BeadBackendCapabilities {
     atomic_claim: true,           // ✅ Verified via capabilities probe
-    transactional_batch: false,    // ❌ Sequential split, NOT crash-safe
+    transactional_batch: true,     // ✅ Versioned manifest split transaction
     velocity_metadata: false,      // ❌ Claims omit model/harness info
 }
 ```
 
 **Implications:**
 - ✅ Atomic claims prevent duplicate work in multi-worker scenarios
-- ❌ Split operations are **NOT crash-safe** — a crash mid-split leaves orphaned children
+- ✅ Split operations use `manifest commit` — children, labels, resource keys, and
+  parent-blocking edges become visible together
 - ❌ Claims don't record which model/harness claimed the bead (limitation for velocity tracking)
 
 ### bead-forge (verified against v0.4.1)
@@ -227,14 +236,15 @@ capabilities: BeadBackendCapabilities {
 
 ## Capability Gaps and Their Impact
 
-### Missing `transactional_batch`
+### Missing `transactional_batch` or `manifest`
 
-When a backend lacks transactional batch support:
+When a backend lacks transactional batch support or its runtime does not advertise
+the versioned `manifest` command:
 
 ```rust
 // src/bead_store/mod.rs:1385-1404
 async fn split_bead(&self, parent_id: &BeadId, children: &[NewChild<'_>]) -> Result<Vec<BeadId>> {
-    // Default implementation: sequential, non-atomic
+    // Explicit legacy/custom-backend behavior: sequential, non-atomic
     let mut created = Vec::with_capacity(children.len());
     for child in children {
         let child_id = self.create_bead(child.title, child.body, child.labels).await?;
@@ -250,7 +260,9 @@ async fn split_bead(&self, parent_id: &BeadId, children: &[NewChild<'_>]) -> Res
 2. Parent never unblocks (still waiting on child that will never complete)
 3. Plan phase deadlocks — Phase 5.3, Race 3 from plan.md
 
-**Detection:** NEEDLE's `check` subcommand warns about this gap:
+**Detection:** NEEDLE's `check` subcommand warns about this gap, while the
+bead-rs manifest path fails closed at split time when the runtime command is
+missing rather than silently degrading:
 
 ```rust
 // src/cli/mod.rs:4067-4068

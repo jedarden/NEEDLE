@@ -613,6 +613,7 @@ impl AnalyzeStrand {
                     title: &child_title,
                     body: &child_body,
                     labels: &child_labels,
+                    resource_keys: &[],
                 }],
             )
             .await

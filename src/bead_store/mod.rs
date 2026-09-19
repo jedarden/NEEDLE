@@ -265,14 +265,19 @@ pub fn open_configured_with_transitions(
             )
         })?;
     verify_backend_identity(&backend, &binary, &workspace)?;
-    let attempt_outcome_supported = if backend == crate::config::Backend::Bead {
+    let (attempt_outcome_supported, manifest_supported) = if backend == crate::config::Backend::Bead
+    {
         let (runtime_capabilities, attempt_outcome_supported) =
             verify_bead_rs_capabilities(&binary, &workspace)?;
+        let manifest_supported = runtime_capabilities
+            .commands
+            .iter()
+            .any(|command| command == "manifest");
         runtime_capabilities
             .ensure_transition_support(&capabilities::enabled_plan_transitions(transitions))?;
-        attempt_outcome_supported
+        (attempt_outcome_supported, manifest_supported)
     } else {
-        false
+        (false, false)
     };
 
     match backend {
@@ -290,7 +295,8 @@ pub fn open_configured_with_transitions(
                     harness,
                     harness_version,
                 )?
-                .with_attempt_outcome_support(attempt_outcome_supported),
+                .with_attempt_outcome_support(attempt_outcome_supported)
+                .with_manifest_support(manifest_supported),
             ))
         }
     }
@@ -1404,6 +1410,9 @@ pub struct NewChild<'a> {
     pub title: &'a str,
     pub body: &'a str,
     pub labels: &'a [&'a str],
+    /// Workspace-local scheduling keys to attach in the same create
+    /// transaction.  Empty for callers that do not need claim exclusion.
+    pub resource_keys: &'a [&'a str],
 }
 
 // ─── BeadStore trait ─────────────────────────────────────────────────────────

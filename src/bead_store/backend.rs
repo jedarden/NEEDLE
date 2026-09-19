@@ -422,6 +422,7 @@ fn allowed_placeholders(operation: &str) -> &'static [&'static str] {
         "recurrence_remove" => &["id"],
         "recurrence_list" => &[],
         "policy_validate" => &[],
+        "manifest" => &["input"],
         "flush" | "doctor_check" | "doctor_repair" | "create_id" => &[],
         _ => &[],
     }
@@ -516,6 +517,10 @@ fn common_operations() -> HashMap<String, BeadOperationSpec> {
         ("create_id", operation(&[], Some("bare_id"), None)),
         ("dep_add", operation(&[], None, None)),
         ("split", operation(&[], None, None)),
+        (
+            "manifest",
+            operation(&[], None, Some(ParseShape::JsonObject)),
+        ),
         ("dep_remove", operation(&[], None, None)),
         ("close", operation(&[], None, None)),
         ("doctor_check", operation(&[], None, None)),
@@ -730,7 +735,23 @@ fn builtin_bead_rs() -> BeadBackend {
             None,
         ),
     );
-    operations.insert("split".into(), operation(&[], Some("sequential"), None));
+    // bead-rs 0.2.6 exposes the versioned atomic manifest transaction.  Keep
+    // this as the split strategy rather than silently routing through the
+    // historical create/dep sequence.
+    operations.insert(
+        "split".into(),
+        operation(&[], Some("transactional_batch"), None),
+    );
+    operations.insert(
+        "manifest".into(),
+        operation(
+            &[
+                "manifest", "commit", "--input", "{input}", "--format", "json",
+            ],
+            None,
+            Some(ParseShape::JsonObject),
+        ),
+    );
     operations.insert(
         "dep_remove".into(),
         operation(&["dep", "remove", "{blocked}", "{blocker}"], None, None),
@@ -977,12 +998,12 @@ fn builtin_bead_rs() -> BeadBackend {
         ],
         identity_pattern: r"^bead\s".to_string(),
         version_command: default_version_command(),
-        verified_against: "bead 0.1.3 (commit 85f36ac)".to_string(),
-        verified_on: "2026-08-13".to_string(),
+        verified_against: "bead 0.2.6 (commit 8e5839b)".to_string(),
+        verified_on: "2026-09-19".to_string(),
         operations,
         capabilities: BeadBackendCapabilities {
             atomic_claim: true,
-            transactional_batch: false,
+            transactional_batch: true,
             velocity_metadata: false,
         },
         quirks: vec![BeadBackendQuirk {

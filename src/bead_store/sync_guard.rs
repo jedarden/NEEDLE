@@ -69,6 +69,7 @@ pub(super) fn guarded_operation(name: &str) -> bool {
             | "create_id"
             | "dep_add"
             | "split"
+            | "manifest"
             | "dep_remove"
             | "update"
             | "doctor_repair"
