@@ -220,6 +220,11 @@ path = "tests/nt53_improvement_proposals.rs"
 harness = true
 
 [[test]]
+name = "nt54_proposal_admission"
+path = "tests/nt54_proposal_admission.rs"
+harness = true
+
+[[test]]
 name = "nt55_impact_receipts"
 path = "tests/nt55_impact_receipts.rs"
 harness = true

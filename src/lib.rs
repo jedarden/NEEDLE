@@ -32,6 +32,7 @@ pub mod fingerprint;
 pub mod gate_health;
 pub mod health;
 pub mod hoop_hooks;
+pub mod improvement_controller;
 /// Load-simulation harness for regression tests.
 ///
 /// Gated off by default. As committed in `ea85a89` ("chore(lab): preserve local

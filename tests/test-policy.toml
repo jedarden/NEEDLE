@@ -161,7 +161,10 @@ push = 665
 # the single revert proposal, costed-only measures, append-only durability.
 # +10 N-T56 view contracts (needle-65e66131): deterministic rendering in both
 # formats, unknown-not-zero cost, bounded operator output, no writes on read.
-contract = 182
+# +6 N-T54 admission-adapter contracts (needle-e830524d): plan-owned classes
+# file nothing, one signature creates one bead across submissions, budget and
+# shadow refusals are recorded, and the budget survives a restart.
+contract = 188
 # +16 literal test attributes for Cargo execution isolation (needle-b31fcb27):
 # seven integration cases plus nine nested-Cargo fixture tests embedded in source.
 # +1 real-adapter contract for the injectable ProcessRunner (needle-d3f191a3).
@@ -327,6 +330,13 @@ name = "nt53_improvement_proposals"
 path = "tests/nt53_improvement_proposals.rs"
 tier = "contract"
 max_tests = 14
+owner = "component:improvement-loop"
+
+[[harness]]
+name = "nt54_proposal_admission"
+path = "tests/nt54_proposal_admission.rs"
+tier = "contract"
+max_tests = 6
 owner = "component:improvement-loop"
 
 [[harness]]

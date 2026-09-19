@@ -179,6 +179,7 @@ needle_slow_targets() {
     nt07_admission_policy \
     nt07_admission_budgets \
     nt53_improvement_proposals \
+    nt54_proposal_admission \
     nt55_impact_receipts \
     nt56_improvements_cli \
     nt07_proposal_contract \
@@ -220,6 +221,8 @@ needle_cargo_selector() {
 ' --test nt07_admission_budgets ;;
     nt53_improvement_proposals) printf '%s
 ' --test nt53_improvement_proposals ;;
+    nt54_proposal_admission) printf '%s
+' --test nt54_proposal_admission ;;
     nt55_impact_receipts) printf '%s
 ' --test nt55_impact_receipts ;;
     nt56_improvements_cli) printf '%s
@@ -272,6 +275,8 @@ needle_nextest_filter() {
 ' 'binary_id(=needle::nt07_admission_budgets)' ;;
     nt53_improvement_proposals) printf '%s
 ' 'binary_id(=needle::nt53_improvement_proposals)' ;;
+    nt54_proposal_admission) printf '%s
+' 'binary_id(=needle::nt54_proposal_admission)' ;;
     nt55_impact_receipts) printf '%s
 ' 'binary_id(=needle::nt55_impact_receipts)' ;;
     nt56_improvements_cli) printf '%s
