@@ -2354,7 +2354,7 @@ mod tests {
         // A pinned path with no enabled store is excluded rather than counted
         // as an empty workspace.
         let missing_store = root.path().join("missing-store");
-        fs::create_dir(missing_store.join(".git")).unwrap();
+        fs::create_dir_all(missing_store.join(".git")).unwrap();
         let mut pinned_workspaces = explicit_workspaces.clone();
         pinned_workspaces.push(missing_store.clone());
         let config = make_explore_config(true, pinned_workspaces);
