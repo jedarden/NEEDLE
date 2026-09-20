@@ -12108,6 +12108,9 @@ mod tests {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut worker = make_worker(store);
         worker.boot().await.unwrap();
+        let attempt_id = crate::attempt::new_id();
+        worker.attempt_id = Some(attempt_id.clone());
+        worker.telemetry.set_attempt_id(attempt_id);
         worker.state = WorkerState::Building;
         worker.current_bead = Some(make_test_bead("needle-build"));
 
@@ -12233,6 +12236,9 @@ mod tests {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut worker = make_worker(store);
         worker.boot().await.unwrap();
+        let attempt_id = crate::attempt::new_id();
+        worker.attempt_id = Some(attempt_id.clone());
+        worker.telemetry.set_attempt_id(attempt_id);
 
         let mut bead = make_test_bead("needle-unreadable-claim");
         bead.status = BeadStatus::InProgress;
