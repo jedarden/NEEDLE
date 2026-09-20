@@ -1905,17 +1905,25 @@ async fn split_bead_creates_children_and_links_them_with_bead_rs() {
     }
 }
 
-/// Transactional split rollback is backend-dependent. The native bead-rs CLI
-/// currently exposes sequential split operations, so this suite documents and
-/// gates the transaction-only scenario on the descriptor capability instead of
-/// invoking a command the backend does not provide.
+/// The pinned bead-rs descriptor advertises the versioned manifest transaction
+/// used by `CliBeadStore::split_bead`. Older runtimes are tested through the
+/// consumer's explicit fail-closed matrix; they must not silently take the
+/// sequential path selected by this descriptor.
 #[test]
-fn bead_rs_split_fixture_is_correctly_gated_without_transactional_batch() {
+fn bead_rs_split_fixture_advertises_transactional_batch() {
     let backend = builtin_bead_backends()
         .into_iter()
         .find(|backend| backend.name == "bead-rs")
         .expect("built-in bead-rs descriptor missing");
-    assert!(!backend.capabilities.transactional_batch);
+    assert!(backend.capabilities.transactional_batch);
+    assert_eq!(
+        backend.operations["split"].strategy.as_deref(),
+        Some("transactional_batch")
+    );
+    assert_eq!(
+        backend.operations["manifest"].argv,
+        ["manifest", "commit", "--input", "{input}", "--format", "json"]
+    );
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

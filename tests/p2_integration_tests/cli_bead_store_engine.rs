@@ -356,6 +356,42 @@ async fn bead_rs_split_uses_one_manifest_transaction() {
     assert!(invocation.contains(&"--format"));
     assert!(!invocations.contains("create\n"));
     assert!(!invocations.contains("dep\n"));
+
+    let legacy_root = tempfile::tempdir().unwrap();
+    let legacy_backend = builtin_bead_backends()
+        .into_iter()
+        .find(|backend| backend.name == "bead-rs")
+        .unwrap();
+    let legacy_binary = legacy_root.path().join("legacy-bead");
+    executable(
+        &legacy_binary,
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> invocations.log\nexit 99\n",
+    );
+    let legacy_store = CliBeadStore::new(
+        legacy_backend,
+        legacy_binary,
+        legacy_root.path().to_path_buf(),
+        None,
+        None,
+        None,
+    )
+    .unwrap()
+    .with_manifest_support(false);
+    let legacy_labels = ["legacy-matrix"];
+    let legacy_children = [NewChild {
+        title: "child",
+        body: "body",
+        labels: &legacy_labels,
+        resource_keys: &["resource:key"],
+    }];
+    let error = legacy_store
+        .split_bead(&BeadId::from("bead-parent"), &legacy_children)
+        .await
+        .expect_err("an unverified atomic split must fail closed");
+    assert!(error
+        .to_string()
+        .contains("does not advertise the versioned manifest command"));
+    assert!(!legacy_root.path().join("invocations.log").exists());
 }
 
 #[tokio::test(flavor = "current_thread")]

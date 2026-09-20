@@ -113,7 +113,8 @@ pub enum SplitStrategy {
     /// **Race semantics:** No race — if any child creation fails, the entire
     /// batch is rolled back and no partial state change occurs.
     ///
-    /// **Used by:** `bf` (bead-forge)
+    /// **Used by:** backends whose descriptor exposes one atomic batch
+    /// primitive, including bead-rs's versioned `manifest commit` path.
     TransactionalBatch,
 
     /// Sequential creation: children are created one at a time.
@@ -123,7 +124,9 @@ pub enum SplitStrategy {
     /// cleanup (e.g., deleting the partial children) or for marking the parent
     /// bead as failed so the split can be retried.
     ///
-    /// **Used by:** `br` (beads_rust), `bead` (bead-rs)
+    /// **Used by:** explicitly legacy or custom backends that do not expose an
+    /// atomic split primitive. The bead-rs descriptor does not select this
+    /// variant; an older bead-rs runtime fails closed instead.
     Sequential,
 }
 
