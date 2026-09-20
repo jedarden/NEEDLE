@@ -22,6 +22,7 @@ use tempfile::TempDir;
 const ADAPTER_NAME: &str = "claim-verification-probe";
 const WORKER_NAME: &str = "claim-verification-worker";
 const MARKER: &str = "needle-agent-spawned.log";
+const QUERY_LOG: &str = ".needle-claim-query.log";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FixtureMode {
@@ -150,24 +151,28 @@ impl Fixture {
     /// preparation is idempotent, so several commands built from the same
     /// fixture race over the very same stores.
     fn command(&self, mode: FixtureMode) -> Command {
-        let missing_binary = self.root.path().join("missing-bead-cli");
-        let config_binary = if mode == FixtureMode::UnavailableCli {
-            missing_binary.clone()
-        } else {
-            self.root.path().join("fixture-bead")
-        };
+        let fixture_binary = self.root.path().join("fixture-bead");
+        let unavailable_binary = self.root.path().join("unavailable-bead");
 
-        if mode != FixtureMode::UnavailableCli {
-            write_bead_wrapper(&config_binary, &self.bead_binary);
-            write_workspace_config(&self.home_workspace, &config_binary);
-            if let Some(remote) = &self.remote_workspace {
-                write_workspace_config(remote, &config_binary);
+        if let Some(remote) = self.remote_workspace.as_ref() {
+            // Keep the worker-home store healthy. A remote-only failure means
+            // that accidentally verifying the colliding ID in HOME cannot
+            // reproduce the injected response; the query trace below then
+            // identifies the incorrect store directly.
+            write_workspace_config(&self.home_workspace, &self.bead_binary);
+            if mode == FixtureMode::UnavailableCli {
+                write_unavailable_wrapper(&unavailable_binary);
+                write_workspace_config(remote, &unavailable_binary);
+            } else {
+                write_bead_wrapper(&fixture_binary, &self.bead_binary);
+                write_workspace_config(remote, &fixture_binary);
             }
+        } else if mode == FixtureMode::UnavailableCli {
+            write_unavailable_wrapper(&unavailable_binary);
+            write_workspace_config(&self.home_workspace, &unavailable_binary);
         } else {
-            write_workspace_config(&self.home_workspace, &missing_binary);
-            if let Some(remote) = &self.remote_workspace {
-                write_workspace_config(remote, &missing_binary);
-            }
+            write_bead_wrapper(&fixture_binary, &self.bead_binary);
+            write_workspace_config(&self.home_workspace, &fixture_binary);
         }
 
         let mut command = Command::new(env!("CARGO_BIN_EXE_needle"));
@@ -238,6 +243,31 @@ impl Fixture {
             ));
         }
         counts.join(", ")
+    }
+
+    fn query_log(&self, workspace: &Path) -> Vec<String> {
+        fs::read_to_string(workspace.join(QUERY_LOG))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    fn assert_remote_only_queried(&self, mode: FixtureMode) {
+        let remote = self
+            .remote_workspace
+            .as_ref()
+            .expect("remote fixture must have a selected target workspace");
+        let home_queries = self.query_log(&self.home_workspace);
+        let remote_queries = self.query_log(remote);
+        assert!(
+            home_queries.is_empty(),
+            "{mode:?}: worker home store must not be queried; home={home_queries:?}, remote={remote_queries:?}"
+        );
+        assert!(
+            !remote_queries.is_empty(),
+            "{mode:?}: selected remote store must record the backend lookup"
+        );
     }
 
     fn raw_response(&self) -> String {
@@ -473,6 +503,8 @@ set -eu
 native="${NEEDLE_FIXTURE_NATIVE_BEAD}"
 mode="${NEEDLE_FIXTURE_MODE:-success}"
 
+printf '%s\n' "$*" >> "$PWD/.needle-claim-query.log"
+
 if [ "${1:-}" = "--version" ] && [ "$mode" = "wrong-backend-identity" ]; then
   printf '%s\n' 'not-a-bead-cli 9.9.9'
   exit 0
@@ -573,6 +605,27 @@ fn assert_no_agent_spawn(fixture: &Fixture) {
     }
 }
 
+fn write_unavailable_wrapper(wrapper: &Path) {
+    let script = r##"#!/bin/sh
+set -eu
+
+printf '%s\n' "$*" >> "$PWD/.needle-claim-query.log"
+printf '%s\n' 'fixture bead CLI unavailable' >&2
+exit 127
+"##;
+    fs::write(wrapper, script).expect("write unavailable fixture bead wrapper");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(wrapper)
+            .expect("stat unavailable fixture bead wrapper")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(wrapper, permissions)
+            .expect("make unavailable fixture bead wrapper executable");
+    }
+}
+
 #[test]
 fn subprocess_claim_verification_routes_remote_collisions_and_local_work() {
     let colliding = Fixture::new(FixtureLayout::CollidingRemote);
@@ -589,6 +642,7 @@ fn subprocess_claim_verification_routes_remote_collisions_and_local_work() {
         "the colliding fixture must expose the same bead ID in both stores"
     );
     assert_eq!(colliding.marker_lines(&colliding.home_workspace), 0);
+    colliding.assert_remote_only_queried(FixtureMode::Success);
     assert_eq!(
         colliding.marker_lines(remote),
         1,
@@ -632,6 +686,7 @@ fn subprocess_claim_verification_routes_remote_collisions_and_local_work() {
         "the non-colliding fixture must use distinct bead IDs"
     );
     assert_eq!(noncolliding.marker_lines(&noncolliding.home_workspace), 0);
+    noncolliding.assert_remote_only_queried(FixtureMode::Success);
     assert_eq!(noncolliding.marker_lines(remote), 1);
 
     let local = Fixture::new(FixtureLayout::Local);
@@ -672,6 +727,7 @@ fn subprocess_unverifiable_cleanup_uses_held_target_store_for_local_and_remote()
         "remote unverifiable claim must abort"
     );
     assert_no_agent_spawn(&remote);
+    remote.assert_remote_only_queried(FixtureMode::IssueNotFound);
     let remote_workspace = remote
         .remote_workspace
         .as_ref()
@@ -720,6 +776,7 @@ pub(super) fn assert_failure_matrix_spawns_zero_agents() {
                 fixture.telemetry()
             );
             assert_no_agent_spawn(&fixture);
+            fixture.assert_remote_only_queried(mode);
             if mode != FixtureMode::WrongBackendIdentity && mode != FixtureMode::UnavailableCli {
                 assert!(
                     fixture.has_event("bead.claim.verify_error"),
