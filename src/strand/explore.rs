@@ -65,6 +65,27 @@ use chrono::Utc;
 #[async_trait::async_trait]
 trait StoreFactory: Send + Sync {
     async fn create_store(&self, workspace: &Path) -> Result<Arc<dyn BeadStore>, anyhow::Error>;
+
+    /// Open a workspace store and prove that its full inventory is readable.
+    ///
+    /// Explore must not count a workspace merely because its descriptor can be
+    /// constructed: an incompatible or corrupt store can still fail on the
+    /// first inventory query. The probe is deliberately read-only. In
+    /// particular, it never invokes a backend repair or initialization command
+    /// for a schema that this process cannot identify.
+    async fn create_validated_store(
+        &self,
+        workspace: &Path,
+    ) -> Result<Arc<dyn BeadStore>, anyhow::Error> {
+        let store = self.create_store(workspace).await?;
+        store.list_all().await.map_err(|error| {
+            anyhow::anyhow!(
+                "failed to read bead-rs inventory for {}: {error:#}",
+                workspace.display()
+            )
+        })?;
+        Ok(store)
+    }
 }
 
 /// Default factory that creates explicitly configured bead store instances.
@@ -607,27 +628,39 @@ impl ExploreStrand {
                 continue;
             }
 
-            match workspace_health::validate_workspace(workspace).quarantine_reason() {
-                None => {
-                    self.record_workspace_success(workspace);
-                    validated.push(workspace.clone());
-                }
-                Some(reason) => {
-                    if reason.is_excluded_shape() {
-                        tracing::debug!(
-                            worker = %self.qualified_id,
-                            workspace = %workspace.display(),
-                            reason = reason.slug(),
-                            "excluding non-workspace from discovery (not counted as a workspace)"
-                        );
-                        // Not a health problem, so clear any earlier one.
-                        self.record_workspace_success(workspace);
-                        continue;
-                    }
-
-                    self.record_workspace_failure(workspace, reason.clone());
-                }
+            let validation = workspace_health::validate_workspace(workspace);
+            if validation.is_healthy {
+                self.record_workspace_success(workspace);
+                validated.push(workspace.clone());
+                continue;
             }
+
+            let Some(reason) = validation.quarantine_reason() else {
+                // Keep this defensive branch explicit: a future health status
+                // must not accidentally admit an unvalidated workspace.
+                tracing::warn!(
+                    worker = %self.qualified_id,
+                    workspace = %workspace.display(),
+                    explanation = %validation.explanation,
+                    "workspace validation returned an unhealthy result without a quarantine reason"
+                );
+                continue;
+            };
+
+            if reason.is_excluded_shape() {
+                tracing::debug!(
+                    worker = %self.qualified_id,
+                    workspace = %workspace.display(),
+                    reason = reason.slug(),
+                    explanation = %validation.explanation,
+                    "excluding non-workspace from discovery (not counted as a workspace)"
+                );
+                // Not a health problem, so clear any earlier one.
+                self.record_workspace_success(workspace);
+                continue;
+            }
+
+            self.record_workspace_failure(workspace, reason.clone());
         }
 
         let (scannable, duplicates) = workspace_health::resolve_duplicates(&validated);
@@ -647,35 +680,15 @@ impl ExploreStrand {
     ///
     /// Returns the number of workspaces that remain scannable.
     ///
-    /// In pinned mode the configured list is validated and reported but never
-    /// truncated. The operator named those paths explicitly, so silently
-    /// dropping one would turn a recoverable condition (a `.beads/` directory
-    /// absent mid-checkout) into a restart requirement. Auto-discovery has no
-    /// such contract — its list is rebuilt from scratch every cycle anyway.
+    /// Pinned paths are held to the same admission bar as auto-discovered
+    /// paths. Explicit configuration is useful for narrowing the fleet, but it
+    /// is not permission to count a missing store, a hidden fixture, or a
+    /// duplicate checkout as an empty workspace.
     fn apply_workspace_health(&self) -> usize {
         let candidates: Vec<PathBuf> = {
             let workspaces = self.workspaces.lock().unwrap();
             workspaces.clone()
         };
-
-        if !self.auto_discovery_mode {
-            for workspace in &candidates {
-                match workspace_health::validate_workspace(workspace).quarantine_reason() {
-                    None => {
-                        self.record_workspace_success(workspace);
-                    }
-                    // Not a workspace at all — same treatment as in discovery:
-                    // not an incident, just not something to scan.
-                    Some(reason) if reason.is_excluded_shape() => {
-                        self.record_workspace_success(workspace);
-                    }
-                    Some(reason) => {
-                        self.record_workspace_failure(workspace, reason.clone());
-                    }
-                }
-            }
-            return candidates.len();
-        }
 
         let scannable = self.filter_healthy_workspaces(&candidates);
         let count = scannable.len();
@@ -1156,8 +1169,11 @@ impl super::Strand for ExploreStrand {
                 continue;
             }
 
-            // Create store and query for ready beads
-            let remote_store = match self.store_factory.create_store(workspace).await {
+            // A successful store construction is not enough to admit a
+            // workspace: incompatible stores often fail only when the full
+            // inventory is decoded. Probe that inventory before it can affect
+            // frontier metrics or starvation accounting.
+            let remote_store = match self.store_factory.create_validated_store(workspace).await {
                 Ok(s) => s,
                 Err(e) => {
                     self.record_store_failure(workspace, &e);
@@ -1194,6 +1210,11 @@ impl super::Strand for ExploreStrand {
 
             match remote_store.ready(&filters).await {
                 Ok(candidates) => {
+                    // The store passed both backend/inventory admission and
+                    // the frontier query. Clear any prior quarantine only now;
+                    // an inventory probe that succeeds followed by a failed
+                    // ready query is still an unhealthy workspace.
+                    self.record_workspace_success(workspace);
                     let p0_count = candidates.iter().filter(|b| b.priority == 0).count();
                     let ready_count = candidates.len();
                     let oldest_bead_age_secs = candidates
@@ -2174,6 +2195,69 @@ mod tests {
             let store = DummyStore;
             let result = strand.evaluate(&store, &HashSet::new()).await;
             assert!(matches!(result, StrandResult::NoWork));
+
+            // An unreadable inventory is quarantined without preventing a
+            // healthy workspace from contributing candidates, then rejoins
+            // after the store becomes readable again.
+            let inventory_root = tempfile::tempdir().unwrap();
+            let bad_workspace = inventory_root.path().join("bad-inventory");
+            let healthy_workspace = inventory_root.path().join("healthy-workspace");
+            for workspace in [&bad_workspace, &healthy_workspace] {
+                fs::create_dir_all(workspace.join(".beads")).unwrap();
+                fs::create_dir(workspace.join(".git")).unwrap();
+            }
+
+            let repaired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let factory = Arc::new(InventoryHealthFactory {
+                bad_workspace: bad_workspace.clone(),
+                healthy_workspace: healthy_workspace.clone(),
+                repaired: repaired.clone(),
+            });
+            let registry_dir = tempfile::tempdir().unwrap();
+            let inventory_strand = ExploreStrand::new_with_store_factory(
+                vec![bad_workspace.clone(), healthy_workspace.clone()],
+                inventory_root.path().join("home"),
+                Registry::new(registry_dir.path()),
+                Telemetry::new("workspace-health-test".to_string()),
+                "workspace-health-test".to_string(),
+                factory,
+                300,
+            );
+
+            let first = inventory_strand
+                .evaluate(&DummyStore, &HashSet::new())
+                .await;
+            let StrandResult::BeadFound(candidates) = first else {
+                panic!("healthy workspace should remain scannable: {first:?}");
+            };
+            assert!(candidates
+                .iter()
+                .all(|candidate| candidate.workspace == healthy_workspace));
+            let quarantine = inventory_strand.quarantine_registry.lock().unwrap();
+            assert!(quarantine.is_quarantined(&bad_workspace));
+            assert_eq!(
+                quarantine
+                    .reason(&bad_workspace)
+                    .map(|reason| reason.slug()),
+                Some("schema_incompatible")
+            );
+            drop(quarantine);
+
+            repaired.store(true, std::sync::atomic::Ordering::SeqCst);
+            let second = inventory_strand
+                .evaluate(&DummyStore, &HashSet::new())
+                .await;
+            let StrandResult::BeadFound(candidates) = second else {
+                panic!("repaired workspace should rejoin Explore: {second:?}");
+            };
+            assert!(candidates
+                .iter()
+                .any(|candidate| candidate.workspace == bad_workspace));
+            assert!(!inventory_strand
+                .quarantine_registry
+                .lock()
+                .unwrap()
+                .is_quarantined(&bad_workspace));
         });
     }
 
@@ -2245,10 +2329,16 @@ mod tests {
 
     #[test]
     fn explicit_workspaces_list_skips_discovery() {
-        let explicit_workspaces = vec![
-            PathBuf::from("/explicit/workspace1"),
-            PathBuf::from("/explicit/workspace2"),
-        ];
+        let root = tempfile::tempdir().unwrap();
+        let explicit_workspaces = ["workspace1", "workspace2"]
+            .into_iter()
+            .map(|name| {
+                let workspace = root.path().join(name);
+                fs::create_dir_all(workspace.join(".beads")).unwrap();
+                fs::create_dir(workspace.join(".git")).unwrap();
+                workspace
+            })
+            .collect::<Vec<_>>();
 
         let config = make_explore_config(true, explicit_workspaces.clone());
         let home = PathBuf::from("/some/other/home");
@@ -2260,6 +2350,29 @@ mod tests {
 
         // Should use the explicit list, not discovery
         assert_eq!(*strand.workspaces.lock().unwrap(), explicit_workspaces);
+
+        // A pinned path with no enabled store is excluded rather than counted
+        // as an empty workspace.
+        let missing_store = root.path().join("missing-store");
+        fs::create_dir(missing_store.join(".git")).unwrap();
+        let mut pinned_workspaces = explicit_workspaces.clone();
+        pinned_workspaces.push(missing_store.clone());
+        let config = make_explore_config(true, pinned_workspaces);
+        let registry_dir = tempfile::tempdir().unwrap();
+        let strand = ExploreStrand::new(
+            config,
+            root.path().join("home"),
+            Registry::new(registry_dir.path()),
+            Telemetry::new("health-test-worker".to_string()),
+            "health-test-worker".to_string(),
+        );
+
+        assert_eq!(*strand.workspaces.lock().unwrap(), explicit_workspaces);
+        assert!(!strand
+            .quarantine_registry
+            .lock()
+            .unwrap()
+            .is_quarantined(&missing_store));
     }
 
     // ── Rotation Tests ─────────────────────────────────────────────────────────────
@@ -3137,6 +3250,43 @@ mod tests {
         }
     }
 
+    /// Store factory for the workspace-health admission regression.
+    ///
+    /// The bad workspace opens successfully but fails its read-only inventory
+    /// probe until `repaired` is set. This distinguishes schema/read failures
+    /// from a factory that simply cannot construct a store.
+    struct InventoryHealthFactory {
+        bad_workspace: PathBuf,
+        healthy_workspace: PathBuf,
+        repaired: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl StoreFactory for InventoryHealthFactory {
+        async fn create_store(
+            &self,
+            workspace: &Path,
+        ) -> Result<Arc<dyn BeadStore>, anyhow::Error> {
+            if workspace == self.bad_workspace {
+                if self.repaired.load(std::sync::atomic::Ordering::SeqCst) {
+                    Ok(Arc::new(ValidBeadStore::new(workspace.to_path_buf())))
+                } else {
+                    Ok(Arc::new(ValidBeadStore::with_inventory_error(
+                        workspace.to_path_buf(),
+                        "file is not a database",
+                    )))
+                }
+            } else if workspace == self.healthy_workspace {
+                Ok(Arc::new(ValidBeadStore::new(workspace.to_path_buf())))
+            } else {
+                Err(anyhow::anyhow!(
+                    "unexpected workspace: {}",
+                    workspace.display()
+                ))
+            }
+        }
+    }
+
     /// Mock store factory for excluded beads scenario.
     ///
     /// Simulates:
@@ -3966,11 +4116,22 @@ mod tests {
     /// Mock store that returns a valid unassigned bead.
     struct ValidBeadStore {
         workspace: PathBuf,
+        inventory_error: Option<String>,
     }
 
     impl ValidBeadStore {
         fn new(workspace: PathBuf) -> Self {
-            ValidBeadStore { workspace }
+            ValidBeadStore {
+                workspace,
+                inventory_error: None,
+            }
+        }
+
+        fn with_inventory_error(workspace: PathBuf, error: impl Into<String>) -> Self {
+            ValidBeadStore {
+                workspace,
+                inventory_error: Some(error.into()),
+            }
         }
     }
 
@@ -3998,6 +4159,9 @@ mod tests {
         }
 
         async fn list_all(&self) -> Result<Vec<Bead>> {
+            if let Some(error) = &self.inventory_error {
+                anyhow::bail!("{error}");
+            }
             Ok(vec![])
         }
         async fn show(&self, _id: &BeadId) -> Result<Bead> {

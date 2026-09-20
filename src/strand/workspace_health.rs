@@ -612,72 +612,57 @@ pub fn classify_store_error(error: &anyhow::Error) -> QuarantineReason {
 pub fn resolve_duplicates(
     candidates: &[PathBuf],
 ) -> (Vec<PathBuf>, Vec<(PathBuf, QuarantineReason)>) {
-    let mut canonical: HashMap<String, PathBuf> = HashMap::new();
-    let mut duplicates: Vec<Option<(PathBuf, QuarantineReason)>> = vec![None; candidates.len()];
-
-    for (index, path) in candidates.iter().enumerate() {
-        // Workspaces with no repository identity are never duplicates.
+    // Resolve the winner for each identity from the complete group before
+    // producing diagnostics. An incremental winner can leave an earlier
+    // duplicate pointing at a checkout that later loses to a shallower path
+    // (the order-dependent three-checkout bug).
+    let mut groups: HashMap<String, Vec<PathBuf>> = HashMap::new();
+    for path in candidates {
         let Some(identity) = repository_identity(path) else {
             continue;
         };
-
-        match canonical.get(&identity) {
-            None => {
-                canonical.insert(identity, path.clone());
-            }
-            Some(existing) => {
-                let winner = canonical_choice(existing, path);
-                if winner.as_path() == existing.as_path() {
-                    duplicates[index] = Some((
-                        path.clone(),
-                        QuarantineReason::DuplicateRepository {
-                            canonical_path: existing.clone(),
-                        },
-                    ));
-                } else {
-                    // The newly seen path is the better canonical one; the
-                    // earlier entry becomes the duplicate instead.
-                    let loser = existing.clone();
-                    canonical.insert(identity, path.clone());
-                    if let Some(earlier) = candidates.iter().position(|p| p == &loser) {
-                        duplicates[earlier] = Some((
-                            loser,
-                            QuarantineReason::DuplicateRepository {
-                                canonical_path: path.clone(),
-                            },
-                        ));
-                    }
-                    duplicates[index] = None;
-                }
-            }
-        }
+        groups.entry(identity).or_default().push(path.clone());
     }
 
-    let mut kept = Vec::new();
+    let canonical: HashMap<String, PathBuf> = groups
+        .into_iter()
+        .filter_map(|(identity, mut paths)| {
+            paths.sort_by(|a, b| {
+                a.components()
+                    .count()
+                    .cmp(&b.components().count())
+                    .then_with(|| a.cmp(b))
+            });
+            paths.into_iter().next().map(|winner| (identity, winner))
+        })
+        .collect();
+
+    let mut kept = Vec::with_capacity(candidates.len());
     let mut reasons = Vec::new();
-    for (index, path) in candidates.iter().enumerate() {
-        match duplicates[index].take() {
-            Some((duplicate_path, reason)) => reasons.push((duplicate_path, reason)),
-            None => kept.push(path.clone()),
+    for path in candidates {
+        let Some(identity) = repository_identity(path) else {
+            kept.push(path.clone());
+            continue;
+        };
+
+        let Some(canonical_path) = canonical.get(&identity) else {
+            kept.push(path.clone());
+            continue;
+        };
+
+        if path == canonical_path {
+            kept.push(path.clone());
+        } else {
+            reasons.push((
+                path.clone(),
+                QuarantineReason::DuplicateRepository {
+                    canonical_path: canonical_path.clone(),
+                },
+            ));
         }
     }
 
     (kept, reasons)
-}
-
-/// Pick the canonical path between two checkouts of the same repository.
-fn canonical_choice(a: &Path, b: &Path) -> PathBuf {
-    let a_depth = a.components().count();
-    let b_depth = b.components().count();
-    if a_depth != b_depth {
-        return if a_depth < b_depth { a } else { b }.to_path_buf();
-    }
-    let (a_str, b_str) = (a.to_string_lossy(), b.to_string_lossy());
-    if a_str <= b_str {
-        a.to_path_buf()
-    } else {
-        b.to_path_buf()
-    }
 }
 
 #[cfg(test)]
@@ -969,6 +954,16 @@ mod tests {
         assert!(duplicates
             .iter()
             .all(|(_, r)| r.canonical_path() == Some(a.as_path())));
+
+        // The stale checkout may be encountered before the live checkout.
+        // Every duplicate must still name the same canonical path.
+        let (reordered_kept, reordered_duplicates) =
+            resolve_duplicates(&[b.clone(), c.clone(), a.clone()]);
+        assert_eq!(reordered_kept, vec![a]);
+        assert_eq!(reordered_duplicates.len(), 2);
+        assert!(reordered_duplicates
+            .iter()
+            .all(|(_, r)| r.canonical_path() == Some(reordered_kept[0].as_path())));
     }
 
     #[test]
