@@ -1016,6 +1016,7 @@ impl MitosisEvaluator {
             },
             chrono::Utc::now(),
         )?;
+        self.emit_child_count_warning_if_crossed(&parent.id, existing.len(), created_ids.len())?;
 
         // Record the final counts on the bead.mitosis span
         tracing::Span::current()
@@ -1032,6 +1033,49 @@ impl MitosisEvaluator {
         Ok(MitosisResult::Split {
             children: created_ids,
         })
+    }
+
+    /// Emit [`EventKind::MitosisChildCountWarning`] when this split pushes the
+    /// parent's cumulative direct-child count from below the configured
+    /// `child_count_warning_threshold` to at or above it.
+    ///
+    /// Edge-triggered on the crossing, not level-triggered on the count: a
+    /// parent already at or above the threshold never re-fires, so a runaway
+    /// produces one warning in the event stream, not one per further split
+    /// (bead needle-d2dd4fbd). The count is cumulative — the `parent-{id}`
+    /// cohort that existed before this split plus the children it just
+    /// created — which is what catches `repeat_interval` growth that never
+    /// breaches `max_children` within any single split. A threshold of 0
+    /// disables the warning.
+    fn emit_child_count_warning_if_crossed(
+        &self,
+        parent_id: &BeadId,
+        existing: usize,
+        created: usize,
+    ) -> Result<()> {
+        let threshold = self.config.child_count_warning_threshold;
+        if threshold == 0 {
+            return Ok(());
+        }
+        let before = existing as u64;
+        let after = before + created as u64;
+        if before < u64::from(threshold) && after >= u64::from(threshold) {
+            self.telemetry.emit(
+                EventKind::MitosisChildCountWarning {
+                    parent_id: parent_id.clone(),
+                    child_count: u32::try_from(after).unwrap_or(u32::MAX),
+                    threshold,
+                },
+                chrono::Utc::now(),
+            )?;
+            tracing::warn!(
+                parent_id = %parent_id,
+                child_count = after,
+                threshold,
+                "parent crossed the mitosis child-count warning threshold"
+            );
+        }
+        Ok(())
     }
 
     /// Apply a resolver's split proposal through Mitosis validation and
@@ -1148,6 +1192,7 @@ impl MitosisEvaluator {
             },
             chrono::Utc::now(),
         )?;
+        self.emit_child_count_warning_if_crossed(&parent.id, existing.len(), created_count)?;
         Ok(SplitApplication::Applied {
             created: created_count,
             deduped,
@@ -5678,5 +5723,301 @@ End of response."#;
         // Test that the default max_children is 8
         let config = MitosisConfig::default();
         assert_eq!(config.max_children, 8, "default max_children should be 8");
+    }
+
+    // ── child-count warning tests (needle-d2dd4fbd) ──
+
+    /// Sink that records every accepted event so tests can assert on what a
+    /// split actually emitted.
+    #[derive(Clone)]
+    struct CaptureSink {
+        events: std::sync::Arc<Mutex<Vec<crate::telemetry::TelemetryEvent>>>,
+    }
+
+    impl CaptureSink {
+        fn new() -> Self {
+            CaptureSink {
+                events: std::sync::Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn events(&self) -> Vec<crate::telemetry::TelemetryEvent> {
+            self.events.lock().unwrap().clone()
+        }
+    }
+
+    impl crate::telemetry::Sink for CaptureSink {
+        fn accept(&self, event: &crate::telemetry::TelemetryEvent) -> anyhow::Result<()> {
+            self.events.lock().unwrap().push(event.clone());
+            Ok(())
+        }
+
+        fn flush(&self, _deadline: std::time::Duration) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A telemetry handle wired to a capture sink, plus the sink itself.
+    /// The handle is `Clone`; keep a clone alive to flush through the writer
+    /// task before asserting on the sink's contents.
+    fn capturing_telemetry() -> (crate::telemetry::Telemetry, CaptureSink) {
+        let sink = CaptureSink::new();
+        let telemetry = crate::telemetry::Telemetry::with_sink("test".to_string(), sink.clone());
+        (telemetry, sink)
+    }
+
+    fn warning_config(threshold: u32) -> MitosisConfig {
+        MitosisConfig {
+            child_count_warning_threshold: threshold,
+            ..MitosisConfig::default()
+        }
+    }
+
+    fn proposal(titles: &[&str]) -> Vec<ProposedChild> {
+        titles
+            .iter()
+            .map(|title| ProposedChild {
+                title: (*title).to_string(),
+                body: format!("Child work: {title}"),
+            })
+            .collect()
+    }
+
+    /// Serialized payloads of every child-count warning the sink captured.
+    /// Call only after flushing through a live telemetry handle — the writer
+    /// task delivers asynchronously.
+    fn child_count_warnings(sink: &CaptureSink) -> Vec<serde_json::Value> {
+        sink.events()
+            .iter()
+            .filter(|e| e.event_type == "bead.mitosis.child_count_warning")
+            .map(|e| e.data.clone())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn child_count_warning_fires_at_threshold_with_parent_and_count() {
+        let (telemetry, sink) = capturing_telemetry();
+        let flush = telemetry.clone();
+        let ws_tmp = tempfile::tempdir().unwrap();
+        let evaluator =
+            MitosisEvaluator::new(warning_config(3), telemetry, ws_tmp.path().to_path_buf());
+        let store = MockStore::new();
+        let parent = test_bead();
+
+        let result = evaluator
+            .create_children(
+                &store,
+                &parent,
+                &proposal(&["Add endpoint", "Write migration", "Update tests"]),
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(result, MitosisResult::Split { .. }),
+            "expected Split, got {:?}",
+            result
+        );
+        flush
+            .force_flush_async(std::time::Duration::from_secs(1))
+            .await
+            .unwrap();
+
+        let warnings = child_count_warnings(&sink);
+        assert_eq!(
+            warnings.len(),
+            1,
+            "one crossing, one warning: {:?}",
+            warnings
+        );
+        let data = warnings[0].as_object().unwrap();
+        assert_eq!(
+            data.get("parent_id").and_then(|v| v.as_str()),
+            Some("parent-001"),
+            "warning must carry the parent id"
+        );
+        assert_eq!(
+            data.get("child_count").and_then(|v| v.as_u64()),
+            Some(3),
+            "warning must carry the cumulative child count"
+        );
+        assert_eq!(
+            data.get("threshold").and_then(|v| v.as_u64()),
+            Some(3),
+            "warning must carry the crossed threshold"
+        );
+    }
+
+    #[tokio::test]
+    async fn child_count_warning_silent_below_threshold() {
+        let (telemetry, sink) = capturing_telemetry();
+        let flush = telemetry.clone();
+        let ws_tmp = tempfile::tempdir().unwrap();
+        let evaluator =
+            MitosisEvaluator::new(warning_config(3), telemetry, ws_tmp.path().to_path_buf());
+        let store = MockStore::new();
+        let parent = test_bead();
+
+        let result = evaluator
+            .create_children(
+                &store,
+                &parent,
+                &proposal(&["Add endpoint", "Write migration"]),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(result, MitosisResult::Split { .. }));
+        flush
+            .force_flush_async(std::time::Duration::from_secs(1))
+            .await
+            .unwrap();
+
+        let warnings = child_count_warnings(&sink);
+        assert!(
+            warnings.is_empty(),
+            "a split that stays under the threshold must not warn: {:?}",
+            warnings
+        );
+    }
+
+    #[tokio::test]
+    async fn child_count_warning_fires_once_per_crossing_not_per_split_beyond() {
+        let (telemetry, sink) = capturing_telemetry();
+        let flush = telemetry.clone();
+        let ws_tmp = tempfile::tempdir().unwrap();
+        let evaluator =
+            MitosisEvaluator::new(warning_config(3), telemetry, ws_tmp.path().to_path_buf());
+        // The parent already has two direct children.
+        let mut store = MockStore::new().with_existing_children(vec![
+            existing_child("Add endpoint", "parent-001"),
+            existing_child("Write migration", "parent-001"),
+        ]);
+        let parent = test_bead();
+
+        // First split: 2 existing + 2 created = 4, crossing the threshold of 3.
+        let first = evaluator
+            .create_children(&store, &parent, &proposal(&["Add retries", "Add metrics"]))
+            .await
+            .unwrap();
+        assert!(
+            matches!(first, MitosisResult::Split { .. }),
+            "expected Split, got {:?}",
+            first
+        );
+
+        // Second split on the same parent: already at or above the threshold,
+        // so the count rising further must not warn again.
+        store.existing_children.extend([
+            existing_child("Add retries", "parent-001"),
+            existing_child("Add metrics", "parent-001"),
+        ]);
+        let second = evaluator
+            .create_children(&store, &parent, &proposal(&["Add tracing", "Add alerts"]))
+            .await
+            .unwrap();
+        assert!(
+            matches!(second, MitosisResult::Split { .. }),
+            "expected Split, got {:?}",
+            second
+        );
+        flush
+            .force_flush_async(std::time::Duration::from_secs(1))
+            .await
+            .unwrap();
+
+        let warnings = child_count_warnings(&sink);
+        assert_eq!(
+            warnings.len(),
+            1,
+            "edge-triggered: exactly one warning per crossing, got {:?}",
+            warnings
+        );
+        assert_eq!(
+            warnings[0].get("child_count").and_then(|v| v.as_u64()),
+            Some(4),
+            "the warning reports the count at the crossing split"
+        );
+    }
+
+    #[tokio::test]
+    async fn child_count_warning_disabled_at_zero() {
+        let (telemetry, sink) = capturing_telemetry();
+        let flush = telemetry.clone();
+        let ws_tmp = tempfile::tempdir().unwrap();
+        let evaluator =
+            MitosisEvaluator::new(warning_config(0), telemetry, ws_tmp.path().to_path_buf());
+        let store = MockStore::new();
+        let parent = test_bead();
+
+        let result = evaluator
+            .create_children(&store, &parent, &proposal(&["A", "B", "C", "D", "E"]))
+            .await
+            .unwrap();
+        assert!(matches!(result, MitosisResult::Split { .. }));
+        flush
+            .force_flush_async(std::time::Duration::from_secs(1))
+            .await
+            .unwrap();
+
+        let warnings = child_count_warnings(&sink);
+        assert!(
+            warnings.is_empty(),
+            "threshold 0 disables the warning: {:?}",
+            warnings
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_split_proposals_emits_child_count_warning() {
+        let (telemetry, sink) = capturing_telemetry();
+        let flush = telemetry.clone();
+        let ws_tmp = tempfile::tempdir().unwrap();
+        let evaluator =
+            MitosisEvaluator::new(warning_config(2), telemetry, ws_tmp.path().to_path_buf());
+        // One existing child; two novel proposals push the parent to 3.
+        let store = MockStore::new()
+            .with_existing_children(vec![existing_child("Add endpoint", "parent-001")]);
+        let parent = test_bead();
+
+        let result = evaluator
+            .apply_split_proposals(
+                &store,
+                &parent,
+                &["Write migration".to_string(), "Update tests".to_string()],
+                "the parent bundles three unrelated deliverables",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result,
+            SplitApplication::Applied {
+                created: 2,
+                deduped: 0
+            },
+            "both novel proposals should be created"
+        );
+        flush
+            .force_flush_async(std::time::Duration::from_secs(1))
+            .await
+            .unwrap();
+
+        let warnings = child_count_warnings(&sink);
+        assert_eq!(
+            warnings.len(),
+            1,
+            "resolve path must warn too: {:?}",
+            warnings
+        );
+        assert_eq!(
+            warnings[0].get("parent_id").and_then(|v| v.as_str()),
+            Some("parent-001")
+        );
+        assert_eq!(
+            warnings[0].get("child_count").and_then(|v| v.as_u64()),
+            Some(3)
+        );
+        assert_eq!(
+            warnings[0].get("threshold").and_then(|v| v.as_u64()),
+            Some(2)
+        );
     }
 }

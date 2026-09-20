@@ -140,7 +140,12 @@ version = 1
 # +5 for dispatch store-context propagation coverage: exact store handle,
 # context cloning, remote-target pre-spawn routing, local routing, and the
 # fail-closed context-free compatibility path (needle-d0f287f9).
-max_tests = 3898
+# +5 child-count warning telemetry suite (needle-d2dd4fbd): five capture-sink
+# contracts in src/mitosis/mod.rs — fires at the threshold carrying parent id,
+# child count and threshold, silent below it, exactly once per crossing and
+# not per split beyond it, disabled at threshold 0, and emitted from the
+# resolve path's apply_split_proposals too.
+max_tests = 3903
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
