@@ -8,7 +8,11 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
+
+/// Version of the canonical effective-policy representation.
+pub const EFFECTIVE_POLICY_CANONICAL_VERSION: u8 = 1;
 
 /// Authority classes from highest to lowest precedence.
 ///
@@ -290,6 +294,96 @@ impl<'a> ResolvedPolicy<'a> {
             .map(|source| source.id.as_str())
             .collect()
     }
+
+    /// Return the stable JSON representation of the effective policy inputs.
+    ///
+    /// The resolver has already ordered these sources by authority, scope, and
+    /// source ID. The canonical representation preserves that order and
+    /// records source identity, precedence, scope, and a digest of each
+    /// source's content. Raw policy content is intentionally not included in
+    /// the representation because the resulting bytes may be persisted or
+    /// attached to telemetry.
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>, PolicyError> {
+        let canonical = CanonicalPolicyInputs {
+            version: EFFECTIVE_POLICY_CANONICAL_VERSION,
+            sources: self
+                .sources
+                .iter()
+                .map(|source| CanonicalPolicySource::from(*source))
+                .collect(),
+        };
+
+        serde_json::to_vec(&canonical).map_err(|error| PolicyError::Canonicalization {
+            message: error.to_string(),
+        })
+    }
+
+    /// Return the canonical effective-policy inputs as UTF-8 JSON.
+    pub fn canonical_json(&self) -> Result<String, PolicyError> {
+        let bytes = self.canonical_bytes()?;
+        String::from_utf8(bytes).map_err(|error| PolicyError::Canonicalization {
+            message: error.to_string(),
+        })
+    }
+
+    /// Hash the canonical effective-policy inputs with SHA-256.
+    pub fn hash(&self) -> Result<String, PolicyError> {
+        let digest = Sha256::digest(self.canonical_bytes()?);
+        Ok(format!("{digest:x}"))
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct CanonicalPolicyInputs<'a> {
+    version: u8,
+    sources: Vec<CanonicalPolicySource<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+struct CanonicalPolicySource<'a> {
+    id: &'a str,
+    kind: PolicyKind,
+    authority: Authority,
+    precedence_rank: u8,
+    scope: CanonicalPolicyScope,
+    content_sha256: String,
+}
+
+impl<'a> From<&'a PolicySource> for CanonicalPolicySource<'a> {
+    fn from(source: &'a PolicySource) -> Self {
+        Self {
+            id: source.id.as_str(),
+            kind: source.kind,
+            authority: source.authority(),
+            precedence_rank: source.authority().rank(),
+            scope: CanonicalPolicyScope::from(&source.scope),
+            content_sha256: format!("{:x}", Sha256::digest(source.content.as_bytes())),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum CanonicalPolicyScope {
+    Global,
+    Repository { root: String },
+    Directory { path: String },
+    Adapter { name: String },
+}
+
+impl From<&PolicyScope> for CanonicalPolicyScope {
+    fn from(scope: &PolicyScope) -> Self {
+        match scope {
+            PolicyScope::Global => Self::Global,
+            PolicyScope::Repository { root } => Self::Repository {
+                root: root.to_string_lossy().into_owned(),
+            },
+            PolicyScope::Directory { path } => Self::Directory {
+                path: path.to_string_lossy().into_owned(),
+            },
+            PolicyScope::Adapter { name } => Self::Adapter { name: name.clone() },
+        }
+    }
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -304,4 +398,6 @@ pub enum PolicyError {
         scope: PolicyScope,
         sources: Vec<PolicySourceId>,
     },
+    #[error("failed to canonicalize effective policy inputs: {message}")]
+    Canonicalization { message: String },
 }

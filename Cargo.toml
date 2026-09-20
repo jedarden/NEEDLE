@@ -208,6 +208,12 @@ name = "nt10_policy_precedence"
 path = "tests/nt10_policy_precedence.rs"
 harness = true
 
+# Canonical effective-policy input hashing contract.
+[[test]]
+name = "nt10_policy_hashing"
+path = "tests/nt10_policy_hashing.rs"
+harness = true
+
 [[test]]
 name = "nt51_gateway_health"
 path = "tests/nt51_gateway_health.rs"

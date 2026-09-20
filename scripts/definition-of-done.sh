@@ -162,6 +162,7 @@ done
 # suite with no cargo target. Both are extracted and unit-tested by
 # tests/dod-modes/run.sh rather than copied, so they cannot drift from what
 # actually runs.
+## N-T10 hashing is independently selectable for the focused contract.
 needle_slow_targets() {
   printf '%s
 ' lib \
@@ -175,6 +176,7 @@ needle_slow_targets() {
     nt50_exception_lessons \
     nt51_adapter_usage_capture \
     nt10_policy_precedence \
+    nt10_policy_hashing \
     nt51_gateway_health \
     nt52_state_dir_isolation \
     nt07_admission_policy \
@@ -212,6 +214,7 @@ needle_cargo_selector() {
 ' --test nt50_exception_lessons ;;
     nt51_adapter_usage_capture) printf '%s
 ' --test nt51_adapter_usage_capture ;;
+    nt10_policy_hashing) printf '%s\n' --test nt10_policy_hashing ;;
     nt10_policy_precedence) printf '%s\n' --test nt10_policy_precedence ;;
     nt51_gateway_health) printf '%s
 ' --test nt51_gateway_health ;;
@@ -267,6 +270,7 @@ needle_nextest_filter() {
 ' 'binary_id(=needle::nt50_exception_lessons)' ;;
     nt51_adapter_usage_capture) printf '%s
 ' 'binary_id(=needle::nt51_adapter_usage_capture)' ;;
+    nt10_policy_hashing) printf '%s\n' 'binary_id(=needle::nt10_policy_hashing)' ;;
     nt10_policy_precedence) printf '%s\n' 'binary_id(=needle::nt10_policy_precedence)' ;;
     nt51_gateway_health) printf '%s
 ' 'binary_id(=needle::nt51_gateway_health)' ;;
