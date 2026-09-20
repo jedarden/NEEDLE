@@ -151,11 +151,15 @@ impl Fixture {
     /// preparation is idempotent, so several commands built from the same
     /// fixture race over the very same stores.
     fn command(&self, mode: FixtureMode) -> Command {
-        let fixture_binary = self.root.path().join("fixture-bead");
-        write_bead_wrapper(&fixture_binary, &self.bead_binary);
-        write_workspace_config(&self.home_workspace, &fixture_binary);
+        let home_binary = self.root.path().join("home-fixture-bead");
+        let remote_binary = self.root.path().join("remote-fixture-bead");
+        write_bead_wrapper(&home_binary, &self.bead_binary, Some("success"));
+        write_workspace_config(&self.home_workspace, &home_binary);
         if let Some(remote) = self.remote_workspace.as_ref() {
-            write_workspace_config(remote, &fixture_binary);
+            write_bead_wrapper(&remote_binary, &self.bead_binary, None);
+            write_workspace_config(remote, &remote_binary);
+        } else {
+            write_bead_wrapper(&remote_binary, &self.bead_binary, None);
         }
 
         let mut command = Command::new(env!("CARGO_BIN_EXE_needle"));
@@ -167,14 +171,6 @@ impl Fixture {
             .env("NEEDLE_STRANDS__EXPLORE__ENABLED", "true")
             .env("NEEDLE_STRANDS__EXPLORE__WORKSPACE_ROOT", self.root.path())
             .env("NEEDLE_FIXTURE_MODE", mode.env_name())
-            .env(
-                "NEEDLE_FIXTURE_HAS_REMOTE",
-                if self.remote_workspace.is_some() {
-                    "1"
-                } else {
-                    "0"
-                },
-            )
             .env("NEEDLE_FIXTURE_NATIVE_BEAD", &self.bead_binary)
             .env("NEEDLE_FIXTURE_WORKER", WORKER_NAME)
             .args([
@@ -489,37 +485,28 @@ fn write_adapter(adapter_dir: &Path, bead_binary: &Path) {
         .expect("write fixture adapter");
 }
 
-fn write_bead_wrapper(wrapper: &Path, native: &Path) {
+fn write_bead_wrapper(wrapper: &Path, native: &Path, mode_override: Option<&str>) {
     let script = r##"#!/bin/sh
 set -eu
 
 native="${NEEDLE_FIXTURE_NATIVE_BEAD}"
-mode="${NEEDLE_FIXTURE_MODE:-success}"
-fail_here=1
-case "$PWD" in
-  *remote-workspace*) ;;
-  *)
-    if [ "${NEEDLE_FIXTURE_HAS_REMOTE:-0}" = "1" ]; then
-      fail_here=0
-    fi
-    ;;
-esac
+mode="__NEEDLE_FIXTURE_MODE__"
 
-if [ "$fail_here" = "1" ] || [ "${1:-}" = "show" ]; then
+if [ "$mode" != "success" ] || [ "${1:-}" = "show" ]; then
   printf '%s\n' "$*" >> "$PWD/.needle-claim-query.log"
 fi
 
-if [ "$fail_here" = "1" ] && [ "$mode" = "unavailable-cli" ]; then
+if [ "$mode" = "unavailable-cli" ]; then
   printf '%s\n' 'fixture bead CLI unavailable' >&2
   exit 127
 fi
 
-if [ "${1:-}" = "--version" ] && [ "$fail_here" = "1" ] && [ "$mode" = "wrong-backend-identity" ]; then
+if [ "${1:-}" = "--version" ] && [ "$mode" = "wrong-backend-identity" ]; then
   printf '%s\n' 'not-a-bead-cli 9.9.9'
   exit 0
 fi
 
-if [ "${1:-}" = "show" ] && [ "$fail_here" = "1" ] && [ "$mode" != "success" ] && [ "$mode" != "wrong-backend-identity" ] && [ "$mode" != "unavailable-cli" ] && [ "$mode" != "agent-fail" ] && [ "$mode" != "agent-hang" ]; then
+if [ "${1:-}" = "show" ] && [ "$mode" != "success" ] && [ "$mode" != "wrong-backend-identity" ] && [ "$mode" != "unavailable-cli" ] && [ "$mode" != "agent-fail" ] && [ "$mode" != "agent-hang" ]; then
   count_file="$PWD/.needle-claim-show-count"
   count=0
   if [ -f "$count_file" ]; then
@@ -582,10 +569,15 @@ exec "$native" "$@"
 "##;
     fs::write(
         wrapper,
-        script.replace(
-            "${NEEDLE_FIXTURE_NATIVE_BEAD}",
-            &native.display().to_string(),
-        ),
+        script
+            .replace(
+                "${NEEDLE_FIXTURE_NATIVE_BEAD}",
+                &native.display().to_string(),
+            )
+            .replace(
+                "__NEEDLE_FIXTURE_MODE__",
+                mode_override.unwrap_or("${NEEDLE_FIXTURE_MODE:-success}"),
+            ),
     )
     .expect("write fixture bead wrapper");
     #[cfg(unix)]
