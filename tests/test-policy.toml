@@ -168,7 +168,7 @@ push = 666
 # +6 N-T54 admission-adapter contracts (needle-e830524d): plan-owned classes
 # file nothing, one signature creates one bead across submissions, budget and
 # shadow refusals are recorded, and the budget survives a restart.
-contract = 194
+contract = 196
 # +16 literal test attributes for Cargo execution isolation (needle-b31fcb27):
 # seven integration cases plus nine nested-Cargo fixture tests embedded in source.
 # +1 real-adapter contract for the injectable ProcessRunner (needle-d3f191a3).
@@ -312,6 +312,13 @@ path = "tests/nt10_policy_hashing.rs"
 tier = "contract"
 max_tests = 3
 owner = "component:policy-resolver"
+
+[[harness]]
+name = "nt10_context_manifest"
+path = "tests/nt10_context_manifest.rs"
+tier = "contract"
+max_tests = 2
+owner = "component:context-manifest"
 
 [[harness]]
 name = "nt07_impact_contract"

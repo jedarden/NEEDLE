@@ -214,6 +214,12 @@ name = "nt10_policy_hashing"
 path = "tests/nt10_policy_hashing.rs"
 harness = true
 
+# Resolved-policy ContextManifest materialization contract.
+[[test]]
+name = "nt10_context_manifest"
+path = "tests/nt10_context_manifest.rs"
+harness = true
+
 [[test]]
 name = "nt51_gateway_health"
 path = "tests/nt51_gateway_health.rs"

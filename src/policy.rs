@@ -7,12 +7,25 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+pub use needle_learning::ContextManifest;
+use needle_learning::{
+    AttemptId, Digest as LearningDigest, PolicyIdentity, SourceId, CURRENT_SCHEMA_VERSION,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 /// Version of the canonical effective-policy representation.
 pub const EFFECTIVE_POLICY_CANONICAL_VERSION: u8 = 1;
+
+/// Schema version used when a resolved policy becomes a context manifest.
+pub const CONTEXT_MANIFEST_SCHEMA_VERSION: u16 = CURRENT_SCHEMA_VERSION;
+
+/// Stable identity assigned to the effective policy snapshot in a manifest.
+pub const RESOLVED_POLICY_SOURCE_ID: &str = "needle.resolved-policy";
+
+/// Version label for the effective policy snapshot recorded in a manifest.
+pub const RESOLVED_POLICY_VERSION: &str = "effective-policy-v1";
 
 /// Authority classes from highest to lowest precedence.
 ///
@@ -271,6 +284,20 @@ impl AuthorityRegistry {
 
         Ok(ResolvedPolicy { sources })
     }
+
+    /// Resolve the applicable policy and materialize its immutable context.
+    ///
+    /// Resolution happens before materialization, so an ambiguous policy
+    /// never produces a manifest that could be mistaken for an admitted
+    /// context.
+    pub fn materialize_context_manifest(
+        &self,
+        context: &ResolutionContext,
+        attempt_id: AttemptId,
+    ) -> Result<ContextManifest, PolicyError> {
+        self.resolve(context)?
+            .materialize_context_manifest(attempt_id)
+    }
 }
 
 /// The ordered view of the registry for one resolution context.
@@ -330,6 +357,36 @@ impl<'a> ResolvedPolicy<'a> {
     pub fn hash(&self) -> Result<String, PolicyError> {
         let digest = Sha256::digest(self.canonical_bytes()?);
         Ok(format!("{digest:x}"))
+    }
+
+    /// Materialize the learning-kernel context record for this resolved
+    /// policy snapshot.
+    ///
+    /// The manifest stores the digest of the canonical effective-policy
+    /// representation rather than raw policy content. This preserves source
+    /// identity, ordering, scope, and content hashes without leaking the
+    /// instructions themselves into the attempt record.
+    pub fn materialize_context_manifest(
+        &self,
+        attempt_id: AttemptId,
+    ) -> Result<ContextManifest, PolicyError> {
+        let policy_digest =
+            LearningDigest::new(self.hash()?).map_err(|error| PolicyError::ManifestIdentity {
+                message: error.to_string(),
+            })?;
+
+        Ok(ContextManifest {
+            schema_version: CONTEXT_MANIFEST_SCHEMA_VERSION,
+            attempt_id,
+            policy: PolicyIdentity {
+                source_id: SourceId::from_static(RESOLVED_POLICY_SOURCE_ID),
+                digest: policy_digest,
+                version: RESOLVED_POLICY_VERSION.to_owned(),
+            },
+            tools: Vec::new(),
+            memory: Vec::new(),
+            redactions: Vec::new(),
+        })
     }
 }
 
@@ -400,4 +457,6 @@ pub enum PolicyError {
     },
     #[error("failed to canonicalize effective policy inputs: {message}")]
     Canonicalization { message: String },
+    #[error("failed to materialize context manifest identity: {message}")]
+    ManifestIdentity { message: String },
 }
