@@ -1954,10 +1954,13 @@ impl Dispatcher {
         // claim-time revision and fencing epoch and can point at the worker's
         // home workspace after Explore has selected a remote target.
         let Some(context) = dispatch_context else {
+            let missing_verifier = if self.bead_store.is_none() {
+                "no bead store wired for pre-spawn claim verification"
+            } else {
+                "no target-store claim context carried to pre-spawn verification"
+            };
             let error = claim_verification_error(format!(
-                "no target-store claim context carried to pre-spawn verification — \
-                 refusing to spawn bead {} unverified",
-                bead_id
+                "{missing_verifier} — refusing to spawn bead {bead_id} unverified"
             ));
             let _ = self.telemetry.emit(
                 crate::telemetry::EventKind::ClaimVerificationBlocked {
