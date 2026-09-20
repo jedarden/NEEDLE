@@ -133,7 +133,9 @@ version = 1
 # +21 adapter heartbeat activity contracts (needle-ded172f0): optional JSON
 # compatibility, scoped reporter intake, stale-attempt rejection, sequence and
 # receive-time safety, bounded wire shape, and coalesced heartbeat emission.
-max_tests = 3884
+# +1 for the pre-claim attempt identity and context-manifest unit contract
+# (needle-cafdd3af).
+max_tests = 3885
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

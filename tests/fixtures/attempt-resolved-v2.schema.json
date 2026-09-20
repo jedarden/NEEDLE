@@ -48,6 +48,24 @@
       "type": "string",
       "description": "HEAD SHA captured before the agent ran, so downstream commits can be attributed to the attempt. Absent when the SHA could not be captured."
     },
+    "claim_revision": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Backend bead revision observed immediately after the claim landed."
+    },
+    "assignee": {
+      "type": "string",
+      "description": "Exact assignee identity captured with the claim."
+    },
+    "claim_epoch": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Backend lease/fencing epoch captured with the claim."
+    },
+    "backend_capabilities": {
+      "type": "object",
+      "description": "Negotiated backend capability snapshot used by the attempt."
+    },
     "worker": {
       "type": "string",
       "description": "Worker identifier that ran the attempt."
@@ -55,6 +73,10 @@
     "adapter": {
       "type": "string",
       "description": "Agent adapter that executed the attempt (e.g. \"claude-code-glm-4.7\")."
+    },
+    "harness": {
+      "type": "string",
+      "description": "Adapter harness identity, when declared."
     },
     "model": {
       "type": "string",
@@ -74,7 +96,7 @@
     },
     "context_manifest_hash": {
       "type": "string",
-      "description": "Hash of the ContextManifest the attempt saw. Absent until N-T10 ships manifest hashing."
+      "description": "Hash of the ContextManifest the attempt saw."
     },
     "gate_results": {
       "type": "array",

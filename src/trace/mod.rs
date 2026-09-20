@@ -122,6 +122,8 @@ pub struct TraceCapture {
     enabled: bool,
     /// Optional sanitizer applied to all content before writing to disk.
     sanitizer: Option<Arc<Sanitizer>>,
+    /// Attempt identity bound before the adapter process starts.
+    attempt_id: Option<String>,
 }
 
 impl TraceCapture {
@@ -173,12 +175,18 @@ impl TraceCapture {
             trace_dir,
             enabled: true,
             sanitizer,
+            attempt_id: None,
         })
     }
 
     /// Get the trace directory path.
     pub fn trace_dir(&self) -> &Path {
         &self.trace_dir
+    }
+
+    /// Bind the immutable attempt identity to this trace capture.
+    pub fn bind_attempt_id(&mut self, attempt_id: impl Into<String>) {
+        self.attempt_id = Some(attempt_id.into());
     }
 
     /// Write stdout to `stdout.txt`.
@@ -270,8 +278,13 @@ impl TraceCapture {
             return Ok(());
         }
         let path = self.trace_dir.join("metadata.json");
+        let mut value =
+            serde_json::to_value(metadata).context("failed to serialize trace metadata")?;
+        if let Some(attempt_id) = &self.attempt_id {
+            value["attempt_id"] = serde_json::json!(attempt_id);
+        }
         let json =
-            serde_json::to_string_pretty(metadata).context("failed to serialize trace metadata")?;
+            serde_json::to_string_pretty(&value).context("failed to serialize trace metadata")?;
         std::fs::write(&path, json)
             .with_context(|| format!("failed to write metadata: {}", path.display()))
     }

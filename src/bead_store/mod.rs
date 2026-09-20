@@ -1420,6 +1420,15 @@ pub struct NewChild<'a> {
 /// Abstract interface to the bead backend.
 #[async_trait]
 pub trait BeadStore: Send + Sync {
+    /// Return the negotiated backend capability snapshot used for this store.
+    ///
+    /// Older/custom stores may not have a capability document; returning
+    /// `None` preserves compatibility while the attempt ledger records that
+    /// the snapshot was unavailable.
+    fn negotiated_capabilities(&self) -> Option<serde_json::Value> {
+        None
+    }
+
     /// Whether an error indicates corruption according to this store's backend.
     fn is_corruption_error(&self, _message: &str) -> bool {
         false

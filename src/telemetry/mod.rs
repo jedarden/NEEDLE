@@ -178,8 +178,16 @@ pub struct AttemptResolvedFields {
     pub bead_id: BeadId,
     pub workspace: String,
     pub bead_revision_start: Option<String>,
+    /// Backend revision observed immediately after the claim landed.
+    pub claim_revision: Option<u64>,
+    /// Assignee/fencing identity captured at claim time.
+    pub assignee: Option<String>,
+    pub claim_epoch: Option<u64>,
+    /// Negotiated backend capability snapshot used by the attempt.
+    pub backend_capabilities: Option<serde_json::Value>,
     pub worker: String,
     pub adapter: String,
+    pub harness: Option<String>,
     pub model: Option<String>,
     pub provider: Option<String>,
     pub prompt_template: String,
@@ -4093,8 +4101,13 @@ impl EventKind {
                     bead_id,
                     workspace,
                     bead_revision_start,
+                    claim_revision,
+                    assignee,
+                    claim_epoch,
+                    backend_capabilities,
                     worker,
                     adapter,
+                    harness,
                     model,
                     provider,
                     prompt_template,
@@ -4144,11 +4157,26 @@ impl EventKind {
                 if let Some(rev) = bead_revision_start {
                     data["bead_revision_start"] = serde_json::json!(rev);
                 }
+                if let Some(rev) = claim_revision {
+                    data["claim_revision"] = serde_json::json!(rev);
+                }
+                if let Some(actor) = assignee {
+                    data["assignee"] = serde_json::json!(actor);
+                }
+                if let Some(epoch) = claim_epoch {
+                    data["claim_epoch"] = serde_json::json!(epoch);
+                }
+                if let Some(capabilities) = backend_capabilities {
+                    data["backend_capabilities"] = capabilities.clone();
+                }
                 if let Some(m) = model {
                     data["model"] = serde_json::json!(m);
                 }
                 if let Some(p) = provider {
                     data["provider"] = serde_json::json!(p);
+                }
+                if let Some(harness) = harness {
+                    data["harness"] = serde_json::json!(harness);
                 }
                 if let Some(hash) = context_manifest_hash {
                     data["context_manifest_hash"] = serde_json::json!(hash);
@@ -7300,8 +7328,13 @@ mod tests {
             bead_id: BeadId::from("needle-96dec90b"),
             workspace: "/home/coding/NEEDLE".to_string(),
             bead_revision_start: Some("f902c854".to_string()),
+            claim_revision: Some(17),
+            assignee: Some("needle-test".to_string()),
+            claim_epoch: Some(3),
+            backend_capabilities: Some(serde_json::json!({"atomic_claim": true})),
             worker: "needle-test".to_string(),
             adapter: "claude-code-glm-5.3-flash".to_string(),
+            harness: Some("claude-code".to_string()),
             model: Some("glm-5.3-flash".to_string()),
             provider: Some("anthropic".to_string()),
             prompt_template: "pluck".to_string(),
@@ -7383,8 +7416,13 @@ mod tests {
             "bead_id",
             "workspace",
             "bead_revision_start",
+            "claim_revision",
+            "assignee",
+            "claim_epoch",
+            "backend_capabilities",
             "worker",
             "adapter",
+            "harness",
             "model",
             "provider",
             "prompt_template",

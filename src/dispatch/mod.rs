@@ -1203,6 +1203,7 @@ pub fn is_claim_verification_error(error: &anyhow::Error) -> bool {
 pub struct DispatchContext {
     target_store: ResolvedStoreContext,
     claim_identity: ClaimIdentity,
+    attempt_id: Option<String>,
 }
 
 impl DispatchContext {
@@ -1212,7 +1213,19 @@ impl DispatchContext {
         Self {
             target_store,
             claim_identity,
+            attempt_id: None,
         }
+    }
+
+    /// Bind the identity minted before the claim to this dispatch context.
+    pub fn with_attempt_id(mut self, attempt_id: impl Into<String>) -> Self {
+        self.attempt_id = Some(attempt_id.into());
+        self
+    }
+
+    /// The attempt identity carried into the pre-spawn gate and child env.
+    pub fn attempt_id(&self) -> Option<&str> {
+        self.attempt_id.as_deref()
     }
 
     /// The exact store/backend context selected for this dispatch.
@@ -1477,6 +1490,23 @@ impl Dispatcher {
         workspace: &Path,
         dispatch_context: Option<&DispatchContext>,
     ) -> Result<ExecutionResult> {
+        if let Some(context) = dispatch_context {
+            if let Some(attempt_id) = context.attempt_id() {
+                if attempt_id.is_empty() {
+                    bail!("dispatch context carries an empty attempt identity");
+                }
+                match self.telemetry.attempt_id() {
+                    Some(active) if active == attempt_id => {}
+                    Some(active) => bail!(
+                        "attempt identity mismatch before dispatch: context={attempt_id}, telemetry={active}"
+                    ),
+                    None => bail!(
+                        "attempt identity missing from telemetry for dispatch context {attempt_id}"
+                    ),
+                }
+            }
+        }
+
         // Set gen_ai.request.model if available
         if let Some(ref model) = adapter.model {
             tracing::Span::current().record("gen_ai.request.model", model.as_str());
@@ -1629,8 +1659,13 @@ impl Dispatcher {
     ) -> Result<ExecutionResult> {
         // Create trace capture for this bead execution.
         // Sanitizer is cloned (Arc clone — cheap) and applied before every disk write.
-        let trace_capture =
+        let mut trace_capture =
             TraceCapture::new_with_sanitizer(bead_id, workspace, self.sanitizer.clone());
+        if let (Some(capture), Some(attempt_id)) =
+            (trace_capture.as_mut(), self.telemetry.attempt_id())
+        {
+            capture.bind_attempt_id(attempt_id);
+        }
 
         // Provision tsnet identity if enabled
         let worker_id = self.telemetry.worker_id().to_string();
@@ -1662,6 +1697,14 @@ impl Dispatcher {
 
         // Build environment variables for the child process
         let mut child_env = adapter.environment.clone();
+
+        let attempt_id = dispatch_context
+            .and_then(DispatchContext::attempt_id)
+            .map(str::to_owned)
+            .or_else(|| self.telemetry.attempt_id());
+        if let Some(attempt_id) = attempt_id {
+            child_env.insert("NEEDLE_ATTEMPT_ID".to_string(), attempt_id);
+        }
 
         // Inject tsnet identity environment variables if provisioned
         if let (Some(ref identity), Some(_)) = (&tsnet_identity, &self.tsnet_registry) {

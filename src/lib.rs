@@ -7,6 +7,7 @@ pub mod adapter_usage;
 pub use needle_learning;
 
 pub mod agent_event;
+pub mod attempt;
 pub mod attempt_accounting;
 pub mod attempt_archive;
 pub mod attempt_history;

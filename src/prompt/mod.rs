@@ -1025,6 +1025,22 @@ impl PromptBuilder {
         })
     }
 
+    /// Bind the attempt identity to a rendered prompt after all template and
+    /// context expansion is complete. Recomputing the digest is important:
+    /// the prompt hash in telemetry must identify the bytes the adapter saw.
+    pub fn bind_attempt_id(prompt: BuiltPrompt, attempt_id: &str) -> BuiltPrompt {
+        let content = format!("[needle-attempt:{attempt_id}]\n{}", prompt.content);
+        let hash = hex_sha256(&content);
+        let token_estimate = content.len() as u64 / 4;
+        BuiltPrompt {
+            content,
+            hash,
+            token_estimate,
+            template_name: prompt.template_name,
+            template_version: prompt.template_version,
+        }
+    }
+
     /// Convenience method that uses the `"pluck"` template.
     pub fn build_pluck(
         &self,

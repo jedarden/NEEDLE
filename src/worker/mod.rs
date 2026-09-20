@@ -30,6 +30,7 @@ use tracing::Instrument;
 #[cfg(unix)]
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering as AtomicOrdering};
 
+use crate::attempt::{self, AttemptProvenance};
 use crate::bead_store::{BeadStore, RecoveryReleaseOutcome};
 use crate::build_status::BuildStatusChecker;
 use crate::canary::CanaryRunner;
@@ -738,6 +739,10 @@ pub struct Worker {
     /// Dispatch must compare the live store with this claim-time snapshot;
     /// reconstructing it later would miss a release/re-claim by the same actor.
     claim_identity: Option<ClaimIdentity>,
+    /// The one identity minted before the claim mutation for this cycle.
+    attempt_id: Option<String>,
+    /// Claim and execution provenance carried into the terminal ledger row.
+    attempt_provenance: AttemptProvenance,
     telemetry: Telemetry,
     strands: StrandRunner,
     claimer: Claimer,
@@ -1296,6 +1301,8 @@ impl Worker {
             store,
             target_store: None,
             claim_identity: None,
+            attempt_id: None,
+            attempt_provenance: AttemptProvenance::default(),
             telemetry,
             strands,
             claimer,
@@ -3046,6 +3053,18 @@ impl Worker {
             }
         };
 
+        // Mint the attempt identity before the claim mutation. Every claim
+        // race, claim failure, and successful claim event is therefore joined
+        // to the same identity that later reaches the prompt and outcome.
+        let attempt_id = attempt::new_id();
+        self.attempt_id = Some(attempt_id.clone());
+        self.attempt_provenance = AttemptProvenance {
+            assignee: Some(self.qualified_id()),
+            ..AttemptProvenance::default()
+        };
+        self.telemetry.set_attempt_id(attempt_id.clone());
+        tracing::debug!(attempt_id = %attempt_id, bead_id = %bead_id, "attempt identity minted before claim");
+
         // Build the current exclusion set and pass it to claim_one. This
         // prevents claim_one from attempting to claim a bead that was
         // just race-lost (which would cause a tight loop).
@@ -3058,6 +3077,7 @@ impl Worker {
         let claim_span = tracing::info_span!(
             "bead.claim",
             needle.bead.id = %bead_id.as_ref(),
+            needle.attempt.id = %attempt_id,
             needle.claim.retry_number = tracing::field::Empty,
             needle.claim.result = tracing::field::Empty,
         );
@@ -3168,6 +3188,11 @@ impl Worker {
                         return Err(error);
                     }
                 };
+                self.attempt_provenance.claim_revision = identity.revision;
+                self.attempt_provenance.claim_epoch = identity.claim_epoch;
+                self.attempt_provenance.backend_capabilities =
+                    target_store.store().negotiated_capabilities();
+                self.attempt_provenance.assignee = Some(identity.actor.clone());
                 self.claim_identity = Some(identity);
 
                 tracing::info!(bead_id = %bead.id, title = %bead.title, "claimed bead");
@@ -3729,6 +3754,11 @@ impl Worker {
             strand,
             prompt.content
         );
+        let attempt_id = self
+            .attempt_id
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("prompt built without an attempt identity"))?;
+        prompt = PromptBuilder::bind_attempt_id(prompt, attempt_id);
 
         // Store the prompt for the dispatch phase. We use a transient field pattern:
         // the prompt is passed via self.built_prompt.
@@ -3743,25 +3773,19 @@ impl Worker {
             bail!("DISPATCHING state without current_bead — invariant violated");
         }
 
-        // Generate the provisional attempt ID for this dispatch (plan section
-        // 4.4 step 1). UUIDv7 embeds a unix-millisecond timestamp so ledger
-        // rows sort by dispatch start. It stays provisional — flagged
-        // `provisional: true` at emission — until N-T03 resolves attempts
-        // against beads. Enter it into the telemetry context so every event
-        // emitted between here and the end of the bead cycle carries it; the
-        // outcome handler reads it back through its own telemetry handle.
-        let attempt_id = uuid::Uuid::now_v7().to_string();
-        self.telemetry.set_attempt_id(attempt_id.clone());
-        tracing::debug!(
-            attempt_id = %attempt_id,
-            "dispatch start — provisional attempt ID assigned"
-        );
+        let attempt_id = self.attempt_id.clone().ok_or_else(|| {
+            anyhow::anyhow!("dispatch started without a pre-claim attempt identity")
+        })?;
 
         // Check rate limits before dispatching.
         let adapter = self.resolve_adapter()?;
         let provider = adapter.provider.as_deref();
         let model = adapter.model.as_deref();
         self.health.update_adapter(Some(&adapter.name));
+        let _ = self.health.bind_current_activity(attempt_id.clone());
+        self.attempt_provenance.adapter = Some(adapter.name.clone());
+        self.attempt_provenance.harness = Some(adapter.name.clone());
+        self.attempt_provenance.model = adapter.model.clone();
 
         // Enter the agent.dispatch span for the dispatching phase.
         let _bead_id = self.current_bead.as_ref().map(|b| b.id.clone());
@@ -4005,6 +4029,10 @@ impl Worker {
         };
 
         let adapter = self.resolve_adapter()?;
+        let attempt_id = self
+            .attempt_id
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("execution started without an attempt identity"))?;
 
         // Use the bead's workspace if set (remote bead from Explore),
         // otherwise fall back to the config's default workspace.
@@ -4013,6 +4041,21 @@ impl Worker {
         } else {
             &bead.workspace
         };
+        self.attempt_provenance.context_manifest_hash = Some(attempt::context_manifest_hash(
+            &attempt_id,
+            bead.id.as_ref(),
+            &dispatch_ws.display().to_string(),
+            &self.qualified_id(),
+            &adapter.name,
+            adapter.model.as_deref(),
+            &prompt.template_name,
+            &prompt.template_version,
+        ));
+        self.attempt_provenance.adapter = Some(adapter.name.clone());
+        self.attempt_provenance.harness = Some(adapter.name.clone());
+        self.attempt_provenance.model = adapter.model.clone();
+        self.outcome_handler
+            .set_attempt_provenance(self.attempt_provenance.clone());
 
         // Race the dispatch against the shutdown signal.
         let was_interrupted;
@@ -4277,8 +4320,15 @@ impl Worker {
                 // final pre-spawn gate. The dispatcher must not reconstruct
                 // either value from the workspace path or its home-store
                 // compatibility fields.
-                let dispatch_context =
-                    DispatchContext::new((*target_store).clone(), claim_identity.clone());
+                let dispatch_context = DispatchContext::new(
+                    (*target_store).clone(),
+                    claim_identity.clone(),
+                )
+                .with_attempt_id(
+                    self.attempt_id
+                        .clone()
+                        .ok_or_else(|| anyhow::anyhow!("dispatch context lost attempt identity"))?,
+                );
 
                 self.exec_started_at = Some(self.clock.now());
                 self.agent_process_active = true;
@@ -6353,6 +6403,9 @@ impl Worker {
         self.last_effort = None;
         self.beads_processed += 1;
         self.current_bead = None;
+        self.attempt_id = None;
+        self.attempt_provenance = AttemptProvenance::default();
+        self.health.clear_activity();
         // The dispatch is over: stop attributing events to its attempt ID so
         // idle and next-selection events are not joined to the previous
         // attempt (plan section 4.4 step 1).
@@ -12210,7 +12263,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn do_dispatch_assigns_provisional_attempt_id_readable_by_outcome_handler() {
+    async fn do_dispatch_preserves_preclaim_attempt_id_readable_by_outcome_handler() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let mut worker = make_worker(store);
         worker.boot().await.unwrap();
@@ -12220,24 +12273,26 @@ mod tests {
         bead.assignee = Some(worker.qualified_id());
         worker.current_bead = Some(bead);
         worker.state = WorkerState::Dispatching;
+        let attempt_id = crate::attempt::new_id();
+        worker.attempt_id = Some(attempt_id.clone());
+        worker.telemetry.set_attempt_id(attempt_id.clone());
 
         // The dispatch below fails closed on the unreadable live claim, but the
-        // provisional attempt ID must already exist by then: it is generated at
-        // dispatch start (plan section 4.4 step 1), and the outcome handler
-        // reads it back through the telemetry handle they share.
+        // attempt ID minted before claim must survive to the dispatcher and
+        // remain readable through the shared outcome-handler telemetry handle.
         worker.do_dispatch().await.unwrap_err();
 
-        let attempt_id = worker
+        let observed = worker
             .outcome_handler
             .attempt_id()
-            .expect("dispatch start must assign a provisional attempt ID");
-        let parsed =
-            uuid::Uuid::parse_str(&attempt_id).expect("provisional attempt ID must be a UUID");
+            .expect("the pre-claim attempt ID must reach the outcome handler");
+        let parsed = uuid::Uuid::parse_str(&observed).expect("attempt ID must be a UUID");
         assert_eq!(
             parsed.get_version_num(),
             7,
             "attempt IDs are UUIDv7 so ledger rows sort by dispatch start"
         );
+        assert_eq!(observed, attempt_id);
     }
 
     #[tokio::test]

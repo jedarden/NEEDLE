@@ -655,6 +655,11 @@ pub struct OutcomeHandler {
     /// resolved through this handler?", which would deny every later
     /// wrapper-path dispatch its row.
     ledger_row_emitted: Arc<std::sync::Mutex<Option<String>>>,
+    /// Claim, backend, adapter, and context identity captured for the active
+    /// attempt. Kept separate from `AttemptContext` so legacy direct handler
+    /// callers remain source-compatible while real worker dispatches carry
+    /// the stronger claim-time provenance.
+    attempt_provenance: Arc<std::sync::Mutex<Option<crate::attempt::AttemptProvenance>>>,
     /// Re-runs the verification commands a close reason claims, in a clean
     /// extraction of committed state, before the close is honoured
     /// ([`Self::verify_close_evidence`]).
@@ -680,6 +685,7 @@ impl OutcomeHandler {
             telemetry,
             attempt_context: Arc::new(std::sync::Mutex::new(None)),
             ledger_row_emitted: Arc::new(std::sync::Mutex::new(None)),
+            attempt_provenance: Arc::new(std::sync::Mutex::new(None)),
             close_verification: close_verification::CloseVerificationRuntime::production(),
             fallback_verification: fallback_verification::FallbackVerificationRuntime::production(),
         }
@@ -702,6 +708,14 @@ impl OutcomeHandler {
             .attempt_context
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(context);
+    }
+
+    /// Bind claim-time provenance to the next ledger row.
+    pub fn set_attempt_provenance(&self, provenance: crate::attempt::AttemptProvenance) {
+        *self
+            .attempt_provenance
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(provenance);
     }
 
     /// Take the pending dispatch context, falling back to an all-unknown one.
@@ -2053,6 +2067,12 @@ impl OutcomeHandler {
         gate_results: Vec<crate::telemetry::GateResultEntry>,
     ) -> crate::telemetry::AttemptResolvedFields {
         let attempt = self.take_attempt_context();
+        let provenance = self
+            .attempt_provenance
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+            .unwrap_or_default();
         let attempt_id = match self.telemetry.attempt_id() {
             Some(id) => id,
             None => {
@@ -2080,20 +2100,28 @@ impl OutcomeHandler {
 
         let fields = crate::telemetry::AttemptResolvedFields {
             attempt_id,
-            // Always true until N-T03 lands: NEEDLE cannot yet attest that an
-            // attempt ID identifies a durable attempt rather than a dispatch.
-            provisional: true,
+            // Direct handler callers without claim provenance remain
+            // provisional; worker-owned attempts are authoritative even when
+            // a legacy backend cannot expose a numeric revision.
+            provisional: provenance.assignee.is_none(),
             bead_id: bead.id.clone(),
             workspace: bead.workspace.display().to_string(),
             bead_revision_start: attempt.bead_revision_start,
+            claim_revision: provenance.claim_revision,
+            assignee: provenance.assignee,
+            claim_epoch: provenance.claim_epoch,
+            backend_capabilities: provenance.backend_capabilities,
             worker: self.telemetry.worker_id().to_string(),
-            adapter: attempt.adapter,
+            adapter: provenance
+                .adapter
+                .unwrap_or_else(|| attempt.adapter.clone()),
+            harness: provenance.harness,
             model: attempt.model,
             provider: attempt.provider,
             prompt_template: attempt.prompt_template,
             template_version: attempt.template_version,
             // ContextManifest hashing is N-T10; the hash is absent until then.
-            context_manifest_hash: None,
+            context_manifest_hash: provenance.context_manifest_hash,
             gate_results,
             outcome: resolved_outcome.to_string(),
             requested_action,

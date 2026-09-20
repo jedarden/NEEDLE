@@ -517,6 +517,17 @@ impl CliBeadStore {
 
 #[async_trait]
 impl BeadStore for CliBeadStore {
+    fn negotiated_capabilities(&self) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "backend": &self.backend.name,
+            "atomic_claim": self.backend.capabilities.atomic_claim,
+            "transactional_batch": self.backend.capabilities.transactional_batch,
+            "velocity_metadata": self.backend.capabilities.velocity_metadata,
+            "attempt_resolution": self.attempt_outcome_supported,
+            "manifest": self.manifest_supported,
+        }))
+    }
+
     fn pause_workspace(&self, reason: String) {
         self.set_sync_pause(Some(reason));
     }
