@@ -3498,4 +3498,110 @@ mod tests {
             "unknown"
         );
     }
+
+    /// A bead CLI that models the backend side of the attempt-ledger
+    /// idempotency contract: the first `resolve` of an attempt records it,
+    /// every later `resolve` of the SAME attempt id is a replay that returns
+    /// the original receipt. The receipt is therefore constant across calls
+    /// and only `is_replay` flips.
+    const RESOLVE_RECEIPT_FIXTURE: &str = r#"#!/bin/sh
+if [ "${1:-}" = "resolve" ]; then
+  count_file="$(dirname "$0")/resolve-count"
+  count=0
+  if [ -f "$count_file" ]; then
+    count=$(cat "$count_file")
+  fi
+  count=$((count + 1))
+  printf '%s\n' "$count" > "$count_file"
+  if [ "$count" -ge 2 ]; then
+    replay=true
+  else
+    replay=false
+  fi
+  printf '{"receipt_id":"receipt-attempt-1","is_replay":%s,"resulting_state":"in_progress","resulting_attempt_tier":1}\n' "$replay"
+  exit 0
+fi
+printf '{"ok":true}\n'
+exit 0
+"#;
+
+    fn resolve_fixture_script(dir: &Path) -> PathBuf {
+        let script = dir.join("fake-bead");
+        std::fs::write(&script, RESOLVE_RECEIPT_FIXTURE).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&script, permissions).unwrap();
+        }
+        script
+    }
+
+    fn receipt_resolution() -> AttemptResolution {
+        AttemptResolution {
+            bead_id: BeadId::from("needle-receipt"),
+            attempt_id: "0192-attempt-1".to_string(),
+            outcome: "verified_success".to_string(),
+            actor: "needle-alpha".to_string(),
+            reason: None,
+            evidence_ref: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_attempt_replay_returns_the_original_receipt() {
+        let bead_rs = backend::builtin_bead_backends()
+            .into_iter()
+            .find(|backend| backend.name == "bead-rs")
+            .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let fake = resolve_fixture_script(temp.path());
+        let workspace = temp.path().join("ws");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let store = CliBeadStore::new(bead_rs, fake, workspace, None, None, None)
+            .unwrap()
+            .with_attempt_outcome_support(true);
+
+        let resolution = receipt_resolution();
+        let first = store
+            .resolve_attempt(&resolution)
+            .await
+            .unwrap()
+            .expect("attempt outcomes are supported");
+        assert_eq!(first.receipt_id, "receipt-attempt-1");
+        assert!(!first.is_replay, "the first recording is not a replay");
+        assert_eq!(first.resulting_attempt_tier, Some(1));
+
+        let replay = store
+            .resolve_attempt(&resolution)
+            .await
+            .unwrap()
+            .expect("attempt outcomes stay supported");
+        assert_eq!(
+            replay.receipt_id, first.receipt_id,
+            "a replay must return the original receipt, not a second one"
+        );
+        assert!(replay.is_replay, "the backend flags the replay");
+    }
+
+    #[tokio::test]
+    async fn resolve_attempt_without_backend_support_is_a_capability_gap() {
+        let bead_rs = backend::builtin_bead_backends()
+            .into_iter()
+            .find(|backend| backend.name == "bead-rs")
+            .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let fake = resolve_fixture_script(temp.path());
+        let workspace = temp.path().join("ws");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        // No `with_attempt_outcome_support`: the capability was never
+        // negotiated, so resolution is a silent no-op and the local ledger
+        // row stays the record.
+        let store = CliBeadStore::new(bead_rs, fake, workspace, None, None, None).unwrap();
+        let resolved = store.resolve_attempt(&receipt_resolution()).await.unwrap();
+        assert!(resolved.is_none());
+    }
 }

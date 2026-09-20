@@ -35,6 +35,12 @@ enum FixtureMode {
     AssigneeMismatch,
     RevisionMismatch,
     EpochMismatch,
+    /// The agent spawns, records its identity, then exits 1 without closing
+    /// the bead: a handled work failure that must release the claim.
+    AgentFail,
+    /// The agent spawns, records its identity, then outlives the adapter
+    /// timeout: a dispatch timeout that must release the claim.
+    AgentHang,
 }
 
 impl FixtureMode {
@@ -50,6 +56,8 @@ impl FixtureMode {
             Self::AssigneeMismatch => "assignee-mismatch",
             Self::RevisionMismatch => "revision-mismatch",
             Self::EpochMismatch => "epoch-mismatch",
+            Self::AgentFail => "agent-fail",
+            Self::AgentHang => "agent-hang",
         }
     }
 }
@@ -133,6 +141,15 @@ impl Fixture {
     }
 
     fn run(&self, mode: FixtureMode) -> Output {
+        self.command(mode)
+            .output()
+            .expect("spawn isolated needle subprocess")
+    }
+
+    /// Build (and prepare the fixture for) one worker invocation. The
+    /// preparation is idempotent, so several commands built from the same
+    /// fixture race over the very same stores.
+    fn command(&self, mode: FixtureMode) -> Command {
         let missing_binary = self.root.path().join("missing-bead-cli");
         let config_binary = if mode == FixtureMode::UnavailableCli {
             missing_binary.clone()
@@ -173,13 +190,36 @@ impl Fixture {
                 "--identifier",
                 WORKER_NAME,
             ]);
-        command.output().expect("spawn isolated needle subprocess")
+        command
     }
 
     fn marker_lines(&self, workspace: &Path) -> usize {
         fs::read_to_string(workspace.join(MARKER))
             .map(|content| content.lines().count())
             .unwrap_or(0)
+    }
+
+    /// The attempt identity every spawned agent recorded from its own
+    /// environment, in spawn order.
+    fn marker_attempt_ids(&self, workspace: &Path) -> Vec<String> {
+        fs::read_to_string(workspace.join(MARKER))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| line.strip_prefix("spawned ").map(str::to_string))
+            .collect()
+    }
+
+    /// The prompt bytes the agent consumed on stdin.
+    fn captured_prompt(&self, workspace: &Path) -> String {
+        fs::read_to_string(workspace.join(".needle-attempt-prompt.txt")).unwrap_or_default()
+    }
+
+    /// Every `attempt.resolved` ledger row the runs emitted.
+    fn resolved_rows(&self) -> Vec<Value> {
+        self.telemetry()
+            .into_iter()
+            .filter(|event| event["event_type"] == "attempt.resolved")
+            .collect()
     }
 
     fn show_counts(&self) -> String {
@@ -414,8 +454,12 @@ fn write_global_config(home: &Path, adapter_dir: &Path) {
 }
 
 fn write_adapter(adapter_dir: &Path, bead_binary: &Path) {
+    // The fixture agent records the attempt identity it was dispatched with
+    // (`NEEDLE_ATTEMPT_ID` comes in through the child environment), captures
+    // the prompt it was handed on stdin, and then either fails, hangs past
+    // the adapter timeout, or delivers the external close — mode-dependent.
     let adapter = format!(
-        "name: {ADAPTER_NAME}\nagent_cli: /bin/sh\ninvoke_template: >\n  cd {{workspace}} && echo spawned >> {MARKER} && {} close {{bead_id}} --reason 'fixture agent completed'\ntimeout_secs: 10\nprovider: local\nmodel: fixture\n",
+        "name: {ADAPTER_NAME}\nagent_cli: /bin/sh\ninvoke_template: >\n  cd {{workspace}} && echo \"spawned ${{NEEDLE_ATTEMPT_ID:-none}}\" >> {MARKER} && cat > .needle-attempt-prompt.txt && if [ \"${{NEEDLE_FIXTURE_MODE:-}}\" = \"agent-hang\" ]; then sleep 31; elif [ \"${{NEEDLE_FIXTURE_MODE:-}}\" = \"agent-fail\" ]; then exit 1; fi && {} close {{bead_id}} --reason 'fixture agent completed'\ntimeout_secs: 10\nprovider: local\nmodel: fixture\n",
         yaml_path(bead_binary)
     );
     fs::write(adapter_dir.join("claim-verification-probe.yaml"), adapter)
@@ -434,7 +478,7 @@ if [ "${1:-}" = "--version" ] && [ "$mode" = "wrong-backend-identity" ]; then
   exit 0
 fi
 
-if [ "${1:-}" = "show" ] && [ "$mode" != "success" ] && [ "$mode" != "wrong-backend-identity" ] && [ "$mode" != "unavailable-cli" ]; then
+if [ "${1:-}" = "show" ] && [ "$mode" != "success" ] && [ "$mode" != "wrong-backend-identity" ] && [ "$mode" != "unavailable-cli" ] && [ "$mode" != "agent-fail" ] && [ "$mode" != "agent-hang" ]; then
   count_file="$PWD/.needle-claim-show-count"
   count=0
   if [ -f "$count_file" ]; then
@@ -724,4 +768,228 @@ fn subprocess_claim_verification_identity_mismatches_abort_before_spawn() {
             "{mode:?}: identity mismatch must emit recheck failure telemetry"
         );
     }
+}
+
+#[test]
+fn subprocess_attempt_identity_flows_from_claim_to_adapter_and_resolution() {
+    let fixture = Fixture::new(FixtureLayout::Local);
+    let output = fixture.run(FixtureMode::Success);
+    assert!(
+        output.status.success(),
+        "identity-flow dispatch failed:\nstdout={}\nstderr={}\nevents={:?}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        fixture.telemetry()
+    );
+
+    // The adapter child saw exactly one attempt identity in its environment,
+    // minted before the claim it dispatched under.
+    let ids = fixture.marker_attempt_ids(&fixture.home_workspace);
+    assert_eq!(ids.len(), 1, "exactly one agent spawn must be recorded");
+    let attempt_id = &ids[0];
+    let parsed = uuid::Uuid::parse_str(attempt_id)
+        .unwrap_or_else(|error| panic!("marker attempt id {attempt_id} must be a UUID: {error}"));
+    assert_eq!(parsed.get_version_num(), 7, "attempt ids are UUIDv7");
+
+    // The prompt the adapter consumed carries the same identity tag.
+    let prompt = fixture.captured_prompt(&fixture.home_workspace);
+    assert!(
+        prompt.contains(&format!("[needle-attempt:{attempt_id}]")),
+        "prompt must carry the dispatch attempt tag; got:\n{}",
+        prompt
+    );
+
+    // Every telemetry event stamped inside the dispatch cycle carries that
+    // one identity — no second id may appear anywhere in the run.
+    let events = fixture.telemetry();
+    let stamped: Vec<&str> = events
+        .iter()
+        .filter_map(|event| event["attempt_id"].as_str())
+        .collect();
+    assert!(
+        !stamped.is_empty(),
+        "dispatch-cycle events must be stamped with the attempt id"
+    );
+    assert!(
+        stamped.iter().all(|stamped| stamped == attempt_id),
+        "one attempt, one id: stamped ids {stamped:?} != marker id {attempt_id}"
+    );
+
+    // The resolved ledger row joins the external deliverable (the agent's
+    // own close) to the same identity, with the claim's provenance facts.
+    let resolved: Vec<&Value> = events
+        .iter()
+        .filter(|event| event["event_type"] == "attempt.resolved")
+        .collect();
+    assert_eq!(resolved.len(), 1, "exactly one resolved ledger row");
+    let row = &resolved[0]["data"];
+    assert_eq!(row["attempt_id"], attempt_id.as_str());
+    assert_eq!(row["bead_id"], fixture.home_bead_id);
+    assert_eq!(row["adapter"], ADAPTER_NAME);
+    assert_eq!(row["model"], "fixture");
+    assert!(
+        row["assignee"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(WORKER_NAME),
+        "resolved row must name the claimant assignee: {row}"
+    );
+    assert!(
+        row["claim_revision"].as_u64().is_some(),
+        "starting bead revision must be captured: {row}"
+    );
+    assert!(
+        row["claim_epoch"].as_u64().is_some(),
+        "lease/fencing epoch must be captured: {row}"
+    );
+    assert!(
+        row["context_manifest_hash"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("sha256:"),
+        "context manifest hash must be captured: {row}"
+    );
+    assert_eq!(
+        row["outcome"], "verified_success",
+        "the agent's external close must be credited to this attempt: {row}"
+    );
+}
+
+#[test]
+fn subprocess_failed_attempt_releases_and_retry_mints_a_fresh_identity() {
+    let fixture = Fixture::new(FixtureLayout::Local);
+
+    let first = fixture.run(FixtureMode::AgentFail);
+    assert!(
+        first.status.success(),
+        "a failed agent attempt is a handled outcome, not a worker crash:\nstdout={}\nstderr={}\nevents={:?}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr),
+        fixture.telemetry()
+    );
+    let first_ids = fixture.marker_attempt_ids(&fixture.home_workspace);
+    assert_eq!(first_ids.len(), 1);
+    // Missing/failed propagation must not strand a claim: the bead is
+    // released and immediately re-claimable.
+    fixture.assert_open_and_unassigned(&fixture.home_workspace, &fixture.home_bead_id);
+    let first_rows = fixture.resolved_rows();
+    assert_eq!(
+        first_rows.len(),
+        1,
+        "the failed attempt still resolves exactly once"
+    );
+    assert_eq!(first_rows[0]["data"]["attempt_id"], first_ids[0].as_str());
+    assert_ne!(
+        first_rows[0]["data"]["outcome"], "verified_success",
+        "an agent that shipped nothing must not be credited: {first_rows:?}"
+    );
+
+    // The retry over the released bead mints a NEW identity end to end.
+    let second = fixture.run(FixtureMode::Success);
+    assert!(
+        second.status.success(),
+        "retry dispatch failed:\nstdout={}\nstderr={}\nevents={:?}",
+        String::from_utf8_lossy(&second.stdout),
+        String::from_utf8_lossy(&second.stderr),
+        fixture.telemetry()
+    );
+    let ids = fixture.marker_attempt_ids(&fixture.home_workspace);
+    assert_eq!(ids.len(), 2, "the retry spawned exactly one more agent");
+    assert_ne!(
+        ids[1], ids[0],
+        "a retry must not reuse the failed attempt's identity"
+    );
+    let rows = fixture.resolved_rows();
+    assert_eq!(rows.len(), 2, "each attempt owns exactly one ledger row");
+    let retry_row = rows
+        .iter()
+        .find(|row| row["data"]["attempt_id"] == ids[1].as_str())
+        .expect("retry attempt must resolve under its own fresh identity");
+    assert_eq!(retry_row["data"]["outcome"], "verified_success");
+}
+
+#[test]
+fn subprocess_agent_timeout_carries_the_attempt_identity_and_releases() {
+    let fixture = Fixture::new(FixtureLayout::Local);
+    let output = fixture.run(FixtureMode::AgentHang);
+    assert!(
+        output.status.success(),
+        "an agent timeout is a handled outcome, not a worker crash:\nstdout={}\nstderr={}\nevents={:?}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        fixture.telemetry()
+    );
+
+    // The timed-out agent still spawned under a recorded identity.
+    let ids = fixture.marker_attempt_ids(&fixture.home_workspace);
+    assert_eq!(ids.len(), 1);
+    let attempt_id = &ids[0];
+    assert_ne!(
+        attempt_id, "none",
+        "the timed-out agent must still receive NEEDLE_ATTEMPT_ID"
+    );
+
+    // The timeout releases the claim — no stranded bead — and the resolved
+    // row joins the timeout to the same identity without crediting it.
+    fixture.assert_open_and_unassigned(&fixture.home_workspace, &fixture.home_bead_id);
+    let rows = fixture.resolved_rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["data"]["attempt_id"], attempt_id.as_str());
+    assert_ne!(
+        rows[0]["data"]["outcome"], "verified_success",
+        "a timed-out attempt must not be credited: {:?}",
+        rows[0]
+    );
+}
+
+#[test]
+fn subprocess_concurrent_claim_race_mints_distinct_attempt_ids() {
+    let fixture = Fixture::new(FixtureLayout::Local);
+
+    // Two workers race for the single bead. Each mints its attempt identity
+    // BEFORE the claim mutation, so even the loser's identity is observable.
+    let mut first = fixture
+        .command(FixtureMode::Success)
+        .spawn()
+        .expect("spawn first racing worker");
+    let mut second = fixture
+        .command(FixtureMode::Success)
+        .spawn()
+        .expect("spawn second racing worker");
+    let out_a = first.wait_with_output().expect("wait first racing worker");
+    let out_b = second
+        .wait_with_output()
+        .expect("wait second racing worker");
+    for (name, output) in [("first", &out_a), ("second", &out_b)] {
+        assert!(
+            output.status.success(),
+            "{name} racing worker failed:\nstdout={}\nstderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    // The atomic backend claim let exactly one worker dispatch an agent.
+    let ids = fixture.marker_attempt_ids(&fixture.home_workspace);
+    assert_eq!(ids.len(), 1, "a claim race must yield exactly one dispatch");
+
+    // Both workers minted before claiming: two distinct identities in
+    // telemetry, only the winner's reached an agent.
+    let stamped: std::collections::HashSet<&str> = fixture
+        .telemetry()
+        .iter()
+        .filter_map(|event| event["attempt_id"].as_str())
+        .collect();
+    assert!(
+        stamped.contains(ids[0].as_str()),
+        "the winner's identity must be stamped on its events: {stamped:?}"
+    );
+    assert!(
+        stamped.len() >= 2,
+        "the race loser minted its own identity before claiming: {stamped:?}"
+    );
+
+    // The winner's external deliverable closed the bead under its identity.
+    let record = fixture.bead_record(&fixture.home_workspace, &fixture.home_bead_id);
+    assert_eq!(record["status"], "closed");
 }

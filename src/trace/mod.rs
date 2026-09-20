@@ -1761,4 +1761,100 @@ mod tests {
         assert!(!bead_dir.join(TEST_OUTPUT_FILE).exists());
         assert!(bead_dir.join("metadata.json").exists());
     }
+
+    fn attempt_metadata() -> TraceMetadata {
+        TraceMetadata {
+            bead_id: test_bead_id(),
+            agent: "probe".to_string(),
+            provider: None,
+            model: None,
+            exit_code: 0,
+            outcome: "success".to_string(),
+            duration_ms: 10,
+            input_tokens: None,
+            output_tokens: None,
+            cost_usd: None,
+            captured_at: Utc::now(),
+            trace_format: TraceFormat::RawText,
+            pruned: false,
+            template_version: None,
+            timeout_reason: None,
+            terminal_reason: None,
+            api_error_status: None,
+        }
+    }
+
+    fn read_raw_metadata(capture: &TraceCapture) -> serde_json::Value {
+        let content = std::fs::read_to_string(capture.trace_dir().join("metadata.json")).unwrap();
+        serde_json::from_str(&content).unwrap()
+    }
+
+    #[test]
+    fn trace_metadata_carries_the_bound_attempt_identity() {
+        let temp_dir = TempDir::new().unwrap();
+        let beads_root = temp_dir.path();
+        std::fs::create_dir_all(beads_root.join(".beads")).unwrap();
+
+        let mut capture = TraceCapture::new(&test_bead_id(), beads_root).unwrap();
+        capture.bind_attempt_id("0192-attempt-identity");
+
+        capture.write_metadata(&attempt_metadata()).unwrap();
+
+        // The attempt id is injected outside `TraceMetadata`, so read the raw
+        // document: parsing into the struct would silently drop the key.
+        let raw = read_raw_metadata(&capture);
+        assert_eq!(raw["attempt_id"], "0192-attempt-identity");
+    }
+
+    #[test]
+    fn trace_metadata_has_no_attempt_id_until_one_is_bound() {
+        let temp_dir = TempDir::new().unwrap();
+        let beads_root = temp_dir.path();
+        std::fs::create_dir_all(beads_root.join(".beads")).unwrap();
+
+        let capture = TraceCapture::new(&test_bead_id(), beads_root).unwrap();
+        capture.write_metadata(&attempt_metadata()).unwrap();
+
+        // An unbound capture must not invent an identity: a missing key is
+        // the observable shape of missing propagation, never a placeholder.
+        let raw = read_raw_metadata(&capture);
+        assert!(raw.get("attempt_id").is_none());
+    }
+
+    #[test]
+    fn trace_attempt_identity_survives_while_content_is_sanitized() {
+        let temp_dir = TempDir::new().unwrap();
+        let beads_root = temp_dir.path();
+        std::fs::create_dir_all(beads_root.join(".beads")).unwrap();
+
+        let sanitizer = Arc::new(
+            Sanitizer::new(&[crate::sanitize::CustomPattern {
+                id: "test-token".to_string(),
+                pattern: "sk-test-[a-z0-9]+".to_string(),
+                entropy: None,
+            }])
+            .unwrap(),
+        );
+        let mut capture =
+            TraceCapture::new_with_sanitizer(&test_bead_id(), beads_root, Some(sanitizer)).unwrap();
+        capture.bind_attempt_id("0192-attempt-identity");
+
+        capture
+            .write_stdout("token sk-test-abc123 leaked into output")
+            .unwrap();
+        capture.write_metadata(&attempt_metadata()).unwrap();
+
+        let stdout = std::fs::read_to_string(capture.trace_dir().join("stdout.txt")).unwrap();
+        assert!(
+            !stdout.contains("sk-test-abc123"),
+            "sanitizer must still redact content: {stdout}"
+        );
+        assert!(stdout.contains("[REDACTED:test-token]"));
+
+        // Identity propagation must not open a redaction bypass: the
+        // metadata key is present even though every content file is
+        // sanitized.
+        let raw = read_raw_metadata(&capture);
+        assert_eq!(raw["attempt_id"], "0192-attempt-identity");
+    }
 }
