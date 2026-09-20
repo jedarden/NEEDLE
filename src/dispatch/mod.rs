@@ -121,7 +121,7 @@ use tokio::sync::watch;
 
 use crate::bead_store::spawn_with_etxtbsy_retry_child;
 use crate::bead_store::BeadStore;
-use crate::claim::{claim_status_with_timeout, ClaimIdentity, ResolvedStoreContext};
+use crate::claim::{ClaimIdentity, ResolvedStoreContext};
 use crate::config::Config;
 use crate::process_guard::{ProcessGroupKillGuard, ProcessGuard};
 use crate::prompt::BuiltPrompt;
@@ -1213,6 +1213,23 @@ pub struct DispatchContext {
     attempt_id: Option<String>,
 }
 
+/// The target-store claim identity proven by the final gate immediately
+/// before process creation.
+///
+/// Keeping this result separate from [`DispatchContext`] prevents callers
+/// from treating the claim-time credential as if it were still live without
+/// performing the final read. The workspace and epoch are the exact values
+/// that authorized the following spawn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedTargetClaim {
+    /// The workspace whose live store answered the verification query.
+    pub workspace: PathBuf,
+    /// The claim epoch/fencing credential proven by the live store.
+    pub epoch: u64,
+    /// The bead revision proven by the live store.
+    pub revision: u64,
+}
+
 impl DispatchContext {
     /// Bind a resolved target-workspace store to the claim identity acquired
     /// from that store.
@@ -1625,6 +1642,212 @@ impl Dispatcher {
         result
     }
 
+    /// Verify the held claim against the already-resolved target store at the
+    /// last possible point before spawning the child.
+    ///
+    /// This is deliberately a context-only operation. The dispatcher fields
+    /// that retain the worker's home store are not consulted, and the target
+    /// store is never reconstructed from a workspace path. A successful
+    /// result carries the workspace and fencing epoch that authorized the
+    /// following spawn.
+    async fn verify_pre_spawn_claim(
+        &self,
+        bead_id: &BeadId,
+        context: &DispatchContext,
+    ) -> Result<VerifiedTargetClaim> {
+        let expected = context.claim_identity();
+        let workspace = context.target_store().workspace().to_path_buf();
+        let actor = expected.actor.clone();
+        let store = context.target_store().store();
+
+        let emit_error = |category: crate::telemetry::ClaimVerifyErrorCategory, detail: String| {
+            let _ = self.telemetry.emit(
+                crate::telemetry::EventKind::ClaimVerifyError {
+                    bead_id: bead_id.clone(),
+                    expected_actor: actor.clone(),
+                    stage: "pre_spawn".to_string(),
+                    target_workspace: Some(workspace.display().to_string()),
+                    category,
+                    detail: crate::telemetry::redact_claim_credentials(&detail),
+                },
+                chrono::Utc::now(),
+            );
+        };
+
+        let mut missing = Vec::new();
+        if expected.actor.trim().is_empty() {
+            missing.push("assignee");
+        }
+        if expected.revision.is_none() {
+            missing.push("revision");
+        }
+        if expected.claim_epoch.is_none() {
+            missing.push("claim_epoch");
+        }
+        if !missing.is_empty() {
+            let error = claim_verification_error(format!(
+                "carried claim identity is incomplete for bead {bead_id}: missing {missing:?}"
+            ));
+            emit_error(
+                if expected.actor.trim().is_empty() {
+                    crate::telemetry::ClaimVerifyErrorCategory::Identity
+                } else {
+                    crate::telemetry::ClaimVerifyErrorCategory::Capability
+                },
+                format!("{error:#}"),
+            );
+            let _ = self.telemetry.emit(
+                crate::telemetry::EventKind::ClaimVerificationBlocked {
+                    bead_id: bead_id.clone(),
+                    workspace: workspace.display().to_string(),
+                    expected_actor: actor,
+                    expected_epoch: expected.claim_epoch,
+                    store_error: None,
+                    actual_status: "unknown".to_string(),
+                    actual_assignee: "unknown".to_string(),
+                    actual_revision: None,
+                    failure_kind: "context_missing".to_string(),
+                    detail: format!("{error:#}"),
+                },
+                chrono::Utc::now(),
+            );
+            return Err(error);
+        }
+
+        if let Err(error) = tokio::time::timeout(
+            crate::claim::CLAIM_VERIFICATION_TIMEOUT,
+            store.validate_for_dispatch(),
+        )
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "target backend validation timed out after {}s for workspace {}",
+                crate::claim::CLAIM_VERIFICATION_TIMEOUT.as_secs(),
+                workspace.display()
+            )
+        })
+        .and_then(|result| result)
+        {
+            emit_error(
+                crate::telemetry::ClaimVerifyErrorCategory::classify(&error),
+                format!("{error:#}"),
+            );
+            let _ = self.telemetry.emit(
+                crate::telemetry::EventKind::ClaimVerificationBlocked {
+                    bead_id: bead_id.clone(),
+                    workspace: workspace.display().to_string(),
+                    expected_actor: actor.clone(),
+                    expected_epoch: expected.claim_epoch,
+                    store_error: Some(format!("{error:#}")),
+                    actual_status: "unknown".to_string(),
+                    actual_assignee: "unknown".to_string(),
+                    actual_revision: None,
+                    failure_kind: "store_error".to_string(),
+                    detail: format!("target backend validation failed: {error:#}"),
+                },
+                chrono::Utc::now(),
+            );
+            return Err(claim_verification_error(format!(
+                "claim verification backend validation failed for bead {bead_id}: {error}"
+            )));
+        }
+
+        let live = match crate::claim::claim_status_with_timeout(store.as_ref(), bead_id).await {
+            Ok(status) => status,
+            Err(error) => {
+                emit_error(
+                    crate::telemetry::ClaimVerifyErrorCategory::classify(&error),
+                    format!("{error:#}"),
+                );
+                let _ = self.telemetry.emit(
+                    crate::telemetry::EventKind::ClaimVerificationBlocked {
+                        bead_id: bead_id.clone(),
+                        workspace: workspace.display().to_string(),
+                        expected_actor: actor.clone(),
+                        expected_epoch: expected.claim_epoch,
+                        store_error: Some(format!("{error:#}")),
+                        actual_status: "unknown".to_string(),
+                        actual_assignee: "unknown".to_string(),
+                        actual_revision: None,
+                        failure_kind: "store_error".to_string(),
+                        detail: format!("live claim read failed: {error:#}"),
+                    },
+                    chrono::Utc::now(),
+                );
+                return Err(claim_verification_error(format!(
+                    "claim verification query failed for bead {bead_id}: {error}"
+                )));
+            }
+        };
+
+        let failed_fields = expected.mismatches(&live);
+        if !failed_fields.is_empty() {
+            let reason = format!("claim identity mismatch in fields {failed_fields:?}");
+            let failure_kind = match failed_fields.first().copied() {
+                Some("status") => "status_mismatch",
+                Some("assignee") => "assignee_mismatch",
+                Some("revision") => "revision_mismatch",
+                Some("claim_epoch") => "epoch_mismatch",
+                _ => "claim_mismatch",
+            };
+            let _ = self.telemetry.emit(
+                crate::telemetry::EventKind::ClaimRecheckFailed {
+                    bead_id: bead_id.clone(),
+                    expected_actor: actor.clone(),
+                    stage: "pre_spawn".to_string(),
+                    target_workspace: Some(workspace.display().to_string()),
+                    category: crate::telemetry::ClaimVerifyErrorCategory::ClaimMismatch,
+                    actual_status: format!("{:?}", live.status),
+                    actual_assignee: live.assignee.clone().unwrap_or_else(|| "none".to_string()),
+                },
+                chrono::Utc::now(),
+            );
+            let _ = self.telemetry.emit(
+                crate::telemetry::EventKind::ClaimVerificationBlocked {
+                    bead_id: bead_id.clone(),
+                    workspace: workspace.display().to_string(),
+                    expected_actor: actor.clone(),
+                    expected_epoch: expected.claim_epoch,
+                    store_error: None,
+                    actual_status: format!("{:?}", live.status),
+                    actual_assignee: live.assignee.clone().unwrap_or_else(|| "none".to_string()),
+                    actual_revision: live.revision,
+                    failure_kind: failure_kind.to_string(),
+                    detail: reason.clone(),
+                },
+                chrono::Utc::now(),
+            );
+            return Err(claim_verification_error(format!(
+                "claim verification failed: {reason}"
+            )));
+        }
+
+        let (Some(epoch), Some(revision)) = (expected.claim_epoch, expected.revision) else {
+            // The completeness check above is deliberately kept adjacent to
+            // this extraction. This branch is defensive against a future
+            // change that mutates the context while verification is running.
+            return Err(claim_verification_error(format!(
+                "claim identity became incomplete for bead {bead_id} after verification"
+            )));
+        };
+        let verified = VerifiedTargetClaim {
+            workspace: workspace.clone(),
+            epoch,
+            revision,
+        };
+        let _ = self.telemetry.emit(
+            crate::telemetry::EventKind::ClaimVerificationPassed {
+                bead_id: bead_id.clone(),
+                workspace: verified.workspace.display().to_string(),
+                expected_actor: actor,
+                epoch: Some(verified.epoch),
+                revision: Some(verified.revision),
+            },
+            chrono::Utc::now(),
+        );
+        Ok(verified)
+    }
+
     /// Internal: execute the agent, ensuring temp file cleanup.
     async fn execute_agent(
         &self,
@@ -1737,6 +1960,21 @@ impl Dispatcher {
                 bead_id
             ));
             let _ = self.telemetry.emit(
+                crate::telemetry::EventKind::ClaimVerificationBlocked {
+                    bead_id: bead_id.clone(),
+                    workspace: workspace.display().to_string(),
+                    expected_actor: "(unset)".to_string(),
+                    expected_epoch: None,
+                    store_error: None,
+                    actual_status: "unknown".to_string(),
+                    actual_assignee: "unknown".to_string(),
+                    actual_revision: None,
+                    failure_kind: "context_missing".to_string(),
+                    detail: format!("{error:#}"),
+                },
+                chrono::Utc::now(),
+            );
+            let _ = self.telemetry.emit(
                 crate::telemetry::EventKind::ClaimVerifyError {
                     bead_id: bead_id.clone(),
                     expected_actor: "(unset)".to_string(),
@@ -1749,183 +1987,40 @@ impl Dispatcher {
             );
             return Err(error);
         };
-        let expected_identity = context.claim_identity();
-        let verify_store = context.target_store().store();
-        let verify_worker_id = expected_identity.actor.clone();
-        let verify_workspace = context.target_store().workspace().to_path_buf();
-        {
-            let mut missing_identity_fields = Vec::new();
-            if expected_identity.actor.trim().is_empty() {
-                missing_identity_fields.push("assignee");
-            }
-            if expected_identity.revision.is_none() {
-                missing_identity_fields.push("revision");
-            }
-            if expected_identity.claim_epoch.is_none() {
-                missing_identity_fields.push("claim_epoch");
-            }
-            if !missing_identity_fields.is_empty() {
-                let error = claim_verification_error(format!(
-                    "carried claim identity is incomplete for bead {}: missing {:?}",
-                    bead_id, missing_identity_fields
-                ));
-                let _ = self.telemetry.emit(
-                    crate::telemetry::EventKind::ClaimVerifyError {
-                        bead_id: bead_id.clone(),
-                        expected_actor: verify_worker_id.clone(),
-                        stage: "pre_spawn".to_string(),
-                        target_workspace: Some(verify_workspace.display().to_string()),
-                        category: if expected_identity.actor.trim().is_empty() {
-                            crate::telemetry::ClaimVerifyErrorCategory::Identity
-                        } else {
-                            crate::telemetry::ClaimVerifyErrorCategory::Capability
-                        },
-                        detail: crate::telemetry::redact_claim_credentials(&format!("{error:#}")),
-                    },
-                    chrono::Utc::now(),
-                );
-                return Err(error);
-            }
+        let verified = self.verify_pre_spawn_claim(bead_id, context).await?;
 
-            // Revalidate the backend contract through the exact store handle
-            // that owns this claim before reading claim state. A roaming
-            // dispatch must never substitute its home store here.
-            if let Err(error) = tokio::time::timeout(
-                crate::claim::CLAIM_VERIFICATION_TIMEOUT,
-                verify_store.validate_for_dispatch(),
-            )
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!(
-                    "target backend validation timed out after {}s for workspace {}",
-                    crate::claim::CLAIM_VERIFICATION_TIMEOUT.as_secs(),
-                    verify_workspace.display()
-                )
-            })
-            .and_then(|result| result)
-            {
-                let _ = self.telemetry.emit(
-                    crate::telemetry::EventKind::ClaimVerifyError {
-                        bead_id: bead_id.clone(),
-                        expected_actor: verify_worker_id.clone(),
-                        stage: "pre_spawn".to_string(),
-                        target_workspace: Some(verify_workspace.display().to_string()),
-                        category: crate::telemetry::ClaimVerifyErrorCategory::classify(&error),
-                        detail: crate::telemetry::redact_claim_credentials(&format!("{error:#}")),
-                    },
-                    chrono::Utc::now(),
-                );
-                return Err(claim_verification_error(format!(
-                    "claim verification backend validation failed for bead {}: {error}",
-                    bead_id
-                )));
-            }
+        // bead-rs treats the claim epoch as the credential for every later
+        // lifecycle mutation. Pass only the epoch and revision proven by the
+        // final target-store read to the dispatched agent.
+        child_env.insert(
+            "NEEDLE_BEAD_FENCING_TOKEN".to_string(),
+            verified.epoch.to_string(),
+        );
+        child_env.insert(
+            "NEEDLE_BEAD_REVISION".to_string(),
+            verified.revision.to_string(),
+        );
 
-            match claim_status_with_timeout(verify_store.as_ref(), bead_id).await {
-                Ok(status) => {
-                    let failed_fields = expected_identity.mismatches(&status);
-                    let is_valid_claim = failed_fields.is_empty();
+        tracing::debug!(
+            bead_id = %bead_id.as_ref(),
+            workspace = %verified.workspace.display(),
+            revision = verified.revision,
+            claim_epoch = verified.epoch,
+            verification_result = "passed",
+            "atomic claim verification passed — proceeding with process spawn"
+        );
 
-                    if !is_valid_claim {
-                        let reason = format!("claim identity mismatch in fields {failed_fields:?}");
-
-                        tracing::warn!(
-                            bead_id = %bead_id.as_ref(),
-                            current_status = ?status.status,
-                            current_assignee = ?status.assignee,
-                            expected_worker = %verify_worker_id,
-                            revision = ?status.revision,
-                            claim_epoch = ?status.claim_epoch,
-                            expected_revision = ?expected_identity.revision,
-                            expected_claim_epoch = ?expected_identity.claim_epoch,
-                            verification_result = "failed",
-                            reason = %reason,
-                            "atomic claim verification failed at process spawn — aborting"
-                        );
-
-                        let _ = self.telemetry.emit(
-                            crate::telemetry::EventKind::ClaimRecheckFailed {
-                                bead_id: bead_id.clone(),
-                                expected_actor: verify_worker_id.clone(),
-                                stage: "pre_spawn".to_string(),
-                                target_workspace: Some(verify_workspace.display().to_string()),
-                                category: crate::telemetry::ClaimVerifyErrorCategory::ClaimMismatch,
-                                actual_status: format!("{:?}", status.status),
-                                actual_assignee: status
-                                    .assignee
-                                    .unwrap_or_else(|| "none".to_string()),
-                            },
-                            chrono::Utc::now(),
-                        );
-
-                        return Err(claim_verification_error(format!(
-                            "claim verification failed: {}",
-                            reason
-                        )));
-                    }
-
-                    // bead-rs treats the claim epoch as the credential for
-                    // every later lifecycle mutation. Make the epoch acquired
-                    // and re-verified by NEEDLE available to the dispatched
-                    // agent without requiring it to race a second `show`.
-                    let claim_epoch = expected_identity.claim_epoch;
-                    if let Some(claim_epoch) = claim_epoch {
-                        child_env.insert(
-                            "NEEDLE_BEAD_FENCING_TOKEN".to_string(),
-                            claim_epoch.to_string(),
-                        );
-                    }
-                    let revision = expected_identity.revision;
-                    if let Some(revision) = revision {
-                        child_env.insert("NEEDLE_BEAD_REVISION".to_string(), revision.to_string());
-                    }
-
-                    tracing::debug!(
-                        bead_id = %bead_id.as_ref(),
-                        current_status = ?status.status,
-                        current_assignee = ?status.assignee,
-                        revision = ?status.revision,
-                        verification_result = "passed",
-                        "atomic claim verification passed — proceeding with process spawn"
-                    );
-
-                    // Stage re-check, not `ClaimVerifySuccess`: that name is
-                    // reserved for the canonical dispatch-time verification in
-                    // `Claimer::verify_claim_at_dispatch`, keeping
-                    // `verify_started`/`verify_success` 1:1 (issue #20).
-                    let _ = self.telemetry.emit(
-                        crate::telemetry::EventKind::ClaimRecheckSucceeded {
-                            bead_id: bead_id.clone(),
-                            expected_actor: verify_worker_id.clone(),
-                            stage: "pre_spawn".to_string(),
-                        },
-                        chrono::Utc::now(),
-                    );
-                }
-                Err(e) => {
-                    tracing::error!(
-                        bead_id = %bead_id.as_ref(),
-                        error = %e,
-                        "atomic claim verification query failed — aborting process spawn"
-                    );
-                    let _ = self.telemetry.emit(
-                        crate::telemetry::EventKind::ClaimVerifyError {
-                            bead_id: bead_id.clone(),
-                            expected_actor: verify_worker_id.clone(),
-                            stage: "pre_spawn".to_string(),
-                            target_workspace: Some(verify_workspace.display().to_string()),
-                            category: crate::telemetry::ClaimVerifyErrorCategory::classify(&e),
-                            detail: crate::telemetry::redact_claim_credentials(&format!("{e:#}")),
-                        },
-                        chrono::Utc::now(),
-                    );
-                    return Err(claim_verification_error(format!(
-                        "claim verification query failed for bead {}: {}",
-                        bead_id, e
-                    )));
-                }
-            }
-        }
+        // Keep the stage-local event for existing consumers; the structured
+        // ClaimVerificationPassed event emitted by the helper carries the
+        // target workspace and epoch for this exact final gate.
+        let _ = self.telemetry.emit(
+            crate::telemetry::EventKind::ClaimRecheckSucceeded {
+                bead_id: bead_id.clone(),
+                expected_actor: context.claim_identity().actor.clone(),
+                stage: "pre_spawn".to_string(),
+            },
+            chrono::Utc::now(),
+        );
 
         // Spawn the agent process with ETXTBSY retry handling.
         // This wrapper retries with backoff if the kernel returns ETXTBSY (errno 26),

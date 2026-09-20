@@ -839,6 +839,30 @@ pub enum EventKind {
         actual_status: String,
         actual_assignee: String,
     },
+    /// The final pre-spawn claim check was blocked. This event carries the
+    /// target-store facts (or the store error) in one structured record so a
+    /// failed verification is distinguishable from a process-launch failure.
+    ClaimVerificationBlocked {
+        bead_id: BeadId,
+        workspace: String,
+        expected_actor: String,
+        expected_epoch: Option<u64>,
+        store_error: Option<String>,
+        actual_status: String,
+        actual_assignee: String,
+        actual_revision: Option<u64>,
+        failure_kind: String,
+        detail: String,
+    },
+    /// The final pre-spawn claim check passed against the carried target
+    /// store. The following child spawn is authorized by these facts.
+    ClaimVerificationPassed {
+        bead_id: BeadId,
+        workspace: String,
+        expected_actor: String,
+        epoch: Option<u64>,
+        revision: Option<u64>,
+    },
     /// A claim verification could not complete: the store could not be
     /// queried, or the verifier itself was unavailable.
     ///
@@ -1890,6 +1914,8 @@ impl EventKind {
             EventKind::ClaimVerifyFailed { .. } => "bead.claim.verify_failed",
             EventKind::ClaimRecheckSucceeded { .. } => "bead.claim.recheck_succeeded",
             EventKind::ClaimRecheckFailed { .. } => "bead.claim.recheck_failed",
+            EventKind::ClaimVerificationBlocked { .. } => "bead.claim.verification_blocked",
+            EventKind::ClaimVerificationPassed { .. } => "bead.claim.verification_passed",
             EventKind::ClaimVerifyError { .. } => "bead.claim.verify_error",
             EventKind::ClaimCleanupSkipped { .. } => "bead.claim.cleanup_skipped",
             EventKind::VersionVerifyStarted { .. } => "version.verify.started",
@@ -2060,6 +2086,8 @@ impl EventKind {
             | EventKind::ClaimVerifyFailed { bead_id, .. }
             | EventKind::ClaimRecheckSucceeded { bead_id, .. }
             | EventKind::ClaimRecheckFailed { bead_id, .. }
+            | EventKind::ClaimVerificationBlocked { bead_id, .. }
+            | EventKind::ClaimVerificationPassed { bead_id, .. }
             | EventKind::ClaimVerifyError { bead_id, .. }
             | EventKind::ClaimCleanupSkipped { bead_id, .. }
             | EventKind::BeadReleased { bead_id, .. }
@@ -3958,6 +3986,45 @@ impl EventKind {
                 "actual_status": actual_status,
                 "actual_assignee": actual_assignee,
             }),
+            EventKind::ClaimVerificationBlocked {
+                bead_id,
+                workspace,
+                expected_actor,
+                expected_epoch,
+                store_error,
+                actual_status,
+                actual_assignee,
+                actual_revision,
+                failure_kind,
+                detail,
+            } => serde_json::json!({
+                "bead_id": bead_id,
+                "workspace": workspace,
+                "target_workspace": workspace,
+                "expected_actor": expected_actor,
+                "expected_epoch": expected_epoch,
+                "store_error": store_error.as_deref().map(redact_claim_credentials),
+                "actual_status": actual_status,
+                "actual_assignee": actual_assignee,
+                "actual_revision": actual_revision,
+                "failure_kind": failure_kind,
+                "detail": redact_claim_credentials(detail),
+            }),
+            EventKind::ClaimVerificationPassed {
+                bead_id,
+                workspace,
+                expected_actor,
+                epoch,
+                revision,
+            } => serde_json::json!({
+                "bead_id": bead_id,
+                "workspace": workspace,
+                "target_workspace": workspace,
+                "expected_actor": expected_actor,
+                "epoch": epoch,
+                "claim_epoch": epoch,
+                "revision": revision,
+            }),
             EventKind::MendStaleAssigneeCleared { bead_id, assignee } => serde_json::json!({
                 "bead_id": bead_id,
                 "assignee": assignee,
@@ -4431,6 +4498,8 @@ impl EventKind {
             | EventKind::ClaimVerifyFailed { .. }
             | EventKind::ClaimRecheckSucceeded { .. }
             | EventKind::ClaimRecheckFailed { .. }
+            | EventKind::ClaimVerificationBlocked { .. }
+            | EventKind::ClaimVerificationPassed { .. }
             | EventKind::ClaimVerifyError { .. }
             | EventKind::ClaimCleanupSkipped { .. }
             | EventKind::VersionVerifyStarted { .. }
