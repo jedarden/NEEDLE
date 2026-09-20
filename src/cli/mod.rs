@@ -32,6 +32,7 @@ use crate::worker::Worker;
 
 pub mod audit;
 pub mod improvements;
+mod policy_doctor;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // NATO alphabet for worker identifiers
@@ -268,6 +269,9 @@ pub enum CliCommand {
     ///   0 - All checks passed (or only warnings)
     ///   1 - One or more checks failed
     Doctor {
+        #[command(subcommand)]
+        command: Option<DoctorCommand>,
+
         /// Attempt automatic repair of issues found.
         #[arg(long)]
         repair: bool,
@@ -567,6 +571,24 @@ pub enum CliCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+pub enum DoctorCommand {
+    /// Report applicable policy provenance, effective manifest identity, and conflicts.
+    Policy {
+        /// Workspace whose policy should be resolved.
+        #[arg(short = 'w', long)]
+        workspace: Option<PathBuf>,
+
+        /// Adapter projection to resolve (defaults to agent.default).
+        #[arg(long)]
+        adapter: Option<String>,
+
+        /// Output one machine-readable JSON report.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 /// Output format for the list command.
 #[derive(Debug, Clone, ValueEnum)]
 pub enum ListFormat {
@@ -667,10 +689,18 @@ pub fn run() -> Result<()> {
             live,
         } => cmd_config(get, set, dump, show_source, live),
         CliCommand::Doctor {
+            command,
             repair,
             workspace,
             json,
-        } => cmd_doctor(repair, workspace, json),
+        } => match command {
+            Some(DoctorCommand::Policy {
+                workspace,
+                adapter,
+                json,
+            }) => cmd_doctor_policy(workspace, adapter, json),
+            None => cmd_doctor(repair, workspace, json),
+        },
         CliCommand::Init {
             backend,
             no_agents_md,
@@ -6182,6 +6212,28 @@ fn gate_config_file<'a>(sources: &'a SourceMap, key: &str) -> Option<&'a Path> {
 // ──────────────────────────────────────────────────────────────────────────────
 
 /// `needle doctor` — check system health and optionally repair.
+/// Policy doctor — report policy provenance and conflicts.
+fn cmd_doctor_policy(
+    workspace: Option<PathBuf>,
+    adapter: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let global = ConfigLoader::load_global()?;
+    let workspace = workspace.unwrap_or_else(|| global.workspace.default.clone());
+    let report = policy_doctor::collect(workspace, adapter)?;
+
+    if json {
+        println!("{}", serde_json::to_string(&report)?);
+    } else {
+        print!("{}", report.render_human());
+    }
+
+    if report.has_conflicts() {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
 fn cmd_doctor(repair: bool, workspace: Option<PathBuf>, json: bool) -> Result<()> {
     let global = ConfigLoader::load_global()?;
     let workspace_root = workspace.unwrap_or_else(|| global.workspace.default.clone());
