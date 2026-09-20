@@ -221,6 +221,11 @@ path = "tests/nt10_context_manifest.rs"
 harness = true
 
 [[test]]
+name = "nt10_context_adapter_parity"
+path = "tests/nt10_context_adapter_parity.rs"
+harness = true
+
+[[test]]
 name = "nt10_policy_doctor"
 path = "tests/nt10_policy_doctor.rs"
 harness = true

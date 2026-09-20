@@ -178,6 +178,7 @@ needle_slow_targets() {
     nt10_policy_precedence \
     nt10_policy_hashing \
     nt10_context_manifest \
+    nt10_context_adapter_parity \
     nt10_policy_doctor \
     nt10_policy_admission \
     nt51_gateway_health \
@@ -219,6 +220,7 @@ needle_cargo_selector() {
 ' --test nt51_adapter_usage_capture ;;
     nt10_policy_hashing) printf '%s\n' --test nt10_policy_hashing ;;
     nt10_context_manifest) printf '%s\n' --test nt10_context_manifest ;;
+    nt10_context_adapter_parity) printf "%s\n" --test nt10_context_adapter_parity ;;
     nt10_policy_doctor) printf '%s\n' --test nt10_policy_doctor ;;
     nt10_policy_admission) printf '%s\n' --test nt10_policy_admission ;;
     nt10_policy_precedence) printf '%s\n' --test nt10_policy_precedence ;;
@@ -278,6 +280,7 @@ needle_nextest_filter() {
 ' 'binary_id(=needle::nt51_adapter_usage_capture)' ;;
     nt10_policy_hashing) printf '%s\n' 'binary_id(=needle::nt10_policy_hashing)' ;;
     nt10_context_manifest) printf '%s\n' 'binary_id(=needle::nt10_context_manifest)' ;;
+    nt10_context_adapter_parity) printf "%s\n" "binary_id(=needle::nt10_context_adapter_parity)" ;;
     nt10_policy_doctor) printf '%s\n' 'binary_id(=needle::nt10_policy_doctor)' ;;
     nt10_policy_admission) printf '%s\n' 'binary_id(=needle::nt10_policy_admission)' ;;
     nt10_policy_precedence) printf '%s\n' 'binary_id(=needle::nt10_policy_precedence)' ;;

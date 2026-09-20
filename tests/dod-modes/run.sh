@@ -118,11 +118,11 @@ else
 fi
 
 # ── needle_slow_targets ──────────────────────────────────────────────────────
-assert_lines "target table lists 28 names" 28 needle_slow_targets
+assert_lines "target table lists 29 names" 29 needle_slow_targets
 
 # Exact set, asserted literally: a renamed or dropped target must be caught
 # here rather than silently accepted by every consumer of the table.
-WANT_TABLE="$(printf '%s\n' lib integration_spawn integration_tests p2_integration_tests p3_integration_tests real_br_integration_tests escalation_ladder nt45_failure_evidence_capture nt50_exception_lessons nt51_adapter_usage_capture nt10_policy_precedence nt10_policy_hashing nt10_context_manifest nt10_policy_doctor nt10_policy_admission nt51_gateway_health nt52_state_dir_isolation nt07_admission_policy nt07_admission_budgets nt53_improvement_proposals nt54_proposal_admission nt55_impact_receipts nt56_improvements_cli nt07_proposal_contract nt07_impact_contract nt07_impact_scoring nt07_executable_admission installer)"
+WANT_TABLE="$(printf '%s\n' lib integration_spawn integration_tests p2_integration_tests p3_integration_tests real_br_integration_tests escalation_ladder nt45_failure_evidence_capture nt50_exception_lessons nt51_adapter_usage_capture nt10_policy_precedence nt10_policy_hashing nt10_context_manifest nt10_context_adapter_parity nt10_policy_doctor nt10_policy_admission nt51_gateway_health nt52_state_dir_isolation nt07_admission_policy nt07_admission_budgets nt53_improvement_proposals nt54_proposal_admission nt55_impact_receipts nt56_improvements_cli nt07_proposal_contract nt07_impact_contract nt07_impact_scoring nt07_executable_admission installer)"
 GOT_TABLE="$(needle_slow_targets)"
 if [[ "$GOT_TABLE" == "$WANT_TABLE" ]]; then
   ok "target table is exactly the 26 cargo targets plus installer"
@@ -141,6 +141,7 @@ assert_selector "escalation ladder selects its target" "--test escalation_ladder
 assert_selector "N-T10 selects its target" "--test nt10_policy_precedence" nt10_policy_precedence
 assert_selector "N-T10 canonical hashing selects its target" "--test nt10_policy_hashing" nt10_policy_hashing
 assert_selector "N-T10 ContextManifest selects its target" "--test nt10_context_manifest" nt10_context_manifest
+assert_selector "N-T10 context adapter parity selects its target" "--test nt10_context_adapter_parity" nt10_context_adapter_parity
 assert_selector "N-T10 policy doctor selects its target" "--test nt10_policy_doctor" nt10_policy_doctor
 assert_selector "N-T10 policy admission selects its target" "--test nt10_policy_admission" nt10_policy_admission
 assert_selector "N-T45 selects its target" "--test nt45_failure_evidence_capture" nt45_failure_evidence_capture
@@ -161,6 +162,7 @@ assert_nextest_filter "real_br has an exact nextest binary ID" "binary_id(=needl
 assert_nextest_filter "N-T10 has an exact nextest binary ID" "binary_id(=needle::nt10_policy_precedence)" nt10_policy_precedence
 assert_nextest_filter "N-T10 hashing has an exact nextest binary ID" "binary_id(=needle::nt10_policy_hashing)" nt10_policy_hashing
 assert_nextest_filter "N-T10 ContextManifest has an exact nextest binary ID" "binary_id(=needle::nt10_context_manifest)" nt10_context_manifest
+assert_nextest_filter "N-T10 context adapter parity has an exact nextest binary ID" "binary_id(=needle::nt10_context_adapter_parity)" nt10_context_adapter_parity
 assert_nextest_filter "N-T10 policy doctor has an exact nextest binary ID" "binary_id(=needle::nt10_policy_doctor)" nt10_policy_doctor
 assert_nextest_filter "N-T10 policy admission has an exact nextest binary ID" "binary_id(=needle::nt10_policy_admission)" nt10_policy_admission
 assert_nextest_filter "escalation ladder has an exact nextest binary ID" "binary_id(=needle::escalation_ladder)" escalation_ladder
@@ -174,7 +176,7 @@ assert_fails "installer has no nextest filter" needle_nextest_filter installer
 
 # ── selected_cargo_targets ───────────────────────────────────────────────────
 SLOW_TARGET=""
-assert_lines "default selection is all 27 cargo targets" 27 selected_cargo_targets
+assert_lines "default selection is all 28 cargo targets" 28 selected_cargo_targets
 
 WANT_DEFAULT="$(needle_expected_slow_targets | grep -vx installer)"
 GOT_DEFAULT="$(selected_cargo_targets)"
@@ -307,6 +309,7 @@ WANT_HARNESSES="$(printf '%s\t%s\n' \
   nt10_policy_precedence tests/nt10_policy_precedence.rs \
   nt10_policy_hashing tests/nt10_policy_hashing.rs \
   nt10_context_manifest tests/nt10_context_manifest.rs \
+  nt10_context_adapter_parity tests/nt10_context_adapter_parity.rs \
   nt10_policy_doctor tests/nt10_policy_doctor.rs \
   nt10_policy_admission tests/nt10_policy_admission.rs \
   nt51_gateway_health tests/nt51_gateway_health.rs \
