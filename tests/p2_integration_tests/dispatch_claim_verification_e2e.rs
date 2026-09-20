@@ -153,13 +153,28 @@ impl Fixture {
     fn command(&self, mode: FixtureMode) -> Command {
         let home_binary = self.root.path().join("home-fixture-bead");
         let remote_binary = self.root.path().join("remote-fixture-bead");
-        write_bead_wrapper(&home_binary, &self.bead_binary, Some("success"));
+        write_bead_wrapper(
+            &home_binary,
+            &self.bead_binary,
+            self.home_workspace.join(QUERY_LOG).as_path(),
+            Some("success"),
+        );
         write_workspace_config(&self.home_workspace, &home_binary);
         if let Some(remote) = self.remote_workspace.as_ref() {
-            write_bead_wrapper(&remote_binary, &self.bead_binary, None);
+            write_bead_wrapper(
+                &remote_binary,
+                &self.bead_binary,
+                remote.join(QUERY_LOG).as_path(),
+                None,
+            );
             write_workspace_config(remote, &remote_binary);
         } else {
-            write_bead_wrapper(&remote_binary, &self.bead_binary, None);
+            write_bead_wrapper(
+                &remote_binary,
+                &self.bead_binary,
+                self.home_workspace.join(QUERY_LOG).as_path(),
+                None,
+            );
         }
 
         let mut command = Command::new(env!("CARGO_BIN_EXE_needle"));
@@ -485,15 +500,21 @@ fn write_adapter(adapter_dir: &Path, bead_binary: &Path) {
         .expect("write fixture adapter");
 }
 
-fn write_bead_wrapper(wrapper: &Path, native: &Path, mode_override: Option<&str>) {
+fn write_bead_wrapper(
+    wrapper: &Path,
+    native: &Path,
+    query_log: &Path,
+    mode_override: Option<&str>,
+) {
     let script = r##"#!/bin/sh
 set -eu
 
 native="${NEEDLE_FIXTURE_NATIVE_BEAD}"
 mode="__NEEDLE_FIXTURE_MODE__"
+query_log="__NEEDLE_FIXTURE_QUERY_LOG__"
 
 if [ "$mode" != "success" ] || [ "${1:-}" = "show" ]; then
-  printf '%s\n' "$*" >> "$PWD/.needle-claim-query.log"
+  printf '%s\n' "$*" >> "$query_log"
 fi
 
 if [ "$mode" = "unavailable-cli" ]; then
@@ -577,6 +598,10 @@ exec "$native" "$@"
             .replace(
                 "__NEEDLE_FIXTURE_MODE__",
                 mode_override.unwrap_or("${NEEDLE_FIXTURE_MODE:-success}"),
+            )
+            .replace(
+                "__NEEDLE_FIXTURE_QUERY_LOG__",
+                &query_log.display().to_string(),
             ),
     )
     .expect("write fixture bead wrapper");
