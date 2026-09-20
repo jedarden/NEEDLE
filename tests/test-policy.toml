@@ -169,7 +169,9 @@ push = 666
 # file nothing, one signature creates one bead across submissions, budget and
 # shadow refusals are recorded, and the budget survives a restart.
 # +2 N-T10 policy-doctor provenance/conflict report cases (needle-d8773e81).
-contract = 198
+# +3 N-T10 policy-admission missing, ambiguity, and success cases
+# (needle-91f5e616).
+contract = 201
 # +16 literal test attributes for Cargo execution isolation (needle-b31fcb27):
 # seven integration cases plus nine nested-Cargo fixture tests embedded in source.
 # +1 real-adapter contract for the injectable ProcessRunner (needle-d3f191a3).
@@ -326,6 +328,13 @@ name = "nt10_policy_doctor"
 path = "tests/nt10_policy_doctor.rs"
 tier = "contract"
 max_tests = 2
+owner = "component:policy-resolver"
+
+[[harness]]
+name = "nt10_policy_admission"
+path = "tests/nt10_policy_admission.rs"
+tier = "contract"
+max_tests = 3
 owner = "component:policy-resolver"
 
 [[harness]]

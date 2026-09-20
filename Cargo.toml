@@ -226,6 +226,11 @@ path = "tests/nt10_policy_doctor.rs"
 harness = true
 
 [[test]]
+name = "nt10_policy_admission"
+path = "tests/nt10_policy_admission.rs"
+harness = true
+
+[[test]]
 name = "nt51_gateway_health"
 path = "tests/nt51_gateway_health.rs"
 harness = true

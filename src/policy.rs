@@ -32,7 +32,7 @@ pub const RESOLVED_POLICY_VERSION: &str = "effective-policy-v1";
 /// The order is represented by the implementation of [`Self::rank`] rather
 /// than by values supplied by callers.  This keeps precedence a property of
 /// the policy vocabulary, not of an individual source record.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Authority {
     /// Safety and constraints imposed by an external authority.
@@ -64,6 +64,72 @@ impl Authority {
             Self::Memory => 1,
         }
     }
+}
+
+/// Authorities that must be present before an execution may be admitted.
+///
+/// The set is supplied by the execution surface instead of being inferred
+/// from whichever policy sources happened to be discovered.  That distinction
+/// is important for fail-closed behavior: an empty or partial registry cannot
+/// accidentally authorize execution merely because resolution itself
+/// succeeded.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ExecutionPolicyRequirements {
+    authorities: Vec<Authority>,
+}
+
+impl ExecutionPolicyRequirements {
+    /// Build requirements from an authority iterator.
+    ///
+    /// Authorities are sorted by descending precedence and duplicate entries
+    /// are removed, making missing-authority failures deterministic even when
+    /// callers assemble the requirements from different collection types.
+    pub fn new<I>(authorities: I) -> Self
+    where
+        I: IntoIterator<Item = Authority>,
+    {
+        let mut authorities = authorities.into_iter().collect::<Vec<_>>();
+        authorities.sort_by_key(|authority| std::cmp::Reverse(authority.rank()));
+        authorities.dedup();
+        Self { authorities }
+    }
+
+    /// The baseline authority envelope for an executable dispatch.
+    ///
+    /// Memory, the current plan, and accepted ADRs can enrich a context, but
+    /// they do not replace the safety, repository, adapter, and executable
+    /// gate authorities needed to run work.
+    pub fn for_execution() -> Self {
+        Self::new([
+            Authority::Safety,
+            Authority::Repository,
+            Authority::Adapter,
+            Authority::Gate,
+        ])
+    }
+
+    pub fn authorities(&self) -> &[Authority] {
+        &self.authorities
+    }
+}
+
+/// A policy failure that prevents execution admission.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum PolicyAdmissionError {
+    #[error(
+        "execution requires policy authority {authority:?}, but no applicable source is present"
+    )]
+    MissingAuthority { authority: Authority },
+    #[error(
+        "required policy authority {authority:?} is ambiguous at scope {scope:?}: sources {sources:?}"
+    )]
+    AmbiguousAuthority {
+        authority: Authority,
+        scope: PolicyScope,
+        sources: Vec<PolicySourceId>,
+    },
+    #[error("policy resolution failed during execution admission: {0}")]
+    Resolution(#[from] PolicyError),
 }
 
 /// The closed set of policy source types understood by NEEDLE.
@@ -283,6 +349,45 @@ impl AuthorityRegistry {
         }
 
         Ok(ResolvedPolicy { sources })
+    }
+
+    /// Admit an execution only when every required authority is represented
+    /// by an applicable source and resolution found no contradiction.
+    ///
+    /// This is the execution boundary for policy.  Callers must use the
+    /// returned resolved policy to build the execution context; an unresolved
+    /// or incomplete registry never yields an admitted value.
+    pub fn admit_execution<'a>(
+        &'a self,
+        context: &ResolutionContext,
+        requirements: &ExecutionPolicyRequirements,
+    ) -> Result<ResolvedPolicy<'a>, PolicyAdmissionError> {
+        let resolved = self.resolve(context).map_err(|error| match error {
+            PolicyError::Conflict {
+                authority,
+                scope,
+                sources,
+            } => PolicyAdmissionError::AmbiguousAuthority {
+                authority,
+                scope,
+                sources,
+            },
+            other => PolicyAdmissionError::Resolution(other),
+        })?;
+
+        for authority in requirements.authorities() {
+            if !resolved
+                .sources()
+                .iter()
+                .any(|source| source.authority() == *authority)
+            {
+                return Err(PolicyAdmissionError::MissingAuthority {
+                    authority: *authority,
+                });
+            }
+        }
+
+        Ok(resolved)
     }
 
     /// Resolve the applicable policy and materialize its immutable context.
