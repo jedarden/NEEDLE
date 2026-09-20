@@ -948,11 +948,11 @@ fn subprocess_concurrent_claim_race_mints_distinct_attempt_ids() {
 
     // Two workers race for the single bead. Each mints its attempt identity
     // BEFORE the claim mutation, so even the loser's identity is observable.
-    let mut first = fixture
+    let first = fixture
         .command(FixtureMode::Success)
         .spawn()
         .expect("spawn first racing worker");
-    let mut second = fixture
+    let second = fixture
         .command(FixtureMode::Success)
         .spawn()
         .expect("spawn second racing worker");
@@ -975,8 +975,8 @@ fn subprocess_concurrent_claim_race_mints_distinct_attempt_ids() {
 
     // Both workers minted before claiming: two distinct identities in
     // telemetry, only the winner's reached an agent.
-    let stamped: std::collections::HashSet<&str> = fixture
-        .telemetry()
+    let telemetry = fixture.telemetry();
+    let stamped: std::collections::HashSet<&str> = telemetry
         .iter()
         .filter_map(|event| event["attempt_id"].as_str())
         .collect();

@@ -140,7 +140,7 @@ version = 1
 # +5 for dispatch store-context propagation coverage: exact store handle,
 # context cloning, remote-target pre-spawn routing, local routing, and the
 # fail-closed context-free compatibility path (needle-d0f287f9).
-max_tests = 3893
+max_tests = 3898
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
@@ -150,7 +150,7 @@ max_tests = 3893
 # contracts (needle-63cf0472).
 # +3 end-to-end claim-verification subprocess matrix tests (needle-653ec4be).
 # +1 local/remote target-store cleanup regression (needle-55e74a46).
-push = 666
+push = 670
 # +20 N-T07 proposal envelope contracts (needle-2b0a309b): derived-signature
 # identity, construction refusals, and the authority ceiling. The contract tier
 # is the right home — these are pure record properties with no process, no
@@ -242,7 +242,7 @@ tier = "push"
 # contracts (needle-63cf0472).
 # +3 end-to-end claim-verification subprocess matrix tests (needle-653ec4be).
 # +1 local/remote target-store cleanup regression (needle-55e74a46).
-max_tests = 120
+max_tests = 124
 owner = "component:pluck-mend-explore"
 
 [[harness]]
