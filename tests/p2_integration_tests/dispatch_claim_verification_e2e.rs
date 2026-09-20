@@ -345,11 +345,23 @@ impl Fixture {
     }
 
     fn assert_claim_verification_error(&self, workspace: &Path) {
-        let event = self
-            .telemetry()
+        let events = self.telemetry();
+        assert!(
+            events
+                .iter()
+                .any(|event| event["event_type"] == "bead.claim.verify_error"),
+            "failed claim verification must emit structured telemetry: {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event["event_type"] != "bead.claim.verify_success"),
+            "failed claim verification must not emit verified-success telemetry: {events:?}"
+        );
+        let event = events
             .into_iter()
             .find(|event| event["event_type"] == "bead.claim.verify_error")
-            .expect("failed claim verification must emit structured telemetry");
+            .expect("the preceding assertion guarantees a verification error");
         assert_eq!(event["data"]["stage"], "dispatching");
         assert_eq!(
             event["data"]["target_workspace"],
@@ -358,6 +370,57 @@ impl Fixture {
         );
         assert_eq!(event["data"]["category"], "lookup");
         assert!(event["data"]["detail"].is_string());
+    }
+
+    fn assert_exactly_one_agent_spawn(&self, workspace: &Path) {
+        assert_eq!(
+            self.marker_lines(workspace),
+            1,
+            "successful dispatch must spawn exactly one child in {}",
+            workspace.display()
+        );
+        let attempt_ids = self.marker_attempt_ids(workspace);
+        assert_eq!(
+            attempt_ids.len(),
+            1,
+            "successful dispatch must record exactly one child attempt identity"
+        );
+        assert_ne!(
+            attempt_ids[0], "none",
+            "the spawned child must receive the attempt identity"
+        );
+    }
+
+    fn assert_verified_success(&self, workspace: &Path) {
+        let events = self.telemetry();
+        let successes: Vec<_> = events
+            .iter()
+            .filter(|event| event["event_type"] == "bead.claim.verify_success")
+            .collect();
+        assert_eq!(
+            successes.len(),
+            1,
+            "successful dispatch must emit exactly one verified-success event: {events:?}"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|event| event["event_type"] != "bead.claim.verify_error"),
+            "successful dispatch must not emit claim-verification failure telemetry: {events:?}"
+        );
+
+        let success = successes[0];
+        let workspace = workspace.display().to_string();
+        assert_eq!(success["data"]["workspace"], workspace);
+        assert_eq!(success["data"]["target_workspace"], workspace);
+        let claim_epoch = success["data"]["claim_epoch"]
+            .as_u64()
+            .expect("verified-success telemetry must contain the claim epoch");
+        assert_eq!(
+            success["data"]["verified_epoch"].as_u64(),
+            Some(claim_epoch),
+            "verified-success telemetry must preserve the epoch that authorized spawn"
+        );
     }
 }
 
@@ -657,22 +720,8 @@ fn subprocess_claim_verification_routes_remote_collisions_and_local_work() {
         String::from_utf8_lossy(&output.stderr),
         colliding.telemetry()
     );
-    let successes: Vec<_> = colliding
-        .telemetry()
-        .into_iter()
-        .filter(|event| event["event_type"] == "bead.claim.verify_success")
-        .collect();
-    assert_eq!(
-        successes.len(),
-        1,
-        "successful remote dispatch must verify exactly once"
-    );
-    let success = successes
-        .into_iter()
-        .next()
-        .expect("successful remote dispatch emits claim verification telemetry");
-    assert_eq!(success["data"]["workspace"], remote.display().to_string());
-    assert!(success["data"]["claim_epoch"].as_u64().is_some());
+    colliding.assert_exactly_one_agent_spawn(remote);
+    colliding.assert_verified_success(remote);
 
     let noncolliding = Fixture::new(FixtureLayout::NonCollidingRemote);
     let output = noncolliding.run(FixtureMode::Success);
@@ -692,7 +741,8 @@ fn subprocess_claim_verification_routes_remote_collisions_and_local_work() {
     );
     assert_eq!(noncolliding.marker_lines(&noncolliding.home_workspace), 0);
     noncolliding.assert_remote_only_queried(FixtureMode::Success);
-    assert_eq!(noncolliding.marker_lines(remote), 1);
+    noncolliding.assert_exactly_one_agent_spawn(remote);
+    noncolliding.assert_verified_success(remote);
 
     let local = Fixture::new(FixtureLayout::Local);
     let output = local.run(FixtureMode::Success);
