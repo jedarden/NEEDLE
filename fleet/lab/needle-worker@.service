@@ -16,6 +16,35 @@ Type=simple
 Slice=needle.slice
 WorkingDirectory=/home/coding
 
+# Per-worker blast radius (2026-09-20), mirroring the ex44 change but sized for
+# lab. needle.slice caps this fleet at 24G/32G, yet each instance was uncapped
+# (MemoryHigh/MemoryMax/MemorySwapMax=infinity), so one worker could consume the
+# entire fleet budget. On ex44 that is exactly what happened: an abandoned
+# `cargo test` under glm-loom took 18.2G resident plus 9.3G swap, pinned the
+# slice at its cap for seven hours and stalled all 31 workers on reclaim.
+#
+# Tuned DOWN from ex44's 8G/12G because lab's workers are an order of magnitude
+# lighter. Measured over 5-8 days of continuous uptime, the highest peak of any
+# lab worker was 883M (lab-drawrace-public); the rest sit at 178M-830M. 8G is
+# ~9x that headroom and 25% of the slice's 32G ceiling, versus the 100% a single
+# worker could take before. Lab also runs 7 workers on 12 cores (CPUQuota=700%),
+# against ex44's 29 on 20, so there is less concurrent build pressure to absorb.
+#
+# 8G rather than something tighter: a cargo build launched through
+# ~/.local/bin/cargo becomes a SIBLING scope in needle.slice under the wrapper's
+# own 6G cap, so it is not charged here — but a build that BYPASSES the wrapper
+# by absolute path (the ex44 failure) runs as a direct child and is charged here.
+# 8G leaves a legitimate bypassing 6G build room to finish alongside the ~0.9G
+# agent, while still stopping a runaway.
+#
+# MemorySwapMax matters more here than on ex44: lab's needle.slice has
+# memory.swap.max=max, so until that is bounded these per-worker limits are the
+# only swap ceiling the fleet has. Without it memory.max caps RSS only and the
+# overage thrashes through swap instead of being killed.
+MemoryHigh=4G
+MemoryMax=8G
+MemorySwapMax=2G
+
 # Per-instance agent, so one template serves every repo lab owns.
 # Missing file => unit fails loudly rather than silently working the wrong repo.
 EnvironmentFile=%h/.config/needle/workers/%i.env
