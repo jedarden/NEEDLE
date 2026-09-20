@@ -534,6 +534,8 @@ pub enum EventKind {
         /// Why nothing ran. The fallback gate uses `not_detected` when no
         /// `scripts/definition-of-done.sh` or recognized build file exists.
         reason: String,
+        gates_source: String,
+        command_gates_resolved: u32,
     },
     /// Worker launch was deferred due to resource saturation.
     WorkerLaunchDeferred {
@@ -1248,10 +1250,14 @@ pub enum EventKind {
         command: String,
         exit_code: Option<i32>,
         output: String,
+        gates_source: String,
+        command_gates_resolved: u32,
     },
     VerificationPassed {
         bead_id: BeadId,
         gates_run: u32,
+        gates_source: String,
+        command_gates_resolved: u32,
     },
     /// Gate execution error — the gate could not run (ENOENT/EACCES/missing directory/timeout).
     GateExecutionError {
@@ -1260,6 +1266,8 @@ pub enum EventKind {
         gate: String,
         command: String,
         reason: String,
+        gates_source: String,
+        command_gates_resolved: u32,
     },
     /// Workspace degraded after consecutive gate execution errors.
     WorkspaceGateDegraded {
@@ -1269,12 +1277,16 @@ pub enum EventKind {
         reason: String,
         consecutive_errors: u32,
         bead_id: BeadId,
+        gates_source: String,
+        command_gates_resolved: u32,
     },
     /// Workspace restored after successful gate run following degradation.
     WorkspaceGateRestored {
         workspace: String,
         bead_id: BeadId,
         degraded_duration_secs: u64,
+        gates_source: String,
+        command_gates_resolved: u32,
     },
     /// An adapter's recent non-gate failures are dominated by one fingerprint
     /// across several beads (N-T23): the provider/adapter is degraded, and
@@ -2337,10 +2349,17 @@ impl EventKind {
                     "paths": paths
                 })
             }
-            EventKind::GateNoVerifier { workspace, reason } => {
+            EventKind::GateNoVerifier {
+                workspace,
+                reason,
+                gates_source,
+                command_gates_resolved,
+            } => {
                 serde_json::json!({
                     "workspace": workspace,
-                    "reason": reason
+                    "reason": reason,
+                    "gates_source": gates_source,
+                    "command_gates_resolved": command_gates_resolved,
                 })
             }
             EventKind::WorkerLaunchDeferred {
@@ -3018,18 +3037,29 @@ impl EventKind {
                 command,
                 exit_code,
                 output,
+                gates_source,
+                command_gates_resolved,
             } => {
                 serde_json::json!({
                     "bead_id": bead_id.as_ref(),
                     "command": command,
                     "exit_code": exit_code,
                     "output": output,
+                    "gates_source": gates_source,
+                    "command_gates_resolved": command_gates_resolved,
                 })
             }
-            EventKind::VerificationPassed { bead_id, gates_run } => {
+            EventKind::VerificationPassed {
+                bead_id,
+                gates_run,
+                gates_source,
+                command_gates_resolved,
+            } => {
                 serde_json::json!({
                     "bead_id": bead_id.as_ref(),
                     "gates_run": gates_run,
+                    "gates_source": gates_source,
+                    "command_gates_resolved": command_gates_resolved,
                 })
             }
             EventKind::GateExecutionError {
@@ -3038,6 +3068,8 @@ impl EventKind {
                 gate,
                 command,
                 reason,
+                gates_source,
+                command_gates_resolved,
             } => {
                 serde_json::json!({
                     "bead_id": bead_id.as_ref(),
@@ -3045,6 +3077,8 @@ impl EventKind {
                     "gate": gate,
                     "command": command,
                     "reason": reason,
+                    "gates_source": gates_source,
+                    "command_gates_resolved": command_gates_resolved,
                 })
             }
             EventKind::WorkspaceGateDegraded {
@@ -3054,6 +3088,8 @@ impl EventKind {
                 reason,
                 consecutive_errors,
                 bead_id,
+                gates_source,
+                command_gates_resolved,
             } => {
                 serde_json::json!({
                     "workspace": workspace,
@@ -3062,17 +3098,23 @@ impl EventKind {
                     "reason": reason,
                     "consecutive_errors": consecutive_errors,
                     "bead_id": bead_id.as_ref(),
+                    "gates_source": gates_source,
+                    "command_gates_resolved": command_gates_resolved,
                 })
             }
             EventKind::WorkspaceGateRestored {
                 workspace,
                 bead_id,
                 degraded_duration_secs,
+                gates_source,
+                command_gates_resolved,
             } => {
                 serde_json::json!({
                     "workspace": workspace,
                     "bead_id": bead_id.as_ref(),
                     "degraded_duration_secs": degraded_duration_secs,
+                    "gates_source": gates_source,
+                    "command_gates_resolved": command_gates_resolved,
                 })
             }
             EventKind::ProviderDegraded {

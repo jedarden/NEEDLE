@@ -70,6 +70,30 @@ Additional fields are event-specific and documented per type below.
 ### Bead Store Errors
 - `bead_store.error` — Bead store operation failed
 
+### Validation Gates
+- `verification.passed` — Validation completed successfully, including the
+  explicit zero-gates case.
+- `verification.failed` — A resolved gate rejected the work.
+- `gate.execution_error` — A resolved gate could not run.
+- `gate.no_verifier` — The workspace had no verifier to run.
+- `workspace.gate_degraded` — Repeated gate execution errors degraded a
+  workspace.
+- `workspace.gate_restored` — A successful gate run restored a degraded
+  workspace.
+
+All gate execution and gate-health transition events carry these provenance
+fields:
+
+| Field                    | Type   | Description |
+|--------------------------|--------|-------------|
+| `gates_source`           | string | Resolved gate origin: `bead_workspace` when command gates came from the bead's workspace, or `none` when no command gates were resolved. `none` is emitted explicitly; it is not represented by a missing field. |
+| `command_gates_resolved` | integer| Number of command gates resolved from the bead's workspace configuration. Zero is emitted with `gates_source: "none"`. |
+
+`verification.passed` also carries `gates_run`, the number of gate result
+entries that actually ran. The resolved count is kept separate so a failed or
+short-circuited run remains distinguishable from the configuration it came
+from.
+
 ### Attempt Ledger
 - `attempt.resolved` — Terminal ledger row for one dispatch (one per dispatch, N-T16)
 

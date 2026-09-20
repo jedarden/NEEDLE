@@ -40,6 +40,36 @@ pub(crate) mod fallback_verification;
 const RETRY_COOLDOWN_BASE_SECS: u64 = 5 * 60;
 const RETRY_COOLDOWN_MAX_SECS: u64 = 30 * 60;
 
+/// Provenance captured when validation gates are resolved for one bead.
+///
+/// The summary travels with every gate state transition so telemetry can
+/// distinguish a gate run resolved from the bead's workspace from a dispatch
+/// where no command gates were resolved at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GateResolutionTelemetry {
+    pub(crate) gates_source: &'static str,
+    pub(crate) command_gates_resolved: u32,
+}
+
+impl GateResolutionTelemetry {
+    fn none() -> Self {
+        Self {
+            gates_source: "none",
+            command_gates_resolved: 0,
+        }
+    }
+
+    fn bead_workspace(command_gates_resolved: usize) -> Self {
+        if command_gates_resolved == 0 {
+            return Self::none();
+        }
+        Self {
+            gates_source: "bead_workspace",
+            command_gates_resolved: command_gates_resolved as u32,
+        }
+    }
+}
+
 /// The first line of a normalized failure summary, capped for a bead title.
 ///
 /// The fingerprint label on the bead carries the full identity; the title
@@ -980,14 +1010,14 @@ impl OutcomeHandler {
     pub(crate) async fn run_verification_gates(
         &self,
         bead: &Bead,
-    ) -> Result<(bool, Option<GateReport>)> {
+    ) -> Result<(bool, Option<GateReport>, GateResolutionTelemetry)> {
         if bead.workspace.as_os_str().is_empty() || bead.workspace.is_relative() {
             tracing::debug!(
                 bead_id = %bead.id,
                 workspace = %bead.workspace.display(),
                 "bead workspace is unset or relative — no workspace config to resolve gates from, running none"
             );
-            return Ok((true, None));
+            return Ok((true, None, GateResolutionTelemetry::none()));
         }
         let GatesConfig {
             gates: mut workspace_gates,
@@ -1039,7 +1069,7 @@ impl OutcomeHandler {
                     workspace = %bead.workspace.display(),
                     "bead's workspace declares no validation gates — running none"
                 );
-                return Ok((true, None));
+                return Ok((true, None, GateResolutionTelemetry::none()));
             }
             // needle-66b015d6 part 3: the workspace's own
             // `validation.fallback_gate` decides whether the built-in gate is
@@ -1057,7 +1087,7 @@ impl OutcomeHandler {
                     "validation.fallback_gate is false — built-in fallback gate opted out; \
                      the dispatch is judged on the agent's exit code alone"
                 );
-                return Ok((true, None));
+                return Ok((true, None, GateResolutionTelemetry::none()));
             }
             tracing::info!(
                 bead_id = %bead.id,
@@ -1072,6 +1102,9 @@ impl OutcomeHandler {
             // passes with the counted `not_detected` WARN.
             return self.run_fallback_gate(bead).await;
         }
+        let gate_telemetry = GateResolutionTelemetry::bead_workspace(
+            workspace_gates.len() + workspace_verification.len(),
+        );
         tracing::debug!(
             bead_id = %bead.id,
             workspace = %bead.workspace.display(),
@@ -1162,7 +1195,7 @@ impl OutcomeHandler {
         })?;
         let report = gate.run(bead).await?;
         let all_passed = report.all_passed;
-        Ok((all_passed, Some(report)))
+        Ok((all_passed, Some(report), gate_telemetry))
     }
 
     /// Run the built-in fallback gate for a workspace that declares no gates
@@ -1177,7 +1210,10 @@ impl OutcomeHandler {
     /// failed-verification path; a check that could not run surfaces as a
     /// `GateResult::ExecutionError`, which routes to the GateError path
     /// (release, failure-count untouched) per needle-4aaa010c.
-    async fn run_fallback_gate(&self, bead: &Bead) -> Result<(bool, Option<GateReport>)> {
+    async fn run_fallback_gate(
+        &self,
+        bead: &Bead,
+    ) -> Result<(bool, Option<GateReport>, GateResolutionTelemetry)> {
         let timeout =
             std::time::Duration::from_secs(self.config.validation.outcome_timeout_seconds);
         let stderr_cap_bytes = self.config.validation.stderr_cap_bytes;
@@ -1186,7 +1222,9 @@ impl OutcomeHandler {
             .verify(bead, timeout, stderr_cap_bytes)
             .await
         {
-            fallback_verification::FallbackVerdict::Pass(report) => Ok((true, Some(report))),
+            fallback_verification::FallbackVerdict::Pass(report) => {
+                Ok((true, Some(report), GateResolutionTelemetry::none()))
+            }
             fallback_verification::FallbackVerdict::NoVerifierPass => {
                 tracing::warn!(
                     bead_id = %bead.id,
@@ -1198,16 +1236,20 @@ impl OutcomeHandler {
                     EventKind::GateNoVerifier {
                         workspace: bead.workspace.display().to_string(),
                         reason: "not_detected".to_string(),
+                        gates_source: "none".to_string(),
+                        command_gates_resolved: 0,
                     },
                     chrono::Utc::now(),
                 ) {
                     tracing::warn!(error = %error, "failed to emit gate.no_verifier");
                 }
-                Ok((true, None))
+                Ok((true, None, GateResolutionTelemetry::none()))
             }
-            fallback_verification::FallbackVerdict::Fail(report) => Ok((false, Some(report))),
+            fallback_verification::FallbackVerdict::Fail(report) => {
+                Ok((false, Some(report), GateResolutionTelemetry::none()))
+            }
             fallback_verification::FallbackVerdict::ExecutionError(report) => {
-                Ok((false, Some(report)))
+                Ok((false, Some(report), GateResolutionTelemetry::none()))
             }
         }
     }
@@ -1235,11 +1277,11 @@ impl OutcomeHandler {
     ) -> Result<HandlerResult> {
         // For exit code 0, run verification BEFORE classification.
         // This is the core fix: Success must mean verification passed.
-        let (verified, gate_report) = if output.exit_code == 0 && !was_interrupted {
+        let (verified, gate_report, gate_telemetry) = if output.exit_code == 0 && !was_interrupted {
             self.run_verification_gates(bead).await?
         } else {
             // Non-zero exit or interrupted — verification irrelevant.
-            (true, None)
+            (true, None, GateResolutionTelemetry::none())
         };
 
         // Classification consults the stream's result envelope in addition to
@@ -1375,7 +1417,7 @@ impl OutcomeHandler {
             } else {
                 match outcome.clone() {
                     Outcome::Success => {
-                        self.handle_success(store, bead, gate_report, &mut outcome)
+                        self.handle_success(store, bead, gate_report, gate_telemetry, &mut outcome)
                             .await?
                     }
                     Outcome::Failure => {
@@ -1394,13 +1436,15 @@ impl OutcomeHandler {
                                             gate_name,
                                             command,
                                             reason,
+                                            gate_telemetry,
                                         )
                                         .await?
                                     } else {
                                         unreachable!() // We already checked is_execution_error()
                                     }
                                 } else {
-                                    self.handle_gate_failure(store, bead, &report).await?
+                                    self.handle_gate_failure(store, bead, &report, gate_telemetry)
+                                        .await?
                                 }
                             } else {
                                 self.handle_failure(store, bead).await?
@@ -2328,20 +2372,29 @@ impl OutcomeHandler {
         store: &dyn BeadStore,
         bead: &Bead,
         gate_report: Option<GateReport>,
+        gate_telemetry: GateResolutionTelemetry,
         outcome: &mut Outcome,
     ) -> Result<(BeadAction, Vec<EventKind>)> {
         tracing::info!(bead_id = %bead.id, "agent completed successfully");
 
-        // If gates ran and passed, emit telemetry.
+        // Emit telemetry even when zero gates were resolved: an explicit
+        // `gates_source=none` distinguishes that case from a gate that could
+        // not be resolved or executed.
+        self.telemetry.emit(
+            EventKind::VerificationPassed {
+                bead_id: bead.id.clone(),
+                gates_run: gate_report
+                    .as_ref()
+                    .map(|report| report.results.len() as u32)
+                    .unwrap_or(0),
+                gates_source: gate_telemetry.gates_source.to_string(),
+                command_gates_resolved: gate_telemetry.command_gates_resolved,
+            },
+            chrono::Utc::now(),
+        )?;
+
         if let Some(report) = gate_report {
             let gates_run = report.results.len() as u32;
-            self.telemetry.emit(
-                EventKind::VerificationPassed {
-                    bead_id: bead.id.clone(),
-                    gates_run,
-                },
-                chrono::Utc::now(),
-            )?;
             tracing::info!(
                 bead_id = %bead.id,
                 gates_run,
@@ -2358,7 +2411,7 @@ impl OutcomeHandler {
                 );
 
                 if let Err(e) = self
-                    .restore_degraded_workspace(store, workspace_path, &bead.id)
+                    .restore_degraded_workspace(store, workspace_path, &bead.id, gate_telemetry)
                     .await
                 {
                     tracing::error!(
@@ -2396,7 +2449,9 @@ impl OutcomeHandler {
                     close_verification::CloseEvidenceVerdict::Skipped
                     | close_verification::CloseEvidenceVerdict::Pass => {}
                     close_verification::CloseEvidenceVerdict::Fail(report) => {
-                        return self.handle_gate_failure(store, bead, &report).await;
+                        return self
+                            .handle_gate_failure(store, bead, &report, gate_telemetry)
+                            .await;
                     }
                     close_verification::CloseEvidenceVerdict::ExecutionError {
                         command,
@@ -2410,6 +2465,7 @@ impl OutcomeHandler {
                                 close_verification::GATE_NAME,
                                 &command,
                                 &reason,
+                                gate_telemetry,
                             )
                             .await;
                     }
@@ -2426,7 +2482,9 @@ impl OutcomeHandler {
                                 "bead closed but shipped-work check failed — reopening and releasing"
                             );
                             let report = GateReport::single_failure("shipped_work", reason);
-                            return self.handle_gate_failure(store, bead, &report).await;
+                            return self
+                                .handle_gate_failure(store, bead, &report, gate_telemetry)
+                                .await;
                         }
                         Ok(crate::validation::GateResult::Pass) => {
                             // Shipped work verified — but a bypass of the
@@ -2452,7 +2510,9 @@ impl OutcomeHandler {
                                     );
                                     let report =
                                         GateReport::single_failure(dod_bypass::GATE_NAME, reason);
-                                    return self.handle_gate_failure(store, bead, &report).await;
+                                    return self
+                                        .handle_gate_failure(store, bead, &report, gate_telemetry)
+                                        .await;
                                 }
                                 Ok(_) => {}
                                 Err(e) => {
@@ -2507,6 +2567,7 @@ impl OutcomeHandler {
                                     "shipped_work",
                                     &command,
                                     &reason,
+                                    gate_telemetry,
                                 )
                                 .await;
                         }
@@ -2944,6 +3005,7 @@ impl OutcomeHandler {
         store: &dyn BeadStore,
         bead: &Bead,
         report: &crate::validation::GateReport,
+        gate_telemetry: GateResolutionTelemetry,
     ) -> Result<(BeadAction, Vec<EventKind>)> {
         // Find the first failing gate for telemetry.
         let (failed_gate, reason) = report
@@ -2978,6 +3040,8 @@ impl OutcomeHandler {
                 command: failed_gate.clone(),
                 exit_code: None,
                 output: reason.clone(),
+                gates_source: gate_telemetry.gates_source.to_string(),
+                command_gates_resolved: gate_telemetry.command_gates_resolved,
             },
             chrono::Utc::now(),
         )?;
@@ -3025,6 +3089,7 @@ impl OutcomeHandler {
                             summary,
                             *failures,
                             *distinct_beads,
+                            gate_telemetry,
                         )
                         .await
                     {
@@ -3228,6 +3293,7 @@ impl OutcomeHandler {
         summary: &str,
         failures: usize,
         distinct_beads: usize,
+        gate_telemetry: GateResolutionTelemetry,
     ) -> Result<()> {
         let workspace = bead.workspace.display().to_string();
         let label = crate::verification_fingerprint::fingerprint_label(fingerprint);
@@ -3270,6 +3336,8 @@ impl OutcomeHandler {
                     ),
                     consecutive_errors: failures as u32,
                     bead_id: existing.id.clone(),
+                    gates_source: gate_telemetry.gates_source.to_string(),
+                    command_gates_resolved: gate_telemetry.command_gates_resolved,
                 },
                 Utc::now(),
             )?;
@@ -3345,6 +3413,8 @@ impl OutcomeHandler {
                 ),
                 consecutive_errors: failures as u32,
                 bead_id: created,
+                gates_source: gate_telemetry.gates_source.to_string(),
+                command_gates_resolved: gate_telemetry.command_gates_resolved,
             },
             Utc::now(),
         )?;
@@ -3367,6 +3437,7 @@ impl OutcomeHandler {
     /// * `gate_name` - Name of the gate that failed
     /// * `command` - The command that could not run
     /// * `reason` - Human-readable error reason (e.g., "ENOENT", "EACCES", "directory not found")
+    #[allow(clippy::too_many_arguments)] // gate execution context plus provenance
     async fn handle_gate_error(
         &self,
         store: &dyn BeadStore,
@@ -3375,6 +3446,7 @@ impl OutcomeHandler {
         gate_name: &str,
         command: &str,
         reason: &str,
+        gate_telemetry: GateResolutionTelemetry,
     ) -> Result<(BeadAction, Vec<EventKind>)> {
         tracing::warn!(
             bead_id = %bead.id,
@@ -3398,6 +3470,8 @@ impl OutcomeHandler {
                 gate: gate_name.to_string(),
                 command: command.to_string(),
                 reason: reason.to_string(),
+                gates_source: gate_telemetry.gates_source.to_string(),
+                command_gates_resolved: gate_telemetry.command_gates_resolved,
             },
             chrono::Utc::now(),
         )?;
@@ -3425,6 +3499,7 @@ impl OutcomeHandler {
                             command,
                             reason,
                             previous_state.as_ref(),
+                            gate_telemetry,
                         )
                         .await
                     {
@@ -3493,6 +3568,7 @@ impl OutcomeHandler {
     ///
     /// This method creates a P0 bead with fingerprinting to prevent duplicates.
     /// The bead remains claimable - fixing a gate is verified by running it.
+    #[allow(clippy::too_many_arguments)] // gate-health alert shape; see fingerprint sibling
     async fn create_gate_broken_bead(
         &self,
         store: &dyn BeadStore,
@@ -3501,6 +3577,7 @@ impl OutcomeHandler {
         command: &str,
         reason: &str,
         previous_state: Option<&crate::gate_health::GateHealthState>,
+        gate_telemetry: GateResolutionTelemetry,
     ) -> Result<()> {
         use crate::fingerprint::{build_alert_labels, compute_fingerprint};
 
@@ -3540,6 +3617,8 @@ impl OutcomeHandler {
                             .map(|s| s.consecutive_errors)
                             .unwrap_or(0),
                         bead_id: bead_id.clone(),
+                        gates_source: gate_telemetry.gates_source.to_string(),
+                        command_gates_resolved: gate_telemetry.command_gates_resolved,
                     },
                     Utc::now(),
                 )?;
@@ -3566,6 +3645,8 @@ impl OutcomeHandler {
                             .map(|s| s.consecutive_errors)
                             .unwrap_or(0),
                         bead_id: bead_id.clone(),
+                        gates_source: gate_telemetry.gates_source.to_string(),
+                        command_gates_resolved: gate_telemetry.command_gates_resolved,
                     },
                     Utc::now(),
                 )?;
@@ -3639,6 +3720,8 @@ impl OutcomeHandler {
                             .map(|s| s.consecutive_errors)
                             .unwrap_or(0),
                         bead_id: bead_id.clone(),
+                        gates_source: gate_telemetry.gates_source.to_string(),
+                        command_gates_resolved: gate_telemetry.command_gates_resolved,
                     },
                     Utc::now(),
                 )?;
@@ -3660,6 +3743,7 @@ impl OutcomeHandler {
         store: &dyn BeadStore,
         workspace_path: &std::path::Path,
         success_bead_id: &BeadId,
+        gate_telemetry: GateResolutionTelemetry,
     ) -> Result<()> {
         // Get the previous state before clearing
         let previous_state = gate_health::clear_state(workspace_path).unwrap_or(None);
@@ -3725,6 +3809,8 @@ impl OutcomeHandler {
                 workspace: workspace.clone(),
                 bead_id: success_bead_id.clone(),
                 degraded_duration_secs,
+                gates_source: gate_telemetry.gates_source.to_string(),
+                command_gates_resolved: gate_telemetry.command_gates_resolved,
             },
             Utc::now(),
         )?;
@@ -5057,7 +5143,12 @@ mod tests {
         let success_bead_id = BeadId::from("needle-success");
 
         handler
-            .restore_degraded_workspace(&store, workspace.path(), &success_bead_id)
+            .restore_degraded_workspace(
+                &store,
+                workspace.path(),
+                &success_bead_id,
+                GateResolutionTelemetry::none(),
+            )
             .await
             .unwrap();
         helper.sync().await;
@@ -5090,7 +5181,12 @@ mod tests {
         let success_bead_id = BeadId::from("needle-success-without-alert");
 
         handler
-            .restore_degraded_workspace(&store, workspace.path(), &success_bead_id)
+            .restore_degraded_workspace(
+                &store,
+                workspace.path(),
+                &success_bead_id,
+                GateResolutionTelemetry::none(),
+            )
             .await
             .unwrap();
         helper.sync().await;
@@ -7654,6 +7750,7 @@ mod tests {
                 "test_gate",
                 "nonexistent_command",
                 "ENOENT",
+                GateResolutionTelemetry::none(),
             )
             .await
             .unwrap();

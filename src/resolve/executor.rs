@@ -288,16 +288,17 @@ impl DecisionExecutor {
         // Configured gates, resolved from the bead's own workspace — the same
         // machinery the dispatch path uses, so resolve closures are judged by
         // exactly the rules that workspace declares.
-        let (verified, gate_report) = match self.outcome.run_verification_gates(bead).await {
-            Ok(result) => result,
-            Err(error) => {
-                // Gates could not even be resolved: nothing judged the work.
-                // Release without penalty; the error is reported.
-                return self
-                    .mutation_failure(store, bead, actor, "gate resolution", error)
-                    .await;
-            }
-        };
+        let (verified, gate_report, gate_telemetry) =
+            match self.outcome.run_verification_gates(bead).await {
+                Ok(result) => result,
+                Err(error) => {
+                    // Gates could not even be resolved: nothing judged the work.
+                    // Release without penalty; the error is reported.
+                    return self
+                        .mutation_failure(store, bead, actor, "gate resolution", error)
+                        .await;
+                }
+            };
         if let Some(report) = gate_report.as_ref().filter(|report| !report.all_passed) {
             if report.results.iter().any(|(_, r)| r.is_execution_error()) {
                 // A gate that could not run is not a gate that failed
@@ -332,6 +333,8 @@ impl DecisionExecutor {
                 EventKind::VerificationPassed {
                     bead_id: bead.id.clone(),
                     gates_run,
+                    gates_source: gate_telemetry.gates_source.to_string(),
+                    command_gates_resolved: gate_telemetry.command_gates_resolved,
                 },
                 Utc::now(),
             );
