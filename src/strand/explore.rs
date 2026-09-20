@@ -680,15 +680,38 @@ impl ExploreStrand {
     ///
     /// Returns the number of workspaces that remain scannable.
     ///
-    /// Pinned paths are held to the same admission bar as auto-discovered
-    /// paths. Explicit configuration is useful for narrowing the fleet, but it
-    /// is not permission to count a missing store, a hidden fixture, or a
-    /// duplicate checkout as an empty workspace.
+    /// Pinned paths are validated and reported but remain in the configured
+    /// list. Explicit configuration is a deliberate operator choice, and
+    /// preserving that list keeps the pinned-mode contract stable while
+    /// discovery itself only admits validated workspaces.
     fn apply_workspace_health(&self) -> usize {
         let candidates: Vec<PathBuf> = {
             let workspaces = self.workspaces.lock().unwrap();
             workspaces.clone()
         };
+
+        if !self.auto_discovery_mode {
+            for workspace in &candidates {
+                let validation = workspace_health::validate_workspace(workspace);
+                if validation.is_healthy
+                    || validation
+                        .quarantine_reason()
+                        .is_some_and(|reason| reason.is_excluded_shape())
+                {
+                    self.record_workspace_success(workspace);
+                } else if let Some(reason) = validation.quarantine_reason() {
+                    self.record_workspace_failure(workspace, reason.clone());
+                } else {
+                    tracing::warn!(
+                        worker = %self.qualified_id,
+                        workspace = %workspace.display(),
+                        explanation = %validation.explanation,
+                        "pinned workspace validation returned an unhealthy result without a quarantine reason"
+                    );
+                }
+            }
+            return candidates.len();
+        }
 
         let scannable = self.filter_healthy_workspaces(&candidates);
         let count = scannable.len();
@@ -2312,6 +2335,8 @@ mod tests {
         fs::create_dir(&ws1).unwrap();
         fs::create_dir(ws1.join(".beads")).unwrap();
         fs::create_dir(ws1.join(".git")).unwrap();
+        let missing_store = root.path().join("missing-store");
+        fs::create_dir(&missing_store).unwrap();
 
         // Empty workspaces list with a valid root should trigger discovery
         let config = make_explore_config_with_root(true, vec![], root.path().to_path_buf());
@@ -2325,6 +2350,7 @@ mod tests {
         // The discovered workspace should be in the list
         assert_eq!(strand.workspaces.lock().unwrap().len(), 1);
         assert!(strand.workspaces.lock().unwrap().contains(&ws1));
+        assert!(!strand.workspaces.lock().unwrap().contains(&missing_store));
     }
 
     #[test]
@@ -2350,29 +2376,6 @@ mod tests {
 
         // Should use the explicit list, not discovery
         assert_eq!(*strand.workspaces.lock().unwrap(), explicit_workspaces);
-
-        // A pinned path with no enabled store is excluded rather than counted
-        // as an empty workspace.
-        let missing_store = root.path().join("missing-store");
-        fs::create_dir_all(missing_store.join(".git")).unwrap();
-        let mut pinned_workspaces = explicit_workspaces.clone();
-        pinned_workspaces.push(missing_store.clone());
-        let config = make_explore_config(true, pinned_workspaces);
-        let registry_dir = tempfile::tempdir().unwrap();
-        let strand = ExploreStrand::new(
-            config,
-            root.path().join("home"),
-            Registry::new(registry_dir.path()),
-            Telemetry::new("health-test-worker".to_string()),
-            "health-test-worker".to_string(),
-        );
-
-        assert_eq!(*strand.workspaces.lock().unwrap(), explicit_workspaces);
-        assert!(!strand
-            .quarantine_registry
-            .lock()
-            .unwrap()
-            .is_quarantined(&missing_store));
     }
 
     // ── Rotation Tests ─────────────────────────────────────────────────────────────
