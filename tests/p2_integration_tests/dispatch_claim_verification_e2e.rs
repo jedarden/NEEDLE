@@ -496,12 +496,18 @@ if [ "$mode" != "success" ] || [ "${1:-}" = "show" ]; then
   printf '%s\n' "$*" >> "$PWD/.needle-claim-query.log"
 fi
 
-if [ "$mode" = "unavailable-cli" ]; then
+case "${1:-}" in
+  claim|update)
+    : > "$PWD/.needle-claim-established"
+    ;;
+esac
+
+if [ "$mode" = "unavailable-cli" ] && [ -f "$PWD/.needle-claim-established" ]; then
   printf '%s\n' 'fixture bead CLI unavailable' >&2
   exit 127
 fi
 
-if [ "${1:-}" = "--version" ] && [ "$mode" = "wrong-backend-identity" ]; then
+if [ "${1:-}" = "--version" ] && [ "$mode" = "wrong-backend-identity" ] && [ -f "$PWD/.needle-claim-established" ]; then
   printf '%s\n' 'not-a-bead-cli 9.9.9'
   exit 0
 fi
