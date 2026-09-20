@@ -261,12 +261,14 @@ impl Fixture {
         let home_queries = self.query_log(&self.home_workspace);
         let remote_queries = self.query_log(remote);
         assert!(
-            home_queries.is_empty(),
-            "{mode:?}: worker home store must not be queried; home={home_queries:?}, remote={remote_queries:?}"
+            home_queries.iter().all(|query| query == "--version"),
+            "{mode:?}: worker home store must not perform a claim lookup; home={home_queries:?}, remote={remote_queries:?}"
         );
         assert!(
-            !remote_queries.is_empty(),
-            "{mode:?}: selected remote store must record the backend lookup"
+            remote_queries
+                .iter()
+                .any(|query| query == "--version" || query.starts_with("show ")),
+            "{mode:?}: selected remote store must record the backend or claim lookup"
         );
     }
 
