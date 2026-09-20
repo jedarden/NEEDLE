@@ -9,6 +9,26 @@ Type=simple
 Slice=needle.slice
 WorkingDirectory=/home/coding
 
+# Per-worker blast radius (2026-09-20). needle.slice caps the fleet at 24G/34G,
+# but each instance was uncapped, so one worker could consume the whole fleet
+# budget. On 2026-09-20 an abandoned `cargo test --bin loom` under glm-loom held
+# 18.2G resident plus 9.3G swap — 72% of the slice's MemoryHigh — pinning the
+# slice against its cap for seven hours. All 31 workers stalled on reclaim
+# (memory.pressure full=77%, load 162 on 20 idle-ish cores) and the process
+# faulted 1.7 TB back off disk. One runaway, thirty victims.
+#
+# Sized from observed per-worker peaks on this fleet: the highest legitimate
+# peak was 9.83G (glm-roam-20), most workers peak at 1-4G. MemoryHigh throttles
+# with reclaim pressure and no kill; MemoryMax is the wall.
+#
+# MemorySwapMax is what makes MemoryMax bind. In cgroup v2 memory.max limits RSS
+# only — swap is governed separately, so a capped worker would push its overage
+# into swap and thrash exactly as above, just more slowly. 2G lets cold pages
+# page out without sustaining a thrash loop.
+MemoryHigh=8G
+MemoryMax=12G
+MemorySwapMax=2G
+
 # Instance identity/routing is source-controlled in workers.tsv and rendered by
 # apply-ex44-fleet.sh. Credentials stay in the host-only common file.
 EnvironmentFile=-%h/.config/needle/worker-common.env
