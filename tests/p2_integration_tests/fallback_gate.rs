@@ -6,6 +6,9 @@
 //! their invocations and exit deterministically. This keeps the tests
 //! hermetic: no registry, package index, network, or operator HOME is used.
 
+#[path = "gate_workspace_resolution.rs"]
+mod gate_workspace_resolution;
+
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -608,6 +611,9 @@ async fn fallback_marker_commands_are_selected_and_executed_in_clean_extractions
 
     assert_fallback_failed_verifier_captures_and_caps_stderr(&environment).await;
     assert_fallback_verifier_timeout_is_released_as_execution_error(&environment).await;
+    gate_workspace_resolution::run_gate_workspace_resolution_regression()
+        .await
+        .expect("per-workspace gate resolution regression");
 }
 
 async fn assert_fallback_failed_verifier_captures_and_caps_stderr(
