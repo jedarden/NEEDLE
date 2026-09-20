@@ -137,6 +137,13 @@ use crate::types::{BeadId, InputMethod};
 /// Pure adapters for exporting process observations to the learning kernel.
 pub mod learning;
 
+/// Focused unit coverage for carrying the resolved target-workspace store
+/// context from selection and claim into the pre-spawn gate, including local
+/// workspace routing
+/// (needle-d0f287f9).
+#[cfg(test)]
+mod context_propagation;
+
 // ──────────────────────────────────────────────────────────────────────────────
 // Extraction module
 // ──────────────────────────────────────────────────────────────────────────────

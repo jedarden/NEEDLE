@@ -137,7 +137,10 @@ version = 1
 # (needle-cafdd3af).
 # +3 audited lesson promotion contracts: exact demotion round-trip,
 # unreviewed refusal, and expired marker reporting (needle-99fb2ea1).
-max_tests = 3888
+# +5 for dispatch store-context propagation coverage: exact store handle,
+# context cloning, remote-target pre-spawn routing, local routing, and the
+# fail-closed context-free compatibility path (needle-d0f287f9).
+max_tests = 3893
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
