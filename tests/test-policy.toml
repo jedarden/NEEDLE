@@ -135,7 +135,9 @@ version = 1
 # receive-time safety, bounded wire shape, and coalesced heartbeat emission.
 # +1 for the pre-claim attempt identity and context-manifest unit contract
 # (needle-cafdd3af).
-max_tests = 3885
+# +3 audited lesson promotion contracts: exact demotion round-trip,
+# unreviewed refusal, and expired marker reporting (needle-99fb2ea1).
+max_tests = 3888
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

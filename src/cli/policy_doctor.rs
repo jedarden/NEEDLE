@@ -10,9 +10,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+use super::lesson;
 use crate::config::{CliOverrides, Config, ConfigLoader};
 use crate::policy::{
     Authority, AuthorityRegistry, PolicyError, PolicyKind, PolicyScope, PolicySource,
@@ -30,6 +32,7 @@ pub(crate) struct Report {
     pub status: &'static str,
     pub provenance: Vec<SourceReport>,
     pub conflicts: Vec<ConflictReport>,
+    pub expired_lessons: Vec<ExpiredLessonReport>,
     pub manifest: Option<ManifestReport>,
     pub exit_code: u8,
 }
@@ -54,6 +57,13 @@ pub(crate) struct ConflictReport {
 }
 
 #[derive(Debug, Serialize)]
+pub(crate) struct ExpiredLessonReport {
+    pub id: String,
+    pub path: String,
+    pub expired_at: String,
+}
+
+#[derive(Debug, Serialize)]
 pub(crate) struct ManifestReport {
     pub version: &'static str,
     pub hash: String,
@@ -63,6 +73,10 @@ pub(crate) struct ManifestReport {
 impl Report {
     pub(crate) fn has_conflicts(&self) -> bool {
         !self.conflicts.is_empty()
+    }
+
+    pub(crate) fn has_findings(&self) -> bool {
+        self.has_conflicts() || !self.expired_lessons.is_empty()
     }
 
     pub(crate) fn render_human(&self) -> String {
@@ -102,6 +116,17 @@ impl Report {
                 output.push_str(&format!(
                     "    sources: {}\n",
                     conflict.source_ids.join(", ")
+                ));
+            }
+        }
+        if self.expired_lessons.is_empty() {
+            output.push_str("Expired lessons: none\n");
+        } else {
+            output.push_str("Expired lessons:\n");
+            for lesson in &self.expired_lessons {
+                output.push_str(&format!(
+                    "  - {} at {} (expired {})\n",
+                    lesson.id, lesson.path, lesson.expired_at
                 ));
             }
         }
@@ -147,7 +172,28 @@ pub(crate) fn collect(workspace: PathBuf, adapter: Option<String>) -> Result<Rep
 
     add_instruction_sources(&workspace, &mut sources, &mut source_ids)?;
     add_configured_context_files(&workspace, &config, &mut sources, &mut source_ids)?;
+    add_promotion_targets(&workspace, &mut sources, &mut source_ids)?;
     add_configured_prompt_sources(&config, &adapter, &mut sources, &mut source_ids)?;
+
+    let now = Utc::now();
+    let expired_lessons = sources
+        .iter()
+        .filter(|source| {
+            matches!(
+                source.kind,
+                PolicyKind::RepositoryInstructions | PolicyKind::AdapterInstructions
+            )
+        })
+        .flat_map(|source| {
+            lesson::expired_markers(&source.content, now)
+                .into_iter()
+                .map(|expired| ExpiredLessonReport {
+                    id: expired.id,
+                    path: source.id.as_str().to_owned(),
+                    expired_at: expired.expired_at.to_rfc3339(),
+                })
+        })
+        .collect::<Vec<_>>();
 
     let mut registry = AuthorityRegistry::new();
     for source in &sources {
@@ -168,7 +214,10 @@ pub(crate) fn collect(workspace: PathBuf, adapter: Option<String>) -> Result<Rep
     };
 
     let (conflicts, manifest, status, exit_code) = match resolved {
-        Ok(policy) => (Vec::new(), Some(manifest_from(&policy)?), "pass", 0),
+        Ok(policy) if expired_lessons.is_empty() => {
+            (Vec::new(), Some(manifest_from(&policy)?), "pass", 0)
+        }
+        Ok(policy) => (Vec::new(), Some(manifest_from(&policy)?), "warn", 1),
         Err(error) => (vec![conflict_from(error)], None, "fail", 1),
     };
 
@@ -179,6 +228,7 @@ pub(crate) fn collect(workspace: PathBuf, adapter: Option<String>) -> Result<Rep
         status,
         provenance,
         conflicts,
+        expired_lessons,
         manifest,
         exit_code,
     })
@@ -356,6 +406,53 @@ fn add_configured_prompt_sources(
         )?;
     }
 
+    Ok(())
+}
+
+/// A promotion may name a docs file that is not conventionally named
+/// AGENTS.md or CLAUDE.md. Receipts are the authoritative index for those
+/// targets, so include each safe, existing target in policy-doctor scanning.
+fn add_promotion_targets(
+    workspace: &Path,
+    sources: &mut Vec<PolicySource>,
+    source_ids: &mut BTreeSet<String>,
+) -> Result<()> {
+    let directory = workspace.join(".needle/promotions");
+    if !directory.is_dir() {
+        return Ok(());
+    }
+    let mut receipts = fs::read_dir(&directory)?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().and_then(|extension| extension.to_str()) == Some("json"))
+        .collect::<Vec<_>>();
+    receipts.sort();
+
+    let workspace = workspace.canonicalize()?;
+    for receipt in receipts {
+        let Ok(content) = fs::read_to_string(&receipt) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
+            continue;
+        };
+        let Some(target) = value.get("target").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let path = workspace.join(target);
+        let Ok(path) = path.canonicalize() else {
+            continue;
+        };
+        if !path.starts_with(&workspace) || !path.is_file() {
+            continue;
+        }
+        add_file_source(
+            sources,
+            source_ids,
+            &path,
+            PolicyKind::RepositoryInstructions,
+            PolicyScope::directory(path.parent().unwrap_or(&workspace)),
+        )?;
+    }
     Ok(())
 }
 

@@ -32,6 +32,7 @@ use crate::worker::Worker;
 
 pub mod audit;
 pub mod improvements;
+mod lesson;
 mod policy_doctor;
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -410,6 +411,12 @@ pub enum CliCommand {
         force: bool,
     },
 
+    /// Promote or demote an audited CandidateLesson projection.
+    Lesson {
+        #[command(subcommand)]
+        command: LessonCommand,
+    },
+
     /// Fetch the latest gitleaks rules and update the vendored config.
     ///
     /// Downloads gitleaks.toml from the upstream GitHub repository, validates
@@ -589,6 +596,33 @@ pub enum DoctorCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+pub enum LessonCommand {
+    /// Validate and project a reviewed CandidateLesson.
+    Promote {
+        /// CandidateLesson markdown file with YAML frontmatter.
+        lesson_file: PathBuf,
+
+        /// Repository receiving the marker-fenced projection.
+        #[arg(long)]
+        repo: PathBuf,
+
+        /// Repository-relative instruction file (defaults to AGENTS.md).
+        #[arg(long = "target", alias = "file")]
+        target: Option<PathBuf>,
+    },
+
+    /// Restore the target bytes recorded by a promotion receipt.
+    Demote {
+        /// CandidateLesson ID used by the promotion receipt.
+        id: String,
+
+        /// Repository containing .needle/promotions (defaults to current dir).
+        #[arg(long, default_value = ".")]
+        repo: PathBuf,
+    },
+}
+
 /// Output format for the list command.
 #[derive(Debug, Clone, ValueEnum)]
 pub enum ListFormat {
@@ -725,6 +759,14 @@ pub fn run() -> Result<()> {
         CliCommand::Rollback => cmd_rollback(),
         CliCommand::Gates { workspace } => cmd_gates(workspace),
         CliCommand::Reflect { workspace, force } => cmd_reflect(workspace, force),
+        CliCommand::Lesson { command } => match command {
+            LessonCommand::Promote {
+                lesson_file,
+                repo,
+                target,
+            } => lesson::promote(&lesson_file, &repo, target.as_deref()),
+            LessonCommand::Demote { id, repo } => lesson::demote(&id, &repo),
+        },
         CliCommand::UpdateRules { output } => cmd_update_rules(output),
         CliCommand::Stats {
             by,
@@ -6228,7 +6270,7 @@ fn cmd_doctor_policy(
         print!("{}", report.render_human());
     }
 
-    if report.has_conflicts() {
+    if report.has_findings() {
         std::process::exit(1);
     }
     Ok(())
