@@ -153,11 +153,15 @@ impl Fixture {
     fn command(&self, mode: FixtureMode) -> Command {
         let home_binary = self.root.path().join("home-fixture-bead");
         let remote_binary = self.root.path().join("remote-fixture-bead");
+        // Remote fixtures keep the worker-home copy healthy so failures are
+        // attributable only to the selected remote store. A local fixture has
+        // no alternate target, so its home wrapper must honor the requested
+        // failure mode as well.
         write_bead_wrapper(
             &home_binary,
             &self.bead_binary,
             self.home_workspace.join(QUERY_LOG).as_path(),
-            Some("success"),
+            self.remote_workspace.as_ref().map(|_| "success"),
         );
         write_workspace_config(&self.home_workspace, &home_binary);
         if let Some(remote) = self.remote_workspace.as_ref() {
@@ -711,15 +715,6 @@ fn subprocess_claim_verification_routes_remote_collisions_and_local_work() {
     );
     assert_eq!(colliding.marker_lines(&colliding.home_workspace), 0);
     colliding.assert_remote_only_queried(FixtureMode::Success);
-    assert_eq!(
-        colliding.marker_lines(remote),
-        1,
-        "remote marker missing; status={:?}\nstdout={}\nstderr={}\nevents={:?}",
-        output.status.code(),
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-        colliding.telemetry()
-    );
     colliding.assert_exactly_one_agent_spawn(remote);
     colliding.assert_verified_success(remote);
 
@@ -751,16 +746,8 @@ fn subprocess_claim_verification_routes_remote_collisions_and_local_work() {
         "local dispatch regression failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(local.marker_lines(&local.home_workspace), 1);
-    let local_success = local
-        .telemetry()
-        .into_iter()
-        .find(|event| {
-            event["event_type"] == "bead.claim.verify_success"
-                && event["data"]["workspace"] == local.home_workspace.display().to_string()
-        })
-        .expect("local dispatch must emit target workspace verification telemetry");
-    assert!(local_success["data"]["claim_epoch"].as_u64().is_some());
+    local.assert_exactly_one_agent_spawn(&local.home_workspace);
+    local.assert_verified_success(&local.home_workspace);
 }
 
 #[test]
