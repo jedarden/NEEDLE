@@ -152,27 +152,10 @@ impl Fixture {
     /// fixture race over the very same stores.
     fn command(&self, mode: FixtureMode) -> Command {
         let fixture_binary = self.root.path().join("fixture-bead");
-        let unavailable_binary = self.root.path().join("unavailable-bead");
-
+        write_bead_wrapper(&fixture_binary, &self.bead_binary);
+        write_workspace_config(&self.home_workspace, &fixture_binary);
         if let Some(remote) = self.remote_workspace.as_ref() {
-            // Keep the worker-home store healthy. A remote-only failure means
-            // that accidentally verifying the colliding ID in HOME cannot
-            // reproduce the injected response; the query trace below then
-            // identifies the incorrect store directly.
-            write_workspace_config(&self.home_workspace, &self.bead_binary);
-            if mode == FixtureMode::UnavailableCli {
-                write_unavailable_wrapper(&unavailable_binary);
-                write_workspace_config(remote, &unavailable_binary);
-            } else {
-                write_bead_wrapper(&fixture_binary, &self.bead_binary);
-                write_workspace_config(remote, &fixture_binary);
-            }
-        } else if mode == FixtureMode::UnavailableCli {
-            write_unavailable_wrapper(&unavailable_binary);
-            write_workspace_config(&self.home_workspace, &unavailable_binary);
-        } else {
-            write_bead_wrapper(&fixture_binary, &self.bead_binary);
-            write_workspace_config(&self.home_workspace, &fixture_binary);
+            write_workspace_config(remote, &fixture_binary);
         }
 
         let mut command = Command::new(env!("CARGO_BIN_EXE_needle"));
@@ -184,6 +167,14 @@ impl Fixture {
             .env("NEEDLE_STRANDS__EXPLORE__ENABLED", "true")
             .env("NEEDLE_STRANDS__EXPLORE__WORKSPACE_ROOT", self.root.path())
             .env("NEEDLE_FIXTURE_MODE", mode.env_name())
+            .env(
+                "NEEDLE_FIXTURE_HAS_REMOTE",
+                if self.remote_workspace.is_some() {
+                    "1"
+                } else {
+                    "0"
+                },
+            )
             .env("NEEDLE_FIXTURE_NATIVE_BEAD", &self.bead_binary)
             .env("NEEDLE_FIXTURE_WORKER", WORKER_NAME)
             .args([
@@ -504,15 +495,31 @@ set -eu
 
 native="${NEEDLE_FIXTURE_NATIVE_BEAD}"
 mode="${NEEDLE_FIXTURE_MODE:-success}"
+fail_here=1
+case "$PWD" in
+  *remote-workspace*) ;;
+  *)
+    if [ "${NEEDLE_FIXTURE_HAS_REMOTE:-0}" = "1" ]; then
+      fail_here=0
+    fi
+    ;;
+esac
 
-printf '%s\n' "$*" >> "$PWD/.needle-claim-query.log"
+if [ "$fail_here" = "1" ] || [ "${1:-}" = "show" ]; then
+  printf '%s\n' "$*" >> "$PWD/.needle-claim-query.log"
+fi
 
-if [ "${1:-}" = "--version" ] && [ "$mode" = "wrong-backend-identity" ]; then
+if [ "$fail_here" = "1" ] && [ "$mode" = "unavailable-cli" ]; then
+  printf '%s\n' 'fixture bead CLI unavailable' >&2
+  exit 127
+fi
+
+if [ "${1:-}" = "--version" ] && [ "$fail_here" = "1" ] && [ "$mode" = "wrong-backend-identity" ]; then
   printf '%s\n' 'not-a-bead-cli 9.9.9'
   exit 0
 fi
 
-if [ "${1:-}" = "show" ] && [ "$mode" != "success" ] && [ "$mode" != "wrong-backend-identity" ] && [ "$mode" != "unavailable-cli" ] && [ "$mode" != "agent-fail" ] && [ "$mode" != "agent-hang" ]; then
+if [ "${1:-}" = "show" ] && [ "$fail_here" = "1" ] && [ "$mode" != "success" ] && [ "$mode" != "wrong-backend-identity" ] && [ "$mode" != "unavailable-cli" ] && [ "$mode" != "agent-fail" ] && [ "$mode" != "agent-hang" ]; then
   count_file="$PWD/.needle-claim-show-count"
   count=0
   if [ -f "$count_file" ]; then
@@ -604,27 +611,6 @@ fn assert_no_agent_spawn(fixture: &Fixture) {
             0,
             "remote workspace must not spawn an agent"
         );
-    }
-}
-
-fn write_unavailable_wrapper(wrapper: &Path) {
-    let script = r##"#!/bin/sh
-set -eu
-
-printf '%s\n' "$*" >> "$PWD/.needle-claim-query.log"
-printf '%s\n' 'fixture bead CLI unavailable' >&2
-exit 127
-"##;
-    fs::write(wrapper, script).expect("write unavailable fixture bead wrapper");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = fs::metadata(wrapper)
-            .expect("stat unavailable fixture bead wrapper")
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(wrapper, permissions)
-            .expect("make unavailable fixture bead wrapper executable");
     }
 }
 
