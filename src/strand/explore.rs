@@ -2256,15 +2256,16 @@ mod tests {
             assert!(candidates
                 .iter()
                 .all(|candidate| candidate.workspace == healthy_workspace));
-            let quarantine = inventory_strand.quarantine_registry.lock().unwrap();
-            assert!(quarantine.is_quarantined(&bad_workspace));
-            assert_eq!(
-                quarantine
-                    .reason(&bad_workspace)
-                    .map(|reason| reason.slug()),
-                Some("schema_incompatible")
-            );
-            drop(quarantine);
+            {
+                let quarantine = inventory_strand.quarantine_registry.lock().unwrap();
+                assert!(quarantine.is_quarantined(&bad_workspace));
+                assert_eq!(
+                    quarantine
+                        .reason(&bad_workspace)
+                        .map(|reason| reason.slug()),
+                    Some("schema_incompatible")
+                );
+            }
 
             repaired.store(true, std::sync::atomic::Ordering::SeqCst);
             let second = inventory_strand
