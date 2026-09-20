@@ -506,37 +506,67 @@ async fn pre_spawn_store_failure_aborts_before_spawn() {
     }
 }
 
-/// A wrong backend identity (the live claim belongs to another worker) is a
-/// failed precondition: abort before spawn, and record the mismatch as
-/// recheck_failed — not as verify_error, which is for verifications that
+/// Every field in the carried claim identity is part of the final spawn
+/// precondition. A live response that does not match status, assignee,
+/// revision, or fencing epoch must abort before spawn and record the mismatch
+/// as recheck_failed — not verify_error, which is for verifications that
 /// could not complete.
 #[tokio::test]
-async fn pre_spawn_wrong_identity_aborts_before_spawn() {
-    let outcome = run_gate(
-        ProbeOutcome::Live(claimed_status("someone-else")),
-        true,
-        true,
-    )
-    .await;
+async fn pre_spawn_claim_identity_field_drift_aborts_before_spawn() {
+    let mut status_drift = claimed_status(WORKER_ID);
+    status_drift.status = BeadStatus::Open;
 
-    assert!(
-        outcome.dispatch.is_err(),
-        "dispatch must fail when the live claim belongs to another worker"
-    );
-    assert!(
-        !outcome.spawned(),
-        "an identity mismatch must spawn zero child processes"
-    );
-    assert_eq!(
-        outcome.count("bead.claim.recheck_failed"),
-        1,
-        "the identity mismatch is recorded once as recheck_failed"
-    );
-    assert_eq!(
-        outcome.count("bead.claim.verify_error"),
-        0,
-        "a verification that ran and compared identity must not also emit verify_error"
-    );
+    let cases = [
+        ("status", status_drift),
+        (
+            "assignee",
+            ClaimStatus {
+                assignee: Some("someone-else".to_string()),
+                ..claimed_status(WORKER_ID)
+            },
+        ),
+        (
+            "revision",
+            ClaimStatus {
+                revision: Some(8),
+                ..claimed_status(WORKER_ID)
+            },
+        ),
+        (
+            "claim_epoch",
+            ClaimStatus {
+                claim_epoch: Some(3),
+                ..claimed_status(WORKER_ID)
+            },
+        ),
+    ];
+
+    for (field, live_status) in cases {
+        let outcome = run_context_gate(
+            ProbeOutcome::Live(claimed_status(WORKER_ID)),
+            ProbeOutcome::Live(live_status),
+        )
+        .await;
+
+        assert!(
+            outcome.dispatch.is_err(),
+            "{field}: identity drift must abort dispatch"
+        );
+        assert!(
+            !outcome.spawned(),
+            "{field}: identity drift must spawn zero child processes"
+        );
+        assert_eq!(
+            outcome.count("bead.claim.recheck_failed"),
+            1,
+            "{field}: identity drift must emit exactly one recheck failure"
+        );
+        assert_eq!(
+            outcome.count("bead.claim.verify_error"),
+            0,
+            "{field}: a compared live response is not a verifier error"
+        );
+    }
 }
 
 /// An unwired verifier is a failed precondition, not a bypass: the previous
