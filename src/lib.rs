@@ -65,6 +65,7 @@ pub mod outcome;
 pub mod panic_capture;
 pub mod panic_safety_tests;
 pub mod peer;
+pub mod policy;
 pub mod process_guard;
 pub mod process_runner;
 pub mod prompt;

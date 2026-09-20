@@ -174,6 +174,7 @@ needle_slow_targets() {
     nt45_failure_evidence_capture \
     nt50_exception_lessons \
     nt51_adapter_usage_capture \
+    nt10_policy_precedence \
     nt51_gateway_health \
     nt52_state_dir_isolation \
     nt07_admission_policy \
@@ -211,6 +212,7 @@ needle_cargo_selector() {
 ' --test nt50_exception_lessons ;;
     nt51_adapter_usage_capture) printf '%s
 ' --test nt51_adapter_usage_capture ;;
+    nt10_policy_precedence) printf '%s\n' --test nt10_policy_precedence ;;
     nt51_gateway_health) printf '%s
 ' --test nt51_gateway_health ;;
     nt52_state_dir_isolation) printf '%s
@@ -265,6 +267,7 @@ needle_nextest_filter() {
 ' 'binary_id(=needle::nt50_exception_lessons)' ;;
     nt51_adapter_usage_capture) printf '%s
 ' 'binary_id(=needle::nt51_adapter_usage_capture)' ;;
+    nt10_policy_precedence) printf '%s\n' 'binary_id(=needle::nt10_policy_precedence)' ;;
     nt51_gateway_health) printf '%s
 ' 'binary_id(=needle::nt51_gateway_health)' ;;
     nt52_state_dir_isolation) printf '%s

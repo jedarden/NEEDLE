@@ -204,6 +204,11 @@ path = "tests/nt51_adapter_usage_capture.rs"
 harness = true
 
 [[test]]
+name = "nt10_policy_precedence"
+path = "tests/nt10_policy_precedence.rs"
+harness = true
+
+[[test]]
 name = "nt51_gateway_health"
 path = "tests/nt51_gateway_health.rs"
 harness = true
