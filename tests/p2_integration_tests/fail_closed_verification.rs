@@ -315,27 +315,54 @@ async fn run_gate_with_validation(
     adapters.insert(adapter.name.clone(), adapter);
 
     let mut dispatcher = Dispatcher::with_adapters(adapters, telemetry, 3600);
-    if wire_store {
+    let target_store = if wire_store {
         let store = ProbeStore::new(outcome);
         let store = match validation_error {
             Some(message) => store.with_validation_error(message),
             None => store,
         };
-        dispatcher.set_bead_store(Arc::new(store));
-    }
+        let store = Arc::new(store);
+        dispatcher.set_bead_store(store.clone());
+        Some(store)
+    } else {
+        None
+    };
     if wire_worker {
         dispatcher = dispatcher.with_worker_id(WORKER_ID.to_string());
     }
 
     let bead_id = BeadId::from("needle-fail-closed-probe");
-    let dispatch = dispatcher
-        .dispatch(
-            &bead_id,
-            &probe_prompt(),
-            dispatcher.adapter("fail-closed-probe").unwrap(),
-            workspace.path(),
-        )
-        .await;
+    let dispatch = match (target_store, wire_worker) {
+        (Some(target_store), true) => {
+            let context = DispatchContext::new(
+                ResolvedStoreContext::new(target_store, workspace.path().to_path_buf()),
+                ClaimIdentity {
+                    actor: WORKER_ID.to_string(),
+                    revision: Some(7),
+                    claim_epoch: Some(2),
+                },
+            );
+            dispatcher
+                .dispatch_with_context(
+                    &bead_id,
+                    &probe_prompt(),
+                    dispatcher.adapter("fail-closed-probe").unwrap(),
+                    workspace.path(),
+                    &context,
+                )
+                .await
+        }
+        _ => {
+            dispatcher
+                .dispatch(
+                    &bead_id,
+                    &probe_prompt(),
+                    dispatcher.adapter("fail-closed-probe").unwrap(),
+                    workspace.path(),
+                )
+                .await
+        }
+    };
 
     drop(dispatcher);
     // Give the telemetry writer thread time to drain the channel to disk.
@@ -592,7 +619,8 @@ async fn pre_spawn_without_store_aborts_before_spawn() {
     );
 }
 
-/// Without a worker identity the claim cannot be compared to anything:
+/// Without a carried target-store context the claim cannot be compared to
+/// anything, regardless of which legacy dispatcher fields happen to be set:
 /// fail closed rather than spawn unverified.
 #[tokio::test]
 async fn pre_spawn_without_worker_identity_aborts_before_spawn() {
@@ -609,8 +637,8 @@ async fn pre_spawn_without_worker_identity_aborts_before_spawn() {
     assert_eq!(outcome.count("bead.claim.verify_error"), 1);
     assert_eq!(
         outcome.verify_error_category().as_deref(),
-        Some("identity"),
-        "a missing worker identity is an identity failure"
+        Some("capability"),
+        "a missing target-store context is a capability failure"
     );
 }
 

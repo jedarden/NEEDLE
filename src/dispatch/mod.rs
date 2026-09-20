@@ -1724,68 +1724,69 @@ impl Dispatcher {
         // ensuring true atomicity - no window for another worker to claim between check
         // and dispatch action. This is the ONLY verification that truly prevents race
         // conditions because it's the last check before the actual spawn.
-        // A worker dispatch carries an immutable target store and the complete
-        // claim identity captured after claim. Only the legacy `dispatch()`
-        // compatibility path uses the dispatcher's configured verifier fields;
-        // it remains fail-closed when those fields are absent.
-        let (verify_store, verify_worker_id, expected_identity) =
-            if let Some(context) = dispatch_context {
-                (
-                    context.target_store().store(),
-                    context.claim_identity().actor.clone(),
-                    Some(context.claim_identity().clone()),
-                )
-            } else {
-                match (&self.bead_store, self.worker_id.as_ref()) {
-                    (Some(store), Some(worker_id)) => (Arc::clone(store), worker_id.clone(), None),
-                    (None, _) => {
-                        let error = claim_verification_error(format!(
-                            "no bead store wired for pre-spawn claim verification — \
-                             refusing to spawn bead {} unverified",
-                            bead_id
-                        ));
-                        let _ = self.telemetry.emit(
-                            crate::telemetry::EventKind::ClaimVerifyError {
-                                bead_id: bead_id.clone(),
-                                expected_actor: "(unset)".to_string(),
-                                stage: "pre_spawn".to_string(),
-                                target_workspace: Some(workspace.display().to_string()),
-                                category: crate::telemetry::ClaimVerifyErrorCategory::Capability,
-                                detail: crate::telemetry::redact_claim_credentials(&format!(
-                                    "{error:#}"
-                                )),
-                            },
-                            chrono::Utc::now(),
-                        );
-                        return Err(error);
-                    }
-                    (Some(_), None) => {
-                        let error = claim_verification_error(format!(
-                            "no worker identity wired for pre-spawn claim verification — \
-                             refusing to spawn bead {} unverified",
-                            bead_id
-                        ));
-                        let _ = self.telemetry.emit(
-                            crate::telemetry::EventKind::ClaimVerifyError {
-                                bead_id: bead_id.clone(),
-                                expected_actor: "(unset)".to_string(),
-                                stage: "pre_spawn".to_string(),
-                                target_workspace: Some(workspace.display().to_string()),
-                                category: crate::telemetry::ClaimVerifyErrorCategory::Identity,
-                                detail: crate::telemetry::redact_claim_credentials(&format!(
-                                    "{error:#}"
-                                )),
-                            },
-                            chrono::Utc::now(),
-                        );
-                        return Err(error);
-                    }
-                }
-            };
-        let verify_workspace = dispatch_context
-            .map(|context| context.target_store().workspace().to_path_buf())
-            .unwrap_or_else(|| workspace.to_path_buf());
+        // Only the immutable context captured during selection and claim may
+        // authorize a child. The dispatcher-level store and worker fields are
+        // retained for construction/reload compatibility, but they are never
+        // a source of pre-spawn claim authority: they do not carry the
+        // claim-time revision and fencing epoch and can point at the worker's
+        // home workspace after Explore has selected a remote target.
+        let Some(context) = dispatch_context else {
+            let error = claim_verification_error(format!(
+                "no target-store claim context carried to pre-spawn verification — \
+                 refusing to spawn bead {} unverified",
+                bead_id
+            ));
+            let _ = self.telemetry.emit(
+                crate::telemetry::EventKind::ClaimVerifyError {
+                    bead_id: bead_id.clone(),
+                    expected_actor: "(unset)".to_string(),
+                    stage: "pre_spawn".to_string(),
+                    target_workspace: None,
+                    category: crate::telemetry::ClaimVerifyErrorCategory::Capability,
+                    detail: crate::telemetry::redact_claim_credentials(&format!("{error:#}")),
+                },
+                chrono::Utc::now(),
+            );
+            return Err(error);
+        };
+        let expected_identity = context.claim_identity();
+        let verify_store = context.target_store().store();
+        let verify_worker_id = expected_identity.actor.clone();
+        let verify_workspace = context.target_store().workspace().to_path_buf();
         {
+            let mut missing_identity_fields = Vec::new();
+            if expected_identity.actor.trim().is_empty() {
+                missing_identity_fields.push("assignee");
+            }
+            if expected_identity.revision.is_none() {
+                missing_identity_fields.push("revision");
+            }
+            if expected_identity.claim_epoch.is_none() {
+                missing_identity_fields.push("claim_epoch");
+            }
+            if !missing_identity_fields.is_empty() {
+                let error = claim_verification_error(format!(
+                    "carried claim identity is incomplete for bead {}: missing {:?}",
+                    bead_id, missing_identity_fields
+                ));
+                let _ = self.telemetry.emit(
+                    crate::telemetry::EventKind::ClaimVerifyError {
+                        bead_id: bead_id.clone(),
+                        expected_actor: verify_worker_id.clone(),
+                        stage: "pre_spawn".to_string(),
+                        target_workspace: Some(verify_workspace.display().to_string()),
+                        category: if expected_identity.actor.trim().is_empty() {
+                            crate::telemetry::ClaimVerifyErrorCategory::Identity
+                        } else {
+                            crate::telemetry::ClaimVerifyErrorCategory::Capability
+                        },
+                        detail: crate::telemetry::redact_claim_credentials(&format!("{error:#}")),
+                    },
+                    chrono::Utc::now(),
+                );
+                return Err(error);
+            }
+
             // Revalidate the backend contract through the exact store handle
             // that owns this claim before reading claim state. A roaming
             // dispatch must never substitute its home store here.
@@ -1822,28 +1823,11 @@ impl Dispatcher {
 
             match claim_status_with_timeout(verify_store.as_ref(), bead_id).await {
                 Ok(status) => {
-                    let failed_fields = expected_identity
-                        .as_ref()
-                        .map(|expected| expected.mismatches(&status));
-                    let is_valid_claim = failed_fields
-                        .as_ref()
-                        .map(|fields| fields.is_empty())
-                        .unwrap_or_else(|| {
-                            status.status == crate::types::BeadStatus::InProgress
-                                && status.assignee.as_deref() == Some(verify_worker_id.as_str())
-                        });
+                    let failed_fields = expected_identity.mismatches(&status);
+                    let is_valid_claim = failed_fields.is_empty();
 
                     if !is_valid_claim {
-                        let reason = if let Some(fields) = failed_fields {
-                            format!("claim identity mismatch in fields {fields:?}")
-                        } else if status.status != crate::types::BeadStatus::InProgress {
-                            format!("bead status is {:?}, not in_progress", status.status)
-                        } else {
-                            format!(
-                                "bead assigned to {:?}, not this worker ({})",
-                                status.assignee, verify_worker_id
-                            )
-                        };
+                        let reason = format!("claim identity mismatch in fields {failed_fields:?}");
 
                         tracing::warn!(
                             bead_id = %bead_id.as_ref(),
@@ -1852,12 +1836,8 @@ impl Dispatcher {
                             expected_worker = %verify_worker_id,
                             revision = ?status.revision,
                             claim_epoch = ?status.claim_epoch,
-                            expected_revision = ?expected_identity
-                                .as_ref()
-                                .and_then(|identity| identity.revision),
-                            expected_claim_epoch = ?expected_identity
-                                .as_ref()
-                                .and_then(|identity| identity.claim_epoch),
+                            expected_revision = ?expected_identity.revision,
+                            expected_claim_epoch = ?expected_identity.claim_epoch,
                             verification_result = "failed",
                             reason = %reason,
                             "atomic claim verification failed at process spawn — aborting"
@@ -1888,20 +1868,14 @@ impl Dispatcher {
                     // every later lifecycle mutation. Make the epoch acquired
                     // and re-verified by NEEDLE available to the dispatched
                     // agent without requiring it to race a second `show`.
-                    let claim_epoch = expected_identity
-                        .as_ref()
-                        .and_then(|identity| identity.claim_epoch)
-                        .or(status.claim_epoch);
+                    let claim_epoch = expected_identity.claim_epoch;
                     if let Some(claim_epoch) = claim_epoch {
                         child_env.insert(
                             "NEEDLE_BEAD_FENCING_TOKEN".to_string(),
                             claim_epoch.to_string(),
                         );
                     }
-                    let revision = expected_identity
-                        .as_ref()
-                        .and_then(|identity| identity.revision)
-                        .or(status.revision);
+                    let revision = expected_identity.revision;
                     if let Some(revision) = revision {
                         child_env.insert("NEEDLE_BEAD_REVISION".to_string(), revision.to_string());
                     }
