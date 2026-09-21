@@ -39,3 +39,20 @@ CPUQuota=700%
 MemoryMax=32G
 MemoryHigh=24G
 TasksMax=1500
+
+# 2026-09-20 (needle-a82a5141): MemorySwapMax was infinity here, so the caps
+# above bounded RSS only — in cgroup v2 swap is a separate knob, and a slice at
+# MemoryMax reclaims into swap rather than failing. The overage then thrashes:
+# on ex44 that day one abandoned `cargo test` held 9.3G of swap and faulted
+# 1.7 TB back off disk (read_bytes 1716263055360 against 844 read syscalls),
+# stalling every worker in the slice on reclaim for seven hours.
+#
+# 8G of lab's 24.6G swap device (/dev/nvme0n1p3), proportionally close to ex44's
+# 12G of 31G. It leaves 16.6G for the rest of the host and caps worst-case
+# thrash volume at 8G instead of the whole device. It also binds below the 14G
+# that lab's seven workers could reach at MemorySwapMax=2G each, so it is a real
+# aggregate ceiling rather than arithmetic that never trips — and it covers
+# everything else in the slice too, including the cargo wrapper's sibling
+# scopes. The fleet was using 0B of swap when this was set, so it bounds a
+# failure mode rather than constraining present behaviour.
+MemorySwapMax=8G
