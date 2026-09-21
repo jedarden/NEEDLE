@@ -1232,6 +1232,7 @@ mod tests {
         // process spawns without an owned exception, which rules out
         // shelling out to `git init` here.
         let git_dir = workspace.join(".git");
+        std::fs::create_dir(&git_dir).expect("create Git metadata fixture");
         std::fs::create_dir(git_dir.join("objects")).expect("create Git objects fixture");
         std::fs::create_dir(git_dir.join("refs")).expect("create Git refs fixture");
         std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n")
