@@ -93,6 +93,7 @@ struct Fixture {
     mitosis_log: PathBuf,
     analysis_log: PathBuf,
     gate_log: PathBuf,
+    instant_agent: PathBuf,
     normal_path: OsString,
     gate_path: OsString,
 }
@@ -141,6 +142,12 @@ impl Fixture {
         let mitosis_log = root.path().join("mitosis.log");
         let analysis_log = root.path().join("analysis.log");
         let gate_log = root.path().join("gate.log");
+        let instant_agent = mock_bin.join("mock-agent-immediate-exit");
+        fs::write(
+            &instant_agent,
+            include_str!("fixtures/mock-agent-immediate-exit.sh"),
+        )?;
+        make_executable(&instant_agent)?;
 
         let analysis_agent = mock_bin.join("ladder-agent");
         fs::write(
@@ -176,6 +183,7 @@ impl Fixture {
             mitosis_log,
             analysis_log,
             gate_log,
+            instant_agent,
             normal_path,
             gate_path,
         };
@@ -240,6 +248,19 @@ impl Fixture {
                 "bead_cli:\n  backend: bead-rs\n  path: {}\n{}",
                 self.bead.display(),
                 gates
+            ),
+        )?;
+        Ok(())
+    }
+
+    fn write_instant_exit_adapter(&self) -> Result<()> {
+        let adapter_dir = self.home.join(".config/needle/adapters");
+        fs::write(
+            adapter_dir.join("ladder-agent.yaml"),
+            format!(
+                "name: ladder-agent\ndescription: immediate-exit quarantine fixture\nagent_cli: /bin/sh\ninvoke_template: |\n  exec '{}'\ntimeout_secs: 30\nenvironment:\n  NEEDLE_ATTEMPT_LOG: '{}'\n",
+                self.instant_agent.display(),
+                self.failure_log.display(),
             ),
         )?;
         Ok(())
@@ -410,6 +431,54 @@ impl Fixture {
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             )
+        }
+        Ok(())
+    }
+
+    async fn run_worker_until_idle(
+        &self,
+        identifier: &str,
+        path: &OsString,
+        max_runtime: Duration,
+    ) -> Result<()> {
+        let mut command = TokioCommand::new(needle_binary_path());
+        command
+            .current_dir(&self.workspace)
+            .env("HOME", &self.home)
+            .env("PATH", path)
+            .env_remove("NEEDLE_WORKER__MAX_WORKERS")
+            .env("NEEDLE_INNER", "1")
+            .args([
+                "run",
+                "--workspace",
+                self.workspace.to_str().context("workspace is not UTF-8")?,
+                "--agent",
+                "ladder-agent",
+                "--identifier",
+                identifier,
+            ]);
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("failed to spawn worker {identifier}"))?;
+        let status = match timeout(max_runtime, child.wait()).await {
+            Ok(status) => {
+                status.with_context(|| format!("failed waiting for worker {identifier}"))?
+            }
+            Err(_) => {
+                child
+                    .kill()
+                    .await
+                    .with_context(|| format!("failed to stop looping worker {identifier}"))?;
+                let _ = child.wait().await;
+                bail!(
+                    "worker {identifier} did not reach idle after {} seconds ({} attempts recorded)",
+                    max_runtime.as_secs(),
+                    Self::log_lines(&self.failure_log)
+                );
+            }
+        };
+        if !status.success() {
+            bail!("worker {identifier} exited unsuccessfully: {status}");
         }
         Ok(())
     }
@@ -659,5 +728,37 @@ async fn escalation_ladder_end_to_end() -> Result<()> {
         .context("Gate broken alert had no labels")?;
     assert!(gate_alert_labels.iter().any(|label| label == "infra"));
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn immediate_exit_agent_quarantines_within_bounded_attempts() -> Result<()> {
+    let fixture = Fixture::new()?;
+    fixture.write_instant_exit_adapter()?;
+    let parent = fixture.create_bead(
+        "Quarantine an immediately exiting agent",
+        "The fixture agent terminates before producing a normal exit status.",
+    )?;
+
+    // One worker process owns the retry loop. A failed spawn/abnormal process
+    // must not release the bead forever: the fifth attempt reaches the same
+    // quarantine ceiling as an ordinary repeated failure and the worker then
+    // exits cleanly because no ready bead remains.
+    fixture
+        .run_worker_until_idle(
+            "instant-exit-loop",
+            &fixture.normal_path,
+            Duration::from_secs(10),
+        )
+        .await?;
+
+    assert_eq!(
+        Fixture::log_lines(&fixture.failure_log),
+        5,
+        "the worker must stop at the quarantine ceiling instead of spinning"
+    );
+    assert_failure_count(&fixture, &parent, 5)?;
+    assert_quarantine_window(&fixture, &parent, 1, 2 * 60 * 60)?;
+    assert_manual_blocked_is_false(&fixture.why(&parent)?, &parent);
     Ok(())
 }

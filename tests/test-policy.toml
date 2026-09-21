@@ -214,7 +214,8 @@ contract = 203
 # +9 post-Pluck Resolve lifecycle scenarios, including isolated resolver
 # process, ownership race, timeout, and telemetry contracts
 # (needle-eba55bfc).
-e2e = 811
+# +1 immediate-exit agent quarantine loop (needle-adbde195).
+e2e = 812
 soak = 0
 fuzz = 0
 
@@ -269,7 +270,8 @@ owner = "component:bead-rs-contract"
 name = "escalation_ladder"
 path = "tests/escalation_ladder.rs"
 tier = "e2e"
-max_tests = 1
+# +1 immediate-exit agent quarantine loop (needle-adbde195).
+max_tests = 2
 owner = "component:escalation-ladder"
 
 [[harness]]
