@@ -40,8 +40,8 @@ pub use backend::{
     builtin_bead_backends, load_bead_backends, BeadBackend, BeadBackendCapabilities,
     BeadBackendErrorMarkers, BeadBackendQuirk, BeadOperationSpec, ParseShape,
 };
-pub use cli_store::CliBeadStore;
 pub(crate) use cli_store::operation_failed_with;
+pub use cli_store::CliBeadStore;
 
 /// Parse a `quarantine-until:<rfc3339>` label into its expiry instant.
 ///
