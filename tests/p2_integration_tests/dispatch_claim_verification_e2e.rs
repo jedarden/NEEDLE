@@ -23,6 +23,7 @@ const ADAPTER_NAME: &str = "claim-verification-probe";
 const WORKER_NAME: &str = "claim-verification-worker";
 const MARKER: &str = "needle-agent-spawned.log";
 const QUERY_LOG: &str = ".needle-claim-query.log";
+const FIXTURE_CLOSE_REASON: &str = r#"$'fixture agent completed\n\n```verified:\n```'"#;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FixtureMode {
@@ -348,6 +349,29 @@ impl Fixture {
         );
     }
 
+    fn clear_retry_cooldown(&self) {
+        let labels = self.bead_record(&self.home_workspace, &self.home_bead_id)["labels"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        for label in labels
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|label| label.starts_with("quarantine-until:"))
+        {
+            run_checked(
+                bead_command(&self.bead_binary, &self.home_workspace, self.root.path()).args([
+                    "label",
+                    "remove",
+                    &self.home_bead_id,
+                    "--label",
+                    label,
+                ]),
+                "clear fixture retry cooldown",
+            );
+        }
+    }
+
     fn assert_claim_verification_error(&self, workspace: &Path) {
         let events = self.telemetry();
         assert!(
@@ -567,6 +591,7 @@ fn write_adapter(adapter_dir: &Path, bead_binary: &Path) {
         "name: {ADAPTER_NAME}\nagent_cli: /bin/sh\ninvoke_template: >\n  cd {{workspace}} && echo \"spawned ${{NEEDLE_ATTEMPT_ID:-none}}\" >> {MARKER} && cat > .needle-attempt-prompt.txt && if [ \"${{NEEDLE_FIXTURE_MODE:-}}\" = \"agent-hang\" ]; then sleep 31; elif [ \"${{NEEDLE_FIXTURE_MODE:-}}\" = \"agent-fail\" ]; then exit 1; fi && {} close {{bead_id}} --reason 'fixture agent completed' --fencing-token $NEEDLE_BEAD_FENCING_TOKEN\ntimeout_secs: 10\nprovider: local\nmodel: fixture\n",
         yaml_path(bead_binary)
     );
+    let adapter = adapter.replace("'fixture agent completed'", FIXTURE_CLOSE_REASON);
     fs::write(adapter_dir.join("claim-verification-probe.yaml"), adapter)
         .expect("write fixture adapter");
 }
@@ -977,6 +1002,7 @@ fn subprocess_failed_attempt_releases_and_retry_mints_a_fresh_identity() {
     // Missing/failed propagation must not strand a claim: the bead is
     // released and immediately re-claimable.
     fixture.assert_open_and_unassigned(&fixture.home_workspace, &fixture.home_bead_id);
+    fixture.clear_retry_cooldown();
     let first_rows = fixture.resolved_rows();
     assert_eq!(
         first_rows.len(),
@@ -1080,10 +1106,10 @@ fn subprocess_concurrent_claim_race_mints_distinct_attempt_ids() {
 
     // Both workers minted before claiming: two distinct identities in
     // telemetry, only the winner's reached an agent.
-    let telemetry = fixture.telemetry();
-    let stamped: std::collections::HashSet<&str> = telemetry
-        .iter()
-        .filter_map(|event| event["attempt_id"].as_str())
+    let stamped: std::collections::HashSet<String> = fixture
+        .telemetry()
+        .into_iter()
+        .filter_map(|event| event["attempt_id"].as_str().map(ToOwned::to_owned))
         .collect();
     assert!(
         stamped.contains(ids[0].as_str()),
