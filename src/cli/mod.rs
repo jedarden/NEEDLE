@@ -3752,7 +3752,8 @@ fn cmd_status(
     let active_count = sessions.len();
     let registered_count = workers.len();
     let discovered_count = discovered.len();
-    let total_beads: u64 = workers.iter().map(|w| w.beads_processed).sum();
+    let total_beads_completed: u64 = workers.iter().map(|w| w.beads_completed).sum();
+    let total_bead_claims: u64 = workers.iter().map(|w| w.beads_processed).sum();
     let false_close_counts = telemetry::read_logs(&needle_home.join("logs"), None, None, None)
         .map(|events| telemetry::compute_false_close_counts(&events))
         .unwrap_or_default();
@@ -3801,7 +3802,9 @@ fn cmd_status(
             println!("  Active tmux sessions: {active_count}");
             println!("  Registered workers:   {registered_count}");
             println!("  Discovered workers:   {discovered_count}");
-            println!("  Total beads processed: {total_beads}");
+            println!(
+                "  Total beads completed / claims: {total_beads_completed} / {total_bead_claims}"
+            );
             if !unregistered.is_empty() {
                 println!("  Unregistered workers: {} (WARN)", unregistered.len());
             }
@@ -3961,8 +3964,8 @@ fn cmd_status(
                             let state = ws.state.as_str();
                             let alive = if ws.pid_alive { "" } else { " (DEAD)" };
                             println!(
-                                "  {} — {} beads, state: {state}{alive}",
-                                ws.entry.id, ws.entry.beads_processed,
+                                "  {} — {} completed / {} claims, state: {state}{alive}",
+                                ws.entry.id, ws.entry.beads_completed, ws.entry.beads_processed,
                             );
                         }
                     }
@@ -4000,7 +4003,8 @@ fn cmd_status(
                 "active_sessions": active_count,
                 "registered_workers": registered_count,
                 "discovered_workers": discovered_count,
-                "total_beads_processed": total_beads,
+                "total_beads_completed": total_beads_completed,
+                "total_bead_claims": total_bead_claims,
                 "false_close_counts": false_close_counts.iter().map(|count| {
                     serde_json::json!({
                         "adapter": count.adapter,
@@ -4048,6 +4052,7 @@ fn cmd_status(
                         "pid": ws.entry.pid,
                         "workspace": ws.entry.workspace,
                         "agent": ws.entry.agent,
+                        "beads_completed": ws.entry.beads_completed,
                         "beads_processed": ws.entry.beads_processed,
                         "state": ws.state,
                         "current_bead": ws.current_bead,

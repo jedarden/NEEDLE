@@ -6,6 +6,10 @@ All notable changes to NEEDLE are documented in this file.
 
 ### Added
 
+- `needle status` reports completed beads separately from dispatch claims in
+  both table and JSON output. The top-level JSON field
+  `total_beads_processed` is replaced by `total_beads_completed`, with
+  `total_bead_claims` providing the cycle/claim count.
 - `needle doctor --json` prints one machine-readable document on stdout: a
   `rows` array (`name`/`status`/`detail`/`fix` per row), a pass/warn/fail
   `summary`, and an `exit_code` field mirroring the process exit code — so
