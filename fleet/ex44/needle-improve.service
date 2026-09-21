@@ -1,0 +1,18 @@
+[Unit]
+Description=Run one pass of the NEEDLE self-improvement loop (ADR-029)
+After=default.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/coding/NEEDLE
+Environment=PATH=/home/coding/.local/bin:/home/coding/.cargo/bin:/home/coding/bin:/run/current-system/sw/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# improvements.enabled must be true in ~/.config/needle/config.yaml or this
+# refuses to run (by design, per `needle improve --help`). Shadow stays the
+# default (improvements.admission.shadow: true) until Gate D evidence is
+# reviewed by a human — see plan.md section 4.10 and ADR-027/029. This unit
+# only generates and journals proposals; it never widens its own authority.
+ExecStart=/home/coding/.needle/bin/needle improve --json
+# One pass reads a 7-day ledger window and ranks proposals — much lighter
+# than the factory audit's full telemetry scan, but still bounded rather
+# than left to hang indefinitely on a stuck ledger read.
+TimeoutStartSec=600
