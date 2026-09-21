@@ -560,7 +560,7 @@ fn write_adapter(adapter_dir: &Path, bead_binary: &Path) {
     // the prompt it was handed on stdin, and then either fails, hangs past
     // the adapter timeout, or delivers the external close — mode-dependent.
     let adapter = format!(
-        "name: {ADAPTER_NAME}\nagent_cli: /bin/sh\ninvoke_template: >\n  cd {{workspace}} && echo \"spawned ${{NEEDLE_ATTEMPT_ID:-none}}\" >> {MARKER} && cat > .needle-attempt-prompt.txt && if [ \"${{NEEDLE_FIXTURE_MODE:-}}\" = \"agent-hang\" ]; then sleep 31; elif [ \"${{NEEDLE_FIXTURE_MODE:-}}\" = \"agent-fail\" ]; then exit 1; fi && {} close {{bead_id}} --reason 'fixture agent completed'\ntimeout_secs: 10\nprovider: local\nmodel: fixture\n",
+        "name: {ADAPTER_NAME}\nagent_cli: /bin/sh\ninvoke_template: >\n  cd {{workspace}} && echo \"spawned ${{NEEDLE_ATTEMPT_ID:-none}}\" >> {MARKER} && cat > .needle-attempt-prompt.txt && if [ \"${{NEEDLE_FIXTURE_MODE:-}}\" = \"agent-hang\" ]; then sleep 31; elif [ \"${{NEEDLE_FIXTURE_MODE:-}}\" = \"agent-fail\" ]; then exit 1; fi && {} close {{bead_id}} --reason 'fixture agent completed' --fencing-token $NEEDLE_BEAD_FENCING_TOKEN\ntimeout_secs: 10\nprovider: local\nmodel: fixture\n",
         yaml_path(bead_binary)
     );
     fs::write(adapter_dir.join("claim-verification-probe.yaml"), adapter)
