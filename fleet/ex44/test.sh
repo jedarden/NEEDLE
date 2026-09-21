@@ -54,6 +54,14 @@ grep -q '^OnCalendar=\*-\*-\* ' "$SRC_DIR/needle-factory-audit.timer"
 grep -qx 'Persistent=true' "$SRC_DIR/needle-factory-audit.timer"
 grep -q 'needle-factory-audit.timer' "$SRC_DIR/apply-ex44-fleet.sh"
 
+# The ADR-029 improvement loop (needle-7c064803) also runs once a day, as a
+# one-shot CLI with no background strand of its own -- same external-scheduler
+# shape as the factory audit, deliberately offset ahead of it.
+grep -q 'ExecStart=/home/coding/.needle/bin/needle improve --json' "$SRC_DIR/needle-improve.service"
+grep -q '^OnCalendar=\*-\*-\* ' "$SRC_DIR/needle-improve.timer"
+grep -qx 'Persistent=true' "$SRC_DIR/needle-improve.timer"
+grep -q 'needle-improve.timer' "$SRC_DIR/apply-ex44-fleet.sh"
+
 # The activation fragment keeps the lane, the workspace-only codex candidate
 # and the OpenAI cap together: enabling the candidate without the cap is what
 # would let one adapter pull the fleet onto an unbilled-by-us provider.

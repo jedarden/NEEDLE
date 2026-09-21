@@ -1,0 +1,17 @@
+[Unit]
+Description=Run the NEEDLE self-improvement loop once a day
+
+[Timer]
+# Once per host per day: the loop reasons over the whole fleet ledger, not
+# per-worker state, so there is nothing for a more-frequent or per-worker
+# cadence to buy — same rationale as needle-factory-audit.timer. Offset 70
+# minutes ahead of it (07:40) so a day's factory audit can see that day's
+# improvement-loop activity in its window.
+OnCalendar=*-*-* 06:30:00 America/New_York
+RandomizedDelaySec=10m
+# A host that was down through the window runs at the next boot rather than
+# skipping the day.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

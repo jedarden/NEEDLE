@@ -160,6 +160,8 @@ install_if_changed 644 "$SRC_DIR/needle-zai-governor.service" "$SYSTEMD_DIR/need
 install_if_changed 644 "$SRC_DIR/needle-zai-governor.timer" "$SYSTEMD_DIR/needle-zai-governor.timer"
 install_if_changed 644 "$SRC_DIR/needle-factory-audit.service" "$SYSTEMD_DIR/needle-factory-audit.service"
 install_if_changed 644 "$SRC_DIR/needle-factory-audit.timer" "$SYSTEMD_DIR/needle-factory-audit.timer"
+install_if_changed 644 "$SRC_DIR/needle-improve.service" "$SYSTEMD_DIR/needle-improve.service"
+install_if_changed 644 "$SRC_DIR/needle-improve.timer" "$SYSTEMD_DIR/needle-improve.timer"
 install_if_changed 755 "$SRC_DIR/needle-zai-governor" "$NEEDLE_HOST_HOME/.local/bin/needle-zai-governor"
 install_if_changed 644 "$SRC_DIR/fleet-policy.env" "$NEEDLE_CONFIG_DIR/fleet-policy.env"
 install_if_changed 644 "$SRC_DIR/backlog-policy.env" "$NEEDLE_CONFIG_DIR/backlog-policy.env"
@@ -247,6 +249,19 @@ if ! systemctl --user is-enabled -q needle-factory-audit.timer 2>/dev/null; then
 fi
 if [[ "$START_NEW" == 1 ]] && ! systemctl --user is-active -q needle-factory-audit.timer; then
     run systemctl --user start --no-block needle-factory-audit.timer
+fi
+
+# ADR-029 (needle-7c064803): `needle improve` is a one-shot CLI with no
+# background strand of its own, so it needs the same external-scheduler
+# treatment as the factory audit. Shadow mode (improvements.admission.shadow)
+# stays the config default of true here -- this unit only makes the loop
+# generate and journal proposals against the live ledger; admitting any of
+# them is a separate, human-reviewed config change per plan.md section 4.10.
+if ! systemctl --user is-enabled -q needle-improve.timer 2>/dev/null; then
+    run systemctl --user enable needle-improve.timer
+fi
+if [[ "$START_NEW" == 1 ]] && ! systemctl --user is-active -q needle-improve.timer; then
+    run systemctl --user start --no-block needle-improve.timer
 fi
 
 echo "- policy converged; no running worker was restarted"

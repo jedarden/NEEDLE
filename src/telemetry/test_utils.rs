@@ -445,10 +445,12 @@ pub fn check_object_matches(
             }
         }
     }
-    let props = spec
-        .get("properties")
-        .and_then(|p| p.as_object())
-        .expect("object spec must declare properties");
+    let Some(props) = spec.get("properties").and_then(|p| p.as_object()) else {
+        // An object-typed spec with no `properties` is a deliberately
+        // free-form field (e.g. backend_capabilities) -- nothing further to
+        // check per-key against.
+        return Ok(());
+    };
     for field in obj.keys() {
         if !props.contains_key(field) {
             return Err(format!("{key}.{field} is not part of the fixture contract"));
