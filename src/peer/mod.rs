@@ -537,6 +537,7 @@ mod tests {
             last_heartbeat,
             started_at: Utc::now() - chrono::Duration::seconds(3600),
             beads_processed: 0,
+            beads_completed: 0,
             session: worker_id.to_string(),
             is_idle,
             current_task: bead_id.map(|s| s.to_string()),
@@ -712,6 +713,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 0,
+                beads_completed: 0,
                 config_reload_generation: 0,
                 state: None,
             })

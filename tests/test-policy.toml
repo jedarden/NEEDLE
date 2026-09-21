@@ -145,7 +145,7 @@ version = 1
 # child count and threshold, silent below it, exactly once per crossing and
 # not per split beyond it, disabled at threshold 0, and emitted from the
 # resolve path's apply_split_proposals too.
-max_tests = 3903
+max_tests = 3906
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

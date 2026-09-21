@@ -132,6 +132,7 @@ mod tests {
             last_heartbeat: Utc::now(),
             started_at: Utc::now(),
             beads_processed: 0,
+            beads_completed: 0,
             session: "test".to_string(),
             is_idle: false,
             current_task: None,

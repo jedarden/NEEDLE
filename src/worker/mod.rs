@@ -776,6 +776,14 @@ pub struct Worker {
     retry_count: u32,
     consecutive_race_lost: u32,
     beads_processed: u64,
+    /// Dispatch cycles that ended with the bead actually closed.
+    ///
+    /// Release, defer, quarantine, and error cycles count in
+    /// `beads_processed` but complete nothing, so this stays ≤
+    /// `beads_processed`. Restored from the registry on hot-reload resume
+    /// and carried into the heartbeat and the registry entry at the LOGGING
+    /// boundary.
+    beads_completed: u64,
     shutdown: Arc<AtomicBool>,
     last_error: Option<anyhow::Error>,
     boot_time: Option<Instant>,
@@ -852,6 +860,10 @@ pub struct Worker {
     bead_lifecycle_span: Option<tracing::Span>,
     /// The last outcome for the current bead (used to record on bead.lifecycle span).
     last_outcome: Option<String>,
+    /// Whether the final terminal action for the in-flight cycle closed the
+    /// bead; consumed and cleared at the LOGGING boundary next to
+    /// `last_outcome`.
+    last_cycle_closed: bool,
     /// Last observed mtime across all workspace .beads/issues.jsonl files.
     /// Used for event-driven wakeups from idle state.
     last_workspace_mtime: Option<std::time::SystemTime>,
@@ -1249,16 +1261,17 @@ impl Worker {
             chrono::Utc::now(),
         );
         let registry_start = Instant::now();
-        // Restore beads_processed from registry if this worker was previously registered
-        // (e.g., hot-reload resume). New workers start at 0.
+        // Restore dispatch-cycle and completion counts from registry if this
+        // worker was previously registered (e.g., hot-reload resume). New
+        // workers start at 0.
         // Match by qualified identity ({adapter}-{worker_id}).
         let qualified_id = format!("{}-{}", config.agent.default, worker_name);
-        let beads_processed = registry
+        let (beads_processed, beads_completed) = registry
             .list()
             .ok()
             .and_then(|workers| workers.into_iter().find(|w| w.id == qualified_id))
-            .map(|entry| entry.beads_processed)
-            .unwrap_or(0);
+            .map(|entry| (entry.beads_processed, entry.beads_completed))
+            .unwrap_or((0, 0));
         let _ = telemetry.emit(
             EventKind::InitStepCompleted {
                 step: "registry_state_restoration".to_string(),
@@ -1323,6 +1336,7 @@ impl Worker {
             retry_count: 0,
             consecutive_race_lost: 0,
             beads_processed,
+            beads_completed,
             shutdown,
             last_error: None,
             boot_time: None,
@@ -1347,6 +1361,7 @@ impl Worker {
             watchdog_control: None,
             bead_lifecycle_span: None,
             last_outcome: None,
+            last_cycle_closed: false,
             last_workspace_mtime: None,
             found_but_excluded: false,
             spawn_path_metadata: None,
@@ -1981,6 +1996,7 @@ impl Worker {
             provider,
             started_at: chrono::Utc::now(),
             beads_processed: 0,
+            beads_completed: 0,
             config_reload_generation: self.config_reload_generation,
             state: Some(WorkerState::Booting),
         };
@@ -6063,6 +6079,12 @@ impl Worker {
     /// branch cannot silently return `()` and leave a claim behind. The type
     /// system enforces that every dispatch cycle ends with an explicit transition.
     async fn apply_bead_action(&mut self, action: BeadAction) -> Result<()> {
+        // Completion is attributed only after the final terminal action has
+        // been selected and successfully applied. In particular, do_handle
+        // may turn an initially closed result into a release while registering
+        // post-push CI, so recording it there would overcount completions.
+        self.last_cycle_closed = false;
+
         let bead = self
             .current_bead
             .as_ref()
@@ -6106,6 +6128,8 @@ impl Worker {
                                 self.store.release(&bead.id),
                             )
                             .await??;
+                        } else {
+                            self.last_cycle_closed = true;
                         }
                         // Bead is closed/done as expected
                     }
@@ -6116,6 +6140,7 @@ impl Worker {
                             "could not verify bead closure; assuming closed"
                         );
                         // Assume closed - the handler determined this
+                        self.last_cycle_closed = true;
                     }
                     Err(_) => {
                         tracing::warn!(
@@ -6123,6 +6148,7 @@ impl Worker {
                             "verification timed out; assuming closed"
                         );
                         // Assume closed - the handler determined this
+                        self.last_cycle_closed = true;
                     }
                 }
             }
@@ -6402,6 +6428,13 @@ impl Worker {
         // Clear per-cycle state.
         self.last_effort = None;
         self.beads_processed += 1;
+        // A real completion is a cycle whose terminal action closed the bead.
+        // Release, defer, quarantine, and error cycles advance the cycle
+        // count but complete nothing.
+        if self.last_cycle_closed {
+            self.beads_completed += 1;
+        }
+        self.last_cycle_closed = false;
         self.current_bead = None;
         self.attempt_id = None;
         self.attempt_provenance = AttemptProvenance::default();
@@ -6429,15 +6462,17 @@ impl Worker {
             // The span closes when this final handle is dropped.
         }
 
-        // Update heartbeat with new bead count.
-        self.health.update_beads_processed(self.beads_processed);
+        // Update heartbeat with the dispatch-cycle and completion counts.
+        self.health
+            .update_bead_counts(self.beads_processed, self.beads_completed);
 
-        // Update registry with current beads_processed count (best-effort).
-        if let Err(e) = self
-            .registry
-            .update_beads_processed(&self.qualified_id(), self.beads_processed)
-        {
-            tracing::warn!(error = %e, "failed to update registry beads_processed");
+        // Update registry with both counts (best-effort).
+        if let Err(e) = self.registry.update_bead_counts(
+            &self.qualified_id(),
+            self.beads_processed,
+            self.beads_completed,
+        ) {
+            tracing::warn!(error = %e, "failed to update registry bead counts");
         }
 
         // Auto-canary: when self_modification is enabled with auto_promote, detect a
@@ -8094,6 +8129,7 @@ impl Worker {
             provider,
             started_at: chrono::Utc::now(),
             beads_processed: self.beads_processed,
+            beads_completed: self.beads_completed,
             config_reload_generation: self.config_reload_generation,
             state: Some(self.state.clone()),
         };
@@ -8947,6 +8983,11 @@ impl Worker {
     /// Return the number of beads processed so far.
     pub fn beads_processed(&self) -> u64 {
         self.beads_processed
+    }
+
+    /// Dispatch cycles that ended with the bead actually closed.
+    pub fn beads_completed(&self) -> u64 {
+        self.beads_completed
     }
 
     /// Replace the dispatcher (for testing with custom adapters).
@@ -12596,6 +12637,50 @@ mod tests {
         worker.do_log().unwrap();
         assert_eq!(worker.beads_processed(), 1);
         assert_eq!(*worker.state(), WorkerState::Selecting);
+    }
+
+    #[tokio::test]
+    async fn do_log_counts_completions_separately_from_cycles() {
+        let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
+        // Isolate workspace home to avoid registry pollution from other tests.
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = valid_test_config();
+        config.self_modification.hot_reload = false;
+        config.workspace.home = dir.path().to_path_buf();
+        let mut worker = Worker::new(config, "test-log-completions".to_string(), store);
+        worker.boot().await.unwrap();
+
+        // Cycle 1: claim then release — HANDLING books a release as a
+        // non-closed action, so the cycle counts but completes nothing.
+        worker.state = WorkerState::Logging;
+        worker.current_bead = Some(make_test_bead("needle-cmp-1"));
+        worker.last_outcome = Some("failure".to_string());
+        worker.last_cycle_closed = false;
+        worker.do_log().unwrap();
+
+        // Cycle 2: re-claim, and this time the handler closes the bead.
+        worker.state = WorkerState::Logging;
+        worker.current_bead = Some(make_test_bead("needle-cmp-1"));
+        worker.last_outcome = Some("success".to_string());
+        worker.last_cycle_closed = true;
+        worker.do_log().unwrap();
+
+        let entry = worker
+            .registry
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|w| w.id == worker.qualified_id())
+            .expect("booted worker should have a registry entry");
+        assert_eq!(
+            entry.beads_processed, 2,
+            "release and completion are both dispatch cycles"
+        );
+        assert_eq!(
+            entry.beads_completed, 1,
+            "only the cycle that closed the bead completes"
+        );
+        assert_eq!(worker.beads_completed(), 1);
     }
 
     #[tokio::test]

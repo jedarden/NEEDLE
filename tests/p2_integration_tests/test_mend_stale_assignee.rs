@@ -172,6 +172,7 @@ fn make_fresh_heartbeat(
         last_heartbeat: Utc::now(), // Fresh
         started_at: Utc::now() - chrono::Duration::seconds(3600),
         beads_processed: 5,
+        beads_completed: 0,
         session: worker_id.to_string(),
         is_idle: false,
         current_task: current_bead.map(|s| s.to_string()),
@@ -357,6 +358,7 @@ async fn test_no_heartbeat_but_in_registry() {
         provider: Some("anthropic".to_string()),
         started_at: chrono::Utc::now(),
         beads_processed: 0,
+        beads_completed: 0,
         config_reload_generation: 0,
         state: None,
     };

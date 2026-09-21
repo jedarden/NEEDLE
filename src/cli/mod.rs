@@ -1791,6 +1791,7 @@ fn run_worker(config: Config, worker_name: String, config_sources: SourceMap) ->
                         provider: None,
                         started_at: chrono::Utc::now(),
                         beads_processed: 0,
+                        beads_completed: 0,
                         config_reload_generation: 0,
                         state: Some(crate::types::WorkerState::AdmissionBlocked),
                     };
@@ -10178,6 +10179,7 @@ WORKSPACE                                  R1 RETRY  R2 DECOMPOSE  R3 QUARANTINE
             last_heartbeat: chrono::Utc::now() - chrono::Duration::seconds(600),
             started_at: chrono::Utc::now(),
             beads_processed: 0,
+            beads_completed: 0,
             session: "test-w".to_string(),
             is_idle: false,
             current_task: None,
@@ -10213,6 +10215,7 @@ WORKSPACE                                  R1 RETRY  R2 DECOMPOSE  R3 QUARANTINE
             last_heartbeat: chrono::Utc::now() - chrono::Duration::seconds(600),
             started_at: chrono::Utc::now(),
             beads_processed: 0,
+            beads_completed: 0,
             session: "test-rm".to_string(),
             is_idle: false,
             current_task: None,

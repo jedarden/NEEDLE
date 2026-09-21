@@ -5131,6 +5131,7 @@ mod tests {
             provider: None,
             started_at: SystemTime::now().into(),
             beads_processed: 0,
+            beads_completed: 0,
             config_reload_generation: 0,
             state: None,
         };

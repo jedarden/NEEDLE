@@ -3157,6 +3157,7 @@ mod tests {
             last_heartbeat: Utc::now() - chrono::Duration::seconds(600),
             started_at: Utc::now() - chrono::Duration::seconds(3600),
             beads_processed: 0,
+            beads_completed: 0,
             session: worker_id.to_string(),
             is_idle: false,
             current_task: bead_id.map(|s| s.to_string()),
@@ -3255,6 +3256,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 0,
+                beads_completed: 0,
                 config_reload_generation: 0,
                 state: None,
             })
@@ -3309,6 +3311,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 1,
+                beads_completed: 0,
                 config_reload_generation: 0,
                 state: None,
             })
@@ -3386,6 +3389,7 @@ mod tests {
                     provider: None,
                     started_at: Utc::now(),
                     beads_processed: 1,
+                    beads_completed: 0,
                     config_reload_generation: 0,
                     state: None,
                 })
@@ -3482,6 +3486,7 @@ mod tests {
                     provider: None,
                     started_at: Utc::now(),
                     beads_processed: 1,
+                    beads_completed: 0,
                     config_reload_generation: 0,
                     state: None,
                 })
@@ -3566,6 +3571,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 1,
+                beads_completed: 0,
                 config_reload_generation: 0,
                 state: None,
             })
@@ -3645,6 +3651,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 0,
+                beads_completed: 0,
                 config_reload_generation: 0,
                 state: None,
             })
@@ -3713,6 +3720,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now() - chrono::Duration::seconds(7200),
                 beads_processed: 10,
+                beads_completed: 0,
                 config_reload_generation: 0,
                 state: None,
             })
@@ -3781,6 +3789,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 1,
+                beads_completed: 0,
                 config_reload_generation: 0,
                 state: None,
             })
@@ -3859,6 +3868,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 1,
+                beads_completed: 0,
                 config_reload_generation: 0,
                 state: None,
             })
@@ -3941,6 +3951,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 5,
+                beads_completed: 0,
                 config_reload_generation: 0,
                 state: None,
             })
@@ -4027,6 +4038,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 10,
+                beads_completed: 0,
                 config_reload_generation: 0,
                 state: None,
             })
@@ -4127,6 +4139,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 0,
+                beads_completed: 0,
                 config_reload_generation: 0,
                 state: None,
             })
@@ -4141,6 +4154,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 100,
+                beads_completed: 0,
                 config_reload_generation: 0,
                 state: None,
             })
@@ -4206,6 +4220,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 342,
+                beads_completed: 0,
                 config_reload_generation: 0,
                 state: None,
             })
@@ -4220,6 +4235,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 0,
+                beads_completed: 0,
                 config_reload_generation: 0,
                 state: None,
             })
@@ -4785,6 +4801,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 5,
+                beads_completed: 0,
                 config_reload_generation: 0,
                 state: None,
             })
@@ -4931,6 +4948,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 0,
+                beads_completed: 0,
                 config_reload_generation: 0,
                 state: None,
             })
@@ -4981,6 +4999,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 0,
+                beads_completed: 0,
                 config_reload_generation: 0,
                 state: None,
             })
@@ -5027,6 +5046,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 10,
+                beads_completed: 0,
                 config_reload_generation: 0,
                 state: None,
             })
@@ -5142,6 +5162,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 0,
+                beads_completed: 0,
                 config_reload_generation: 0,
                 state: None,
             })
@@ -5205,6 +5226,7 @@ mod tests {
             last_heartbeat: Utc::now(), // Fresh heartbeat
             started_at: Utc::now(),
             beads_processed: 0,
+            beads_completed: 0,
             session: "fresh-ghost".to_string(),
             is_idle: false,
             current_task: Some("nd-fresh".to_string()),
@@ -5278,6 +5300,7 @@ mod tests {
             last_heartbeat: Utc::now() - chrono::Duration::seconds(600),
             started_at: Utc::now(),
             beads_processed: 0,
+            beads_completed: 0,
             session: "nato-name".to_string(),
             is_idle: false,
             current_task: Some("nd-qualified".to_string()),
@@ -5350,6 +5373,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 5,
+                beads_completed: 0,
                 config_reload_generation: 0,
                 state: None,
             })
@@ -5409,6 +5433,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 10,
+                beads_completed: 0,
                 config_reload_generation: 0,
                 state: None,
             })
@@ -5462,6 +5487,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 0,
+                beads_completed: 0,
                 config_reload_generation: 0,
                 state: None,
             })
@@ -5516,6 +5542,7 @@ mod tests {
                     provider: None,
                     started_at: Utc::now(),
                     beads_processed: i as u64,
+                    beads_completed: 0,
                     config_reload_generation: 0,
                     state: None,
                 })
@@ -5533,6 +5560,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 100,
+                beads_completed: 0,
                 config_reload_generation: 0,
                 state: None,
             })
@@ -5836,6 +5864,7 @@ mod tests {
             provider: Some("anthropic".to_string()),
             started_at: Utc::now() - chrono::Duration::seconds(300), // 5 minutes ago
             beads_processed: 0,
+            beads_completed: 0,
             config_reload_generation: 0,
             state: None,
         };
@@ -5887,6 +5916,7 @@ mod tests {
             provider: Some("anthropic".to_string()),
             started_at: Utc::now() - chrono::Duration::seconds(300),
             beads_processed: 10,
+            beads_completed: 0,
             config_reload_generation: 0,
             state: None,
         };
@@ -5938,6 +5968,7 @@ mod tests {
             provider: Some("anthropic".to_string()),
             started_at: Utc::now() - chrono::Duration::seconds(30), // 30 seconds ago
             beads_processed: 0,
+            beads_completed: 0,
             config_reload_generation: 0,
             state: None,
         };
@@ -5990,6 +6021,7 @@ mod tests {
                 provider: Some("anthropic".to_string()),
                 started_at: Utc::now() - chrono::Duration::seconds(300),
                 beads_processed: 0,
+                beads_completed: 0,
                 config_reload_generation: 0,
                 state: None,
             };
@@ -6042,6 +6074,7 @@ mod tests {
             provider: Some("anthropic".to_string()),
             started_at: Utc::now() - chrono::Duration::seconds(300),
             beads_processed: 10,
+            beads_completed: 0,
             config_reload_generation: 0,
             state: None,
         };
@@ -6057,6 +6090,7 @@ mod tests {
             provider: Some("anthropic".to_string()),
             started_at: Utc::now() - chrono::Duration::seconds(30),
             beads_processed: 0,
+            beads_completed: 0,
             config_reload_generation: 0,
             state: None,
         };
@@ -6072,6 +6106,7 @@ mod tests {
             provider: Some("anthropic".to_string()),
             started_at: Utc::now() - chrono::Duration::seconds(300),
             beads_processed: 0,
+            beads_completed: 0,
             config_reload_generation: 0,
             state: None,
         };
@@ -6160,6 +6195,7 @@ mod tests {
             provider: Some("anthropic".to_string()),
             started_at: Utc::now() + chrono::Duration::seconds(300), // 5 minutes in the future
             beads_processed: 0,
+            beads_completed: 0,
             config_reload_generation: 0,
             state: None,
         };
@@ -6214,6 +6250,7 @@ mod tests {
             provider: Some("anthropic".to_string()),
             started_at: Utc::now() - chrono::Duration::seconds(300), // 5 minutes ago
             beads_processed: 0,
+            beads_completed: 0,
             config_reload_generation: 0,
             state: None,
         };
@@ -7408,6 +7445,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now() - chrono::Duration::seconds(600),
                 beads_processed: 5,
+                beads_completed: 0,
                 config_reload_generation: 0,
                 state: None,
             })
@@ -7456,6 +7494,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now() - chrono::Duration::seconds(60),
                 beads_processed: 0,
+                beads_completed: 0,
                 config_reload_generation: 0,
                 state: None,
             })
@@ -7504,6 +7543,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now() - chrono::Duration::seconds(600),
                 beads_processed: 0,
+                beads_completed: 0,
                 config_reload_generation: 0,
                 state: None,
             })
@@ -7552,6 +7592,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now() + chrono::Duration::seconds(60),
                 beads_processed: 0,
+                beads_completed: 0,
                 config_reload_generation: 0,
                 state: None,
             })
@@ -7600,6 +7641,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now() - chrono::Duration::seconds(600),
                 beads_processed: 0,
+                beads_completed: 0,
                 config_reload_generation: 0,
                 state: None,
             })
@@ -7659,6 +7701,7 @@ mod tests {
             provider: None,
             started_at: Utc::now() - chrono::Duration::seconds(60), // Exactly at timeout
             beads_processed: 0,
+            beads_completed: 0,
             config_reload_generation: 0,
             state: None,
         };
@@ -7752,6 +7795,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now() - chrono::Duration::seconds(300),
                 beads_processed: 0,
+                beads_completed: 0,
                 config_reload_generation: 0,
                 state: None,
             };
@@ -8477,6 +8521,7 @@ mod tests {
             provider: Some("anthropic".to_string()),
             started_at,
             beads_processed,
+            beads_completed: 0,
             config_reload_generation: 0,
             state: None,
         }
@@ -8579,6 +8624,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 1,
+                beads_completed: 0,
                 config_reload_generation: 0,
                 state: None,
             })
@@ -8656,6 +8702,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 1,
+                beads_completed: 0,
                 config_reload_generation: 0,
                 state: None,
             })
@@ -8717,6 +8764,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 0,
+                beads_completed: 0,
                 config_reload_generation: 0,
                 state: None,
             })
@@ -8777,6 +8825,7 @@ mod tests {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 1,
+                beads_completed: 0,
                 config_reload_generation: 0,
                 state: None,
             })

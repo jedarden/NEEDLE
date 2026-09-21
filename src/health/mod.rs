@@ -84,7 +84,13 @@ pub struct HeartbeatData {
     pub workspace: PathBuf,
     pub last_heartbeat: DateTime<Utc>,
     pub started_at: DateTime<Utc>,
+    /// Dispatch cycles so far — one per dispatch, regardless of outcome.
     pub beads_processed: u64,
+    /// Dispatch cycles that ended with the bead actually closed. Always
+    /// ≤ `beads_processed`; 0 for heartbeats written before this field
+    /// existed.
+    #[serde(default)]
+    pub beads_completed: u64,
     pub session: String,
     /// Whether the worker is currently idle (no active task).
     ///
@@ -127,6 +133,9 @@ struct SharedHeartbeatState {
     state: WorkerState,
     current_bead: Option<BeadId>,
     beads_processed: u64,
+    /// Cycles that ended with the bead actually closed — see
+    /// [`HeartbeatData::beads_completed`].
+    beads_completed: u64,
     /// The workspace of the current bead (updates dynamically during cross-workspace work).
     current_workspace: Option<PathBuf>,
     /// Model being used (from adapter configuration).
@@ -149,6 +158,7 @@ impl SharedHeartbeatState {
             state: WorkerState::Booting,
             current_bead: None,
             beads_processed: 0,
+            beads_completed: 0,
             current_workspace: None,
             model: String::new(),
             last_strand: None,
@@ -272,6 +282,7 @@ impl HealthMonitor {
                 state: WorkerState::Booting,
                 current_bead: None,
                 beads_processed: 0,
+                beads_completed: 0,
                 current_workspace: None,
                 model: config.agent.default.clone(),
                 last_strand: None,
@@ -481,6 +492,22 @@ impl HealthMonitor {
     pub fn update_beads_processed(&self, count: u64) {
         if let Ok(mut guard) = self.shared_state.lock() {
             guard.beads_processed = count;
+        }
+    }
+
+    /// Update the dispatch-cycle and completion counts as one heartbeat state
+    /// change so readers never observe a mixed pair.
+    pub fn update_bead_counts(&self, processed: u64, completed: u64) {
+        if let Ok(mut guard) = self.shared_state.lock() {
+            guard.beads_processed = processed;
+            guard.beads_completed = completed;
+        }
+    }
+
+    /// Update the beads_completed count visible to the heartbeat emitter.
+    pub fn update_beads_completed(&self, count: u64) {
+        if let Ok(mut guard) = self.shared_state.lock() {
+            guard.beads_completed = count;
         }
     }
 
@@ -1194,6 +1221,7 @@ impl HealthMonitor {
             state,
             current_bead,
             beads_processed,
+            beads_completed,
             current_workspace,
             model,
             last_strand,
@@ -1208,6 +1236,7 @@ impl HealthMonitor {
                 guard.state.clone(),
                 guard.current_bead.clone(),
                 guard.beads_processed,
+                guard.beads_completed,
                 guard.current_workspace.clone(),
                 guard.model.clone(),
                 guard.last_strand.clone(),
@@ -1278,6 +1307,7 @@ impl HealthMonitor {
             last_heartbeat: Utc::now(),
             started_at: self.started_at,
             beads_processed,
+            beads_completed,
             session: self.worker_id.clone(),
             is_idle,
             current_task,
@@ -1645,25 +1675,33 @@ fn emitter_loop(
         }
         elapsed = Duration::ZERO;
 
-        let (state, current_bead, beads_processed, current_workspace, model, activity) =
-            match shared_state.lock() {
-                Ok(guard) => (
-                    guard.state.clone(),
-                    guard.current_bead.clone(),
-                    guard.beads_processed,
-                    guard.current_workspace.clone(),
-                    guard.model.clone(),
-                    guard.activity.latest().cloned(),
-                ),
-                Err(_) => {
-                    // Mutex poisoned — the main thread panicked. Exit.
-                    tracing::error!(
-                        worker = %worker_id,
-                        "shared state mutex poisoned, heartbeat emitter exiting"
-                    );
-                    return;
-                }
-            };
+        let (
+            state,
+            current_bead,
+            beads_processed,
+            beads_completed,
+            current_workspace,
+            model,
+            activity,
+        ) = match shared_state.lock() {
+            Ok(guard) => (
+                guard.state.clone(),
+                guard.current_bead.clone(),
+                guard.beads_processed,
+                guard.beads_completed,
+                guard.current_workspace.clone(),
+                guard.model.clone(),
+                guard.activity.latest().cloned(),
+            ),
+            Err(_) => {
+                // Mutex poisoned — the main thread panicked. Exit.
+                tracing::error!(
+                    worker = %worker_id,
+                    "shared state mutex poisoned, heartbeat emitter exiting"
+                );
+                return;
+            }
+        };
 
         // Use the current bead's workspace if set, otherwise fall back to home workspace.
         let effective_workspace = current_workspace.unwrap_or_else(|| workspace.clone());
@@ -1683,6 +1721,7 @@ fn emitter_loop(
             last_heartbeat: Utc::now(),
             started_at,
             beads_processed,
+            beads_completed,
             session: worker_id.clone(),
             is_idle,
             current_task,
@@ -1870,6 +1909,34 @@ mod tests {
     }
 
     #[test]
+    fn heartbeat_carries_completion_count() {
+        let _home_guard = isolate_test_home();
+        let dir = tempfile::tempdir().unwrap();
+        let hb_dir = dir.path().join("state").join("heartbeats");
+        let config = test_config(&hb_dir);
+        let mut monitor = HealthMonitor::new(
+            config,
+            "completion-test".to_string(),
+            Telemetry::new("test".to_string()),
+            None,
+        );
+
+        monitor.use_manual_emitter_time();
+        monitor.start_emitter().unwrap();
+
+        monitor.update_bead_counts(7, 5);
+
+        assert!(monitor.advance_emitter(Duration::from_secs(1)).unwrap());
+
+        let content = std::fs::read_to_string(monitor.heartbeat_path()).unwrap();
+        let data: HeartbeatData = serde_json::from_str(&content).unwrap();
+        assert_eq!(data.beads_processed, 7);
+        assert_eq!(data.beads_completed, 5);
+
+        monitor.stop();
+    }
+
+    #[test]
     fn heartbeat_updates_with_shared_state() {
         let _home_guard = isolate_test_home();
         let dir = tempfile::tempdir().unwrap();
@@ -1944,6 +2011,7 @@ mod tests {
             last_heartbeat: Utc::now(),
             started_at: Utc::now(),
             beads_processed: 0,
+            beads_completed: 0,
             session: "worker-a".to_string(),
             is_idle: false,
             current_task: None,
@@ -1961,6 +2029,7 @@ mod tests {
             last_heartbeat: Utc::now(),
             started_at: Utc::now(),
             beads_processed: 3,
+            beads_completed: 0,
             session: "worker-b".to_string(),
             is_idle: false,
             current_task: Some("nd-x".to_string()),
@@ -2013,6 +2082,7 @@ mod tests {
             last_heartbeat: Utc::now(),
             started_at: Utc::now(),
             beads_processed: 1,
+            beads_completed: 0,
             session: "worker-a".to_string(),
             is_idle: false,
             current_task: Some("nd-live".to_string()),
@@ -2141,6 +2211,7 @@ mod tests {
             last_heartbeat: Utc::now(),
             started_at: Utc::now(),
             beads_processed: 0,
+            beads_completed: 0,
             session: "test".to_string(),
             is_idle: false,
             current_task: None,
@@ -2218,6 +2289,7 @@ mod tests {
             last_heartbeat: Utc::now(),
             started_at: Utc::now(),
             beads_processed: 10,
+            beads_completed: 0,
             session: "test-rt".to_string(),
             is_idle: false,
             current_task: Some("nd-abc".to_string()),
@@ -2261,6 +2333,7 @@ mod tests {
             last_heartbeat: Utc::now() - chrono::Duration::seconds(600),
             started_at: Utc::now(),
             beads_processed: 0,
+            beads_completed: 0,
             session: "self-worker".to_string(),
             is_idle: false,
             current_task: None,
@@ -2307,6 +2380,7 @@ mod tests {
             state: WorkerState::Selecting,
             current_bead: None,
             beads_processed: 0,
+            beads_completed: 0,
             current_workspace: None,
             model: "claude-sonnet-4".to_string(),
             last_strand: None,
@@ -2829,6 +2903,7 @@ mod tests {
                 last_heartbeat: now,
                 started_at: now - chrono::Duration::seconds(60),
                 beads_processed: 0,
+                beads_completed: 0,
                 session: format!("worker-{}", i),
                 is_idle: false,
                 current_task: None,
@@ -2876,6 +2951,7 @@ mod tests {
             last_heartbeat: old_time,
             started_at: old_time,
             beads_processed: 0,
+            beads_completed: 0,
             session: "worker-2".to_string(),
             is_idle: false,
             current_task: None,
@@ -2923,6 +2999,7 @@ mod tests {
             last_heartbeat: now,
             started_at: recent_time,
             beads_processed: 0,
+            beads_completed: 0,
             session: "worker-2".to_string(),
             is_idle: false,
             current_task: None,
@@ -3108,6 +3185,7 @@ mod tests {
             last_heartbeat: Utc::now(),
             started_at: Utc::now(),
             beads_processed: 0,
+            beads_completed: 0,
             session: "test-worker".to_string(),
             is_idle: false,
             current_task: None,
@@ -4378,6 +4456,7 @@ mod tests {
             last_heartbeat: Utc::now() - chrono::Duration::seconds(60), // 1 minute ago
             started_at: Utc::now(),
             beads_processed: 0,
+            beads_completed: 0,
             session: "test".to_string(),
             is_idle: false,
             current_task: None,
@@ -4410,6 +4489,7 @@ mod tests {
             last_heartbeat: Utc::now() - chrono::Duration::seconds(600), // 10 minutes ago
             started_at: Utc::now(),
             beads_processed: 0,
+            beads_completed: 0,
             session: "test".to_string(),
             is_idle: false,
             current_task: None,
@@ -4442,6 +4522,7 @@ mod tests {
             last_heartbeat: Utc::now() - chrono::Duration::seconds(300), // exactly 5 minutes ago
             started_at: Utc::now(),
             beads_processed: 0,
+            beads_completed: 0,
             session: "test".to_string(),
             is_idle: false,
             current_task: None,
@@ -4492,6 +4573,7 @@ mod tests {
             last_heartbeat: Utc::now() - chrono::Duration::seconds(2), // 2 seconds ago (fresh, within 5s TTL)
             started_at: Utc::now(),
             beads_processed: 5,
+            beads_completed: 0,
             session: "other-worker".to_string(),
             is_idle: false,
             current_task: Some("nd-abc".to_string()),
@@ -4545,6 +4627,7 @@ mod tests {
             last_heartbeat: Utc::now() - chrono::Duration::seconds(600), // 10 minutes ago (stale)
             started_at: Utc::now(),
             beads_processed: 10,
+            beads_completed: 0,
             session: "stale-worker".to_string(),
             is_idle: false,
             current_task: Some("nd-def".to_string()),
@@ -5241,6 +5324,7 @@ mod tests {
             last_heartbeat: Utc::now(),
             started_at: Utc::now(),
             beads_processed: 5,
+            beads_completed: 0,
             session: "alpha".to_string(),
             is_idle: false,
             current_task: Some("needle-abc".to_string()),
@@ -5287,6 +5371,7 @@ mod tests {
             last_heartbeat: Utc::now() - chrono::Duration::seconds(600), // 10 minutes old
             started_at: Utc::now(),
             beads_processed: 5,
+            beads_completed: 0,
             session: "alpha".to_string(),
             is_idle: false,
             current_task: Some("needle-abc".to_string()),
@@ -5387,6 +5472,7 @@ mod tests {
             last_heartbeat: Utc::now() - chrono::Duration::seconds(300), // Exactly at TTL
             started_at: Utc::now(),
             beads_processed: 0,
+            beads_completed: 0,
             session: "boundary".to_string(),
             is_idle: false,
             current_task: None,
@@ -5434,6 +5520,7 @@ mod tests {
             last_heartbeat: Utc::now(),
             started_at: Utc::now(),
             beads_processed: 0,
+            beads_completed: 0,
             session: "foxtrot".to_string(),
             is_idle: false,
             current_task: None,
@@ -5538,6 +5625,7 @@ mod tests {
             last_heartbeat: Utc::now() - chrono::Duration::seconds(10), // 10 seconds ago (older than 3s TTL)
             started_at: Utc::now() - chrono::Duration::seconds(100),
             beads_processed: 0,
+            beads_completed: 0,
             session: "liveness-test".to_string(),
             is_idle: false,
             current_task: Some("stale-test".to_string()),

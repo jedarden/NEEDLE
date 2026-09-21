@@ -389,6 +389,7 @@ fn make_heartbeat(worker_id: &str, pid: u32, bead_id: Option<&str>, stale: bool)
         last_heartbeat,
         started_at: Utc::now() - chrono::Duration::seconds(3600),
         beads_processed: 0,
+        beads_completed: 0,
         session: worker_id.to_string(),
         heartbeat_file: None,
         // The stale-detection helper does not report adapter activity.
@@ -409,6 +410,7 @@ fn make_worker_entry(id: &str, provider: Option<&str>, model: Option<&str>) -> W
         provider: provider.map(|s| s.to_string()),
         started_at: Utc::now(),
         beads_processed: 0,
+        beads_completed: 0,
         config_reload_generation: 0,
         state: Some(WorkerState::Executing),
     }
@@ -813,6 +815,7 @@ async fn mend_strand_cleans_dead_zero_activity_worker_logs_immediately() {
             provider: Some("anthropic".to_string()),
             started_at: Utc::now(),
             beads_processed: 0,
+            beads_completed: 0,
             config_reload_generation: 0,
             state: None,
         })
@@ -881,6 +884,7 @@ async fn mend_strand_preserves_active_worker_logs() {
             provider: Some("anthropic".to_string()),
             started_at: Utc::now(),
             beads_processed: 10,
+            beads_completed: 0,
             config_reload_generation: 0,
             state: None,
         })
@@ -1331,6 +1335,7 @@ async fn registry_concurrent_registration_no_corruption() {
                     provider: Some("anthropic".to_string()),
                     started_at: Utc::now(),
                     beads_processed: 0,
+                    beads_completed: 0,
                     config_reload_generation: 0,
                     state: None,
                 })
@@ -1373,6 +1378,7 @@ async fn registry_deregister_during_concurrent_registrations() {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 0,
+                beads_completed: 0,
                 config_reload_generation: 0,
                 state: None,
             })
@@ -1393,6 +1399,7 @@ async fn registry_deregister_during_concurrent_registrations() {
                 provider: None,
                 started_at: Utc::now(),
                 beads_processed: 0,
+                beads_completed: 0,
                 config_reload_generation: 0,
                 state: None,
             })
@@ -1494,6 +1501,7 @@ fn stale_detection_works_correctly() {
         last_heartbeat: Utc::now(),
         started_at: Utc::now(),
         beads_processed: 0,
+        beads_completed: 0,
         session: "fresh".to_string(),
         heartbeat_file: None,
         // This fixture models the legacy heartbeat shape.
@@ -1513,6 +1521,7 @@ fn stale_detection_works_correctly() {
         last_heartbeat: Utc::now() - chrono::Duration::seconds(600),
         started_at: Utc::now(),
         beads_processed: 0,
+        beads_completed: 0,
         session: "stale".to_string(),
         heartbeat_file: None,
         // This fixture models the legacy heartbeat shape.

@@ -124,8 +124,17 @@ pub struct WorkerEntry {
     pub provider: Option<String>,
     /// When the worker started.
     pub started_at: DateTime<Utc>,
-    /// Number of beads processed so far.
+    /// Number of dispatch cycles so far — one per dispatch, regardless of
+    /// outcome. This is the denominator for churn metrics, not a completion
+    /// count; `beads_completed` counts cycles that actually shipped.
     pub beads_processed: u64,
+    /// Number of dispatch cycles that ended with the bead actually closed.
+    ///
+    /// Always ≤ [`WorkerEntry::beads_processed`]: a cycle that releases,
+    /// defers, quarantines, or errors does not complete anything. Optional
+    /// on read so entries written before this field existed load as 0.
+    #[serde(default)]
+    pub beads_completed: u64,
     /// Number of times the configuration has been reloaded since boot.
     /// Used by `needle config --dump --live` to show the live config generation.
     #[serde(default)]
@@ -263,6 +272,26 @@ impl Registry {
         self.modify(|reg| {
             if let Some(entry) = reg.workers.iter_mut().find(|w| w.id == worker_id) {
                 entry.beads_processed = beads_processed;
+            }
+        })
+    }
+
+    /// Update a worker's dispatch-cycle and completion counts in one write.
+    ///
+    /// `beads_processed` counts every dispatch cycle; `beads_completed`
+    /// counts only the cycles that ended with the bead closed. Writing them
+    /// together keeps the pair coherent for readers polling the registry
+    /// between cycles.
+    pub fn update_bead_counts(
+        &self,
+        worker_id: &str,
+        beads_processed: u64,
+        beads_completed: u64,
+    ) -> Result<()> {
+        self.modify(|reg| {
+            if let Some(entry) = reg.workers.iter_mut().find(|w| w.id == worker_id) {
+                entry.beads_processed = beads_processed;
+                entry.beads_completed = beads_completed;
             }
         })
     }
@@ -553,6 +582,7 @@ mod tests {
             provider: Some("anthropic".to_string()),
             started_at: Utc::now(),
             beads_processed: 0,
+            beads_completed: 0,
             config_reload_generation: 0,
             state: None,
         }
@@ -698,6 +728,19 @@ mod tests {
         let workers = reg.list().unwrap();
         assert_eq!(workers.len(), 1);
         assert_eq!(workers[0].beads_processed, 0);
+    }
+
+    #[test]
+    fn update_bead_counts_writes_both_counters() {
+        let dir = tempfile::tempdir().unwrap();
+        let reg = Registry::new(dir.path());
+
+        reg.register(make_entry("alpha")).unwrap();
+        reg.update_bead_counts("alpha", 9, 4).unwrap();
+
+        let workers = reg.list().unwrap();
+        assert_eq!(workers[0].beads_processed, 9);
+        assert_eq!(workers[0].beads_completed, 4);
     }
 
     #[test]

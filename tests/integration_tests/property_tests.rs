@@ -296,6 +296,7 @@ proptest! {
             last_heartbeat: Utc::now(),
             started_at: Utc::now(),
             beads_processed: 0,
+            beads_completed: 0,
             session: "test".to_string(),
             heartbeat_file: None,
             // Property fixtures cover the absent-activity compatibility case.
@@ -326,6 +327,7 @@ proptest! {
             last_heartbeat: old_time,
             started_at: old_time,
             beads_processed: 0,
+            beads_completed: 0,
             session: "test".to_string(),
             heartbeat_file: None,
             // Property fixtures cover the absent-activity compatibility case.

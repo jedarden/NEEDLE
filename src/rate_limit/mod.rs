@@ -1163,6 +1163,7 @@ mod tests {
             provider: provider.map(|s| s.to_string()),
             started_at: Utc::now(),
             beads_processed: 0,
+            beads_completed: 0,
             config_reload_generation: 0,
             state: Some(state),
         }
