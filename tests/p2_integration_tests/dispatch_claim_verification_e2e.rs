@@ -551,6 +551,10 @@ fn write_global_config(home: &Path, adapter_dir: &Path) {
         yaml_path(home),
         yaml_path(home),
     );
+    let config = config.replace(
+        "workspace:\n",
+        "validation:\n  fallback_gate: false\nworkspace:\n",
+    );
     fs::write(config_dir.join("config.yaml"), config).expect("write isolated global config");
 }
 
