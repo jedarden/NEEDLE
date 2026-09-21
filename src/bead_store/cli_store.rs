@@ -33,7 +33,7 @@ struct CliOperationFailure {
     stderr: String,
 }
 
-fn operation_failed_with(error: &anyhow::Error, operation: &str, exit_code: i32) -> bool {
+pub(crate) fn operation_failed_with(error: &anyhow::Error, operation: &str, exit_code: i32) -> bool {
     error.chain().any(|cause| {
         cause
             .downcast_ref::<CliOperationFailure>()

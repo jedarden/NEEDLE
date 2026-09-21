@@ -31,7 +31,7 @@ use tracing::Instrument;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering as AtomicOrdering};
 
 use crate::attempt::{self, AttemptProvenance};
-use crate::bead_store::{BeadStore, RecoveryReleaseOutcome};
+use crate::bead_store::{operation_failed_with, BeadStore, RecoveryReleaseOutcome};
 use crate::build_status::BuildStatusChecker;
 use crate::canary::CanaryRunner;
 use crate::ci::{self, RegistrationResult};
@@ -6069,6 +6069,37 @@ impl Worker {
         Ok(())
     }
 
+    /// Release a claim as part of a terminal `BeadAction`, tolerating a
+    /// conflict caused by the claim already having left `in_progress`.
+    ///
+    /// By the time a terminal action reaches `apply_bead_action`, the agent
+    /// may already have closed the bead itself (NEEDLE's own design has the
+    /// agent own validation and closure), or another writer may have moved
+    /// it off `in_progress` for some other reason. Either way, the intent
+    /// behind "release" -- stop holding this claim -- is already satisfied,
+    /// so a bead-rs exit-code-4 conflict here is expected, not fatal. Before
+    /// this helper existed, `self.store.release()` propagated that conflict
+    /// through `??` and crashed the whole worker process: 108 crash-restarts
+    /// across 21 worker units fleet-wide in a 60h window (needle-cgraph
+    /// audit trail), none of which lost real work but every one of which
+    /// cost a full boot cycle. Mirrors the conflict-as-success handling
+    /// `release_recovery` already applies elsewhere in this file.
+    async fn release_terminal_claim(&self, bead_id: &BeadId) -> Result<()> {
+        match tokio::time::timeout(Duration::from_secs(30), self.store.release(bead_id)).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(error)) if operation_failed_with(&error, "release", 4) => {
+                tracing::debug!(
+                    bead_id = %bead_id,
+                    error = %error,
+                    "release conflict on terminal action; claim already left in_progress, treating as satisfied"
+                );
+                Ok(())
+            }
+            Ok(Err(error)) => Err(error),
+            Err(_) => bail!("release of {bead_id} timed out"),
+        }
+    }
+
     /// Consume a terminal action and enforce the dispatch postcondition.
     ///
     /// This is the ONLY place in the codebase that mutates bead state based on
@@ -6123,11 +6154,7 @@ impl Worker {
                                 "agent reported closed but bead is not closed; releasing to enforce postcondition"
                             );
                             // Force release to enforce postcondition
-                            tokio::time::timeout(
-                                Duration::from_secs(30),
-                                self.store.release(&bead.id),
-                            )
-                            .await??;
+                            self.release_terminal_claim(&bead.id).await?;
                         } else {
                             self.last_cycle_closed = true;
                         }
@@ -6154,8 +6181,7 @@ impl Worker {
             }
             BeadAction::Released(release_reason) => {
                 // Release the bead back to open status.
-                tokio::time::timeout(Duration::from_secs(30), self.store.release(&bead.id))
-                    .await??;
+                self.release_terminal_claim(&bead.id).await?;
                 self.telemetry.emit(
                     EventKind::BeadReleased {
                         bead_id: bead.id.clone(),
@@ -6174,8 +6200,7 @@ impl Worker {
                 // the ADR-022 expiring form (N-T26); the permanent bare
                 // `deferred` label is operator territory and nothing automatic
                 // may add it.
-                tokio::time::timeout(Duration::from_secs(30), self.store.release(&bead.id))
-                    .await??;
+                self.release_terminal_claim(&bead.id).await?;
                 self.apply_deferral_hold(&bead).await;
                 self.telemetry.emit(
                     EventKind::BeadReleased {
@@ -6187,8 +6212,7 @@ impl Worker {
             }
             BeadAction::Alerted => {
                 // Release after creating an alert bead.
-                tokio::time::timeout(Duration::from_secs(30), self.store.release(&bead.id))
-                    .await??;
+                self.release_terminal_claim(&bead.id).await?;
                 self.telemetry.emit(
                     EventKind::BeadReleased {
                         bead_id: bead.id.clone(),
@@ -6204,8 +6228,7 @@ impl Worker {
                 // `quarantine-until:*` labels.  Release ownership so the bead
                 // becomes eligible automatically after that timestamp; a
                 // permanent manual block would make the expiry meaningless.
-                tokio::time::timeout(Duration::from_secs(30), self.store.release(&bead.id))
-                    .await??;
+                self.release_terminal_claim(&bead.id).await?;
                 let _ = tokio::time::timeout(
                     Duration::from_secs(30),
                     self.store.add_label(&bead.id, "cycling"),
@@ -6221,8 +6244,7 @@ impl Worker {
             }
             BeadAction::Interrupted => {
                 // Release due to worker interruption.
-                tokio::time::timeout(Duration::from_secs(30), self.store.release(&bead.id))
-                    .await??;
+                self.release_terminal_claim(&bead.id).await?;
                 self.telemetry.emit(
                     EventKind::BeadReleased {
                         bead_id: bead.id.clone(),
@@ -6233,8 +6255,7 @@ impl Worker {
             }
             BeadAction::Errored => {
                 // Release after handler error.
-                tokio::time::timeout(Duration::from_secs(30), self.store.release(&bead.id))
-                    .await??;
+                self.release_terminal_claim(&bead.id).await?;
                 self.telemetry.emit(
                     EventKind::BeadReleased {
                         bead_id: bead.id.clone(),
