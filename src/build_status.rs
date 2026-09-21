@@ -1221,14 +1221,33 @@ mod tests {
         // Git checkout. `git archive HEAD` is the required verification
         // environment, so `CARGO_MANIFEST_DIR` has no `.git` directory or
         // remote to inspect.
-        let workspace = tempfile::tempdir().expect("create Git workspace fixture");
-        std::fs::create_dir(workspace.path().join(".git")).expect("create Git metadata fixture");
+        let fixture = tempfile::tempdir().expect("create Git workspace fixture");
+        let workspace = fixture.path();
+        // The fixture must be a complete repository for `git config --get
+        // remote.origin.url` to answer: modern git (2.54) refuses to read
+        // config from the config-only `.git` directory this fixture once
+        // hand-wrote. HEAD plus objects/ and refs/ is exactly the layout
+        // git's own repository detection requires, so the repository is
+        // written out directly; the unit tier's test policy forbids raw
+        // process spawns without an owned exception, which rules out
+        // shelling out to `git init` here.
+        let git_dir = workspace.join(".git");
+        std::fs::create_dir(git_dir.join("objects")).expect("create Git objects fixture");
+        std::fs::create_dir(git_dir.join("refs")).expect("create Git refs fixture");
+        std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n")
+            .expect("write Git HEAD fixture");
+        // Origin names NEEDLE so the fleet convention derives `needle-ci`,
+        // but the path does not exist: `main_branch_sha`'s `git ls-remote`
+        // must fail fast and offline rather than reach the host the fleet
+        // URL shape implies.
         std::fs::write(
-            workspace.path().join(".git/config"),
-            "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = https://git.ardenone.com/jedarden/NEEDLE.git\n",
+            git_dir.join("config"),
+            format!(
+                "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = {}\n",
+                workspace.join("NEEDLE.git").display()
+            ),
         )
         .expect("write Git remote fixture");
-        let workspace = workspace.path();
         let red = CircuitPolicy::new(
             BuildStatusChecker::with_source(60, Arc::new(FixedSource::failing_run())),
             vec!["fix-build".to_string()],
