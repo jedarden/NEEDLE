@@ -798,7 +798,7 @@ fn write_repair_failure_diagnostic(
     tracing::warn!(
         failure_path = %failure_path.display(),
         workspace = %workspace,
-        "Auto-repair failed, wrote diagnostic to target workspace"
+        "Auto-repair failed; wrote diagnostic to NEEDLE's own diagnostics dir"
     );
 
     Ok(())
@@ -860,13 +860,16 @@ struct PerBeadExclusion {
     exclusion_reasons: Vec<String>,
 }
 
-/// Write pluck evaluation diagnostic to .beads/pluck-diagnostics.json.
+/// Write pluck evaluation diagnostic to NEEDLE's diagnostics dir for the
+/// target workspace (`<state-root>/diagnostics/<workspace-slug>/`).
 ///
 /// This file provides a persistent, machine-readable log of every Pluck
 /// evaluation, showing exactly why beads were or were not selected. A
 /// monitoring system can tail this file and alert on patterns like
 /// "all beads excluded by assignee" (stale worker crash) or "all beads
 /// blocked by dependencies" (genuine dependency wait vs. missing blocker).
+/// It never lands in the target repository — starvation diagnostics report
+/// on a workspace and must not modify it.
 // A diagnostic writer that reports nine distinct things; splitting it into a
 // struct would only move the same nine across the call.
 #[allow(clippy::too_many_arguments)]
@@ -3121,7 +3124,7 @@ impl super::Strand for PluckStrand {
                 }
             }
 
-            // Write pluck diagnostic to target workspace for monitoring
+            // Write pluck diagnostic to NEEDLE's diagnostics dir for monitoring
             if let Some(beads) = all_beads.as_deref() {
                 if let Err(e) = write_pluck_diagnostic(
                     &workspace_path,
@@ -3137,7 +3140,7 @@ impl super::Strand for PluckStrand {
                     tracing::warn!(
                         error = %e,
                         workspace = %workspace_path,
-                        "Failed to write pluck diagnostic to target workspace"
+                        "Failed to write pluck diagnostic to NEEDLE's diagnostics dir"
                     );
                 }
 
@@ -3175,7 +3178,7 @@ impl super::Strand for PluckStrand {
                 candidate_count
             );
 
-            // Write query execution diagnostic to target workspace
+            // Write query execution diagnostic to NEEDLE's diagnostics dir
             if let Some(ref all_beads) = all_beads {
                 let workspace_path = extract_workspace_path(all_beads);
                 if let Err(e) = write_query_execution_diagnostic(
@@ -3194,7 +3197,7 @@ impl super::Strand for PluckStrand {
                 }
             }
 
-            // Write pluck diagnostic to target workspace for monitoring
+            // Write pluck diagnostic to NEEDLE's diagnostics dir for monitoring
             if let Some(ref all_beads) = all_beads {
                 let workspace_path = extract_workspace_path(all_beads);
                 if let Err(e) = write_pluck_diagnostic(
@@ -3211,7 +3214,7 @@ impl super::Strand for PluckStrand {
                     tracing::warn!(
                         error = %e,
                         workspace = %workspace_path,
-                        "Failed to write pluck diagnostic to target workspace"
+                        "Failed to write pluck diagnostic to NEEDLE's diagnostics dir"
                     );
                 }
             }
@@ -3275,10 +3278,13 @@ struct FilterStage {
     filter_reasons: Vec<String>,
 }
 
-/// Write query execution diagnostic to .beads/query-execution-diagnostics.jsonl.
+/// Write query execution diagnostic to NEEDLE's diagnostics dir for the
+/// target workspace (`<state-root>/diagnostics/<workspace-slug>/`).
 ///
 /// This provides a complete audit trail showing exactly where candidates are
-/// lost in the filtering pipeline, enabling automated analysis of starvation alerts.
+/// lost in the filtering pipeline, enabling automated analysis of starvation
+/// alerts. Like every starvation diagnostic it stays out of the target
+/// repository — reporting on a workspace must not modify it.
 fn write_query_execution_diagnostic(
     workspace: &str,
     query_params: &QueryParameters,
@@ -3746,36 +3752,46 @@ mod tests {
         }
     }
 
-    /// A backend that omits named beads from the ready frontier — the
-    /// "genuinely invisible" condition — while `list_all()` still returns
-    /// them. Records `create_bead` calls so tests can assert that no alert
-    /// bead was filed, and can simulate a recovery that restores visibility.
-    #[allow(dead_code)]
+    /// A backend that omits named beads from its read projections — the
+    /// withholding shape starvation handling has to survive — while
+    /// `list_all()` still returns them. Records `create_bead` calls so tests
+    /// can assert that no diagnostic bead was filed in the target store.
     struct RecoverableFrontierStore {
         beads: Vec<Bead>,
-        /// Bead ids the ready query drops until a doctor repair restores them.
+        /// Bead ids the ready query drops.
         hidden: Mutex<HashSet<String>>,
-        /// Whether `doctor_repair` clears `hidden` (models a repair that works).
-        repair_restores: bool,
-        doctor_calls: Mutex<usize>,
+        /// When set, the starvation-inventory projection drops the hidden
+        /// beads too, leaving no pluck-visible read that returns them.
+        withholds_inventory: bool,
         created_beads: Mutex<Vec<(String, String, Vec<String>)>>,
     }
 
-    #[allow(dead_code)]
     impl RecoverableFrontierStore {
         fn hiding(beads: Vec<Bead>, hidden: &[&str]) -> Self {
             Self {
                 beads,
                 hidden: Mutex::new(hidden.iter().map(|id| id.to_string()).collect()),
-                repair_restores: false,
-                doctor_calls: Mutex::new(0),
+                withholds_inventory: false,
                 created_beads: Mutex::new(Vec::new()),
             }
         }
 
-        fn with_working_repair(mut self) -> Self {
-            self.repair_restores = true;
+        /// Also drop the hidden beads from the starvation-inventory projection.
+        fn with_inventory_projection_withheld(mut self) -> Self {
+            self.withholds_inventory = true;
             self
+        }
+
+        fn visible_beads(&self) -> Vec<Bead> {
+            let hidden = self
+                .hidden
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            self.beads
+                .iter()
+                .filter(|bead| !hidden.contains(bead.id.as_ref()))
+                .cloned()
+                .collect()
         }
     }
 
@@ -3785,17 +3801,16 @@ mod tests {
             Ok(self.beads.clone())
         }
 
+        async fn starvation_inventory(&self) -> Result<Vec<Bead>> {
+            if self.withholds_inventory {
+                Ok(self.visible_beads())
+            } else {
+                Ok(self.beads.clone())
+            }
+        }
+
         async fn ready(&self, _filters: &Filters) -> Result<Vec<Bead>> {
-            let hidden = self
-                .hidden
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            Ok(self
-                .beads
-                .iter()
-                .filter(|bead| !hidden.contains(bead.id.as_ref()))
-                .cloned()
-                .collect())
+            Ok(self.visible_beads())
         }
 
         async fn show(&self, id: &BeadId) -> Result<Bead> {
@@ -3851,20 +3866,7 @@ mod tests {
         }
 
         async fn doctor_repair(&self) -> Result<RepairReport> {
-            *self
-                .doctor_calls
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) += 1;
-            if self.repair_restores {
-                self.hidden
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .clear();
-            }
-            Ok(RepairReport {
-                fixed: vec!["test-repair".to_string()],
-                warnings: vec![],
-            })
+            Ok(RepairReport::default())
         }
 
         async fn doctor_check(&self) -> Result<RepairReport> {
@@ -3901,7 +3903,6 @@ mod tests {
     }
 
     /// Read every snapshot record written for `needle_workspace`.
-    #[allow(dead_code)]
     fn read_snapshot_records(needle_workspace: &std::path::Path) -> Vec<serde_json::Value> {
         let record_path = needle_workspace
             .join("state")
@@ -6563,11 +6564,9 @@ mod tests {
             other => panic!("expected NoWork, got: {:?}", other),
         }
 
-        // Verify NO starvation alert bead was created
-        // Since the store is a mock, we can't check actual bead creation,
-        // but we can verify the logic didn't attempt to create one by checking
-        // that the code path was skipped (no panic/error occurred)
-        // Test reaches this point = success
+        // Verify NO starvation alert bead was created. This plain mock cannot
+        // record creation attempts; the RecoverableFrontierStore tests below
+        // assert the create_bead contract itself.
     }
 
     #[tokio::test]
@@ -6630,6 +6629,147 @@ mod tests {
             event.data.get("open_count").and_then(|v| v.as_u64()),
             Some(1),
             "should have one open bead (blocked bead)"
+        );
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Withheld-frontier starvation — the target store must never gain a bead
+    // ──────────────────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn ready_frontier_withholding_bead_recovers_without_filing_a_bead() {
+        use crate::telemetry::test_utils::TestHelper;
+
+        let helper = TestHelper::new("test-worker");
+        let needle_workspace = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let workspace_path = workspace.path().to_str().unwrap();
+
+        // "hidden-1" is open, unassigned, and unblocked, but the backend's
+        // ready frontier drops it. The inventory read still returns it, so the
+        // relaxation waterfall's status-only tier surfaces the bead as a
+        // candidate. `RecoverableFrontierStore` records every `create_bead`
+        // call, so the emptiness assertion below is the regression proof that
+        // recovering the withheld bead files nothing in the target `.beads`
+        // store — starvation handling reports through telemetry instead.
+        let store = RecoverableFrontierStore::hiding(
+            vec![make_bead_with_workspace_and_labels(
+                "hidden-1",
+                1,
+                workspace_path,
+                vec![],
+            )],
+            &["hidden-1"],
+        );
+
+        let strand = PluckStrand::with_persistent_records(
+            vec![],
+            3,
+            helper.telemetry().clone(),
+            needle_workspace.path().to_path_buf(),
+            true,
+        );
+
+        let result = strand.evaluate(&store, &HashSet::new()).await;
+
+        // The waterfall must surface the bead the frontier dropped.
+        match result {
+            StrandResult::BeadFound(candidates) => {
+                assert_eq!(
+                    candidates.len(),
+                    1,
+                    "exactly the withheld bead should be recovered"
+                );
+                assert_eq!(candidates[0].id.as_ref(), "hidden-1");
+            }
+            other => panic!("expected BeadFound despite the withheld frontier, got: {other:?}"),
+        }
+
+        assert!(
+            store
+                .created_beads
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty(),
+            "no diagnostic bead may be filed in the target store"
+        );
+
+        // Work was found before the no-candidate diagnostic point, so the
+        // starvation event must not fire for this evaluation.
+        helper.sync().await;
+        helper.assert_event_not_emitted("strand.pluck.no_candidate");
+    }
+
+    #[tokio::test]
+    async fn fully_withheld_bead_reports_starvation_without_filing_a_bead() {
+        use crate::telemetry::test_utils::TestHelper;
+
+        let helper = TestHelper::new("test-worker");
+        let needle_workspace = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let workspace_path = workspace.path().to_str().unwrap();
+
+        // The starvation-inventory projection withholds the bead too, so every
+        // relaxation tier returns empty and the inventory pass behind the
+        // starvation diagnostics cannot see it either (open_count = 0). The
+        // report can only describe what the backend revealed — and it still
+        // travels out through telemetry and NEEDLE's own snapshot stream
+        // instead of a bead in the target.
+        let store = RecoverableFrontierStore::hiding(
+            vec![make_bead_with_workspace_and_labels(
+                "hidden-1",
+                1,
+                workspace_path,
+                vec![],
+            )],
+            &["hidden-1"],
+        )
+        .with_inventory_projection_withheld();
+
+        let strand = PluckStrand::with_persistent_records(
+            vec![],
+            3,
+            helper.telemetry().clone(),
+            needle_workspace.path().to_path_buf(),
+            true,
+        );
+
+        let result = strand.evaluate(&store, &HashSet::new()).await;
+
+        match result {
+            StrandResult::NoWork => {}
+            other => {
+                panic!("expected NoWork when the store withholds every read, got: {other:?}")
+            }
+        }
+
+        assert!(
+            store
+                .created_beads
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty(),
+            "a fully withheld frontier must not produce a diagnostic bead in the target store"
+        );
+
+        helper.sync().await;
+        helper.assert_event_emitted("strand.pluck.no_candidate");
+        let events = helper.events_by_type("strand.pluck.no_candidate");
+        assert_eq!(events.len(), 1, "exactly one starvation event");
+        assert_eq!(
+            events[0].data.get("open_count").and_then(|v| v.as_u64()),
+            Some(0),
+            "the projection withheld the bead from the diagnostics view too"
+        );
+
+        // The durable snapshot lands in NEEDLE's own state stream — never in
+        // the target repository.
+        let records = read_snapshot_records(needle_workspace.path());
+        let record = records.last().expect("at least one snapshot record");
+        assert_eq!(record["event"], "pluck.no_candidate");
+        assert_eq!(
+            record["summary"]["open_beads_total"], 0,
+            "the diagnostics saw none of the work the backend withheld"
         );
     }
 

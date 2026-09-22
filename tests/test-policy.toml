@@ -154,7 +154,14 @@ version = 1
 # +3 from the fixture_root migration batch (canary, claim, strand::*, types,
 # upgrade, validation): net new coverage picked up incidentally while
 # replacing shared /tmp fixture paths in those files.
-max_tests = 3912
+# +2 withheld-frontier starvation contracts in src/strand/pluck.rs
+# (needle-0cba0af5): a ready-frontier that drops an open bead is recovered by
+# the waterfall without filing anything in the target store, and a projection
+# that withholds it from every pluck-visible read reports the starvation
+# through telemetry and NEEDLE's own snapshot stream, also without filing.
+# The unit tier is the only home that can reach the private
+# RecoverableFrontierStore mock and the create_bead recorder it wraps.
+max_tests = 3914
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
