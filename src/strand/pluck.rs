@@ -1579,7 +1579,14 @@ impl PluckStrand {
             "Pluck ready queries returned no candidates; retrying with status=open and dependency safety"
         );
         let inventory = store.starvation_inventory().await?;
-        let finished_by_id: HashMap<BeadId, bool> = inventory
+        // Keep the candidate projection (which may carry bead-rs-specific
+        // readiness enrichment) separate from the authoritative inventory
+        // used to resolve lean bead-rs dependency edges.  A reduced
+        // projection can omit closed blockers, while legacy bead-forge edges
+        // still carry their own status as a safe fallback in
+        // `dependency_is_blocking`.
+        let complete_inventory = store.list_all().await?;
+        let finished_by_id: HashMap<BeadId, bool> = complete_inventory
             .iter()
             .map(|bead| (bead.id.clone(), bead.status.is_done()))
             .collect();
@@ -1616,7 +1623,8 @@ impl PluckStrand {
             "Pluck returned zero candidates but open beads exist; surfacing the oldest open bead that still passes the never-relaxed constraints"
         );
         let inventory = store.starvation_inventory().await?;
-        let finished_by_id: HashMap<BeadId, bool> = inventory
+        let complete_inventory = store.list_all().await?;
+        let finished_by_id: HashMap<BeadId, bool> = complete_inventory
             .iter()
             .map(|bead| (bead.id.clone(), bead.status.is_done()))
             .collect();
@@ -3460,6 +3468,103 @@ mod tests {
         }
     }
 
+    /// Models a bead-rs readiness projection that omits terminal blocker rows
+    /// while its ordinary inventory query still returns the complete graph.
+    /// Pluck must use the latter to resolve lean `blocker`/`kind` edges.
+    struct DeepDependencyStore {
+        complete: MemoryStore,
+        reduced: Vec<Bead>,
+    }
+
+    #[async_trait::async_trait]
+    impl BeadStore for DeepDependencyStore {
+        async fn ready(&self, _filters: &Filters) -> Result<Vec<Bead>> {
+            Ok(Vec::new())
+        }
+
+        async fn list_all(&self) -> Result<Vec<Bead>> {
+            self.complete.list_all().await
+        }
+
+        async fn starvation_inventory(&self) -> Result<Vec<Bead>> {
+            Ok(self.reduced.clone())
+        }
+
+        async fn show(&self, id: &BeadId) -> Result<Bead> {
+            self.complete.show(id).await
+        }
+
+        async fn claim(&self, id: &BeadId, actor: &str) -> Result<ClaimResult> {
+            self.complete.claim(id, actor).await
+        }
+
+        async fn release(&self, id: &BeadId) -> Result<()> {
+            self.complete.release(id).await
+        }
+
+        async fn block(&self, id: &BeadId) -> Result<()> {
+            self.complete.block(id).await
+        }
+
+        async fn flush(&self) -> Result<()> {
+            self.complete.flush().await
+        }
+
+        async fn reopen(&self, id: &BeadId) -> Result<()> {
+            self.complete.reopen(id).await
+        }
+
+        async fn labels(&self, id: &BeadId) -> Result<Vec<String>> {
+            self.complete.labels(id).await
+        }
+
+        async fn add_label(&self, id: &BeadId, label: &str) -> Result<()> {
+            self.complete.add_label(id, label).await
+        }
+
+        async fn remove_label(&self, id: &BeadId, label: &str) -> Result<()> {
+            self.complete.remove_label(id, label).await
+        }
+
+        async fn create_bead(&self, title: &str, body: &str, labels: &[&str]) -> Result<BeadId> {
+            self.complete.create_bead(title, body, labels).await
+        }
+
+        async fn doctor_repair(&self) -> Result<RepairReport> {
+            self.complete.doctor_repair().await
+        }
+
+        async fn doctor_check(&self) -> Result<RepairReport> {
+            self.complete.doctor_check().await
+        }
+
+        async fn full_rebuild(&self) -> Result<()> {
+            self.complete.full_rebuild().await
+        }
+
+        async fn add_dependency(&self, blocker_id: &BeadId, blocked_id: &BeadId) -> Result<()> {
+            self.complete.add_dependency(blocker_id, blocked_id).await
+        }
+
+        async fn remove_dependency(&self, blocked_id: &BeadId, blocker_id: &BeadId) -> Result<()> {
+            self.complete
+                .remove_dependency(blocked_id, blocker_id)
+                .await
+        }
+
+        async fn clear_assignee(&self, id: &BeadId) -> Result<()> {
+            self.complete.clear_assignee(id).await
+        }
+
+        async fn claim_auto(&self, actor: &str) -> Result<ClaimResult> {
+            self.complete.claim_auto(actor).await
+        }
+
+        fn has_valid_store(&self) -> bool {
+            true
+        }
+    }
+
     /// A store that returns all beads from `ready()` without any label filtering,
     /// simulating a backend that omits label data from its ready listing.
     struct UnfilteredStore {
@@ -3921,16 +4026,12 @@ mod tests {
         )
     }
 
-    /// Red reproducer for needle-cebcc031. Run with:
-    ///
-    /// `cargo test --lib strand::pluck::tests::bead_rs_deep_dependency_graph_reproduces_zero_candidate_regression -- --ignored --nocapture`
-    ///
-    /// This intentionally fails on current main: the complete fixture proves
-    /// the root is ready, while Pluck's reduced-inventory readiness assertion
-    /// rejects every bead because lean edges have no status fallback value.
+    /// Regression for needle-cebcc031 and needle-feae3af9. The reduced
+    /// bead-rs projection omits closed blocker rows, but `list_all()` remains
+    /// complete. Pluck must return the root whose blockers are closed without
+    /// relaxing the dependency guard for the rest of the open chain.
     #[tokio::test]
-    #[ignore = "intentional red reproducer for the bead-rs deep dependency graph"]
-    async fn bead_rs_deep_dependency_graph_reproduces_zero_candidate_regression() {
+    async fn bead_rs_deep_dependency_graph_returns_ready_root_only() {
         let (all_beads, incomplete_inventory, expected_ready_id) =
             bead_rs_deep_dependency_fixture();
         let complete_finished_by_id: HashMap<BeadId, bool> = all_beads
@@ -4014,18 +4115,37 @@ mod tests {
             dependency_is_blocking(root_dependency, &incomplete_finished_by_id),
             "the missing lookup falls back to the empty edge status and falsely blocks the root"
         );
-        let fallback_candidates: Vec<&Bead> = incomplete_inventory
-            .iter()
-            .filter(|bead| {
-                passes_never_relaxed_constraints(bead, &incomplete_finished_by_id, Utc::now())
-            })
-            .collect();
 
+        let store = DeepDependencyStore {
+            complete: MemoryStore {
+                beads: all_beads.clone(),
+            },
+            reduced: incomplete_inventory.clone(),
+        };
+        let strand = PluckStrand::new(vec![], Telemetry::new("deep-graph-test".to_string()));
+        let result = strand.evaluate(&store, &HashSet::new()).await;
+        let candidates = match result {
+            StrandResult::BeadFound(candidates) => candidates,
+            other => panic!("expected the closed-blocker root to be returned, got: {other:?}"),
+        };
+
+        assert_eq!(
+            candidates.iter().map(|bead| &bead.id).collect::<Vec<_>>(),
+            vec![&expected_ready_id],
+            "only the root with satisfied dependencies is ready"
+        );
         assert!(
-            fallback_candidates
+            incomplete_inventory
                 .iter()
-                .any(|bead| bead.id == expected_ready_id),
-            "Pluck's fallback returned zero candidates; expected ready bead {expected_ready_id}"
+                .filter(|bead| bead.id != expected_ready_id)
+                .all(|bead| bead
+                    .dependencies
+                    .iter()
+                    .any(|dependency| dependency_is_blocking(
+                        dependency,
+                        &complete_finished_by_id,
+                    ))),
+            "every other open bead must remain excluded by its open chain blocker"
         );
     }
 
