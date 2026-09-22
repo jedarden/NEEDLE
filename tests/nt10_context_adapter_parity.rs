@@ -129,6 +129,7 @@ impl Fixture {
         command
             .current_dir(&self.workspace)
             .env("HOME", &self.home)
+            .env("NEEDLE_STRANDS__EXPLORE__WORKSPACE_ROOT", self.root.path())
             .env("XDG_CONFIG_HOME", self.home.join(".config"))
             .env("XDG_STATE_HOME", self.home.join(".local/state"))
             .env("XDG_CACHE_HOME", self.home.join(".cache"))

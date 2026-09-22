@@ -702,6 +702,7 @@ fn init_in_sandbox(home: &Path, cwd: &Path, args: &[&str]) -> std::process::Outp
         .arg("init")
         .args(args)
         .env("HOME", home)
+        .env("NEEDLE_STRANDS__EXPLORE__WORKSPACE_ROOT", home)
         .current_dir(cwd)
         .output()
         .expect("failed to execute needle init")

@@ -15,13 +15,17 @@ NEEDLE tests often spawn real subprocesses (the `needle` binary itself) which ca
 
 ### 1. HOME Directory Isolation (Required)
 
-All tests that spawn the `needle` binary MUST isolate the HOME directory. The Explore strand (enabled by default) scans `workspace_root` (defaulting to `$HOME`) for bead workspaces.
+All tests that spawn the `needle` binary MUST isolate the HOME directory and
+pin `strands.explore.workspace_root` to the same temporary fixture (or disable
+Explore when the command does not exercise it). The Explore strand (enabled by
+default) otherwise scans its configured root for bead workspaces.
 
 **Pattern: Set HOME in test environment**
 
 ```rust
 let temp_home = TempHome::new()?;
-cmd.env("HOME", temp_home.path());
+cmd.env("HOME", temp_home.path())
+   .env("NEEDLE_STRANDS__EXPLORE__WORKSPACE_ROOT", temp_home.path());
 ```
 
 **Why this matters:**
@@ -103,7 +107,12 @@ identical.
 - **`isolate_command(cmd) -> (Command, TempDir)`** — sets HOME on the child's
   environment only and never mutates this process's HOME, so it needs no
   locking. Use it for subprocess tests; keep the returned `TempDir` alive while
-  the child runs.
+  the child runs, then add the Explore-root override shown above.
+
+- **`IsolatedChildEnv`** in `tests/integration_spawn/isolation.rs` — constructs
+  commands with HOME, XDG, state, temp, and Explore roots under one disposable
+  directory. The `subprocess_isolation` test statically rejects direct
+  `needle` constructors that omit HOME or the Explore-root override.
 
 - **`isolated_config() -> (Config, IsolatedHome)`** — the HOME guard plus a
   config whose Explore scan root is pinned to the temp directory and whose pulse
@@ -173,6 +182,7 @@ fn test_worker_with_real_process() {
     // 3. Spawn needle process with isolated HOME
     let child = Command::new("needle")
         .env("HOME", temp_home.path())
+        .env("NEEDLE_STRANDS__EXPLORE__WORKSPACE_ROOT", temp_home.path())
         .arg("worker")
         .arg("--once")
         .spawn()

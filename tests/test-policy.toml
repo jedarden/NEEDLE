@@ -237,7 +237,8 @@ contract = 203
 # process, ownership race, timeout, and telemetry contracts
 # (needle-eba55bfc).
 # +1 immediate-exit agent quarantine loop (needle-adbde195).
-e2e = 812
+# +2 subprocess HOME/Explore isolation contracts (needle-11c4fb97).
+e2e = 814
 soak = 0
 fuzz = 0
 
@@ -249,7 +250,8 @@ tier = "e2e"
 # +1 heartbeat cleanup removal-failure contract (needle-7721ee7d).
 # +2 status/doctor integration contracts (needle-e896b565): oversized-root
 # doctor exit and root-to-C transitive pinning.
-max_tests = 401
+# +2 subprocess HOME/Explore isolation contracts (needle-11c4fb97).
+max_tests = 403
 owner = "component:process-integration"
 
 [[harness]]

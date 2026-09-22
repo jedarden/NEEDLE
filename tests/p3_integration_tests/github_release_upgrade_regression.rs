@@ -98,6 +98,7 @@ fn run_upgrade_command(home: &Path, candidate: &Path) -> anyhow::Result<Output> 
                 .ok_or_else(|| anyhow::anyhow!("candidate path is not valid UTF-8"))?,
         ])
         .env("HOME", home)
+        .env("NEEDLE_STRANDS__EXPLORE__WORKSPACE_ROOT", home)
         .env("PATH", path)
         // The fleet dispatch environment sets a large stagger for workers.
         // A release canary must own its timing and not inherit that delay.

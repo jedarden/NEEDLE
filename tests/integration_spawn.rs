@@ -87,6 +87,8 @@ mod sigpipe_test;
 mod sigterm_heartbeat_cleanup;
 #[path = "integration_spawn/stop_kills_process_tree.rs"]
 mod stop_kills_process_tree;
+#[path = "integration_spawn/subprocess_isolation.rs"]
+mod subprocess_isolation;
 #[path = "integration_spawn/test_panic_safety_verification.rs"]
 mod test_panic_safety_verification;
 #[path = "integration_spawn/tmux_fixture.rs"]

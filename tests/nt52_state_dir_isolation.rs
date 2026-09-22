@@ -304,6 +304,7 @@ fn spawned_fixture_writes_nothing_under_a_read_only_fake_home() {
         .arg("json")
         .current_dir(fixture.path())
         .env("HOME", &fake_home)
+        .env("NEEDLE_STRANDS__EXPLORE__WORKSPACE_ROOT", fixture.path())
         .env(needle::state_dir::STATE_DIR_ENV, &override_root)
         .env(needle::state_dir::TEST_HARNESS_ENV, real_home())
         .output()
@@ -347,6 +348,7 @@ fn spawned_test_without_the_override_fails_fast_with_a_clear_message() {
         .arg("--version")
         .current_dir(fixture.path())
         .env("HOME", fixture.path())
+        .env("NEEDLE_STRANDS__EXPLORE__WORKSPACE_ROOT", fixture.path())
         .env(needle::state_dir::TEST_HARNESS_ENV, real_home())
         .env_remove(needle::state_dir::STATE_DIR_ENV)
         .output()
@@ -382,6 +384,7 @@ fn spawned_test_beneath_the_real_home_is_refused() {
         .arg("--version")
         .current_dir(fixture.path())
         .env("HOME", fixture.path())
+        .env("NEEDLE_STRANDS__EXPLORE__WORKSPACE_ROOT", fixture.path())
         .env(needle::state_dir::TEST_HARNESS_ENV, &home)
         .env(
             needle::state_dir::STATE_DIR_ENV,

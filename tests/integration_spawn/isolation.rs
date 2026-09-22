@@ -65,6 +65,7 @@ impl IsolatedChildEnv {
         command
             .current_dir(self.path())
             .env("HOME", self.path())
+            .env("NEEDLE_STRANDS__EXPLORE__WORKSPACE_ROOT", self.path())
             .env("XDG_CONFIG_HOME", self.path().join(".config"))
             .env("XDG_STATE_HOME", self.path().join(".local/state"))
             .env("XDG_CACHE_HOME", self.path().join(".cache"))
@@ -120,4 +121,40 @@ impl Drop for ChildGuard {
             let _ = child.wait();
         }
     }
+}
+
+#[test]
+fn isolated_child_pins_home_and_explore_root_to_fixture() {
+    let fixture = IsolatedChildEnv::new();
+    let outside = tempfile::tempdir().expect("create outside workspace fixture");
+    std::fs::create_dir_all(outside.path().join(".beads"))
+        .expect("create outside workspace marker");
+    std::fs::write(outside.path().join("marker"), "must remain untouched")
+        .expect("write outside workspace marker");
+
+    let output = fixture
+        .needle()
+        .args(["config", "--dump"])
+        .output()
+        .expect("run isolated needle config dump");
+    assert!(
+        output.status.success(),
+        "isolated config dump failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let config = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        config.contains(&fixture.path().display().to_string()),
+        "effective config must use the fixture as Explore root: {config}"
+    );
+    assert!(
+        !config.contains(&outside.path().display().to_string()),
+        "effective config must not discover an outside workspace: {config}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(outside.path().join("marker"))
+            .expect("read outside workspace marker"),
+        "must remain untouched"
+    );
 }

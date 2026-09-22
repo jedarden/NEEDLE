@@ -406,6 +406,7 @@ impl Fixture {
         command
             .current_dir(&self.workspace)
             .env("HOME", &self.home)
+            .env("NEEDLE_STRANDS__EXPLORE__WORKSPACE_ROOT", &self.home)
             .env("PATH", path)
             .env_remove("NEEDLE_WORKER__MAX_WORKERS")
             .env("NEEDLE_INNER", "1")
@@ -445,6 +446,7 @@ impl Fixture {
         command
             .current_dir(&self.workspace)
             .env("HOME", &self.home)
+            .env("NEEDLE_STRANDS__EXPLORE__WORKSPACE_ROOT", &self.home)
             .env("PATH", path)
             .env_remove("NEEDLE_WORKER__MAX_WORKERS")
             .env("NEEDLE_INNER", "1")

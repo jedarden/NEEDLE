@@ -39,6 +39,7 @@ impl IsolatedHome {
         Command::new(crate::isolation::needle_binary_path())
             .args(args)
             .env("HOME", self.0.path())
+            .env("NEEDLE_STRANDS__EXPLORE__WORKSPACE_ROOT", self.0.path())
             .output()
             .expect("failed to spawn needle binary")
     }

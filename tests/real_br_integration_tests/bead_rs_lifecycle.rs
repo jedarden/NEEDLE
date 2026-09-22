@@ -147,6 +147,7 @@ fn needle_claims_closes_and_restores_a_bead_rs_workspace() {
             "false",
         ])
         .env("HOME", &home)
+        .env("NEEDLE_STRANDS__EXPLORE__WORKSPACE_ROOT", root.path())
         .env("NEEDLE_INNER", "1")
         .env(
             "PATH",

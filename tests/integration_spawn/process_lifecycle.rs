@@ -320,6 +320,7 @@ fn needle_binary_runs_with_the_inner_process_marker() {
     let child = Command::new(crate::isolation::needle_binary_path())
         .arg("version")
         .env("HOME", home.path())
+        .env("NEEDLE_STRANDS__EXPLORE__WORKSPACE_ROOT", home.path())
         .env("NEEDLE_INNER", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

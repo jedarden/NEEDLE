@@ -599,6 +599,7 @@ fn config_set_flag_help_text_subprocess_verification() {
         .arg("config")
         .arg("--help")
         .env("HOME", temp_dir.path()) // Isolate from real bead workspaces
+        .env("NEEDLE_STRANDS__EXPLORE__WORKSPACE_ROOT", temp_dir.path())
         .output();
 
     // Verify the command executed successfully
