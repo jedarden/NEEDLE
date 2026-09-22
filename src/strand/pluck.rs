@@ -6659,7 +6659,12 @@ mod tests {
             "the blocked bead should be the only excluded bead"
         );
 
-        assert_eq!(store.list_all().await.unwrap(), before);
+        let after = store.list_all().await.unwrap();
+        assert_eq!(
+            serde_json::to_value(after).unwrap(),
+            serde_json::to_value(before).unwrap(),
+            "the target bead store must remain unchanged"
+        );
         assert!(
             store
                 .created_beads
