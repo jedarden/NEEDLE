@@ -546,12 +546,6 @@ impl Claimer {
 
         let mut attempts = 0u32;
 
-        // Tracks whether any candidate produced a ClaimError. The trailing
-        // "all_race_lost" span record below must not overwrite a real error reason:
-        // last-write-wins on the span attribute would otherwise report a lost race
-        // for what was actually a store error, discarding the reason entirely.
-        let mut had_claim_error = false;
-
         for candidate in &eligible {
             if attempts >= self.max_retries {
                 tracing::Span::current().record("needle.claim.result", "max_retries_exceeded");
@@ -723,7 +717,6 @@ impl Claimer {
                     continue;
                 }
                 Ok(ClaimResult::ClaimError { reason }) => {
-                    had_claim_error = true;
                     tracing::Span::current().record("needle.claim.result", &reason);
                     self.telemetry.emit(
                         EventKind::ClaimFailed {
@@ -753,8 +746,13 @@ impl Claimer {
                             last_error,
                         });
                     }
-                    // Continue to next candidate when threshold not yet reached
-                    continue;
+                    // A claim error is an operational failure, not a race. Stop
+                    // here so a candidate list containing only failed CLI/store
+                    // operations cannot be reported as AllRaceLost. The single-
+                    // bead boundary maps this outcome to ClaimResult::ClaimError.
+                    tracing::Span::current().record("otel.status_code", 2u64);
+                    tracing::Span::current().record("otel.status_description", &reason);
+                    return Ok(ClaimOutcome::StoreError(anyhow!(reason)));
                 }
                 Ok(ClaimResult::Suspect {
                     bead_id: id,
@@ -822,12 +820,10 @@ impl Claimer {
             }
         }
 
-        // Exhausted all eligible candidates without success.
-        // Only claim the span's result attribute if no candidate reported an error --
-        // an error reason recorded above is the more specific and more useful result.
-        if !had_claim_error {
-            tracing::Span::current().record("needle.claim.result", "all_race_lost");
-        }
+        // Exhausted all eligible candidates without success. At this point every
+        // attempted candidate was a genuine race loss or a normal not-claimable
+        // result; operational failures return above with StoreError.
+        tracing::Span::current().record("needle.claim.result", "all_race_lost");
         // Set Error status on the bead.claim span
         tracing::Span::current().record("otel.status_code", 2u64);
         tracing::Span::current().record("otel.status_description", "all_race_lost");
@@ -904,7 +900,9 @@ impl Claimer {
             ClaimOutcome::NoCandidates => Ok(ClaimResult::NotClaimable {
                 reason: "no candidates".to_string(),
             }),
-            ClaimOutcome::StoreError(e) => Err(e),
+            ClaimOutcome::StoreError(e) => Ok(ClaimResult::ClaimError {
+                reason: e.to_string(),
+            }),
             ClaimOutcome::Suspect {
                 bead_id,
                 consecutive_errors,
@@ -1847,7 +1845,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn claim_error_returns_error_not_race_lost() {
+    async fn claim_error_returns_store_error_not_race_lost() {
         // ClaimResult::ClaimError should be distinguished from RaceLost
         let bead = make_bead("needle-abc", "/tmp/ws");
         let store = Arc::new(
@@ -1864,9 +1862,12 @@ mod tests {
             .await
             .unwrap();
 
-        // Single claim error with no other candidates should return AllRaceLost
-        // (not Suspect yet - need consecutive errors across calls)
-        assert!(matches!(result, ClaimOutcome::AllRaceLost));
+        match result {
+            ClaimOutcome::StoreError(error) => {
+                assert!(error.to_string().contains("br update exited with code 1"));
+            }
+            other => panic!("expected StoreError, not a race outcome: {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -1897,7 +1898,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(matches!(result1, ClaimOutcome::AllRaceLost));
+        assert!(matches!(result1, ClaimOutcome::StoreError(_)));
 
         // Second call: second error
         let result2 = claimer
@@ -1909,7 +1910,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(matches!(result2, ClaimOutcome::AllRaceLost));
+        assert!(matches!(result2, ClaimOutcome::StoreError(_)));
 
         // Third call: third error triggers Suspect
         let result3 = claimer
@@ -1963,7 +1964,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(matches!(result1, ClaimOutcome::AllRaceLost));
+        assert!(matches!(result1, ClaimOutcome::StoreError(_)));
 
         // Second call: successful claim (empty results queue → default MockBeadStore behavior)
         let result2 = claimer
@@ -2061,14 +2062,18 @@ mod tests {
                 Ok(self.beads.lock().unwrap().clone())
             }
 
-            async fn show(&self, _id: &BeadId) -> Result<Bead> {
-                Err(anyhow!("store error: show failed"))
+            async fn show(&self, id: &BeadId) -> Result<Bead> {
+                self.beads
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .find(|bead| bead.id == *id)
+                    .cloned()
+                    .ok_or_else(|| anyhow!("bead not found: {id}"))
             }
 
             async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<ClaimResult> {
-                Ok(ClaimResult::ClaimError {
-                    reason: "show failed".to_string(),
-                })
+                Err(anyhow!("store error: claim failed"))
             }
 
             async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {
@@ -2241,14 +2246,16 @@ mod tests {
 
         // Make 3 separate calls to accumulate errors
         let bead_id = BeadId::from("needle-suspect");
-        let _ = claimer
+        let first = claimer
             .claim_one(&bead_id, "worker-1", &HashSet::new(), Some("test-strand"))
             .await
             .unwrap();
-        let _ = claimer
+        assert!(matches!(first, ClaimResult::ClaimError { .. }));
+        let second = claimer
             .claim_one(&bead_id, "worker-1", &HashSet::new(), Some("test-strand"))
             .await
             .unwrap();
+        assert!(matches!(second, ClaimResult::ClaimError { .. }));
         let result = claimer
             .claim_one(&bead_id, "worker-1", &HashSet::new(), Some("test-strand"))
             .await
