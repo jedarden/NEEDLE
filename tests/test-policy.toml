@@ -441,6 +441,13 @@ owner = "component:build-metadata"
 reason = "Grandfathered unit-tier debt; replace with an injected boundary."
 
 [[unit_exception]]
+path = "src/build_status.rs"
+kind = "process"
+max_occurrences = 1
+owner = "component:build-status"
+reason = "The build-status fixture initializes a real Git repository, because modern git refuses remote.origin.url from the config-only .git directory it previously hand-wrote."
+
+[[unit_exception]]
 path = "src/cli/mod.rs"
 kind = "global-env"
 max_occurrences = 6
