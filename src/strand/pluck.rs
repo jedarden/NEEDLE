@@ -3972,6 +3972,48 @@ mod tests {
             .iter()
             .map(|bead| (bead.id.clone(), bead.status.is_done()))
             .collect();
+        let root_dependency = all_beads
+            .iter()
+            .find(|bead| bead.id == expected_ready_id)
+            .and_then(|bead| bead.dependencies.first())
+            .expect("the ready root should have its closed blocker edge");
+        let parsed_dependency_id: BeadId = root_dependency
+            .id
+            .as_ref()
+            .parse()
+            .expect("BeadId parsing is infallible for the fixture ID");
+        assert_eq!(
+            parsed_dependency_id, root_dependency.id,
+            "parsing the edge ID preserves the same BeadId used by the inventory map"
+        );
+        assert_eq!(
+            root_dependency.id,
+            BeadId::from("needle-closed-blocker-000"),
+            "the dependency ID parses and compares exactly; this is not normalization drift"
+        );
+        assert!(
+            root_dependency.status.is_empty(),
+            "bead-rs lean blocker/kind edges do not carry a per-edge status"
+        );
+        assert_eq!(
+            complete_finished_by_id.get(&root_dependency.id),
+            Some(&true),
+            "the exact dependency ID resolves to the closed blocker in the complete inventory"
+        );
+        assert!(
+            incomplete_finished_by_id
+                .get(&root_dependency.id)
+                .is_none(),
+            "the same exact dependency ID misses only because the reduced inventory omitted closed blockers"
+        );
+        assert!(
+            !dependency_is_blocking(root_dependency, &complete_finished_by_id),
+            "a complete inventory proves the root dependency is satisfied"
+        );
+        assert!(
+            dependency_is_blocking(root_dependency, &incomplete_finished_by_id),
+            "the missing lookup falls back to the empty edge status and falsely blocks the root"
+        );
         let fallback_candidates: Vec<&Bead> = incomplete_inventory
             .iter()
             .filter(|bead| {
