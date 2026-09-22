@@ -1038,7 +1038,8 @@ impl ExploreStrand {
         candidates
             .into_iter()
             .filter(|bead| {
-                bead.assignee.is_none()
+                !filters.exclude_ids.contains(&bead.id)
+                    && bead.assignee.is_none()
                     && !crate::bead_store::excluded_by_labels(bead, filters, now)
                     && self.lane_admits(bead)
             })
@@ -1349,6 +1350,24 @@ impl ExploreStrand {
         rotated
     }
 
+    /// Rotate an already-ranked workspace list to this worker's starting point.
+    ///
+    /// The rank is computed before rotation so claimable work remains ahead of
+    /// poisoned or busy workspaces. Rotating the whole eligible list (rather
+    /// than only a fixed prefix) gives workers with different identities
+    /// different first targets even when there are only two workspaces.
+    fn worker_scan_order(&self, mut workspaces: Vec<PathBuf>) -> Vec<PathBuf> {
+        if workspaces.len() < 2 {
+            return workspaces;
+        }
+
+        let mut hasher = DefaultHasher::new();
+        self.qualified_id.hash(&mut hasher);
+        let offset = (hasher.finish() as usize) % workspaces.len();
+        workspaces.rotate_left(offset);
+        workspaces
+    }
+
     /// Create a bead store for a workspace's explicit backend binding.
     #[allow(dead_code)]
     async fn store_for_workspace(workspace: &Path) -> Result<Arc<dyn BeadStore>, anyhow::Error> {
@@ -1379,11 +1398,7 @@ impl super::Strand for ExploreStrand {
         "explore"
     }
 
-    async fn evaluate(
-        &self,
-        _store: &dyn BeadStore,
-        _exclusions: &HashSet<BeadId>,
-    ) -> StrandResult {
+    async fn evaluate(&self, _store: &dyn BeadStore, exclusions: &HashSet<BeadId>) -> StrandResult {
         use std::time::Instant;
 
         // If disabled, nothing to explore.
@@ -1485,14 +1500,14 @@ impl super::Strand for ExploreStrand {
                 "human".to_string(),
                 "blocked".to_string(),
             ],
-            exclude_ids: HashSet::new(),
+            exclude_ids: exclusions.clone(),
         };
 
         // Collect frontier health metrics for deterministic workspace ranking.
-        // Workspaces are ranked by: (P0 ready count desc, ready count desc,
-        // oldest ready bead age desc, path asc), then the top three are rotated
-        // by hash(qualified_id) % 3 to spread concurrent workers across them while
-        // keeping all workspaces reachable (bf-6anj4's guarantee).
+        // Workspaces are ranked by: (P0 claimable count desc, claimable count
+        // desc, oldest claimable bead age desc, path asc), then the claimable
+        // frontier is rotated by worker identity to spread concurrent workers
+        // across it while keeping every workspace reachable.
         #[derive(Clone)]
         struct WorkspaceHealth {
             path: PathBuf,
@@ -1537,6 +1552,33 @@ impl super::Strand for ExploreStrand {
                 }
             };
 
+            // A busy workspace cannot produce a claim for this worker. Keep it
+            // out of the ranked/rotated frontier so it cannot consume the
+            // first scan slot ahead of a workspace that can actually dispatch.
+            match self
+                .workspace_capacity(workspace, remote_store.as_ref())
+                .await
+            {
+                Ok(Some(snapshot)) if snapshot.at_capacity() => {
+                    tracing::debug!(
+                        workspace = %workspace.display(),
+                        active_workers = snapshot.active_workers,
+                        max_workers = snapshot.max_workers,
+                        "excluding busy workspace from Explore frontier ranking"
+                    );
+                    continue;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::warn!(
+                        workspace = %workspace.display(),
+                        error = %error,
+                        "workspace capacity could not be evaluated during Explore ranking"
+                    );
+                    continue;
+                }
+            }
+
             // Reconcile terminal auto-split umbrellas before measuring this
             // workspace's frontier. Closing a completed parent can make its
             // dependents ready in this same scan, while also preventing the
@@ -1565,7 +1607,19 @@ impl super::Strand for ExploreStrand {
             }
 
             match remote_store.ready(&filters).await {
-                Ok(candidates) => {
+                Ok(mut candidates) => {
+                    self.filter_circuit_candidates(workspace, &mut candidates)
+                        .await;
+                    let mut candidates = self
+                        .admit_candidates(remote_store.as_ref(), candidates, &filters)
+                        .await;
+                    candidates.retain(|bead| {
+                        !crate::mitosis::would_release_as_split_out_of_scope(
+                            bead,
+                            self.split_after_failures,
+                        )
+                    });
+
                     // The store passed both backend/inventory admission and
                     // the frontier query. Clear any prior quarantine only now;
                     // an inventory probe that succeeds followed by a failed
@@ -1610,22 +1664,21 @@ impl super::Strand for ExploreStrand {
                 })
         });
 
-        // Rotate top three by worker hash to spread concurrent workers
-        // Proper rotation: offset 1 → [B,C,A], offset 2 → [C,A,B]
-        if workspace_health.len() >= 3 {
-            let mut hasher = DefaultHasher::new();
-            self.qualified_id.hash(&mut hasher);
-            let offset = (hasher.finish() % 3) as usize;
-
-            if offset > 0 {
-                let top = workspace_health[0..3].to_vec();
-                for i in 0..3 {
-                    workspace_health[i] = top[(i + offset) % 3].clone();
-                }
+        // Keep workspaces with at least one claimable candidate ahead of
+        // poisoned/empty ones, then rotate the claimable frontier per worker.
+        // This makes the first target both useful and de-herded; the trailing
+        // workspaces are still scanned for recovery and telemetry.
+        let mut claimable_workspaces = Vec::new();
+        let mut deferred_workspaces = Vec::new();
+        for health in workspace_health {
+            if health.ready_count > 0 {
+                claimable_workspaces.push(health.path);
+            } else {
+                deferred_workspaces.push(health.path);
             }
         }
-
-        let workspaces: Vec<PathBuf> = workspace_health.iter().map(|h| h.path.clone()).collect();
+        let mut workspaces = self.worker_scan_order(claimable_workspaces);
+        workspaces.extend(deferred_workspaces);
         let total_workspaces = workspaces.len();
 
         tracing::debug!(
@@ -5857,6 +5910,7 @@ mod tests {
     struct FrontierRankingStore {
         _workspace: PathBuf,
         beads: Vec<Bead>,
+        ready_calls: Option<Arc<std::sync::Mutex<Vec<PathBuf>>>>,
     }
 
     impl FrontierRankingStore {
@@ -5864,6 +5918,19 @@ mod tests {
             Self {
                 _workspace: workspace,
                 beads,
+                ready_calls: None,
+            }
+        }
+
+        fn with_ready_calls(
+            workspace: PathBuf,
+            beads: Vec<Bead>,
+            ready_calls: Arc<std::sync::Mutex<Vec<PathBuf>>>,
+        ) -> Self {
+            Self {
+                _workspace: workspace,
+                beads,
+                ready_calls: Some(ready_calls),
             }
         }
     }
@@ -5879,6 +5946,9 @@ mod tests {
         }
 
         async fn ready(&self, _filters: &Filters) -> Result<Vec<Bead>> {
+            if let Some(ready_calls) = &self.ready_calls {
+                ready_calls.lock().unwrap().push(self._workspace.clone());
+            }
             Ok(self.beads.clone())
         }
 
@@ -5958,13 +6028,20 @@ mod tests {
     /// Mock factory for frontier ranking tests.
     struct FrontierRankingFactory {
         workspaces: std::collections::HashMap<PathBuf, Vec<Bead>>,
+        ready_calls: Option<Arc<std::sync::Mutex<Vec<PathBuf>>>>,
     }
 
     impl FrontierRankingFactory {
         fn new(workspaces: Vec<(PathBuf, Vec<Bead>)>) -> Self {
             Self {
                 workspaces: workspaces.into_iter().collect(),
+                ready_calls: None,
             }
+        }
+
+        fn with_ready_calls(mut self, ready_calls: Arc<std::sync::Mutex<Vec<PathBuf>>>) -> Self {
+            self.ready_calls = Some(ready_calls);
+            self
         }
     }
 
@@ -5972,20 +6049,26 @@ mod tests {
     impl StoreFactory for FrontierRankingFactory {
         async fn create_store(&self, workspace: &Path) -> Result<Arc<dyn BeadStore>> {
             if let Some(beads) = self.workspaces.get(workspace) {
-                Ok(Arc::new(FrontierRankingStore::new(
-                    workspace.to_path_buf(),
-                    beads.clone(),
-                )))
+                let store = match &self.ready_calls {
+                    Some(ready_calls) => FrontierRankingStore::with_ready_calls(
+                        workspace.to_path_buf(),
+                        beads.clone(),
+                        ready_calls.clone(),
+                    ),
+                    None => FrontierRankingStore::new(workspace.to_path_buf(), beads.clone()),
+                };
+                Ok(Arc::new(store))
             } else {
                 Err(anyhow::anyhow!("unknown workspace"))
             }
         }
     }
 
-    /// Test that two workers with different identifiers pick different first targets
-    /// among the top three workspaces when there are multiple high-ranking candidates.
+    /// Regression for poisoned-frontier and multi-worker herding scenarios:
+    /// excluded work must not rank its workspace ahead of claimable work, and
+    /// different workers must rotate across the remaining frontier.
     #[test]
-    fn frontier_ranking_rotates_top_three_for_different_workers() {
+    fn frontier_ranking_skips_poisoned_workspace_and_rotates_workers() {
         let runtime = create_test_runtime();
         runtime.block_on(async {
             let temp_root = tempfile::tempdir().unwrap();
@@ -6023,7 +6106,15 @@ mod tests {
                 (ws3.clone(), vec![p0_bead("ws3-p0")]),
             ];
 
-            let factory = Arc::new(FrontierRankingFactory::new(workspaces_data));
+            let calls1 = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let calls2 = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let factory1 = Arc::new(
+                FrontierRankingFactory::new(workspaces_data.clone())
+                    .with_ready_calls(calls1.clone()),
+            );
+            let factory2 = Arc::new(
+                FrontierRankingFactory::new(workspaces_data).with_ready_calls(calls2.clone()),
+            );
 
             // Create two workers with different IDs
             let home = PathBuf::from("/home/test");
@@ -6038,9 +6129,24 @@ mod tests {
                 registry1,
                 telemetry1,
                 "worker-alpha".to_string(),
-                factory.clone(),
+                factory1,
                 300,
             );
+
+            let claimable_order = strand1.worker_scan_order(vec![ws2.clone(), ws3.clone()]);
+            let worker2_id = (0..128)
+                .map(|index| format!("worker-bravo-{index}"))
+                .find(|worker_id| {
+                    let candidate = ExploreStrand::new_for_test(
+                        vec![ws2.clone(), ws3.clone()],
+                        home.clone(),
+                        crate::registry::Registry::new(tempfile::tempdir().unwrap().path()),
+                        Telemetry::new(worker_id.clone()),
+                        worker_id.clone(),
+                    );
+                    candidate.worker_scan_order(vec![ws2.clone(), ws3.clone()]) != claimable_order
+                })
+                .expect("worker identities should produce more than one frontier rotation");
 
             let temp_dir2 = tempfile::tempdir().unwrap();
             let registry2 = crate::registry::Registry::new(temp_dir2.path());
@@ -6051,16 +6157,17 @@ mod tests {
                 home,
                 registry2,
                 telemetry2,
-                "worker-bravo".to_string(),
-                factory,
+                worker2_id,
+                factory2,
                 300,
             );
 
             let store = DummyStore;
 
             // Run both strands
-            let result1 = strand1.evaluate(&store, &HashSet::new()).await;
-            let result2 = strand2.evaluate(&store, &HashSet::new()).await;
+            let exclusions = HashSet::from([BeadId::from("ws1-p0".to_string())]);
+            let result1 = strand1.evaluate(&store, &exclusions).await;
+            let result2 = strand2.evaluate(&store, &exclusions).await;
 
             // Both should find candidates
             let StrandResult::BeadFound(candidates1) = result1 else {
@@ -6070,38 +6177,43 @@ mod tests {
                 panic!("worker-bravo should find candidates");
             };
 
-            // The rotation should cause workers to scan workspaces in different orders
-            // While final candidates are globally sorted by priority/created_at/ID,
-            // the rotation ensures workers start with different workspaces and scan
-            // in different sequences, spreading load across the fleet.
-            //
-            // Verify rotation is working by checking that both workers found candidates
-            // from all three workspaces (not blocked on a single workspace).
             let workspaces1: HashSet<_> = candidates1.iter().map(|c| &c.workspace).collect();
             let workspaces2: HashSet<_> = candidates2.iter().map(|c| &c.workspace).collect();
 
             assert_eq!(
                 workspaces1.len(),
-                3,
-                "worker-alpha should have found candidates from all 3 workspaces"
+                2,
+                "worker-alpha should find both claimable workspaces"
             );
             assert_eq!(
                 workspaces2.len(),
-                3,
-                "worker-bravo should have found candidates from all 3 workspaces"
+                2,
+                "worker-bravo should find both claimable workspaces"
             );
             assert!(
-                workspaces1.contains(&&ws1)
-                    && workspaces1.contains(&&ws2)
-                    && workspaces1.contains(&&ws3),
-                "worker-alpha should have scanned all workspaces despite rotation"
+                workspaces1.contains(&&ws2) && workspaces1.contains(&&ws3),
+                "worker-alpha should skip the excluded workspace"
             );
             assert!(
-                workspaces2.contains(&&ws1)
-                    && workspaces2.contains(&&ws2)
-                    && workspaces2.contains(&&ws3),
-                "worker-bravo should have scanned all workspaces despite rotation"
+                workspaces2.contains(&&ws2) && workspaces2.contains(&&ws3),
+                "worker-bravo should skip the excluded workspace"
             );
+
+            let calls1 = calls1.lock().unwrap().clone();
+            let calls2 = calls2.lock().unwrap().clone();
+            assert_eq!(calls1.len(), 6);
+            assert_eq!(calls2.len(), 6);
+            assert_eq!(
+                &calls1[3..],
+                &[
+                    claimable_order[0].clone(),
+                    claimable_order[1].clone(),
+                    ws1.clone()
+                ]
+            );
+            assert_ne!(&calls1[3..5], &calls2[3..5]);
+            assert_eq!(&calls1[5], &ws1);
+            assert_eq!(&calls2[5], &ws1);
         });
     }
 
