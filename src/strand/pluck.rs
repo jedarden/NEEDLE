@@ -3980,10 +3980,14 @@ mod tests {
             }));
         }
 
-        for index in 0..BEAD_RS_DEEP_GRAPH_DEPTH {
+        for (index, blocker_id) in closed_blocker_ids
+            .iter()
+            .enumerate()
+            .take(BEAD_RS_DEEP_GRAPH_DEPTH)
+        {
             let id = format!("needle-deep-open-{index:03}");
             let mut dependencies = vec![serde_json::json!({
-                "blocker": closed_blocker_ids[index],
+                "blocker": blocker_id,
                 "kind": "blocks"
             })];
             if index > 0 {
@@ -4102,9 +4106,7 @@ mod tests {
             "the exact dependency ID resolves to the closed blocker in the complete inventory"
         );
         assert!(
-            incomplete_finished_by_id
-                .get(&root_dependency.id)
-                .is_none(),
+            !incomplete_finished_by_id.contains_key(&root_dependency.id),
             "the same exact dependency ID misses only because the reduced inventory omitted closed blockers"
         );
         assert!(

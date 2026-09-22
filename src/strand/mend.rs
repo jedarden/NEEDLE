@@ -6714,14 +6714,15 @@ mod tests {
             .await
             .unwrap();
 
-        // Exactly one edge removed: needle-a ← needle-b.
-        let removed = removed_deps.lock().unwrap();
+        // Exactly one edge removed: needle-a ← needle-b. Snapshot under the
+        // lock so the guard drops before the awaits below.
+        let removed = removed_deps.lock().unwrap().clone();
         assert_eq!(removed.len(), 1);
         assert_eq!(removed[0].0, BeadId::from("needle-a"));
         assert_eq!(removed[0].1, BeadId::from("needle-b"));
 
         // Both endpoint beads carry the Phase 19.7 note.
-        let notes = appended_notes.lock().unwrap();
+        let notes = appended_notes.lock().unwrap().clone();
         assert_eq!(notes.len(), 2);
         let expected = "cycle broken (Phase 19.7): removed needle-a ← needle-b";
         assert!(notes.iter().all(|(id, text)| {
@@ -6732,7 +6733,7 @@ mod tests {
         assert_eq!(summary.cycles_broken, 1);
         // Wait for background task to process telemetry events.
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        let events = events.lock().unwrap();
+        let events = events.lock().unwrap().clone();
         let cycle_events: Vec<_> = events
             .iter()
             .filter(|event| event.event_type == "mend.cycle_broken")

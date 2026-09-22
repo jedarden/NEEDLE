@@ -1458,8 +1458,10 @@ timeout_secs: 5
         let virtual_home = dir.path().join("roam-only");
         std::fs::create_dir_all(&virtual_home).unwrap();
 
-        let mut explore = ExploreConfig::default();
-        explore.workspaces = vec![first.clone(), virtual_home, second.clone()];
+        let explore = ExploreConfig {
+            workspaces: vec![first.clone(), virtual_home, second.clone()],
+            ..Default::default()
+        };
         let strand = FleetWeaveStrand::new(
             make_enabled_config(),
             explore,
