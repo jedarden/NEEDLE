@@ -6405,6 +6405,14 @@ pub struct ModelLimits {
     pub max_concurrent: Option<u32>,
 }
 
+/// Per-attempt spend cap (`limits.attempt.max_cost_usd`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AttemptLimitsConfig {
+    /// Dollar amount at which a running dispatch is stopped. Off when unset.
+    #[serde(default)]
+    pub max_cost_usd: Option<f64>,
+}
+
 /// Provider/model concurrency and rate limiting configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LimitsConfig {
@@ -6414,6 +6422,9 @@ pub struct LimitsConfig {
     /// Per-model limits keyed by model name (e.g., `claude-opus`).
     #[serde(default)]
     pub models: BTreeMap<String, ModelLimits>,
+    /// Per-attempt spend cap, overridable per adapter.
+    #[serde(default)]
+    pub attempt: AttemptLimitsConfig,
 }
 
 impl ConfigTier for LimitsConfig {

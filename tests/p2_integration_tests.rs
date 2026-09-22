@@ -961,6 +961,7 @@ fn provider_concurrency_limit_blocks_at_max() {
     let config = LimitsConfig {
         providers,
         models: std::collections::BTreeMap::new(),
+        attempt: Default::default(),
     };
     let limiter = RateLimiter::new(config, dir.path());
 
@@ -1011,6 +1012,7 @@ fn model_concurrency_limit_blocks_at_max() {
     let config = LimitsConfig {
         providers: std::collections::BTreeMap::new(),
         models,
+        attempt: Default::default(),
     };
     let limiter = RateLimiter::new(config, dir.path());
 
@@ -1051,6 +1053,7 @@ fn below_limit_allows_dispatch() {
     let config = LimitsConfig {
         providers,
         models: std::collections::BTreeMap::new(),
+        attempt: Default::default(),
     };
     let limiter = RateLimiter::new(config, dir.path());
 
@@ -1080,6 +1083,7 @@ fn rpm_limit_blocks_after_exhaustion() {
     let config = LimitsConfig {
         providers,
         models: std::collections::BTreeMap::new(),
+        attempt: Default::default(),
     };
     let limiter = RateLimiter::new(config, dir.path());
 

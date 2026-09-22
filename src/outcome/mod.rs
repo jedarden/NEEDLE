@@ -1588,6 +1588,7 @@ impl OutcomeHandler {
             outcome,
             bead_action,
             telemetry_events,
+            budget_exhausted: false,
         })
     }
 
@@ -2274,6 +2275,7 @@ impl OutcomeHandler {
                 outcome: classify(output.exit_code, was_interrupted, false),
                 bead_action: BeadAction::Errored,
                 telemetry_events: vec![],
+                budget_exhausted: false,
             });
         }
 
@@ -2349,6 +2351,7 @@ impl OutcomeHandler {
                     outcome: classify(output.exit_code, was_interrupted, false),
                     bead_action: BeadAction::Errored,
                     telemetry_events: vec![],
+                    budget_exhausted: false,
                 })
             }
         }
@@ -7758,6 +7761,7 @@ mod tests {
             bead_action,
             telemetry_events,
             outcome: Outcome::GateError,
+            budget_exhausted: false,
         };
 
         // The bead should be released

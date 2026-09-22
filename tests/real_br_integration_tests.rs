@@ -1629,6 +1629,7 @@ fn real_bead_rs_provider_concurrency_limit_enforced() {
     let config = needle::config::LimitsConfig {
         providers,
         models: std::collections::BTreeMap::new(),
+        attempt: Default::default(),
     };
     let limiter = needle::rate_limit::RateLimiter::new(config, dir.path());
 

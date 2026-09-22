@@ -3673,6 +3673,7 @@ impl Worker {
                         failure_count,
                         &failure_history,
                         &prior_fixes,
+                        "",
                     )
                 } else {
                     prompt_builder.build_pluck_with_history(
@@ -3681,6 +3682,7 @@ impl Worker {
                         &worker_name,
                         &failure_history,
                         &prior_fixes,
+                        "",
                     )
                 }
             }),
