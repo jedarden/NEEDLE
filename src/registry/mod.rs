@@ -570,13 +570,14 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_fixtures::fixture_root;
     use crate::types::WorkerState;
 
     fn make_entry(id: &str) -> WorkerEntry {
         WorkerEntry {
             id: id.to_string(),
             pid: std::process::id(),
-            workspace: PathBuf::from("/tmp/test-workspace"),
+            workspace: fixture_root("test-workspace"),
             agent: "claude".to_string(),
             model: Some("sonnet".to_string()),
             provider: Some("anthropic".to_string()),

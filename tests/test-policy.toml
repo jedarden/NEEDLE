@@ -151,7 +151,10 @@ version = 1
 # the post-claim state arms route through the graceful path.
 # +2 test_fixtures module self-tests (needle-bff53d4c): fixture_root returns
 # a directory that exists, and two calls with the same tag never collide.
-max_tests = 3909
+# +3 from the fixture_root migration batch (canary, claim, strand::*, types,
+# upgrade, validation): net new coverage picked up incidentally while
+# replacing shared /tmp fixture paths in those files.
+max_tests = 3912
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

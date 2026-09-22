@@ -701,6 +701,7 @@ mod tests {
     use super::*;
     use crate::bead_store::{Filters, RepairReport};
     use crate::strand::Strand;
+    use crate::test_fixtures::fixture_root;
     use crate::types::{Bead, BeadId, ClaimResult};
 
     use chrono::Utc;
@@ -807,7 +808,7 @@ mod tests {
 
     #[test]
     fn state_load_missing_returns_default() {
-        let path = PathBuf::from("/tmp/nonexistent-pulse-state-12345.json");
+        let path = fixture_root("nonexistent-pulse-state-12345.json");
         let state = PulseState::load(&path).unwrap();
         assert!(state.last_run.is_none());
         assert!(state.seen_fingerprints.is_empty());
@@ -914,7 +915,7 @@ mod tests {
         // Pre-populate state with recent run
         let mut state = PulseState::default();
         state.touch();
-        let hash = workspace_hash(Path::new("/tmp/test"));
+        let hash = workspace_hash(&fixture_root("test"));
         let state_path = state_dir.path().join(format!("{hash}.json"));
         state.save(&state_path).unwrap();
 
@@ -931,7 +932,7 @@ mod tests {
 
         let strand = PulseStrand::new(
             config,
-            PathBuf::from("/tmp/test"),
+            fixture_root("test"),
             state_dir.path().to_path_buf(),
             telemetry,
         );
@@ -1055,7 +1056,7 @@ mod tests {
                 ..PulseConfig::default()
             },
             PathBuf::from("/my/workspace"),
-            PathBuf::from("/tmp/state"),
+            fixture_root("state"),
             telemetry,
         );
 
@@ -1071,7 +1072,7 @@ mod tests {
         let strand = PulseStrand::new(
             PulseConfig::default(),
             PathBuf::from("/my/workspace"),
-            PathBuf::from("/tmp/state"),
+            fixture_root("state"),
             telemetry,
         );
 

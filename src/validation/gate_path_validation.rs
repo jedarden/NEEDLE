@@ -313,6 +313,7 @@ fn which_exists(command: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_fixtures::fixture_root;
     use std::path::PathBuf;
     use tempfile::TempDir;
 
@@ -393,7 +394,7 @@ mod tests {
         // `true` should always exist in $PATH
         let result = validate_command_path(
             "true",
-            Path::new("/tmp"),
+            &fixture_root("ws-root"),
             Some(&PathBuf::from("/workspace/.needle.yaml")),
         );
 
@@ -407,7 +408,7 @@ mod tests {
     fn test_validate_path_command_missing() {
         let result = validate_command_path(
             "nonexistent_command_xyz123",
-            Path::new("/tmp"),
+            &fixture_root("ws-root"),
             Some(&PathBuf::from("/workspace/.needle.yaml")),
         );
 
@@ -433,7 +434,7 @@ mod tests {
         for command in complex_commands {
             let result = validate_command_path(
                 command,
-                Path::new("/tmp"),
+                &fixture_root("ws-root"),
                 Some(&PathBuf::from("/workspace/.needle.yaml")),
             );
             assert!(

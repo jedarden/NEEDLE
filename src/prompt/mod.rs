@@ -52,6 +52,8 @@ const DEFAULT_PLUCK_TEMPLATE: &str = "\
 
 {workspace_instructions}
 
+{deadline_notice}
+
 Complete the task described above. When finished:
 - **If you changed files, commit them before starting the checklist below, but do not
   close the bead yet.** Real changes are source, tests, config, or documentation the
@@ -583,6 +585,10 @@ const COMMON_VARS: &[&str] = &[
     // Retrieved prior fixes for the failure (plan 4.4 step 7); empty unless a
     // retry retrieved something.
     "{prior_fixes}",
+    // Stated wall-clock deadline and checkpoint-commit request for this
+    // attempt (N-T25), composed by the adapter that will run it; empty when
+    // the attempt faces no wall-clock cap.
+    "{deadline_notice}",
 ];
 
 /// Returns the extra (strand-specific) variables allowed for a given template name.
@@ -1007,7 +1013,8 @@ impl PromptBuilder {
         // the caller supplying them (first attempt, or a strand that has none).
         content = content
             .replace("{failure_history}", "")
-            .replace("{prior_fixes}", "");
+            .replace("{prior_fixes}", "")
+            .replace("{deadline_notice}", "");
 
         let hash = hex_sha256(&content);
         let token_estimate = content.len() as u64 / 4;
@@ -1061,6 +1068,7 @@ impl PromptBuilder {
         worker_id: &str,
         failure_history: &str,
         prior_fixes: &str,
+        deadline_notice: &str,
     ) -> Result<BuiltPrompt> {
         self.build_with_vars(
             bead,
@@ -1070,12 +1078,19 @@ impl PromptBuilder {
             &[
                 ("{failure_history}", failure_history),
                 ("{prior_fixes}", prior_fixes),
+                ("{deadline_notice}", deadline_notice),
             ],
         )
     }
 
     /// Build a split prompt carrying the bead's rendered attempt history and
     /// retrieved prior fixes.
+    ///
+    /// `deadline_notice` is accepted for call-site symmetry with
+    /// [`Self::build_pluck_with_history`] (N-T25): the split template asks
+    /// for bead decomposition, not for work, so it renders no checkpoint
+    /// request and the value is ignored.
+    #[allow(clippy::too_many_arguments)]
     pub fn build_split_with_history(
         &self,
         bead: &Bead,
@@ -1084,7 +1099,9 @@ impl PromptBuilder {
         failure_count: u32,
         failure_history: &str,
         prior_fixes: &str,
+        deadline_notice: &str,
     ) -> Result<BuiltPrompt> {
+        let _ = deadline_notice;
         self.build_with_vars(
             bead,
             workspace,
@@ -1534,6 +1551,7 @@ fn extract_template_vars(template: &str) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::config::PromptConfig;
+    use crate::test_fixtures::fixture_root;
     use crate::types::{BeadId, BeadStatus};
     use chrono::Utc;
     use std::path::PathBuf;
@@ -1547,7 +1565,7 @@ mod tests {
             status: BeadStatus::InProgress,
             assignee: Some("worker-01".to_string()),
             labels: vec![],
-            workspace: PathBuf::from("/tmp/test-workspace"),
+            workspace: fixture_root("test-workspace"),
             dependencies: vec![],
             dependents: vec![],
             comments: vec![],
@@ -1562,12 +1580,93 @@ mod tests {
         let builder = PromptBuilder::new(&config);
         let bead = test_bead();
         let result = builder
-            .build_pluck(&bead, Path::new("/tmp/test-workspace"), "worker-01")
+            .build_pluck(&bead, &fixture_root("test-workspace"), "worker-01")
             .unwrap();
 
         assert!(
             result.content.contains("needle-abc"),
             "prompt must contain bead ID"
+        );
+    }
+
+    #[test]
+    fn bind_attempt_id_updates_prompt_bytes_and_hash() {
+        let prompt = BuiltPrompt {
+            content: "do the work".to_string(),
+            hash: hex_sha256("do the work"),
+            token_estimate: 2,
+            template_name: "pluck".to_string(),
+            template_version: "pluck-default".to_string(),
+        };
+        let bound = PromptBuilder::bind_attempt_id(prompt, "attempt-123");
+        assert!(bound.content.starts_with("[needle-attempt:attempt-123]"));
+        assert_eq!(bound.hash, hex_sha256(&bound.content));
+    }
+
+    #[test]
+    fn build_pluck_renders_the_supplied_deadline_notice() {
+        // N-T25: the template renders the deadline the running adapter
+        // stated — its real budget, not a constant.
+        let config = PromptConfig::default();
+        let builder = PromptBuilder::new(&config);
+        let bead = test_bead();
+
+        let hour = builder
+            .build_pluck_with_history(
+                &bead,
+                &fixture_root("test-workspace"),
+                "worker-01",
+                "",
+                "",
+                "You have 60 minutes of wall clock. By the 75% mark (about 45 minutes in) \
+                 commit what compiles and passes fmt/clippy with a `wip(needle-abc):` prefix, \
+                 then continue.",
+            )
+            .unwrap();
+        assert!(
+            hour.content.contains("You have 60 minutes of wall clock"),
+            "prompt must state the adapter's deadline, got: {}",
+            hour.content
+        );
+        assert!(
+            hour.content.contains("`wip(needle-abc):`"),
+            "prompt must carry the checkpoint-commit request"
+        );
+
+        // A different adapter budget renders that budget.
+        let half = builder
+            .build_pluck_with_history(
+                &bead,
+                &fixture_root("test-workspace"),
+                "worker-01",
+                "",
+                "",
+                "You have 30 minutes of wall clock. By the 75% mark (about 22 minutes in) \
+                 commit what compiles and passes fmt/clippy with a `wip(needle-abc):` prefix, \
+                 then continue.",
+            )
+            .unwrap();
+        assert!(half.content.contains("You have 30 minutes of wall clock"));
+        assert!(
+            !half.content.contains("60 minutes"),
+            "the other adapter's budget must not leak"
+        );
+
+        // No wall-clock cap: the attempt states no deadline at all.
+        let unlimited = builder
+            .build_pluck_with_history(
+                &bead,
+                &fixture_root("test-workspace"),
+                "worker-01",
+                "",
+                "",
+                "",
+            )
+            .unwrap();
+        assert!(
+            !unlimited.content.contains("wall clock"),
+            "an unlimited attempt states no deadline, got: {}",
+            unlimited.content
         );
     }
 
@@ -1580,7 +1679,7 @@ mod tests {
         let builder = PromptBuilder::new(&config);
         let bead = test_bead();
         let result = builder
-            .build_pluck(&bead, Path::new("/tmp/test-workspace"), "worker-01")
+            .build_pluck(&bead, &fixture_root("test-workspace"), "worker-01")
             .unwrap();
 
         assert!(
@@ -1721,14 +1820,14 @@ mod tests {
         let config = PromptConfig::default();
         let builder = PromptBuilder::new(&config);
         let bead = test_bead();
-        let ws = Path::new("/tmp/test-workspace");
+        let ws = &fixture_root("test-workspace");
         let history = "## Previous attempts on this bead (newest first)\n\n\
                        ### Attempt 1 — outcome: work_failure (gate:dod)\n```\nerror[E0308]\n```";
 
         let fixes =
             "## Prior fixes for similar failures\n\n- **nd-9 — fix**\n  closed: cast the usize";
         let pluck = builder
-            .build_pluck_with_history(&bead, ws, "worker-01", history, fixes)
+            .build_pluck_with_history(&bead, ws, "worker-01", history, fixes, "")
             .unwrap();
         assert!(pluck.content.contains("## Previous attempts on this bead"));
         assert!(pluck.content.contains("error[E0308]"));
@@ -1743,7 +1842,7 @@ mod tests {
         assert!(desc < hist && hist < fix && fix < wsp);
 
         let split = builder
-            .build_split_with_history(&bead, ws, "worker-01", 3, history, fixes)
+            .build_split_with_history(&bead, ws, "worker-01", 3, history, fixes, "")
             .unwrap();
         assert!(split.content.contains("failed 3 times in a row"));
         assert!(split.content.contains("error[E0308]"));
@@ -1834,7 +1933,7 @@ mod tests {
         let builder = PromptBuilder::new(&config);
         let bead = test_bead();
         let result = builder
-            .build_pluck(&bead, Path::new("/tmp/test-workspace"), "worker-01")
+            .build_pluck(&bead, &fixture_root("test-workspace"), "worker-01")
             .unwrap();
 
         assert!(
@@ -1917,7 +2016,7 @@ mod tests {
         let builder = PromptBuilder::new(&config);
         let bead = test_bead();
         let result = builder
-            .build_pluck(&bead, Path::new("/tmp/test-workspace"), "worker-01")
+            .build_pluck(&bead, &fixture_root("test-workspace"), "worker-01")
             .unwrap();
 
         assert!(result.content.contains("Implement the widget"));
@@ -1929,7 +2028,7 @@ mod tests {
         let config = PromptConfig::default();
         let builder = PromptBuilder::new(&config);
         let bead = test_bead();
-        let ws = Path::new("/tmp/test-workspace");
+        let ws = &fixture_root("test-workspace");
 
         let a = builder.build_pluck(&bead, ws, "worker-01").unwrap();
         let b = builder.build_pluck(&bead, ws, "worker-01").unwrap();
@@ -1945,7 +2044,7 @@ mod tests {
         let builder = PromptBuilder::new(&config);
         let bead = test_bead();
         let result = builder
-            .build_pluck(&bead, Path::new("/tmp/test-workspace"), "worker-01")
+            .build_pluck(&bead, &fixture_root("test-workspace"), "worker-01")
             .unwrap();
 
         assert_eq!(result.hash.len(), 64, "SHA-256 hex digest is 64 chars");
@@ -1961,7 +2060,7 @@ mod tests {
         let builder = PromptBuilder::new(&config);
         let bead = test_bead();
         let result = builder
-            .build_pluck(&bead, Path::new("/tmp/test-workspace"), "worker-01")
+            .build_pluck(&bead, &fixture_root("test-workspace"), "worker-01")
             .unwrap();
 
         let expected = result.content.len() as u64 / 4;
@@ -1975,7 +2074,7 @@ mod tests {
         let builder = PromptBuilder::new(&config);
         let bead = test_bead();
         let result = builder
-            .build_pluck(&bead, Path::new("/tmp/test-workspace"), "worker-01")
+            .build_pluck(&bead, &fixture_root("test-workspace"), "worker-01")
             .unwrap();
 
         let variables = [
@@ -2003,7 +2102,7 @@ mod tests {
         let mut bead = test_bead();
         bead.body = None;
         let result = builder
-            .build_pluck(&bead, Path::new("/tmp/test-workspace"), "worker-01")
+            .build_pluck(&bead, &fixture_root("test-workspace"), "worker-01")
             .unwrap();
 
         assert!(
@@ -2027,7 +2126,7 @@ mod tests {
         let builder = PromptBuilder::new(&config);
         let bead = test_bead();
         let result = builder
-            .build_pluck(&bead, Path::new("/tmp/test-workspace"), "worker-01")
+            .build_pluck(&bead, &fixture_root("test-workspace"), "worker-01")
             .unwrap();
 
         // Should not error, and should indicate no files found
@@ -2077,7 +2176,7 @@ mod tests {
         let config = PromptConfig::default();
         let builder = PromptBuilder::new(&config);
         let bead = test_bead();
-        let result = builder.build(&bead, Path::new("/tmp"), "w1", "nonexistent");
+        let result = builder.build(&bead, &fixture_root("ws-root"), "w1", "nonexistent");
 
         assert!(result.is_err(), "unknown template name should error");
     }
@@ -2100,7 +2199,7 @@ mod tests {
         let builder = PromptBuilder::new(&config);
         let bead = test_bead();
         let result = builder
-            .build_pluck(&bead, Path::new("/tmp"), "needle-w42")
+            .build_pluck(&bead, &fixture_root("ws-root"), "needle-w42")
             .unwrap();
 
         // worker_id is substituted but only appears if the template references it.
@@ -2143,7 +2242,7 @@ mod tests {
         let result = builder
             .build_weave(
                 &bead,
-                Path::new("/tmp"),
+                &fixture_root("ws-root"),
                 "w1",
                 "README.md contents here",
                 "needle-001: open task",
@@ -2164,7 +2263,7 @@ mod tests {
         let result = builder
             .build_unravel(
                 &bead,
-                Path::new("/tmp"),
+                &fixture_root("ws-root"),
                 "w1",
                 "Blocked on architecture decision for auth",
             )
@@ -2184,7 +2283,7 @@ mod tests {
         let result = builder
             .build_pulse(
                 &bead,
-                Path::new("/tmp"),
+                &fixture_root("ws-root"),
                 "w1",
                 "clippy: 3 warnings found",
                 "needle-xyz: existing bead",
@@ -2203,7 +2302,12 @@ mod tests {
         let builder = PromptBuilder::new(&config);
         let bead = test_bead();
         let result = builder
-            .build_mitosis(&bead, Path::new("/tmp"), "w1", "needle-c1: child task one")
+            .build_mitosis(
+                &bead,
+                &fixture_root("ws-root"),
+                "w1",
+                "needle-c1: child task one",
+            )
             .unwrap();
 
         assert!(result.content.contains("needle-c1: child task one"));
@@ -2227,7 +2331,9 @@ mod tests {
         };
         let builder = PromptBuilder::new(&config);
         let bead = test_bead();
-        let result = builder.build_pluck(&bead, Path::new("/tmp"), "w1").unwrap();
+        let result = builder
+            .build_pluck(&bead, &fixture_root("ws-root"), "w1")
+            .unwrap();
 
         assert!(result.content.starts_with("Custom: Implement the widget"));
         // The default "## Task" header should NOT appear
@@ -2250,12 +2356,14 @@ mod tests {
 
         // pluck was overridden
         let bead = test_bead();
-        let pluck = builder.build_pluck(&bead, Path::new("/tmp"), "w1").unwrap();
+        let pluck = builder
+            .build_pluck(&bead, &fixture_root("ws-root"), "w1")
+            .unwrap();
         assert_eq!(pluck.content, "Custom pluck");
 
         // weave still uses default
         let weave = builder
-            .build_weave(&bead, Path::new("/tmp"), "w1", "docs", "beads")
+            .build_weave(&bead, &fixture_root("ws-root"), "w1", "docs", "beads")
             .unwrap();
         assert!(weave.content.contains("Workspace Documentation"));
     }
@@ -2362,7 +2470,7 @@ mod tests {
         let result = builder
             .build_with_vars(
                 &bead,
-                Path::new("/tmp"),
+                &fixture_root("ws-root"),
                 "w1",
                 "weave",
                 &[("{doc_files}", "MY_DOCS"), ("{existing_beads}", "MY_BEADS")],
@@ -2392,7 +2500,7 @@ mod tests {
         }];
 
         let result = builder
-            .build_pluck(&bead, Path::new("/tmp/test-workspace"), "worker-01")
+            .build_pluck(&bead, &fixture_root("test-workspace"), "worker-01")
             .unwrap();
 
         // Comments section should be present
@@ -2412,7 +2520,7 @@ mod tests {
         let bead = test_bead(); // No comments by default
 
         let result = builder
-            .build_pluck(&bead, Path::new("/tmp/test-workspace"), "worker-01")
+            .build_pluck(&bead, &fixture_root("test-workspace"), "worker-01")
             .unwrap();
 
         // No comments section when there are no comments
@@ -2455,7 +2563,7 @@ mod tests {
         ];
 
         let result = builder
-            .build_pluck(&bead, Path::new("/tmp/test-workspace"), "worker-01")
+            .build_pluck(&bead, &fixture_root("test-workspace"), "worker-01")
             .unwrap();
 
         // Comments should appear in reverse chronological order

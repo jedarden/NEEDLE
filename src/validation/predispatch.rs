@@ -385,6 +385,7 @@ async fn read_notes(store: &dyn BeadStore, bead_id: &BeadId) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_fixtures::fixture_root;
     use tempfile::TempDir;
 
     /// Write a snapshot under an explicit root, mirroring what `record` does.
@@ -678,7 +679,7 @@ mod tests {
                     status: crate::types::BeadStatus::Open,
                     assignee: None,
                     labels: vec![],
-                    workspace: std::path::PathBuf::from("/tmp/test"),
+                    workspace: fixture_root("test"),
                     dependencies: vec![],
                     dependents: vec![],
                     comments: vec![],

@@ -14,10 +14,10 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-// ──────────────────────────────────────────────────────────────────────────────
 /// Read-only transition adapters into the internal learning kernel.
 pub mod learning;
 
+// ──────────────────────────────────────────────────────────────────────────────
 // BeadId newtype
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -1297,6 +1297,7 @@ pub enum PeerStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_fixtures::fixture_root;
 
     #[test]
     fn bead_id_roundtrip() {
@@ -3310,7 +3311,7 @@ test foo ... ok"#;
             status: BeadStatus::Open,
             assignee: assignee.map(|s| s.to_string()),
             labels: labels.into_iter().map(|s| s.to_string()).collect(),
-            workspace: std::path::PathBuf::from("/tmp/test"),
+            workspace: fixture_root("test"),
             dependencies: vec![],
             dependents: vec![],
             comments: vec![],
@@ -3969,6 +3970,9 @@ pub struct HandlerResult {
     pub bead_action: BeadAction,
     /// Telemetry events emitted during handling.
     pub telemetry_events: Vec<crate::telemetry::EventKind>,
+    /// True when a budget cap stopped the attempt; this prevents timeout-only
+    /// recovery such as mitosis from treating it as task-size evidence.
+    pub budget_exhausted: bool,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

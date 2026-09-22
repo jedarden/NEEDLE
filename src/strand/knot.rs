@@ -665,11 +665,11 @@ mod tests {
     use super::*;
     use crate::bead_store::{Filters, RepairReport};
     use crate::telemetry::TelemetryEvent;
+    use crate::test_fixtures::fixture_root;
     use crate::types::{Bead, BeadId, BeadStatus, ClaimResult};
 
     use anyhow::Result;
     use chrono::{TimeZone, Utc};
-    use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
 
@@ -853,7 +853,7 @@ mod tests {
             status,
             assignee: assignee.map(|s| s.to_string()),
             labels: vec![],
-            workspace: PathBuf::from("/tmp/test"),
+            workspace: fixture_root("test"),
             dependencies: vec![],
             dependents: vec![],
             comments: vec![],

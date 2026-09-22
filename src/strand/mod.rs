@@ -780,6 +780,7 @@ impl StrandRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_fixtures::fixture_root;
     use crate::types::{Bead, BeadId};
 
     /// A stub strand that always returns the given result.
@@ -849,7 +850,7 @@ mod tests {
             status: crate::types::BeadStatus::Open,
             assignee: None,
             labels: vec![],
-            workspace: std::path::PathBuf::from("/tmp/test"),
+            workspace: fixture_root("test"),
             dependencies: vec![],
             dependents: vec![],
             comments: vec![],

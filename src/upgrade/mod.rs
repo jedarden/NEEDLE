@@ -983,6 +983,7 @@ impl ResumeState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_fixtures::fixture_root;
 
     #[test]
     fn is_newer_version_major() {
@@ -1146,11 +1147,11 @@ mod tests {
         let detected = HotReloadCheck::NewBinaryDetected {
             old_hash: "aaa".to_string(),
             new_hash: "bbb".to_string(),
-            stable_path: PathBuf::from("/tmp/test"),
+            stable_path: fixture_root("test"),
         };
         let deleted = HotReloadCheck::CurrentBinaryDeleted {
             stable_hash: "ccc".to_string(),
-            stable_path: PathBuf::from("/tmp/stable"),
+            stable_path: fixture_root("stable"),
         };
         assert_ne!(no_change, skipped);
         assert_ne!(no_change, detected);
@@ -1192,11 +1193,11 @@ mod tests {
     fn download_to_testing_result_enum_variants_are_distinct() {
         let downloaded = DownloadToTestingResult::Downloaded {
             version: "1.0.0".to_string(),
-            testing_path: PathBuf::from("/tmp/needle-testing"),
+            testing_path: fixture_root("needle-testing"),
         };
         let skipped = DownloadToTestingResult::Skipped {
             reason: "test".to_string(),
-            testing_path: PathBuf::from("/tmp/needle-testing"),
+            testing_path: fixture_root("needle-testing"),
         };
         let no_update = DownloadToTestingResult::NoUpdateAvailable;
 

@@ -243,6 +243,7 @@ fn append_jsonl_line(
 
 #[cfg(test)]
 mod tests {
+    use crate::test_fixtures::fixture_root;
 
     #[test]
     fn default_targets_never_create_a_beads_dir_outside_a_workspace() {
@@ -305,7 +306,7 @@ mod tests {
         unsafe {
             std::env::remove_var("NEEDLE_EVENTS");
         }
-        let ws = Path::new("/tmp/some-workspace");
+        let ws = &fixture_root("some-workspace");
         assert_eq!(events_path(ws), ws.join(".beads").join("events.jsonl"));
     }
 

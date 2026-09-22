@@ -1190,6 +1190,7 @@ mod tests {
     use super::*;
     use crate::bead_store::{Filters, RepairReport};
     use crate::config::GenerationConfig;
+    use crate::test_fixtures::fixture_root;
     use crate::types::{Bead, BeadId, BeadStatus, ClaimResult};
 
     use anyhow::Result;
@@ -1338,7 +1339,7 @@ mod tests {
             status: BeadStatus::Open,
             assignee: None,
             labels: vec![],
-            workspace: PathBuf::from("/tmp/test"),
+            workspace: fixture_root("test"),
             dependencies: vec![],
             dependents: vec![],
             comments: vec![],
@@ -1457,10 +1458,8 @@ timeout_secs: 5
         let virtual_home = dir.path().join("roam-only");
         std::fs::create_dir_all(&virtual_home).unwrap();
 
-        let explore = ExploreConfig {
-            workspaces: vec![first.clone(), virtual_home, second.clone()],
-            ..ExploreConfig::default()
-        };
+        let mut explore = ExploreConfig::default();
+        explore.workspaces = vec![first.clone(), virtual_home, second.clone()];
         let strand = FleetWeaveStrand::new(
             make_enabled_config(),
             explore,
@@ -1996,7 +1995,7 @@ timeout_secs: 5
 
     #[test]
     fn state_load_missing_file_returns_default() {
-        let path = PathBuf::from("/tmp/nonexistent-weave-state-12345.json");
+        let path = fixture_root("nonexistent-weave-state-12345.json");
         let state = WeaveState::load(&path).unwrap();
         assert!(state.last_run.is_none());
         assert!(state.seen_titles.is_empty());
@@ -2019,7 +2018,7 @@ timeout_secs: 5
 
     #[test]
     fn format_doc_files_empty() {
-        let result = WeaveStrand::format_doc_files(&[], Path::new("/tmp"));
+        let result = WeaveStrand::format_doc_files(&[], &fixture_root("ws-root"));
         assert_eq!(result, "(no documentation files found)");
     }
 

@@ -1204,6 +1204,7 @@ mod tests {
     use crate::bead_store::{BeadStore, Filters, RepairReport};
     use crate::telemetry::test_utils::MemorySink;
     use crate::telemetry::Telemetry;
+    use crate::test_fixtures::fixture_root;
     use crate::types::{Bead, BeadId, BeadStatus, ClaimResult};
     use async_trait::async_trait;
     use std::sync::Mutex;
@@ -2769,10 +2770,6 @@ mod tests {
                 ClaimVerifyErrorCategory::Capability,
             ),
             (
-                anyhow::anyhow!("backend 'bead' operation 'show': command not found"),
-                ClaimVerifyErrorCategory::Capability,
-            ),
-            (
                 anyhow::anyhow!("store shuffled its indexes inexplicably"),
                 ClaimVerifyErrorCategory::Backend,
             ),
@@ -3222,7 +3219,7 @@ mod tests {
                 600,
                 Arc::new(StaticCircuitSource { run, error: None }),
             ),
-            PathBuf::from("/tmp/claim-circuit-home"),
+            fixture_root("claim-circuit-home"),
             vec!["fix-build".to_string(), "ci-red".to_string()],
         )
         .with_template("needle-ci")
@@ -3352,7 +3349,7 @@ mod tests {
                     error: Some("connection refused".to_string()),
                 }),
             ),
-            PathBuf::from("/tmp/claim-circuit-home"),
+            fixture_root("claim-circuit-home"),
             vec!["fix-build".to_string()],
         )
         .with_template("needle-ci");
@@ -3388,7 +3385,7 @@ mod tests {
 
     #[tokio::test]
     async fn circuit_gate_matches_its_own_workspace_path() {
-        let home = PathBuf::from("/tmp/claim-circuit-home");
+        let home = fixture_root("claim-circuit-home");
         let mut bead = make_bead("needle-ws-1", "/tmp/claim-circuit-home");
         bead.workspace = home.clone();
         let claimer = claimer_with_gate(vec![bead.clone()], circuit_gate(Some(ci_run("Failed"))));

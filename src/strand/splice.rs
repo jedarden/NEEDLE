@@ -1216,6 +1216,7 @@ impl super::Strand for SpliceStrand {
 mod tests {
     use super::*;
     use crate::strand::Strand as _;
+    use crate::test_fixtures::fixture_root;
     use crate::types::{Bead, BeadStatus};
     use std::sync::{Arc, Mutex};
 
@@ -1326,8 +1327,8 @@ mod tests {
         let tel = Telemetry::new("test".to_string());
         let strand = SpliceStrand::new(
             config,
-            PathBuf::from("/tmp/heartbeats"),
-            PathBuf::from("/tmp/state"),
+            fixture_root("heartbeats"),
+            fixture_root("state"),
             tel,
         );
         assert_eq!(strand.name(), "splice");
@@ -1336,7 +1337,7 @@ mod tests {
     #[tokio::test]
     async fn failed_build_creates_one_p0_fix_bead_and_deduplicates_it() {
         let store = NoOpStore::default();
-        let workspace = PathBuf::from("/tmp/circuit-workspace");
+        let workspace = fixture_root("circuit-workspace");
 
         let first = ensure_fix_build_bead(
             &store,
@@ -1387,8 +1388,8 @@ mod tests {
         let tel = Telemetry::new("test".to_string());
         let strand = SpliceStrand::new(
             config,
-            PathBuf::from("/tmp/heartbeats"),
-            PathBuf::from("/tmp/state"),
+            fixture_root("heartbeats"),
+            fixture_root("state"),
             tel,
         );
         let result = strand
@@ -1440,8 +1441,8 @@ mod tests {
         let tel = Telemetry::new("test".to_string());
         let strand = SpliceStrand::new(
             config,
-            PathBuf::from("/tmp/heartbeats"),
-            PathBuf::from("/tmp/state"),
+            fixture_root("heartbeats"),
+            fixture_root("state"),
             tel,
         );
 
@@ -1503,8 +1504,8 @@ mod tests {
         let tel = Telemetry::new("test".to_string());
         let strand = SpliceStrand::new(
             config,
-            PathBuf::from("/tmp/heartbeats"),
-            PathBuf::from("/tmp/state"),
+            fixture_root("heartbeats"),
+            fixture_root("state"),
             tel,
         );
 
@@ -1562,8 +1563,8 @@ mod tests {
         let tel = Telemetry::new("test".to_string());
         let strand = SpliceStrand::new(
             config,
-            PathBuf::from("/tmp/heartbeats"),
-            PathBuf::from("/tmp/state"),
+            fixture_root("heartbeats"),
+            fixture_root("state"),
             tel,
         );
 

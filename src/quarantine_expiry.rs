@@ -321,6 +321,7 @@ pub(crate) async fn lift_expired_marking(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_fixtures::fixture_root;
 
     /// A moment `secs` from the real clock, so a window labelled "past" or
     /// "future" stays past or future however long the tests sit around. The
@@ -339,7 +340,7 @@ mod tests {
             status: crate::types::BeadStatus::Open,
             assignee: None,
             labels,
-            workspace: std::path::PathBuf::from("/tmp/q-expiry"),
+            workspace: fixture_root("q-expiry"),
             dependencies: Vec::new(),
             dependents: Vec::new(),
             comments: Vec::new(),

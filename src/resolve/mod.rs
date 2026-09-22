@@ -1008,6 +1008,7 @@ impl Resolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_fixtures::fixture_root;
     use crate::types::{BeadId, BeadStatus};
     use chrono::Utc;
     use std::path::PathBuf;
@@ -1022,7 +1023,7 @@ mod tests {
             status: BeadStatus::InProgress,
             assignee: Some("worker-01".to_string()),
             labels: vec![],
-            workspace: PathBuf::from("/tmp/test-workspace"),
+            workspace: fixture_root("test-workspace"),
             dependencies: vec![],
             dependents: vec![],
             comments: vec![],
@@ -1526,21 +1527,20 @@ mod tests {
 
     #[test]
     fn resolver_with_custom_template_path() {
-        use std::path::PathBuf;
         let prompt_builder =
             crate::prompt::PromptBuilder::new(&crate::config::PromptConfig::default());
 
         let config = crate::config::ResolveConfig {
             enabled: true,
             timeout_secs: 60,
-            custom_template_path: Some(PathBuf::from("/tmp/resolve-template.txt")),
+            custom_template_path: Some(fixture_root("resolve-template.txt")),
             use_default_template: false,
         };
 
         let resolver = Resolver::with_config(prompt_builder, config);
         assert_eq!(
             resolver.config.custom_template_path,
-            Some(PathBuf::from("/tmp/resolve-template.txt"))
+            Some(fixture_root("resolve-template.txt"))
         );
         assert!(!resolver.config.use_default_template);
     }

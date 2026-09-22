@@ -948,6 +948,7 @@ fn workspace_hash(workspace: &Path) -> String {
 mod tests {
     use super::*;
     use crate::bead_store::{Filters, RepairReport};
+    use crate::test_fixtures::fixture_root;
     use crate::types::{BeadStatus, ClaimResult};
 
     use anyhow::Result;
@@ -1239,7 +1240,7 @@ mod tests {
             status: BeadStatus::Open,
             assignee: None,
             labels: labels.iter().map(|s| s.to_string()).collect(),
-            workspace: PathBuf::from("/tmp/test"),
+            workspace: fixture_root("test"),
             dependencies: vec![],
             dependents: vec![],
             comments: vec![],
@@ -1268,7 +1269,7 @@ mod tests {
                 enabled: true,
                 ..AnalyzeConfig::default()
             },
-            PathBuf::from("/tmp/test-workspace"),
+            fixture_root("test-workspace"),
             dir.to_path_buf(),
             agent,
             Telemetry::new("test".to_string()),
@@ -1639,7 +1640,7 @@ mod tests {
                 enabled: false,
                 ..AnalyzeConfig::default()
             },
-            PathBuf::from("/tmp/test-workspace"),
+            fixture_root("test-workspace"),
             dir.path().to_path_buf(),
             Box::new(MockAgent::new(HUMAN_RESPONSE)),
             Telemetry::new("test".to_string()),
@@ -1660,7 +1661,7 @@ mod tests {
                 max_beads_per_run: 1,
                 ..AnalyzeConfig::default()
             },
-            PathBuf::from("/tmp/test-workspace"),
+            fixture_root("test-workspace"),
             dir.path().to_path_buf(),
             Box::new(MockAgent::new(HUMAN_RESPONSE)),
             Telemetry::new("test".to_string()),
@@ -1707,7 +1708,7 @@ mod tests {
                 max_beads_per_run: 2,
                 ..AnalyzeConfig::default()
             },
-            PathBuf::from("/tmp/test-workspace"),
+            fixture_root("test-workspace"),
             dir.path().to_path_buf(),
             Box::new(MockAgent::new(RESCOPE_RESPONSE)),
             Telemetry::new("test".to_string()),

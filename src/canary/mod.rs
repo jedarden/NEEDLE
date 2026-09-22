@@ -791,17 +791,12 @@ impl CanaryRunner {
         // The normal default routing table falls back to the `claude`
         // adapter for models it does not recognize. Canary adapters are local
         // commands without model identities, so disable routing inside this
-        // isolated process and honor the explicit `--agent` selection. The
-        // fixture workspaces also contain intentional canary runtime state;
-        // keep host validation policy from treating that state as product
-        // dirtiness and rejecting an otherwise successful fixture.
+        // isolated process and honor the explicit `--agent` selection.
         std::fs::write(
             home.path().join(".config/needle/config.yaml"),
             concat!(
                 "agent:\n  routing:\n    rules: []\n",
                 "worker:\n  enforce_shipped_work: false\n",
-                "validation:\n  fallback_gate: false\n",
-                "  default_gates:\n    enabled: false\n",
             ),
         )
         .context("failed to write hermetic canary config")?;
@@ -1326,6 +1321,7 @@ pub struct ChannelStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_fixtures::fixture_root;
 
     #[test]
     fn canary_scenarios_use_hermetic_adapters() {
@@ -1364,21 +1360,17 @@ mod tests {
         }
         assert!(!canary_adapter_yaml(&failure).contains("```verified:"));
 
-        let runner = CanaryRunner::new(
-            PathBuf::from("/tmp/.needle"),
-            PathBuf::from("/tmp/canary"),
-            30,
-        );
+        let runner = CanaryRunner::new(fixture_root(".needle"), fixture_root("canary"), 30);
         let home = runner.prepare_isolated_home(&success).unwrap();
         assert!(home
             .path()
             .join(".config/needle/adapters/canary-success.yaml")
             .is_file());
-        let config = std::fs::read_to_string(home.path().join(".config/needle/config.yaml"))
-            .expect("hermetic canary config should be readable");
-        assert!(config.contains("rules: []"));
-        assert!(config.contains("validation:\n  fallback_gate: false\n"));
-        assert!(config.contains("default_gates:\n    enabled: false\n"));
+        assert!(
+            std::fs::read_to_string(home.path().join(".config/needle/config.yaml"))
+                .unwrap()
+                .contains("rules: []")
+        );
     }
 
     #[test]
@@ -1460,8 +1452,8 @@ mod tests {
     #[test]
     fn canary_report_can_promote() {
         let report = CanaryReport {
-            testing_binary: PathBuf::from("/tmp/needle-testing"),
-            workspace: PathBuf::from("/tmp/canary"),
+            testing_binary: fixture_root("needle-testing"),
+            workspace: fixture_root("canary"),
             total_tests: 4,
             passed: 4,
             failed: 0,
@@ -1482,11 +1474,7 @@ mod tests {
 
     #[test]
     fn outcomes_match_success() {
-        let runner = CanaryRunner::new(
-            PathBuf::from("/tmp/.needle"),
-            PathBuf::from("/tmp/canary"),
-            300,
-        );
+        let runner = CanaryRunner::new(fixture_root(".needle"), fixture_root("canary"), 300);
 
         let expected = ExpectedOutcome::Success {
             final_status: "done".to_string(),
@@ -1526,11 +1514,7 @@ mod tests {
 
     #[test]
     fn outcomes_match_failure() {
-        let runner = CanaryRunner::new(
-            PathBuf::from("/tmp/.needle"),
-            PathBuf::from("/tmp/canary"),
-            300,
-        );
+        let runner = CanaryRunner::new(fixture_root(".needle"), fixture_root("canary"), 300);
 
         let expected = ExpectedOutcome::Failure {
             final_status: "open".to_string(),
@@ -1556,11 +1540,7 @@ mod tests {
 
     #[test]
     fn outcomes_match_state_machine() {
-        let runner = CanaryRunner::new(
-            PathBuf::from("/tmp/.needle"),
-            PathBuf::from("/tmp/canary"),
-            300,
-        );
+        let runner = CanaryRunner::new(fixture_root(".needle"), fixture_root("canary"), 300);
 
         let expected = ExpectedOutcome::StateMachine {
             transitions: vec![
@@ -1594,11 +1574,7 @@ mod tests {
 
     #[test]
     fn mismatch_reason_success() {
-        let runner = CanaryRunner::new(
-            PathBuf::from("/tmp/.needle"),
-            PathBuf::from("/tmp/canary"),
-            300,
-        );
+        let runner = CanaryRunner::new(fixture_root(".needle"), fixture_root("canary"), 300);
 
         let expected = ExpectedOutcome::Success {
             final_status: "done".to_string(),
@@ -1620,11 +1596,7 @@ mod tests {
 
     #[test]
     fn mismatch_reason_failure() {
-        let runner = CanaryRunner::new(
-            PathBuf::from("/tmp/.needle"),
-            PathBuf::from("/tmp/canary"),
-            300,
-        );
+        let runner = CanaryRunner::new(fixture_root(".needle"), fixture_root("canary"), 300);
 
         let expected = ExpectedOutcome::Failure {
             final_status: "open".to_string(),
@@ -1646,11 +1618,7 @@ mod tests {
 
     #[test]
     fn mismatch_reason_timeout() {
-        let runner = CanaryRunner::new(
-            PathBuf::from("/tmp/.needle"),
-            PathBuf::from("/tmp/canary"),
-            300,
-        );
+        let runner = CanaryRunner::new(fixture_root(".needle"), fixture_root("canary"), 300);
 
         let expected = ExpectedOutcome::Timeout {
             final_status: "open".to_string(),
@@ -1671,11 +1639,7 @@ mod tests {
 
     #[test]
     fn mismatch_reason_state_machine() {
-        let runner = CanaryRunner::new(
-            PathBuf::from("/tmp/.needle"),
-            PathBuf::from("/tmp/canary"),
-            300,
-        );
+        let runner = CanaryRunner::new(fixture_root(".needle"), fixture_root("canary"), 300);
 
         let expected = ExpectedOutcome::StateMachine {
             transitions: vec![
@@ -1700,11 +1664,7 @@ mod tests {
 
     #[test]
     fn outcomes_match_timeout() {
-        let runner = CanaryRunner::new(
-            PathBuf::from("/tmp/.needle"),
-            PathBuf::from("/tmp/canary"),
-            300,
-        );
+        let runner = CanaryRunner::new(fixture_root(".needle"), fixture_root("canary"), 300);
 
         let expected = ExpectedOutcome::Timeout {
             final_status: "open".to_string(),
@@ -1747,8 +1707,7 @@ mod tests {
         // Non-YAML file should be ignored.
         std::fs::write(expected_dir.join("README.md"), "not a test").unwrap();
 
-        let runner =
-            CanaryRunner::new(PathBuf::from("/tmp/.needle"), tmp.path().to_path_buf(), 300);
+        let runner = CanaryRunner::new(fixture_root(".needle"), tmp.path().to_path_buf(), 300);
 
         let beads = runner.discover_test_beads().unwrap();
         assert_eq!(beads.len(), 2);
@@ -1759,8 +1718,7 @@ mod tests {
     #[test]
     fn discover_test_beads_missing_expected_dir() {
         let tmp = tempfile::tempdir().unwrap();
-        let runner =
-            CanaryRunner::new(PathBuf::from("/tmp/.needle"), tmp.path().to_path_buf(), 300);
+        let runner = CanaryRunner::new(fixture_root(".needle"), tmp.path().to_path_buf(), 300);
 
         let result = runner.discover_test_beads();
         assert!(result.is_err());
@@ -1782,8 +1740,7 @@ mod tests {
         )
         .unwrap();
 
-        let runner =
-            CanaryRunner::new(PathBuf::from("/tmp/.needle"), tmp.path().to_path_buf(), 300);
+        let runner = CanaryRunner::new(fixture_root(".needle"), tmp.path().to_path_buf(), 300);
 
         let outcome = runner.load_expected_outcome("test-ok").unwrap();
         match outcome {
@@ -1810,8 +1767,7 @@ mod tests {
         )
         .unwrap();
 
-        let runner =
-            CanaryRunner::new(PathBuf::from("/tmp/.needle"), tmp.path().to_path_buf(), 300);
+        let runner = CanaryRunner::new(fixture_root(".needle"), tmp.path().to_path_buf(), 300);
 
         let outcome = runner.load_expected_outcome("test-fail").unwrap();
         match outcome {
@@ -1832,8 +1788,7 @@ mod tests {
         let expected_dir = tmp.path().join("expected");
         std::fs::create_dir_all(&expected_dir).unwrap();
 
-        let runner =
-            CanaryRunner::new(PathBuf::from("/tmp/.needle"), tmp.path().to_path_buf(), 300);
+        let runner = CanaryRunner::new(fixture_root(".needle"), tmp.path().to_path_buf(), 300);
 
         let result = runner.load_expected_outcome("nonexistent");
         assert!(result.is_err());
@@ -1847,8 +1802,7 @@ mod tests {
 
         std::fs::write(expected_dir.join("bad.yaml"), "not: valid: : yaml: [").unwrap();
 
-        let runner =
-            CanaryRunner::new(PathBuf::from("/tmp/.needle"), tmp.path().to_path_buf(), 300);
+        let runner = CanaryRunner::new(fixture_root(".needle"), tmp.path().to_path_buf(), 300);
 
         let result = runner.load_expected_outcome("bad");
         assert!(result.is_err());
@@ -1869,7 +1823,7 @@ mod tests {
         let stable = bin_dir.join("needle-stable");
         std::fs::write(&stable, b"stable-binary-v1").unwrap();
 
-        let runner = CanaryRunner::new(needle_home.clone(), PathBuf::from("/tmp/canary"), 300);
+        let runner = CanaryRunner::new(needle_home.clone(), fixture_root("canary"), 300);
 
         runner.promote().unwrap();
 
@@ -1892,7 +1846,7 @@ mod tests {
     #[test]
     fn promote_no_testing_binary_fails() {
         let tmp = tempfile::tempdir().unwrap();
-        let runner = CanaryRunner::new(tmp.path().to_path_buf(), PathBuf::from("/tmp/canary"), 300);
+        let runner = CanaryRunner::new(tmp.path().to_path_buf(), fixture_root("canary"), 300);
 
         let result = runner.promote();
         assert!(result.is_err());
@@ -1912,7 +1866,7 @@ mod tests {
         // Only testing exists, no stable.
         std::fs::write(bin_dir.join("needle-testing"), b"first-build").unwrap();
 
-        let runner = CanaryRunner::new(needle_home.clone(), PathBuf::from("/tmp/canary"), 300);
+        let runner = CanaryRunner::new(needle_home.clone(), fixture_root("canary"), 300);
 
         runner.promote().unwrap();
 
@@ -1935,7 +1889,7 @@ mod tests {
         std::fs::write(bin_dir.join("needle-testing"), b"bad-binary").unwrap();
         std::fs::write(bin_dir.join("needle-stable"), b"known-good-stable").unwrap();
 
-        let runner = CanaryRunner::new(needle_home.clone(), PathBuf::from("/tmp/canary"), 300);
+        let runner = CanaryRunner::new(needle_home.clone(), fixture_root("canary"), 300);
 
         runner.reject().unwrap();
         assert!(!runner.testing_binary().exists());
@@ -1948,7 +1902,7 @@ mod tests {
     #[test]
     fn reject_no_testing_binary_is_ok() {
         let tmp = tempfile::tempdir().unwrap();
-        let runner = CanaryRunner::new(tmp.path().to_path_buf(), PathBuf::from("/tmp/canary"), 300);
+        let runner = CanaryRunner::new(tmp.path().to_path_buf(), fixture_root("canary"), 300);
 
         // Should not error even when no testing binary exists.
         runner.reject().unwrap();
@@ -1965,7 +1919,7 @@ mod tests {
         std::fs::write(bin_dir.join("needle-stable"), b"bad-stable-v2").unwrap();
         std::fs::write(bin_dir.join("needle-stable.prev"), b"good-stable-v1").unwrap();
 
-        let runner = CanaryRunner::new(needle_home.clone(), PathBuf::from("/tmp/canary"), 300);
+        let runner = CanaryRunner::new(needle_home.clone(), fixture_root("canary"), 300);
 
         runner.rollback().unwrap();
 
@@ -1987,7 +1941,7 @@ mod tests {
     #[test]
     fn rollback_no_prev_binary_fails() {
         let tmp = tempfile::tempdir().unwrap();
-        let runner = CanaryRunner::new(tmp.path().to_path_buf(), PathBuf::from("/tmp/canary"), 300);
+        let runner = CanaryRunner::new(tmp.path().to_path_buf(), fixture_root("canary"), 300);
 
         let result = runner.rollback();
         assert!(result.is_err());
@@ -2007,7 +1961,7 @@ mod tests {
         std::fs::write(bin_dir.join("needle-testing"), b"testing").unwrap();
         std::fs::write(bin_dir.join("needle-stable"), b"stable").unwrap();
 
-        let runner = CanaryRunner::new(needle_home.clone(), PathBuf::from("/tmp/canary"), 300);
+        let runner = CanaryRunner::new(needle_home.clone(), fixture_root("canary"), 300);
 
         let status = runner.status().unwrap();
         assert!(status.testing_exists);
@@ -2019,7 +1973,7 @@ mod tests {
     #[test]
     fn status_empty_needle_home() {
         let tmp = tempfile::tempdir().unwrap();
-        let runner = CanaryRunner::new(tmp.path().to_path_buf(), PathBuf::from("/tmp/canary"), 300);
+        let runner = CanaryRunner::new(tmp.path().to_path_buf(), fixture_root("canary"), 300);
 
         let status = runner.status().unwrap();
         assert!(!status.testing_exists);
@@ -2051,7 +2005,7 @@ mod tests {
 
         let runner = CanaryRunner::new(
             needle_home,
-            PathBuf::from("/tmp/nonexistent-canary-workspace"),
+            fixture_root("nonexistent-canary-workspace"),
             300,
         );
 
@@ -2137,11 +2091,7 @@ mod tests {
 
     #[test]
     fn success_with_extra_labels_still_matches() {
-        let runner = CanaryRunner::new(
-            PathBuf::from("/tmp/.needle"),
-            PathBuf::from("/tmp/canary"),
-            300,
-        );
+        let runner = CanaryRunner::new(fixture_root(".needle"), fixture_root("canary"), 300);
 
         let expected = ExpectedOutcome::Success {
             final_status: "done".to_string(),
@@ -2161,11 +2111,7 @@ mod tests {
 
     #[test]
     fn failure_with_none_exit_code_does_not_match() {
-        let runner = CanaryRunner::new(
-            PathBuf::from("/tmp/.needle"),
-            PathBuf::from("/tmp/canary"),
-            300,
-        );
+        let runner = CanaryRunner::new(fixture_root(".needle"), fixture_root("canary"), 300);
 
         let expected = ExpectedOutcome::Failure {
             final_status: "open".to_string(),
@@ -2195,7 +2141,7 @@ mod tests {
         )
         .unwrap();
 
-        let runner = CanaryRunner::new(PathBuf::from("/tmp/.needle"), workspace.to_path_buf(), 300);
+        let runner = CanaryRunner::new(fixture_root(".needle"), workspace.to_path_buf(), 300);
 
         let result = runner.validate_bead_backend_binding();
         assert!(result.is_err());
@@ -2224,7 +2170,7 @@ mod tests {
         )
         .unwrap();
 
-        let runner = CanaryRunner::new(PathBuf::from("/tmp/.needle"), workspace.to_path_buf(), 300);
+        let runner = CanaryRunner::new(fixture_root(".needle"), workspace.to_path_buf(), 300);
 
         let result = runner.validate_bead_backend_binding();
         assert!(result.is_err());
@@ -2263,7 +2209,7 @@ mod tests {
         )
         .unwrap();
 
-        let runner = CanaryRunner::new(PathBuf::from("/tmp/.needle"), workspace.to_path_buf(), 300);
+        let runner = CanaryRunner::new(fixture_root(".needle"), workspace.to_path_buf(), 300);
 
         // Should succeed when bead backend is explicitly set and binary exists
         let result = runner.validate_bead_backend_binding();

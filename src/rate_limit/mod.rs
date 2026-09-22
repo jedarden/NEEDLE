@@ -1140,9 +1140,9 @@ mod tests {
     use super::*;
     use crate::config::{LimitsConfig, ModelLimits, ProviderLimits};
     use crate::registry::{Registry, WorkerEntry};
+    use crate::test_fixtures::fixture_root;
     use chrono::Utc;
     use std::collections::BTreeMap;
-    use std::path::PathBuf;
 
     fn make_entry(id: &str, provider: Option<&str>, model: Option<&str>) -> WorkerEntry {
         make_entry_in_state(id, provider, model, WorkerState::Executing)
@@ -1157,7 +1157,7 @@ mod tests {
         WorkerEntry {
             id: id.to_string(),
             pid: std::process::id(),
-            workspace: PathBuf::from("/tmp/test"),
+            workspace: fixture_root("test"),
             agent: "claude".to_string(),
             model: model.map(|s| s.to_string()),
             provider: provider.map(|s| s.to_string()),
@@ -1190,6 +1190,7 @@ mod tests {
         LimitsConfig {
             providers: provider_map,
             models: model_map,
+            attempt: Default::default(),
         }
     }
 

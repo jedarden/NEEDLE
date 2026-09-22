@@ -30,7 +30,8 @@
 //!
 //! ## Design Constraints (from v1 lessons)
 //! - **No upward traversal.** Only configured paths are checked.
-//! - **Static workspace list.** Read from config at boot, not re-evaluated.
+//! - **Bounded workspace discovery.** Auto-discovery is refreshed during Explore
+//!   scans, but it never traverses above the configured root.
 //! - **No permanent relocation.** Workers process one bead then return home.
 //!
 //! ## Implementation
@@ -166,7 +167,7 @@ impl ExploreScanBackoff {
 pub struct ExploreStrand {
     /// Whether this strand is enabled.
     enabled: bool,
-    /// Static list of workspace paths to search (in order).
+    /// Current list of workspace paths to search (in order).
     /// Wrapped in Mutex for interior mutability during re-discovery.
     workspaces: std::sync::Mutex<Vec<PathBuf>>,
     /// Home workspace path — excluded from exploration.
@@ -192,11 +193,10 @@ pub struct ExploreStrand {
     /// beads carrying the lane's label are admitted as candidates. `None` —
     /// the default — admits candidates exactly as before lanes existed.
     lane: Option<crate::config::PluckLaneConfig>,
-    /// Re-discovery interval, still parsed from config for backward
-    /// compatibility with existing `.needle.yaml` files, but no longer read:
-    /// re-discovery runs unconditionally every cycle as of bf-6anj4 (the
-    /// legacy throttle this gated is documented, not applied, at the call
-    /// site below).
+    /// Historical re-discovery interval retained for configuration
+    /// compatibility. Auto-discovery is refreshed on each eligible Explore
+    /// scan so new workspaces become selectable without waiting for a worker
+    /// restart; pinned workspaces never re-discover.
     #[allow(dead_code)]
     rediscovery_cycles: u32,
     /// Workspace root for re-discovery (from config.workspace_root).
@@ -241,8 +241,8 @@ pub struct ExploreStrand {
 impl ExploreStrand {
     /// Create a new ExploreStrand from config.
     ///
-    /// The workspace list is captured at construction time and re-discovered periodically
-    /// (if `config.rediscovery_cycles` > 0 and `config.workspaces` is empty).
+    /// The workspace list is captured at construction time and refreshed during
+    /// eligible Explore scans when `config.workspaces` is empty.
     /// If `workspaces` is empty, auto-discovers all dirs with `.beads/` under
     /// the configured `workspace_root`.
     pub fn new(
@@ -369,7 +369,7 @@ impl ExploreStrand {
             split_after_failures: 0,
             lane: None,
             rediscovery_cycles: 0,
-            workspace_root: PathBuf::from("/tmp/needle-test-root"),
+            workspace_root: crate::test_fixtures::fixture_root("needle-test-root"),
             auto_discovery_mode: false,
             starvation_threshold_minutes: 0,
             last_successful_claim_seconds: AtomicU64::new(0),
@@ -412,7 +412,7 @@ impl ExploreStrand {
             split_after_failures: 0,
             lane: None,
             rediscovery_cycles: 0,
-            workspace_root: PathBuf::from("/tmp/needle-test-root"),
+            workspace_root: crate::test_fixtures::fixture_root("needle-test-root"),
             auto_discovery_mode: false,
             starvation_threshold_minutes: 0,
             last_successful_claim_seconds: AtomicU64::new(0),
@@ -904,8 +904,8 @@ impl ExploreStrand {
 
     /// Re-discover workspaces (refresh the workspace list).
     ///
-    /// This is called periodically when `rediscovery_cycles` > 0 and we're in
-    /// auto-discovery mode (empty workspaces config). It re-runs discovery under
+    /// This is called for each eligible Explore scan in auto-discovery mode
+    /// (empty workspaces config). It re-runs discovery under
     /// `workspace_root` and updates the workspace list, preserving:
     /// - **No upward traversal:** Only scans immediate children of workspace_root
     /// - **Explicit workspaces override:** Only runs when auto_discovery_mode is true
@@ -921,9 +921,28 @@ impl ExploreStrand {
             return 0;
         }
 
-        // NOTE: re-discovery is now run every cycle (bf-6anj4). The historical
-        // `rediscovery_cycles == 0` disable path was removed; the only skip that
-        // remains is pinned mode (handled above).
+        // Re-discovery is intentionally best-effort. If the configured root is
+        // temporarily unavailable (for example, a briefly unmounted volume),
+        // retain the last known list so a healthy workspace can still be
+        // scanned. An empty but readable root is different: it means the
+        // operator removed all discovered workspaces and should clear the list.
+        let root_is_readable = match fs::read_dir(&self.workspace_root) {
+            Ok(_) => true,
+            Err(error) => {
+                tracing::warn!(
+                    worker = %self.qualified_id,
+                    root = %self.workspace_root.display(),
+                    error = %error,
+                    "workspace discovery root is unavailable; retaining the last discovered workspaces"
+                );
+                false
+            }
+        };
+
+        if !root_is_readable {
+            return 0;
+        }
+
         let previous_count = {
             let workspaces = self.workspaces.lock().unwrap();
             workspaces.len()
@@ -1698,6 +1717,7 @@ impl super::Strand for ExploreStrand {
 mod tests {
     use super::*;
     use crate::bead_store::RepairReport;
+    use crate::test_fixtures::fixture_root;
     use crate::types::{Bead, BeadId, BeadStatus, ClaimResult};
     use chrono::Utc;
 
@@ -1724,7 +1744,7 @@ mod tests {
         ExploreConfig {
             enabled,
             workspaces,
-            workspace_root: PathBuf::from("/tmp/needle-test-root"),
+            workspace_root: fixture_root("needle-test-root"),
             rediscovery_cycles: 0,
             starvation_threshold_minutes: 0,
             scan_interval_cycles: 1,
@@ -3291,6 +3311,29 @@ mod tests {
         }
     }
 
+    /// Store factory for proving that one unavailable workspace does not stop
+    /// Explore from scanning the remaining workspaces.
+    struct UnavailableWorkspaceFactory {
+        unavailable: PathBuf,
+        healthy: PathBuf,
+    }
+
+    #[async_trait::async_trait]
+    impl StoreFactory for UnavailableWorkspaceFactory {
+        async fn create_store(
+            &self,
+            workspace: &Path,
+        ) -> Result<Arc<dyn BeadStore>, anyhow::Error> {
+            if workspace == self.unavailable {
+                anyhow::bail!("workspace is unavailable");
+            }
+            if workspace == self.healthy {
+                return Ok(Arc::new(ValidBeadStore::new(self.healthy.clone())));
+            }
+            anyhow::bail!("unexpected workspace: {}", workspace.display());
+        }
+    }
+
     /// Mock store factory for excluded beads scenario.
     ///
     /// Simulates:
@@ -4635,7 +4678,7 @@ mod tests {
                 PathBuf::from("/nonexistent/path/2"),
                 PathBuf::from("/another/fake/path"),
             ],
-            workspace_root: PathBuf::from("/tmp/irrelevant"),
+            workspace_root: fixture_root("irrelevant"),
             rediscovery_cycles: 0,
             starvation_threshold_minutes: 15,
             scan_interval_cycles: 1,
@@ -4845,101 +4888,117 @@ mod tests {
         );
     }
 
-    /// Test: Periodic workspace re-discovery picks up new workspaces.
-    ///
-    /// This test verifies that when a new workspace with a .beads/ directory
-    /// appears after the ExploreStrand is constructed, it is discovered
-    /// during periodic re-discovery without requiring a worker restart.
-    ///
-    /// Test flow:
-    /// 1. Create a root with one initial workspace
-    /// 2. Create an ExploreStrand with rediscovery_cycles = 2
-    /// 3. Call evaluate() once (cycle 1 of 2) - no rediscovery yet
-    /// 4. Create a second workspace with .beads/
-    /// 5. Call evaluate() again (cycle 2) - triggers rediscovery, picks up new workspace
-    /// 6. Verify the new workspace is now in the strand's workspace list
-    ///
-    /// NOTE: This test is quarantined due to spawn_blocking deadlock in test environments.
-    /// See deadlock_scenario_assigned_beads_allow_advancement for details.
-    #[tokio::test]
-    #[ignore]
-    async fn periodic_rediscovery_discovers_new_workspaces() {
-        let root = tempfile::tempdir().unwrap();
+    /// A workspace created after startup is discovered and returned as a
+    /// selectable candidate on the next eligible Explore scan.
+    #[test]
+    fn periodic_rediscovery_makes_new_workspace_selectable() {
+        let runtime = create_test_runtime();
+        runtime.block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let ws1 = root.path().join("workspace1");
+            fs::create_dir(&ws1).unwrap();
+            fs::create_dir(ws1.join(".beads")).unwrap();
+            fs::create_dir(ws1.join(".git")).unwrap();
 
-        // Create initial workspace with .beads/
-        let ws1 = root.path().join("workspace1");
-        fs::create_dir(&ws1).unwrap();
-        fs::create_dir(ws1.join(".beads")).unwrap();
+            let config = ExploreConfig {
+                enabled: true,
+                workspaces: vec![],
+                workspace_root: root.path().to_path_buf(),
+                rediscovery_cycles: 2,
+                starvation_threshold_minutes: 15,
+                scan_interval_cycles: 1,
+                max_scan_interval_cycles: 1,
+                stale_claim_ttl: 300,
+            };
+            let temp_dir = tempfile::tempdir().unwrap();
+            let registry = crate::registry::Registry::new(temp_dir.path());
+            let telemetry = Telemetry::new("test-worker".to_string());
+            let ws2 = root.path().join("workspace2");
 
-        // Configure auto-discovery with rediscovery_cycles = 2
-        let config = ExploreConfig {
-            enabled: true,
-            workspaces: vec![], // EMPTY — auto-discovery mode
-            workspace_root: root.path().to_path_buf(),
-            rediscovery_cycles: 2, // Re-discover every 2 cycles
-            starvation_threshold_minutes: 15,
-            scan_interval_cycles: 1,
-            max_scan_interval_cycles: 1,
-            stale_claim_ttl: 300,
-        };
+            let mut strand = ExploreStrand::new(
+                config,
+                PathBuf::from("/some/other/home"),
+                registry,
+                telemetry,
+                "test-worker-rediscovery".to_string(),
+            );
+            strand.store_factory = Arc::new(BothValidMockFactory {
+                workspace1: ws1.clone(),
+                workspace2: ws2.clone(),
+            });
 
-        let home = PathBuf::from("/some/other/home");
-        let temp_dir = tempfile::tempdir().unwrap();
-        let registry = crate::registry::Registry::new(temp_dir.path());
-        let telemetry = Telemetry::new("test-worker".to_string());
+            // The worker starts with only workspace1 visible.
+            assert_eq!(strand.workspaces.lock().unwrap().len(), 1);
+            assert!(strand.workspaces.lock().unwrap().contains(&ws1));
 
-        let strand = ExploreStrand::new(
-            config,
-            home,
-            registry,
-            telemetry,
-            "test-worker-rediscovery".to_string(),
-        );
+            // Simulate a repository appearing after worker startup.
+            fs::create_dir(&ws2).unwrap();
+            fs::create_dir(ws2.join(".beads")).unwrap();
+            fs::create_dir(ws2.join(".git")).unwrap();
 
-        // Initial state: should have discovered workspace1
-        assert_eq!(
-            strand.workspaces.lock().unwrap().len(),
-            1,
-            "initial discovery should find 1 workspace"
-        );
-        assert!(
-            strand.workspaces.lock().unwrap().contains(&ws1),
-            "initial workspace should be in list"
-        );
+            let result = strand.evaluate(&DummyStore, &HashSet::new()).await;
+            let StrandResult::BeadFound(candidates) = result else {
+                panic!("newly discovered workspace should yield selectable work");
+            };
 
-        // Cycle 1: no rediscovery yet (we need 2 cycles)
-        let store = DummyStore;
-        let _ = strand.evaluate(&store, &HashSet::new()).await;
+            assert!(
+                candidates.iter().any(|bead| bead.workspace == ws2),
+                "the candidate list should include work from the post-startup workspace"
+            );
+            assert!(strand.workspaces.lock().unwrap().contains(&ws2));
+        });
+    }
 
-        // Verify we haven't done rediscovery yet (still 1 workspace)
-        assert_eq!(
-            strand.workspaces.lock().unwrap().len(),
-            1,
-            "after cycle 1, still 1 workspace"
-        );
+    /// A workspace that cannot be opened is skipped while the scan continues
+    /// to a healthy workspace discovered in the same cycle.
+    #[test]
+    fn unavailable_workspace_does_not_halt_scan() {
+        let runtime = create_test_runtime();
+        runtime.block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let unavailable = root.path().join("unavailable");
+            let healthy = root.path().join("healthy");
+            for workspace in [&unavailable, &healthy] {
+                fs::create_dir(workspace).unwrap();
+                fs::create_dir(workspace.join(".beads")).unwrap();
+                fs::create_dir(workspace.join(".git")).unwrap();
+            }
 
-        // Create a second workspace with .beads/ (simulating a new repo being added)
-        let ws2 = root.path().join("workspace2");
-        fs::create_dir(&ws2).unwrap();
-        fs::create_dir(ws2.join(".beads")).unwrap();
+            let config = ExploreConfig {
+                enabled: true,
+                workspaces: vec![],
+                workspace_root: root.path().to_path_buf(),
+                rediscovery_cycles: 1,
+                starvation_threshold_minutes: 15,
+                scan_interval_cycles: 1,
+                max_scan_interval_cycles: 1,
+                stale_claim_ttl: 300,
+            };
+            let temp_dir = tempfile::tempdir().unwrap();
+            let registry = crate::registry::Registry::new(temp_dir.path());
+            let telemetry = Telemetry::new("test-worker".to_string());
+            let mut strand = ExploreStrand::new(
+                config,
+                PathBuf::from("/some/other/home"),
+                registry,
+                telemetry,
+                "test-worker-unavailable".to_string(),
+            );
+            strand.store_factory = Arc::new(UnavailableWorkspaceFactory {
+                unavailable: unavailable.clone(),
+                healthy: healthy.clone(),
+            });
 
-        // Cycle 2: this should trigger rediscovery and pick up the new workspace
-        let _ = strand.evaluate(&store, &HashSet::new()).await;
+            let result = strand.evaluate(&DummyStore, &HashSet::new()).await;
+            let StrandResult::BeadFound(candidates) = result else {
+                panic!("an unavailable workspace must not prevent healthy work from being found");
+            };
 
-        // After rediscovery, we should have both workspaces
-        assert_eq!(
-            strand.workspaces.lock().unwrap().len(),
-            2,
-            "after cycle 2 (rediscovery), should have 2 workspaces"
-        );
-        assert!(
-            strand.workspaces.lock().unwrap().contains(&ws1),
-            "original workspace should still be in list"
-        );
-        assert!(
-            strand.workspaces.lock().unwrap().contains(&ws2),
-            "new workspace should be discovered during rediscovery"
-        );
+            assert!(
+                candidates.iter().all(|bead| bead.workspace == healthy),
+                "only the healthy workspace should contribute candidates"
+            );
+        });
     }
 
     /// Test: Periodic re-discovery is skipped in pinned mode (explicit workspaces list).
@@ -5301,7 +5360,7 @@ mod tests {
         let _config = ExploreConfig {
             enabled: true,
             workspaces: vec![remote_workspace.clone()],
-            workspace_root: PathBuf::from("/tmp/needle-test-root"),
+            workspace_root: fixture_root("needle-test-root"),
             rediscovery_cycles: 0,
             starvation_threshold_minutes: 15,
             scan_interval_cycles: 1,
@@ -5978,7 +6037,7 @@ mod tests {
                 status: BeadStatus::Open,
                 assignee: None,
                 labels: labels.into_iter().map(|s| s.to_string()).collect(),
-                workspace: PathBuf::from("/tmp/nt59-remote"),
+                workspace: fixture_root("nt59-remote"),
                 dependencies: vec![],
                 dependents: vec![],
                 comments: vec![],

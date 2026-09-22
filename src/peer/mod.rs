@@ -358,6 +358,7 @@ mod tests {
     use super::*;
     use crate::bead_store::{Filters, RecoveryReleaseOutcome, RepairReport};
     use crate::health::HeartbeatData;
+    use crate::test_fixtures::fixture_root;
     use crate::types::{Bead, BeadId, ClaimResult, ClaimStatus, WorkerState};
     use async_trait::async_trait;
     use chrono::Utc;
@@ -533,7 +534,7 @@ mod tests {
             pid,
             state: WorkerState::Executing,
             current_bead,
-            workspace: PathBuf::from("/tmp/test"),
+            workspace: fixture_root("test"),
             last_heartbeat,
             started_at: Utc::now() - chrono::Duration::seconds(3600),
             beads_processed: 0,

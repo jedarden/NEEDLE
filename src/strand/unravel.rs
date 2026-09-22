@@ -739,6 +739,7 @@ fn workspace_hash(workspace: &Path) -> String {
 mod tests {
     use super::*;
     use crate::bead_store::{Filters, RepairReport};
+    use crate::test_fixtures::fixture_root;
     use crate::types::{BeadStatus, ClaimResult};
 
     use anyhow::Result;
@@ -948,7 +949,7 @@ mod tests {
             status: BeadStatus::Open,
             assignee: None,
             labels: labels.iter().map(|s| s.to_string()).collect(),
-            workspace: PathBuf::from("/tmp/test"),
+            workspace: fixture_root("test"),
             dependencies: vec![],
             dependents: vec![],
             comments: vec![],
@@ -1127,7 +1128,7 @@ mod tests {
         // Pre-populate state with recent analysis.
         let mut state = UnravelState::default();
         state.mark_analyzed(&BeadId::from("nd-cooldown".to_string()));
-        let hash = workspace_hash(Path::new("/tmp/test"));
+        let hash = workspace_hash(&fixture_root("test"));
         let state_path = state_dir.path().join(format!("{hash}.json"));
         state.save(&state_path).unwrap();
 
@@ -1139,7 +1140,7 @@ mod tests {
         let response = r#"[{"title": "Alt", "body": "body"}]"#;
         let strand = UnravelStrand::new(
             config,
-            PathBuf::from("/tmp/test"),
+            fixture_root("test"),
             state_dir.path().to_path_buf(),
             Box::new(MockAgent::new(response)),
             telemetry,
@@ -1168,7 +1169,7 @@ mod tests {
             "nd-expired".to_string(),
             Utc::now() - chrono::Duration::days(8),
         );
-        let hash = workspace_hash(Path::new("/tmp/test"));
+        let hash = workspace_hash(&fixture_root("test"));
         let state_path = state_dir.path().join(format!("{hash}.json"));
         state.save(&state_path).unwrap();
 
@@ -1180,7 +1181,7 @@ mod tests {
         let response = r#"[{"title": "Alt", "body": "body"}]"#;
         let strand = UnravelStrand::new(
             config,
-            PathBuf::from("/tmp/test"),
+            fixture_root("test"),
             state_dir.path().to_path_buf(),
             Box::new(MockAgent::new(response)),
             telemetry,
@@ -1271,7 +1272,7 @@ mod tests {
         let response = r#"[{"title": "Alt", "body": "body"}]"#;
         let strand = UnravelStrand::new(
             make_enabled_config(),
-            PathBuf::from("/tmp/test"),
+            fixture_root("test"),
             state_dir.path().to_path_buf(),
             Box::new(MockAgent::new(response)),
             telemetry,
@@ -1282,7 +1283,7 @@ mod tests {
         let _ = strand.evaluate(&store, &HashSet::new()).await;
 
         // Verify state was saved.
-        let hash = workspace_hash(Path::new("/tmp/test"));
+        let hash = workspace_hash(&fixture_root("test"));
         let state_path = state_dir.path().join(format!("{hash}.json"));
         let state = UnravelState::load(&state_path).unwrap();
         assert!(
@@ -1371,7 +1372,7 @@ mod tests {
 
     #[test]
     fn state_load_missing_file_returns_default() {
-        let path = PathBuf::from("/tmp/nonexistent-unravel-state-12345.json");
+        let path = fixture_root("nonexistent-unravel-state-12345.json");
         let state = UnravelState::load(&path).unwrap();
         assert!(state.analyzed.is_empty());
     }
@@ -1419,7 +1420,7 @@ mod tests {
         let (agent, calls) = CountingAgent::new();
         let strand = UnravelStrand::new(
             make_enabled_config(),
-            PathBuf::from("/tmp/test"),
+            fixture_root("test"),
             state_dir.path().to_path_buf(),
             Box::new(agent),
             telemetry,
@@ -1462,7 +1463,7 @@ mod tests {
         let (agent, calls) = CountingAgent::new();
         let strand = UnravelStrand::new(
             make_enabled_config(),
-            PathBuf::from("/tmp/test"),
+            fixture_root("test"),
             state_dir.path().to_path_buf(),
             Box::new(agent),
             Telemetry::new("test".to_string()),
@@ -1496,7 +1497,7 @@ mod tests {
         let (agent, calls) = CountingAgent::new();
         let strand = UnravelStrand::new(
             make_enabled_config(),
-            PathBuf::from("/tmp/test"),
+            fixture_root("test"),
             state_dir.path().to_path_buf(),
             Box::new(agent),
             Telemetry::new("test".to_string()),
