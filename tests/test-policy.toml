@@ -161,7 +161,12 @@ version = 1
 # through telemetry and NEEDLE's own snapshot stream, also without filing.
 # The unit tier is the only home that can reach the private
 # RecoverableFrontierStore mock and the create_bead recorder it wraps.
-max_tests = 3914
+# +5 ADR-003 cleanup liveness contracts (needle-81be9028): the pane-tree
+# incident shapes (dead shell wrapper with a live worker child, live
+# `needle supervise` pane) plus the real inspector's live/dead answers.
+# The filter, the trait, and its mock are all private to src/cli/mod.rs,
+# so the unit tier is the only home that can reach them.
+max_tests = 3919
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
