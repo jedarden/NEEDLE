@@ -1260,7 +1260,8 @@ mod tests {
 
         // Create unpromoted testing binary (different hash).
         let testing_path = bin_dir.join("needle-testing");
-        fs::write(&testing_path, b"different testing binary").unwrap();
+        let testing_content = b"different testing binary";
+        fs::write(&testing_path, testing_content).unwrap();
 
         // Verify the hashes are different.
         let stable_hash = file_hash(&stable_path).unwrap();
