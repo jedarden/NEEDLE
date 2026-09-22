@@ -22,6 +22,7 @@ pub mod capabilities;
 mod cli_store;
 mod strategies;
 mod sync_guard;
+mod version_handshake;
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -42,6 +43,7 @@ pub use backend::{
 };
 pub(crate) use cli_store::operation_failed_with;
 pub use cli_store::CliBeadStore;
+pub use version_handshake::{check_bead_forge_version, run_version_handshake, VersionCheck};
 
 /// Parse a `quarantine-until:<rfc3339>` label into its expiry instant.
 ///
@@ -202,6 +204,8 @@ pub fn open_configured(
     harness: Option<String>,
     harness_version: Option<String>,
 ) -> Result<Arc<dyn BeadStore>> {
+    version_handshake::warn_for_legacy_workspace(&workspace, config.path.as_deref());
+
     // Keep the historical public signature compatible while ensuring every
     // production store open observes the host-level transition policy. The
     // workspace file only supplies backend identity; authority-changing
