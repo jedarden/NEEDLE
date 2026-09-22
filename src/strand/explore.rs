@@ -193,11 +193,9 @@ pub struct ExploreStrand {
     /// beads carrying the lane's label are admitted as candidates. `None` —
     /// the default — admits candidates exactly as before lanes existed.
     lane: Option<crate::config::PluckLaneConfig>,
-    /// Historical re-discovery interval retained for configuration
-    /// compatibility. Auto-discovery is refreshed on each eligible Explore
-    /// scan so new workspaces become selectable without waiting for a worker
-    /// restart; pinned workspaces never re-discover.
-    #[allow(dead_code)]
+    /// Number of eligible Explore scans between auto-discovery refreshes.
+    /// Zero disables refreshes after the construction-time discovery; pinned
+    /// workspaces never re-discover regardless of this setting.
     rediscovery_cycles: u32,
     /// Workspace root for re-discovery (from config.workspace_root).
     workspace_root: PathBuf,
@@ -281,15 +279,14 @@ impl ExploreStrand {
             );
         }
 
-        // Auto-discovery mode re-discovers workspaces every cycle (bf-6anj4). The
-        // legacy `rediscovery_cycles` throttle is no longer applied; it is logged
-        // here for visibility only.
+        // Log the periodic refresh setting in auto-discovery mode. The initial
+        // discovery above always runs, while later refreshes honor the configured
+        // cadence in `evaluate`.
         if auto_discovery_mode {
             tracing::info!(
                 worker = %qualified_id,
-                configured_rediscovery_cycles = config.rediscovery_cycles,
-                "Explore auto-discovery: workspaces re-discovered every cycle \
-                 (rediscovery_cycles throttle no longer applied)"
+                rediscovery_cycles = config.rediscovery_cycles,
+                "Explore auto-discovery configured for periodic workspace re-discovery"
             );
         }
 
@@ -904,8 +901,8 @@ impl ExploreStrand {
 
     /// Re-discover workspaces (refresh the workspace list).
     ///
-    /// This is called for each eligible Explore scan in auto-discovery mode
-    /// (empty workspaces config). It re-runs discovery under
+    /// This is called periodically for eligible Explore scans in auto-discovery
+    /// mode (empty workspaces config). It re-runs discovery under
     /// `workspace_root` and updates the workspace list, preserving:
     /// - **No upward traversal:** Only scans immediate children of workspace_root
     /// - **Explicit workspaces override:** Only runs when auto_discovery_mode is true
@@ -917,6 +914,14 @@ impl ExploreStrand {
             tracing::debug!(
                 worker = %self.qualified_id,
                 "skipping workspace re-discovery: running in pinned mode (explicit workspaces list)"
+            );
+            return 0;
+        }
+
+        if self.rediscovery_cycles == 0 {
+            tracing::debug!(
+                worker = %self.qualified_id,
+                "skipping workspace re-discovery: disabled (rediscovery_cycles = 0)"
             );
             return 0;
         }
@@ -1129,23 +1134,26 @@ impl super::Strand for ExploreStrand {
             return StrandResult::NoWork;
         }
 
-        // Re-discover workspaces every cycle (bf-3peh4 / bf-6anj4). The workspace
-        // list was captured at boot and only refreshed on a throttle, so a newly
-        // created store needed a worker restart to be seen. A plain read_dir over
-        // ~40 entries is cheap, so we refresh unconditionally each cycle;
-        // `rediscover_workspaces` is a no-op in pinned mode. The cycle counter is
-        // still advanced so telemetry/consumers that read it stay meaningful.
-        let _cycle = self
+        // Re-discover periodically (bf-3peh4 / bf-6anj4). The workspace list is
+        // captured at boot, then refreshed after the configured number of eligible
+        // Explore scans so a newly created store becomes selectable without a
+        // worker restart while avoiding a directory scan on every cycle.
+        let cycles = self
             .cycles_since_rediscovery
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
-        let added = self.rediscover_workspaces();
-        if added > 0 {
-            tracing::info!(
-                worker = %self.qualified_id,
-                added,
-                "workspace re-discovery found new workspaces"
-            );
+        if self.rediscovery_cycles > 0 && cycles >= self.rediscovery_cycles {
+            self.cycles_since_rediscovery
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+
+            let added = self.rediscover_workspaces();
+            if added > 0 {
+                tracing::info!(
+                    worker = %self.qualified_id,
+                    added,
+                    "periodic workspace re-discovery found new workspaces"
+                );
+            }
         }
 
         // Empty workspaces (after discovery attempt) means no workspaces found.
@@ -4936,6 +4944,16 @@ mod tests {
             fs::create_dir(ws2.join(".beads")).unwrap();
             fs::create_dir(ws2.join(".git")).unwrap();
 
+            // The first eligible scan only increments the periodic counter.
+            let result = strand.evaluate(&DummyStore, &HashSet::new()).await;
+            let StrandResult::BeadFound(candidates) = result else {
+                panic!("the initially discovered workspace should yield selectable work");
+            };
+            assert!(candidates.iter().all(|bead| bead.workspace == ws1));
+            assert!(!strand.workspaces.lock().unwrap().contains(&ws2));
+
+            // The configured interval is two scans, so the second scan refreshes
+            // the list and makes the post-startup workspace selectable.
             let result = strand.evaluate(&DummyStore, &HashSet::new()).await;
             let StrandResult::BeadFound(candidates) = result else {
                 panic!("newly discovered workspace should yield selectable work");
@@ -5078,24 +5096,22 @@ mod tests {
         );
     }
 
-    /// Test: Re-discovery runs every cycle regardless of `rediscovery_cycles`
-    /// (bf-6anj4). The legacy throttle — including the `rediscovery_cycles == 0`
-    /// disable path — was removed, so a workspace created after boot is picked up
-    /// on the next cycle even when the config value is 0.
+    /// Test: `rediscovery_cycles = 0` disables refreshes after construction.
     ///
     /// NOTE: This test is quarantined due to spawn_blocking deadlock in test environments.
     /// See deadlock_scenario_assigned_beads_allow_advancement for details.
     #[tokio::test]
     #[ignore]
-    async fn rediscovery_runs_every_cycle_regardless_of_config() {
+    async fn rediscovery_can_be_disabled_by_config() {
         let root = tempfile::tempdir().unwrap();
 
         // Create initial workspace
         let ws1 = root.path().join("workspace1");
         fs::create_dir(&ws1).unwrap();
         fs::create_dir(ws1.join(".beads")).unwrap();
+        fs::create_dir(ws1.join(".git")).unwrap();
 
-        // rediscovery_cycles = 0 used to DISABLE re-discovery; it is now ignored.
+        // rediscovery_cycles = 0 disables re-discovery after construction.
         let config = ExploreConfig {
             enabled: true,
             workspaces: vec![], // Auto-discovery mode
@@ -5131,23 +5147,24 @@ mod tests {
         let ws2 = root.path().join("workspace2");
         fs::create_dir(&ws2).unwrap();
         fs::create_dir(ws2.join(".beads")).unwrap();
+        fs::create_dir(ws2.join(".git")).unwrap();
 
-        // One cycle is enough — re-discovery runs unconditionally now.
+        // A selection cycle must not refresh the list when re-discovery is disabled.
         let store = DummyStore;
         let _ = strand.evaluate(&store, &HashSet::new()).await;
 
         assert_eq!(
             strand.workspaces.lock().unwrap().len(),
-            2,
-            "new workspace should be discovered every cycle even with rediscovery_cycles = 0"
+            1,
+            "new workspace should not be discovered when rediscovery_cycles = 0"
         );
         assert!(
             strand.workspaces.lock().unwrap().contains(&ws1),
             "original workspace should still be in list"
         );
         assert!(
-            strand.workspaces.lock().unwrap().contains(&ws2),
-            "new workspace should be discovered when rediscovery_cycles = 0 (throttle removed)"
+            !strand.workspaces.lock().unwrap().contains(&ws2),
+            "new workspace should remain undiscovered when periodic refresh is disabled"
         );
     }
 
