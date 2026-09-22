@@ -6617,7 +6617,7 @@ mod tests {
 
         // Even though there's an open bead, it is waiting on unfinished work.
         // Pluck should diagnose no candidate and continue the waterfall.
-        let store = RecoverableFrontierStore::hiding(vec![blocked], &[]);
+        let store = RecoverableFrontierStore::hiding(vec![blocked], &["blocked"]);
         let before = store.list_all().await.unwrap();
 
         let strand = PluckStrand::with_persistent_records(
