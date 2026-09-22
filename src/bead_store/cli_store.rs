@@ -23,6 +23,13 @@ use super::{
 };
 
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
+/// Explicit ceiling for inventory/frontier queries.
+///
+/// Backends must receive a positive limit: omitted limits may use a small
+/// default and hide lower-priority work, while zero has backend-specific
+/// meanings (including an empty result set). This is the largest value
+/// accepted by the bead-rs CLI and is also understood by legacy stores.
+const EXPLICIT_QUERY_LIMIT: &str = "999999";
 
 #[derive(Debug, thiserror::Error)]
 #[error("backend '{backend}' operation '{operation}' exited with code {exit_code}: {stderr}")]
@@ -220,41 +227,8 @@ impl CliBeadStore {
         }
     }
 
-    /// Check if a specific quirk applies to the current backend version.
-    /// Returns true only if the quirk exists and its version_requirement matches
-    /// the backend's verified version (or has no version requirement).
-    fn has_quirk(&self, quirk_name: &str) -> bool {
-        self.backend
-            .quirks
-            .iter()
-            .any(|q| q.name == quirk_name && self.quirk_version_matches(q))
-    }
-
-    /// Check if a quirk's version requirement matches the backend's verified version.
-    fn quirk_version_matches(&self, quirk: &crate::bead_store::backend::BeadBackendQuirk) -> bool {
-        match &quirk.version_requirement {
-            None => true, // No version requirement means it always applies
-            Some(requirement) => {
-                // Parse the version requirement and check against verified version
-                // For now, since we only have "<= 0.2.0" and verified_against is "bf 0.4.1",
-                // the quirk should NOT apply (0.4.1 > 0.2.0)
-                // This is a simplified check - a full implementation would use semver parsing
-                let verified = &self.backend.verified_against;
-                // Extract version number (e.g., "bf 0.4.1" -> "0.4.1")
-                let version_part = verified.split_whitespace().nth(1).unwrap_or(verified);
-                // Simple check: if requirement says "<= 0.2.0" and we're at "0.4.1", it doesn't match
-                if let Some(req_version) = requirement.strip_prefix("<=") {
-                    let req_version = req_version.trim();
-                    // Very basic version comparison - should use semver crate in production
-                    // For now: "0.4.1" > "0.2.0" means quirk doesn't apply (return false)
-                    // If current version > required version, quirk does NOT match
-                    version_part <= req_version
-                } else {
-                    // Unknown requirement format - conservatively apply the quirk
-                    true
-                }
-            }
-        }
+    fn explicit_query_values() -> HashMap<&'static str, String> {
+        HashMap::from([("limit", EXPLICIT_QUERY_LIMIT.to_string())])
     }
 
     pub async fn run_operation(
@@ -594,13 +568,7 @@ impl BeadStore for CliBeadStore {
     }
 
     async fn ready(&self, filters: &Filters) -> Result<Vec<Bead>> {
-        // Apply limit workaround only if backend has the quirk
-        let limit = if self.has_quirk("limit_zero_returns_empty_set") {
-            "999999"
-        } else {
-            "0" // Use 0 for backends that handle --limit correctly
-        };
-        let values = HashMap::from([("limit", limit.to_string())]);
+        let values = Self::explicit_query_values();
         let stdout = self.run_operation("ready", &values).await?;
         let mut beads = self.parse_beads("ready", &stdout)?;
         if let Some(assignee) = &filters.assignee {
@@ -625,13 +593,7 @@ impl BeadStore for CliBeadStore {
     }
 
     async fn list_all(&self) -> Result<Vec<Bead>> {
-        // Apply limit workaround only if backend has the quirk
-        let limit = if self.has_quirk("limit_zero_returns_empty_set") {
-            "999999"
-        } else {
-            "0" // Use 0 for backends that handle --limit correctly
-        };
-        let values = HashMap::from([("limit", limit.to_string())]);
+        let values = Self::explicit_query_values();
         let stdout = self.run_operation("list_all", &values).await?;
         self.parse_beads("list_all", &stdout)
     }
@@ -641,12 +603,7 @@ impl BeadStore for CliBeadStore {
         // capacity support continue to work through the trait's compatible
         // full-inventory fallback.
         if self.operation("list_in_progress").is_ok() {
-            let limit = if self.has_quirk("limit_zero_returns_empty_set") {
-                "999999"
-            } else {
-                "0"
-            };
-            let values = HashMap::from([("limit", limit.to_string())]);
+            let values = Self::explicit_query_values();
             let stdout = self.run_operation("list_in_progress", &values).await?;
             return self.parse_beads("list_in_progress", &stdout);
         }
@@ -657,26 +614,14 @@ impl BeadStore for CliBeadStore {
     }
 
     async fn starvation_inventory(&self) -> Result<Vec<Bead>> {
-        let limit = if self.has_quirk("limit_zero_returns_empty_set") {
-            "999999"
-        } else {
-            "0"
-        };
-        let values = HashMap::from([("limit", limit.to_string())]);
-        let stdout = self.run_operation("list_all", &values).await?;
-        let mut beads = self.parse_beads("list_all", &stdout)?;
+        let mut beads = self.list_all().await?;
         self.enrich_manual_block_labels(&mut beads).await;
         Ok(beads)
     }
 
     async fn manually_blocked_open(&self) -> Result<Vec<Bead>> {
         if self.backend.name == "bead-rs" && self.operation("manual_blocked").is_ok() {
-            let limit = if self.has_quirk("limit_zero_returns_empty_set") {
-                "999999"
-            } else {
-                "0"
-            };
-            let values = HashMap::from([("limit", limit.to_string())]);
+            let values = Self::explicit_query_values();
             match self.run_operation("manual_blocked", &values).await {
                 Ok(stdout) => {
                     let mut beads = self.parse_beads("manual_blocked", &stdout)?;
@@ -1682,8 +1627,8 @@ fn is_optional_placeholder(name: &str) -> bool {
 
 #[cfg(test)]
 mod process_runner_tests {
-    use super::{super::builtin_bead_backends, CliBeadStore};
-    use crate::bead_store::{BeadStore as _, RecoveryReleaseOutcome};
+    use super::{super::builtin_bead_backends, CliBeadStore, EXPLICIT_QUERY_LIMIT};
+    use crate::bead_store::{BeadStore as _, Filters, RecoveryReleaseOutcome};
     use crate::process_runner::{FakeProcessRunner, ProcessOutput};
     use crate::types::{BeadId, BeadStatus, ClaimStatus};
     use std::sync::Arc;
@@ -1762,7 +1707,7 @@ mod process_runner_tests {
     }
 
     #[tokio::test]
-    async fn process_runner_fake_drives_bead_adapter_without_a_child() {
+    async fn process_runner_fake_drives_bead_adapter_and_passes_explicit_ready_limit() {
         let directory = tempfile::tempdir().unwrap();
         let binary = directory.path().join("fixture-cli");
         std::fs::write(&binary, "fixture").unwrap();
@@ -1794,6 +1739,36 @@ mod process_runner_tests {
         assert_eq!(requests[0].program(), binary);
         assert_eq!(requests[0].arguments(), ["list", "--json"]);
         assert_eq!(requests[0].working_directory(), Some(directory.path()));
+
+        runner.push_output(ProcessOutput::success(
+            concat!(
+                r#"{"id":"urgent-1","title":"urgent","priority":0,"status":"open","created_at":"2026-08-12T00:00:00Z"}"#,
+                "\n",
+                r#"{"id":"urgent-2","title":"urgent","priority":0,"status":"open","created_at":"2026-08-12T00:00:00Z"}"#,
+                "\n",
+                r#"{"id":"urgent-3","title":"urgent","priority":0,"status":"open","created_at":"2026-08-12T00:00:00Z"}"#,
+                "\n",
+                r#"{"id":"low-priority-tail","title":"low priority","priority":4,"status":"open","created_at":"2026-08-12T00:00:00Z"}"#,
+                "\n"
+            )
+            .as_bytes()
+            .to_vec(),
+        ));
+
+        let ready = store.ready(&Filters::default()).await.unwrap();
+        assert!(
+            ready
+                .iter()
+                .any(|bead| bead.id.as_ref() == "low-priority-tail"),
+            "a busy ready store must not hide the low-priority tail"
+        );
+
+        let requests = runner.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[1].arguments(),
+            ["list", "--ready", "--json", "--limit", EXPLICIT_QUERY_LIMIT]
+        );
     }
 
     #[tokio::test]
@@ -2086,7 +2061,9 @@ fn parse_beads_with_claim_history(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_beads, parse_beads_with_claim_history, CliBeadStore, ParseShape};
+    use super::{
+        parse_beads, parse_beads_with_claim_history, CliBeadStore, ParseShape, EXPLICIT_QUERY_LIMIT,
+    };
     use std::collections::HashMap;
 
     #[test]
@@ -2207,14 +2184,10 @@ mod tests {
         )
         .unwrap();
 
-        // bead-rs has the quirk (declared without version requirement in builtin_bead_rs)
-        assert!(store.has_quirk("limit_zero_returns_empty_set"));
-        // When the quirk applies, "0" is still passed - the workaround is applied by the caller
-        // by using a large explicit limit instead of 0
-        let values = HashMap::from([("limit", "0".to_string())]);
+        let values = HashMap::from([("limit", EXPLICIT_QUERY_LIMIT.to_string())]);
         assert_eq!(
             store.render_operation("ready", &values).unwrap(),
-            ["list", "--ready", "--json", "--limit", "0"]
+            ["list", "--ready", "--json", "--limit", "999999"]
         );
     }
 
