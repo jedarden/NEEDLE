@@ -162,7 +162,12 @@ install_if_changed 644 "$SRC_DIR/needle-factory-audit.service" "$SYSTEMD_DIR/nee
 install_if_changed 644 "$SRC_DIR/needle-factory-audit.timer" "$SYSTEMD_DIR/needle-factory-audit.timer"
 install_if_changed 644 "$SRC_DIR/needle-improve.service" "$SYSTEMD_DIR/needle-improve.service"
 install_if_changed 644 "$SRC_DIR/needle-improve.timer" "$SYSTEMD_DIR/needle-improve.timer"
+install_if_changed 644 "$SRC_DIR/needle-release-upgrade.service" "$SYSTEMD_DIR/needle-release-upgrade.service"
+install_if_changed 644 "$SRC_DIR/needle-release-upgrade.timer" "$SYSTEMD_DIR/needle-release-upgrade.timer"
 install_if_changed 755 "$SRC_DIR/needle-zai-governor" "$NEEDLE_HOST_HOME/.local/bin/needle-zai-governor"
+# Both systemd ExecStart and test.sh invoke the helper directly, so it must
+# land executable; its behavior suite is test.sh's --self-test run.
+install_if_changed 755 "$SRC_DIR/needle-release-upgrade" "$NEEDLE_HOST_HOME/.local/bin/needle-release-upgrade"
 install_if_changed 644 "$SRC_DIR/fleet-policy.env" "$NEEDLE_CONFIG_DIR/fleet-policy.env"
 install_if_changed 644 "$SRC_DIR/backlog-policy.env" "$NEEDLE_CONFIG_DIR/backlog-policy.env"
 for adapter in "$MANAGED_ADAPTERS_DIR"/*.yaml; do
@@ -262,6 +267,16 @@ if ! systemctl --user is-enabled -q needle-improve.timer 2>/dev/null; then
 fi
 if [[ "$START_NEW" == 1 ]] && ! systemctl --user is-active -q needle-improve.timer; then
     run systemctl --user start --no-block needle-improve.timer
+fi
+
+# Standalone systemd workers do not run `needle supervise`, so its release
+# poller is absent on ex44. This host-level timer reuses `needle upgrade`'s
+# canary-gated :testing -> :stable path without starting a second worker fleet.
+if ! systemctl --user is-enabled -q needle-release-upgrade.timer 2>/dev/null; then
+    run systemctl --user enable needle-release-upgrade.timer
+fi
+if [[ "$START_NEW" == 1 ]] && ! systemctl --user is-active -q needle-release-upgrade.timer; then
+    run systemctl --user start --no-block needle-release-upgrade.timer
 fi
 
 echo "- policy converged; no running worker was restarted"

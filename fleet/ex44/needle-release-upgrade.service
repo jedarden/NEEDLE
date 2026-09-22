@@ -1,0 +1,19 @@
+[Unit]
+Description=Canary-gated NEEDLE release upgrade
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Slice=needle.slice
+WorkingDirectory=/home/coding/NEEDLE
+# Canary dispatch may need the same provider credentials as a fleet worker.
+EnvironmentFile=-%h/.config/needle/worker-common.env
+Environment=PATH=/home/coding/.local/bin:/home/coding/.cargo/bin:/home/coding/bin:/run/current-system/sw/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# `needle upgrade` is a no-op when this host already runs the newest release.
+# A newer release goes through :testing -> canary -> :stable; live workers
+# re-exec the promoted stable binary only at a safe bead boundary.
+ExecStart=/run/current-system/sw/bin/flock --nonblock %h/.needle/state/release-upgrade.lock /home/coding/.local/bin/needle-release-upgrade
+# The release canary dispatches real agents and is intentionally allowed the
+# same bounded half-hour window as the workspace validation outcome gate.
+TimeoutStartSec=1800

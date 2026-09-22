@@ -1,0 +1,15 @@
+[Unit]
+Description=Check for a canary-gated NEEDLE release every six hours
+
+[Timer]
+# Give the fleet five minutes after installation/boot before the first check,
+# then spread subsequent checks away from exact clock boundaries.
+OnActiveSec=5min
+OnUnitActiveSec=6h
+RandomizedDelaySec=15m
+AccuracySec=1m
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+

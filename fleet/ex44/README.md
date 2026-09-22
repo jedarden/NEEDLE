@@ -49,6 +49,18 @@ exploration sample.
    Explore use the managed `~/.needle/roam-only` home. It has an explicit bead
    backend binding and no bead store, so home strands skip cleanly and Explore
    selects work from the maintained-workspace allowlist.
+8. **Follow published releases.** The workers are standalone systemd units,
+   so they do not run the release poller built into `needle supervise`.
+   `needle-release-upgrade.timer` checks every six hours under a host-local
+   lock. Its helper resolves the public `releases/latest` redirect instead of
+   the shared-host GitHub API quota, downloads the platform binary and output
+   transforms, verifies `checksums.txt`, and hands them to the canary-gated
+   `needle upgrade --from-file` path. A newer release is staged to
+   `needle-testing`, promoted atomically to `needle-stable` only after its
+   canary passes, and picked up by workers at safe bead boundaries. An
+   already-current or newer-than-published host is unchanged.
+   `apply-ex44-fleet.sh` installs the helper next to the units, and `test.sh`
+   runs the helper's `--self-test` alongside the unit-content assertions.
 
 The backlog audit intentionally counts selection eligibility rather than raw
 open beads. It excludes active timed holds, manual/human work, and ordinary

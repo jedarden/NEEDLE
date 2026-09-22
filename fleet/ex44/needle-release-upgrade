@@ -1,0 +1,130 @@
+#!/usr/bin/env bash
+# Discover a public GitHub release without consuming the shared-host API rate
+# limit, verify its checksums, and hand it to NEEDLE's canary-gated installer.
+#
+# The ex44 workers are standalone systemd units and never run `needle
+# supervise`, so this helper is the host's release poller. It resolves the
+# `releases/latest` redirect (no API call), refuses downgrades, verifies every
+# asset against the release's checksums.txt, and installs through
+# `needle upgrade --from-file`: the candidate is staged to :testing, validated
+# by the canary suite, and only promoted to :stable — where live workers
+# re-exec it at a safe bead boundary — when that suite passes. A failed canary
+# rejects the candidate and leaves the running fleet's binary untouched.
+set -euo pipefail
+
+REPOSITORY=jedarden/NEEDLE
+NEEDLE_BIN="${NEEDLE_BIN:-$HOME/.needle/bin/needle}"
+NEEDLE_HOME="${NEEDLE_HOME:-$HOME/.needle}"
+PLATFORM_SUFFIX=x86_64-unknown-linux-gnu
+
+parse_release_version() {
+    local release_url=$1 tag
+    tag=${release_url%/}
+    tag=${tag##*/}
+    [[ "$tag" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)$ ]] || {
+        echo "unexpected latest-release URL: $release_url" >&2
+        return 1
+    }
+    printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
+parse_binary_version() {
+    local version_output=$1
+    [[ "$version_output" =~ ^needle[[:space:]]+([0-9]+\.[0-9]+\.[0-9]+)([[:space:]]|$) ]] || {
+        echo "unexpected needle --version output" >&2
+        return 1
+    }
+    printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
+version_is_newer() {
+    local candidate=$1 current=$2 highest
+    [[ "$candidate" != "$current" ]] || return 1
+    highest=$(printf '%s\n%s\n' "$candidate" "$current" | LC_ALL=C sort -V | tail -n 1)
+    [[ "$highest" == "$candidate" ]]
+}
+
+self_test() {
+    [[ "$(parse_release_version 'https://github.com/jedarden/NEEDLE/releases/tag/v1.2.3')" == 1.2.3 ]]
+    [[ "$(parse_binary_version 'needle 1.2.3 (abcdef0 2026-09-18T00:00:00Z)')" == 1.2.3 ]]
+    version_is_newer 1.2.4 1.2.3
+    version_is_newer 1.10.0 1.9.9
+    ! version_is_newer 1.2.3 1.2.3
+    ! version_is_newer 1.2.2 1.2.3
+    echo "needle release upgrade self-test passed"
+}
+
+if [[ "${1:-}" == --self-test ]]; then
+    self_test
+    exit 0
+fi
+[[ $# -eq 0 ]] || {
+    echo "usage: needle-release-upgrade [--self-test]" >&2
+    exit 2
+}
+
+curl_common=(
+    --fail --silent --show-error --location
+    --retry 3 --retry-all-errors --connect-timeout 10 --max-time 300
+    --user-agent "needle-release-upgrade/1"
+)
+
+latest_url=$(curl "${curl_common[@]}" --head --output /dev/null \
+    --write-out '%{url_effective}' "https://github.com/$REPOSITORY/releases/latest")
+latest_version=$(parse_release_version "$latest_url")
+current_version=$(parse_binary_version "$("$NEEDLE_BIN" --version)")
+
+if [[ "$latest_version" == "$current_version" ]]; then
+    echo "Already up to date (version $current_version)"
+    exit 0
+fi
+if ! version_is_newer "$latest_version" "$current_version"; then
+    echo "Refusing release downgrade: installed $current_version, published $latest_version" >&2
+    exit 0
+fi
+
+state_dir="$NEEDLE_HOME/state"
+mkdir -p "$state_dir"
+temp_dir=$(mktemp -d "$state_dir/release-upgrade.XXXXXX")
+cleanup() {
+    find "$temp_dir" -mindepth 1 -delete
+    rmdir "$temp_dir"
+}
+trap cleanup EXIT
+
+release_base="https://github.com/$REPOSITORY/releases/download/v$latest_version"
+assets=(
+    "needle-$PLATFORM_SUFFIX"
+    "needle-transform-claude-$PLATFORM_SUFFIX"
+    "needle-transform-codex-$PLATFORM_SUFFIX"
+)
+
+curl "${curl_common[@]}" --output "$temp_dir/checksums.txt" "$release_base/checksums.txt"
+for asset in "${assets[@]}"; do
+    curl "${curl_common[@]}" --output "$temp_dir/$asset" "$release_base/$asset"
+    expected=$(awk -v asset="$asset" '$2 == asset { print $1 }' "$temp_dir/checksums.txt")
+    [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || {
+        echo "release checksum is missing or malformed for $asset" >&2
+        exit 1
+    }
+    actual=$(sha256sum "$temp_dir/$asset" | cut -d' ' -f1)
+    [[ "$actual" == "$expected" ]] || {
+        echo "release checksum mismatch for $asset" >&2
+        exit 1
+    }
+    chmod 755 "$temp_dir/$asset"
+done
+
+candidate="$temp_dir/needle-$PLATFORM_SUFFIX"
+candidate_version=$(parse_binary_version "$("$candidate" --version)")
+[[ "$candidate_version" == "$latest_version" ]] || {
+    echo "downloaded binary reports $candidate_version, expected $latest_version" >&2
+    exit 1
+}
+
+# `needle upgrade --from-file` discovers unsuffixed transform siblings.
+mv "$temp_dir/needle-transform-claude-$PLATFORM_SUFFIX" "$temp_dir/needle-transform-claude"
+mv "$temp_dir/needle-transform-codex-$PLATFORM_SUFFIX" "$temp_dir/needle-transform-codex"
+
+echo "Installing verified NEEDLE release $latest_version via canary channel..."
+"$NEEDLE_BIN" upgrade --from-file "$candidate"
