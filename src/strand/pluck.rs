@@ -3846,6 +3846,147 @@ mod tests {
         }
     }
 
+    const BEAD_RS_DEEP_GRAPH_DEPTH: usize = 96;
+
+    /// Build a large bead-rs-shaped graph with lean `blocker`/`kind` edges.
+    /// The complete projection has one ready chain root; the reduced
+    /// inventory omits closed blocker rows to reproduce the lookup miss.
+    fn bead_rs_deep_dependency_fixture() -> (Vec<Bead>, Vec<Bead>, BeadId) {
+        let mut raw_beads = Vec::with_capacity(BEAD_RS_DEEP_GRAPH_DEPTH * 3);
+        let mut closed_blocker_ids = Vec::with_capacity(BEAD_RS_DEEP_GRAPH_DEPTH * 2);
+
+        for index in 0..(BEAD_RS_DEEP_GRAPH_DEPTH * 2) {
+            let id = format!("needle-closed-blocker-{index:03}");
+            closed_blocker_ids.push(id.clone());
+            raw_beads.push(serde_json::json!({
+                "id": id,
+                "title": "closed blocker",
+                "description": null,
+                "priority": 1,
+                "status": "closed",
+                "assignee": null,
+                "labels": [],
+                "source_repo": "/tmp/needle-bead-rs-deep-graph",
+                "dependencies": [],
+                "dependents": [],
+                "comments": [],
+                "created_at": "2026-09-01T00:00:00Z",
+                "updated_at": "2026-09-01T00:00:00Z"
+            }));
+        }
+
+        for index in 0..BEAD_RS_DEEP_GRAPH_DEPTH {
+            let id = format!("needle-deep-open-{index:03}");
+            let mut dependencies = vec![serde_json::json!({
+                "blocker": closed_blocker_ids[index],
+                "kind": "blocks"
+            })];
+            if index > 0 {
+                dependencies.push(serde_json::json!({
+                    "blocker": format!("needle-deep-open-{:03}", index - 1),
+                    "kind": "blocks"
+                }));
+            }
+            raw_beads.push(serde_json::json!({
+                "id": id,
+                "title": "deep open bead",
+                "description": null,
+                "priority": 1,
+                "status": "open",
+                "assignee": null,
+                "labels": [],
+                "source_repo": "/tmp/needle-bead-rs-deep-graph",
+                "dependencies": dependencies,
+                "dependents": [],
+                "comments": [],
+                "created_at": "2026-09-01T00:00:00Z",
+                "updated_at": "2026-09-01T00:00:00Z"
+            }));
+        }
+
+        let all_beads: Vec<Bead> = raw_beads
+            .into_iter()
+            .map(|value| serde_json::from_value(value).expect("bead-rs fixture should deserialize"))
+            .collect();
+        let incomplete_inventory = all_beads
+            .iter()
+            .filter(|bead| !bead.status.is_done())
+            .cloned()
+            .collect();
+
+        (
+            all_beads,
+            incomplete_inventory,
+            BeadId::from("needle-deep-open-000"),
+        )
+    }
+
+    /// Red reproducer for needle-cebcc031. Run with:
+    ///
+    /// `cargo test --lib strand::pluck::tests::bead_rs_deep_dependency_graph_reproduces_zero_candidate_regression -- --ignored --nocapture`
+    ///
+    /// This intentionally fails on current main: the complete fixture proves
+    /// the root is ready, while Pluck's reduced-inventory readiness assertion
+    /// rejects every bead because lean edges have no status fallback value.
+    #[tokio::test]
+    #[ignore = "intentional red reproducer for the bead-rs deep dependency graph"]
+    async fn bead_rs_deep_dependency_graph_reproduces_zero_candidate_regression() {
+        let (all_beads, incomplete_inventory, expected_ready_id) =
+            bead_rs_deep_dependency_fixture();
+        let complete_finished_by_id: HashMap<BeadId, bool> = all_beads
+            .iter()
+            .map(|bead| (bead.id.clone(), bead.status.is_done()))
+            .collect();
+        let expected_ready: Vec<BeadId> = all_beads
+            .iter()
+            .filter(|bead| {
+                bead.status == BeadStatus::Open
+                    && bead.assignee.is_none()
+                    && !bead.dependencies.iter().any(|dependency| {
+                        dependency_is_blocking(dependency, &complete_finished_by_id)
+                    })
+            })
+            .map(|bead| bead.id.clone())
+            .collect();
+        assert_eq!(all_beads.len(), BEAD_RS_DEEP_GRAPH_DEPTH * 3);
+        assert!(
+            all_beads
+                .iter()
+                .filter(|bead| bead.status.is_done())
+                .count()
+                > all_beads.len() / 2,
+            "fixture should contain mostly closed blocker rows"
+        );
+        assert_eq!(expected_ready, vec![expected_ready_id.clone()]);
+        assert!(
+            all_beads
+                .iter()
+                .flat_map(|bead| bead.dependencies.iter())
+                .all(|dependency| {
+                    dependency.dependency_type == "blocks" && dependency.status.is_empty()
+                }),
+            "fixture must preserve bead-rs's lean blocker/kind dependency shape"
+        );
+
+        let incomplete_finished_by_id: HashMap<BeadId, bool> = incomplete_inventory
+            .iter()
+            .map(|bead| (bead.id.clone(), bead.status.is_done()))
+            .collect();
+        let fallback_candidates: Vec<&Bead> = incomplete_inventory
+            .iter()
+            .filter(|bead| {
+                passes_never_relaxed_constraints(bead, &incomplete_finished_by_id, Utc::now())
+            })
+            .collect();
+
+        assert!(
+            fallback_candidates
+                .iter()
+                .any(|bead| bead.id == expected_ready_id),
+            "Pluck's fallback returned zero candidates; expected ready bead {expected_ready_id}"
+        );
+    }
+
     fn make_bead_with_labels(id: &str, priority: u8, labels: Vec<&str>) -> Bead {
         let mut bead = make_bead(id, priority, "2026-01-01 00:00:00");
         bead.labels = labels.into_iter().map(|s| s.to_string()).collect();

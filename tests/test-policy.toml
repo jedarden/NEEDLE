@@ -145,7 +145,11 @@ version = 1
 # child count and threshold, silent below it, exactly once per crossing and
 # not per split beyond it, disabled at threshold 0, and emitted from the
 # resolve path's apply_split_proposals too.
-max_tests = 3906
+# +4 attempt-identity propagation-failure contracts (needle-cafdd3af): the
+# typed failure releases the claim and resolves without credit, unrelated
+# errors still propagate, dispatch fails typed without a minted identity, and
+# the post-claim state arms route through the graceful path.
+max_tests = 3907
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
