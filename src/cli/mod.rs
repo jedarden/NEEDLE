@@ -34,6 +34,8 @@ pub mod audit;
 pub mod improvements;
 mod lesson;
 mod policy_doctor;
+#[cfg(test)]
+mod reconciliation_tests;
 
 // ──────────────────────────────────────────────────────────────────────────────
 // NATO alphabet for worker identifiers
@@ -2331,6 +2333,35 @@ trait ProcessInspector {
 /// Real process inspector using /proc filesystem.
 struct RealProcessInspector;
 
+/// Split tmux sessions into sessions backed by a live process tree and stale
+/// sessions whose pane process (and all descendants) have exited.
+///
+/// `pane_pid` is commonly a shell wrapper rather than the worker PID, so
+/// comparing it directly with the process-discovery list would incorrectly
+/// mark healthy sessions stale. The process inspector walks the PID tree and
+/// is therefore the single liveness decision used by status, list, and the
+/// cleanup command.
+fn reconcile_tmux_sessions(
+    sessions: &[TmuxSession],
+    inspector: &dyn ProcessInspector,
+) -> (Vec<TmuxSession>, Vec<TmuxSession>) {
+    sessions.iter().cloned().partition(|session| {
+        session
+            .pid
+            .is_some_and(|pane_pid| inspector.tree_has_live_process(pane_pid))
+    })
+}
+
+fn unregistered_processes<'a>(
+    discovered: &'a [DiscoveredProcess],
+    registered_pids: &HashSet<u32>,
+) -> Vec<&'a DiscoveredProcess> {
+    discovered
+        .iter()
+        .filter(|process| !registered_pids.contains(&process.pid))
+        .collect()
+}
+
 /// Return whether an argv[0] basename is one of NEEDLE's executable names.
 ///
 /// Workers normally start through `needle`, then may replace their process
@@ -2832,7 +2863,8 @@ fn cmd_cleanup(all: bool, identifier: Option<String>) -> Result<()> {
 
 /// `needle list` — show running needle sessions.
 fn cmd_list(format: ListFormat) -> Result<()> {
-    let sessions = list_needle_sessions()?;
+    let all_sessions = list_needle_sessions()?;
+    let (sessions, stale_sessions) = reconcile_tmux_sessions(&all_sessions, &RealProcessInspector);
 
     // ALWAYS scan process table for ALL needle run processes (both tmux and non-tmux).
     // This ensures we discover workers regardless of how they were started.
@@ -2864,7 +2896,11 @@ fn cmd_list(format: ListFormat) -> Result<()> {
 
     // Preserve the human-friendly empty message. JSON always falls through to
     // the object serializer below so its schema does not depend on fleet state.
-    if sessions.is_empty() && discovered.is_empty() && matches!(&format, ListFormat::Table) {
+    if sessions.is_empty()
+        && discovered.is_empty()
+        && stale_sessions.is_empty()
+        && matches!(&format, ListFormat::Table)
+    {
         println!("No needle sessions running.");
         return Ok(());
     }
@@ -2876,6 +2912,17 @@ fn cmd_list(format: ListFormat) -> Result<()> {
                 println!("{}", "-".repeat(70));
                 for s in &sessions {
                     println!("{:<40} {:<20} {:<10}", s.name, s.created, s.status);
+                }
+            }
+
+            if !stale_sessions.is_empty() {
+                println!();
+                println!(
+                    "Stale needle sessions ({}; no live process found):",
+                    stale_sessions.len()
+                );
+                for session in &stale_sessions {
+                    println!("  {}", session.name);
                 }
             }
 
@@ -2914,6 +2961,7 @@ fn cmd_list(format: ListFormat) -> Result<()> {
         ListFormat::Json => {
             let json = serde_json::json!({
                 "tmux_sessions": sessions,
+                "stale_sessions": stale_sessions,
                 "discovered": discovered.iter().map(|p| {
                     serde_json::json!({
                         "pid": p.pid,
@@ -3728,7 +3776,8 @@ fn cmd_status(
     let needle_home = crate::state_dir::root_for(&config.workspace.home);
     let registry = Registry::default_location(&needle_home);
     let workers = registry.list().unwrap_or_default();
-    let sessions = list_needle_sessions().unwrap_or_default();
+    let all_sessions = list_needle_sessions().unwrap_or_default();
+    let (sessions, stale_sessions) = reconcile_tmux_sessions(&all_sessions, &RealProcessInspector);
 
     // ALWAYS scan process table for ALL needle run processes (both registered and unregistered).
     // This ensures we discover workers regardless of registry registration status.
@@ -3741,10 +3790,7 @@ fn cmd_status(
         .iter()
         .filter(|p| registered_pids.contains(&p.pid))
         .collect();
-    let unregistered: Vec<&DiscoveredProcess> = discovered
-        .iter()
-        .filter(|p| !registered_pids.contains(&p.pid))
-        .collect();
+    let unregistered = unregistered_processes(&discovered, &registered_pids);
 
     if !unregistered.is_empty() {
         tracing::warn!(
@@ -3759,6 +3805,7 @@ fn cmd_status(
 
     // Build a fleet summary.
     let active_count = sessions.len();
+    let stale_session_count = stale_sessions.len();
     let registered_count = workers.len();
     let discovered_count = discovered.len();
     let total_beads_completed: u64 = workers.iter().map(|w| w.beads_completed).sum();
@@ -3809,6 +3856,7 @@ fn cmd_status(
             println!("Fleet Summary");
             println!("{}", "-".repeat(50));
             println!("  Active tmux sessions: {active_count}");
+            println!("  Stale tmux sessions:   {stale_session_count}");
             println!("  Registered workers:   {registered_count}");
             println!("  Discovered workers:   {discovered_count}");
             println!(
@@ -3816,6 +3864,12 @@ fn cmd_status(
             );
             if !unregistered.is_empty() {
                 println!("  Unregistered workers: {} (WARN)", unregistered.len());
+            }
+            if !stale_sessions.is_empty() {
+                println!(
+                    "  Stale sessions need cleanup: {} (WARN)",
+                    stale_session_count
+                );
             }
             println!();
 
@@ -4002,7 +4056,7 @@ fn cmd_status(
                 }
             }
 
-            if discovered.is_empty() && active_count == 0 {
+            if discovered.is_empty() && active_count == 0 && stale_sessions.is_empty() {
                 println!("No workers running.");
             }
         }
@@ -4010,6 +4064,7 @@ fn cmd_status(
             let degraded_workspaces = scan_degraded_workspaces(&needle_home).unwrap_or_default();
             let summary = serde_json::json!({
                 "active_sessions": active_count,
+                "stale_sessions": stale_session_count,
                 "registered_workers": registered_count,
                 "discovered_workers": discovered_count,
                 "total_beads_completed": total_beads_completed,
@@ -7700,7 +7755,8 @@ fn list_needle_sessions() -> Result<Vec<TmuxSession>> {
 /// or tmux is unavailable.
 fn occupied_worker_ids(agent: &str) -> Result<HashSet<String>> {
     let prefix = sanitize_session_name(&format!("needle-{agent}-"));
-    let sessions = list_needle_sessions()?;
+    let all_sessions = list_needle_sessions()?;
+    let (sessions, _) = reconcile_tmux_sessions(&all_sessions, &RealProcessInspector);
     let ids = sessions
         .iter()
         .filter_map(|s| s.name.strip_prefix(&prefix))
@@ -7899,19 +7955,10 @@ fn scan_needle_processes() -> Result<Vec<DiscoveredProcess>> {
             }
         }
 
-        // Validate cmdline parsing succeeded before including this process.
-        // During concurrent startup, processes may be read while their cmdline
-        // is still being written, resulting in incomplete metadata (<unknown>).
-        // Require at least workspace to be parsed successfully; this filters
-        // out processes that are mid-startup or mid-shutdown.
-        //
-        // This fix addresses needle-c5967224: concurrent startup was causing
-        // 58 false positives when only 15 workers existed, with 44/58 entries
-        // showing "<unknown>" for all metadata fields.
-        if workspace.is_none() || agent.is_none() {
-            continue;
-        }
-
+        // Workspace, agent, and identifier are optional CLI overrides. A
+        // worker that uses configured defaults is still a real worker and
+        // must remain visible; the strict executable + `run` argv check above
+        // is the identity guard, not the presence of optional flags.
         discovered.push(DiscoveredProcess {
             pid,
             workspace,
@@ -7934,11 +7981,10 @@ fn scan_needle_processes() -> Result<Vec<DiscoveredProcess>> {
     Ok(discovered)
 }
 
-/// Test-only version of scan_needle_processes that validates cmdline completeness.
+/// Test-only version of scan_needle_processes.
 ///
-/// This function is used in regression tests for concurrent startup bugs (needle-c5967224).
-/// It's exposed for testing to verify that the scanner correctly filters out processes
-/// with incomplete metadata during concurrent worker startup.
+/// This function is used by process-discovery regression tests. Metadata fields
+/// remain optional because workers may rely on configured CLI defaults.
 #[cfg(unix)]
 #[cfg(test)]
 pub fn scan_needle_processes_for_test() -> Result<Vec<DiscoveredProcess>> {
@@ -8055,10 +8101,7 @@ fn reconcile_process_registry(discovered: &[DiscoveredProcess], registry: &Regis
     let registered_pids: HashSet<u32> = workers.iter().map(|w| w.pid).collect();
 
     // Find processes not in the registry
-    let unregistered: Vec<&DiscoveredProcess> = discovered
-        .iter()
-        .filter(|p| !registered_pids.contains(&p.pid))
-        .collect();
+    let unregistered = unregistered_processes(discovered, &registered_pids);
 
     if !unregistered.is_empty() {
         eprintln!(

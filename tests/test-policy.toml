@@ -167,7 +167,8 @@ version = 1
 # The filter, the trait, and its mock are all private to src/cli/mod.rs,
 # so the unit tier is the only home that can reach them.
 # +3 for bounded Explore rediscovery and filesystem wakeup contracts (needle-1ed126bb).
-max_tests = 3922
+# +3 for fleet process/session reconciliation contracts (needle-a4ac6c32).
+max_tests = 3925
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
