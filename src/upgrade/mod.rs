@@ -314,27 +314,20 @@ fn download_to_testing_channel_internal() -> Result<DownloadToTestingResult> {
     let testing_binary = bin_dir.join("needle-testing");
     let stable_binary = bin_dir.join("needle-stable");
 
-    // Check if an unpromoted testing binary already exists.
-    // An unpromoted testing binary is one whose hash differs from :stable.
-    if testing_binary.exists() {
-        let testing_hash = file_hash(&testing_binary);
-        let stable_hash = file_hash(&stable_binary);
-
-        // If both exist and have different hashes, testing is unpromoted.
-        if let (Ok(th), Ok(sh)) = (testing_hash, stable_hash) {
-            if th != sh {
-                tracing::info!(
-                    testing_path = %testing_binary.display(),
-                    testing_hash = %th,
-                    stable_hash = %sh,
-                    "Unpromoted testing binary already exists - skipping download"
-                );
-                return Ok(DownloadToTestingResult::Skipped {
-                    reason: "unpromoted testing binary already exists".to_string(),
-                    testing_path: testing_binary,
-                });
-            }
-        }
+    // Never overwrite a candidate unless it is provably the already-promoted
+    // stable binary. In particular, a missing stable channel means that an
+    // existing testing artifact cannot be shown to be promoted; fail closed so
+    // a supervisor check cannot clobber an in-flight self-modification candidate.
+    if testing_candidate_is_unpromoted(&testing_binary, &stable_binary)? {
+        tracing::info!(
+            testing_path = %testing_binary.display(),
+            stable_path = %stable_binary.display(),
+            "unpromoted testing binary already exists - skipping download"
+        );
+        return Ok(DownloadToTestingResult::Skipped {
+            reason: "unpromoted testing binary already exists".to_string(),
+            testing_path: testing_binary,
+        });
     }
 
     // Download the new version to testing channel.
@@ -395,6 +388,30 @@ fn download_to_testing_channel_internal() -> Result<DownloadToTestingResult> {
         version: check.latest_version,
         testing_path: testing_binary,
     })
+}
+
+/// Return whether an existing testing artifact must be preserved.
+///
+/// A testing artifact is replaceable only when it hashes identically to the
+/// current stable artifact. A missing stable artifact therefore makes the
+/// testing artifact unpromoted. Unreadable channel files are treated as errors
+/// rather than as permission to overwrite: the release poller must fail closed
+/// around a candidate that another process may be validating.
+fn testing_candidate_is_unpromoted(testing: &Path, stable: &Path) -> Result<bool> {
+    if !testing.exists() {
+        return Ok(false);
+    }
+
+    if !stable.exists() {
+        return Ok(true);
+    }
+
+    let testing_hash = file_hash(testing)
+        .with_context(|| format!("failed to inspect testing binary: {}", testing.display()))?;
+    let stable_hash = file_hash(stable)
+        .with_context(|| format!("failed to inspect stable binary: {}", stable.display()))?;
+
+    Ok(testing_hash != stable_hash)
 }
 
 /// Compare two semver versions, return true if `latest` > `current`.
@@ -1250,8 +1267,13 @@ mod tests {
         let testing_hash = file_hash(&testing_path).unwrap();
         assert_ne!(stable_hash, testing_hash);
 
-        // The skip logic is tested in integration tests where we can
-        // set up the full environment and call download_to_testing_channel.
-        // This test verifies the hash comparison logic works.
+        // Preserve a different candidate, including when stable is absent.
+        assert!(testing_candidate_is_unpromoted(&testing_path, &stable_path).unwrap());
+        fs::remove_file(&stable_path).unwrap();
+        assert!(testing_candidate_is_unpromoted(&testing_path, &stable_path).unwrap());
+
+        // A candidate matching stable is the only replaceable case.
+        fs::write(&stable_path, testing_content).unwrap();
+        assert!(!testing_candidate_is_unpromoted(&testing_path, &stable_path).unwrap());
     }
 }
