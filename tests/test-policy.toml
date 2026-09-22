@@ -166,7 +166,8 @@ version = 1
 # `needle supervise` pane) plus the real inspector's live/dead answers.
 # The filter, the trait, and its mock are all private to src/cli/mod.rs,
 # so the unit tier is the only home that can reach them.
-max_tests = 3919
+# +3 for bounded Explore rediscovery and filesystem wakeup contracts (needle-1ed126bb).
+max_tests = 3922
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

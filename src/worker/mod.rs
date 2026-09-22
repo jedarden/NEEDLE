@@ -3009,6 +3009,33 @@ impl Worker {
             }
         }
 
+        // Auto-discovery can learn about a workspace that did not exist when
+        // the worker started. Watch the bounded discovery surface as well as
+        // known issues files so idle backoff wakes for directory creation or
+        // for a new `.beads/` marker inside an existing child.
+        if self.config.strands.explore.workspaces.is_empty() {
+            let root = &self.config.strands.explore.workspace_root;
+            let mut observe_mtime = |path: &Path| {
+                if let Ok(metadata) = std::fs::metadata(path) {
+                    if let Ok(mtime) = metadata.modified() {
+                        if most_recent_mtime
+                            .map(|existing| mtime > existing)
+                            .unwrap_or(true)
+                        {
+                            most_recent_mtime = Some(mtime);
+                        }
+                    }
+                }
+            };
+
+            observe_mtime(root);
+            if let Ok(entries) = std::fs::read_dir(root) {
+                for entry in entries.flatten() {
+                    observe_mtime(&entry.path());
+                }
+            }
+        }
+
         most_recent_mtime
     }
 
@@ -13967,6 +13994,37 @@ mod tests {
         assert!(
             mtime.unwrap() <= std::time::SystemTime::now(),
             "returned mtime should not be in the future"
+        );
+    }
+
+    #[test]
+    fn check_workspace_mtimes_watches_auto_discovery_root() {
+        let temp_root = tempfile::tempdir().unwrap();
+        let config = isolated_default_config();
+        let store = Arc::new(MockStore::empty());
+        let mut worker = Worker::new(config, "test-worker".to_string(), store);
+        let default_workspace = temp_root.path().join("home");
+        fs::create_dir(&default_workspace).unwrap();
+
+        worker.config.workspace.default = default_workspace;
+        worker.config.strands.explore.workspaces.clear();
+        worker.config.strands.explore.workspace_root = temp_root.path().to_path_buf();
+
+        let before = worker
+            .check_workspace_mtimes()
+            .expect("the auto-discovery root should provide an mtime baseline");
+        worker.last_workspace_mtime = Some(before);
+
+        let new_workspace = temp_root.path().join("new-workspace");
+        fs::create_dir(&new_workspace).unwrap();
+        fs::create_dir(new_workspace.join(".beads")).unwrap();
+
+        let after = worker
+            .check_workspace_mtimes()
+            .expect("the changed discovery surface should remain observable");
+        assert!(
+            after > before,
+            "creating a workspace should advance the mtime wake signal"
         );
     }
 

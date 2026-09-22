@@ -47,7 +47,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use super::workspace_health;
 use crate::bead_store::{discover_default, BeadStore, Filters};
@@ -117,6 +117,26 @@ struct ExploreScanBackoff {
     cycles_until_scan: u32,
 }
 
+/// Snapshot of the shallow discovery surface used to wake Explore promptly.
+///
+/// The snapshot is deliberately limited to the configured root and its
+/// immediate children. This keeps change detection bounded by the same
+/// one-level discovery contract as [`ExploreStrand::discover_workspaces`],
+/// while still noticing a repository directory or its `.beads/` marker being
+/// created after worker startup.
+#[derive(Debug, PartialEq, Eq)]
+struct WorkspaceDiscoverySnapshot {
+    root_mtime: Option<SystemTime>,
+    entries: Vec<WorkspaceDiscoveryEntry>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct WorkspaceDiscoveryEntry {
+    path: PathBuf,
+    mtime: Option<SystemTime>,
+    has_beads_dir: bool,
+}
+
 impl ExploreScanBackoff {
     fn new(base_interval_cycles: u32, max_interval_cycles: u32) -> Self {
         let base_interval_cycles = base_interval_cycles.max(1);
@@ -160,6 +180,11 @@ impl ExploreScanBackoff {
 
         self.consecutive_empty_scans = self.consecutive_empty_scans.saturating_add(1);
         self.cycles_until_scan = self.effective_interval_cycles().saturating_sub(1);
+    }
+
+    /// Make the next selection cycle perform a scan immediately.
+    fn wake(&mut self) {
+        self.cycles_until_scan = 0;
     }
 }
 
@@ -220,6 +245,10 @@ pub struct ExploreStrand {
     /// Adaptive cadence for roaming scans. This is intentionally in-memory and
     /// scoped to one worker instance.
     scan_backoff: std::sync::Mutex<ExploreScanBackoff>,
+    /// Last observed shallow discovery surface. A changed snapshot bypasses
+    /// empty-scan backoff once so a newly created workspace is selectable
+    /// without waiting for the next periodic interval.
+    workspace_discovery_snapshot: std::sync::Mutex<Option<WorkspaceDiscoverySnapshot>>,
     /// Cross-workspace cleanup claim TTL (seconds), from
     /// `strands.explore.stale_claim_ttl`. An in_progress claim older than this
     /// is a release candidate during remote workspace scans — subject to the
@@ -290,6 +319,7 @@ impl ExploreStrand {
             );
         }
 
+        let workspace_root = config.workspace_root.clone();
         let strand = ExploreStrand {
             enabled: config.enabled,
             workspaces: std::sync::Mutex::new(workspaces),
@@ -302,7 +332,7 @@ impl ExploreStrand {
             split_after_failures: 0,
             lane: None,
             rediscovery_cycles: config.rediscovery_cycles,
-            workspace_root: config.workspace_root,
+            workspace_root,
             auto_discovery_mode,
             starvation_threshold_minutes: config.starvation_threshold_minutes,
             last_successful_claim_seconds: AtomicU64::new(0),
@@ -312,6 +342,9 @@ impl ExploreStrand {
                 config.scan_interval_cycles,
                 config.max_scan_interval_cycles,
             )),
+            workspace_discovery_snapshot: std::sync::Mutex::new(
+                Self::capture_workspace_discovery_snapshot(&config.workspace_root),
+            ),
             stale_claim_ttl: config.stale_claim_ttl,
             heartbeat_ttl: Duration::from_secs(300),
             quarantine_registry: std::sync::Mutex::new(
@@ -373,6 +406,7 @@ impl ExploreStrand {
             ready_beads_detected: AtomicU64::new(0),
             last_scan_per_workspace: std::sync::Mutex::new(std::collections::HashMap::new()),
             scan_backoff: std::sync::Mutex::new(ExploreScanBackoff::new(1, 8)),
+            workspace_discovery_snapshot: std::sync::Mutex::new(None),
             stale_claim_ttl: 300,
             heartbeat_ttl: Duration::from_secs(300),
             quarantine_registry: std::sync::Mutex::new(
@@ -416,6 +450,7 @@ impl ExploreStrand {
             ready_beads_detected: AtomicU64::new(0),
             last_scan_per_workspace: std::sync::Mutex::new(std::collections::HashMap::new()),
             scan_backoff: std::sync::Mutex::new(ExploreScanBackoff::new(1, 8)),
+            workspace_discovery_snapshot: std::sync::Mutex::new(None),
             stale_claim_ttl,
             heartbeat_ttl: Duration::from_secs(300),
             quarantine_registry: std::sync::Mutex::new(
@@ -595,6 +630,58 @@ impl ExploreStrand {
     /// Check if a workspace path has a `.beads/` directory.
     fn has_beads_dir(workspace: &Path) -> bool {
         workspace.join(".beads").is_dir()
+    }
+
+    /// Capture the bounded filesystem surface used by auto-discovery.
+    fn capture_workspace_discovery_snapshot(root: &Path) -> Option<WorkspaceDiscoverySnapshot> {
+        let root_mtime = fs::metadata(root).ok()?.modified().ok();
+        let entries = fs::read_dir(root)
+            .ok()?
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let path = entry.path();
+                if !path.is_dir() {
+                    return None;
+                }
+
+                let mtime = entry
+                    .metadata()
+                    .ok()
+                    .and_then(|metadata| metadata.modified().ok());
+                Some(WorkspaceDiscoveryEntry {
+                    has_beads_dir: Self::has_beads_dir(&path),
+                    path,
+                    mtime,
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let mut entries = entries;
+        entries.sort_by(|left, right| left.path.cmp(&right.path));
+        Some(WorkspaceDiscoverySnapshot {
+            root_mtime,
+            entries,
+        })
+    }
+
+    /// Return whether auto-discovery's shallow filesystem surface changed.
+    ///
+    /// A change wakes Explore even when adaptive empty-scan backoff would have
+    /// skipped this cycle. The snapshot is updated before the caller scans so
+    /// one filesystem change produces one prompt wakeup, not a burst of scans.
+    fn workspace_discovery_changed(&self) -> bool {
+        if !self.auto_discovery_mode || self.rediscovery_cycles == 0 {
+            return false;
+        }
+
+        let current = Self::capture_workspace_discovery_snapshot(&self.workspace_root);
+        let mut previous = self.workspace_discovery_snapshot.lock().unwrap();
+        if *previous == current {
+            return false;
+        }
+
+        *previous = current;
+        true
     }
 
     /// Reduce a discovered workspace list to the workspaces worth scanning.
@@ -965,6 +1052,8 @@ impl ExploreStrand {
             *workspaces = new_workspaces;
         }
         let new_count = self.apply_workspace_health();
+        *self.workspace_discovery_snapshot.lock().unwrap() =
+            Self::capture_workspace_discovery_snapshot(&self.workspace_root);
 
         tracing::debug!(
             worker = %self.qualified_id,
@@ -1116,10 +1205,15 @@ impl super::Strand for ExploreStrand {
             return StrandResult::NoWork;
         }
 
+        // Filesystem changes on the auto-discovery surface are a prompt wakeup:
+        // bypass the empty-scan backoff once so a newly created workspace can be
+        // rediscovered before the next periodic interval.
+        let discovery_changed = self.workspace_discovery_changed();
+
         // A backoff skip is still reported as NoWork so the waterfall continues
         // evaluating Weave and all later escalation strands in their normal
         // order; only Explore's remote scan is deferred.
-        if !self.should_scan_this_cycle() {
+        if !discovery_changed && !self.should_scan_this_cycle() {
             let _ = self.telemetry.emit(
                 crate::telemetry::EventKind::StrandSkipped {
                     strand_name: "explore".to_string(),
@@ -1134,6 +1228,20 @@ impl super::Strand for ExploreStrand {
             return StrandResult::NoWork;
         }
 
+        if discovery_changed {
+            self.scan_backoff.lock().unwrap().wake();
+            self.cycles_since_rediscovery
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            let added = self.rediscover_workspaces();
+            if added > 0 {
+                tracing::info!(
+                    worker = %self.qualified_id,
+                    added,
+                    "filesystem change woke Explore and found new workspaces"
+                );
+            }
+        }
+
         // Re-discover periodically (bf-3peh4 / bf-6anj4). The workspace list is
         // captured at boot, then refreshed after the configured number of eligible
         // Explore scans so a newly created store becomes selectable without a
@@ -1142,7 +1250,7 @@ impl super::Strand for ExploreStrand {
             .cycles_since_rediscovery
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
-        if self.rediscovery_cycles > 0 && cycles >= self.rediscovery_cycles {
+        if !discovery_changed && self.rediscovery_cycles > 0 && cycles >= self.rediscovery_cycles {
             self.cycles_since_rediscovery
                 .store(0, std::sync::atomic::Ordering::Relaxed);
 
@@ -2084,6 +2192,18 @@ mod tests {
         assert_eq!(backoff.effective_interval_cycles(), 3);
         assert!(!backoff.should_scan());
         assert!(!backoff.should_scan());
+        assert!(backoff.should_scan());
+    }
+
+    #[test]
+    fn filesystem_wakeup_bypasses_empty_scan_backoff() {
+        let mut backoff = ExploreScanBackoff::new(4, 16);
+
+        assert!(backoff.should_scan());
+        backoff.record_scan(false);
+        assert!(!backoff.should_scan());
+
+        backoff.wake();
         assert!(backoff.should_scan());
     }
 
@@ -4896,10 +5016,10 @@ mod tests {
         );
     }
 
-    /// A workspace created after startup is discovered and returned as a
-    /// selectable candidate on the next eligible Explore scan.
+    /// A workspace created after startup wakes Explore even while an empty-scan
+    /// backoff would otherwise defer the next remote scan.
     #[test]
-    fn periodic_rediscovery_makes_new_workspace_selectable() {
+    fn filesystem_wakeup_makes_new_workspace_selectable() {
         let runtime = create_test_runtime();
         runtime.block_on(async {
             let root = tempfile::tempdir().unwrap();
@@ -4912,10 +5032,10 @@ mod tests {
                 enabled: true,
                 workspaces: vec![],
                 workspace_root: root.path().to_path_buf(),
-                rediscovery_cycles: 2,
+                rediscovery_cycles: 60,
                 starvation_threshold_minutes: 15,
-                scan_interval_cycles: 1,
-                max_scan_interval_cycles: 1,
+                scan_interval_cycles: 8,
+                max_scan_interval_cycles: 8,
                 stale_claim_ttl: 300,
             };
             let temp_dir = tempfile::tempdir().unwrap();
@@ -4944,25 +5064,81 @@ mod tests {
             fs::create_dir(ws2.join(".beads")).unwrap();
             fs::create_dir(ws2.join(".git")).unwrap();
 
-            // The first eligible scan only increments the periodic counter.
+            // The new child changes the bounded discovery surface. The wakeup
+            // must bypass the empty-scan backoff and rediscover immediately.
             let result = strand.evaluate(&DummyStore, &HashSet::new()).await;
             let StrandResult::BeadFound(candidates) = result else {
                 panic!("the initially discovered workspace should yield selectable work");
             };
-            assert!(candidates.iter().all(|bead| bead.workspace == ws1));
-            assert!(!strand.workspaces.lock().unwrap().contains(&ws2));
-
-            // The configured interval is two scans, so the second scan refreshes
-            // the list and makes the post-startup workspace selectable.
-            let result = strand.evaluate(&DummyStore, &HashSet::new()).await;
-            let StrandResult::BeadFound(candidates) = result else {
-                panic!("newly discovered workspace should yield selectable work");
-            };
-
             assert!(
                 candidates.iter().any(|bead| bead.workspace == ws2),
-                "the candidate list should include work from the post-startup workspace"
+                "the first scan after a filesystem change should include the new workspace"
             );
+            assert!(strand.workspaces.lock().unwrap().contains(&ws2));
+        });
+    }
+
+    /// A stable discovery surface still uses the configured periodic cadence,
+    /// rather than scanning on every selection cycle.
+    #[test]
+    fn periodic_rediscovery_makes_new_workspace_selectable() {
+        let runtime = create_test_runtime();
+        runtime.block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let ws1 = root.path().join("workspace1");
+            fs::create_dir(&ws1).unwrap();
+            fs::create_dir(ws1.join(".beads")).unwrap();
+            fs::create_dir(ws1.join(".git")).unwrap();
+
+            let ws2 = root.path().join("workspace2");
+            fs::create_dir(&ws2).unwrap();
+            fs::create_dir(ws2.join(".beads")).unwrap();
+            fs::create_dir(ws2.join(".git")).unwrap();
+
+            let config = ExploreConfig {
+                enabled: true,
+                workspaces: vec![],
+                workspace_root: root.path().to_path_buf(),
+                rediscovery_cycles: 2,
+                starvation_threshold_minutes: 15,
+                scan_interval_cycles: 1,
+                max_scan_interval_cycles: 1,
+                stale_claim_ttl: 300,
+            };
+            let temp_dir = tempfile::tempdir().unwrap();
+            let registry = crate::registry::Registry::new(temp_dir.path());
+            let telemetry = Telemetry::new("test-worker-periodic-rediscovery".to_string());
+            let mut strand = ExploreStrand::new(
+                config,
+                PathBuf::from("/some/other/home"),
+                registry,
+                telemetry,
+                "test-worker-periodic-rediscovery".to_string(),
+            );
+            strand.store_factory = Arc::new(BothValidMockFactory {
+                workspace1: ws1.clone(),
+                workspace2: ws2.clone(),
+            });
+
+            // Make the new workspace part of the baseline so this test covers
+            // the periodic path rather than the filesystem-change wakeup.
+            *strand.workspace_discovery_snapshot.lock().unwrap() =
+                ExploreStrand::capture_workspace_discovery_snapshot(root.path());
+            strand
+                .workspaces
+                .lock()
+                .unwrap()
+                .retain(|path| path == &ws1);
+
+            let first = strand.evaluate(&DummyStore, &HashSet::new()).await;
+            assert!(matches!(first, StrandResult::BeadFound(_)));
+            assert!(!strand.workspaces.lock().unwrap().contains(&ws2));
+
+            let second = strand.evaluate(&DummyStore, &HashSet::new()).await;
+            let StrandResult::BeadFound(candidates) = second else {
+                panic!("periodic rediscovery should make the new workspace selectable");
+            };
+            assert!(candidates.iter().any(|bead| bead.workspace == ws2));
             assert!(strand.workspaces.lock().unwrap().contains(&ws2));
         });
     }
