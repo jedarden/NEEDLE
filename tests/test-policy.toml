@@ -149,7 +149,9 @@ version = 1
 # typed failure releases the claim and resolves without credit, unrelated
 # errors still propagate, dispatch fails typed without a minted identity, and
 # the post-claim state arms route through the graceful path.
-max_tests = 3907
+# +2 test_fixtures module self-tests (needle-bff53d4c): fixture_root returns
+# a directory that exists, and two calls with the same tag never collide.
+max_tests = 3909
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

@@ -2,10 +2,10 @@
 //!
 //! Library crate exposing the public API for integration tests and embedding.
 
-pub mod adapter_usage;
 /// The pure learning kernel shipped as part of the NEEDLE release.
 pub use needle_learning;
 
+pub mod adapter_usage;
 pub mod agent_event;
 pub mod attempt;
 pub mod attempt_accounting;
@@ -91,6 +91,9 @@ pub mod supervisor;
 pub mod tailscale_api;
 pub mod telemetry;
 pub mod template;
+/// Test-only fixture roots; compiled solely for the crate's own unit tests.
+#[cfg(test)]
+pub(crate) mod test_fixtures;
 pub mod test_output;
 pub mod test_runner;
 pub mod tmux_socket;
