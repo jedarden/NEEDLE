@@ -104,17 +104,83 @@ impl StoreFactory for DefaultStoreFactory {
     }
 }
 
+/// De-herding jitter added to the ramped empty-scan interval, as a percent of
+/// that interval (ADR-001's cadence contract: concurrent workers with identical
+/// ramps must not fire their scans on the same selection cycle).
+const SCAN_INTERVAL_JITTER_MAX_PERCENT: u32 = 25;
+
+/// Basis of a jitter draw: a jitter source yields a percentage in `0..=100`,
+/// which is scaled down into `0..=SCAN_INTERVAL_JITTER_MAX_PERCENT`.
+const JITTER_DRAW_BASIS_PERCENT: u32 = 100;
+
+/// A jitter source: returns a draw in `0..=100` (a percentage). Production
+/// uses entropy; cadence tests inject fixed draws to stay deterministic.
+type ExploreJitterSource = Box<dyn Fn() -> u32 + Send>;
+
+/// Production jitter draw: wall-clock entropy combined with a process-wide
+/// call counter, hashed. The goal is spread between workers and calls, not
+/// reproducibility, and no RNG dependency is pulled in for it.
+fn system_jitter_draw() -> u32 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static CALL_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64)
+        .unwrap_or(0);
+    let entropy = nanos ^ CALL_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut hasher = DefaultHasher::new();
+    entropy.hash(&mut hasher);
+    (hasher.finish() % u64::from(JITTER_DRAW_BASIS_PERCENT + 1)) as u32
+}
+
+/// What one real Explore scan observed, from the cadence's point of view.
+///
+/// The distinction carries ADR-001's "found-but-excluded triggers short
+/// retry, never idle backoff": a scan that saw ready beads but could not
+/// return any of them is evidence of work, not of emptiness, and must not
+/// let the empty-scan ramp grow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExploreScanOutcome {
+    /// At least one claimable candidate was returned to the waterfall.
+    Candidate,
+    /// Ready beads were seen but every one was excluded before ranking
+    /// (lane mismatch, circuit cooldown, split-out-of-scope rejection).
+    /// The exclusions are expected to be transient, so the cadence retries
+    /// at the floor interval without growing the ramp.
+    ExcludedCandidates,
+    /// No ready beads in any scanned workspace — the ramp may grow.
+    Empty,
+}
+
 /// In-memory cadence state for Explore's roaming scan.
 ///
 /// The worker's normal selection loop may call Explore frequently while all
 /// discovered workspaces are empty. This state lets those empty scans spread
 /// out without sleeping the worker or changing the waterfall's ordering.
-#[derive(Debug)]
+///
+/// ADR-001's cadence contract shapes the three outcomes a cycle can have:
+/// a bead-store change wakes the scan immediately, candidates (claimable or
+/// excluded) hold the ramp at the floor, and only genuine emptiness ramps
+/// toward the ceiling.
 struct ExploreScanBackoff {
     base_interval_cycles: u32,
     max_interval_cycles: u32,
     consecutive_empty_scans: u32,
     cycles_until_scan: u32,
+    jitter: ExploreJitterSource,
+}
+
+impl std::fmt::Debug for ExploreScanBackoff {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The jitter source is an opaque closure; its identity is not state.
+        f.debug_struct("ExploreScanBackoff")
+            .field("base_interval_cycles", &self.base_interval_cycles)
+            .field("max_interval_cycles", &self.max_interval_cycles)
+            .field("consecutive_empty_scans", &self.consecutive_empty_scans)
+            .field("cycles_until_scan", &self.cycles_until_scan)
+            .finish()
+    }
 }
 
 /// Snapshot of the shallow discovery surface used to wake Explore promptly.
@@ -147,10 +213,21 @@ impl ExploreScanBackoff {
             max_interval_cycles,
             consecutive_empty_scans: 0,
             cycles_until_scan: 0,
+            jitter: Box::new(system_jitter_draw),
         }
     }
 
-    /// Return the effective interval after the recorded empty scans.
+    /// Pin the jitter source (cadence tests inject fixed draws to stay
+    /// deterministic; production keeps the entropy draw from `new`).
+    #[cfg(test)]
+    fn with_jitter_source(mut self, jitter: ExploreJitterSource) -> Self {
+        self.jitter = jitter;
+        self
+    }
+
+    /// Return the effective interval after the recorded empty scans, before
+    /// jitter. The ramp itself stays deterministic; jitter is applied only
+    /// when the interval is scheduled (see `jittered_interval_cycles`).
     fn effective_interval_cycles(&self) -> u32 {
         let multiplier = 1u32
             .checked_shl(self.consecutive_empty_scans.min(31))
@@ -160,8 +237,28 @@ impl ExploreScanBackoff {
             .min(self.max_interval_cycles)
     }
 
+    /// The effective interval with de-herding jitter applied, still capped at
+    /// the configured ceiling.
+    fn jittered_interval_cycles(&self) -> u32 {
+        let interval = self.effective_interval_cycles();
+        let draw = (self.jitter)().min(JITTER_DRAW_BASIS_PERCENT);
+        let jitter_percent = draw * SCAN_INTERVAL_JITTER_MAX_PERCENT / JITTER_DRAW_BASIS_PERCENT;
+        interval
+            .saturating_add(interval.saturating_mul(jitter_percent) / JITTER_DRAW_BASIS_PERCENT)
+            .min(self.max_interval_cycles)
+    }
+
     /// Decide whether this selection cycle should perform an Explore scan.
-    fn should_scan(&mut self) -> bool {
+    ///
+    /// A bead-store change opens the gate immediately regardless of the ramp:
+    /// the wake exists so a store that just changed is not left waiting out
+    /// empty-scan backoff it did not earn (ADR-001 event-driven cadence).
+    fn should_scan(&mut self, store_changed: bool) -> bool {
+        if store_changed {
+            self.cycles_until_scan = 0;
+            return true;
+        }
+
         if self.cycles_until_scan == 0 {
             true
         } else {
@@ -171,20 +268,99 @@ impl ExploreScanBackoff {
     }
 
     /// Record the outcome of a real scan and schedule the next one.
-    fn record_scan(&mut self, found_candidate: bool) {
-        if found_candidate {
-            self.consecutive_empty_scans = 0;
-            self.cycles_until_scan = self.base_interval_cycles.saturating_sub(1);
-            return;
+    fn record_scan(&mut self, outcome: ExploreScanOutcome) {
+        match outcome {
+            ExploreScanOutcome::Candidate => {
+                self.consecutive_empty_scans = 0;
+                self.cycles_until_scan = self.base_interval_cycles.saturating_sub(1);
+            }
+            ExploreScanOutcome::ExcludedCandidates => {
+                // Ready beads existed but none were claimable this cycle. Hold
+                // the ramp where it is — the exclusion may clear on its own
+                // (race TTLs, circuit cooldowns) — and retry at the floor
+                // interval instead of letting found-but-excluded scans decay
+                // into the long ramp. `consecutive_empty_scans` is frozen, not
+                // reset: exclusions lasting a while must not grant a fresh
+                // ramp once they end, and must not deepen either.
+                self.cycles_until_scan = self.base_interval_cycles.saturating_sub(1);
+            }
+            ExploreScanOutcome::Empty => {
+                self.consecutive_empty_scans = self.consecutive_empty_scans.saturating_add(1);
+                self.cycles_until_scan = self.jittered_interval_cycles().saturating_sub(1);
+            }
         }
-
-        self.consecutive_empty_scans = self.consecutive_empty_scans.saturating_add(1);
-        self.cycles_until_scan = self.effective_interval_cycles().saturating_sub(1);
     }
 
     /// Make the next selection cycle perform a scan immediately.
     fn wake(&mut self) {
         self.cycles_until_scan = 0;
+    }
+}
+
+/// Detects bead-store changes for Explore's event-driven cadence (ADR-001).
+///
+/// Each check snapshots every live store file in every known workspace and
+/// reports whether that set changed since the previous check. Keeping one
+/// fingerprint per file matters: a change in a less-recently-modified store
+/// must not be hidden by another workspace's newer mtime. The first
+/// observation only baselines — a worker starting up has not seen a change.
+///
+/// The watched files are `beads.db` and its write-ahead log for the bead-rs
+/// layout, plus `issues.jsonl` for the legacy bead-forge layout. SQLite's
+/// `-shm` sibling is deliberately excluded because read connections churn it;
+/// watching it would report perpetual change and defeat the ramp this wake
+/// complements.
+#[derive(Debug)]
+struct ExploreStoreWatcher {
+    last_seen: Option<Vec<ExploreStoreFingerprint>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ExploreStoreFingerprint {
+    path: PathBuf,
+    modified: std::time::SystemTime,
+    len: u64,
+}
+
+impl ExploreStoreWatcher {
+    fn new() -> Self {
+        Self { last_seen: None }
+    }
+
+    /// Report whether any watched store changed since the previous call,
+    /// consuming the observation: the next call compares against it.
+    fn changed_since_last_check(&mut self, workspaces: &[PathBuf]) -> bool {
+        let current = Self::store_fingerprints(workspaces);
+        let changed = match &self.last_seen {
+            Some(previous) => previous != &current,
+            None => false,
+        };
+        self.last_seen = Some(current);
+        changed
+    }
+
+    /// Fingerprint every watched store file, sorted so workspace discovery
+    /// order does not affect change detection.
+    fn store_fingerprints(workspaces: &[PathBuf]) -> Vec<ExploreStoreFingerprint> {
+        const STORE_FILES: [&str; 3] = ["beads.db", "beads.db-wal", "issues.jsonl"];
+
+        let mut fingerprints = Vec::new();
+        for workspace in workspaces {
+            for file in STORE_FILES {
+                let path = workspace.join(".beads").join(file);
+                if let Ok(metadata) = std::fs::metadata(&path) {
+                    if let Ok(mtime) = metadata.modified() {
+                        fingerprints.push(ExploreStoreFingerprint {
+                            path,
+                            modified: mtime,
+                            len: metadata.len(),
+                        });
+                    }
+                }
+            }
+        }
+        fingerprints.sort_by(|left, right| left.path.cmp(&right.path));
+        fingerprints
     }
 }
 
@@ -249,6 +425,9 @@ pub struct ExploreStrand {
     /// empty-scan backoff once so a newly created workspace is selectable
     /// without waiting for the next periodic interval.
     workspace_discovery_snapshot: std::sync::Mutex<Option<WorkspaceDiscoverySnapshot>>,
+    /// Bead-store change detector feeding the event-driven cadence (ADR-001).
+    /// In-memory for the same reason as `scan_backoff`.
+    store_watcher: std::sync::Mutex<ExploreStoreWatcher>,
     /// Cross-workspace cleanup claim TTL (seconds), from
     /// `strands.explore.stale_claim_ttl`. An in_progress claim older than this
     /// is a release candidate during remote workspace scans — subject to the
@@ -345,6 +524,7 @@ impl ExploreStrand {
             workspace_discovery_snapshot: std::sync::Mutex::new(
                 Self::capture_workspace_discovery_snapshot(&config.workspace_root),
             ),
+            store_watcher: std::sync::Mutex::new(ExploreStoreWatcher::new()),
             stale_claim_ttl: config.stale_claim_ttl,
             heartbeat_ttl: Duration::from_secs(300),
             quarantine_registry: std::sync::Mutex::new(
@@ -407,6 +587,7 @@ impl ExploreStrand {
             last_scan_per_workspace: std::sync::Mutex::new(std::collections::HashMap::new()),
             scan_backoff: std::sync::Mutex::new(ExploreScanBackoff::new(1, 8)),
             workspace_discovery_snapshot: std::sync::Mutex::new(None),
+            store_watcher: std::sync::Mutex::new(ExploreStoreWatcher::new()),
             stale_claim_ttl: 300,
             heartbeat_ttl: Duration::from_secs(300),
             quarantine_registry: std::sync::Mutex::new(
@@ -451,6 +632,7 @@ impl ExploreStrand {
             last_scan_per_workspace: std::sync::Mutex::new(std::collections::HashMap::new()),
             scan_backoff: std::sync::Mutex::new(ExploreScanBackoff::new(1, 8)),
             workspace_discovery_snapshot: std::sync::Mutex::new(None),
+            store_watcher: std::sync::Mutex::new(ExploreStoreWatcher::new()),
             stale_claim_ttl,
             heartbeat_ttl: Duration::from_secs(300),
             quarantine_registry: std::sync::Mutex::new(
@@ -564,18 +746,29 @@ impl ExploreStrand {
         super::workspace_capacity::check(workspace, store, &heartbeat_dir, self.heartbeat_ttl).await
     }
 
+    /// Whether any known workspace's bead store changed since the previous
+    /// cycle. Consumes the observation: the next call baselines against what
+    /// was just seen, so a change wakes exactly one scan.
+    fn bead_store_changed(&self) -> bool {
+        let workspaces = self.workspaces.lock().unwrap();
+        self.store_watcher
+            .lock()
+            .unwrap()
+            .changed_since_last_check(&workspaces)
+    }
+
     /// Return whether this cycle should perform the remote workspace scan.
-    fn should_scan_this_cycle(&self) -> bool {
-        self.scan_backoff.lock().unwrap().should_scan()
+    fn should_scan_this_cycle(&self, store_changed: bool) -> bool {
+        self.scan_backoff.lock().unwrap().should_scan(store_changed)
     }
 
     /// Record a completed Explore scan and update its future cadence.
-    fn record_scan_result(&self, found_candidate: bool) {
+    fn record_scan_result(&self, outcome: ExploreScanOutcome) {
         let mut backoff = self.scan_backoff.lock().unwrap();
-        backoff.record_scan(found_candidate);
+        backoff.record_scan(outcome);
         tracing::debug!(
             worker = %self.qualified_id,
-            found_candidate,
+            outcome = ?outcome,
             consecutive_empty_scans = backoff.consecutive_empty_scans,
             next_scan_interval_cycles = backoff.effective_interval_cycles(),
             "updated Explore adaptive scan cadence"
@@ -1209,11 +1402,16 @@ impl super::Strand for ExploreStrand {
         // bypass the empty-scan backoff once so a newly created workspace can be
         // rediscovered before the next periodic interval.
         let discovery_changed = self.workspace_discovery_changed();
+        // ADR-001 event-driven cadence: stat the known workspaces' store files
+        // once per cycle. A change opens the scan gate immediately inside
+        // `should_scan` — a store that just changed never waits out empty-scan
+        // backoff — and the observation is consumed either way.
+        let store_changed = self.bead_store_changed();
 
         // A backoff skip is still reported as NoWork so the waterfall continues
         // evaluating Weave and all later escalation strands in their normal
         // order; only Explore's remote scan is deferred.
-        if !discovery_changed && !self.should_scan_this_cycle() {
+        if !discovery_changed && !self.should_scan_this_cycle(store_changed) {
             let _ = self.telemetry.emit(
                 crate::telemetry::EventKind::StrandSkipped {
                     strand_name: "explore".to_string(),
@@ -1275,7 +1473,7 @@ impl super::Strand for ExploreStrand {
                     },
                     chrono::Utc::now(),
                 );
-                self.record_scan_result(false);
+                self.record_scan_result(ExploreScanOutcome::Empty);
                 return StrandResult::NoWork;
             }
         }
@@ -1459,6 +1657,11 @@ impl super::Strand for ExploreStrand {
         // We now scan every workspace, collect all candidates, and rank them
         // globally before returning.
         let mut all_candidates: Vec<crate::types::Bead> = Vec::new();
+        // Ready beads seen this cycle that in-scan admission dropped (lane
+        // mismatch, circuit cooldown, split-out-of-scope rejection). A nonzero
+        // count with an empty aggregate is a found-but-excluded scan: cadence
+        // retries it at the floor interval instead of ramping (ADR-001).
+        let mut excluded_ready_candidates = 0usize;
 
         for workspace in &workspaces {
             // Track this workspace as visited
@@ -1556,6 +1759,7 @@ impl super::Strand for ExploreStrand {
 
                     if filtered_count > 0 {
                         exclusion_reasons.insert(format!("filtered_{}", filtered_count));
+                        excluded_ready_candidates += filtered_count;
                     }
 
                     // Reject candidates the worker would claim and then release
@@ -1586,6 +1790,7 @@ impl super::Strand for ExploreStrand {
                             "split_out_of_scope_ineligible_{}",
                             ineligible_count
                         ));
+                        excluded_ready_candidates += ineligible_count;
                         tracing::info!(
                             workspace = %workspace.display(),
                             ineligible_count,
@@ -1673,6 +1878,7 @@ impl super::Strand for ExploreStrand {
                                                 "retry_filtered_{}",
                                                 retry_filtered
                                             ));
+                                            excluded_ready_candidates += retry_filtered;
                                         }
 
                                         if !retry_candidates.is_empty() {
@@ -1791,8 +1997,19 @@ impl super::Strand for ExploreStrand {
             chrono::Utc::now(),
         );
 
+        // ADR-001 retry contract: an excluded-only scan is evidence of work,
+        // so it must not feed the empty-scan ramp — the next scan comes at the
+        // floor interval and the exclusions get a prompt re-check.
+        let outcome = if !all_candidates.is_empty() {
+            ExploreScanOutcome::Candidate
+        } else if excluded_ready_candidates > 0 {
+            ExploreScanOutcome::ExcludedCandidates
+        } else {
+            ExploreScanOutcome::Empty
+        };
+        self.record_scan_result(outcome);
+
         if all_candidates.is_empty() {
-            self.record_scan_result(false);
             let _ = self.telemetry.emit(
                 crate::telemetry::EventKind::StrandSkipped {
                     strand_name: "explore".to_string(),
@@ -1802,8 +2019,6 @@ impl super::Strand for ExploreStrand {
             );
             return StrandResult::NoWork;
         }
-
-        self.record_scan_result(true);
 
         // Rank the aggregated candidates globally: priority ASC, created_at ASC,
         // id ASC. Returning the full cross-workspace list lets the outer waterfall
@@ -2155,56 +2370,104 @@ mod tests {
 
     #[test]
     fn adaptive_scan_backoff_doubles_to_ceiling_and_resets() {
-        let mut backoff = ExploreScanBackoff::new(1, 8);
+        let mut backoff = ExploreScanBackoff::new(1, 8).with_jitter_source(Box::new(|| 0));
         let mut observed_intervals = Vec::new();
 
         for _ in 0..5 {
-            assert!(backoff.should_scan());
+            assert!(backoff.should_scan(false));
             observed_intervals.push(backoff.effective_interval_cycles());
-            backoff.record_scan(false);
+            backoff.record_scan(ExploreScanOutcome::Empty);
 
             let next_interval = backoff.effective_interval_cycles();
             for _ in 1..next_interval {
-                assert!(!backoff.should_scan());
+                assert!(!backoff.should_scan(false));
             }
         }
 
         assert_eq!(observed_intervals, vec![1, 2, 4, 8, 8]);
 
-        backoff.record_scan(true);
+        backoff.record_scan(ExploreScanOutcome::Candidate);
         assert_eq!(backoff.effective_interval_cycles(), 1);
-        assert!(backoff.should_scan());
+        assert!(backoff.should_scan(false));
     }
 
     #[test]
     fn adaptive_scan_backoff_honors_configured_base_interval() {
-        let mut backoff = ExploreScanBackoff::new(3, 10);
+        let mut backoff = ExploreScanBackoff::new(3, 10).with_jitter_source(Box::new(|| 0));
 
-        assert!(backoff.should_scan());
-        backoff.record_scan(false);
+        assert!(backoff.should_scan(false));
+        backoff.record_scan(ExploreScanOutcome::Empty);
         assert_eq!(backoff.effective_interval_cycles(), 6);
         for _ in 1..6 {
-            assert!(!backoff.should_scan());
+            assert!(!backoff.should_scan(false));
         }
-        assert!(backoff.should_scan());
+        assert!(backoff.should_scan(false));
 
-        backoff.record_scan(true);
+        backoff.record_scan(ExploreScanOutcome::Candidate);
         assert_eq!(backoff.effective_interval_cycles(), 3);
-        assert!(!backoff.should_scan());
-        assert!(!backoff.should_scan());
-        assert!(backoff.should_scan());
+        assert!(!backoff.should_scan(false));
+        assert!(!backoff.should_scan(false));
+        assert!(backoff.should_scan(false));
+
+        let mut jittered = ExploreScanBackoff::new(4, 32).with_jitter_source(Box::new(|| 100));
+        assert_eq!(jittered.jittered_interval_cycles(), 5);
+        jittered.record_scan(ExploreScanOutcome::Empty);
+        assert_eq!(jittered.effective_interval_cycles(), 8);
+        assert_eq!(jittered.jittered_interval_cycles(), 10);
+        assert_eq!(jittered.cycles_until_scan, 9);
+
+        let mut excluded = ExploreScanBackoff::new(2, 16).with_jitter_source(Box::new(|| 0));
+        assert!(excluded.should_scan(false));
+        excluded.record_scan(ExploreScanOutcome::Empty);
+        for _ in 0..3 {
+            assert!(!excluded.should_scan(false));
+        }
+        assert!(excluded.should_scan(false));
+        excluded.record_scan(ExploreScanOutcome::Empty);
+        assert_eq!(excluded.consecutive_empty_scans, 2);
+        assert_eq!(excluded.effective_interval_cycles(), 8);
+        excluded.record_scan(ExploreScanOutcome::ExcludedCandidates);
+        assert_eq!(excluded.consecutive_empty_scans, 2);
+        assert_eq!(excluded.cycles_until_scan, 1);
+        assert!(!excluded.should_scan(false));
+        assert!(excluded.should_scan(false));
     }
 
     #[test]
     fn filesystem_wakeup_bypasses_empty_scan_backoff() {
-        let mut backoff = ExploreScanBackoff::new(4, 16);
+        let mut backoff = ExploreScanBackoff::new(4, 16).with_jitter_source(Box::new(|| 0));
 
-        assert!(backoff.should_scan());
-        backoff.record_scan(false);
-        assert!(!backoff.should_scan());
+        assert!(backoff.should_scan(false));
+        backoff.record_scan(ExploreScanOutcome::Empty);
+        assert!(!backoff.should_scan(false));
 
-        backoff.wake();
-        assert!(backoff.should_scan());
+        assert!(backoff.should_scan(true));
+
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("first").join(".beads");
+        let second = root.path().join("second").join(".beads");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+        let workspaces = vec![
+            first.parent().unwrap().to_path_buf(),
+            second.parent().unwrap().to_path_buf(),
+        ];
+        let first_db = first.join("beads.db");
+        let second_db = second.join("beads.db");
+        fs::write(&first_db, "first").unwrap();
+        fs::write(&second_db, "second store has a newer initial payload").unwrap();
+
+        let mut watcher = ExploreStoreWatcher::new();
+        assert!(!watcher.changed_since_last_check(&workspaces));
+        assert!(!watcher.changed_since_last_check(&workspaces));
+        fs::write(&first_db, "first store changed").unwrap();
+        assert!(watcher.changed_since_last_check(&workspaces));
+        assert!(!watcher.changed_since_last_check(&workspaces));
+        fs::write(first.join("beads.db-wal"), "pending write").unwrap();
+        assert!(watcher.changed_since_last_check(&workspaces));
+        assert!(!watcher.changed_since_last_check(&workspaces));
+        fs::write(first.join("beads.db-shm"), "read sidecar").unwrap();
+        assert!(!watcher.changed_since_last_check(&workspaces));
     }
 
     /// Pin CPU-relevant behavior by counting actual remote-store queries. The
@@ -2237,6 +2500,10 @@ mod tests {
             "adaptive-backoff-test".to_string(),
         );
         strand.store_factory = factory;
+        // Pin the de-herding jitter to zero: the exact cycle counts below
+        // hold only for the unjittered ramp.
+        strand.scan_backoff =
+            std::sync::Mutex::new(ExploreScanBackoff::new(1, 8).with_jitter_source(Box::new(|| 0)));
 
         let store = DummyStore;
         let mut evaluate_calls = 0;
