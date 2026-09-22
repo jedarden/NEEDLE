@@ -1,5 +1,10 @@
 # ExploreConfig Initialization and Loading Flow
 
+> Historical/non-operational reference: this document preserves retired `br`
+> commands from an earlier implementation or incident. Do not run them; use
+> the current `bead` CLI for active work.
+<!-- retired-br: historical-only -->
+
 ## Overview
 
 `ExploreConfig` controls the Explore strand's multi-workspace bead discovery behavior. This document traces the complete initialization flow from "no config file" to a fully initialized `ExploreConfig`, documenting all merge points and default injection locations.

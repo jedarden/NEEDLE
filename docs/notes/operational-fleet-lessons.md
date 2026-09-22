@@ -1,5 +1,10 @@
 # Operational Fleet Lessons
 
+> Historical/non-operational reference: this document preserves retired `br`
+> commands from an earlier implementation or incident. Do not run them; use
+> the current `bead` CLI for active work.
+<!-- retired-br: historical-only -->
+
 Extracted from memory files, bead history, git log patterns, and the
 bead-splitting and gap-analysis docs in NEEDLE-deprecated.
 

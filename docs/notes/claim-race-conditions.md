@@ -1,5 +1,10 @@
 # Claim Race Conditions
 
+> Historical/non-operational reference: this document preserves retired `br`
+> commands from an earlier implementation or incident. Do not run them; use
+> the current `bead` CLI for active work.
+<!-- retired-br: historical-only -->
+
 Extracted from git log analysis, bead history, and the lock/claim commit
 messages in NEEDLE-deprecated.
 

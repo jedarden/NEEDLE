@@ -1,5 +1,10 @@
 # ADR-013: Pluggable Bead-CLI Backends — Three Upstreams, One Configurable Seam
 
+> Historical/non-operational reference: this document preserves retired `br`
+> commands from an earlier implementation or incident. Do not run them; use
+> the current `bead` CLI for active work.
+<!-- retired-br: historical-only -->
+
 **Status:** Accepted — 2026-08-12 (proposed 2026-08-11; four drafts, see Revision History)
 **Deciders:** operator (jedarden), via Claude Code
 **Tracking:** see Phase 16 in `docs/plan/plan.md`; beads filed under label `bead-cli-backend`

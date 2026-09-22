@@ -1,5 +1,10 @@
 # Bash at Scale Problems
 
+> Historical/non-operational reference: this document preserves retired `br`
+> commands from an earlier implementation or incident. Do not run them; use
+> the current `bead` CLI for active work.
+<!-- retired-br: historical-only -->
+
 Extracted from the full NEEDLE-deprecated codebase analysis: git log patterns,
 bug beads, commit messages, and architecture docs.
 

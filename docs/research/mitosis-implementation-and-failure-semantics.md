@@ -1,5 +1,10 @@
 # Mitosis Implementation and Failure Semantics
 
+> Historical/non-operational reference: this document preserves retired `br`
+> commands from an earlier implementation or incident. Do not run them; use
+> the current `bead` CLI for active work.
+<!-- retired-br: historical-only -->
+
 **Research Date:** 2026-08-15  
 **Purpose:** Document current Mitosis implementation, failure handling, and timeout context availability for enhanced timeout analysis capability.
 

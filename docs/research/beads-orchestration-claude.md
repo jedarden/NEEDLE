@@ -1,5 +1,10 @@
 # beads-orchestration-claude: Multi-Model Orchestration with Worktrees
 
+> Historical/non-operational reference: this document preserves retired `br`
+> commands from an earlier implementation or incident. Do not run them; use
+> the current `bead` CLI for active work.
+<!-- retired-br: historical-only -->
+
 ## Research Date: 2026-03-20
 ## Source: https://github.com/ninjapanzer/beads-orchestration-claude
 

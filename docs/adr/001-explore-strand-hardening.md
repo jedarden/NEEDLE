@@ -1,5 +1,10 @@
 # ADR-001: Explore Strand Hardening
 
+> Historical/non-operational reference: this document preserves retired `br`
+> commands from an earlier implementation or incident. Do not run them; use
+> the current `bead` CLI for active work.
+<!-- retired-br: historical-only -->
+
 **Status:** Accepted — 2026-07-13
 **Deciders:** operator (jedarden)
 **Tracking:** plan.md Phase 5; implementation beads in this repo's workspace

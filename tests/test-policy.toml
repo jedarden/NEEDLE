@@ -755,3 +755,7 @@ owner = "component:precommit-staged-tree"
 [[artifact]]
 pattern = "tests/test-policy/*"
 owner = "component:test-policy"
+
+[[artifact]]
+pattern = "tests/documentation/*"
+owner = "component:test-documentation"

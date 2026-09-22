@@ -1,5 +1,10 @@
 # ADR-006: Bead Lifecycle Reliability — Test Isolation, Failure Quarantine, and Liveness-Independent Reclamation
 
+> Historical/non-operational reference: this document preserves retired `br`
+> commands from an earlier implementation or incident. Do not run them; use
+> the current `bead` CLI for active work.
+<!-- retired-br: historical-only -->
+
 **Status:** Proposed — 2026-07-21
 **Deciders:** operator (jedarden), via Claude Code
 **Tracking:** plan.md Phase 10

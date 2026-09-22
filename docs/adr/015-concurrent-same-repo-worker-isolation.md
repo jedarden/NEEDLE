@@ -1,5 +1,10 @@
 # ADR-015: Concurrent Same-Repo Worker Isolation
 
+> Historical/non-operational reference: this document preserves retired `br`
+> commands from an earlier implementation or incident. Do not run them; use
+> the current `bead` CLI for active work.
+<!-- retired-br: historical-only -->
+
 **Status:** Accepted — 2026-08-15
 **Deciders:** operator (jedarden)
 **Tracking:** plan.md §6.9; CLAUDE.md "NEEDLE Fleet Dispatch — no worktrees"

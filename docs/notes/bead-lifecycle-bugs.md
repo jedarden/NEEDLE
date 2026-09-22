@@ -1,5 +1,10 @@
 # Bead Lifecycle Bugs
 
+> Historical/non-operational reference: this document preserves retired `br`
+> commands from an earlier implementation or incident. Do not run them; use
+> the current `bead` CLI for active work.
+<!-- retired-br: historical-only -->
+
 Extracted from git log, bead history, and the memory files documenting the
 2026-03-18 bug fix session.
 

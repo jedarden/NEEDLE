@@ -1,5 +1,10 @@
 # Worker Starvation Lessons
 
+> Historical/non-operational reference: this document preserves retired `br`
+> commands from an earlier implementation or incident. Do not run them; use
+> the current `bead` CLI for active work.
+<!-- retired-br: historical-only -->
+
 Extracted from 16 starvation alert analyses, the false-alarm/false-positive docs,
 the stuck-behavior research, and the alternative-solutions doc in NEEDLE-deprecated.
 

@@ -1,5 +1,10 @@
 # OBC: OpenSpec-Beads-Coordination Multi-Agent Workflow
 
+> Historical/non-operational reference: this document preserves retired `br`
+> commands from an earlier implementation or incident. Do not run them; use
+> the current `bead` CLI for active work.
+<!-- retired-br: historical-only -->
+
 ## Research Date: 2026-03-20
 ## Source: https://github.com/jkbhagatio/obc_agent_workflow
 

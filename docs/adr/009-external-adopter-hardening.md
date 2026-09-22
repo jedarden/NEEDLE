@@ -1,5 +1,10 @@
 # ADR-009: External-Adopter Hardening — Gate Bead-Context, Gate Configurability, Deferred Bead Status, Spawn-Path Robustness
 
+> Historical/non-operational reference: this document preserves retired `br`
+> commands from an earlier implementation or incident. Do not run them; use
+> the current `bead` CLI for active work.
+<!-- retired-br: historical-only -->
+
 **Status:** Accepted — 2026-07-28
 **Deciders:** operator (jedarden), via Claude Code
 **Tracking:** plan.md Phase 13; GitHub issues [#7](https://github.com/jedarden/NEEDLE/issues/7), [#8](https://github.com/jedarden/NEEDLE/issues/8), [#9](https://github.com/jedarden/NEEDLE/issues/9), [#10](https://github.com/jedarden/NEEDLE/issues/10), [#11](https://github.com/jedarden/NEEDLE/issues/11)

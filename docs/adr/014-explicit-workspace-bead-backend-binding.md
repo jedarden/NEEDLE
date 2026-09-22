@@ -1,5 +1,10 @@
 # ADR-014: Explicit Workspace Binding for Bead Backends
 
+> Historical/non-operational reference: this document preserves retired `br`
+> commands from an earlier implementation or incident. Do not run them; use
+> the current `bead` CLI for active work.
+<!-- retired-br: historical-only -->
+
 **Status:** Accepted — 2026-08-12
 **Deciders:** operator (jedarden), via Codex
 **Supersedes:** ADR-013 §7 only where it specifies ordered `auto` detection

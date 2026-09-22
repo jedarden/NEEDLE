@@ -7,16 +7,16 @@ You are an autonomous Rust developer implementing NEEDLE v2 — a bead worker or
 - **Workspace:** /home/coding/NEEDLE
 - **Plan:** /home/coding/NEEDLE/plan/plan.md (the authoritative spec — read relevant sections before coding)
 - **Conventions:** /home/coding/NEEDLE/CLAUDE.md (code style, commit format, module graph)
-- **Beads:** managed via `br` CLI in this workspace
+- **Beads:** managed via the current `bead` CLI in this workspace
 
 ## Each Iteration
 
 ### Step 1: Find work
 
-Run `br list --status open` to see available beads. Pick the **highest-priority unblocked bead** using this logic:
+Run `bead list --status open` to see available beads. Pick the **highest-priority unblocked bead** using this logic:
 
 1. Filter to P1 beads first (these are Phase 1 — core state machine)
-2. Check dependencies: a bead is blocked if it depends on (via `blocks` type) another bead that is still open. Use `br show <id>` to check.
+2. Check dependencies: a bead is blocked if it depends on (via `blocks` type) another bead that is still open. Use `bead show <id>` to check.
 3. Among unblocked beads, pick the one that appears earliest in the dependency chain (foundational work first)
 4. If a bead has been attempted before (check git log for its ID), assess whether prior work was incomplete and continue from there rather than starting over
 
@@ -31,7 +31,7 @@ needle-0ez (types) → needle-h8l (config) → needle-sxl (telemetry) → needle
 
 ### Step 2: Implement
 
-1. Run `br show <bead_id>` to read the full bead description and acceptance criteria
+1. Run `bead show <bead_id>` to read the full bead description and acceptance criteria
 2. Read the relevant section of `plan/plan.md` for the detailed spec
 3. Read existing source files in `src/` to understand what's already implemented
 4. Implement the bead's deliverables:
@@ -79,7 +79,7 @@ If all remaining beads are blocked by unclosed dependencies, or the bead list is
    - Add missing tests for already-implemented modules
    - Fix clippy warnings or improve error handling
    - Wire up modules that exist but aren't connected (e.g., main.rs integration)
-   - Create a bead for work you identify: `br create --type task --priority 1 --title "description"`
+   - Create a bead for work you identify: `bead create --title "description" --issue-type task --priority 1`
 3. Implement it, then commit and push
 
 ## Rules

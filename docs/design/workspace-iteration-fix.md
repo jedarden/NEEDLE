@@ -1,5 +1,10 @@
 # Workspace Iteration Fix for Explore Strand
 
+> Historical/non-operational reference: this document preserves retired `br`
+> commands from an earlier implementation or incident. Do not run them; use
+> the current `bead` CLI for active work.
+<!-- retired-br: historical-only -->
+
 **Status:** Design
 **Tracking:** bead bf-k17qj
 **Related:** ADR-001 (Explore Strand Hardening)

@@ -1,5 +1,10 @@
 # NEEDLE Test Isolation Catalog
 
+> Historical/non-operational reference: this document preserves retired `br`
+> commands from an earlier implementation or incident. Do not run them; use
+> the current `bead` CLI for active work.
+<!-- retired-br: historical-only -->
+
 This document catalogs the isolation configuration for every Explore-capable test in `tests/integration_tests.rs`. Each test listing shows the minimal safe configuration needed to prevent bead store contamination.
 
 ## Background

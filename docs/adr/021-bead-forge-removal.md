@@ -1,5 +1,10 @@
 # ADR-021: Removal of bead-forge (bf) Backend Support
 
+> Historical/non-operational reference: this document preserves retired `br`
+> commands from an earlier implementation or incident. Do not run them; use
+> the current `bead` CLI for active work.
+<!-- retired-br: historical-only -->
+
 **Status:** Accepted — 2026-08-28
 **Deciders:** operator (jedarden), via Claude Code
 **Supersedes:** ADR-013 §7 (backend priority table) and ADR-013's rejection of "Standardize on one CLI and drop the others"

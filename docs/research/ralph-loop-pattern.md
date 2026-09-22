@@ -1,5 +1,10 @@
 # The Ralph Loop Pattern: Sequential Bead Processing
 
+> Historical/non-operational reference: this document preserves retired `br`
+> commands from an earlier implementation or incident. Do not run them; use
+> the current `bead` CLI for active work.
+<!-- retired-br: historical-only -->
+
 ## Research Date: 2026-03-20
 ## Sources:
 ## - https://github.com/danboyle7/ralph-beads (original Ralph, targets bd)

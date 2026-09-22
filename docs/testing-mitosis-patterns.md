@@ -1,5 +1,10 @@
 # Mitosis Test Patterns and Workarounds
 
+> Historical/non-operational reference: this document preserves retired `br`
+> commands from an earlier implementation or incident. Do not run them; use
+> the current `bead` CLI for active work.
+<!-- retired-br: historical-only -->
+
 **Date:** 2026-09-19
 **Beads:** needle-6729ce69 (test-pattern baseline), needle-ed937f7e (interaction recheck)
 **Verification lineage:** needle-6522fcf4 → needle-12609517 → needle-ad7bd937 →

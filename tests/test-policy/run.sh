@@ -104,3 +104,10 @@ expect_failure "unowned verification artifact is rejected" \
 
 echo "test-policy checker: $passes passed, $failures failed"
 [[ "$failures" -eq 0 ]]
+
+if "$REPO_ROOT/scripts/check-documentation.sh" >/dev/null; then
+  echo "documentation checker: passed"
+else
+  echo "documentation checker: failed" >&2
+  exit 1
+fi

@@ -1,5 +1,10 @@
 # Mend Strand Cleanup Audit Report
 
+> Historical/non-operational reference: this document preserves retired `br`
+> commands from an earlier implementation or incident. Do not run them; use
+> the current `bead` CLI for active work.
+<!-- retired-br: historical-only -->
+
 **Date:** 2026-04-25
 **Bead:** needle-9hu7
 **File:** `src/strand/mend.rs`

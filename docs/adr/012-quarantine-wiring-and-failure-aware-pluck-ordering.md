@@ -1,5 +1,10 @@
 # ADR-012: Wire the Failure-Quarantine Circuit Breaker and Add Failure-Aware Pluck Ordering
 
+> Historical/non-operational reference: this document preserves retired `br`
+> commands from an earlier implementation or incident. Do not run them; use
+> the current `bead` CLI for active work.
+<!-- retired-br: historical-only -->
+
 **Status:** Accepted — 2026-07-30
 **Deciders:** operator (jedarden), via Claude Code
 **Tracking:** bf-2tow4 (BeadStore::block primitive), bf-5rp29 (quarantine wiring), bf-3milo (Pluck sort), bf-u3aca (tests)
