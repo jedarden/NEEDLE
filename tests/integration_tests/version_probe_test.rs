@@ -105,8 +105,8 @@ fn test_version_probe_is_binary_available() {
     println!("✓ Binary availability check works");
 }
 
-#[tokio::test]
-async fn test_version_probe_timeout_configurable() {
+#[test]
+fn test_version_probe_timeout_configurable() {
     let short_timeout = Duration::from_millis(100);
     let probe = VersionProbe::with_timeout(short_timeout);
 
@@ -125,23 +125,28 @@ async fn test_version_probe_timeout_configurable() {
 
     #[cfg(unix)]
     {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let compatible_bf = fake_bead_forge(&temp_dir, "bf 0.3.0");
-        assert_eq!(
-            check_bead_forge_version(&compatible_bf).await,
-            VersionCheck::Ok
-        );
-        run_version_handshake(&compatible_bf).await;
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let temp_dir = tempfile::tempdir().unwrap();
+            let compatible_bf = fake_bead_forge(&temp_dir, "bf 0.3.0");
+            assert_eq!(
+                check_bead_forge_version(&compatible_bf).await,
+                VersionCheck::Ok
+            );
+            run_version_handshake(&compatible_bf).await;
 
-        let incompatible_bf = fake_bead_forge(&temp_dir, "bf 0.2.0");
-        assert_eq!(
-            check_bead_forge_version(&incompatible_bf).await,
-            VersionCheck::KnownBad {
-                version: "bf 0.2.0".to_string(),
-                issues: vec!["--limit 0 returns empty set (should return all beads)".to_string()],
-            }
-        );
-        run_version_handshake(&incompatible_bf).await;
+            let incompatible_bf = fake_bead_forge(&temp_dir, "bf 0.2.0");
+            assert_eq!(
+                check_bead_forge_version(&incompatible_bf).await,
+                VersionCheck::KnownBad {
+                    version: "bf 0.2.0".to_string(),
+                    issues: vec![
+                        "--limit 0 returns empty set (should return all beads)".to_string()
+                    ],
+                }
+            );
+            run_version_handshake(&incompatible_bf).await;
+        });
     }
 }
 
