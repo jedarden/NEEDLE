@@ -3090,6 +3090,28 @@ impl super::Strand for PluckStrand {
                 Utc::now(),
             );
 
+            // Report local starvation when open work is present but every
+            // visible bead is held by a legitimate Pluck exclusion. Backend
+            // frontier omissions and claim-race exclusions remain Knot's
+            // terminal responsibility, so they do not produce a duplicate
+            // starvation verdict here.
+            let has_local_starvation = stats.open_count > 0
+                && stats.classification.invisible.is_empty()
+                && stats.classification.resource_conflict.is_empty();
+            if has_local_starvation {
+                if let Err(error) = self.telemetry.emit(
+                    crate::telemetry::EventKind::PluckStarvationDetected {
+                        workspace: workspace_path.clone(),
+                        open_count: stats.open_count,
+                        excluded_count: stats.excluded_count,
+                        candidate_exclusion_reasons: stats.exclusion_reasons.clone(),
+                    },
+                    Utc::now(),
+                ) {
+                    tracing::warn!(error = %error, "failed to emit Pluck starvation telemetry");
+                }
+            }
+
             // Persist a point-in-time snapshot of the frontier, whatever its
             // shape: a quiescent workspace (no open work at all) is recorded
             // exactly like a blocked one, because "nothing open and nothing
@@ -6595,9 +6617,8 @@ mod tests {
 
         // Even though there's an open bead, it is waiting on unfinished work.
         // Pluck should diagnose no candidate and continue the waterfall.
-        let store = MemoryStore {
-            beads: vec![blocked],
-        };
+        let store = RecoverableFrontierStore::hiding(vec![blocked], &[]);
+        let before = store.list_all().await.unwrap();
 
         let strand = PluckStrand::with_persistent_records(
             vec![],
@@ -6620,15 +6641,36 @@ mod tests {
 
         helper.sync().await;
 
-        // Verify starvation telemetry was emitted (it's always emitted)
+        // Verify the local starvation event and its no-candidate companion.
         helper.assert_event_emitted("strand.pluck.no_candidate");
+        helper.assert_event_emitted("strand.pluck.starvation_detected");
 
-        // Verify the event shows all beads are blocked
-        let event = helper.find_event("strand.pluck.no_candidate").unwrap();
+        let event = helper
+            .find_event("strand.pluck.starvation_detected")
+            .unwrap();
         assert_eq!(
             event.data.get("open_count").and_then(|v| v.as_u64()),
             Some(1),
             "should have one open bead (blocked bead)"
+        );
+        assert_eq!(
+            event.data.get("excluded_count").and_then(|v| v.as_u64()),
+            Some(1),
+            "the blocked bead should be the only excluded bead"
+        );
+
+        assert_eq!(store.list_all().await.unwrap(), before);
+        assert!(
+            store
+                .created_beads
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty(),
+            "starvation diagnostics must not create a bead in the target store"
+        );
+        assert!(
+            !workspace.path().join("state").exists(),
+            "diagnostics must not create target-workspace state"
         );
     }
 

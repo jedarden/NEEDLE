@@ -664,8 +664,9 @@ pub enum EventKind {
         workspace: Option<String>,
     },
     QueueEmpty,
-    /// Legacy compatibility event retained for readers of older telemetry.
-    /// Strand selection no longer emits this pre-waterfall verdict.
+    /// Pluck-local starvation diagnostic for open work excluded from its
+    /// candidate frontier. Knot remains responsible for the terminal
+    /// starvation verdict after the complete strand waterfall.
     PluckStarvationDetected {
         workspace: String,
         open_count: usize,
