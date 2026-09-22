@@ -159,7 +159,12 @@ fn classify_version_output(output: Output) -> VersionCheck {
 
     let issues = KNOWN_INCOMPATIBLE_VERSIONS
         .iter()
-        .filter(|(prefix, _)| version.starts_with(prefix))
+        .filter(|(prefix, _)| {
+            version.starts_with(prefix)
+                || version
+                    .split_whitespace()
+                    .any(|token| token.starts_with(prefix))
+        })
         .map(|(_, issue)| (*issue).to_string())
         .collect::<Vec<_>>();
 
