@@ -646,20 +646,31 @@ fn stage_and_promote(content: &[u8], label: &str, skip_canary: bool) -> Result<P
     fs::create_dir_all(&bin_dir).context("failed to create bin directory")?;
     let testing_binary = bin_dir.join("needle-testing");
 
-    // Write the new binary to :testing.
-    let mut cursor = Cursor::new(content);
-    {
+    // Write the new binary beside :testing and rename it into place only after
+    // the complete artifact has been written. A canary may start immediately,
+    // so exposing a partially-written executable here would turn a transient
+    // download race into a rejected release (or, worse, a bad promotion).
+    let temp_path = bin_dir.join(format!(".needle-testing.{}.tmp", std::process::id()));
+    let write_result = (|| -> Result<()> {
+        let mut cursor = Cursor::new(content);
         let mut file =
-            fs::File::create(&testing_binary).context("failed to create testing binary file")?;
+            fs::File::create(&temp_path).context("failed to create testing binary temp file")?;
         io::copy(&mut cursor, &mut file).context("failed to write testing binary")?;
-    }
 
-    // Make it executable.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&testing_binary, fs::Permissions::from_mode(0o755))
-            .context("failed to set executable permissions on testing binary")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&temp_path, fs::Permissions::from_mode(0o755))
+                .context("failed to set executable permissions on testing binary")?;
+        }
+
+        fs::rename(&temp_path, &testing_binary)
+            .context("failed to publish testing binary atomically")?;
+        Ok(())
+    })();
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error);
     }
 
     println!("Staged {} to {}", label, testing_binary.display());
@@ -692,7 +703,21 @@ fn stage_and_promote(content: &[u8], label: &str, skip_canary: bool) -> Result<P
 
         let runner = CanaryRunner::new(home.clone(), canary_workspace, canary_timeout);
 
-        let report = runner.run().context("canary validation failed")?;
+        let report = match runner.run() {
+            Ok(report) => report,
+            Err(error) => {
+                // A runner error is a failed validation too. Never leave an
+                // unvalidated release in :testing where a later worker cycle
+                // could mistake it for a candidate ready for promotion.
+                let rejection = runner.reject();
+                return match rejection {
+                    Ok(()) => Err(error.context("canary validation failed; testing binary rejected")),
+                    Err(rejection_error) => Err(error.context(format!(
+                        "canary validation failed and rejecting testing binary also failed: {rejection_error:#}"
+                    ))),
+                };
+            }
+        };
 
         if !report.suite_passed {
             // Canary failed - reject the testing binary

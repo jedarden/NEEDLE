@@ -8,6 +8,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
 
 // We'll need mock server support - for now structure the test framework
 // TODO: Add httpmock or similar dependency to Cargo.toml for actual GitHub API mocking
@@ -37,6 +38,74 @@ fn create_stable_binary(needle_home: &Path, content: &[u8]) -> anyhow::Result<Pa
     let stable_binary = needle_home.join("bin/needle-stable");
     fs::write(&stable_binary, content)?;
     Ok(stable_binary)
+}
+
+/// Create the smallest real canary workspace accepted by [`CanaryRunner`].
+///
+/// The release tests intentionally use the workspace's bound native bead-rs
+/// binary, while the candidate worker uses an isolated HOME. This exercises
+/// the same process boundary as a production release without touching the
+/// operator's queue or adapter configuration.
+fn setup_upgrade_canary(home: &Path, expected: &str) -> anyhow::Result<String> {
+    let canary = home.join(".needle/canary");
+    fs::create_dir_all(&canary)?;
+
+    let bead_home = canary.join(".test-home");
+    fs::create_dir_all(&bead_home)?;
+    let init = Command::new(super::bead_path())
+        .current_dir(&canary)
+        .env("HOME", &bead_home)
+        .args(["init", "--prefix", "upgrade", "--skip-foreign-workspace"])
+        .output()?;
+    anyhow::ensure!(
+        init.status.success(),
+        "canary bead init failed: {}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+
+    let bead_path = serde_json::to_string(&super::bead_path())?;
+    fs::write(
+        canary.join(".needle.yaml"),
+        format!("bead_cli:\n  backend: bead-rs\n  path: {bead_path}\n"),
+    )?;
+
+    let bead_id = super::create_bead(&canary, "release canary")?.to_string();
+    fs::create_dir_all(canary.join("expected"))?;
+    fs::write(
+        canary.join("expected").join(format!("{bead_id}.yaml")),
+        expected,
+    )?;
+    Ok(bead_id)
+}
+
+fn run_upgrade_command(home: &Path, candidate: &Path) -> anyhow::Result<Output> {
+    let bead_binary = super::bead_path();
+    let bead_dir = bead_binary
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("native bead-rs binary has no parent directory"))?;
+    let inherited_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut path_entries = vec![bead_dir.to_path_buf()];
+    path_entries.extend(std::env::split_paths(&inherited_path));
+    let path = std::env::join_paths(path_entries)
+        .map_err(|error| anyhow::anyhow!("failed to construct candidate PATH: {error}"))?;
+
+    Ok(Command::new(env!("CARGO_BIN_EXE_needle"))
+        .args([
+            "upgrade",
+            "--from-file",
+            candidate
+                .to_str()
+                .ok_or_else(|| anyhow::anyhow!("candidate path is not valid UTF-8"))?,
+        ])
+        .env("HOME", home)
+        .env("PATH", path)
+        // The fleet dispatch environment sets a large stagger for workers.
+        // A release canary must own its timing and not inherit that delay.
+        .env_remove("NEEDLE_START_DELAY")
+        // The canary is a deterministic release check, not a host-capacity
+        // test; let it run even when the shared CI host is busy.
+        .env("NEEDLE_SKIP_LAUNCH_RESOURCE_CHECK", "1")
+        .output()?)
 }
 
 /// Test 1: check_for_update_to_testing() with mocked newer release downloads to :testing
@@ -165,47 +234,109 @@ fn test_version_comparison_strictly_greater() {
     // TODO: Wire this to actual is_newer_version() function from upgrade module
 }
 
-/// Test 7: Full supervisor poll cycle with mocked release
-#[tokio::test]
-async fn test_supervisor_poll_cycle_with_auto_upgrade_check() {
-    // Setup:
-    // - Create supervisor with auto_upgrade_check: true
-    // - Mock GitHub API returning newer release
-    // - Mock canary workspace with passing tests
-    //
-    // Execute:
-    // - Run one supervisor poll cycle (tick)
-    //
-    // Expected:
-    // - Supervisor calls check_for_update_to_testing()
-    // - Downloaded :testing binary is created
-    // - Canary validation runs and passes
-    // - :testing promoted to :stable
-    // - Worker loop detects new :stable via check_hot_reload()
-    // - Hot-reload occurs (re_exec_stable called)
+/// Test 7: `needle upgrade` promotes a canary-passing candidate and exposes it
+/// to the existing hot-reload detector.
+#[test]
+fn upgrade_command_promotes_passing_canary_and_hot_reload_detects_stable() {
+    let temp_dir = tempfile::tempdir().expect("failed to create upgrade fixture");
+    let home = temp_dir.path();
+    let needle_home = home.join(".needle");
+    let bin_dir = needle_home.join("bin");
+    fs::create_dir_all(&bin_dir).expect("failed to create release channel");
+    create_stable_binary(&needle_home, b"stable-before-upgrade")
+        .expect("failed to create previous stable");
+    setup_upgrade_canary(home, "type: success\nfinal_status: closed\n")
+        .expect("failed to create passing canary");
 
-    println!("Test 7: TODO - Implement full supervisor integration test");
+    let candidate = PathBuf::from(env!("CARGO_BIN_EXE_needle"));
+    let output = run_upgrade_command(home, &candidate).expect("failed to run upgrade command");
+    assert!(
+        output.status.success(),
+        "passing canary upgrade failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert_eq!(
+        fs::read(needle_home.join("bin/needle-stable")).unwrap(),
+        fs::read(&candidate).unwrap(),
+        "promoted stable must be the tested candidate"
+    );
+    assert_eq!(
+        fs::read(needle_home.join("bin/needle-stable.prev")).unwrap(),
+        b"stable-before-upgrade",
+        "promotion must retain the rollback binary"
+    );
+    assert!(
+        !needle_home.join("bin/needle-testing").exists(),
+        "successful promotion must consume :testing"
+    );
+
+    match needle::upgrade::check_hot_reload(&needle_home).unwrap() {
+        needle::upgrade::HotReloadCheck::NewBinaryDetected { stable_path, .. } => {
+            assert_eq!(stable_path, needle_home.join("bin/needle-stable"));
+        }
+        other => panic!("expected hot-reload detection after promotion, got {other:?}"),
+    }
 }
 
-/// Test 8: Failing canary leaves :stable untouched
-#[tokio::test]
-async fn test_failing_canary_leaves_stable_untouched() {
-    // Setup:
-    // - Create supervisor with auto_upgrade_check: true
-    // - Mock GitHub API returning newer release (with bad binary)
-    // - Mock canary workspace with failing tests
-    //
-    // Execute:
-    // - Run one supervisor poll cycle
-    //
-    // Expected:
-    // - :testing binary is downloaded
-    // - Canary validation runs and fails
-    // - :testing is rejected (deleted)
-    // - :stable binary is unchanged
-    // - No hot-reload occurs
+/// Test 8: a failed canary rejects the candidate and leaves :stable/rollback
+/// channels unchanged, so workers have nothing new to hot-reload.
+#[test]
+fn upgrade_command_rejects_failed_canary_without_touching_stable() {
+    let temp_dir = tempfile::tempdir().expect("failed to create upgrade fixture");
+    let home = temp_dir.path();
+    let needle_home = home.join(".needle");
+    let bin_dir = needle_home.join("bin");
+    fs::create_dir_all(&bin_dir).expect("failed to create release channel");
+    create_stable_binary(&needle_home, b"stable-before-rejected-upgrade")
+        .expect("failed to create previous stable");
+    fs::write(
+        needle_home.join("bin/needle-stable.prev"),
+        b"rollback-before-rejected-upgrade",
+    )
+    .expect("failed to create existing rollback binary");
+    setup_upgrade_canary(home, "type: success\nfinal_status: closed\n")
+        .expect("failed to create failing canary");
 
-    println!("Test 8: TODO - Implement failing canary test");
+    let candidate = temp_dir.path().join("bad-needle");
+    fs::write(&candidate, b"#!/bin/sh\nexit 42\n").expect("failed to create bad candidate");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&candidate, fs::Permissions::from_mode(0o755))
+            .expect("failed to make bad candidate executable");
+    }
+
+    let output = run_upgrade_command(home, &candidate).expect("failed to run upgrade command");
+    assert!(
+        !output.status.success(),
+        "failed canary upgrade unexpectedly succeeded: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fs::read(needle_home.join("bin/needle-stable")).unwrap(),
+        b"stable-before-rejected-upgrade",
+        "failed canary must leave stable untouched"
+    );
+    assert_eq!(
+        fs::read(needle_home.join("bin/needle-stable.prev")).unwrap(),
+        b"rollback-before-rejected-upgrade",
+        "failed canary must leave rollback untouched"
+    );
+    assert!(
+        !needle_home.join("bin/needle-testing").exists(),
+        "failed canary must reject and remove :testing"
+    );
+
+    assert!(
+        matches!(
+            needle::upgrade::check_hot_reload(&needle_home).unwrap(),
+            needle::upgrade::HotReloadCheck::NewBinaryDetected { .. }
+        ),
+        "stable remains the only binary visible to hot-reload"
+    );
 }
 
 /// Test 9: Supervisor respects update_check_interval_secs timing
