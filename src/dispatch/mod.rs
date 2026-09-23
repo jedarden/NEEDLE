@@ -1263,6 +1263,28 @@ impl DispatchContext {
     }
 }
 
+/// What authorizes a dispatch to create a child process.
+#[derive(Clone, Copy)]
+enum SpawnAuthority<'a> {
+    /// A bead attempt. Only a carried claim context that passes the final
+    /// pre-spawn verification may authorize the spawn; `None` fails closed.
+    Claim(Option<&'a DispatchContext>),
+    /// An analysis dispatch that acts on no claim (Mitosis runs after the
+    /// outcome handler has released the bead). Nothing is verified, and the
+    /// child receives no fencing credential, so bead-rs refuses any lifecycle
+    /// mutation it attempts on the bead.
+    UnclaimedAnalysis,
+}
+
+impl<'a> SpawnAuthority<'a> {
+    fn claim_context(self) -> Option<&'a DispatchContext> {
+        match self {
+            SpawnAuthority::Claim(context) => context,
+            SpawnAuthority::UnclaimedAnalysis => None,
+        }
+    }
+}
+
 /// Executes agent processes for claimed beads.
 pub struct Dispatcher {
     adapters: HashMap<String, AgentAdapter>,
@@ -1482,8 +1504,40 @@ impl Dispatcher {
         adapter: &AgentAdapter,
         workspace: &Path,
     ) -> Result<ExecutionResult> {
-        self.dispatch_inner(bead_id, prompt, adapter, workspace, None)
-            .await
+        self.dispatch_inner(
+            bead_id,
+            prompt,
+            adapter,
+            workspace,
+            SpawnAuthority::Claim(None),
+        )
+        .await
+    }
+
+    /// Execute an analysis agent for a bead this worker does not hold.
+    ///
+    /// Mitosis dispatches its analysis after the outcome handler has already
+    /// released the bead, so there is no claim for the pre-spawn gate to
+    /// verify and [`Self::dispatch`] would always refuse. This path is
+    /// claim-free by construction rather than by skipping a check: the child
+    /// is never given `NEEDLE_BEAD_FENCING_TOKEN` or `NEEDLE_BEAD_REVISION`,
+    /// so it holds no credential for any bead lifecycle mutation. Its only
+    /// output is the analysis text the caller parses.
+    pub async fn dispatch_unclaimed_analysis(
+        &self,
+        bead_id: &BeadId,
+        prompt: &BuiltPrompt,
+        adapter: &AgentAdapter,
+        workspace: &Path,
+    ) -> Result<ExecutionResult> {
+        self.dispatch_inner(
+            bead_id,
+            prompt,
+            adapter,
+            workspace,
+            SpawnAuthority::UnclaimedAnalysis,
+        )
+        .await
     }
 
     /// Execute an agent with the exact store and claim identity captured by
@@ -1502,8 +1556,14 @@ impl Dispatcher {
         workspace: &Path,
         context: &DispatchContext,
     ) -> Result<ExecutionResult> {
-        self.dispatch_inner(bead_id, prompt, adapter, workspace, Some(context))
-            .await
+        self.dispatch_inner(
+            bead_id,
+            prompt,
+            adapter,
+            workspace,
+            SpawnAuthority::Claim(Some(context)),
+        )
+        .await
     }
 
     async fn dispatch_inner(
@@ -1512,9 +1572,9 @@ impl Dispatcher {
         prompt: &BuiltPrompt,
         adapter: &AgentAdapter,
         workspace: &Path,
-        dispatch_context: Option<&DispatchContext>,
+        authority: SpawnAuthority<'_>,
     ) -> Result<ExecutionResult> {
-        if let Some(context) = dispatch_context {
+        if let Some(context) = authority.claim_context() {
             if let Some(attempt_id) = context.attempt_id() {
                 if attempt_id.is_empty() {
                     bail!("dispatch context carries an empty attempt identity");
@@ -1561,13 +1621,7 @@ impl Dispatcher {
         )?;
 
         let result = self
-            .execute_agent(
-                bead_id,
-                &prompt.content,
-                adapter,
-                workspace,
-                dispatch_context,
-            )
+            .execute_agent(bead_id, &prompt.content, adapter, workspace, authority)
             .await;
 
         // Emit completion telemetry regardless of success/failure.
@@ -1855,12 +1909,12 @@ impl Dispatcher {
         prompt_content: &str,
         adapter: &AgentAdapter,
         workspace: &Path,
-        dispatch_context: Option<&DispatchContext>,
+        authority: SpawnAuthority<'_>,
     ) -> Result<ExecutionResult> {
         let prompt_file = write_prompt_to_temp(bead_id, prompt_content)?;
 
         let result = self
-            .run_process(bead_id, adapter, workspace, &prompt_file, dispatch_context)
+            .run_process(bead_id, adapter, workspace, &prompt_file, authority)
             .await;
 
         // Always clean up temp file.
@@ -1872,7 +1926,7 @@ impl Dispatcher {
     /// Internal: spawn and manage the agent process.
     #[tracing::instrument(
         name = "agent.execution",
-        skip(self, bead_id, adapter, workspace, prompt_file, dispatch_context),
+        skip(self, bead_id, adapter, workspace, prompt_file, authority),
         fields(
             needle.bead.id = %bead_id.as_ref(),
             needle.agent.pid = tracing::field::Empty,
@@ -1885,7 +1939,7 @@ impl Dispatcher {
         adapter: &AgentAdapter,
         workspace: &Path,
         prompt_file: &Path,
-        dispatch_context: Option<&DispatchContext>,
+        authority: SpawnAuthority<'_>,
     ) -> Result<ExecutionResult> {
         // Create trace capture for this bead execution.
         // Sanitizer is cloned (Arc clone — cheap) and applied before every disk write.
@@ -1928,7 +1982,8 @@ impl Dispatcher {
         // Build environment variables for the child process
         let mut child_env = adapter.environment.clone();
 
-        let attempt_id = dispatch_context
+        let attempt_id = authority
+            .claim_context()
             .and_then(DispatchContext::attempt_id)
             .map(str::to_owned)
             .or_else(|| self.telemetry.attempt_id());
@@ -1953,77 +2008,94 @@ impl Dispatcher {
         // a source of pre-spawn claim authority: they do not carry the
         // claim-time revision and fencing epoch and can point at the worker's
         // home workspace after Explore has selected a remote target.
-        let Some(context) = dispatch_context else {
-            let missing_verifier = if self.bead_store.is_none() {
-                "no bead store wired for pre-spawn claim verification"
-            } else {
-                "no target-store claim context carried to pre-spawn verification"
-            };
-            let error = claim_verification_error(format!(
-                "{missing_verifier} — refusing to spawn bead {bead_id} unverified"
-            ));
-            let _ = self.telemetry.emit(
-                crate::telemetry::EventKind::ClaimVerificationBlocked {
-                    bead_id: bead_id.clone(),
-                    workspace: workspace.display().to_string(),
-                    expected_actor: "(unset)".to_string(),
-                    expected_epoch: None,
-                    store_error: None,
-                    actual_status: "unknown".to_string(),
-                    actual_assignee: "unknown".to_string(),
-                    actual_revision: None,
-                    failure_kind: "context_missing".to_string(),
-                    detail: format!("{error:#}"),
-                },
-                chrono::Utc::now(),
-            );
-            let _ = self.telemetry.emit(
-                crate::telemetry::EventKind::ClaimVerifyError {
-                    bead_id: bead_id.clone(),
-                    expected_actor: "(unset)".to_string(),
-                    stage: "pre_spawn".to_string(),
-                    target_workspace: None,
-                    category: crate::telemetry::ClaimVerifyErrorCategory::Capability,
-                    detail: crate::telemetry::redact_claim_credentials(&format!("{error:#}")),
-                },
-                chrono::Utc::now(),
-            );
-            return Err(error);
-        };
-        let verified = self.verify_pre_spawn_claim(bead_id, context).await?;
+        match authority {
+            SpawnAuthority::Claim(dispatch_context) => {
+                let Some(context) = dispatch_context else {
+                    let missing_verifier = if self.bead_store.is_none() {
+                        "no bead store wired for pre-spawn claim verification"
+                    } else {
+                        "no target-store claim context carried to pre-spawn verification"
+                    };
+                    let error = claim_verification_error(format!(
+                        "{missing_verifier} — refusing to spawn bead {bead_id} unverified"
+                    ));
+                    let _ = self.telemetry.emit(
+                        crate::telemetry::EventKind::ClaimVerificationBlocked {
+                            bead_id: bead_id.clone(),
+                            workspace: workspace.display().to_string(),
+                            expected_actor: "(unset)".to_string(),
+                            expected_epoch: None,
+                            store_error: None,
+                            actual_status: "unknown".to_string(),
+                            actual_assignee: "unknown".to_string(),
+                            actual_revision: None,
+                            failure_kind: "context_missing".to_string(),
+                            detail: format!("{error:#}"),
+                        },
+                        chrono::Utc::now(),
+                    );
+                    let _ = self.telemetry.emit(
+                        crate::telemetry::EventKind::ClaimVerifyError {
+                            bead_id: bead_id.clone(),
+                            expected_actor: "(unset)".to_string(),
+                            stage: "pre_spawn".to_string(),
+                            target_workspace: None,
+                            category: crate::telemetry::ClaimVerifyErrorCategory::Capability,
+                            detail: crate::telemetry::redact_claim_credentials(&format!(
+                                "{error:#}"
+                            )),
+                        },
+                        chrono::Utc::now(),
+                    );
+                    return Err(error);
+                };
+                let verified = self.verify_pre_spawn_claim(bead_id, context).await?;
 
-        // bead-rs treats the claim epoch as the credential for every later
-        // lifecycle mutation. Pass only the epoch and revision proven by the
-        // final target-store read to the dispatched agent.
-        child_env.insert(
-            "NEEDLE_BEAD_FENCING_TOKEN".to_string(),
-            verified.epoch.to_string(),
-        );
-        child_env.insert(
-            "NEEDLE_BEAD_REVISION".to_string(),
-            verified.revision.to_string(),
-        );
+                // bead-rs treats the claim epoch as the credential for every later
+                // lifecycle mutation. Pass only the epoch and revision proven by the
+                // final target-store read to the dispatched agent.
+                child_env.insert(
+                    "NEEDLE_BEAD_FENCING_TOKEN".to_string(),
+                    verified.epoch.to_string(),
+                );
+                child_env.insert(
+                    "NEEDLE_BEAD_REVISION".to_string(),
+                    verified.revision.to_string(),
+                );
 
-        tracing::debug!(
-            bead_id = %bead_id.as_ref(),
-            workspace = %verified.workspace.display(),
-            revision = verified.revision,
-            claim_epoch = verified.epoch,
-            verification_result = "passed",
-            "atomic claim verification passed — proceeding with process spawn"
-        );
+                tracing::debug!(
+                    bead_id = %bead_id.as_ref(),
+                    workspace = %verified.workspace.display(),
+                    revision = verified.revision,
+                    claim_epoch = verified.epoch,
+                    verification_result = "passed",
+                    "atomic claim verification passed — proceeding with process spawn"
+                );
 
-        // Keep the stage-local event for existing consumers; the structured
-        // ClaimVerificationPassed event emitted by the helper carries the
-        // target workspace and epoch for this exact final gate.
-        let _ = self.telemetry.emit(
-            crate::telemetry::EventKind::ClaimRecheckSucceeded {
-                bead_id: bead_id.clone(),
-                expected_actor: context.claim_identity().actor.clone(),
-                stage: "pre_spawn".to_string(),
-            },
-            chrono::Utc::now(),
-        );
+                // Keep the stage-local event for existing consumers; the structured
+                // ClaimVerificationPassed event emitted by the helper carries the
+                // target workspace and epoch for this exact final gate.
+                let _ = self.telemetry.emit(
+                    crate::telemetry::EventKind::ClaimRecheckSucceeded {
+                        bead_id: bead_id.clone(),
+                        expected_actor: context.claim_identity().actor.clone(),
+                        stage: "pre_spawn".to_string(),
+                    },
+                    chrono::Utc::now(),
+                );
+            }
+            SpawnAuthority::UnclaimedAnalysis => {
+                // No claim is held, so no credential may reach the child —
+                // not even one an adapter's static environment happens to set.
+                child_env.remove("NEEDLE_BEAD_FENCING_TOKEN");
+                child_env.remove("NEEDLE_BEAD_REVISION");
+                tracing::debug!(
+                    bead_id = %bead_id.as_ref(),
+                    workspace = %workspace.display(),
+                    "unclaimed analysis dispatch — no claim to verify, no fencing credential issued"
+                );
+            }
+        }
 
         // Spawn the agent process with ETXTBSY retry handling.
         // This wrapper retries with backoff if the kernel returns ETXTBSY (errno 26),

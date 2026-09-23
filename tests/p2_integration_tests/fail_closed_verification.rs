@@ -667,6 +667,7 @@ async fn pre_spawn_control_with_matching_claim_spawns() {
 
     assert_context_uses_selected_target_store_and_claim_identity().await;
     assert_context_rejects_moved_claim_identity_from_target_store().await;
+    assert_unclaimed_analysis_spawns_without_credential().await;
 
     // Keep the real-binary failure fixtures under the fail-closed acceptance
     // filter without adding another harness test budget entry.
@@ -722,4 +723,73 @@ async fn assert_context_rejects_moved_claim_identity_from_target_store() {
     assert!(outcome.dispatch.is_err());
     assert!(!outcome.spawned());
     assert_eq!(outcome.count("bead.claim.recheck_failed"), 1);
+}
+
+/// Mitosis dispatches its analysis after the outcome handler released the
+/// bead, so it has no claim to verify. The unclaimed-analysis path must spawn
+/// without consulting any store and must never hand the child a fencing
+/// credential — not even one set in the adapter's static environment — while
+/// the ordinary context-free `dispatch()` on the same dispatcher keeps
+/// refusing.
+async fn assert_unclaimed_analysis_spawns_without_credential() {
+    let workspace = TempDir::new().expect("create probe workspace");
+    let telemetry_log = TelemetryLog::new();
+    let telemetry = telemetry_log.telemetry();
+
+    let mut adapter = probe_adapter();
+    adapter
+        .environment
+        .insert("NEEDLE_BEAD_FENCING_TOKEN".to_string(), "99".to_string());
+    adapter
+        .environment
+        .insert("NEEDLE_BEAD_REVISION".to_string(), "99".to_string());
+    let mut adapters = HashMap::new();
+    adapters.insert(adapter.name.clone(), adapter);
+
+    // A store that fails every verification query: consulting it at all
+    // would abort the analysis dispatch.
+    let dispatcher = Dispatcher::with_adapters(adapters, telemetry, 3600)
+        .with_bead_store(Arc::new(ProbeStore::new(ProbeOutcome::StoreError(
+            "bead not found: needle-unclaimed-analysis".to_string(),
+        ))))
+        .with_worker_id(WORKER_ID.to_string());
+    let bead_id = BeadId::from("needle-unclaimed-analysis");
+    let adapter = dispatcher.adapter("fail-closed-probe").unwrap();
+
+    let analysis = dispatcher
+        .dispatch_unclaimed_analysis(&bead_id, &probe_prompt(), adapter, workspace.path())
+        .await;
+    let refused = dispatcher
+        .dispatch(&bead_id, &probe_prompt(), adapter, workspace.path())
+        .await;
+
+    drop(dispatcher);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let result = analysis.expect("an unclaimed analysis dispatch must spawn");
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("claim-context.txt"))
+            .expect("the analysis child should record its claim context")
+            .trim(),
+        "missing:missing",
+        "an unclaimed analysis child must receive no revision or fencing token"
+    );
+    assert!(
+        refused.is_err(),
+        "context-free dispatch() must still fail closed"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.path().join("spawned.txt"))
+            .expect("the analysis child should leave the spawn sentinel")
+            .lines()
+            .count(),
+        1,
+        "only the analysis dispatch may spawn; the refused dispatch spawns nothing"
+    );
+    assert_eq!(
+        telemetry_log.count("bead.claim.recheck_succeeded"),
+        0,
+        "the unclaimed path performs no claim verification"
+    );
 }

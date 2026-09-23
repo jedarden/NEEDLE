@@ -496,9 +496,10 @@ impl MitosisEvaluator {
 
         tracing::info!(bead_id = %bead.id, "dispatching agent for mitosis analysis");
 
-        // Dispatch agent with mitosis prompt.
+        // Dispatch agent with mitosis prompt. The outcome handler released the
+        // bead before evaluation, so this analysis holds no claim.
         let exec_result = dispatcher
-            .dispatch(&bead.id, &prompt, adapter, workspace)
+            .dispatch_unclaimed_analysis(&bead.id, &prompt, adapter, workspace)
             .await
             .context("mitosis agent dispatch failed")?;
 
@@ -758,9 +759,10 @@ impl MitosisEvaluator {
 
         tracing::info!(bead_id = %bead.id, "dispatching agent for timeout mitosis analysis");
 
-        // Step 10: Dispatch agent with timeout-specific prompt
+        // Step 10: Dispatch agent with timeout-specific prompt (unclaimed:
+        // the timed-out attempt's claim was released before evaluation)
         let exec_result = dispatcher
-            .dispatch(&bead.id, &prompt, adapter, workspace)
+            .dispatch_unclaimed_analysis(&bead.id, &prompt, adapter, workspace)
             .await
             .context("timeout mitosis agent dispatch failed")?;
 
