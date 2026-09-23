@@ -1668,7 +1668,8 @@ impl PluckStrand {
                     "Automatic bypass activated: returning oldest open bead despite all filters"
                 );
 
-                // Emit telemetry event for bypass activation
+                // Emit telemetry event for bypass activation. The event is the
+                // diagnostic record; this path must not write into any bead store.
                 let _ = self.telemetry.emit(
                     crate::telemetry::EventKind::PluckBypassActivated {
                         workspace: workspace_path.clone(),
