@@ -104,10 +104,16 @@ for id in $(manifest_ids); do
     fi
 done
 
-for unit in $(systemctl --user list-unit-files 'needle-worker@*' --no-legend 2>/dev/null | awk '$2 ~ /^enabled/ { print $1 }'); do
+for link in "$SYSTEMD_DIR/default.target.wants"/needle-worker@*.service; do
+    [[ -e "$link" || -L "$link" ]] || continue
+    unit="${link##*/}"
     id="${unit#needle-worker@}"; id="${id%.service}"
     if ! grep -qx "$id" < <(manifest_ids); then
-        echo "- MASKING stray unit: $unit (not in workers.tsv)"
+        echo "- DISABLING + MASKING stray unit: $unit (not in workers.tsv)"
+        # `systemctl list-unit-files needle-worker@*` only reports the template
+        # on some systemd versions, not enabled template instances. Enumerate
+        # the target wants directly, then remove that enablement before masking.
+        run systemctl --user disable "$unit"
         run systemctl --user mask "$unit"
     fi
 done
