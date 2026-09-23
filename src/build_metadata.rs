@@ -161,15 +161,100 @@ impl BuildMetadata {
         format!("needle {}", self.version)
     }
 
+    /// Whether this metadata names a real commit.
+    ///
+    /// A build without git information reports `unknown`; such a value can
+    /// never be compared against another build, so it must not be treated as
+    /// evidence that either binary is stale.
+    pub fn has_known_commit(&self) -> bool {
+        let commit = self.commit_sha.trim();
+        !commit.is_empty() && commit != "unknown"
+    }
+
+    /// Parse the output of `needle --version`:
+    /// `needle <version> (<commit>[-dirty] <build_timestamp>)`.
+    ///
+    /// Returns `None` for anything else rather than guessing.
+    pub fn from_version_output(output: &str) -> Option<Self> {
+        let line = output.lines().map(str::trim).find(|l| !l.is_empty())?;
+        let rest = line.strip_prefix("needle ")?;
+        let (version, rest) = rest.split_once(" (")?;
+        let inner = rest.strip_suffix(')')?;
+        let (commit, build_timestamp) = inner.split_once(' ')?;
+        let commit = commit.strip_suffix("-dirty").unwrap_or(commit);
+        if version.is_empty() || commit.is_empty() || build_timestamp.is_empty() {
+            return None;
+        }
+        Some(BuildMetadata {
+            version: version.to_string(),
+            commit_sha: commit.to_string(),
+            build_timestamp: build_timestamp.to_string(),
+        })
+    }
+
+    /// Read build metadata from a binary by running `<path> --version`.
+    ///
+    /// The binary reports its own compile-time metadata, so this cannot be
+    /// fooled by unrelated strings in the file the way scanning its bytes can
+    /// (needle-f1efbb0a). The child is killed if it does not answer within
+    /// `timeout`.
+    pub fn from_binary_version(path: &Path, timeout: std::time::Duration) -> Result<Self> {
+        use std::io::Read;
+
+        let mut child = std::process::Command::new(path)
+            .arg("--version")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .with_context(|| format!("failed to run {} --version", path.display()))?;
+        let deadline = std::time::Instant::now() + timeout;
+        let status = loop {
+            if let Some(status) = child
+                .try_wait()
+                .with_context(|| format!("failed to wait for {} --version", path.display()))?
+            {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                anyhow::bail!(
+                    "{} --version did not answer within {:?}",
+                    path.display(),
+                    timeout
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        let mut stdout = String::new();
+        if let Some(mut pipe) = child.stdout.take() {
+            pipe.read_to_string(&mut stdout)
+                .with_context(|| format!("failed to read {} --version", path.display()))?;
+        }
+        anyhow::ensure!(
+            status.success(),
+            "{} --version exited with {status}",
+            path.display()
+        );
+        Self::from_version_output(&stdout).with_context(|| {
+            format!(
+                "{} --version printed no parseable build metadata: {:?}",
+                path.display(),
+                stdout.trim()
+            )
+        })
+    }
+
     /// Read build metadata from the latest needle-stable binary on disk.
     ///
     /// This function attempts to read metadata from the needle-stable binary
-    /// located in the needle home directory.
+    /// located in the needle home directory, by asking it for its version.
     ///
     /// # Returns
     /// * `Ok(Some(BuildMetadata))` if the stable binary exists and metadata is readable
     /// * `Ok(None)` if the stable binary does not exist
-    /// * `Err` if the binary exists but cannot be read or parsed
+    /// * `Err` if the binary exists but cannot be run or its output parsed
     pub fn from_stable_binary() -> Result<Option<Self>> {
         // Get the needle home directory
         let home = needle_home()?;
@@ -180,8 +265,8 @@ impl BuildMetadata {
             return Ok(None);
         }
 
-        // Read metadata from the stable binary
-        let metadata = Self::from_binary(&stable_binary)?;
+        let metadata =
+            Self::from_binary_version(&stable_binary, std::time::Duration::from_secs(10))?;
         Ok(Some(metadata))
     }
 }
@@ -228,6 +313,62 @@ mod tests {
 
         // Build timestamp should be set (even if "unknown")
         assert!(!metadata.build_timestamp.is_empty());
+    }
+
+    #[test]
+    fn version_output_parses_commit_and_timestamp() {
+        let parsed =
+            BuildMetadata::from_version_output("needle 0.6.7 (573a5b17 2026-09-23T17:17:19Z)\n")
+                .expect("release --version output must parse");
+        assert_eq!(parsed.version, "0.6.7");
+        assert_eq!(parsed.commit_sha, "573a5b17");
+        assert_eq!(parsed.build_timestamp, "2026-09-23T17:17:19Z");
+        assert!(parsed.has_known_commit());
+
+        let dirty = BuildMetadata::from_version_output("needle 0.6.7 (573a5b17-dirty unknown)")
+            .expect("dirty builds must parse");
+        assert_eq!(dirty.commit_sha, "573a5b17");
+
+        let unknown = BuildMetadata::from_version_output("needle 0.6.7 (unknown unknown)")
+            .expect("git-less builds must parse");
+        assert!(!unknown.has_known_commit());
+
+        for garbage in [
+            "",
+            "needle 0.6.7",
+            "bead 0.2.6 (d9a32b3 x)",
+            "needle 0.6.7 (abc)",
+        ] {
+            assert_eq!(
+                BuildMetadata::from_version_output(garbage),
+                None,
+                "{garbage:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn binary_version_reads_the_binary_self_report() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("needle-stable");
+        // The file also contains an unrelated JSON blob that the old byte
+        // scan would have matched first.
+        fs::write(
+            &fake,
+            "#!/bin/sh\n# {\"commit_sha\":1}\necho 'needle 0.6.7 (abc12345 2026-09-23T00:00:00Z)'\n",
+        )
+        .unwrap();
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+        let metadata =
+            BuildMetadata::from_binary_version(&fake, std::time::Duration::from_secs(10)).unwrap();
+        assert_eq!(metadata.commit_sha, "abc12345");
+
+        fs::write(&fake, "#!/bin/sh\necho 'not a needle'\n").unwrap();
+        assert!(
+            BuildMetadata::from_binary_version(&fake, std::time::Duration::from_secs(10)).is_err()
+        );
     }
 
     #[test]
@@ -374,20 +515,20 @@ mod tests {
         let bin_dir = needle_home.join("bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
 
-        // Create a fake stable binary with metadata
+        // Create a fake stable binary that self-reports its build metadata
+        // the way `needle --version` does.
         let stable_binary = bin_dir.join("needle-stable");
-        let metadata = BuildMetadata {
-            version: "5.0.0".to_string(),
-            commit_sha: "stable123".to_string(),
-            build_timestamp: "2024-12-01T08:00:00Z".to_string(),
-        };
-
-        let metadata_json = serde_json::to_string(&metadata).unwrap();
         std::fs::write(
             &stable_binary,
-            format!("BINARY_DATA\n{}\nMORE_DATA", metadata_json),
+            "#!/bin/sh\necho 'needle 5.0.0 (stable123 2024-12-01T08:00:00Z)'\n",
         )
         .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stable_binary, std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
 
         // Should return Some(metadata) when stable binary exists
         let result = BuildMetadata::from_stable_binary().unwrap();

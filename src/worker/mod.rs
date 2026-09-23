@@ -536,6 +536,32 @@ pub fn truncate_commit_sha(sha: &str) -> &str {
     }
 }
 
+/// Outcome of comparing the running binary's build metadata with needle-stable's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FreshnessDecision {
+    /// Both builds name the same commit.
+    Fresh,
+    /// Both builds name a real commit and they differ: re-exec needle-stable.
+    Stale,
+    /// At least one side has no known commit, so staleness cannot be proven.
+    /// Never re-exec on this: an unreadable stable commit once made every
+    /// worker re-exec in a loop (needle-f1efbb0a).
+    Unverifiable,
+}
+
+pub(crate) fn freshness_decision(
+    current: &crate::build_metadata::BuildMetadata,
+    stable: &crate::build_metadata::BuildMetadata,
+) -> FreshnessDecision {
+    if !current.has_known_commit() || !stable.has_known_commit() {
+        FreshnessDecision::Unverifiable
+    } else if current.commit_sha == stable.commit_sha {
+        FreshnessDecision::Fresh
+    } else {
+        FreshnessDecision::Stale
+    }
+}
+
 /// TTL for race-lost bead exclusions.
 ///
 /// After losing a claim race, a bead is excluded from selection for this duration
@@ -7462,8 +7488,18 @@ impl Worker {
 
         let stable_commit = &stable_metadata.commit_sha;
 
+        let decision = freshness_decision(&current_metadata, &stable_metadata);
+        if decision == FreshnessDecision::Unverifiable {
+            tracing::warn!(
+                current_commit = %truncate_commit_sha(current_commit),
+                stable_commit = %truncate_commit_sha(stable_commit),
+                "cannot compare build commits (one side is unknown); skipping freshness re-exec"
+            );
+            return Ok(());
+        }
+
         // Compare commit SHAs
-        if current_commit != stable_commit {
+        if decision == FreshnessDecision::Stale {
             let current_display = truncate_commit_sha(current_commit);
             let stable_display = truncate_commit_sha(stable_commit);
 
@@ -9135,6 +9171,37 @@ mod tests {
     use async_trait::async_trait;
     use std::io::Write;
     use std::sync::Mutex;
+
+    #[test]
+    fn freshness_never_treats_an_unknown_commit_as_stale() {
+        use crate::build_metadata::BuildMetadata;
+        let build = |commit: &str| BuildMetadata {
+            version: "0.6.7".to_string(),
+            commit_sha: commit.to_string(),
+            build_timestamp: "2026-09-23T00:00:00Z".to_string(),
+        };
+        // needle-f1efbb0a: stable read as "unknown" re-exec'd every worker.
+        assert_eq!(
+            freshness_decision(&build("573a5b17"), &build("unknown")),
+            FreshnessDecision::Unverifiable
+        );
+        assert_eq!(
+            freshness_decision(&build("unknown"), &build("573a5b17")),
+            FreshnessDecision::Unverifiable
+        );
+        assert_eq!(
+            freshness_decision(&build("573a5b17"), &build("")),
+            FreshnessDecision::Unverifiable
+        );
+        assert_eq!(
+            freshness_decision(&build("573a5b17"), &build("573a5b17")),
+            FreshnessDecision::Fresh
+        );
+        assert_eq!(
+            freshness_decision(&build("573a5b17"), &build("9acf8b5f")),
+            FreshnessDecision::Stale
+        );
+    }
 
     struct RecordingTelemetrySink(Arc<Mutex<Vec<TelemetryEvent>>>);
 

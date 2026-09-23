@@ -187,7 +187,11 @@ version = 1
 # failure falls back to the notes field before the human label, and the
 # rewritten combined-failure contract still refuses a bare `human`. The strand
 # is private, so the unit tier is the only home for its handler contracts.
-max_tests = 3952
+# +3 freshness re-exec guard (needle-f1efbb0a): --version parsing and the
+# binary self-report read in build_metadata, plus the worker's pure freshness
+# decision refusing to re-exec on an unknown commit. Both are module-private
+# helpers, so the unit tier is their home.
+max_tests = 3955
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
