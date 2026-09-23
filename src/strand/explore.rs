@@ -5421,6 +5421,17 @@ mod tests {
                 "the first scan after a filesystem change should include the new workspace"
             );
             assert!(strand.workspaces.lock().unwrap().contains(&ws2));
+
+            // A bead added to an already-known workspace must also wake the
+            // strand through the store watcher, rather than waiting for the
+            // empty-scan backoff that the first candidate scan established.
+            let issues = ws1.join(".beads").join("issues.jsonl");
+            fs::write(&issues, "{\"id\":\"post-startup-bead\"}\n").unwrap();
+            let result = strand.evaluate(&DummyStore, &HashSet::new()).await;
+            assert!(
+                matches!(result, StrandResult::BeadFound(_)),
+                "a changed bead store should wake Explore before idle backoff"
+            );
         });
     }
 
