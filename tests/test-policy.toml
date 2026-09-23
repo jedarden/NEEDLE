@@ -191,7 +191,9 @@ version = 1
 # binary self-report read in build_metadata, plus the worker's pure freshness
 # decision refusing to re-exec on an unknown commit. Both are module-private
 # helpers, so the unit tier is their home.
-max_tests = 3955
+# +1 Go clean-gate environment contract (needle-8bca1772): the unit test
+# proves GOFLAGS is extended rather than replaced.
+max_tests = 3956
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
@@ -201,7 +203,9 @@ max_tests = 3955
 # contracts (needle-63cf0472).
 # +3 end-to-end claim-verification subprocess matrix tests (needle-653ec4be).
 # +1 local/remote target-store cleanup regression (needle-55e74a46).
-push = 671
+# +2 Go clean-gate integration scenarios (needle-8bca1772): both default and
+# fallback gates pass a gitless extraction and reject a compile error.
+push = 673
 # +20 N-T07 proposal envelope contracts (needle-2b0a309b): derived-signature
 # identity, construction refusals, and the authority ceiling. The contract tier
 # is the right home — these are pure record properties with no process, no
@@ -318,7 +322,9 @@ tier = "push"
 # +1 local/remote target-store cleanup regression (needle-55e74a46).
 # +1 Pluck telemetry-isolation regression (needle-4529ad02): starvation
 # payload and unchanged target bead/comment/issue store snapshot.
-max_tests = 125
+# +2 Go clean-gate integration scenarios (needle-8bca1772): both default and
+# fallback gates pass a gitless extraction and reject a compile error.
+max_tests = 127
 owner = "component:pluck-mend-explore"
 
 [[harness]]

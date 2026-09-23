@@ -45,6 +45,7 @@ struct IsolatedEnvironment {
     previous_cargo_home: Option<OsString>,
     previous_cargo_target_dir: Option<OsString>,
     previous_cargo_net_offline: Option<OsString>,
+    previous_goflags: Option<OsString>,
     previous_explore_workspace_root: Option<OsString>,
 }
 
@@ -59,6 +60,7 @@ impl IsolatedEnvironment {
         let previous_cargo_home = std::env::var_os("CARGO_HOME");
         let previous_cargo_target_dir = std::env::var_os("CARGO_TARGET_DIR");
         let previous_cargo_net_offline = std::env::var_os("CARGO_NET_OFFLINE");
+        let previous_goflags = std::env::var_os("GOFLAGS");
         let previous_explore_workspace_root =
             std::env::var_os("NEEDLE_STRANDS__EXPLORE__WORKSPACE_ROOT");
 
@@ -66,6 +68,7 @@ impl IsolatedEnvironment {
         std::env::set_var("CARGO_HOME", home.path().join("cargo-home"));
         std::env::set_var("CARGO_TARGET_DIR", home.path().join("cargo-target"));
         std::env::set_var("CARGO_NET_OFFLINE", "true");
+        std::env::set_var("GOFLAGS", "-trimpath");
         std::env::set_var(
             "NEEDLE_STRANDS__EXPLORE__WORKSPACE_ROOT",
             home.path().join("explore-root"),
@@ -93,6 +96,7 @@ impl IsolatedEnvironment {
             previous_cargo_home,
             previous_cargo_target_dir,
             previous_cargo_net_offline,
+            previous_goflags,
             previous_explore_workspace_root,
         }
     }
@@ -113,6 +117,7 @@ impl Drop for IsolatedEnvironment {
         restore_env("CARGO_HOME", self.previous_cargo_home.take());
         restore_env("CARGO_TARGET_DIR", self.previous_cargo_target_dir.take());
         restore_env("CARGO_NET_OFFLINE", self.previous_cargo_net_offline.take());
+        restore_env("GOFLAGS", self.previous_goflags.take());
         restore_env(
             "NEEDLE_STRANDS__EXPLORE__WORKSPACE_ROOT",
             self.previous_explore_workspace_root.take(),
@@ -284,6 +289,14 @@ fn config_without_default_gates() -> Config {
     config_with_fallback_settings(30, 4096)
 }
 
+fn config_with_default_gates() -> Config {
+    let mut config = Config::default();
+    config.worker.enforce_shipped_work = false;
+    config.validation.outcome_timeout_seconds = 30;
+    config.validation.stderr_cap_bytes = 4096;
+    config
+}
+
 fn config_with_fallback_settings(timeout_seconds: u64, stderr_cap_bytes: usize) -> Config {
     let mut config = Config::default();
     config.worker.enforce_shipped_work = false;
@@ -444,6 +457,67 @@ fn marker_fixture(marker: &str, log: &Path) -> tempfile::TempDir {
     root
 }
 
+fn go_module_fixture(compiles: bool) -> tempfile::TempDir {
+    let root = tempfile::tempdir().expect("Go module fixture");
+    write_file(
+        root.path(),
+        "go.mod",
+        "module example.test/clean-go-gate\n\ngo 1.20\n",
+    );
+    write_file(
+        root.path(),
+        "main.go",
+        if compiles {
+            "package main\n\nfunc main() {}\n"
+        } else {
+            "package main\n\nfunc main() { var _ int = \"compile failure\" }\n"
+        },
+    );
+    write_file(
+        root.path(),
+        "clean_extraction_test.go",
+        "package main\n\nimport (\n\t\"os\"\n\t\"testing\"\n)\n\nfunc TestCleanExtractionHasNoGit(t *testing.T) {\n\tif _, err := os.Stat(\".git\"); !os.IsNotExist(err) {\n\t\tt.Fatalf(\"clean extraction contains .git: %v\", err)\n\t}\n}\n",
+    );
+    commit_fixture(
+        root.path(),
+        &["go.mod", "main.go", "clean_extraction_test.go"],
+    );
+    root
+}
+
+async fn run_real_go_fixture(
+    config: Config,
+    workspace: &Path,
+    id: &str,
+) -> (needle::types::HandlerResult, Vec<StoreAction>, String) {
+    let store = OutcomeStore::new(bead(workspace, id));
+    let log_dir = tempfile::tempdir().expect("Go gate telemetry directory");
+    let telemetry = Telemetry::with_log_dir(WORKER.to_string(), log_dir.path());
+    telemetry.start();
+    let handler = OutcomeHandler::new(config, telemetry.clone());
+    let result = handler
+        .handle(
+            &store,
+            &bead(workspace, id),
+            &AgentOutcome {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+            false,
+        )
+        .await
+        .expect("Go gate handler");
+    telemetry
+        .force_flush_async(std::time::Duration::from_secs(2))
+        .await
+        .expect("Go gate telemetry flush");
+    let events = read_telemetry(log_dir.path());
+    let actions = store.actions();
+    telemetry.shutdown().await;
+    (result, actions, events)
+}
+
 async fn run_fixture(
     environment: &IsolatedEnvironment,
     marker: &str,
@@ -562,6 +636,70 @@ fn fallback_marker_selection_covers_all_language_branches_and_fallthrough() {
     let root = tempfile::tempdir().expect("package no-test fixture");
     write_file(root.path(), "package.json", r#"{"name":"fixture"}"#);
     assert_eq!(select_verifier(root.path()), Verifier::NoVerifier);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn builtin_go_gates_pass_in_gitless_clean_extractions() {
+    let _environment = IsolatedEnvironment::new(false);
+
+    for (id, config, expected_gate) in [
+        (
+            "default-go-clean",
+            config_with_default_gates(),
+            "default_go",
+        ),
+        (
+            "fallback-go-clean",
+            config_without_default_gates(),
+            "fallback_go",
+        ),
+    ] {
+        let workspace = go_module_fixture(true);
+        let (result, actions, events) = run_real_go_fixture(config, workspace.path(), id).await;
+        assert_eq!(result.outcome, needle::types::Outcome::Success, "{id}");
+        assert_eq!(result.bead_action, BeadAction::Closed, "{id}");
+        assert!(actions.contains(&StoreAction::Flush), "{id}: {actions:?}");
+        assert!(
+            events.contains(expected_gate),
+            "{id} should report {expected_gate}: {events}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn builtin_go_gates_reject_a_deliberate_compile_error() {
+    let _environment = IsolatedEnvironment::new(false);
+
+    for (id, config, expected_gate) in [
+        (
+            "default-go-broken",
+            config_with_default_gates(),
+            "default_go",
+        ),
+        (
+            "fallback-go-broken",
+            config_without_default_gates(),
+            "fallback_go",
+        ),
+    ] {
+        let workspace = go_module_fixture(false);
+        let (result, actions, events) = run_real_go_fixture(config, workspace.path(), id).await;
+        assert_eq!(result.outcome, needle::types::Outcome::Failure, "{id}");
+        assert_eq!(
+            result.bead_action,
+            BeadAction::Released(ReleaseReason::GateFailed),
+            "{id}"
+        );
+        assert!(actions.contains(&StoreAction::Reopen), "{id}: {actions:?}");
+        assert!(
+            actions.contains(&StoreAction::AddLabel("verification-failed".into())),
+            "{id}: {actions:?}"
+        );
+        assert!(
+            events.contains(expected_gate),
+            "{id} should report {expected_gate}: {events}"
+        );
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]

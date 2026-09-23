@@ -149,10 +149,11 @@ impl FallbackVerificationRuntime {
         };
 
         let environment = crate::validation::GateEnvironment::capture();
+        let command_environment = environment.for_command(command);
         let mut request = ProcessRequest::new("sh")
             .args(["-c", command])
             .current_dir(&extraction_dir);
-        for (key, value) in environment.env_pairs() {
+        for (key, value) in command_environment.env_pairs() {
             request = request.env(key, value);
         }
         request = request

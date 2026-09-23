@@ -269,7 +269,7 @@ pub struct ValidationRunResult {
 ///
 /// Receipt fingerprinting can name this schema later. Bumping the allowlist or
 /// changing an injected variable's meaning requires a new version.
-pub const COMMAND_GATE_ENVIRONMENT_SCHEMA: &str = "needle-command-gate-env/v1";
+pub const COMMAND_GATE_ENVIRONMENT_SCHEMA: &str = "needle-command-gate-env/v2";
 
 /// Environment variables whose values may affect ordinary build/test tools
 /// without carrying credentials. Everything else is deliberately absent from
@@ -291,6 +291,7 @@ const COMMAND_GATE_ENV_ALLOWLIST: &[&str] = &[
     "CI",
     "CXX",
     "CXXFLAGS",
+    "GOFLAGS",
     "HOME",
     "LANG",
     "LC_ALL",
@@ -419,6 +420,31 @@ impl GateEnvironment {
     /// environment as data (a `ProcessRequest`) rather than a tokio Command.
     pub(crate) fn env_pairs(&self) -> impl Iterator<Item = (&OsString, &OsString)> {
         self.values.iter()
+    }
+
+    /// Return the gate environment for one shell command.
+    ///
+    /// Go's default VCS stamping cannot inspect a repository in a `git
+    /// archive` extraction. Builtin Go gates therefore disable that stamping,
+    /// while preserving any other flags the operator supplied. The flag is
+    /// appended so it also overrides an inherited `-buildvcs=true` without
+    /// discarding the rest of `GOFLAGS`.
+    pub(crate) fn for_command(&self, command: &str) -> Self {
+        if command.split_whitespace().next() != Some("go") {
+            return self.clone();
+        }
+
+        let mut values = self.values.clone();
+        let mut goflags = values
+            .get(OsStr::new("GOFLAGS"))
+            .cloned()
+            .unwrap_or_default();
+        if !goflags.is_empty() {
+            goflags.push(" ");
+        }
+        goflags.push("-buildvcs=false");
+        values.insert(OsString::from("GOFLAGS"), goflags);
+        Self { values }
     }
 }
 
@@ -1066,7 +1092,7 @@ impl CommandGate {
         context: &GateExecutionContext,
     ) -> std::result::Result<(), GateFailure> {
         let mut command = tokio::process::Command::new("sh");
-        context.environment().apply(&mut command);
+        context.environment().for_command(cmd).apply(&mut command);
         let result = command
             .arg("-c")
             .arg(cmd)
@@ -1272,6 +1298,27 @@ impl ValidationGate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn go_gate_environment_appends_buildvcs_flag_without_dropping_existing_flags() {
+        let environment = GateEnvironment {
+            values: BTreeMap::from([(OsString::from("GOFLAGS"), OsString::from("-trimpath"))]),
+        };
+
+        let go_environment = environment.for_command("go build ./...");
+        assert_eq!(
+            go_environment.values.get(OsStr::new("GOFLAGS")),
+            Some(&OsString::from("-trimpath -buildvcs=false"))
+        );
+        assert_eq!(
+            environment.values.get(OsStr::new("GOFLAGS")),
+            Some(&OsString::from("-trimpath"))
+        );
+        assert_eq!(
+            environment.for_command("cargo check").values,
+            environment.values
+        );
+    }
 
     // ── GateResult tests ──
 
