@@ -309,8 +309,11 @@ enum AdapterJudgement {
 /// The adapter-level failure signal in an agent's output, if it has one.
 ///
 /// A stream envelope that reports an API error names the error and its
-/// status; an infrastructure-shaped exit code names the code. An ordinary
-/// non-zero exit is the agent's task result and yields `None`.
+/// status; an exit code names the process-level failure signal. Non-zero exits
+/// remain attributable to the bead until the adapter-level detector observes
+/// the same signal across enough distinct beads to prove a shared dispatch
+/// problem. This is important for adapters whose transport reports a generic
+/// exit 1 for both task failures and provider/CLI failures.
 fn adapter_failure_signal(output: &AgentOutcome) -> Option<String> {
     if let Some(envelope) = crate::trace::parse_result_envelope(&output.stdout) {
         if envelope.indicates_failure() {
@@ -324,11 +327,7 @@ fn adapter_failure_signal(output: &AgentOutcome) -> Option<String> {
             ));
         }
     }
-    match output.exit_code {
-        124 | 126 | 127 => Some(format!("exit_code:{}", output.exit_code)),
-        code if code > 128 => Some(format!("exit_code:{code}")),
-        _ => None,
-    }
+    (output.exit_code != 0).then(|| format!("exit_code:{}", output.exit_code))
 }
 
 /// The bounded failure text recorded against the attempt for the next
@@ -1746,12 +1745,11 @@ impl OutcomeHandler {
     /// the outcome carries no adapter-level signal (a rejecting gate is the
     /// bead's result; a plain timeout follows the ADR-022 ladder).
     ///
-    /// Only infrastructure-shaped signals are fingerprinted: a stream
-    /// envelope that reports an API error, an exit code the wrappers and the
-    /// kernel use (124 timeout, 126/127 exec failure, >128 signal), a crash,
-    /// or a missing agent binary. An ordinary non-zero exit is a task result
-    /// and never counts, so an adapter whose agent legitimately exits 1 on
-    /// hard tasks cannot be misjudged as an outage.
+    /// Adapter-level signals include stream API errors, every non-zero exit
+    /// code, crashes, and missing binaries. A normal non-zero exit is still
+    /// judged as the bead's own failure until the aggregate detector sees the
+    /// same signal across enough distinct beads; one hard task therefore
+    /// cannot be misjudged as an outage.
     fn judge_adapter_health(
         &self,
         adapter: &str,
@@ -6306,6 +6304,69 @@ mod tests {
         assert!(crate::provider_health::degraded_state(&adapter, None)
             .unwrap()
             .is_none());
+        crate::provider_health::clear_state(&adapter, None).unwrap();
+    }
+
+    #[tokio::test]
+    async fn generic_exit_one_storm_is_not_applied_as_a_bead_failure() {
+        // A Codex/CLI invocation can report both task failures and dispatch
+        // failures as exit 1. The first attempts remain bead-scoped; once the
+        // same adapter emits exit 1 across unrelated beads, provider health
+        // must release the tripping attempt without another quarantine count.
+        // This is the regression for the uniform failure-count wave observed
+        // on 2026-09-21, where no validation gate ran for the non-zero exits.
+        let (_env_guard, _home) = isolated_home();
+        let adapter = format!(
+            "test-exit-one-storm-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        );
+        let mut config = Config::default();
+        config.workspace_health.fingerprint_min_window_failures = 4;
+        config.workspace_health.fingerprint_min_distinct_beads = 3;
+        let handler = test_handler_with_config(config);
+        let store = test_store(BeadStatus::InProgress);
+
+        for n in 0..4 {
+            let mut bead = test_bead(BeadStatus::InProgress);
+            bead.id = BeadId::from(format!("needle-exit-one-{n}").as_str());
+            handler.set_attempt_context(AttemptContext {
+                adapter: adapter.clone(),
+                ..AttemptContext::default()
+            });
+            let result = handler
+                .handle(&store, &bead, &test_output(1), false)
+                .await
+                .unwrap();
+
+            if n < 3 {
+                assert_eq!(result.outcome, Outcome::Failure);
+                assert!(matches!(result.bead_action, BeadAction::Released(_)));
+            } else {
+                assert_eq!(result.outcome, Outcome::Failure);
+                assert_eq!(
+                    result.bead_action,
+                    BeadAction::Released(ReleaseReason::InfrastructureFailure)
+                );
+            }
+        }
+
+        let failure_labels = store
+            .actions()
+            .iter()
+            .filter(|action| matches!(action, StoreAction::AddLabel(_, label) if label.starts_with("failure-count:")))
+            .count();
+        assert_eq!(
+            failure_labels, 3,
+            "the aggregate detector must stop the fourth exit-1 penalty"
+        );
+        assert!(
+            store.actions().iter().all(|action| {
+                !matches!(action, StoreAction::AddLabel(_, label) if label == "verification-failed")
+            }),
+            "non-zero dispatch failures have no shared gate verdict"
+        );
+
         crate::provider_health::clear_state(&adapter, None).unwrap();
     }
 

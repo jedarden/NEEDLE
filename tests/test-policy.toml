@@ -180,7 +180,10 @@ version = 1
 # which only the unit tier can intercept), and 1 default-limit truncation
 # contract in src/bead_store/cli_store.rs built on an argument-sensitive
 # ProcessRunner.
-max_tests = 3949
+# +2 adapter-wide generic-exit-1 storm contracts (needle-cd95f7a5): the
+# provider-health detector and OutcomeHandler regression each cover unrelated
+# beads, proving the shared dispatch failure stops adding uniform penalties.
+max_tests = 3951
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

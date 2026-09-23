@@ -8,7 +8,10 @@
 //! answers the equivalent question for verification gates — "is one
 //! fingerprint dominating recent failures across distinct beads?" — so this
 //! module applies the same detector to the adapter's own failure signal:
-//! exit code, stream terminal reason, API error status, timeout, signal.
+//! exit code, stream terminal reason, API error status, timeout, signal. A
+//! generic non-zero exit is included too: some agent CLIs use exit 1 for
+//! transport or invocation failures, and the cross-bead threshold is what
+//! distinguishes that shared failure from one bead's ordinary failed attempt.
 //!
 //! State lives per adapter at `~/.needle/state/provider-health/<hash>.json`
 //! (every worker on the host shares it, and it survives restarts). When the
@@ -304,7 +307,7 @@ fn remove_state_file(path: &Path) -> Result<()> {
 /// Record one non-gate failure of `adapter` on `bead` and decide what it
 /// means. `provider` is the adapter's configured provider when gateway
 /// keying is enabled, `None` otherwise (N-T51). `reason` is the short
-/// failure signal (`exit_code:124`,
+/// failure signal (`exit_code:1`, `exit_code:124`,
 /// `terminal_reason=api_error api_error_status=503`, `timeout`, `signal:9`).
 pub fn record_adapter_failure(
     adapter: &str,
@@ -583,6 +586,53 @@ mod tests {
         let prior = record_adapter_success(&adapter, None).unwrap();
         assert!(prior.is_some_and(|s| s.degraded));
         assert!(degraded_state(&adapter, None).unwrap().is_none());
+        clear_state(&adapter, None).unwrap();
+    }
+
+    #[test]
+    fn generic_exit_one_storm_is_aggregate_infrastructure() {
+        let (_env_guard, _home) = isolated_home();
+        let adapter = unique_adapter("exit-one-storm");
+        let config = quick_config();
+
+        // A normal exit 1 remains a bead failure in isolation. Once the same
+        // adapter produces it across unrelated beads, the aggregate detector
+        // proves that the shared dispatch path is the more likely cause and
+        // trips the adapter without any bead-specific quarantine penalty.
+        for n in 0..3 {
+            let outcome = record_adapter_failure(
+                &adapter,
+                None,
+                &format!("nd-exit-one-{n}"),
+                "exit_code:1",
+                &config,
+            )
+            .unwrap();
+            assert!(!outcome.is_infra(), "the first failures stay bead-scoped");
+        }
+
+        let tripping =
+            record_adapter_failure(&adapter, None, "nd-exit-one-3", "exit_code:1", &config)
+                .unwrap();
+        assert!(tripping.is_infra(), "the cross-bead exit-1 storm must trip");
+        assert!(matches!(
+            tripping,
+            VerificationRecording::Tripped {
+                failures: 4,
+                distinct_beads: 4,
+                ..
+            }
+        ));
+
+        let repeated =
+            record_adapter_failure(&adapter, None, "nd-exit-one-4", "exit_code:1", &config)
+                .unwrap();
+        assert!(repeated.is_infra());
+        assert!(matches!(
+            repeated,
+            VerificationRecording::DegradedForThisFingerprint { .. }
+        ));
+
         clear_state(&adapter, None).unwrap();
     }
 
