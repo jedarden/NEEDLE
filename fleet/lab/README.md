@@ -75,6 +75,14 @@ Fleet size: **7 workers** (`workers.tsv`), the 2026-09-09 right-size of the
 15-unit fleet — one workspace family each, ~1 core per worker against the
 7-core slice, start-staggered 15s → 150s.
 
+On 2026-09-23, the idle `lab-needle` slot was reassigned to `lab-tgplat` to
+move one build-heavy `tradegraph-platform` route off codinghome without adding
+an eighth lab worker or raising the 7-core slice quota. The retired slot had no
+active child and its local NEEDLE checkout had no initialized bead database;
+codinghome already retains three NEEDLE-homed workers. The replacement remains
+pinned (`explore=false`) so lab capacity cannot wander into browser-driving or
+other host-incompatible repositories.
+
 ## 2026-09-10 orphan cleanup record
 
 Every sustained process was attributed from read-only evidence (process

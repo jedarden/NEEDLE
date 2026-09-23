@@ -19,7 +19,7 @@
 #
 #identifier	workspace	agent	start_delay	explore
 lab-beadrs	/home/coding/bead-rs	claude-code-glm-5.3-flash	15	false
-lab-needle	/home/coding/NEEDLE	claude-code-glm-5.3-flash	30	false
+lab-tgplat	/home/coding/tradegraph-platform	claude-code-glm-5.3-flash	30	false
 lab-drawrace-public	/home/coding/drawrace	claude-code-glm-5.3-flash	60	false
 lab-gantry	/home/coding/gantry-rs	claude-code-glm-5.3-flash	75	false
 lab-miroir	/home/coding/miroir	claude-code-glm-5.3-flash	90	false
