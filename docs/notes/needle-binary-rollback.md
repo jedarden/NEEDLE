@@ -107,13 +107,13 @@ clears the failure mode this procedure exists for.
 
 ## Notes
 
-- The canary and the fleet can run different NEEDLE versions at the same time.
-  Nothing reconciles them today, because `Worker::check_hot_reload` is never
-  called (`#[allow(dead_code)]`) and `self_modification.enabled` is `false`.
-  **If hot-reload is ever re-enabled this stops being true**: it compares the
-  running binary's *hash* against `needle-stable` and re-execs into
-  `needle-stable` on any difference — hashes, not versions — so a worker
-  deliberately pinned to a newer build gets dragged back.
+- GitHub-release upgrades and local `--from-file` upgrades share the same
+  `needle-testing` → canary → `needle-stable` channel. A failed or unavailable
+  canary is fail-closed, so it cannot replace the current stable image.
+- Workers compare the running binary's *hash* against `needle-stable` at a
+  safe cycle boundary and re-exec into it on any difference — hashes, not
+  versions. A worker deliberately pinned to a newer build is therefore moved
+  back to the promoted stable image on its next hot-reload check.
 - Backend coexistence does not need two binaries. One binary carries both the
   `bead-rs` and `bead-forge` descriptors and selects per workspace from
   `.needle.yaml`'s `bead_cli.backend`. Isolate backends per repository, and

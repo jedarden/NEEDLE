@@ -119,3 +119,17 @@ work, and its staged-rollout item changes the claim path for every backend
 including NEEDLE's own coordination substrate. This ADR is the mechanism that
 makes that rollout survivable — canary-validate the artifact before it becomes
 `:stable` — so the two should land in that order rather than in parallel.
+
+## Implementation note (2026-09-23)
+
+The manual path was hardened as part of this ADR's rollout. `needle upgrade`
+now stages the GitHub artifact as `needle-testing`, runs the configured canary
+suite, and promotes only a passing candidate to `needle-stable`. A missing or
+failed canary rejects the candidate; it does not fall back to an unvalidated
+promotion. The existing `needle-stable.prev` rollback and safe-boundary
+hot-reload paths remain the downstream recovery and propagation mechanisms.
+
+`needle upgrade --from-file` uses the same pipeline for local builds. Its
+explicit `--skip-canary` option is retained only for controlled bootstrap or
+emergency recovery and is not used for GitHub releases. The executable
+regression coverage is documented in [Upgrade Channels](../upgrade.md).

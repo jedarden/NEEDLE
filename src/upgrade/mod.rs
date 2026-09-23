@@ -654,9 +654,12 @@ pub fn perform_upgrade_from_file(binary: &Path, skip_canary: bool) -> Result<Pat
     Ok(stable_path)
 }
 
-/// Write `content` to `:testing`, validate it with the canary suite when a
-/// canary workspace exists (and `skip_canary` is false), and promote it to
-/// `:stable`. Returns the stable path.
+/// Write `content` to `:testing`, validate it with the canary suite, and
+/// promote it to `:stable`. Returns the stable path.
+///
+/// An upgrade without an explicit `skip_canary` opt-out is fail-closed: a
+/// missing or unusable canary workspace rejects the candidate instead of
+/// silently turning a release into an unvalidated stable binary.
 fn stage_and_promote(content: &[u8], label: &str, skip_canary: bool) -> Result<PathBuf> {
     // Write the new binary to :testing channel for canary validation.
     let home = needle_home();
@@ -722,7 +725,9 @@ fn stage_and_promote(content: &[u8], label: &str, skip_canary: bool) -> Result<P
         }
     };
 
-    // Run canary validation if canary workspace exists.
+    // A deliberate --skip-canary is the only path that may promote without a
+    // passing canary report. This is retained for controlled local bootstrap
+    // and emergency recovery; GitHub-release upgrades always pass false.
     if skip_canary {
         println!("Skipping canary validation as requested (--skip-canary).");
         use crate::canary::CanaryRunner;
@@ -780,25 +785,19 @@ fn stage_and_promote(content: &[u8], label: &str, skip_canary: bool) -> Result<P
             .context("failed to promote testing binary to stable")?;
         println!("Promoted to :stable");
     } else {
-        println!(
-            "No canary workspace found at {}. Installing without validation.",
-            canary_workspace.display()
-        );
-        println!("WARNING: Skipping canary validation is not recommended for production upgrades.");
-        println!(
-            "         Set up a canary workspace at {} to enable validation.",
-            canary_workspace.display()
-        );
-
-        // Create a minimal canary runner for promotion only (no tests run)
         use crate::canary::CanaryRunner;
-        let runner = CanaryRunner::new(home.clone(), canary_workspace, canary_timeout);
 
-        // Promote without canary validation (fallback behavior)
-        runner
-            .promote()
-            .context("failed to promote testing binary to stable")?;
-        println!("Promoted to :stable (without canary validation)");
+        let runner = CanaryRunner::new(home.clone(), canary_workspace.clone(), canary_timeout);
+        let reason = format!("canary workspace not found: {}", canary_workspace.display());
+        let rejection = runner.reject();
+        return match rejection {
+            Ok(()) => Err(anyhow::anyhow!(
+                "{reason}; testing binary rejected and not promoted"
+            )),
+            Err(rejection_error) => Err(anyhow::anyhow!(
+                "{reason}; rejecting testing binary also failed: {rejection_error:#}"
+            )),
+        };
     }
 
     println!("Successfully installed {label}!");

@@ -93,6 +93,7 @@ Running, maintaining, and operating NEEDLE fleets.
 |----------|-------------|
 | **[Binary Freshness Verification](binary-freshness-verification.md)** | Verifying automatic worker rotation on binary updates |
 | **[Binary Freshness Status](binary-freshness-verification-status.md)** | Status tracking for binary freshness feature |
+| **[Upgrade Channels](upgrade.md)** | Canary-gated GitHub releases, rollback, and hot reload |
 | **[Heartbeat System](heartbeat.md)** | Worker heartbeat protocol and peer monitoring |
 | **[Definition of Done](definition-of-done.md)** | DoD adoption guide and pattern reference |
 | **[DoD Pattern](definition-of-done-pattern.md)** | Reusable DoD pattern for bead deliverables |
