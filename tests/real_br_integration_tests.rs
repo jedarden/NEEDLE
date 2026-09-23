@@ -16,6 +16,8 @@
 //! 7. Concurrent mitosis on same parent: flock serializes
 //! 10. Database corruption — corrupt SQLite, verify auto-repair from JSONL
 
+#[path = "real_br_integration_tests/alert_note_persistence.rs"]
+mod alert_note_persistence;
 #[path = "real_br_integration_tests/bead_rehydration_verification.rs"]
 mod bead_rehydration_verification;
 #[path = "real_br_integration_tests/bead_rs_lifecycle.rs"]

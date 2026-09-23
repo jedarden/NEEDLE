@@ -181,22 +181,14 @@ pub async fn check_alert_deduplication(
 /// This is used when deduplicating an alert - each occurrence gets logged
 /// to the same bead instead of creating duplicates.
 pub async fn append_alert_note(
-    _store: &dyn BeadStore,
+    store: &dyn BeadStore,
     bead_id: &BeadId,
     message: &str,
 ) -> Result<()> {
     let timestamp = Utc::now().to_rfc3339();
     let note = format!("[{}] {}", timestamp, message);
 
-    // Note: BeadStore doesn't currently support adding notes/comments.
-    // We log the note and emit telemetry instead.
-    tracing::info!(
-        bead_id = %bead_id,
-        "Would append note to bead: {}", note
-    );
-
-    // TODO: Add BeadStore::add_note method and call it here
-    Ok(())
+    store.append_notes(bead_id, &note).await
 }
 
 /// Build fingerprint labels for a new alert bead.
