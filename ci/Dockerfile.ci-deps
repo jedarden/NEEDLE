@@ -13,6 +13,10 @@ FROM ${BASE_IMAGE}
 WORKDIR /workspace
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY .config/nextest.toml ./.config/nextest.toml
+# Every workspace member's manifest must be present or `cargo metadata` fails
+# to load the workspace ("failed to load manifest for workspace member");
+# its source is stubbed below like the root package's.
+COPY crates/needle-learning/Cargo.toml ./crates/needle-learning/Cargo.toml
 RUN set -eux; \
     source_toolchain="$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml)"; \
     actual_toolchain="$(rustc -vV | sed -n 's/^release: //p')"; \
@@ -40,7 +44,8 @@ RUN set -eux; \
 # command, feature set and six-target inventory so only NEEDLE workspace
 # targets need recompilation after the real source checkout replaces the stubs.
 # N-T10's canonical policy hash is included in that explicit target inventory.
-RUN mkdir -p src/bin benches tests && \
+RUN mkdir -p src/bin benches tests crates/needle-learning/src && \
+    echo "pub fn _dummy() {}" > crates/needle-learning/src/lib.rs && \
     echo "fn main() {}" > build.rs && \
     echo "pub fn _dummy() {}" > src/lib.rs && \
     echo "fn main() {}" > src/main.rs && \
@@ -136,6 +141,6 @@ RUN mkdir -p src/bin benches tests && \
     } > /opt/needle-ci-nextest-cache-contract && \
     test -s /opt/needle-ci-nextest-cache-contract && \
     rm /workspace/target && \
-    rm -rf src benches tests
+    rm -rf src benches tests crates
 
 WORKDIR /workspace

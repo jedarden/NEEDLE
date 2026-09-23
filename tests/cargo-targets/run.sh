@@ -110,6 +110,17 @@ grep -Fq -- '--locked' "$DEPS_DOCKERFILE" \
   || fail 'dependency warm-up must lock dependency resolution'
 grep -Fq -- '--lib' "$DEPS_DOCKERFILE" \
   || fail 'dependency warm-up must include the library test binary'
+# Cargo loads every workspace member's manifest before it builds anything, so
+# the dependency layer must copy each one (24f76cff added needle-learning and
+# left the with-deps image unbuildable until needle-b65c6309).
+workspace_members="$(sed -n 's/^members[[:space:]]*=[[:space:]]*\[\(.*\)\]/\1/p' "$MANIFEST" | tr ',' '\n' | tr -d ' "')"
+[[ -n "$workspace_members" ]] || fail 'Cargo.toml must declare its workspace members on one line'
+for member in $workspace_members; do
+  grep -Fxq "COPY $member/Cargo.toml ./$member/Cargo.toml" "$DEPS_DOCKERFILE" \
+    || fail "dependency image must copy workspace member manifest $member/Cargo.toml"
+  grep -Fq "> $member/src/lib.rs" "$DEPS_DOCKERFILE" \
+    || fail "dependency image must stub workspace member source $member/src/lib.rs"
+done
 for target in $EXPECTED_TARGETS; do
   [[ "$(grep -cF -- "--test $target" "$DEPS_DOCKERFILE")" -eq 1 ]] \
     || fail "dependency warm-up must include declared test target $target exactly once"
@@ -323,7 +334,7 @@ probe_targets="$(test_targets "$probe_root/Cargo.toml")"
 
 echo 'PASS: Cargo reports only the explicit integration-test roots'
 echo 'PASS: a stray tests/scratch.rs is not auto-discovered'
-echo 'PASS: dependency-image stubs cover every declared Cargo target'
+echo 'PASS: dependency-image stubs cover every declared Cargo target and workspace member'
 echo 'PASS: dependency image preserves its target tree outside /workspace'
 echo "PASS: rustc release matches the source toolchain pin ($source_toolchain)"
 echo 'PASS: base image builds bead-rs 0.2.6 from the pinned fleet revision'
