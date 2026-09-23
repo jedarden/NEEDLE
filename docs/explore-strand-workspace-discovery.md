@@ -215,15 +215,22 @@ Every selection cycle, the Explore strand:
 - Each worker had a fixed starting position
 - Problem: A worker whose fixed index landed near an always-non-empty workspace could permanently starve later workspaces
 
-**Current behavior (bf-6anj4):**
-- **Fresh shuffle every cycle**
-- Random order using thread RNG
-- De-herds workers without pinning coverage to static identity-derived values
+**Intermediate behavior (bf-6anj4, superseded):**
+- Fresh random shuffle every cycle
+- De-herded workers, but starvation avoidance was only probabilistic
+
+**Current behavior:**
+- **Rank by claimability first**: workspaces with claimable candidates rank
+  ahead of empty/poisoned ones; busy, gate-degraded, and unreadable stores
+  never enter the frontier at all
+- **Rotate the claimable frontier per worker**: `hash(qualified_id) % len`
+  via `worker_scan_order`, so different workers start on different
+  workspaces while the deferred tail keeps every workspace reachable
 
 ```rust
-// Shuffle this worker's workspace scan order fresh every cycle
-let mut workspaces = { workspaces.lock().unwrap().clone() };
-workspaces.shuffle(&mut rand::thread_rng());
+// Claimable workspaces first (ranked), rotated per worker; the rest trail.
+let mut workspaces = self.worker_scan_order(claimable_workspaces);
+workspaces.extend(deferred_workspaces);
 ```
 
 ### Candidate Aggregation

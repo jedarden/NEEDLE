@@ -4,6 +4,11 @@ version = 1
 # Raise one only when a reviewer agrees that the named tier is the cheapest
 # correct home for the added behavior. Counts are literal Rust test attributes.
 [unit]
+# +4 for the Explore claimability/rotation scan-order contracts
+# (needle-4193db57): three worker_scan_order rotation suites and one
+# admit_candidates excluded-id suite in src/strand/explore.rs. These belong in
+# the unit tier because both functions are private to the strand, so only the
+# unit tier can call them directly.
 # +3 for the launch-timestamp telemetry emission coverage (needle-d6864d47):
 # start_telemetry_survives_command_failure_to_start,
 # start_telemetry_timestamp_matches_outcome_record,
@@ -175,7 +180,7 @@ version = 1
 # which only the unit tier can intercept), and 1 default-limit truncation
 # contract in src/bead_store/cli_store.rs built on an argument-sensitive
 # ProcessRunner.
-max_tests = 3945
+max_tests = 3949
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

@@ -445,32 +445,41 @@ strands:
     max_scan_interval_cycles: 8    # Maximum interval after backoff
 ```
 
-### 6.2 Per-Cycle Shuffle (De-Herding)
+### 6.2 Claimability-Ranked, Worker-Rotated Scan Order (De-Herding)
 
-**Source:** `src/strand/explore.rs:642-663`
+**Source:** `src/strand/explore.rs` — `worker_scan_order()`, applied in `evaluate()`
 
 ```rust
-// Shuffle this worker's workspace scan order fresh every cycle (bf-6anj4)
-let mut workspaces = {
-    let workspaces = self.workspaces.lock().unwrap();
-    workspaces.clone()
-};
-{
-    use rand::seq::SliceRandom;
-    workspaces.shuffle(&mut rand::thread_rng());
-}
+// Keep workspaces with at least one claimable candidate ahead of
+// poisoned/empty ones, then rotate the claimable frontier per worker.
+let mut workspaces = self.worker_scan_order(claimable_workspaces);
+workspaces.extend(deferred_workspaces);
 ```
-
-**Historical Context:**
-
-Previously, each worker had a **static rotation order** derived from `hash(qualified_id) % N`. This meant a worker whose fixed index landed near an always-non-empty workspace could **permanently starve** later workspaces.
 
 **Current Behavior:**
 
-Every cycle, each worker **shuffles its scan order randomly**. This ensures:
-- No permanent bias toward any workspace
-- All workspaces get equal coverage over time
-- Multiple workers naturally de-herd across workspaces
+Workspaces are first **ranked by claimability** (P0 claimable count desc,
+claimable count desc, oldest claimable bead age desc, path asc). Busy,
+gate-degraded, and unreadable workspaces never enter the ranked frontier at
+all. Workspaces with at least one claimable candidate are then **rotated by
+`hash(qualified_id) % len`** (`worker_scan_order`); workspaces without
+claimable candidates are deferred behind them, in ranked order. This ensures:
+- A workspace whose candidates are all excluded (assigned, blocked, already
+  tried by this worker) cannot consume the first scan slot ahead of a
+  workspace that can actually dispatch
+- Every workspace is still scanned every cycle (the deferred tail), so
+  recovery and telemetry keep their coverage
+- Workers with different identities start at different frontiers, spreading
+  concurrent workers across workspaces instead of herding them on one store
+
+**Historical Context:**
+
+An earlier model shuffled the workspace list randomly every cycle
+(bf-6anj4), which itself replaced a static `hash(qualified_id) % N` rotation
+that could permanently starve later workspaces. The shuffle was replaced by
+the ranked rotation above: randomness made starvation *unlikely*, while
+claimability ranking makes it *structural* — an unclaimable workspace cannot
+outrank a claimable one regardless of where a worker's rotation starts.
 
 ## 7. Cross-Workspace Aggregation
 
@@ -653,7 +662,7 @@ needle worker --config ...
 - **Config:** `src/config/mod.rs:4390-4494`
 - **Tests:** `src/strand/explore.rs:964-3980` (comprehensive unit tests)
 - **Related Beads:**
-  - bf-6anj4: Per-cycle shuffle (de-herding fix)
+  - bf-6anj4: Per-cycle shuffle (de-herding fix; superseded by ranked rotation)
   - bf-4df1e: Cross-workspace aggregation (starvation fix)
   - bf-3peh4: Per-cycle re-discovery (fresh workspace pickup)
 

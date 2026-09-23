@@ -213,17 +213,22 @@ if workspaces.is_empty() {
 
 **Activation requires:** At least one workspace with `.beads/` directory
 
-#### 5. Workspace Shuffle
+#### 5. Claimability-Ranked, Worker-Rotated Scan Order
 
 ```rust
-let mut workspaces = { /* clone */ };
-use rand::seq::SliceRandom;
-workspaces.shuffle(&mut rand::thread_rng());
+let mut workspaces = self.worker_scan_order(claimable_workspaces);
+workspaces.extend(deferred_workspaces);
 ```
 
-**Purpose:** De-herd workers by randomizing scan order each cycle (bf-6anj4)
+**Purpose:** De-herd workers by rotating the claimable frontier per worker
+identity (`hash(qualified_id) % len`), after ranking workspaces by claimable
+candidate count so an excluded or busy workspace cannot consume the first
+scan slot ahead of one with dispatchable work.
 
-**Replaces:** Static hash-based rotation that could permanently starve workspaces
+**Replaces:** Per-cycle random shuffle (bf-6anj4), which itself replaced a
+static rotation that could permanently starve workspaces. The ranked
+rotation keeps bf-6anj4's guarantee — no workspace is unreachable — while
+making starvation structurally impossible rather than unlikely.
 
 #### 6. Workspace Iteration Filters
 
@@ -528,11 +533,11 @@ all_candidates.sort_by(...);
 StrandResult::BeadFound(all_candidates)
 ```
 
-### bf-6anj4: Per-Cycle Workspace Shuffle
+### bf-6anj4: Scan-Order De-Herding (superseded mechanism)
 
 **Problem:** Static hash-based rotation (`hash(qualified_id) % N`) caused permanent starvation when a worker's fixed index landed near an always-non-empty workspace.
 
-**Fix:** Shuffle workspace list fresh every cycle using `rand::thread_rng()`.
+**Fix (as shipped in bf-6anj4):** Shuffle workspace list fresh every cycle using `rand::thread_rng()`.
 
 **Before:**
 ```rust
@@ -540,10 +545,21 @@ let start = self.compute_start_index(); // hash(qualified_id) % N
 let rotated = self.rotated_workspace_order(); // static per worker
 ```
 
-**After:**
+**bf-6anj4's fix:**
 ```rust
 let mut workspaces = self.workspaces.lock().unwrap().clone();
 workspaces.shuffle(&mut rand::thread_rng()); // fresh every cycle
+```
+
+**Current mechanism (supersedes the shuffle):** Rank workspaces by
+claimability, keep the claimable frontier ahead of the deferred tail, then
+rotate that frontier per worker — starvation is now structural (an
+unclaimable workspace cannot outrank a claimable one) rather than
+probabilistic, and the de-herding property is retained:
+
+```rust
+let mut workspaces = self.worker_scan_order(claimable_workspaces);
+workspaces.extend(deferred_workspaces);
 ```
 
 ### bf-3peh4: Cycle-by-Cycle Re-discovery
@@ -646,5 +662,5 @@ config.strands.explore.workspaces = Vec::new();
 **Historical Context:**
 - ADR-006: Test isolation incident (phantom beads from non-isolated `HOME`)
 - bf-4df1e / bf-47bfm: Multi-workspace aggregation fix
-- bf-6anj4: Per-cycle workspace shuffle (de-herding)
+- bf-6anj4: Per-cycle workspace shuffle (de-herding; superseded by ranked per-worker rotation)
 - bf-3peh4: Cycle-by-cycle re-discovery (dynamic workspace pickup)

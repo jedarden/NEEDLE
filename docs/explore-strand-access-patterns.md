@@ -48,7 +48,7 @@ ExploreStrand::evaluate() called
 ├─ Is workspaces list empty after discovery?
 │  └─ YES → Return NoWork (telemetry: StrandSkipped { reason: "no_workspaces_discovered" })
 │
-├─ For each workspace in shuffled order:
+├─ For each workspace in claimability-ranked order (frontier rotated per worker):
 │  │
 │  ├─ Is workspace == home_workspace?
 │  │  └─ YES → Skip (Pluck already checked it)
@@ -369,15 +369,10 @@ async fn evaluate(
         exclude_ids: HashSet::new(),
     };
 
-    // 6. Shuffle workspace order (bf-6anj4)
-    let mut workspaces = {
-        let workspaces = self.workspaces.lock().unwrap();
-        workspaces.clone()
-    };
-    {
-        use rand::seq::SliceRandom;
-        workspaces.shuffle(&mut rand::thread_rng());
-    }
+    // 6. Rank workspaces by claimability, rotate the claimable frontier
+    //    per worker (supersedes the bf-6anj4 shuffle)
+    let mut workspaces = self.worker_scan_order(claimable_workspaces);
+    workspaces.extend(deferred_workspaces);
     let total_workspaces = workspaces.len();
 
     // 7. Scan all workspaces

@@ -349,12 +349,13 @@ async fn evaluate(
         }
     }
 
-    // ── STEP 5: Shuffle scan order (bf-6anj4) ─────────────────────────
-    let mut workspaces = {
-        let workspaces = self.workspaces.lock().unwrap();
-        workspaces.clone()
-    };
-    workspaces.shuffle(&mut rand::thread_rng());
+    // ── STEP 5: Claimability-ranked, worker-rotated scan order ────────
+    // Busy/degraded/unreadable stores never enter the frontier. Workspaces
+    // with claimable candidates rank ahead of the rest, and the claimable
+    // frontier is rotated per worker (hash of qualified_id) so concurrent
+    // workers de-herd while every workspace stays reachable.
+    let mut workspaces = self.worker_scan_order(claimable_workspaces);
+    workspaces.extend(deferred_workspaces);
 
     // ── STEP 6: Scan all workspaces (aggregate candidates) ────────────
     let mut all_candidates: Vec<Bead> = Vec::new();
@@ -807,7 +808,7 @@ START
   │   ├─ NO → RETURN NoWork (emit "no_workspaces_discovered")
   │   └─ YES → CONTINUE
   │
-  ├─ Shuffle workspace scan order
+  ├─ Rank workspaces by claimability, rotate claimable frontier per worker
   │
   ├─ For each workspace:
   │   ├─ Is this the home workspace?
@@ -998,7 +999,7 @@ EventKind::ExploreScanSummary {
 
 **Successful scan:**
 ```
-INFO explore{worker=needle-test}: worker scan: shuffled order over 26 workspaces this cycle
+INFO explore{worker=needle-test}: worker scan: frontier-ranked order over 26 workspaces this cycle
 INFO explore{worker=needle-test}: explore found candidates in remote workspace
  INFO explore{worker=needle-test, workspace=/home/coding/NEEDLE}: explore found candidates in remote workspace
 INFO explore{worker=needle-test}: explore aggregated candidates across all workspaces this cycle
@@ -1064,7 +1065,7 @@ CHECK 1: enabled? → NO: return NoWork
 CHECK 2: should_scan_this_cycle? → NO: return NoWork
 STEP 3: rediscover_workspaces()
 CHECK 4: workspaces.is_empty? → YES: return NoWork
-STEP 5: shuffle scan order
+STEP 5: rank workspaces by claimability, rotate claimable frontier per worker
 STEP 6: for each workspace:
     - Skip home workspace
     - Verify .beads/ exists

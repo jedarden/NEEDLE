@@ -1292,9 +1292,9 @@ impl ExploreStrand {
     ///
     /// Returns 0 if there are no workspaces (defensive, should be handled earlier).
     ///
-    /// Superseded in production by the per-cycle shuffle in `evaluate()` (bf-6anj4);
-    /// retained (and exercised by unit tests) as documentation of the prior
-    /// static-rotation de-herd model.
+    /// Superseded in production by `evaluate()`'s claimability-ranked,
+    /// per-worker rotation (`worker_scan_order`); retained (and exercised by
+    /// unit tests) as documentation of the prior static-rotation de-herd model.
     #[allow(dead_code)]
     fn compute_start_index(&self) -> usize {
         let workspaces = self.workspaces.lock().unwrap();
@@ -1319,8 +1319,9 @@ impl ExploreStrand {
     /// covering all workspaces exactly once. Each worker with a different qualified_id
     /// will visit workspaces in a different rotation.
     ///
-    /// Superseded in production by the per-cycle shuffle in `evaluate()` (bf-6anj4);
-    /// retained (and exercised by unit tests) as documentation of the prior model.
+    /// Superseded in production by `evaluate()`'s claimability-ranked,
+    /// per-worker rotation (`worker_scan_order`); retained (and exercised by
+    /// unit tests) as documentation of the prior model.
     #[allow(dead_code)]
     fn rotated_workspace_order(&self) -> Vec<PathBuf> {
         // Compute the start index *before* taking the lock below:
@@ -3124,6 +3125,103 @@ mod tests {
         // Should return empty
         assert_eq!(rotated.len(), 0);
         assert_eq!(strand.compute_start_index(), 0);
+    }
+
+    /// `worker_scan_order` is the production scan order: a rotation of the
+    /// already-ranked list, never a re-rank, filter, or drop, and stable for
+    /// a given worker identity.
+    #[test]
+    fn worker_scan_order_is_a_rotation_preserving_every_workspace() {
+        let ranked: Vec<PathBuf> = (0..6)
+            .map(|i| PathBuf::from(format!("/ranked-ws{}", i)))
+            .collect();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let registry = crate::registry::Registry::new(temp_dir.path());
+        let telemetry = Telemetry::new("test-worker".to_string());
+        let strand = ExploreStrand::new_for_test(
+            ranked.clone(),
+            PathBuf::from("/home"),
+            registry,
+            telemetry,
+            "worker-alpha".to_string(),
+        );
+
+        let order = strand.worker_scan_order(ranked.clone());
+
+        // Same length, same members: rotated, not filtered or re-ranked.
+        assert_eq!(order.len(), ranked.len());
+        for ws in &ranked {
+            assert_eq!(order.iter().filter(|&x| x == ws).count(), 1);
+        }
+
+        // Deterministic for a stable worker identity.
+        assert_eq!(order, strand.worker_scan_order(ranked.clone()));
+
+        // It must be a rotation of the ranked input: the ranked list with a
+        // leading slice moved to the back.
+        let rotations: Vec<Vec<PathBuf>> = (0..ranked.len())
+            .map(|offset| {
+                let mut rotated = ranked.clone();
+                rotated.rotate_left(offset);
+                rotated
+            })
+            .collect();
+        assert!(
+            rotations.contains(&order),
+            "scan order {order:?} must be a rotation of the ranked list {ranked:?}"
+        );
+    }
+
+    /// Distinct worker identities must not all land on the same first target,
+    /// or concurrent workers would herd on one workspace's store.
+    #[test]
+    fn worker_scan_order_de_herds_worker_identities() {
+        let ranked: Vec<PathBuf> = (0..4)
+            .map(|i| PathBuf::from(format!("/ranked-ws{}", i)))
+            .collect();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let distinct: HashSet<Vec<PathBuf>> = (0..16)
+            .map(|worker| {
+                let registry = crate::registry::Registry::new(temp_dir.path());
+                let telemetry = Telemetry::new(format!("worker-{worker}"));
+                let strand = ExploreStrand::new_for_test(
+                    ranked.clone(),
+                    PathBuf::from("/home"),
+                    registry,
+                    telemetry,
+                    format!("worker-{worker}"),
+                );
+                strand.worker_scan_order(ranked.clone())
+            })
+            .collect();
+
+        assert!(
+            distinct.len() > 1,
+            "16 worker identities collapsed to one scan order; rotation is not de-herding"
+        );
+    }
+
+    /// Fewer than two workspaces have nothing to rotate: the list passes
+    /// through untouched so a lone workspace stays reachable.
+    #[test]
+    fn worker_scan_order_short_lists_are_unchanged() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let registry = crate::registry::Registry::new(temp_dir.path());
+        let telemetry = Telemetry::new("test-worker".to_string());
+        let strand = ExploreStrand::new_for_test(
+            Vec::new(),
+            PathBuf::from("/home"),
+            registry,
+            telemetry,
+            "worker-alpha".to_string(),
+        );
+
+        assert_eq!(strand.worker_scan_order(Vec::new()), Vec::<PathBuf>::new());
+
+        let single = vec![PathBuf::from("/only-ws")];
+        assert_eq!(strand.worker_scan_order(single.clone()), single);
     }
 
     #[test]
@@ -6702,6 +6800,55 @@ mod tests {
             ids,
             vec!["unlabelled".to_string(), "lane-bead".to_string()],
             "an ordinary worker's admission must be unchanged, lane beads included"
+        );
+    }
+
+    /// Candidate-level claimability: a bead named in `filters.exclude_ids` is
+    /// dropped before ranking/aggregation, so an excluded candidate can never
+    /// make its workspace look claimable ahead of one with real work.
+    #[tokio::test]
+    async fn admit_candidates_drops_excluded_ids() {
+        fn candidate(id: &str) -> Bead {
+            Bead {
+                id: BeadId::from(id.to_string()),
+                title: id.to_string(),
+                body: None,
+                priority: 0,
+                status: BeadStatus::Open,
+                assignee: None,
+                labels: vec![],
+                workspace: fixture_root("excluded-ids-remote"),
+                dependencies: vec![],
+                dependents: vec![],
+                comments: vec![],
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            }
+        }
+
+        let temp_root = tempfile::tempdir().unwrap();
+        let pinned = vec![temp_root.path().to_path_buf()];
+        let home = temp_root.path().join("home");
+        let filters = Filters {
+            assignee: None,
+            exclude_labels: vec![
+                "deferred".to_string(),
+                "human".to_string(),
+                "blocked".to_string(),
+            ],
+            exclude_ids: HashSet::from([BeadId::from("already-tried".to_string())]),
+        };
+        let candidates = vec![candidate("already-tried"), candidate("fresh-work")];
+
+        let strand = make_test_explore_strand(true, pinned, home);
+        let admitted = strand
+            .admit_candidates(&DummyStore, candidates, &filters)
+            .await;
+        let ids: Vec<String> = admitted.iter().map(|b| b.id.to_string()).collect();
+        assert_eq!(
+            ids,
+            vec!["fresh-work".to_string()],
+            "the excluded candidate must be dropped; only claimable work survives admission"
         );
     }
 }

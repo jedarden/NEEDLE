@@ -47,9 +47,9 @@ Explore strand evaluation starts
 │               Telemetry: `StrandSkipped { reason: "no_workspaces_discovered" }`
 │               (Happens when workspace_root has no .beads/ directories)
 │
-├── 5. WORKSPACE ITERATION (shuffled order each cycle - bf-6anj4)
+├── 5. WORKSPACE ITERATION (claimability-ranked order, frontier rotated per worker)
 │   │
-│   For each workspace in shuffled list:
+│   For each workspace in ranked/rotated list:
 │   │
 │   ├── 5.1. HOME WORKSPACE SKIP
 │   │   ├── Condition: `workspace != home_workspace`
@@ -153,7 +153,7 @@ Explore strand evaluation starts
 │   │   │       │               Reason: "query_error: <error message>"
 │   │   │       └── Telemetry: `ExploreScanSummary` with exclusion_reasons
 │   │   │
-│   └── Continue to next workspace in shuffled order
+│   └── Continue to next workspace in ranked/rotated order
 │
 ├── 6. AGGREGATE CANDIDATES FROM ALL WORKSPACES
 │   ├── Combine all candidates found across all workspaces
@@ -267,7 +267,7 @@ These conditions cause a workspace to be skipped with a warning logged:
 
 1. **Aggregation over early return:** Explore scans ALL workspaces and aggregates candidates before returning (bf-4df1e / bf-47bfm). Previously it would return on the first non-empty workspace, causing starvation when candidates were excluded by the waterfall.
 
-2. **Workspace shuffling:** Each cycle shuffles the workspace list to avoid static ordering that could cause starvation (bf-6anj4).
+2. **Claimability-ranked, worker-rotated scan order:** Workspaces are ranked by claimable candidate count, and the claimable frontier is rotated per worker (`hash(qualified_id) % len`) so an unclaimable or busy workspace cannot consume the first scan slot ahead of one with dispatchable work, while concurrent workers de-herd. Supersedes the per-cycle shuffle (bf-6anj4), which made starvation merely unlikely rather than structurally impossible.
 
 3. **Home workspace exclusion:** The home workspace is always skipped because Pluck already checked it. This is deliberate separation of concerns.
 
