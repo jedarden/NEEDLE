@@ -1681,46 +1681,6 @@ impl PluckStrand {
                     Utc::now(),
                 );
 
-                // Log to persistent diagnostics if enabled
-                if self.persistent_starvation_records {
-                    let log_entry = format!(
-                        "{} | Bypass activated | Workspace: {} | Bead: {} | Title: {} | Age: {}",
-                        Utc::now().to_rfc3339(),
-                        workspace_path,
-                        bead.id,
-                        bead.title,
-                        Utc::now().signed_duration_since(bead.created_at).num_days()
-                    );
-
-                    if let Some(needle_workspace) = &self.needle_workspace {
-                        let log_path = needle_workspace
-                            .join(".beads")
-                            .join("diagnostics")
-                            .join("pluck-bypass.log");
-                        let log_dir = log_path
-                            .parent()
-                            .unwrap_or_else(|| std::path::Path::new("."));
-                        if let Err(e) = std::fs::create_dir_all(log_dir)
-                            .and_then(|_| {
-                                std::fs::OpenOptions::new()
-                                    .create(true)
-                                    .append(true)
-                                    .open(&log_path)
-                            })
-                            .and_then(|mut file| {
-                                use std::io::Write;
-                                writeln!(file, "{}", log_entry)
-                            })
-                        {
-                            tracing::warn!(
-                                error = %e,
-                                path = %log_path.display(),
-                                "Failed to write bypass diagnostic log"
-                            );
-                        }
-                    }
-                }
-
                 Ok((vec![bead], tier))
             }
             None => {
@@ -3785,6 +3745,11 @@ mod tests {
         /// When set, the starvation-inventory projection drops the hidden
         /// beads too, leaving no pluck-visible read that returns them.
         withholds_inventory: bool,
+        /// When set, the first starvation-inventory read is empty and the
+        /// next one returns the bead. This reaches the oldest-open fallback
+        /// so its telemetry-only diagnostic contract can be tested.
+        return_bead_on_second_inventory: bool,
+        inventory_calls: AtomicUsize,
         created_beads: Mutex<Vec<(String, String, Vec<String>)>>,
     }
 
@@ -3794,6 +3759,8 @@ mod tests {
                 beads,
                 hidden: Mutex::new(hidden.iter().map(|id| id.to_string()).collect()),
                 withholds_inventory: false,
+                return_bead_on_second_inventory: false,
+                inventory_calls: AtomicUsize::new(0),
                 created_beads: Mutex::new(Vec::new()),
             }
         }
@@ -3801,6 +3768,11 @@ mod tests {
         /// Also drop the hidden beads from the starvation-inventory projection.
         fn with_inventory_projection_withheld(mut self) -> Self {
             self.withholds_inventory = true;
+            self
+        }
+
+        fn with_bypass_inventory(mut self) -> Self {
+            self.return_bead_on_second_inventory = true;
             self
         }
 
@@ -3824,6 +3796,11 @@ mod tests {
         }
 
         async fn starvation_inventory(&self) -> Result<Vec<Bead>> {
+            if self.return_bead_on_second_inventory
+                && self.inventory_calls.fetch_add(1, Ordering::Relaxed) == 0
+            {
+                return Ok(Vec::new());
+            }
             if self.withholds_inventory {
                 Ok(self.visible_beads())
             } else {
@@ -3934,6 +3911,21 @@ mod tests {
             .lines()
             .map(|line| serde_json::from_str(line).expect("one JSON object per line"))
             .collect()
+    }
+
+    fn sorted_directory_entries(path: &std::path::Path) -> Vec<String> {
+        let mut entries: Vec<String> = std::fs::read_dir(path)
+            .expect("directory should be readable")
+            .map(|entry| {
+                entry
+                    .expect("directory entry should be readable")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        entries.sort();
+        entries
     }
 
     fn make_bead(id: &str, priority: u8, created_at: &str) -> Bead {
@@ -6676,6 +6668,63 @@ mod tests {
         assert!(
             !workspace.path().join("state").exists(),
             "diagnostics must not create target-workspace state"
+        );
+
+        // Also exercise the oldest-open fallback: its starvation diagnostic
+        // must travel through telemetry without adding anything to a target
+        // `.beads` store.
+        let bypass_workspace = tempfile::tempdir().unwrap();
+        let bypass_beads = bypass_workspace.path().join(".beads");
+        std::fs::create_dir_all(&bypass_beads).unwrap();
+        let marker = bypass_beads.join("store-marker.jsonl");
+        std::fs::write(&marker, b"target store state\n").unwrap();
+        let before_entries = sorted_directory_entries(&bypass_beads);
+        let before_marker = std::fs::read(&marker).unwrap();
+        let bypass_store = RecoverableFrontierStore::hiding(
+            vec![make_bead_with_workspace_and_labels(
+                "bypass-candidate",
+                1,
+                bypass_workspace.path().to_str().unwrap(),
+                vec![],
+            )],
+            &["bypass-candidate"],
+        )
+        .with_bypass_inventory();
+        let bypass_strand = PluckStrand::with_persistent_records(
+            vec![],
+            3,
+            helper.telemetry().clone(),
+            bypass_workspace.path().to_path_buf(),
+            true,
+        );
+        let outcome = bypass_strand
+            .query_with_relaxation(&bypass_store)
+            .await
+            .expect("bypass query should succeed");
+        assert_eq!(outcome.tier, RelaxationTier::OldestOpen);
+        let candidates = outcome.candidates;
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|bead| bead.id.as_ref())
+                .collect::<Vec<_>>(),
+            vec!["bypass-candidate"]
+        );
+        helper.sync().await;
+        helper.assert_event_emitted("strand.pluck.bypass_activated");
+        assert_eq!(
+            sorted_directory_entries(&bypass_beads),
+            before_entries,
+            "Pluck diagnostics must not add files to the target .beads store"
+        );
+        assert_eq!(
+            std::fs::read(&marker).unwrap(),
+            before_marker,
+            "Pluck diagnostics must not modify target store contents"
+        );
+        assert!(
+            !bypass_beads.join("diagnostics").exists(),
+            "legacy target-store diagnostic directory must remain absent"
         );
     }
 
