@@ -421,6 +421,10 @@ impl Fixture {
             .env("NEEDLE_STRANDS__EXPLORE__WORKSPACE_ROOT", &self.home)
             .env("PATH", path)
             .env_remove("NEEDLE_WORKER__MAX_WORKERS")
+            // The launch admission gate compares node-wide load with this
+            // process's CPU quota; in a CI pod that defers the worker until the
+            // harness timeout expires (needle-581f3e67).
+            .env("NEEDLE_SKIP_LAUNCH_RESOURCE_CHECK", "1")
             .env("NEEDLE_INNER", "1")
             .env("ANALYSIS_LOG", &self.analysis_log)
             .args([
@@ -461,6 +465,10 @@ impl Fixture {
             .env("NEEDLE_STRANDS__EXPLORE__WORKSPACE_ROOT", &self.home)
             .env("PATH", path)
             .env_remove("NEEDLE_WORKER__MAX_WORKERS")
+            // The launch admission gate compares node-wide load with this
+            // process's CPU quota; in a CI pod that defers the worker until the
+            // harness timeout expires (needle-581f3e67).
+            .env("NEEDLE_SKIP_LAUNCH_RESOURCE_CHECK", "1")
             .env("NEEDLE_INNER", "1")
             .args([
                 "run",
