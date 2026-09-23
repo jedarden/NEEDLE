@@ -8,12 +8,13 @@ bash -n "$SRC_DIR/apply-ex44-fleet.sh" "$SRC_DIR/backlog-slo.sh" "$SRC_DIR/needl
 [[ -r "$SRC_DIR/required-explore-workspaces.txt" ]]
 
 rows=$(awk -F'\t' '$1 !~ /^#/ && NF == 5 {print}' "$MANIFEST")
-[[ "$(wc -l <<<"$rows")" -eq 30 ]]
-[[ "$(cut -f1 <<<"$rows" | sort -u | wc -l)" -eq 30 ]]
+[[ "$(wc -l <<<"$rows")" -eq 32 ]]
+[[ "$(cut -f1 <<<"$rows" | sort -u | wc -l)" -eq 32 ]]
 [[ "$(awk -F'\t' '$5 == "true" {n++} END {print n+0}' <<<"$rows")" -eq 28 ]]
 grep -q $'^codex-luna-tradegraph\t/home/coding/.needle/roam-only\t.*\ttrue$' "$MANIFEST"
 grep -q $'^codex-luna-adc\t/home/coding/.needle/roam-only\t.*\ttrue$' "$MANIFEST"
-[[ "$(awk -F'\t' '$3 == "codex-gpt-5.6-luna-xhigh" {n++} END {print n+0}' <<<"$rows")" -eq 6 ]]
+[[ "$(awk -F'\t' '$3 == "codex-gpt-5.6-luna-xhigh" {n++} END {print n+0}' <<<"$rows")" -eq 8 ]]
+[[ "$(awk -F'\t' '$1 ~ /^codex-luna-tgplat-0[12]$/ && $2 == "/home/coding/tradegraph-platform" && $5 == "false" {n++} END {print n+0}' <<<"$rows")" -eq 2 ]]
 [[ "$(awk -F'\t' '$3 == "codex-gpt-6-luna-xhigh" {n++} END {print n+0}' <<<"$rows")" -eq 1 ]]
 grep -q $'^codex-needle-01\t/home/coding/NEEDLE\tcodex-gpt-5.6-luna-xhigh\t0\ttrue$' "$MANIFEST"
 grep -q $'^codex-luna-tradegraph\t/home/coding/.needle/roam-only\tcodex-gpt-5.6-luna-xhigh\t90\ttrue$' "$MANIFEST"
@@ -29,7 +30,7 @@ grep -qx '/home/coding/FABRIC' "$SRC_DIR/required-explore-workspaces.txt"
 grep -qx 'NEEDLE_STRANDS__GENERATION__LOW_WATER_RESERVE=6' "$SRC_DIR/fleet-policy.env"
 ! grep -q 'NEEDLE_STRANDS__GENERATION__ENABLED' "$SRC_DIR/apply-ex44-fleet.sh"
 grep -qx 'NEEDLE_STRANDS__MITOSIS__TIMEOUT_TRIGGERED__AGENT_WALLCLOCK_TIMEOUT=true' "$SRC_DIR/fleet-policy.env"
-grep -qx 'NEEDLE_WORKER__MAX_WORKERS=30' "$SRC_DIR/fleet-policy.env"
+grep -qx 'NEEDLE_WORKER__MAX_WORKERS=32' "$SRC_DIR/fleet-policy.env"
 grep -qx 'FLEET_WORKER_TARGET=27' "$SRC_DIR/backlog-policy.env"
 grep -qx 'FLEET_ELIGIBLE_TARGET=108' "$SRC_DIR/backlog-policy.env"
 grep -qx 'FLEET_ELIGIBLE_MINIMUM=54' "$SRC_DIR/backlog-policy.env"

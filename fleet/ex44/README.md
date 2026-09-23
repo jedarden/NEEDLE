@@ -1,16 +1,17 @@
 # ex44 NEEDLE fleet policy
 
 This directory makes the codinghome/ex44 worker capacity and backlog policy
-reproducible. It registers 30 workers across the Z.ai, OpenAI, and Anthropic
-provider pools; 28 can roam, while two NEEDLE-home workers remain scoped to
-that build-heavy repository. Every roaming worker tries its listed home
+reproducible. It registers 32 workers across the Z.ai, OpenAI, and Anthropic
+provider pools; 28 can roam, while four workers remain scoped to their home
+repositories: two to NEEDLE and two (`codex-luna-tgplat-01`/`-02`) to
+tradegraph-platform, both build-heavy. Every roaming worker tries its listed home
 workspace first, then may use the maintained-workspace frontier when that
 route has no eligible work. Eight workers use GLM-5.3, fourteen use
-GLM-5.3-Flash, six use Codex GPT-5.6 Luna, one uses Codex GPT-6 Luna, and
+GLM-5.3-Flash, eight use Codex GPT-5.6 Luna, one uses Codex GPT-6 Luna, and
 one uses Claude. Live-session concurrency is enforced separately from the
 number of registered workers.
 Codex instance environments disable the fleet-wide GLM evidence router so
-those seven workers remain Codex capacity rather than entering its 10% GLM
+those nine workers remain Codex capacity rather than entering its 10% GLM
 exploration sample.
 
 ## What this implements
@@ -90,9 +91,9 @@ timestamped files under `~/.config/systemd/user` and `~/.config/needle`, run
 `needle-zai-governor` protects the proxy without fighting the manifest. It
 scales the eight expansion workers (`glm-icg` and `glm-roam-18` through `24`)
 between one and eight, for 15--22 active GLM workers including the fixed base.
-The seven Codex workers and the Claude worker are outside this Z.ai-specific
-controller. The total registered-service range is 23--30; excluding the two
-NEEDLE-home workers, the general roaming range remains 21--28 workers. The
+The nine Codex workers and the Claude worker are outside this Z.ai-specific
+controller. The total registered-service range is 25--32; excluding the four
+home-pinned workers, the general roaming range remains 21--28 workers. The
 home-first ICG worker is first in the pool and is therefore preserved by the
 one-worker floor, but it can roam when ICG has no eligible work. A productive
 window with no
