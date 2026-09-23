@@ -1,8 +1,9 @@
 //! Self-update functionality for needle.
 //!
 //! Provides the `needle upgrade` command that checks GitHub releases for
-//! newer versions and downloads/replaces the binary. Also provides hot-reload
-//! support: detecting a new `:stable` binary and re-exec'ing into it.
+//! newer versions and routes them through the testing/canary/stable channels.
+//! Also provides hot-reload support: detecting a new `:stable` binary and
+//! re-exec'ing into it.
 
 use chrono::Utc;
 use std::env;
@@ -662,6 +663,19 @@ fn stage_and_promote(content: &[u8], label: &str, skip_canary: bool) -> Result<P
     let bin_dir = home.join("bin");
     fs::create_dir_all(&bin_dir).context("failed to create bin directory")?;
     let testing_binary = bin_dir.join("needle-testing");
+    let stable_binary = bin_dir.join("needle-stable");
+
+    // The supervisor and the self-modification path can both discover a
+    // release. Never replace a candidate that is different from :stable while
+    // another process may be validating it. This is deliberately fail-closed:
+    // a candidate must be explicitly promoted or rejected before a later
+    // release can take its slot.
+    if testing_candidate_is_unpromoted(&testing_binary, &stable_binary)? {
+        bail!(
+            "unpromoted testing binary already exists: {}",
+            testing_binary.display()
+        );
+    }
 
     // Write the new binary beside :testing and rename it into place only after
     // the complete artifact has been written. A canary may start immediately,
@@ -692,12 +706,27 @@ fn stage_and_promote(content: &[u8], label: &str, skip_canary: bool) -> Result<P
 
     println!("Staged {} to {}", label, testing_binary.display());
 
+    // Use the configured canary workspace so manual, supervisor, and local
+    // upgrade entry points all validate against the same fixture set.
+    let (canary_workspace, canary_timeout) = match crate::config::ConfigLoader::load_global() {
+        Ok(config) => (
+            config.self_modification.canary_workspace,
+            config.self_modification.canary_timeout,
+        ),
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "failed to load canary configuration; using default canary settings"
+            );
+            (home.join("canary"), 1800)
+        }
+    };
+
     // Run canary validation if canary workspace exists.
-    let canary_workspace = home.join("canary");
     if skip_canary {
         println!("Skipping canary validation as requested (--skip-canary).");
         use crate::canary::CanaryRunner;
-        let runner = CanaryRunner::new(home.clone(), canary_workspace, 300);
+        let runner = CanaryRunner::new(home.clone(), canary_workspace, canary_timeout);
         runner
             .promote()
             .context("failed to promote testing binary to stable")?;
@@ -706,17 +735,6 @@ fn stage_and_promote(content: &[u8], label: &str, skip_canary: bool) -> Result<P
         println!("Running canary validation...");
 
         use crate::canary::CanaryRunner;
-
-        // Honour `self_modification.canary_timeout` instead of hardcoding 300s.
-        // A canary test dispatches a real agent against a real bead, which
-        // routinely takes longer than five minutes — so the hardcoded budget
-        // failed every test by timeout regardless of the binary's health. On
-        // 2026-08-07 that produced "0/4 tests passed" for a build whose workers
-        // were observably fine, and rejected it. A gate that cannot pass is not
-        // a gate; it is an outage with a good reputation.
-        let canary_timeout = crate::config::ConfigLoader::load_global()
-            .map(|c| c.self_modification.canary_timeout)
-            .unwrap_or(1800);
 
         let runner = CanaryRunner::new(home.clone(), canary_workspace, canary_timeout);
 
@@ -774,7 +792,7 @@ fn stage_and_promote(content: &[u8], label: &str, skip_canary: bool) -> Result<P
 
         // Create a minimal canary runner for promotion only (no tests run)
         use crate::canary::CanaryRunner;
-        let runner = CanaryRunner::new(home.clone(), canary_workspace, 300);
+        let runner = CanaryRunner::new(home.clone(), canary_workspace, canary_timeout);
 
         // Promote without canary validation (fallback behavior)
         runner

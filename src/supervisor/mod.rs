@@ -62,14 +62,16 @@ pub struct UpgradePoller {
 }
 
 impl UpgradePoller {
-    /// Create a production poller using the GitHub-release testing-channel
-    /// downloader.
+    /// Create a production poller using the complete GitHub-release upgrade
+    /// pipeline. A release is staged to `:testing`, canary-validated,
+    /// promoted to `:stable`, and then picked up by workers through their
+    /// safe-boundary hot-reload path.
     pub fn new(enabled: bool, interval_secs: u64) -> Self {
         Self::with_checker(
             enabled,
             interval_secs,
             Arc::new(|telemetry| {
-                upgrade::download_to_testing_channel_with_telemetry(Some(telemetry)).map(|_| ())
+                upgrade::perform_upgrade_with_telemetry(Some(telemetry)).map(|_| ())
             }),
         )
     }
