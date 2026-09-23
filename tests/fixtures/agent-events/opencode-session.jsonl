@@ -1,0 +1,13 @@
+{"type":"needle_meta","model":"opencode/glm-5.3-flash"}
+{"type":"step_start","timestamp":1788799620000,"sessionID":"ses_1","part":{}}
+{"type":"text","timestamp":1788799620500,"sessionID":"ses_1","part":{"id":"prt_1","type":"text","text":"Patching the schema doc."},"future_metadata":{"adapter":"fixture"}}
+{"type":"tool_use","timestamp":1788799621000,"sessionID":"ses_1","part":{"id":"prt_2","type":"tool_use","callID":"call_01","tool":"edit","state":{"status":"pending","input":{"path":"docs/agent-event-schema.md"}}}}
+{"type":"tool_use","timestamp":1788799621500,"sessionID":"ses_1","part":{"id":"prt_2","type":"tool_use","callID":"call_01","tool":"edit","state":{"status":"completed","input":{"path":"docs/agent-event-schema.md"},"output":"patched","metadata":{"files":[{"relativePath":"docs/agent-event-schema.md"}]}}}}
+{"type":"tool_use","timestamp":1788799622000,"sessionID":"ses_1","part":{"id":"prt_3","type":"tool_use","callID":"call_02","tool":"bash","state":{"status":"error","error":"exit status 1"}}}
+{"type":"reasoning","timestamp":1788799622500,"sessionID":"ses_1","part":{"id":"prt_4","type":"reasoning","text":"private chain-of-thought"}}
+{"type":"step_finish","timestamp":1788799623000,"sessionID":"ses_1","part":{"id":"prt_5","type":"step-finish","tokens":{"input":9100,"output":640,"reasoning":220,"cache":{"read":1500,"write":300}}}}
+{"type":"error","timestamp":1788799624000,"sessionID":"ses_1","error":{"name":"ProviderAuthError","data":{"message":"missing API key","isRetryable":false}}}
+{"type":"step_finish","timestamp":1788799625000,"sessionID":"ses_1","part":{"id":"prt_6","type":"step-finish","tokens":{"input":0,"output":0,"reasoning":0}}}
+MALFORMED_SENTINEL_OPENCODE
+{"type":"needle_future_unknown","timestamp":1788799626000,"sessionID":"ses_1","part":{}}
+{"no_type_field":true}

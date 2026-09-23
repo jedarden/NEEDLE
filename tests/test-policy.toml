@@ -253,7 +253,9 @@ contract = 207
 # (needle-eba55bfc).
 # +1 immediate-exit agent quarantine loop (needle-adbde195).
 # +2 subprocess HOME/Explore isolation contracts (needle-11c4fb97).
-e2e = 814
+# +10 agent-event schema conformance contracts (needle-6fd2b6bd), all in the
+# integration_spawn harness above.
+e2e = 824
 soak = 0
 fuzz = 0
 
@@ -271,7 +273,17 @@ tier = "e2e"
 # aider/generic templates driven through the real dispatch spawn path.
 # These belong here because the contract is the rendered-template process
 # spawn, which only the process-spawning harness can observe.
-max_tests = 409
+# +10 agent-event schema conformance contracts (needle-6fd2b6bd): the schema
+# doc executed as a contract (examples parse and round-trip, the heading
+# vocabulary, Required/Optional columns enforced against serde, additive
+# unknown-field tolerance, unknown-type fail-closed) plus one spawned-binary
+# run per shipped needle-transform-* over its upstream-session fixture.
+# The four adapter cases belong here because the contract is the serialized
+# stdout of the real binary; the six doc cases ride along in the same module
+# rather than splitting the schema contract across tiers.
+# Each adapter fixture also carries malformed, missing-type, and future-type
+# lines whose absence from normalized stdout is asserted by that same suite.
+max_tests = 419
 owner = "component:process-integration"
 
 [[harness]]

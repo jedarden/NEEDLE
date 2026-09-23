@@ -1,0 +1,10 @@
+{"type":"system","subtype":"init","cwd":"/repo","session_id":"sess_a1","tools":["Read","Edit","Bash"],"model":"claude-sonnet-4-6"}
+{"type":"assistant","message":{"id":"msg_01","type":"message","role":"assistant","content":[{"type":"text","text":"Reading the bead before touching the code."},{"type":"tool_use","id":"toolu_01","name":"Read","input":{"file_path":"src/main.rs"}}],"model":"claude-sonnet-4-6","stop_reason":"tool_use","stop_sequence":null,"usage":{"input_tokens":1234,"output_tokens":56,"cache_creation_input_tokens":0,"cache_read_input_tokens":800},"future_metadata":{"adapter":"fixture"}}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_01","content":"fn main() {\n    println!(\"hello\");\n}\n","is_error":false}]}}
+{"type":"assistant","message":{"id":"msg_02","type":"message","role":"assistant","content":[{"type":"tool_use","id":"toolu_02","name":"Edit","input":{"file_path":"src/main.rs","old_string":"println!(\"hello\")","new_string":"println!(\"goodbye\")"}}],"model":"claude-sonnet-4-6","stop_reason":"tool_use","stop_sequence":null,"usage":{"input_tokens":1500,"output_tokens":80,"cache_creation_input_tokens":100,"cache_read_input_tokens":900}}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_02","content":"file not found","is_error":true}]}}
+{"type":"assistant","message":{"id":"msg_03","type":"message","role":"assistant","content":[{"type":"text","text":"The edit failed; stopping here."}],"model":"claude-sonnet-4-6","stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":1600,"output_tokens":12,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}
+{"type":"result","subtype":"error_max_turns","cost_usd":0.05,"is_error":true,"session_id":"sess_a1","num_turns":10}
+MALFORMED_SENTINEL_CLAUDE
+{"type":"needle_future_unknown","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}},"session_id":"sess_a1"}
+{"no_type_field":true}

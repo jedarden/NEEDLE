@@ -1,0 +1,16 @@
+{"type":"session","id":"sess_1"}
+{"type":"agent_start","agent":"build"}
+{"type":"turn_start"}
+{"type":"message_update","delta":"partial text"}
+{"type":"tool_execution_start","toolName":"edit","args":{"filePath":"src/lib.rs","old_string":"a","new_string":"b"},"future_metadata":{"adapter":"fixture"}}
+{"type":"tool_execution_end","toolName":"edit","isError":false,"result":{"content":[{"type":"text","text":"Successfully wrote 512 bytes"}]}}
+{"type":"tool_execution_update","toolName":"edit","partial":true}
+{"type":"tool_execution_start","toolName":"bash","args":{"command":"cargo test"}}
+{"type":"tool_execution_end","toolName":"bash","isError":true,"result":"command failed with exit 101"}
+{"type":"message_end","message":{"role":"assistant","model":"glm-5.3-flash","provider":"zai","timestamp":1788799630000,"content":[{"type":"thinking","thinking":"private chain-of-thought"},{"type":"text","text":"Fixed the failing gate."},{"type":"toolCall","id":"tc_1"}],"usage":{"input":15792,"output":1022,"reasoningTokens":960,"totalTokens":16814}}}
+{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"dispatched prompt echoed back"}]}}
+{"type":"turn_end","message":{"role":"assistant","content":[]}}
+{"type":"error","message":"provider rate limited"}
+MALFORMED_SENTINEL_OMP
+{"type":"needle_future_unknown","from":"a future omp release"}
+{"no_type_field":true}

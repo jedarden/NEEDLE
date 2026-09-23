@@ -1,0 +1,15 @@
+{"type":"thread.started","thread_id":"th_01"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"cargo test","future_metadata":{"adapter":"fixture"}}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","exit_code":0,"output":"test result: ok. 912 passed; 0 failed"}}
+{"type":"item.started","item":{"id":"item_2","type":"file_change","changes":[{"path":"src/main.rs"}]}}
+{"type":"item.completed","item":{"id":"item_2","type":"file_change","changes":[{"path":"src/main.rs"}]}}
+{"type":"item.updated","item":{"id":"item_1","type":"command_execution","streaming":true}}
+{"type":"item.completed","item":{"id":"item_3","type":"agent_message","content":"Tests pass and the change is in."}}
+{"type":"item.completed","item":{"id":"item_4","type":"reasoning","content":"weighing whether to also bump the version"}}
+{"type":"turn.completed","usage":{"input_tokens":4200,"output_tokens":310,"cached_input_tokens":2048},"model":"gpt-5-codex"}
+{"type":"item.completed","item":{"id":"item_5","type":"error","message":"sandbox denied network access","code":"sandbox"}}
+{"type":"turn.failed","message":"context window exhausted","code":"context_overflow"}
+MALFORMED_SENTINEL_CODEX
+{"type":"needle_future_unknown","from":"a future codex release"}
+{"no_type_field":true}

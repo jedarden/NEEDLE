@@ -25,6 +25,10 @@
 //! roots to prevent contamination of the real bead store. See
 //! `docs/testing-isolation-patterns.md` for detailed patterns.
 
+// Keep the transform fixtures in the CI integration target so schema drift is
+// caught alongside the adapter process tests.
+#[path = "integration_spawn/agent_event_schema_conformance.rs"]
+mod agent_event_schema_conformance;
 #[path = "integration_spawn/binary_freshness_fix_loop_e2e.rs"]
 mod binary_freshness_fix_loop_e2e;
 #[path = "integration_spawn/builtin_adapter_invocation.rs"]
