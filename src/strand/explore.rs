@@ -119,6 +119,11 @@ const SCAN_INTERVAL_JITTER_MAX_PERCENT: u32 = 25;
 /// which is scaled down into `0..=SCAN_INTERVAL_JITTER_MAX_PERCENT`.
 const JITTER_DRAW_BASIS_PERCENT: u32 = 100;
 
+/// Maximum time one Explore evaluation may hold the serial strand waterfall.
+/// ADR-025 will ultimately make the controllers independent; this bound keeps
+/// Weave and later strands reachable while that migration is completed.
+const EXPLORE_EVALUATION_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// A jitter source: returns a draw in `0..=100` (a percentage). Production
 /// uses entropy; cadence tests inject fixed draws to stay deterministic.
 type ExploreJitterSource = Box<dyn Fn() -> u32 + Send>;
@@ -447,6 +452,8 @@ pub struct ExploreStrand {
     quarantine_registry: std::sync::Mutex<workspace_health::QuarantineRegistry>,
     /// Build circuit policy applied before remote candidates are returned.
     circuit: Option<CircuitPolicy>,
+    /// Wall-clock budget for one evaluation before Explore yields NoWork.
+    evaluation_timeout: Duration,
 }
 
 impl ExploreStrand {
@@ -536,6 +543,7 @@ impl ExploreStrand {
                 workspace_health::QuarantineRegistry::default(),
             ),
             circuit: None,
+            evaluation_timeout: EXPLORE_EVALUATION_TIMEOUT,
         };
 
         // The construction-time list is held to the same bar as every later
@@ -599,6 +607,7 @@ impl ExploreStrand {
                 workspace_health::QuarantineRegistry::default(),
             ),
             circuit: None,
+            evaluation_timeout: EXPLORE_EVALUATION_TIMEOUT,
         }
     }
 
@@ -644,7 +653,15 @@ impl ExploreStrand {
                 workspace_health::QuarantineRegistry::default(),
             ),
             circuit: None,
+            evaluation_timeout: EXPLORE_EVALUATION_TIMEOUT,
         }
+    }
+
+    /// Override the wall-clock evaluation budget in focused tests.
+    #[cfg(test)]
+    fn with_evaluation_timeout(mut self, evaluation_timeout: Duration) -> Self {
+        self.evaluation_timeout = evaluation_timeout;
+        self
     }
 
     /// Use the configured worker heartbeat TTL for cross-workspace claim
@@ -1439,15 +1456,8 @@ impl ExploreStrand {
     ) -> Result<Arc<dyn BeadStore>, anyhow::Error> {
         self.store_factory.create_store(workspace).await
     }
-}
 
-#[async_trait::async_trait]
-impl super::Strand for ExploreStrand {
-    fn name(&self) -> &str {
-        "explore"
-    }
-
-    async fn evaluate(&self, _store: &dyn BeadStore, exclusions: &HashSet<BeadId>) -> StrandResult {
+    async fn evaluate_within_budget(&self, exclusions: &HashSet<BeadId>) -> StrandResult {
         use std::time::Instant;
 
         // If disabled, nothing to explore.
@@ -2164,6 +2174,44 @@ impl super::Strand for ExploreStrand {
     }
 }
 
+#[async_trait::async_trait]
+impl super::Strand for ExploreStrand {
+    fn name(&self) -> &str {
+        "explore"
+    }
+
+    async fn evaluate(&self, _store: &dyn BeadStore, exclusions: &HashSet<BeadId>) -> StrandResult {
+        match tokio::time::timeout(
+            self.evaluation_timeout,
+            self.evaluate_within_budget(exclusions),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                // A partial scan observed a non-empty fleet surface even if it
+                // did not reach a candidate. Retry at the cadence floor rather
+                // than treating the timeout as an empty scan and backing off.
+                self.record_scan_result(ExploreScanOutcome::ExcludedCandidates);
+                let timeout_secs = self.evaluation_timeout.as_secs_f64();
+                let _ = self.telemetry.emit(
+                    crate::telemetry::EventKind::StrandSkipped {
+                        strand_name: "explore".to_string(),
+                        reason: format!("evaluation_timeout_{timeout_secs:.3}s"),
+                    },
+                    Utc::now(),
+                );
+                tracing::warn!(
+                    worker = %self.qualified_id,
+                    timeout_seconds = timeout_secs,
+                    "Explore evaluation exceeded its wall-clock budget; yielding to later strands"
+                );
+                StrandResult::NoWork
+            }
+        }
+    }
+}
+
 // ─── Unit tests ──────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -2314,6 +2362,19 @@ mod tests {
         }
     }
 
+    /// Factory whose store handshake never completes inside the test budget.
+    struct SlowStoreFactory;
+
+    #[async_trait::async_trait]
+    impl StoreFactory for SlowStoreFactory {
+        async fn create_store(
+            &self,
+            _workspace: &Path,
+        ) -> Result<Arc<dyn BeadStore>, anyhow::Error> {
+            std::future::pending().await
+        }
+    }
+
     /// Store factory used to verify Explore's scan cadence without sleeping.
     struct AdaptiveScanFactory {
         ready_calls: Arc<std::sync::atomic::AtomicU32>,
@@ -2459,13 +2520,9 @@ mod tests {
         assert_eq!(strand.name(), "explore");
     }
 
-    /// Test that disabled Explore strand returns NoWork.
-    ///
-    /// NOTE: This test is quarantined due to spawn_blocking deadlock in test environments.
-    /// See deadlock_scenario_assigned_beads_allow_advancement for details.
+    /// Disabled and over-budget evaluations both yield to later strands.
     #[tokio::test]
-    #[ignore]
-    async fn disabled_returns_no_work() {
+    async fn disabled_and_timed_out_evaluations_return_no_work() {
         let strand = make_test_explore_strand(
             false,
             vec![PathBuf::from("/some/path")],
@@ -2474,6 +2531,31 @@ mod tests {
         let store = DummyStore;
         let result = strand.evaluate(&store, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::NoWork));
+
+        let workspace_root = tempfile::tempdir().unwrap();
+        let workspace = workspace_root.path().join("slow-workspace");
+        std::fs::create_dir_all(workspace.join(".beads")).unwrap();
+
+        let state_dir = tempfile::tempdir().unwrap();
+        let strand = ExploreStrand::new_with_store_factory(
+            vec![workspace],
+            workspace_root.path().join("home"),
+            Registry::new(state_dir.path()),
+            Telemetry::new("timeout-test-worker".to_string()),
+            "timeout-test-worker".to_string(),
+            Arc::new(SlowStoreFactory),
+            300,
+        )
+        .with_evaluation_timeout(Duration::from_millis(20));
+
+        let started = std::time::Instant::now();
+        let result = strand.evaluate(&DummyStore, &HashSet::new()).await;
+
+        assert!(matches!(result, StrandResult::NoWork));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "Explore did not yield near its configured timeout"
+        );
     }
 
     /// With empty workspaces, discovery runs under /tmp/needle-test-root,
