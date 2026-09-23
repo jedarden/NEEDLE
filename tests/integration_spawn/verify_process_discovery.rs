@@ -61,7 +61,7 @@ fn test_process_table_reconciliation() {
     {
         assert_eq!(
             empty_or_host_populated,
-            serde_json::json!({"tmux_sessions": [], "discovered": []}),
+            serde_json::json!({"tmux_sessions": [], "discovered": [], "stale_sessions": []}),
             "an empty fleet still emits the complete object schema"
         );
     }
