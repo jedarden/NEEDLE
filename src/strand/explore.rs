@@ -189,13 +189,12 @@ impl std::fmt::Debug for ExploreScanBackoff {
     }
 }
 
-/// Snapshot of the shallow discovery surface used to wake Explore promptly.
+/// Snapshot of the bounded discovery surface used to wake Explore promptly.
 ///
 /// The snapshot is deliberately limited to the configured root and its
-/// immediate children. This keeps change detection bounded by the same
-/// one-level discovery contract as [`ExploreStrand::discover_workspaces`],
-/// while still noticing a repository directory or its `.beads/` marker being
-/// created after worker startup.
+/// immediate children. This keeps change detection bounded while still
+/// noticing a repository directory or its `.beads/` marker being created
+/// after worker startup.
 #[derive(Debug, PartialEq, Eq)]
 struct WorkspaceDiscoverySnapshot {
     root_mtime: Option<SystemTime>,
@@ -427,7 +426,7 @@ pub struct ExploreStrand {
     /// Adaptive cadence for roaming scans. This is intentionally in-memory and
     /// scoped to one worker instance.
     scan_backoff: std::sync::Mutex<ExploreScanBackoff>,
-    /// Last observed shallow discovery surface. A changed snapshot bypasses
+    /// Last observed bounded discovery surface. A changed snapshot bypasses
     /// empty-scan backoff once so a newly created workspace is selectable
     /// without waiting for the next periodic interval.
     workspace_discovery_snapshot: std::sync::Mutex<Option<WorkspaceDiscoverySnapshot>>,
@@ -781,10 +780,15 @@ impl ExploreStrand {
         );
     }
 
-    /// Discover all workspaces under a root path.
+    /// Discover all workspaces under a root path recursively.
     ///
     /// A workspace is any directory containing a `.beads/` subdirectory.
     /// Returns an empty vector if the root doesn't exist or cannot be read.
+    /// Symlinked directories are skipped so a workspace tree cannot escape the
+    /// configured root or loop back into itself. Known repository/store
+    /// internals are skipped because they cannot contain independent
+    /// workspaces and can be very large (`.git`, `.beads`, `target`, and
+    /// `node_modules`).
     pub(super) fn discover_workspaces(root: &Path) -> Vec<PathBuf> {
         let mut discovered = Vec::new();
 
@@ -794,7 +798,9 @@ impl ExploreStrand {
             return discovered;
         }
 
-        // Read the directory; non-existent or unreadable dirs return empty.
+        // Read the root directory; non-existent or unreadable roots return
+        // empty. Start with its children so the configured root itself is a
+        // scan boundary rather than an implicit workspace.
         let entries = match fs::read_dir(root) {
             Ok(entries) => entries,
             Err(e) => {
@@ -803,19 +809,37 @@ impl ExploreStrand {
             }
         };
 
-        // Filter for entries containing a `.beads/` subdirectory.
-        for entry in entries {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(_) => continue,
+        let mut pending: Vec<PathBuf> = entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| Self::directory_entry_path(&entry))
+            .collect();
+
+        while let Some(path) = pending.pop() {
+            if Self::has_beads_dir(&path) {
+                tracing::debug!(workspace = %path.display(), "discovered workspace");
+                discovered.push(path.clone());
+            }
+
+            let entries = match fs::read_dir(&path) {
+                Ok(entries) => entries,
+                Err(error) => {
+                    tracing::debug!(
+                        path = %path.display(),
+                        error = %error,
+                        "failed to read workspace discovery directory"
+                    );
+                    continue;
+                }
             };
 
-            let path = entry.path();
-            if path.is_dir() && Self::has_beads_dir(&path) {
-                tracing::debug!(workspace = %path.display(), "discovered workspace");
-                discovered.push(path);
+            for entry in entries.flatten() {
+                if let Some(child) = Self::directory_entry_path(&entry) {
+                    pending.push(child);
+                }
             }
         }
+
+        discovered.sort();
 
         tracing::debug!(
             root = %root.display(),
@@ -824,6 +848,24 @@ impl ExploreStrand {
         );
 
         discovered
+    }
+
+    /// Return a real directory entry that is worth descending into.
+    fn directory_entry_path(entry: &fs::DirEntry) -> Option<PathBuf> {
+        let file_type = entry.file_type().ok()?;
+        if !file_type.is_dir() {
+            return None;
+        }
+
+        let name = entry.file_name();
+        if matches!(
+            name.to_str(),
+            Some(".beads" | ".git" | "target" | "node_modules")
+        ) {
+            return None;
+        }
+
+        Some(entry.path())
     }
 
     /// Check if a workspace path has a `.beads/` directory.
@@ -863,7 +905,7 @@ impl ExploreStrand {
         })
     }
 
-    /// Return whether auto-discovery's shallow filesystem surface changed.
+    /// Return whether auto-discovery's bounded filesystem surface changed.
     ///
     /// A change wakes Explore even when adaptive empty-scan backoff would have
     /// skipped this cycle. The snapshot is updated before the caller scans so
@@ -1191,7 +1233,7 @@ impl ExploreStrand {
     /// This is called periodically for eligible Explore scans in auto-discovery
     /// mode (empty workspaces config). It re-runs discovery under
     /// `workspace_root` and updates the workspace list, preserving:
-    /// - **No upward traversal:** Only scans immediate children of workspace_root
+    /// - **No upward traversal:** Only scans descendants of workspace_root
     /// - **Explicit workspaces override:** Only runs when auto_discovery_mode is true
     ///
     /// Returns the number of new workspaces discovered (if any).
@@ -5390,16 +5432,13 @@ mod tests {
         );
     }
 
-    /// Regression Test 9: Discovery handles nested .beads/ directories correctly.
+    /// Regression Test 9: Empty configuration discovers nested workspaces.
     ///
-    /// Test: ExploreStrand::new() with empty `config.workspaces` only discovers
-    /// IMMEDIATE children of workspace_root, not nested grandchildren.
-    ///
-    /// This is a critical test — discovery should be shallow (one level deep)
-    /// to avoid unbounded filesystem traversal. A .beads/ directory in a
-    /// subdirectory of a subdirectory should NOT be discovered.
+    /// Test: ExploreStrand::new() with empty `config.workspaces` recursively
+    /// discovers every directory under `workspace_root` that contains a
+    /// `.beads/` subdirectory.
     #[test]
-    fn regression_discovery_is_shallow_single_level_only() {
+    fn regression_empty_config_discovers_nested_beads_workspaces() {
         let root = tempfile::tempdir().unwrap();
 
         // Create a valid workspace at the top level
@@ -5408,7 +5447,7 @@ mod tests {
         fs::create_dir(top_level.join(".beads")).unwrap();
         fs::create_dir(top_level.join(".git")).unwrap();
 
-        // Create a nested subdirectory WITH .beads/ (should NOT be discovered)
+        // Create a nested subdirectory WITH .beads/ (must be discovered)
         let parent_dir = root.path().join("parent-dir");
         fs::create_dir(&parent_dir).unwrap();
         let nested_dir = parent_dir.join("nested-workspace");
@@ -5435,11 +5474,11 @@ mod tests {
         let strand =
             ExploreStrand::new(config, home, registry, telemetry, "test-worker".to_string());
 
-        // Should discover ONLY the top-level workspace
+        // Both the direct and nested workspaces must be discovered.
         assert_eq!(
             strand.workspaces.lock().unwrap().len(),
-            1,
-            "discovery should be shallow — only immediate children of workspace_root"
+            2,
+            "empty workspaces config should recursively discover .beads/ directories"
         );
 
         assert!(
@@ -5447,10 +5486,10 @@ mod tests {
             "top-level workspace should be discovered"
         );
 
-        // Nested workspace should NOT be discovered
+        // Nested workspace should be discovered in the default empty-list mode.
         assert!(
-            !strand.workspaces.lock().unwrap().contains(&nested_dir),
-            "nested workspace (grandchild of root) should NOT be discovered"
+            strand.workspaces.lock().unwrap().contains(&nested_dir),
+            "nested workspace should be discovered when workspaces config is empty"
         );
 
         // Parent directory without .beads/ should not be discovered
