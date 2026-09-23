@@ -30,6 +30,14 @@ const DEFAULT_TIMEOUT_SECS: u64 = 30;
 /// meanings (including an empty result set). This is the largest value
 /// accepted by the bead-rs CLI and is also understood by legacy stores.
 const EXPLICIT_QUERY_LIMIT: &str = "999999";
+/// Operations whose results must not be truncated by a backend default.
+///
+/// Keep this list at the CLI boundary rather than relying only on individual
+/// callers to populate `{limit}`. Explore, capacity checks, and tests also use
+/// `run_operation` directly, and a missing limit there can hide the lower
+/// priority tail of a busy workspace.
+const BOUNDED_QUERY_OPERATIONS: &[&str] =
+    &["ready", "list_all", "list_in_progress", "manual_blocked"];
 
 #[derive(Debug, thiserror::Error)]
 #[error("backend '{backend}' operation '{operation}' exited with code {exit_code}: {stderr}")]
@@ -231,13 +239,63 @@ impl CliBeadStore {
         HashMap::from([("limit", EXPLICIT_QUERY_LIMIT.to_string())])
     }
 
+    fn values_with_explicit_query_limit<'a>(
+        name: &str,
+        values: &HashMap<&'a str, String>,
+    ) -> HashMap<&'a str, String> {
+        let mut values = values.clone();
+        if BOUNDED_QUERY_OPERATIONS.contains(&name) {
+            // Do not let a legacy caller reintroduce `--limit 0`; the safe
+            // positive ceiling is part of the store contract.
+            values.insert("limit", EXPLICIT_QUERY_LIMIT.to_string());
+        }
+        values
+    }
+
+    fn validate_explicit_query_limit(&self, name: &str, args: &[String]) -> Result<()> {
+        if !BOUNDED_QUERY_OPERATIONS.contains(&name) {
+            return Ok(());
+        }
+
+        let Some(limit_index) = args.iter().position(|argument| argument == "--limit") else {
+            bail!(
+                "backend '{}' operation '{}' must declare --limit with a positive value; refusing an unbounded query",
+                self.backend.name,
+                name
+            );
+        };
+        let Some(limit) = args.get(limit_index + 1) else {
+            bail!(
+                "backend '{}' operation '{}' passed --limit without a value; refusing an unbounded query",
+                self.backend.name,
+                name
+            );
+        };
+        if limit
+            .parse::<u64>()
+            .ok()
+            .filter(|limit| *limit > 0)
+            .is_none()
+        {
+            bail!(
+                "backend '{}' operation '{}' must use a positive --limit, got {:?}; refusing a potentially truncated query",
+                self.backend.name,
+                name,
+                limit
+            );
+        }
+        Ok(())
+    }
+
     pub async fn run_operation(
         &self,
         name: &str,
         values: &HashMap<&str, String>,
     ) -> Result<String> {
-        let rendered_values = self.values_with_claim_token(values);
+        let rendered_values =
+            Self::values_with_explicit_query_limit(name, &self.values_with_claim_token(values));
         let args = self.render_operation(name, &rendered_values)?;
+        self.validate_explicit_query_limit(name, &args)?;
         let timeout_secs = self
             .operation(name)?
             .timeout_secs
@@ -1631,6 +1689,7 @@ mod process_runner_tests {
     use crate::bead_store::{BeadStore as _, Filters, RecoveryReleaseOutcome};
     use crate::process_runner::{FakeProcessRunner, ProcessOutput};
     use crate::types::{BeadId, BeadStatus, ClaimStatus};
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     #[tokio::test]
@@ -1769,6 +1828,26 @@ mod process_runner_tests {
             requests[1].arguments(),
             ["list", "--ready", "--json", "--limit", EXPLICIT_QUERY_LIMIT]
         );
+        // Direct engine calls also receive the safe positive ceiling, even
+        // when callers omit it or pass the legacy zero value.
+        runner.push_output(ProcessOutput::success(b"[]\n".to_vec()));
+        runner.push_output(ProcessOutput::success(b"[]\n".to_vec()));
+        store.run_operation("ready", &HashMap::new()).await.unwrap();
+        store
+            .run_operation("list_all", &HashMap::from([("limit", "0".to_string())]))
+            .await
+            .unwrap();
+
+        let requests = runner.requests();
+        assert_eq!(requests.len(), 4);
+        for request in requests.iter().skip(2) {
+            let arguments = request.arguments();
+            let limit_index = arguments
+                .iter()
+                .position(|argument| argument == "--limit")
+                .expect("query must carry an explicit --limit");
+            assert_eq!(arguments[limit_index + 1], EXPLICIT_QUERY_LIMIT);
+        }
     }
 
     #[tokio::test]

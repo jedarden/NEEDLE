@@ -79,6 +79,12 @@ trait StoreFactory: Send + Sync {
         workspace: &Path,
     ) -> Result<Arc<dyn BeadStore>, anyhow::Error> {
         let store = self.create_store(workspace).await?;
+        store.validate_for_dispatch().await.map_err(|error| {
+            anyhow::anyhow!(
+                "backend capability handshake failed for {}: {error:#}",
+                workspace.display()
+            )
+        })?;
         store.list_all().await.map_err(|error| {
             anyhow::anyhow!(
                 "failed to read bead-rs inventory for {}: {error:#}",
@@ -1762,6 +1768,26 @@ impl super::Strand for ExploreStrand {
                     continue;
                 }
             };
+
+            // The first pass validates stores for ranking, but the scan below
+            // creates its own target store. Re-run the target's identity and
+            // capability handshake immediately before reading the ready
+            // frontier so Explore cannot dispatch through an incompatible
+            // legacy/client binding that changed between the two passes.
+            if let Err(error) = remote_store.validate_for_dispatch().await {
+                let error = anyhow::anyhow!(
+                    "backend capability handshake failed for {}: {error:#}",
+                    workspace.display()
+                );
+                tracing::warn!(
+                    workspace = %workspace.display(),
+                    error = %error,
+                    "Explore rejected workspace after backend capability validation"
+                );
+                exclusion_reasons.insert("backend_capability_mismatch".to_string());
+                self.record_store_failure(workspace, &error);
+                continue;
+            }
 
             // This is the final admission check for a roaming candidate. The
             // remote store is the workspace's own store, so the status query
