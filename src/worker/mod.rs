@@ -562,6 +562,38 @@ pub(crate) fn freshness_decision(
     }
 }
 
+/// What a process-replacing upgrade check (`check_freshness`,
+/// `check_hot_reload`) must do at this boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReExecDecision {
+    /// The running binary is current — nothing to replace.
+    CurrentBinaryOk,
+    /// A different binary is available but the agent process is still
+    /// executing — warn and wait for the next cycle boundary.
+    DeferWhileAgentActive,
+    /// A different binary is available and no agent is running — replace
+    /// the process image with needle-stable.
+    ReExecNow,
+}
+
+/// Decide whether an upgrade check may replace the process image right now.
+///
+/// Both checks run at cycle boundaries where no agent should be executing,
+/// but a stale binary must never win over an in-flight agent: replacing the
+/// process image mid-dispatch loses the attempt (the agent is orphaned, the
+/// bead is released as an infrastructure failure, and the work is lost). The
+/// `agent_process_active` flag is the dispatcher's own marker for a live
+/// child, so it is the authority this decision defers to (needle-f1efbb0a).
+pub(crate) fn re_exec_decision(binary_differs: bool, agent_process_active: bool) -> ReExecDecision {
+    if !binary_differs {
+        ReExecDecision::CurrentBinaryOk
+    } else if agent_process_active {
+        ReExecDecision::DeferWhileAgentActive
+    } else {
+        ReExecDecision::ReExecNow
+    }
+}
+
 /// TTL for race-lost bead exclusions.
 ///
 /// After losing a claim race, a bead is excluded from selection for this duration
@@ -6687,6 +6719,21 @@ impl Worker {
                 new_hash,
                 stable_path,
             }) => {
+                // Same agent guard as the freshness check: a hot-reload
+                // boundary must not replace the process image under a live
+                // agent, even though LOGGING should imply there is none.
+                if re_exec_decision(true, self.agent_process_active)
+                    == ReExecDecision::DeferWhileAgentActive
+                {
+                    tracing::warn!(
+                        new_hash = %truncate_for_display(&new_hash, 12),
+                        "new :stable binary detected but the agent process is \
+                         still active — deferring the re-exec to the next cycle \
+                         boundary"
+                    );
+                    return Ok(());
+                }
+
                 tracing::info!(
                     old_hash = %truncate_for_display(&old_hash, 12),
                     new_hash = %truncate_for_display(&new_hash, 12),
@@ -6722,7 +6769,20 @@ impl Worker {
             }) => {
                 // A deleted executable cannot be hashed or recovered in place.
                 // Re-exec :stable directly instead of relying on a launcher that
-                // may itself still point at the deleted path.
+                // may itself still point at the deleted path. The deleted inode
+                // stays mapped for this process, so waiting one more cycle for
+                // a running agent is safe; replacing the image under it is not.
+                if re_exec_decision(true, self.agent_process_active)
+                    == ReExecDecision::DeferWhileAgentActive
+                {
+                    tracing::warn!(
+                        "current binary is deleted but the agent process is \
+                         still active — deferring the needle-stable re-exec to \
+                         the next cycle boundary"
+                    );
+                    return Ok(());
+                }
+
                 tracing::error!(
                     stable_hash = %truncate_for_display(&stable_hash, 12),
                     "current binary has been deleted/unlinked — re-execing needle-stable"
@@ -7498,55 +7558,75 @@ impl Worker {
             return Ok(());
         }
 
-        // Compare commit SHAs
-        if decision == FreshnessDecision::Stale {
-            let current_display = truncate_commit_sha(current_commit);
-            let stable_display = truncate_commit_sha(stable_commit);
+        // Compare commit SHAs, and replace the process image only when no
+        // agent is executing. The check runs between dispatch cycles (in
+        // LOGGING state), so the flag should always be false here — but a
+        // stale binary must never win over an in-flight agent, so the gate
+        // defers the replacement instead of trusting the invariant.
+        match re_exec_decision(
+            decision == FreshnessDecision::Stale,
+            self.agent_process_active,
+        ) {
+            ReExecDecision::DeferWhileAgentActive => {
+                tracing::warn!(
+                    current_commit = %truncate_commit_sha(current_commit),
+                    stable_commit = %truncate_commit_sha(stable_commit),
+                    "needle-stable differs from the running binary but the agent \
+                     process is still active — deferring the re-exec to the next \
+                     cycle boundary"
+                );
+                return Ok(());
+            }
+            ReExecDecision::CurrentBinaryOk => {
+                // Binary is fresh — reset the warned flag so we warn again if it becomes stale later
+                self.stale_binary_warned = false;
+                let current_display = truncate_commit_sha(current_commit);
+                tracing::debug!(
+                    commit = %current_display,
+                    version = %current_metadata.version,
+                    "binary freshness check passed — running commit matches needle-stable"
+                );
+            }
+            ReExecDecision::ReExecNow => {
+                let current_display = truncate_commit_sha(current_commit);
+                let stable_display = truncate_commit_sha(stable_commit);
 
-            // Re-exec when stale binary is detected. This check runs between
-            // dispatch cycles (in LOGGING state), ensuring no bead is left
-            // mid-dispatch and preserving the systemd service PID.
-            tracing::info!(
-                current_commit = %current_display,
-                stable_commit = %stable_display,
-                current_version = %current_metadata.version,
-                stable_version = %stable_metadata.version,
-                "running binary is STALE — current commit {} differs from needle-stable commit {}. \
-                 Re-execing needle-stable at the safe cycle boundary. \
-                 This check runs every {} seconds (configured by worker.freshness_check_interval_secs). \
-                 Set to 0 to disable freshness checking.",
-                current_display,
-                stable_display,
-                interval_secs
-            );
+                // Re-exec when stale binary is detected. This check runs between
+                // dispatch cycles (in LOGGING state), ensuring no bead is left
+                // mid-dispatch and preserving the systemd service PID.
+                tracing::info!(
+                    current_commit = %current_display,
+                    stable_commit = %stable_display,
+                    current_version = %current_metadata.version,
+                    stable_version = %stable_metadata.version,
+                    "running binary is STALE — current commit {} differs from needle-stable commit {}. \
+                     Re-execing needle-stable at the safe cycle boundary. \
+                     This check runs every {} seconds (configured by worker.freshness_check_interval_secs). \
+                     Set to 0 to disable freshness checking.",
+                    current_display,
+                    stable_display,
+                    interval_secs
+                );
 
-            self.telemetry.emit(
-                EventKind::UpgradeDetected {
-                    old_hash: current_commit.clone(),
-                    new_hash: stable_commit.clone(),
-                },
-                chrono::Utc::now(),
-            )?;
+                self.telemetry.emit(
+                    EventKind::UpgradeDetected {
+                        old_hash: current_commit.clone(),
+                        new_hash: stable_commit.clone(),
+                    },
+                    chrono::Utc::now(),
+                )?;
 
-            let stable_path = self.config.workspace.home.join("bin/needle-stable");
-            upgrade::re_exec_stable(
-                &stable_path,
-                &self.worker_name,
-                Some(&self.config.workspace.default),
-                Some(&self.config.agent.default),
-                Some(self.config.agent.timeout),
-            )
-            .await
-            .context("failed to replace stale worker process with needle-stable")?;
-        } else {
-            // Binary is fresh — reset the warned flag so we warn again if it becomes stale later
-            self.stale_binary_warned = false;
-            let current_display = truncate_commit_sha(current_commit);
-            tracing::debug!(
-                commit = %current_display,
-                version = %current_metadata.version,
-                "binary freshness check passed — running commit matches needle-stable"
-            );
+                let stable_path = self.config.workspace.home.join("bin/needle-stable");
+                upgrade::re_exec_stable(
+                    &stable_path,
+                    &self.worker_name,
+                    Some(&self.config.workspace.default),
+                    Some(&self.config.agent.default),
+                    Some(self.config.agent.timeout),
+                )
+                .await
+                .context("failed to replace stale worker process with needle-stable")?;
+            }
         }
 
         Ok(())
@@ -9211,6 +9291,36 @@ mod tests {
             freshness_decision(&build("573a5b17"), &build("9acf8b5f")),
             FreshnessDecision::Stale
         );
+    }
+
+    /// needle-f1efbb0a acceptance: an agent in EXECUTING is not killed by a
+    /// freshness check. Even when the running binary is provably stale, an
+    /// active agent process defers the re-exec; and a fresh or unverifiable
+    /// comparison never re-execs regardless of the agent's state.
+    #[test]
+    fn freshness_reexec_does_not_fire_while_an_agent_is_executing() {
+        // Stale binary + live agent: the upgrade waits, the agent survives.
+        assert_eq!(
+            re_exec_decision(true, true),
+            ReExecDecision::DeferWhileAgentActive
+        );
+        // Fresh and unverifiable comparisons never replace the image, with
+        // or without an agent.
+        assert_eq!(
+            re_exec_decision(false, true),
+            ReExecDecision::CurrentBinaryOk
+        );
+        assert_eq!(
+            re_exec_decision(false, false),
+            ReExecDecision::CurrentBinaryOk
+        );
+    }
+
+    /// The deferred upgrade is not lost: once the agent has exited, the same
+    /// staleness produces the replacement at the next boundary.
+    #[test]
+    fn freshness_reexec_proceeds_once_the_agent_has_exited() {
+        assert_eq!(re_exec_decision(true, false), ReExecDecision::ReExecNow);
     }
 
     struct RecordingTelemetrySink(Arc<Mutex<Vec<TelemetryEvent>>>);

@@ -330,6 +330,44 @@ fn adapter_failure_signal(output: &AgentOutcome) -> Option<String> {
     (output.exit_code != 0).then(|| format!("exit_code:{}", output.exit_code))
 }
 
+/// The adapter-health failure signal for one outcome (N-T23), or `None` when
+/// the outcome must not be recorded against the provider's health window.
+///
+/// A crash death by SIGTERM (exit 143) is excluded: SIGTERM is sent by the
+/// fleet's own machinery — a freshness re-exec, a supervisor drain, the
+/// orphan reaper, an operator — never by a provider, and a synchronized
+/// burst of them (as when an upgrade storm replaces every worker at once)
+/// must not fingerprint as `provider.degraded` (needle-f1efbb0a). The kill
+/// stays visible everywhere else: the attempt ledger still records
+/// `infrastructure_failure` with `signal:15`.
+fn adapter_health_failure_reason(
+    outcome: &Outcome,
+    output: &AgentOutcome,
+    gate_report: Option<&GateReport>,
+) -> Option<String> {
+    match outcome {
+        Outcome::Failure => {
+            if gate_report.is_some_and(|r| !r.all_passed) {
+                return None;
+            }
+            adapter_failure_signal(output)
+        }
+        Outcome::Crash(code) => {
+            let signal = if *code > 128 { code - 128 } else { *code };
+            if signal == 15 {
+                return None;
+            }
+            Some(format!("signal:{signal}"))
+        }
+        Outcome::AgentNotFound => Some(format!("agent_not_found exit_code:{}", output.exit_code)),
+        Outcome::Success
+        | Outcome::Timeout
+        | Outcome::Interrupted
+        | Outcome::GateError
+        | Outcome::GateUnsatisfiable => None,
+    }
+}
+
 /// The bounded failure text recorded against the attempt for the next
 /// attempt to read (R3). `None` on a verified success.
 ///
@@ -1771,24 +1809,7 @@ impl OutcomeHandler {
             .provider_keyed_health
             .then_some(provider)
             .flatten();
-        let reason = match outcome {
-            Outcome::Failure => {
-                if gate_report.is_some_and(|r| !r.all_passed) {
-                    return None;
-                }
-                adapter_failure_signal(output)?
-            }
-            Outcome::Crash(code) => {
-                let signal = if *code > 128 { code - 128 } else { *code };
-                format!("signal:{signal}")
-            }
-            Outcome::AgentNotFound => format!("agent_not_found exit_code:{}", output.exit_code),
-            Outcome::Success
-            | Outcome::Timeout
-            | Outcome::Interrupted
-            | Outcome::GateError
-            | Outcome::GateUnsatisfiable => return None,
-        };
+        let reason = adapter_health_failure_reason(outcome, output, gate_report)?;
 
         match crate::provider_health::record_adapter_failure(
             adapter,
@@ -5338,6 +5359,40 @@ mod tests {
             classify_with_stream(0, false, true, stdout),
             Outcome::Failure
         );
+    }
+
+    fn signal_outcome(exit_code: i32) -> (Outcome, AgentOutcome) {
+        (
+            Outcome::Crash(exit_code),
+            AgentOutcome {
+                exit_code,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+        )
+    }
+
+    /// needle-f1efbb0a acceptance: a SIGTERM death (exit 143) is fleet
+    /// machinery — a re-exec, a drain, an operator — and must never enter the
+    /// provider-health window, or an upgrade storm fingerprinting as
+    /// `signal:15` across distinct beads trips a false `provider.degraded`.
+    #[test]
+    fn crash_by_sigterm_is_not_an_adapter_health_signal() {
+        let (outcome, output) = signal_outcome(143);
+        assert_eq!(adapter_health_failure_reason(&outcome, &output, None), None);
+    }
+
+    /// Every other crash signal still fingerprints: SIGKILL and SEGV deaths
+    /// are real adapter signals the detector must keep seeing.
+    #[test]
+    fn crash_by_other_signals_still_reach_adapter_health() {
+        for (exit_code, expected) in [(137, "signal:9"), (139, "signal:11")] {
+            let (outcome, output) = signal_outcome(exit_code);
+            assert_eq!(
+                adapter_health_failure_reason(&outcome, &output, None),
+                Some(expected.to_string())
+            );
+        }
     }
 
     #[test]

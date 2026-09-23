@@ -193,7 +193,10 @@ version = 1
 # helpers, so the unit tier is their home.
 # +1 Go clean-gate environment contract (needle-8bca1772): the unit test
 # proves GOFLAGS is extended rather than replaced.
-max_tests = 3956
+# +4 re-exec agent guard and SIGTERM health exclusion (needle-f1efbb0a): the
+# re_exec_decision matrix and the SIGTERM-only adapter-health refusal plus its
+# contrast, all pure functions private to their modules.
+max_tests = 3960
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
