@@ -1,15 +1,16 @@
 # ex44 NEEDLE fleet policy
 
 This directory makes the codinghome/ex44 worker capacity and backlog policy
-reproducible. It registers 29 workers across the Z.ai, OpenAI, and Anthropic
-provider pools; 27 can roam, while two NEEDLE-home workers remain scoped to
+reproducible. It registers 30 workers across the Z.ai, OpenAI, and Anthropic
+provider pools; 28 can roam, while two NEEDLE-home workers remain scoped to
 that build-heavy repository. Every roaming worker tries its listed home
 workspace first, then may use the maintained-workspace frontier when that
 route has no eligible work. Eight workers use GLM-5.3, fourteen use
-GLM-5.3-Flash, six use Codex GPT-5.6 Luna, and one uses Claude. Live-session
-concurrency is enforced separately from the number of registered workers.
+GLM-5.3-Flash, six use Codex GPT-5.6 Luna, one uses Codex GPT-6 Luna, and
+one uses Claude. Live-session concurrency is enforced separately from the
+number of registered workers.
 Codex instance environments disable the fleet-wide GLM evidence router so
-those six workers remain Codex capacity rather than entering its 10% GLM
+those seven workers remain Codex capacity rather than entering its 10% GLM
 exploration sample.
 
 ## What this implements
@@ -89,9 +90,9 @@ timestamped files under `~/.config/systemd/user` and `~/.config/needle`, run
 `needle-zai-governor` protects the proxy without fighting the manifest. It
 scales the eight expansion workers (`glm-icg` and `glm-roam-18` through `24`)
 between one and eight, for 15--22 active GLM workers including the fixed base.
-The six Codex workers and the Claude worker are outside this Z.ai-specific
-controller. The total registered-service range is 22--29; excluding the two
-NEEDLE-home workers, the general roaming range remains 20--27 workers. The
+The seven Codex workers and the Claude worker are outside this Z.ai-specific
+controller. The total registered-service range is 23--30; excluding the two
+NEEDLE-home workers, the general roaming range remains 21--28 workers. The
 home-first ICG worker is first in the pool and is therefore preserved by the
 one-worker floor, but it can roam when ICG has no eligible work. A productive
 window with no
@@ -110,3 +111,33 @@ harness: `codex-luna-tradegraph`, `codex-luna-adc`, and
 `codex-luna-needle-01`. Existing role suffixes keep the operational purpose
 visible; the `codex-luna-*` prefix prevents dashboards and operators from
 mistaking these workers for Z.ai-backed GLM capacity.
+
+## Luna model comparison
+
+`codex-needle-01` runs GPT-5.6 Luna and `codex-luna-needle-01` runs GPT-6
+Luna against NEEDLE's bead queue. The latter remains a NEEDLE-home worker;
+the existing three-worker workspace cap and host fleet size stay fixed. Both
+profiles use xhigh reasoning, the Codex JSONL usage parser, and the same
+timeout. Each resolved attempt records its actual model. After a comparison
+window starting with the GPT-6 worker's first dispatch, compare NEEDLE-only,
+non-provisional attempts with:
+
+```bash
+/home/coding/.needle/bin/needle logs --since 7d \
+  --filter event_type=attempt.resolved --format json |
+  jq -s --arg ws /home/coding/NEEDLE '
+    [.[] | select(.data.workspace == $ws)
+      | select(.data.model == "gpt-5.6-luna" or .data.model == "gpt-6-luna")
+      | select(.data.provisional == false)]
+    | group_by(.data.model)
+    | map({model: .[0].data.model, attempts: length,
+           verified_closes: (map(select(.data.outcome == "verified_success")) | length),
+           failures: (map(select(.data.outcome == "work_failure")) | length),
+           avg_minutes: ((map(.data.duration_ms // 0) | add) / length / 60000)})'
+```
+
+Run this after the full window has elapsed; a shorter window can include
+pre-canary GPT-5.6 attempts. Keep worker assignments and prompts fixed while
+collecting it. The bead mix can differ between workers, and Codex attempt
+costs are currently unreported, so this compares outcome and time rather
+than cost.

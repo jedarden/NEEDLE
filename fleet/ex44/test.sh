@@ -13,11 +13,12 @@ rows=$(awk -F'\t' '$1 !~ /^#/ && NF == 5 {print}' "$MANIFEST")
 [[ "$(awk -F'\t' '$5 == "true" {n++} END {print n+0}' <<<"$rows")" -eq 28 ]]
 grep -q $'^codex-luna-tradegraph\t/home/coding/.needle/roam-only\t.*\ttrue$' "$MANIFEST"
 grep -q $'^codex-luna-adc\t/home/coding/.needle/roam-only\t.*\ttrue$' "$MANIFEST"
-[[ "$(awk -F'\t' '$3 == "codex-gpt-5.6-luna-xhigh" {n++} END {print n+0}' <<<"$rows")" -eq 7 ]]
+[[ "$(awk -F'\t' '$3 == "codex-gpt-5.6-luna-xhigh" {n++} END {print n+0}' <<<"$rows")" -eq 6 ]]
+[[ "$(awk -F'\t' '$3 == "codex-gpt-6-luna-xhigh" {n++} END {print n+0}' <<<"$rows")" -eq 1 ]]
 grep -q $'^codex-needle-01\t/home/coding/NEEDLE\tcodex-gpt-5.6-luna-xhigh\t0\ttrue$' "$MANIFEST"
 grep -q $'^codex-luna-tradegraph\t/home/coding/.needle/roam-only\tcodex-gpt-5.6-luna-xhigh\t90\ttrue$' "$MANIFEST"
 grep -q $'^codex-luna-adc\t/home/coding/.needle/roam-only\tcodex-gpt-5.6-luna-xhigh\t135\ttrue$' "$MANIFEST"
-grep -q $'^codex-luna-needle-01\t/home/coding/NEEDLE\tcodex-gpt-5.6-luna-xhigh\t315\tfalse$' "$MANIFEST"
+grep -q $'^codex-luna-needle-01\t/home/coding/NEEDLE\tcodex-gpt-6-luna-xhigh\t315\tfalse$' "$MANIFEST"
 ! grep -Eq $'^(glm-tradegraph|glm53-adc|glm-needle-01)\t' "$MANIFEST"
 grep -q 'NEEDLE_AGENT__EVIDENCE_ROUTING__ENABLED=false' "$SRC_DIR/apply-ex44-fleet.sh"
 grep -q '^  backend: bead-rs$' "$SRC_DIR/roam-home.yaml"
@@ -37,6 +38,14 @@ grep -qx 'ELIGIBLE_MINIMUM_PER_WORKER=2' "$SRC_DIR/backlog-policy.env"
 grep -qx 'provider: openai' "$SRC_DIR/adapters/codex-gpt-5.6-luna-xhigh.yaml"
 grep -q -- 'codex exec --json --model gpt-5.6-luna' "$SRC_DIR/adapters/codex-gpt-5.6-luna-xhigh.yaml"
 grep -qx 'output_transform: needle-transform-codex' "$SRC_DIR/adapters/codex-gpt-5.6-luna-xhigh.yaml"
+grep -qx 'provider: openai' "$SRC_DIR/adapters/codex-gpt-6-luna-xhigh.yaml"
+grep -qx 'model: gpt-6-luna' "$SRC_DIR/adapters/codex-gpt-6-luna-xhigh.yaml"
+grep -q -- 'codex exec --json --model gpt-6-luna' "$SRC_DIR/adapters/codex-gpt-6-luna-xhigh.yaml"
+grep -qx 'usage_format: codex_jsonl' "$SRC_DIR/adapters/codex-gpt-6-luna-xhigh.yaml"
+grep -qx 'output_transform: needle-transform-codex' "$SRC_DIR/adapters/codex-gpt-6-luna-xhigh.yaml"
+cmp -s "$SRC_DIR/adapters/codex-gpt-5.6-luna-xhigh.yaml" \
+    <(sed -e 's/gpt-6-luna/gpt-5.6-luna/g' -e 's/GPT-6 Luna/GPT-5.6 Luna/g' \
+        "$SRC_DIR/adapters/codex-gpt-6-luna-xhigh.yaml")
 grep -q 'Environment=PATH=.*/home/coding/.local/bin' "$SRC_DIR/needle-backlog-slo.service"
 grep -qx 'ELASTIC_UNITS=(glm-icg glm-roam-18 glm-roam-19 glm-roam-20 glm-roam-21 glm-roam-22 glm-roam-23 glm-roam-24)' "$SRC_DIR/needle-zai-governor"
 grep -qx 'TOLERATED_AFFECTED_REQUESTS=1' "$SRC_DIR/needle-zai-governor"

@@ -32,6 +32,6 @@ glm-roam-23	/home/coding/reddit-media-player	claude-code-glm-5.3-flash	90	true
 glm-roam-24	/home/coding/claude-print	claude-code-glm-5.3-flash	120	true
 codex-roam-01	/home/coding/.needle/roam-only	codex-gpt-5.6-luna-xhigh	0	true
 codex-roam-02	/home/coding/.needle/roam-only	codex-gpt-5.6-luna-xhigh	15	true
-codex-luna-needle-01	/home/coding/NEEDLE	codex-gpt-5.6-luna-xhigh	315	false
+codex-luna-needle-01	/home/coding/NEEDLE	codex-gpt-6-luna-xhigh	315	false
 claude-needle-01	/home/coding/NEEDLE	claude-print	330	false
 codex-luna-warp	/home/coding/WARP	codex-gpt-5.6-luna-xhigh	45	true
