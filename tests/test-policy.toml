@@ -183,7 +183,11 @@ version = 1
 # +2 adapter-wide generic-exit-1 storm contracts (needle-cd95f7a5): the
 # provider-health detector and OutcomeHandler regression each cover unrelated
 # beads, proving the shared dispatch failure stops adding uniform penalties.
-max_tests = 3951
+# +1 rung-4 analysis-note fallback (needle-c4be0589): a description-write
+# failure falls back to the notes field before the human label, and the
+# rewritten combined-failure contract still refuses a bare `human`. The strand
+# is private, so the unit tier is the only home for its handler contracts.
+max_tests = 3952
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

@@ -499,6 +499,15 @@ impl AnalyzeStrand {
     /// is re-read from the store rather than reused from the in-memory copy —
     /// writing back a stale body would revert whatever landed since selection
     /// (the same rule the Phase 19.4 fold follows).
+    ///
+    /// A backend whose CLI cannot edit descriptions at all (bead-rs rejects
+    /// `update --description` outright: the field is immutable after create)
+    /// would otherwise turn this into a permanent failure, and rung 4 would
+    /// requeue the same beads every cycle instead of ever concluding. The note
+    /// therefore falls back to the durable `notes` field. The ADR-022 contract
+    /// is that the analysis is recorded before the human label; it does not
+    /// care which field carries it. A backend that can do neither fails here,
+    /// and the callers keep the label off.
     async fn append_analysis_note(
         &self,
         store: &dyn BeadStore,
@@ -509,15 +518,29 @@ impl AnalyzeStrand {
             .show(bead_id)
             .await
             .with_context(|| format!("failed to re-read {bead_id} before recording analysis"))?;
+        let note = format!(
+            "analysis: {analysis}\n\n(rung-4 analysis dispatch, {})",
+            Utc::now().to_rfc3339()
+        );
         let mut body = fresh.body.unwrap_or_default();
         if !body.trim().is_empty() {
             body.push_str("\n\n");
         }
-        body.push_str(&format!(
-            "analysis: {analysis}\n\n(rung-4 analysis dispatch, {})",
-            Utc::now().to_rfc3339()
-        ));
-        store.update_description(bead_id, body.trim()).await
+        body.push_str(&note);
+        if let Err(description_error) = store.update_description(bead_id, body.trim()).await {
+            tracing::warn!(
+                bead_id = %bead_id,
+                error = %description_error,
+                "rung 4: description update failed; recording the analysis note in the notes field instead"
+            );
+            store.append_notes(bead_id, &note).await.with_context(|| {
+                format!(
+                    "failed to record the rung-4 analysis note on {bead_id} \
+                     via notes after the description update also failed"
+                )
+            })?;
+        }
+        Ok(())
     }
 
     /// Apply outcome (b): `human` with an `analysis:` note.
@@ -1022,9 +1045,13 @@ mod tests {
         labels_removed: Mutex<Vec<(String, String)>>,
         /// Description writes per bead.
         descriptions: Mutex<Vec<(String, String)>>,
+        /// Notes appends per bead.
+        notes_added: Mutex<Vec<(String, String)>>,
         /// When set, `update_description` fails, emulating a backend that
         /// cannot update descriptions (bead-rs `update`).
         fail_update_description: bool,
+        /// When set, `append_notes` fails.
+        fail_append_notes: bool,
         /// When set, `split_bead` fails.
         fail_split: bool,
     }
@@ -1038,7 +1065,9 @@ mod tests {
                 labels_added: Mutex::new(Vec::new()),
                 labels_removed: Mutex::new(Vec::new()),
                 descriptions: Mutex::new(Vec::new()),
+                notes_added: Mutex::new(Vec::new()),
                 fail_update_description: false,
+                fail_append_notes: false,
                 fail_split: false,
             }
         }
@@ -1061,6 +1090,10 @@ mod tests {
 
         fn descriptions(&self) -> Vec<(String, String)> {
             self.descriptions.lock().unwrap().clone()
+        }
+
+        fn notes_added(&self) -> Vec<(String, String)> {
+            self.notes_added.lock().unwrap().clone()
         }
 
         #[allow(dead_code)]
@@ -1184,6 +1217,16 @@ mod tests {
                 .iter_mut()
                 .filter(|bead| bead.id == *id)
                 .for_each(|bead| bead.body = Some(description.to_string()));
+            Ok(())
+        }
+        async fn append_notes(&self, id: &BeadId, note: &str) -> Result<()> {
+            if self.fail_append_notes {
+                anyhow::bail!("configured bead backend does not implement append_notes");
+            }
+            self.notes_added
+                .lock()
+                .unwrap()
+                .push((id.to_string(), note.to_string()));
             Ok(())
         }
         async fn clear_assignee(&self, _id: &BeadId) -> Result<()> {
@@ -1517,7 +1560,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_path_applies_human_without_the_analysis_note() {
+    async fn description_failure_falls_back_to_the_notes_field_before_the_human_label() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = MockStore::new(vec![make_rung4_bead("bead-g")]);
         store.fail_update_description = true;
@@ -1526,12 +1569,40 @@ mod tests {
         let result = strand.evaluate(&store, &HashSet::new()).await;
         assert!(matches!(result, StrandResult::NoWork));
 
-        // The note could not be recorded, so the label must not exist.
+        // bead-rs cannot edit descriptions at all, so the note must have
+        // landed in the notes field and the human label must have followed it.
+        assert!(store.descriptions().is_empty());
+        let notes = store.notes_added();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].0, "bead-g");
+        assert!(notes[0]
+            .1
+            .contains("analysis: the plan has no acceptance criteria for this subsystem"));
+        assert!(store
+            .added_labels()
+            .iter()
+            .any(|(id, label)| id == "bead-g" && label == "human"));
+    }
+
+    #[tokio::test]
+    async fn no_path_applies_human_without_the_analysis_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = MockStore::new(vec![make_rung4_bead("bead-g")]);
+        store.fail_update_description = true;
+        store.fail_append_notes = true;
+        let strand = make_strand(dir.path(), Box::new(MockAgent::new(HUMAN_RESPONSE)));
+
+        let result = strand.evaluate(&store, &HashSet::new()).await;
+        assert!(matches!(result, StrandResult::NoWork));
+
+        // Neither write path could record the note, so the label must not
+        // exist — a `human` label without its note is the ADR-022 defect.
         assert!(!store
             .added_labels()
             .iter()
             .any(|(_, label)| label == "human"));
         assert!(store.descriptions().is_empty());
+        assert!(store.notes_added().is_empty());
     }
 
     #[tokio::test]
