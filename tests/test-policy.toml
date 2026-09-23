@@ -168,7 +168,14 @@ version = 1
 # so the unit tier is the only home that can reach them.
 # +3 for bounded Explore rediscovery and filesystem wakeup contracts (needle-1ed126bb).
 # +3 for fleet process/session reconciliation contracts (needle-a4ac6c32).
-max_tests = 3925
+# +20 for the ADR-001 axis-3 limit and version-handshake coverage
+# (needle-6b860c6e): 14 descriptor-validation and version-quirk suites in
+# src/bead_store/backend.rs, 5 legacy-workspace handshake warning suites in
+# src/bead_store/version_handshake.rs (they assert captured tracing output,
+# which only the unit tier can intercept), and 1 default-limit truncation
+# contract in src/bead_store/cli_store.rs built on an argument-sensitive
+# ProcessRunner.
+max_tests = 3945
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
@@ -449,6 +456,13 @@ owner = "component:improvement-loop"
 # These are strict ceilings on existing debt. A new occurrence fails the fast
 # lane; deleting an occurrence makes the corresponding exception stale so the
 # policy shrinks with the implementation.
+[[unit_exception]]
+path = "src/bead_store/version_handshake.rs"
+kind = "global-env"
+max_occurrences = 2
+owner = "component:bead-store"
+reason = "The ADR-001 legacy-workspace handshake resolves `bf` from the process PATH when no binary is configured, so proving the missing-binary migration guidance requires emptying PATH/HOME under the test_env lock."
+
 [[unit_exception]]
 path = "src/build_metadata.rs"
 kind = "global-env"

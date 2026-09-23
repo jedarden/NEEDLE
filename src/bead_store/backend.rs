@@ -55,6 +55,16 @@ const REQUIRED_OPERATIONS: &[&str] = &[
     "policy_validate",
 ];
 
+/// Inventory and frontier queries whose result sets must never depend on the
+/// backend's own default limit (ADR-001 axis 3). A descriptor takes the
+/// caller's explicit ceiling through the `{limit}` placeholder, or may
+/// hardcode its own positive limit — but an omitted limit falls back to the
+/// CLI default, which truncates priority-sorted output until low-priority
+/// beads are invisible, and a hardcoded zero has backend-specific meanings
+/// including an empty result set. [`BeadBackend::validate`] rejects both
+/// shapes at descriptor load so no scan can silently depend on them.
+const INVENTORY_OPERATIONS: &[&str] = &["ready", "list_all", "list_in_progress", "manual_blocked"];
+
 /// Parse shape expected from one CLI operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -94,13 +104,145 @@ pub struct BeadBackendCapabilities {
     pub velocity_metadata: bool,
 }
 
+/// A backend version triple parsed from the binary's `version_command` output
+/// (e.g. `0.2.6` out of `bead 0.2.6 (unknown 2026-09-06T14:10:37Z)`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct BackendVersion {
+    major: u64,
+    minor: u64,
+    patch: u64,
+}
+
+impl BackendVersion {
+    /// Extract the first `major.minor.patch` triple from free-form version
+    /// output. Non-numeric or missing components yield `None`.
+    pub fn parse(text: &str) -> Option<Self> {
+        let pattern = Regex::new(r"(\d+)\.(\d+)\.(\d+)").ok()?;
+        let captures = pattern.captures(text)?;
+        let field = |index: usize| -> Option<u64> {
+            captures
+                .get(index)
+                .and_then(|group| group.as_str().parse().ok())
+        };
+        Some(Self {
+            major: field(1)?,
+            minor: field(2)?,
+            patch: field(3)?,
+        })
+    }
+}
+
+/// Comparison operator of a quirk's version requirement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VersionOp {
+    Le,
+    Lt,
+    Ge,
+    Gt,
+    Eq,
+}
+
+impl VersionOp {
+    fn compare(self, version: BackendVersion, bound: BackendVersion) -> bool {
+        match self {
+            Self::Le => version <= bound,
+            Self::Lt => version < bound,
+            Self::Ge => version >= bound,
+            Self::Gt => version > bound,
+            Self::Eq => version == bound,
+        }
+    }
+
+    fn from_prefix(requirement: &str) -> (Self, &str) {
+        // Two-character prefixes first so "<=" is not read as "<" with junk.
+        if let Some(rest) = requirement.strip_prefix("<=") {
+            (Self::Le, rest)
+        } else if let Some(rest) = requirement.strip_prefix(">=") {
+            (Self::Ge, rest)
+        } else if let Some(rest) = requirement.strip_prefix('<') {
+            (Self::Lt, rest)
+        } else if let Some(rest) = requirement.strip_prefix('>') {
+            (Self::Gt, rest)
+        } else if let Some(rest) = requirement.strip_prefix('=') {
+            (Self::Eq, rest)
+        } else {
+            (Self::Eq, requirement)
+        }
+    }
+}
+
+/// Is `text` exactly `MAJOR.MINOR.PATCH`, digits and dots only?
+///
+/// [`BackendVersion::parse`] deliberately digs a triple out of free-form
+/// probe output, where the version is embedded in surrounding text. A
+/// quirk requirement is authored, not probed: anything beyond the bare
+/// version (`~0.2.6`, `0.2.x`, `0.2`) is a typo and must fail validation
+/// instead of silently binding to the digits it happens to contain.
+fn is_exact_version(text: &str) -> bool {
+    text.split('.').count() == 3
+        && text
+            .split('.')
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+/// Parse a quirk version requirement: one of `<=X.Y.Z`, `<X.Y.Z`, `>=X.Y.Z`,
+/// `>X.Y.Z`, `=X.Y.Z`, or a bare `X.Y.Z` (exact). Descriptors are validated
+/// with this at load time, so an unparseable range fails fast instead of
+/// silently applying or skipping the quirk.
+fn parse_version_requirement(requirement: &str) -> Result<(VersionOp, BackendVersion)> {
+    let trimmed = requirement.trim();
+    let (op, rest) = VersionOp::from_prefix(trimmed);
+    let bound = BackendVersion::parse(rest)
+        .filter(|_| is_exact_version(rest))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "expected a MAJOR.MINOR.PATCH version (optionally preceded by <=, <, >=, > or =), got {:?}",
+                requirement
+            )
+        })?;
+    Ok((op, bound))
+}
+
 /// Version-scoped workaround declared by a backend.
+///
+/// A quirk's `description` is the retirement contract required by ADR-013 §4:
+/// it must say WHY the workaround exists, which binary versions exhibit the
+/// behaviour, and what evidence lets the range be narrowed or dropped. The
+/// workaround itself stays linked to that condition — `applies_to` evaluates
+/// the requirement against the running binary's version — instead of being
+/// frozen into the call sites.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BeadBackendQuirk {
     pub name: String,
     #[serde(default)]
     pub version_requirement: Option<String>,
     pub description: String,
+}
+
+impl BeadBackendQuirk {
+    /// Does this quirk apply to a binary of `runtime_version`?
+    ///
+    /// A quirk without a version requirement applies unconditionally — declare
+    /// one only when every version of the backend needs the workaround. When
+    /// the running version is unknown (the descriptor's `version_command`
+    /// output could not be parsed), a scoped quirk conservatively applies:
+    /// the safe default is the documented-harmless workaround, not the plain
+    /// query an old broken binary would answer wrong.
+    pub fn applies_to(&self, runtime_version: Option<BackendVersion>) -> bool {
+        let Some(requirement) = &self.version_requirement else {
+            return true;
+        };
+        match parse_version_requirement(requirement) {
+            Ok((op, bound)) => match runtime_version {
+                Some(version) => op.compare(version, bound),
+                // Descriptor validation rejects malformed ranges before the
+                // store is built; an unparseable range fails safe the same
+                // way an unknown version does.
+                None => true,
+            },
+            Err(_) => true,
+        }
+    }
 }
 
 /// Error fragments used to classify backend failures.
@@ -321,6 +463,12 @@ impl BeadBackend {
             }
         }
 
+        for inventory_operation in INVENTORY_OPERATIONS {
+            if let Some(spec) = self.operations.get(*inventory_operation) {
+                validate_inventory_limits(source, inventory_operation, &spec.argv)?;
+            }
+        }
+
         for (operation, spec) in &self.operations {
             if spec.timeout_secs == Some(0) {
                 bail!(
@@ -333,6 +481,35 @@ impl BeadBackend {
                 validate_strategy_name(source, operation, strategy)?;
             }
             validate_placeholders(source, operation, &spec.argv)?;
+        }
+
+        for quirk in &self.quirks {
+            if quirk.name.trim().is_empty() {
+                bail!(
+                    "descriptor {} for backend '{}' has a quirk with an empty name",
+                    source.display(),
+                    self.name
+                );
+            }
+            if quirk.description.trim().is_empty() {
+                bail!(
+                    "descriptor {} for backend '{}' quirk '{}' has an empty description; a quirk must document why it exists and for which versions so it can be retired",
+                    source.display(),
+                    self.name,
+                    quirk.name
+                );
+            }
+            if let Some(requirement) = &quirk.version_requirement {
+                parse_version_requirement(requirement).with_context(|| {
+                    format!(
+                        "descriptor {} for backend '{}' quirk '{}' has invalid version_requirement {:?}",
+                        source.display(),
+                        self.name,
+                        quirk.name,
+                        requirement
+                    )
+                })?;
+            }
         }
         Ok(())
     }
@@ -367,6 +544,67 @@ fn validate_placeholders(source: &Path, operation: &str, argv: &[String]) -> Res
         }
     }
     Ok(())
+}
+
+/// The limit value an inventory operation's argv renders, if any.
+///
+/// Recognizes both the two-token form (`--limit`, value) and the combined
+/// form (`--limit=value`); `None` when the argv carries no limit at all.
+fn inventory_limit_value(argv: &[String]) -> Option<String> {
+    for window in argv.windows(2) {
+        if window[0] == "--limit" {
+            return Some(window[1].clone());
+        }
+    }
+    argv.iter()
+        .find(|argument| argument.starts_with("--limit="))
+        .map(|argument| argument["--limit=".len()..].to_string())
+}
+
+/// ADR-001 axis 3: an inventory operation must render an explicit, nonzero
+/// limit. The caller's ceiling arrives as the `{limit}` placeholder value; a
+/// hardcoded positive literal is also explicit. Anything else — no limit at
+/// all, or a zero literal — reintroduces the failures ADR-001 records: the
+/// CLI default truncating priority-sorted output until low-priority beads
+/// drop off the tail, and `--limit 0` answering with an empty set.
+fn validate_inventory_limits(source: &Path, operation: &str, argv: &[String]) -> Result<()> {
+    let Some(value) = inventory_limit_value(argv) else {
+        if argv.iter().any(|argument| argument.contains("{limit}")) {
+            // A backend whose limit flag is spelled differently still
+            // receives the caller's explicit ceiling through the placeholder.
+            return Ok(());
+        }
+        bail!(
+            "descriptor {} operation '{}' has no explicit limit, so the backend's own \
+             default would decide how much of the priority-sorted inventory is visible \
+             and low-priority beads can drop off the tail; add '--limit {{limit}}' \
+             (ADR-001)",
+            source.display(),
+            operation
+        );
+    };
+
+    if value.contains("{limit}") {
+        return Ok(());
+    }
+    match value.parse::<u64>() {
+        Ok(0) => bail!(
+            "descriptor {} operation '{}' hardcodes '--limit 0', which answers with an \
+             empty set on backends with the limit-zero defect instead of the full \
+             inventory; pass '{{limit}}' so the caller's positive limit is rendered, or \
+             a positive literal (ADR-001)",
+            source.display(),
+            operation
+        ),
+        Ok(_) => Ok(()),
+        Err(_) => bail!(
+            "descriptor {} operation '{}' has a non-numeric '--limit {}'; pass \
+             '{{limit}}' or a positive integer (ADR-001)",
+            source.display(),
+            operation,
+            value
+        ),
+    }
 }
 
 fn allowed_placeholders(operation: &str) -> &'static [&'static str] {
@@ -1008,8 +1246,24 @@ fn builtin_bead_rs() -> BeadBackend {
         },
         quirks: vec![BeadBackendQuirk {
             name: "limit_zero_returns_empty_set".to_string(),
-            version_requirement: None,
-            description: "bead-rs has a bug where --limit 0 returns an empty set instead of all beads. Workaround: use a large explicit limit.".to_string(),
+            // Retire by narrowing this range, never by editing the call
+            // sites: once a bead-rs release returns the full inventory for
+            // `--limit 0`, bump the bound below that release (or drop the
+            // quirk) and the plain query — no `--limit` flag at all — takes
+            // over automatically.
+            version_requirement: Some("<=0.2.6".to_string()),
+            description: "WHY: an unbounded list query must pass an explicit limit, because \
+                `--limit 0` returns an empty set instead of the full inventory. Observed on \
+                bead-forge 0.2.0 (the origin of the old unconditional `--limit 999999` \
+                workaround, retired into this quirk), and on bead-rs: verified on 0.1.3 \
+                (2026-08-23, needle-17fabf0a) and still present in 0.2.6 (probed 2026-09-17: \
+                `list --limit 0` -> `[]`). WHICH VERSIONS: every bead-rs through 0.2.6; the \
+                plain query with no `--limit` flag returns the full inventory on 0.2.6, so \
+                only the explicit-zero form is broken. THE VALUE: 999999 is bead-rs's own \
+                ceiling (the CLI validates `0 <= --limit <= 999999`; anything larger is a \
+                usage error), and 0.1.3 accepted it too. Narrow the range once a fixed \
+                release ships and re-probe with a scratch workspace before dropping."
+                .to_string(),
         }],
         error_markers: BeadBackendErrorMarkers {
             corruption: vec![
@@ -1050,16 +1304,133 @@ mod tests {
     fn builtins_declare_quirks_for_known_bugs() {
         let bead_rs = builtin_bead_rs();
 
-        // bead-rs SHOULD have the limit_zero_returns_empty_set quirk (verified against v0.1.3)
+        // The quirk is version-scoped, not unconditional: it covers every
+        // bead-rs verified broken (`--limit 0` -> empty set) and is retired
+        // by narrowing the range once a fixed release ships.
         let rs_quirk = bead_rs
             .quirks
             .iter()
             .find(|q| q.name == "limit_zero_returns_empty_set")
             .expect("bead-rs should declare limit_zero_returns_empty_set quirk");
-        assert!(
-            rs_quirk.version_requirement.is_none(),
-            "bead-rs quirk should apply to all versions"
+        assert_eq!(
+            rs_quirk.version_requirement.as_deref(),
+            Some("<=0.2.6"),
+            "bead-rs quirk must be scoped to the versions verified broken"
         );
+        // The description is the retirement contract: it must say why the
+        // quirk exists and for which versions.
+        assert!(rs_quirk.description.contains("WHY"));
+        assert!(rs_quirk.description.contains("0.1.3"));
+        assert!(rs_quirk.description.contains("0.2.6"));
+    }
+
+    #[test]
+    fn backend_version_parses_from_version_output() {
+        assert_eq!(
+            BackendVersion::parse("bead 0.2.6 (unknown 2026-09-06T14:10:37Z)"),
+            Some(BackendVersion {
+                major: 0,
+                minor: 2,
+                patch: 6
+            })
+        );
+        assert_eq!(
+            BackendVersion::parse("bf 0.2.0"),
+            Some(BackendVersion {
+                major: 0,
+                minor: 2,
+                patch: 0
+            })
+        );
+        assert_eq!(BackendVersion::parse("no version here"), None);
+        assert_eq!(BackendVersion::parse("bead 0.2 (truncated)"), None);
+    }
+
+    #[test]
+    fn version_requirements_compare_component_wise() {
+        let quirk = |requirement: &str| BeadBackendQuirk {
+            name: "probe".to_string(),
+            version_requirement: Some(requirement.to_string()),
+            description: "probe".to_string(),
+        };
+        let version = |major: u64, minor: u64, patch: u64| {
+            Some(BackendVersion {
+                major,
+                minor,
+                patch,
+            })
+        };
+
+        // 0.2.6 is in scope; 0.3.0 and 1.0.0 are past it.
+        assert!(quirk("<=0.2.6").applies_to(version(0, 2, 6)));
+        assert!(quirk("<=0.2.6").applies_to(version(0, 1, 3)));
+        assert!(!quirk("<=0.2.6").applies_to(version(0, 3, 0)));
+        assert!(!quirk("<=0.2.6").applies_to(version(1, 0, 0)));
+        // String comparison would misjudge 0.10.0 against <=0.2.6; numeric
+        // components must not. 0.2.10 is likewise *past* 0.2.6 (ten patches
+        // after the sixth), so it falls outside the range too.
+        assert!(!quirk("<=0.2.6").applies_to(version(0, 10, 0)));
+        assert!(!quirk("<=0.2.6").applies_to(version(0, 2, 10)));
+
+        // Other operators.
+        assert!(quirk(">=0.3.0").applies_to(version(0, 3, 0)));
+        assert!(!quirk(">=0.3.0").applies_to(version(0, 2, 6)));
+        assert!(quirk("<0.3.0").applies_to(version(0, 2, 6)));
+        assert!(!quirk("<0.3.0").applies_to(version(0, 3, 0)));
+        assert!(quirk("=0.2.6").applies_to(version(0, 2, 6)));
+        assert!(!quirk("=0.2.6").applies_to(version(0, 2, 7)));
+        // A bare version is exact.
+        assert!(quirk("0.2.6").applies_to(version(0, 2, 6)));
+        assert!(!quirk("0.2.6").applies_to(version(0, 2, 7)));
+
+        // An unknown runtime version conservatively applies the quirk.
+        assert!(quirk("<=0.2.6").applies_to(None));
+        // An unconditional quirk applies to everything.
+        let unconditional = BeadBackendQuirk {
+            name: "probe".to_string(),
+            version_requirement: None,
+            description: "probe".to_string(),
+        };
+        assert!(unconditional.applies_to(version(0, 2, 6)));
+        assert!(unconditional.applies_to(None));
+    }
+
+    #[test]
+    fn parse_version_requirement_rejects_garbage() {
+        assert!(parse_version_requirement("<=0.2").is_err());
+        assert!(parse_version_requirement("<=x.y.z").is_err());
+        assert!(parse_version_requirement("<=").is_err());
+        assert!(parse_version_requirement("").is_err());
+        assert!(parse_version_requirement("~0.2.6").is_err());
+    }
+
+    #[test]
+    fn descriptor_validation_rejects_malformed_quirk_version_requirement() {
+        let mut backend = builtin_bead_rs();
+        backend.quirks[0].version_requirement = Some("~0.2.6".to_string());
+        let error = backend
+            .validate(Path::new("<test>"))
+            .expect_err("malformed version_requirement must fail validation");
+        assert!(error.to_string().contains("invalid version_requirement"));
+        assert!(error.to_string().contains("limit_zero_returns_empty_set"));
+    }
+
+    #[test]
+    fn descriptor_validation_rejects_quirk_without_description() {
+        let mut backend = builtin_bead_rs();
+        backend.quirks[0].description = "   ".to_string();
+        let error = backend
+            .validate(Path::new("<test>"))
+            .expect_err("empty quirk description must fail validation");
+        assert!(error.to_string().contains("empty description"));
+    }
+
+    #[test]
+    fn builtins_validate_with_declared_quirks() {
+        let bead_rs = builtin_bead_rs();
+        bead_rs
+            .validate(Path::new("<builtin:bead-rs>"))
+            .expect("builtin bead-rs descriptor must validate");
     }
 
     #[test]
@@ -1331,5 +1702,165 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ─── Inventory-limit validation tests (ADR-001 axis 3) ─────────────────────
+
+    #[test]
+    fn builtin_bead_rs_carries_explicit_limits_on_every_inventory_operation() {
+        let backend = builtin_bead_rs();
+        backend
+            .validate(Path::new("<builtin:bead-rs>"))
+            .expect("builtin bead-rs descriptor must pass the inventory-limit check");
+
+        for operation in INVENTORY_OPERATIONS {
+            let spec = backend
+                .operations
+                .get(*operation)
+                .unwrap_or_else(|| panic!("builtin bead-rs must define '{operation}'"));
+            let explicit = inventory_limit_value(&spec.argv)
+                .is_some_and(|value| value.contains("{limit}"))
+                || spec
+                    .argv
+                    .iter()
+                    .any(|argument| argument.contains("{limit}"));
+            assert!(
+                explicit,
+                "builtin bead-rs '{operation}' must render the caller's explicit limit, got {:?}",
+                spec.argv
+            );
+        }
+    }
+
+    #[test]
+    fn descriptor_without_inventory_limit_is_rejected() {
+        let mut backend = builtin_bead_rs();
+        backend.operations.get_mut("ready").unwrap().argv =
+            vec!["list".into(), "--ready".into(), "--json".into()];
+
+        let error = backend
+            .validate(Path::new("<test>"))
+            .expect_err("a limit-less ready query must fail descriptor validation");
+        let message = error.to_string();
+        assert!(
+            message.contains("no explicit limit"),
+            "error must name the missing limit, got: {message}"
+        );
+        assert!(
+            message.contains("'ready'"),
+            "error must name the offending operation, got: {message}"
+        );
+        assert!(
+            message.contains("--limit {limit}"),
+            "error must state the fix, got: {message}"
+        );
+        assert!(
+            message.contains("low-priority"),
+            "error must state the consequence, got: {message}"
+        );
+    }
+
+    #[test]
+    fn descriptor_hardcoding_zero_inventory_limit_is_rejected() {
+        let mut backend = builtin_bead_rs();
+        backend.operations.get_mut("list_all").unwrap().argv =
+            vec!["list".into(), "--json".into(), "--limit".into(), "0".into()];
+
+        let error = backend
+            .validate(Path::new("<test>"))
+            .expect_err("a hardcoded --limit 0 must fail descriptor validation");
+        let message = error.to_string();
+        assert!(
+            message.contains("'--limit 0'"),
+            "error must quote the zero limit, got: {message}"
+        );
+        assert!(
+            message.contains("empty set"),
+            "error must state the zero-limit consequence, got: {message}"
+        );
+    }
+
+    #[test]
+    fn descriptor_with_non_numeric_inventory_limit_is_rejected() {
+        let mut backend = builtin_bead_rs();
+        // Replace the limit outright: the builtin already carries a valid
+        // `{limit}` placeholder, and the validator reads the first limit it
+        // finds, so appending a second malformed one would never be seen.
+        backend.operations.get_mut("manual_blocked").unwrap().argv = vec![
+            "list".into(),
+            "--json".into(),
+            "--limit".into(),
+            "all".into(),
+        ];
+
+        let error = backend
+            .validate(Path::new("<test>"))
+            .expect_err("a non-numeric limit must fail descriptor validation");
+        assert!(
+            error.to_string().contains("non-numeric"),
+            "error must name the non-numeric limit, got: {}",
+            error
+        );
+    }
+
+    #[test]
+    fn descriptor_with_positive_hardcoded_inventory_limit_is_accepted() {
+        let mut backend = builtin_bead_rs();
+        backend.operations.get_mut("list_in_progress").unwrap().argv = vec![
+            "list".into(),
+            "--status".into(),
+            "in_progress".into(),
+            "--limit".into(),
+            "500000".into(),
+        ];
+
+        backend
+            .validate(Path::new("<test>"))
+            .expect("an explicit positive literal limit is not a default or zero limit");
+    }
+
+    #[test]
+    fn descriptor_limit_through_placeholder_on_another_flag_is_accepted() {
+        let mut backend = builtin_bead_rs();
+        backend.operations.get_mut("ready").unwrap().argv = vec![
+            "list".into(),
+            "--ready".into(),
+            "--json".into(),
+            "--max".into(),
+            "{limit}".into(),
+        ];
+
+        backend
+            .validate(Path::new("<test>"))
+            .expect("a differently spelled limit flag still receives the caller's ceiling");
+    }
+
+    #[test]
+    fn combined_form_limit_literals_are_validated_too() {
+        let zero = |argument: &str| {
+            let mut backend = builtin_bead_rs();
+            backend.operations.get_mut("ready").unwrap().argv =
+                vec!["list".into(), "--ready".into(), argument.into()];
+            backend.validate(Path::new("<test>")).err()
+        };
+        assert!(
+            zero("--limit=0")
+                .expect("combined-form zero limit must be rejected")
+                .to_string()
+                .contains("'--limit 0'"),
+            "the combined form must hit the same zero-limit rejection"
+        );
+        assert!(zero("--limit=999999").is_none());
+    }
+
+    #[test]
+    fn non_inventory_operations_do_not_require_limits() {
+        let mut backend = builtin_bead_rs();
+        backend.operations.get_mut("show").unwrap().argv =
+            vec!["show".into(), "{id}".into(), "--json".into()];
+
+        backend
+            .validate(Path::new("<test>"))
+            .expect("single-bead lookups have no inventory to truncate");
     }
 }

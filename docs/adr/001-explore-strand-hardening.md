@@ -42,6 +42,7 @@ Kept from v1 by design: no upward traversal; workers return home after one remot
 - New telemetry events extend the existing schema (additive; JSONL/OTLP consumers unaffected).
 - The starvation alarm gives FABRIC/HOOP a signal for the fleet-immune-system layer identified in the 2026-07 corpus audit.
 - As of 2026-08-24 (ADR-018), `bead reopen` clears the assignee, fixing the core failure mode that motivated defensive assignee healing. The `--limit 0` fix remains pending in bead-forge. NEEDLE's defensive workarounds (assignee healing, explicit limits) stay in place for robustness and to handle other cases where beads become stuck with stale assignees.
+- As of 2026-09-22, axis 3's limit requirement is mechanical: `BeadBackend::validate` rejects any descriptor whose inventory/frontier operations (`ready`, `list_all`, `list_in_progress`, `manual_blocked`) render no explicit nonzero limit — no `--limit` flag at all falls back to the CLI default that truncates priority-sorted output, and a hardcoded `--limit 0` returns an empty set on the versions with that defect. Descriptors carry the caller's ceiling via the `{limit}` placeholder or a positive literal.
 
 ## Evidence
 

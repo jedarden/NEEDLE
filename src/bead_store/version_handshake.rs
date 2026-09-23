@@ -257,3 +257,224 @@ fn is_executable(path: &Path) -> bool {
 fn is_executable(path: &Path) -> bool {
     path.is_file()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Capture `tracing` output written through the default subscriber.
+    ///
+    /// Same shape as the log-capture helpers used by the `hoop_hooks` and
+    /// `health` modules: a `MakeWriter` over a shared byte buffer, so the
+    /// store-open warning path can be asserted on without owning stderr.
+    #[derive(Clone, Default)]
+    struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    struct CapturedLogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLogWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+        type Writer = CapturedLogWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            CapturedLogWriter(self.0.clone())
+        }
+    }
+
+    fn captured_logs_subscriber(captured: &CapturedLogs) -> impl tracing::Subscriber {
+        tracing_subscriber::fmt()
+            .with_writer(captured.clone())
+            .with_ansi(false)
+            .without_time()
+            .finish()
+    }
+
+    fn captured_text(captured: &CapturedLogs) -> String {
+        String::from_utf8(captured.0.lock().unwrap().clone()).unwrap()
+    }
+
+    /// A legacy bead-forge store: the flat `issues.jsonl` layout that predates
+    /// the bead-rs migration. `warn_for_legacy_workspace` keys on exactly this
+    /// file, and every production store open passes through it
+    /// (`open_configured` → Explore's `DefaultStoreFactory`), so a store like
+    /// this is what the Explore strand hands its scan.
+    fn legacy_workspace(root: &Path) -> PathBuf {
+        let workspace = root.join("ws");
+        std::fs::create_dir_all(workspace.join(".beads")).unwrap();
+        std::fs::write(
+            workspace.join(".beads/issues.jsonl"),
+            "{\"id\":\"legacy-1\",\"status\":\"open\"}\n",
+        )
+        .unwrap();
+        workspace
+    }
+
+    /// A `bf`-named executable whose `--version` prints `version_output`.
+    #[cfg(unix)]
+    fn fake_bf(root: &Path, version_output: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = root.join("bf");
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\nprintf '%s\\n' '{version_output}'\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// ADR-001 axis 3, emission half: a legacy workspace whose `bf` reports a
+    /// known-incompatible version must produce a WARN that identifies the
+    /// version, the concrete incompatibility, and the remediation — not fail
+    /// silently into the truncation the version is known for.
+    #[cfg(unix)]
+    #[test]
+    fn legacy_workspace_with_known_bad_bf_warns_actionably() {
+        let captured = CapturedLogs::default();
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = legacy_workspace(dir.path());
+        let bf = fake_bf(dir.path(), "bf 0.2.0");
+
+        tracing::subscriber::with_default(captured_logs_subscriber(&captured), || {
+            warn_for_legacy_workspace(&workspace, Some(&bf));
+        });
+
+        let logs = captured_text(&captured);
+        assert!(logs.contains("WARN"), "expected a warning, got: {logs}");
+        assert!(
+            logs.contains("incompatible bead-forge version detected"),
+            "warning must name the condition, got: {logs}"
+        );
+        assert!(
+            logs.contains("0.2.0"),
+            "warning must identify the offending version, got: {logs}"
+        );
+        assert!(
+            logs.contains("--limit 0 returns empty set"),
+            "warning must state the concrete incompatibility, got: {logs}"
+        );
+        assert!(
+            logs.contains("upgrade bead-forge or migrate this legacy workspace to bead-rs"),
+            "warning must carry the remediation, got: {logs}"
+        );
+    }
+
+    /// The second known-incompatible family: pre-0.2.0 releases are matched by
+    /// the `"0.1."` prefix (the version arrives embedded in `bf 0.1.7`, not as
+    /// the whole first line), and their issue is the default-limit truncation —
+    /// the exact failure ADR-001's explicit-limits rule exists to prevent.
+    #[cfg(unix)]
+    #[test]
+    fn legacy_workspace_with_pre_02_bf_warns_default_limit_truncation() {
+        let captured = CapturedLogs::default();
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = legacy_workspace(dir.path());
+        let bf = fake_bf(dir.path(), "bf 0.1.7");
+
+        tracing::subscriber::with_default(captured_logs_subscriber(&captured), || {
+            warn_for_legacy_workspace(&workspace, Some(&bf));
+        });
+
+        let logs = captured_text(&captured);
+        assert!(logs.contains("WARN"), "expected a warning, got: {logs}");
+        assert!(
+            logs.contains("0.1.7"),
+            "warning must identify the offending version, got: {logs}"
+        );
+        assert!(
+            logs.contains("pre-0.2.0 releases can truncate results"),
+            "warning must state the truncation incompatibility, got: {logs}"
+        );
+    }
+
+    /// The quiet half of the same contract: a compatible `bf` version must not
+    /// warn, so a healthy legacy workspace opens without log noise.
+    #[cfg(unix)]
+    #[test]
+    fn legacy_workspace_with_compatible_bf_does_not_warn() {
+        let captured = CapturedLogs::default();
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = legacy_workspace(dir.path());
+        let bf = fake_bf(dir.path(), "bf 0.3.0");
+
+        tracing::subscriber::with_default(captured_logs_subscriber(&captured), || {
+            warn_for_legacy_workspace(&workspace, Some(&bf));
+        });
+
+        let logs = captured_text(&captured);
+        assert!(
+            !logs.contains("WARN"),
+            "a compatible version must not warn, got: {logs}"
+        );
+        assert!(
+            !logs.contains("incompatible"),
+            "a compatible version must not be reported as incompatible, got: {logs}"
+        );
+    }
+
+    /// A legacy workspace with no `bf` anywhere must still warn — the
+    /// migration guidance is the actionable signal, and silence here would
+    /// hide an unverifiable handshake behind a missing binary. Runs under
+    /// [`crate::util::test_env::isolate_env`] because the binary search reads
+    /// the process `PATH` and `HOME`.
+    #[test]
+    fn legacy_workspace_without_bf_binary_warns_migration_guidance() {
+        let _env = crate::util::test_env::isolate_env();
+        let empty = tempfile::tempdir().unwrap();
+        std::env::set_var("PATH", empty.path());
+        std::env::set_var("HOME", empty.path());
+
+        let captured = CapturedLogs::default();
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = legacy_workspace(dir.path());
+
+        tracing::subscriber::with_default(captured_logs_subscriber(&captured), || {
+            warn_for_legacy_workspace(&workspace, None);
+        });
+
+        let logs = captured_text(&captured);
+        assert!(logs.contains("WARN"), "expected a warning, got: {logs}");
+        assert!(
+            logs.contains("no bf executable was found"),
+            "warning must say the handshake could not run, got: {logs}"
+        );
+        assert!(
+            logs.contains("migrate this workspace to bead-rs"),
+            "warning must carry the remediation, got: {logs}"
+        );
+    }
+
+    /// A workspace without the legacy store layout must never trigger the
+    /// handshake at all — the pointing-at-a-legacy-workspace warning (and any
+    /// spawn noise from a dead binary) belongs only to stores that need it.
+    /// The configured `bf` path deliberately does not exist: if the handshake
+    /// ran, the failed spawn would warn and fail this test.
+    #[test]
+    fn workspace_without_legacy_store_stays_silent() {
+        let captured = CapturedLogs::default();
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("modern-ws");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        tracing::subscriber::with_default(captured_logs_subscriber(&captured), || {
+            warn_for_legacy_workspace(&workspace, Some(&dir.path().join("bf")));
+        });
+
+        let logs = captured_text(&captured);
+        assert!(
+            !logs.contains("WARN"),
+            "a non-legacy workspace must not warn, got: {logs}"
+        );
+    }
+}

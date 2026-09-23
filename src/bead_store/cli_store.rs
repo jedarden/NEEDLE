@@ -1687,10 +1687,14 @@ fn is_optional_placeholder(name: &str) -> bool {
 mod process_runner_tests {
     use super::{super::builtin_bead_backends, CliBeadStore, EXPLICIT_QUERY_LIMIT};
     use crate::bead_store::{BeadStore as _, Filters, RecoveryReleaseOutcome};
-    use crate::process_runner::{FakeProcessRunner, ProcessOutput};
+    use crate::process_runner::{FakeProcessRunner, ProcessOutput, ProcessRequest, ProcessRunner};
     use crate::types::{BeadId, BeadStatus, ClaimStatus};
+    use anyhow::Result;
+    use async_trait::async_trait;
     use std::collections::HashMap;
-    use std::sync::Arc;
+    use std::ffi::OsString;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     #[tokio::test]
     async fn close_reason_reads_the_bead_rs_query_projection() {
@@ -1848,6 +1852,134 @@ mod process_runner_tests {
                 .expect("query must carry an explicit --limit");
             assert_eq!(arguments[limit_index + 1], EXPLICIT_QUERY_LIMIT);
         }
+    }
+
+    /// The priority-sorted inventory a busy store answers with: the low
+    /// tail sorts last, exactly where a small backend default cuts it off.
+    const PRIORITY_SORTED_INVENTORY: &str = concat!(
+        r#"{"id":"p0-urgent","title":"urgent","priority":0,"status":"open","created_at":"2026-08-12T00:00:00Z"}"#,
+        "\n",
+        r#"{"id":"p2-middle","title":"middle","priority":2,"status":"open","created_at":"2026-08-12T00:00:00Z"}"#,
+        "\n",
+        r#"{"id":"low-priority-tail","title":"low priority","priority":4,"status":"open","created_at":"2026-08-12T00:00:00Z"}"#,
+        "\n"
+    );
+
+    /// A stand-in for the defective backends ADR-001 records: asked without
+    /// an explicit limit it answers with its own small default and truncates
+    /// the priority-sorted list; an explicit limit is honored as given.
+    /// Unlike [`FakeProcessRunner`] it varies the response by the request, so
+    /// a discovery that succeeds here succeeds *because* the store passed
+    /// the ceiling.
+    struct DefaultLimitTruncatingRunner {
+        backend_default: usize,
+        requests: Mutex<Vec<Vec<OsString>>>,
+    }
+
+    impl DefaultLimitTruncatingRunner {
+        fn new(backend_default: usize) -> Arc<Self> {
+            Arc::new(Self {
+                backend_default,
+                requests: Mutex::new(Vec::new()),
+            })
+        }
+
+        fn request_arguments(&self, index: usize) -> Vec<OsString> {
+            self.requests
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())[index]
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl ProcessRunner for DefaultLimitTruncatingRunner {
+        async fn output(
+            &self,
+            request: ProcessRequest,
+            _timeout: Duration,
+        ) -> Result<ProcessOutput> {
+            let arguments: Vec<OsString> = request.arguments().to_vec();
+            let explicit_limit = arguments
+                .iter()
+                .position(|argument| argument == "--limit")
+                .and_then(|index| arguments.get(index + 1))
+                .and_then(|value| value.to_str())
+                .and_then(|value| value.parse::<usize>().ok());
+            self.requests
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(arguments);
+
+            let lines: Vec<&str> = PRIORITY_SORTED_INVENTORY.lines().collect();
+            let visible = explicit_limit
+                .unwrap_or(self.backend_default)
+                .min(lines.len());
+            let answer = format!("{}\n", lines[..visible].join("\n"));
+            Ok(ProcessOutput::success(answer.into_bytes()))
+        }
+    }
+
+    /// ADR-001 axis 3, discoverability half: with a backend whose own default
+    /// truncates the priority-sorted list, `ready()` still surfaces the
+    /// low-priority tail — and only because the store put the explicit
+    /// positive ceiling on the wire. The truncated control proves the runner
+    /// really behaves like the defective backend, so the discovery above is
+    /// attributable to the explicit limit rather than an unconditionally
+    /// generous fixture.
+    #[tokio::test]
+    async fn ready_discovers_low_priority_tail_through_the_explicit_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        let binary = directory.path().join("fixture-cli");
+        std::fs::write(&binary, "fixture").unwrap();
+        let backend = builtin_bead_backends()
+            .into_iter()
+            .find(|backend| backend.name == "bead-rs")
+            .unwrap();
+        let runner = DefaultLimitTruncatingRunner::new(2);
+        let store = CliBeadStore::new(
+            backend,
+            binary,
+            directory.path().to_path_buf(),
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .with_process_runner(runner.clone());
+
+        // Control: the unbounded invocation shape from the 2026-07-11 incident
+        // truncates at the backend default and hides the tail.
+        let truncated = store
+            .run_argv_unchecked(
+                "ready",
+                &[
+                    "list".to_string(),
+                    "--ready".to_string(),
+                    "--json".to_string(),
+                ],
+                30,
+            )
+            .await
+            .unwrap();
+        assert!(
+            !truncated.contains("low-priority-tail"),
+            "control: the backend default must truncate the tail, got: {truncated}"
+        );
+
+        let ready = store.ready(&Filters::default()).await.unwrap();
+        assert!(
+            ready
+                .iter()
+                .any(|bead| bead.id.as_ref() == "low-priority-tail"),
+            "the low-priority tail must stay discoverable through the store's explicit limit"
+        );
+
+        let wire_arguments = runner.request_arguments(1);
+        assert_eq!(
+            wire_arguments,
+            ["list", "--ready", "--json", "--limit", EXPLICIT_QUERY_LIMIT]
+        );
     }
 
     #[tokio::test]
