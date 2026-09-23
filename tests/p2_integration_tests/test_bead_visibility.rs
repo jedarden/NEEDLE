@@ -19,8 +19,9 @@
 //! 3. Assert the expected candidates
 //! 4. On failure, output detailed diagnostics
 
-use std::collections::HashSet;
-use std::path::PathBuf;
+use std::collections::{BTreeMap, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
@@ -38,17 +39,27 @@ use needle::types::{Bead, BeadId, BeadStatus, BrDependency, ClaimResult, StrandR
 /// own client-side guard, not a store behaviour.
 struct MockBeadStore {
     beads: Arc<Mutex<Vec<Bead>>>,
+    mutations: Arc<Mutex<Vec<String>>>,
 }
 
 impl MockBeadStore {
     fn new(beads: Vec<Bead>) -> Self {
         Self {
             beads: Arc::new(Mutex::new(beads)),
+            mutations: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     fn all_beads(&self) -> Vec<Bead> {
         self.beads.lock().unwrap().clone()
+    }
+
+    fn record_mutation(&self, operation: &str) {
+        self.mutations.lock().unwrap().push(operation.to_string());
+    }
+
+    fn mutations(&self) -> Vec<String> {
+        self.mutations.lock().unwrap().clone()
     }
 }
 
@@ -70,26 +81,32 @@ impl BeadStore for MockBeadStore {
     }
 
     async fn claim(&self, _id: &BeadId, _actor: &str) -> Result<ClaimResult> {
+        self.record_mutation("claim");
         anyhow::bail!("not implemented")
     }
 
     async fn claim_auto(&self, _actor: &str) -> Result<ClaimResult> {
+        self.record_mutation("claim_auto");
         anyhow::bail!("not implemented")
     }
 
     async fn release(&self, _id: &BeadId) -> Result<()> {
+        self.record_mutation("release");
         Ok(())
     }
 
     async fn block(&self, _id: &BeadId) -> Result<()> {
+        self.record_mutation("block");
         Ok(())
     }
 
     async fn flush(&self) -> Result<()> {
+        self.record_mutation("flush");
         Ok(())
     }
 
     async fn reopen(&self, _id: &BeadId) -> Result<()> {
+        self.record_mutation("reopen");
         Ok(())
     }
 
@@ -98,26 +115,32 @@ impl BeadStore for MockBeadStore {
     }
 
     async fn add_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
+        self.record_mutation("add_label");
         Ok(())
     }
 
     async fn remove_label(&self, _id: &BeadId, _label: &str) -> Result<()> {
+        self.record_mutation("remove_label");
         Ok(())
     }
 
     async fn create_bead(&self, _title: &str, _body: &str, _labels: &[&str]) -> Result<BeadId> {
+        self.record_mutation("create_bead");
         anyhow::bail!("not implemented")
     }
 
     async fn add_dependency(&self, _blocker_id: &BeadId, _blocked_id: &BeadId) -> Result<()> {
+        self.record_mutation("add_dependency");
         Ok(())
     }
 
     async fn remove_dependency(&self, _blocked_id: &BeadId, _blocker_id: &BeadId) -> Result<()> {
+        self.record_mutation("remove_dependency");
         Ok(())
     }
 
     async fn clear_assignee(&self, id: &BeadId) -> Result<()> {
+        self.record_mutation("clear_assignee");
         let mut beads = self.beads.lock().unwrap();
         match beads.iter_mut().find(|bead| &bead.id == id) {
             Some(bead) => {
@@ -129,6 +152,7 @@ impl BeadStore for MockBeadStore {
     }
 
     async fn doctor_repair(&self) -> Result<RepairReport> {
+        self.record_mutation("doctor_repair");
         Ok(RepairReport::default())
     }
 
@@ -137,12 +161,43 @@ impl BeadStore for MockBeadStore {
     }
 
     async fn full_rebuild(&self) -> Result<()> {
+        self.record_mutation("full_rebuild");
         Ok(())
     }
 
     fn has_valid_store(&self) -> bool {
         true
     }
+}
+
+/// Capture every file in a target workspace so diagnostics cannot hide as a
+/// new issue, comment, or sidecar file outside the `.beads` directory.
+fn snapshot_workspace(root: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    fn visit(root: &Path, current: &Path, snapshot: &mut BTreeMap<PathBuf, Vec<u8>>) {
+        for entry in fs::read_dir(current).expect("target workspace should be readable") {
+            let entry = entry.expect("target workspace entry should be readable");
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .expect("target workspace entry type should be readable");
+            if file_type.is_dir() {
+                visit(root, &path, snapshot);
+            } else if file_type.is_file() {
+                let relative = path
+                    .strip_prefix(root)
+                    .expect("workspace entry should be under the target root")
+                    .to_path_buf();
+                snapshot.insert(
+                    relative,
+                    fs::read(&path).expect("target file should be readable"),
+                );
+            }
+        }
+    }
+
+    let mut snapshot = BTreeMap::new();
+    visit(root, root, &mut snapshot);
+    snapshot
 }
 
 /// A fake-but-stable workspace slug for diagnostics. Pluck writes its
@@ -456,4 +511,94 @@ async fn test_bead_visibility_dependency_edges_are_the_frontiers_concern() {
             panic!("Unexpected result: {other:?}");
         }
     }
+}
+
+#[tokio::test]
+async fn pluck_starvation_uses_telemetry_without_mutating_target_store() {
+    let target_workspace = tempfile::tempdir().expect("target workspace");
+    let target_beads = target_workspace.path().join(".beads");
+    fs::create_dir_all(&target_beads).expect("target bead store directory");
+    fs::write(
+        target_beads.join("issues.jsonl"),
+        b"existing issue record\n",
+    )
+    .expect("target issue data");
+    fs::write(
+        target_beads.join("comments.jsonl"),
+        b"existing comment record\n",
+    )
+    .expect("target comment data");
+    fs::write(
+        target_beads.join("issue_data.jsonl"),
+        b"existing issue metadata\n",
+    )
+    .expect("target issue metadata");
+
+    let mut blocked = create_test_bead();
+    blocked.workspace = target_workspace.path().to_path_buf();
+    blocked.body = Some("The target issue description must survive unchanged.".to_string());
+    blocked.labels = vec!["deferred".to_string()];
+    let store = MockBeadStore::new(vec![blocked]);
+    let before_beads = store.all_beads();
+    let before_workspace = snapshot_workspace(target_workspace.path());
+
+    let telemetry_dir = tempfile::tempdir().expect("telemetry directory");
+    let telemetry =
+        Telemetry::with_log_dir("pluck-isolation-worker".to_string(), telemetry_dir.path());
+    telemetry.start();
+    let strand = PluckStrand::new(vec![], telemetry.clone());
+    let result = strand.evaluate(&store, &HashSet::new()).await;
+
+    assert!(
+        matches!(result, StrandResult::NoWork),
+        "a deferred-only target should have no Pluck candidate: {result:?}"
+    );
+
+    telemetry.shutdown().await;
+    let events: Vec<serde_json::Value> = fs::read_dir(telemetry_dir.path())
+        .expect("telemetry directory should be readable")
+        .map(|entry| {
+            let path = entry.expect("telemetry entry should be readable").path();
+            fs::read_to_string(path).expect("telemetry file should be readable")
+        })
+        .flat_map(|content| {
+            content
+                .lines()
+                .map(|line| {
+                    serde_json::from_str(line).expect("telemetry line should be valid JSON")
+                })
+                .collect::<Vec<serde_json::Value>>()
+        })
+        .filter(|event: &serde_json::Value| {
+            event["event_type"] == "strand.pluck.starvation_detected"
+        })
+        .collect();
+    assert_eq!(events.len(), 1, "Pluck should emit one starvation event");
+    let payload = &events[0]["data"];
+    assert_eq!(
+        payload["workspace"],
+        target_workspace.path().display().to_string()
+    );
+    assert_eq!(payload["open_count"], 1);
+    assert_eq!(payload["excluded_count"], 1);
+    assert_eq!(
+        payload["candidate_exclusion_reasons"],
+        serde_json::json!(["label:deferred"])
+    );
+
+    assert_eq!(
+        serde_json::to_value(store.all_beads()).expect("serialize target beads"),
+        serde_json::to_value(before_beads).expect("serialize target bead snapshot"),
+        "starvation diagnostics must not change bead, comment, or issue fields"
+    );
+    assert!(
+        store.mutations().is_empty(),
+        "starvation diagnostics must not call a target-store mutation: {:?}",
+        store.mutations()
+    );
+    assert_eq!(
+        snapshot_workspace(target_workspace.path()),
+        before_workspace,
+        "starvation diagnostics must not write any target-workspace file"
+    );
 }
