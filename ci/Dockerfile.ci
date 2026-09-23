@@ -2,9 +2,9 @@
 #
 # Version contract: the tag produced from this image comes from ci/VERSION, and
 # every consumer template in declarative-config pins
-# ronaldraygun/needle-ci-builder:<ci/VERSION>-with-deps. Bump ci/VERSION only
-# together with those pins -- a VERSION bump without them, or a contents change
-# without a bump, leaves needle-ci pulling a tag that does not exist.
+# ronaldraygun/needle-ci-builder:<ci/VERSION>-with-deps by digest. Bump
+# ci/VERSION with image content changes, then repin the consumers after both
+# new image tags publish. Never point CI at a tag before it exists.
 #
 # Build trigger: the needle-ci-builder WorkflowTemplate's check-changed-files
 # step only rebuilds when the pushed commit touches Cargo.toml, Cargo.lock,
@@ -38,6 +38,21 @@ RUN apt-get update && apt-get install -y \
     git curl jq build-essential pkg-config libssl-dev \
     gcc-aarch64-linux-gnu \
     && rm -rf /var/lib/apt/lists/*
+
+# The P2 fallback-gate integration tests run real Go builds. Keep the
+# toolchain in the base image so both the builder and test shards use it.
+# Checksum: https://go.dev/dl/ (go1.26.8.linux-amd64.tar.gz).
+ARG GO_VERSION=1.26.8
+ARG GO_ARCHIVE_SHA256=d0f743b33e8d8945e6b1f432edd15785c70507121d6e2a723b21285eddf8b57b
+RUN set -eux; \
+    archive="go${GO_VERSION}.linux-amd64.tar.gz"; \
+    curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-all-errors \
+      "https://go.dev/dl/${archive}" -o "/tmp/${archive}"; \
+    echo "${GO_ARCHIVE_SHA256}  /tmp/${archive}" | sha256sum --check --strict; \
+    tar -C /usr/local -xzf "/tmp/${archive}"; \
+    rm -f "/tmp/${archive}"; \
+    test "$(/usr/local/go/bin/go version)" = "go version go${GO_VERSION} linux/amd64"
+ENV PATH="/usr/local/go/bin:${PATH}"
 
 # Keep the compiler cache available without making every CI pod download an
 # executable from GitHub before it can start useful work. The checksum is tied

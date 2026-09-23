@@ -262,7 +262,7 @@ workdir_line="$(grep -nF 'WORKDIR /workspace' "$BASE_DOCKERFILE" | cut -d: -f1)"
    "$nextest_assert_line" -lt "$workdir_line" ]] || fail \
   'base image must add cargo-nextest after the pinned Rust toolchain layer and before WORKDIR'
 
-[[ "$(tr -d '\n' < "$CI_VERSION_FILE")" == "0.1.13" ]] \
+[[ "$(tr -d '\n' < "$CI_VERSION_FILE")" == "0.1.14" ]] \
   || fail 'ci/VERSION must move with the exact-profile dependency image contents'
 grep -Fq 'nextest-version = { required = "0.9.144" }' "$NEXTEST_CONFIG" \
   || fail 'nextest config must set the minimum supported runner version'
