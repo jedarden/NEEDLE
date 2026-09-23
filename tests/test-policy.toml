@@ -213,7 +213,9 @@ push = 670
 # +2 N-T10 policy-doctor provenance/conflict report cases (needle-d8773e81).
 # +3 N-T10 policy-admission missing, ambiguity, and success cases
 # (needle-91f5e616).
-contract = 203
+# +4 Explore rediscovery, rotation, exclusion cadence, and starvation-safe
+# scanning contracts (needle-5df91926).
+contract = 207
 # +16 literal test attributes for Cargo execution isolation (needle-b31fcb27):
 # seven integration cases plus nine nested-Cargo fixture tests embedded in source.
 # +1 real-adapter contract for the injectable ProcessRunner (needle-d3f191a3).
@@ -295,7 +297,9 @@ owner = "component:weave-unravel-pulse"
 name = "real_br_integration_tests"
 path = "tests/real_br_integration_tests.rs"
 tier = "contract"
-max_tests = 67
+# +4 Explore rediscovery, rotation, exclusion cadence, and starvation-safe
+# scanning contracts (needle-5df91926).
+max_tests = 71
 owner = "component:bead-rs-contract"
 
 [[harness]]
@@ -777,3 +781,7 @@ owner = "component:test-policy"
 [[artifact]]
 pattern = "tests/documentation/*"
 owner = "component:test-documentation"
+
+[[artifact]]
+pattern = "tests/real_br_integration_tests/*"
+owner = "component:bead-rs-contract"

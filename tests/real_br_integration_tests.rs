@@ -24,6 +24,8 @@ mod bead_rs_lifecycle;
 mod checkpoint_dispatch_guard;
 #[path = "real_br_integration_tests/checkpoint_roundtrip_fidelity.rs"]
 mod checkpoint_roundtrip_fidelity;
+#[path = "real_br_integration_tests/explore_rediscovery_e2e.rs"]
+mod explore_rediscovery_e2e;
 #[path = "real_br_integration_tests/workspace_equality_tests.rs"]
 mod workspace_equality_tests;
 
