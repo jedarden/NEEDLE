@@ -1,0 +1,621 @@
+//! Fake-CLI coverage for the documented agent adapter support matrix.
+//!
+//! The README's "Supported Agents" table promises OpenCode, Codex, and Aider
+//! (plus a generic YAML template) alongside the Claude adapters. The built-in
+//! registry ships all of them, but until now only their static configuration
+//! was asserted on — no test ever executed their invoke templates. These
+//! tests run each shipped built-in adapter definition through the real
+//! [`Dispatcher::dispatch`] spawn path against a fake agent CLI, checking:
+//!
+//! 1. **Invocation** — the rendered template hands the prompt to the CLI the
+//!    way the adapter's input method promises (file path, argv, or stdin),
+//!    from the bead's workspace, with `{model}` rendered.
+//! 2. **Exit status** — a zero exit is reported as success with captured
+//!    stdout; a non-zero exit is reported verbatim.
+//! 3. **Failures** — a CLI named by the template but missing from PATH
+//!    surfaces as exit 127 with "command not found" on stderr.
+//!
+//! The fake CLIs resolve through `PATH`, so tests that prepend a fake bin
+//! directory serialize on a shared mutex: concurrent `set_var` from sibling
+//! tests in this binary would lose one another's directory.
+
+use std::collections::HashMap;
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use tempfile::TempDir;
+use tokio::sync::Mutex;
+
+use needle::bead_store::{BeadStore, Filters, RepairReport};
+use needle::claim::{ClaimIdentity, ResolvedStoreContext};
+use needle::dispatch::{
+    builtin_adapters, extract_tokens, AgentAdapter, DispatchContext, Dispatcher, ExecutionResult,
+};
+use needle::prompt::BuiltPrompt;
+use needle::telemetry::Telemetry;
+use needle::types::{Bead, BeadId, BeadStatus, ClaimResult, ClaimStatus};
+
+/// The worker identity every matrix dispatch claims (and verifies) under.
+const MATRIX_WORKER: &str = "matrix-test";
+/// Claim revision and epoch the matrix store reports for every bead.
+const MATRIX_REVISION: u64 = 11;
+const MATRIX_EPOCH: u64 = 4;
+
+/// Serializes PATH mutation among the tests in this module.
+static FAKE_PATH_LOCK: Mutex<()> = Mutex::const_new(());
+
+/// A bead store that answers every claim with this module's worker, so the
+/// dispatcher's final pre-spawn gate verifies and the spawn proceeds.
+///
+/// The pre-spawn gate only accepts a carried [`DispatchContext`], so the
+/// identity here and in [`matrix_context`] must agree exactly.
+struct MatrixClaimStore;
+
+#[async_trait]
+impl BeadStore for MatrixClaimStore {
+    async fn ready(&self, _filters: &Filters) -> anyhow::Result<Vec<Bead>> {
+        Ok(vec![])
+    }
+
+    async fn list_all(&self) -> anyhow::Result<Vec<Bead>> {
+        Ok(vec![])
+    }
+
+    async fn show(&self, _id: &BeadId) -> anyhow::Result<Bead> {
+        anyhow::bail!("MatrixClaimStore serves claim_status only")
+    }
+
+    async fn claim_status(&self, _id: &BeadId) -> anyhow::Result<ClaimStatus> {
+        Ok(ClaimStatus {
+            status: BeadStatus::InProgress,
+            assignee: Some(MATRIX_WORKER.to_string()),
+            revision: Some(MATRIX_REVISION),
+            claim_epoch: Some(MATRIX_EPOCH),
+        })
+    }
+
+    async fn claim(&self, _id: &BeadId, _actor: &str) -> anyhow::Result<ClaimResult> {
+        anyhow::bail!("MatrixClaimStore serves claim_status only")
+    }
+
+    async fn claim_auto(&self, _actor: &str) -> anyhow::Result<ClaimResult> {
+        anyhow::bail!("MatrixClaimStore serves claim_status only")
+    }
+
+    async fn release(&self, _id: &BeadId) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn block(&self, _id: &BeadId) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn clear_assignee(&self, _id: &BeadId) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn flush(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn reopen(&self, _id: &BeadId) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn labels(&self, _id: &BeadId) -> anyhow::Result<Vec<String>> {
+        Ok(vec![])
+    }
+
+    async fn add_label(&self, _id: &BeadId, _label: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn remove_label(&self, _id: &BeadId, _label: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn create_bead(
+        &self,
+        _title: &str,
+        _body: &str,
+        _labels: &[&str],
+    ) -> anyhow::Result<BeadId> {
+        anyhow::bail!("MatrixClaimStore serves claim_status only")
+    }
+
+    async fn add_dependency(
+        &self,
+        _blocker_id: &BeadId,
+        _blocked_id: &BeadId,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn remove_dependency(
+        &self,
+        _blocked_id: &BeadId,
+        _blocker_id: &BeadId,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    async fn doctor_repair(&self) -> anyhow::Result<RepairReport> {
+        Ok(RepairReport {
+            warnings: Vec::new(),
+            fixed: Vec::new(),
+        })
+    }
+
+    async fn doctor_check(&self) -> anyhow::Result<RepairReport> {
+        Ok(RepairReport {
+            warnings: Vec::new(),
+            fixed: Vec::new(),
+        })
+    }
+
+    async fn full_rebuild(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn has_valid_store(&self) -> bool {
+        true
+    }
+}
+
+/// The claim identity and carried store the pre-spawn gate verifies against.
+fn matrix_context(workspace: &Path) -> DispatchContext {
+    let store: Arc<dyn BeadStore> = Arc::new(MatrixClaimStore);
+    DispatchContext::new(
+        ResolvedStoreContext::new(store, workspace.to_path_buf()),
+        ClaimIdentity {
+            actor: MATRIX_WORKER.to_string(),
+            revision: Some(MATRIX_REVISION),
+            claim_epoch: Some(MATRIX_EPOCH),
+        },
+    )
+}
+
+/// Marker env var carrying the fake-CLI invocation log path. Injected through
+/// the adapter's own `environment` map, which the dispatcher passes to the
+/// child process — the templates themselves are never modified.
+const LOG_ENV: &str = "NEEDLE_FAKE_AGENT_LOG";
+
+/// Env var a fake CLI reads to decide its exit code (failure-path control).
+const EXIT_ENV: &str = "NEEDLE_FAKE_AGENT_EXIT";
+
+/// One fake bin directory plus the invocation log its CLIs append to.
+struct FakeCli {
+    _bin_dir: TempDir,
+    log: PathBuf,
+}
+
+impl FakeCli {
+    /// Create the bin dir and write a fake script for each agent name.
+    ///
+    /// Each script appends one record per invocation — `cwd=`, then one
+    /// `arg=` line per argv entry, then `file_content=` for any
+    /// `--prompt-file <path>` pair — prints a marker line, and exits with
+    /// [`EXIT_ENV`] (default 0).
+    fn new() -> Self {
+        let bin_dir = tempfile::tempdir().expect("create fake bin dir");
+        let log = bin_dir.path().join("invocations.log");
+        // Shared prologue: record cwd and every argv entry.
+        const RECORD_ARGS: &str = "printf 'cwd=%s\\n' \"$PWD\" >> \"$NEEDLE_FAKE_AGENT_LOG\"\n\
+             for a in \"$@\"; do printf 'arg=%s\\n' \"$a\" >> \"$NEEDLE_FAKE_AGENT_LOG\"; done\n\
+             prev=''\n\
+             for a in \"$@\"; do\n\
+             \x20 if [ \"$prev\" = '--prompt-file' ]; then\n\
+             \x20   printf 'file_content=%s\\n' \"$(cat \"$a\")\" >> \"$NEEDLE_FAKE_AGENT_LOG\"\n\
+             \x20 fi\n\
+             \x20 prev=\"$a\"\n\
+             done\n";
+        let agents = [
+            ("opencode", "fake-opencode-ok", "", RECORD_ARGS),
+            ("codex", "fake-codex-ok", "", RECORD_ARGS),
+            (
+                "aider",
+                "fake-aider-ok",
+                // The token line the shipped regex extraction config parses.
+                "echo 'Tokens: 1,234 sent, 567 received'",
+                RECORD_ARGS,
+            ),
+            (
+                "my-agent",
+                "fake-generic-ok",
+                "",
+                concat!(
+                    "printf 'cwd=%s\\n' \"$PWD\" >> \"$NEEDLE_FAKE_AGENT_LOG\"\n",
+                    // The generic template (and the Stdin input method) hand
+                    // the prompt to the CLI on standard input.
+                    "stdin_content=$(cat)\n",
+                    "printf 'stdin=%s\\n' \"$stdin_content\" >> \"$NEEDLE_FAKE_AGENT_LOG\"\n",
+                ),
+            ),
+        ];
+        for (name, marker, output, record) in agents {
+            let script = format!(
+                "#!/usr/bin/env bash\n{record}{output}\necho '{marker}'\nexit \"${{NEEDLE_FAKE_AGENT_EXIT:-0}}\"\n"
+            );
+            let path = bin_dir.path().join(name);
+            fs::write(&path, script).expect("write fake CLI script");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755))
+                .expect("make fake CLI executable");
+        }
+        FakeCli {
+            _bin_dir: bin_dir,
+            log,
+        }
+    }
+}
+
+/// Prepend `dir` to `PATH`, restoring the previous value on drop.
+struct FakePathGuard {
+    previous: Option<std::ffi::OsString>,
+}
+
+impl FakePathGuard {
+    fn prepend(dir: &Path) -> Self {
+        let previous = std::env::var_os("PATH");
+        let mut paths = vec![dir.to_path_buf()];
+        paths.extend(std::env::split_paths(
+            previous.as_deref().unwrap_or_default(),
+        ));
+        std::env::set_var("PATH", std::env::join_paths(&paths).expect("join PATH"));
+        FakePathGuard { previous }
+    }
+}
+
+impl Drop for FakePathGuard {
+    fn drop(&mut self) {
+        match self.previous.take() {
+            Some(value) => std::env::set_var("PATH", value),
+            None => std::env::remove_var("PATH"),
+        }
+    }
+}
+
+fn test_prompt(bead_id: &str) -> BuiltPrompt {
+    BuiltPrompt {
+        content: format!("matrix smoke prompt for {bead_id}"),
+        hash: "matrix-hash".to_string(),
+        token_estimate: 42,
+        template_name: "test".to_string(),
+        template_version: "1.0".to_string(),
+    }
+}
+
+/// Dispatch the shipped built-in adapter `name` against the fake CLIs.
+///
+/// Clones the built-in definition untouched except for the fake-CLI log path
+/// (and any extra environment), so the template under test is exactly the one
+/// shipped in [`builtin_adapters`].
+async fn dispatch_builtin(
+    name: &str,
+    fake: &FakeCli,
+    extra_env: &[(&str, String)],
+    bead_id: &str,
+    workspace: &Path,
+) -> anyhow::Result<ExecutionResult> {
+    let mut adapter: AgentAdapter = builtin_adapters()
+        .into_iter()
+        .find(|a| a.name == name)
+        .unwrap_or_else(|| panic!("builtin adapter {name} missing from the registry"))
+        .clone();
+    adapter
+        .environment
+        .insert(LOG_ENV.to_string(), fake.log.display().to_string());
+    for (key, value) in extra_env {
+        adapter.environment.insert(key.to_string(), value.clone());
+    }
+
+    let mut adapters = HashMap::new();
+    adapters.insert(name.to_string(), adapter);
+
+    let dispatcher =
+        Dispatcher::with_adapters(adapters, Telemetry::new(MATRIX_WORKER.to_string()), 3600)
+            .with_worker_id(MATRIX_WORKER.to_string());
+
+    let adapter_ref = dispatcher.adapter(name).expect("adapter wired");
+    dispatcher
+        .dispatch_with_context(
+            &BeadId::from(bead_id),
+            &test_prompt(bead_id),
+            adapter_ref,
+            workspace,
+            &matrix_context(workspace),
+        )
+        .await
+}
+
+/// Read the fake CLI's invocation log as flat `key=value` lines.
+fn read_log(fake: &FakeCli) -> Vec<String> {
+    fs::read_to_string(&fake.log)
+        .unwrap_or_else(|e| panic!("fake CLI never ran (no log at {}): {e}", fake.log.display()))
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+fn log_values<'a>(lines: &'a [String], key: &str) -> Vec<&'a str> {
+    let prefix = format!("{key}=");
+    lines
+        .iter()
+        .filter_map(|l| l.strip_prefix(prefix.as_str()))
+        .collect()
+}
+
+/// The argv entry immediately following `flag` in the logged invocation.
+fn value_after_flag<'a>(args: &'a [&'a str], flag: &str) -> Option<&'a str> {
+    args.iter()
+        .position(|a| *a == flag)
+        .and_then(|i| args.get(i + 1).copied())
+}
+
+fn unique_workspace() -> TempDir {
+    tempfile::tempdir().expect("create workspace dir")
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Invocation: each documented input method delivers the prompt as promised
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn opencode_builtin_receives_prompt_via_file() {
+    let _path_lock = FAKE_PATH_LOCK.lock().await;
+    let fake = FakeCli::new();
+    let _path = FakePathGuard::prepend(fake._bin_dir.path());
+    let workspace = unique_workspace();
+
+    let result = dispatch_builtin(
+        "opencode",
+        &fake,
+        &[],
+        "needle-matrix-opencode",
+        workspace.path(),
+    )
+    .await
+    .expect("opencode dispatch should succeed");
+
+    assert_eq!(result.exit_code, 0, "fake opencode exits 0");
+    assert!(result.timeout_reason.is_none());
+    assert!(
+        result.stdout.contains("fake-opencode-ok"),
+        "stdout captured"
+    );
+
+    let lines = read_log(&fake);
+    assert_eq!(
+        log_values(&lines, "cwd").first().copied(),
+        Some(workspace.path().to_str().expect("utf-8 workspace")),
+        "template must run the CLI from the bead workspace"
+    );
+
+    let args = log_values(&lines, "arg");
+    assert_eq!(
+        args.first().copied(),
+        Some("run"),
+        "opencode run subcommand"
+    );
+    assert!(args.contains(&"--non-interactive"), "non-interactive flag");
+
+    let prompt_path = value_after_flag(&args, "--prompt-file")
+        .expect("--prompt-file must be followed by the prompt path");
+    let logged_content = log_values(&lines, "file_content");
+    assert_eq!(
+        logged_content.first().copied(),
+        Some("matrix smoke prompt for needle-matrix-opencode"),
+        "prompt file must carry the built prompt"
+    );
+    assert!(
+        PathBuf::from(prompt_path).starts_with(std::env::temp_dir().join("needle")),
+        "prompt file lives under the dispatcher's temp prompt dir"
+    );
+}
+
+#[tokio::test]
+async fn codex_builtin_receives_prompt_as_argument() {
+    let _path_lock = FAKE_PATH_LOCK.lock().await;
+    let fake = FakeCli::new();
+    let _path = FakePathGuard::prepend(fake._bin_dir.path());
+    let workspace = unique_workspace();
+
+    let result = dispatch_builtin("codex", &fake, &[], "needle-matrix-codex", workspace.path())
+        .await
+        .expect("codex dispatch should succeed");
+
+    assert_eq!(result.exit_code, 0, "fake codex exits 0");
+    assert!(result.stdout.contains("fake-codex-ok"), "stdout captured");
+
+    let lines = read_log(&fake);
+    assert_eq!(
+        log_values(&lines, "cwd").first().copied(),
+        Some(workspace.path().to_str().expect("utf-8 workspace"))
+    );
+
+    let args = log_values(&lines, "arg");
+    assert_eq!(args.first().copied(), Some("exec"), "codex exec subcommand");
+    for expected in [
+        "--model",
+        "gpt-5.6-terra",
+        "--sandbox",
+        "workspace-write",
+        "--json",
+    ] {
+        assert!(
+            args.contains(&expected),
+            "codex template must render {expected}"
+        );
+    }
+    assert_eq!(
+        args.last().copied(),
+        Some("matrix smoke prompt for needle-matrix-codex"),
+        "prompt must arrive as the final argv entry via $(cat prompt_file)"
+    );
+    assert!(
+        !args.iter().any(|a| a.ends_with(".md")),
+        "args input method must not leak the prompt file path"
+    );
+}
+
+#[tokio::test]
+async fn aider_builtin_receives_prompt_via_message_flag() {
+    let _path_lock = FAKE_PATH_LOCK.lock().await;
+    let fake = FakeCli::new();
+    let _path = FakePathGuard::prepend(fake._bin_dir.path());
+    let workspace = unique_workspace();
+
+    let result = dispatch_builtin("aider", &fake, &[], "needle-matrix-aider", workspace.path())
+        .await
+        .expect("aider dispatch should succeed");
+
+    assert_eq!(result.exit_code, 0, "fake aider exits 0");
+    assert!(result.stdout.contains("fake-aider-ok"), "stdout captured");
+
+    let lines = read_log(&fake);
+    assert_eq!(
+        log_values(&lines, "cwd").first().copied(),
+        Some(workspace.path().to_str().expect("utf-8 workspace"))
+    );
+
+    let args = log_values(&lines, "arg");
+    for expected in ["--model", "claude-sonnet-4-6", "--yes", "--message"] {
+        assert!(
+            args.contains(&expected),
+            "aider template must render {expected}"
+        );
+    }
+    assert_eq!(
+        value_after_flag(&args, "--message"),
+        Some("matrix smoke prompt for needle-matrix-aider"),
+        "--message must carry the rendered prompt"
+    );
+
+    // The shipped regex extraction config must parse the token line the real
+    // aider prints (and this fake reproduces) from the captured stdout.
+    let adapter = builtin_adapters()
+        .into_iter()
+        .find(|a| a.name == "aider")
+        .expect("aider builtin");
+    let usage = extract_tokens(&adapter.token_extraction, &result.stdout, "");
+    assert_eq!(usage.input_tokens, Some(1234));
+    assert_eq!(usage.output_tokens, Some(567));
+}
+
+#[tokio::test]
+async fn generic_builtin_delivers_prompt_via_stdin() {
+    let _path_lock = FAKE_PATH_LOCK.lock().await;
+    let fake = FakeCli::new();
+    let _path = FakePathGuard::prepend(fake._bin_dir.path());
+    let workspace = unique_workspace();
+
+    // The generic template pipes {prompt_file} into the CLI's stdin.
+    let result = dispatch_builtin(
+        "generic",
+        &fake,
+        &[],
+        "needle-matrix-generic",
+        workspace.path(),
+    )
+    .await
+    .expect("generic dispatch should succeed");
+
+    assert_eq!(result.exit_code, 0, "fake generic agent exits 0");
+    assert!(result.stdout.contains("fake-generic-ok"), "stdout captured");
+
+    let lines = read_log(&fake);
+    assert_eq!(
+        log_values(&lines, "stdin").first().copied(),
+        Some("matrix smoke prompt for needle-matrix-generic"),
+        "the prompt must arrive on the CLI's standard input"
+    );
+    let args = log_values(&lines, "arg");
+    assert!(
+        !args.iter().any(|a| a.contains("matrix smoke prompt")),
+        "stdin adapters must not pass the prompt through argv"
+    );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Exit status and failures
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn builtin_adapter_nonzero_exit_is_reported_verbatim() {
+    let _path_lock = FAKE_PATH_LOCK.lock().await;
+    let fake = FakeCli::new();
+    let _path = FakePathGuard::prepend(fake._bin_dir.path());
+    let workspace = unique_workspace();
+
+    let result = dispatch_builtin(
+        "aider",
+        &fake,
+        &[(EXIT_ENV, "3".to_string())],
+        "needle-matrix-aider-fail",
+        workspace.path(),
+    )
+    .await
+    .expect("dispatch itself completes even when the agent fails");
+
+    assert_eq!(result.exit_code, 3, "agent exit code must pass through");
+    assert!(
+        result.timeout_reason.is_none(),
+        "a plain failure is not a timeout"
+    );
+}
+
+#[tokio::test]
+async fn missing_agent_cli_reports_command_not_found() {
+    // No PATH mutation: the template's CLI is renamed to a binary that cannot
+    // exist, so this test never races sibling tests reading the real PATH.
+    let fake = FakeCli::new();
+    let workspace = unique_workspace();
+
+    let mut adapter: AgentAdapter = builtin_adapters()
+        .into_iter()
+        .find(|a| a.name == "opencode")
+        .expect("opencode builtin")
+        .clone();
+    adapter
+        .environment
+        .insert(LOG_ENV.to_string(), fake.log.display().to_string());
+    adapter.agent_cli = "needle-matrix-missing-cli".to_string();
+    adapter.invoke_template = adapter
+        .invoke_template
+        .replace("opencode", "needle-matrix-missing-cli");
+
+    let mut adapters = HashMap::new();
+    adapters.insert("opencode".to_string(), adapter);
+
+    let dispatcher =
+        Dispatcher::with_adapters(adapters, Telemetry::new(MATRIX_WORKER.to_string()), 3600)
+            .with_worker_id(MATRIX_WORKER.to_string());
+
+    let adapter_ref = dispatcher.adapter("opencode").expect("adapter wired");
+    let result = dispatcher
+        .dispatch_with_context(
+            &BeadId::from("needle-matrix-missing-cli"),
+            &test_prompt("needle-matrix-missing-cli"),
+            adapter_ref,
+            workspace.path(),
+            &matrix_context(workspace.path()),
+        )
+        .await
+        .expect("missing CLI is a process exit, not a dispatch error");
+
+    assert_eq!(
+        result.exit_code, 127,
+        "shell reports a missing command as 127"
+    );
+    assert!(
+        result.stderr.contains("command not found"),
+        "stderr must name the failure: {:?}",
+        result.stderr
+    );
+    assert!(
+        !fake.log.exists(),
+        "the fake CLI must not have been invoked"
+    );
+}

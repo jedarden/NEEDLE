@@ -266,7 +266,12 @@ tier = "e2e"
 # +2 status/doctor integration contracts (needle-e896b565): oversized-root
 # doctor exit and root-to-C transitive pinning.
 # +2 subprocess HOME/Explore isolation contracts (needle-11c4fb97).
-max_tests = 403
+# +6 fake-CLI invocation, exit-status, and failure contracts for the
+# documented built-in adapter matrix (needle-55a93f6b): opencode/codex/
+# aider/generic templates driven through the real dispatch spawn path.
+# These belong here because the contract is the rendered-template process
+# spawn, which only the process-spawning harness can observe.
+max_tests = 409
 owner = "component:process-integration"
 
 [[harness]]
