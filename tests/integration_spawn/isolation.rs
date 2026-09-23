@@ -66,6 +66,10 @@ impl IsolatedChildEnv {
             .current_dir(self.path())
             .env("HOME", self.path())
             .env("NEEDLE_STRANDS__EXPLORE__WORKSPACE_ROOT", self.path())
+            // An inherited explicit list wins over workspace_root. Remove it
+            // so a caller cannot accidentally re-enable discovery of a real
+            // workspace through the parent test process's environment.
+            .env_remove("NEEDLE_STRANDS__EXPLORE__WORKSPACES")
             .env("XDG_CONFIG_HOME", self.path().join(".config"))
             .env("XDG_STATE_HOME", self.path().join(".local/state"))
             .env("XDG_CACHE_HOME", self.path().join(".cache"))

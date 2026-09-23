@@ -10,6 +10,22 @@ use std::path::{Path, PathBuf};
 
 #[test]
 fn needle_subprocesses_pin_home_and_explore_root() {
+    let synthetic = r#"
+        fn literal() {
+            let _ = Command::new("needle");
+        }
+        fn aliased() {
+            let binary = needle_binary_path();
+            let _ = Command::new(binary);
+        }
+    "#;
+    let synthetic_masked = mask_non_code(synthetic);
+    assert_eq!(
+        needle_constructors(synthetic, &synthetic_masked).len(),
+        2,
+        "the audit must recognize literal and aliased NEEDLE launches"
+    );
+
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut violations = Vec::new();
 
@@ -48,13 +64,30 @@ fn needle_constructors(source: &str, masked: &str) -> Vec<(usize, String)> {
         let open = start + "Command::new".len();
         let end = matching_delimiter(masked, open, b'(', b')');
         let argument = &source[open..end];
-        if !argument.contains("needle_transform")
-            && (argument.contains("CARGO_BIN_EXE_needle")
-                || argument.contains("needle_binary")
-                || argument.contains("needle_path")
-                || argument.contains("&needle")
-                || argument.contains("needle)"))
-        {
+        let function = function_source(source, masked, start);
+        let is_transform = argument.contains("needle_transform");
+        let direct_needle_path = argument.contains("CARGO_BIN_EXE_needle")
+            || argument.contains("NEXTEST_BIN_EXE_needle")
+            || argument.contains("needle_binary")
+            || argument.contains("needle_path")
+            || argument.contains("&needle")
+            || argument.contains("needle)")
+            || argument.contains("\"needle\"");
+        // Also cover an alias such as `let binary = needle_binary_path();`
+        // followed by `Command::new(binary)`. A function that resolves the
+        // NEEDLE binary and constructs a process command must isolate that
+        // command even when the path is not passed inline.
+        let function_resolves_needle = function.contains("CARGO_BIN_EXE_needle")
+            || function.contains("NEXTEST_BIN_EXE_needle")
+            || function.contains("needle_binary_path")
+            || function.contains("needle_binary")
+            || function.contains("needle_path");
+        // A cargo-based launch is also a real NEEDLE subprocess even though
+        // its constructor argument is `cargo`, not the binary path itself.
+        let cargo_runs_needle = argument.contains("\"cargo\"")
+            && function.contains("--bin")
+            && function.contains("\"needle\"");
+        if !is_transform && (direct_needle_path || function_resolves_needle || cargo_runs_needle) {
             constructors.push((start, "Command::new".to_string()));
         }
         cursor = end;
