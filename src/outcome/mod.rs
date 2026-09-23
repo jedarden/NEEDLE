@@ -4030,37 +4030,12 @@ impl OutcomeHandler {
             .iter()
             .any(|e| matches!(e, EventKind::WorkerHandlingTimeout { .. }));
         let mut action = BeadAction::Released(ReleaseReason::DispatchFailed);
-        if release_succeeded {
-            match self.increment_failure_count(store, bead).await {
-                Ok(new_count) => {
-                    let threshold = self.config.outcome.quarantine_after_failures;
-                    if threshold > 0 && new_count >= threshold {
-                        match self
-                            .quarantine_bead(store, bead, new_count, threshold)
-                            .await
-                        {
-                            Ok(quarantine_events) => {
-                                events.extend(quarantine_events);
-                                action = BeadAction::Quarantined;
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    bead_id = %bead.id,
-                                    error = %e,
-                                    "failed to quarantine bead after exceeding failure threshold"
-                                );
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        bead_id = %bead.id,
-                        error = %e,
-                        "failed to increment failure count after release"
-                    );
-                }
-            }
+        if release_succeeded
+            && self
+                .count_failure_toward_quarantine(store, bead, &mut events)
+                .await
+        {
+            action = BeadAction::Quarantined;
         }
 
         // Ensure we emit a reason event for telemetry.
@@ -4077,6 +4052,52 @@ impl OutcomeHandler {
         }
 
         Ok((action, events))
+    }
+
+    /// Increment a released bead's failure count and quarantine it once the
+    /// count reaches `outcome.quarantine_after_failures`.
+    ///
+    /// Returns whether the bead was quarantined; the quarantine events are
+    /// appended to `events`. Store errors are logged and leave the bead
+    /// released rather than failing the handler.
+    async fn count_failure_toward_quarantine(
+        &self,
+        store: &dyn BeadStore,
+        bead: &Bead,
+        events: &mut Vec<EventKind>,
+    ) -> bool {
+        let new_count = match self.increment_failure_count(store, bead).await {
+            Ok(new_count) => new_count,
+            Err(e) => {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    error = %e,
+                    "failed to increment failure count after release"
+                );
+                return false;
+            }
+        };
+        let threshold = self.config.outcome.quarantine_after_failures;
+        if threshold == 0 || new_count < threshold {
+            return false;
+        }
+        match self
+            .quarantine_bead(store, bead, new_count, threshold)
+            .await
+        {
+            Ok(quarantine_events) => {
+                events.extend(quarantine_events);
+                true
+            }
+            Err(e) => {
+                tracing::warn!(
+                    bead_id = %bead.id,
+                    error = %e,
+                    "failed to quarantine bead after exceeding failure threshold"
+                );
+                false
+            }
+        }
     }
 
     /// Timeout: release the bead and let it cool down behind an expiring
@@ -4139,7 +4160,22 @@ impl OutcomeHandler {
         );
 
         self.capture_wip_patch(bead, output).await;
-        let events = self.prepare_release_events(store, bead).await?;
+        let mut events = self.prepare_release_events(store, bead).await?;
+
+        // A crash on this bead counts toward its quarantine ceiling exactly
+        // like an ordinary failure, including the retry cooldown that the
+        // count installs. An adapter-wide crash storm never reaches this
+        // handler: judge_adapter_health routes it to
+        // handle_infrastructure_failure once the fingerprint spans distinct
+        // beads. Without the count, an agent that dies before doing any work
+        // (exit=-1 in 0ms, GitHub #22) is re-claimed forever.
+        let release_succeeded = !events
+            .iter()
+            .any(|e| matches!(e, EventKind::WorkerHandlingTimeout { .. }));
+        let quarantined = release_succeeded
+            && self
+                .count_failure_toward_quarantine(store, bead, &mut events)
+                .await;
 
         // Create alert bead with diagnostic info (best-effort).
         let signal_num = if signal_code > 128 {
@@ -4258,7 +4294,12 @@ impl OutcomeHandler {
             }
         }
 
-        Ok((BeadAction::Alerted, events))
+        let action = if quarantined {
+            BeadAction::Quarantined
+        } else {
+            BeadAction::Alerted
+        };
+        Ok((action, events))
     }
 
     /// AgentNotFound: release bead, emit error. No retry — this is a config issue.
@@ -6118,6 +6159,17 @@ mod tests {
 
         assert_eq!(result.outcome, Outcome::Crash(-1));
         assert_eq!(result.bead_action, BeadAction::Alerted);
+
+        // GitHub #22: an agent that dies before doing any work must still
+        // count toward the bead's quarantine ceiling, or it is re-claimed
+        // forever.
+        assert!(
+            store.actions().iter().any(|action| matches!(
+                action,
+                StoreAction::AddLabel(_, label) if label.starts_with("failure-count:")
+            )),
+            "a crash must increment the bead's failure count"
+        );
     }
 
     #[tokio::test]

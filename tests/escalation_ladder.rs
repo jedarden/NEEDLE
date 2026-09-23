@@ -258,12 +258,24 @@ impl Fixture {
         fs::write(
             adapter_dir.join("ladder-agent.yaml"),
             format!(
-                "name: ladder-agent\ndescription: immediate-exit quarantine fixture\nagent_cli: /bin/sh\ninvoke_template: |\n  exec '{}'\ntimeout_secs: 30\nenvironment:\n  NEEDLE_ATTEMPT_LOG: '{}'\n",
+                "name: ladder-agent\ndescription: immediate-exit quarantine fixture\nagent_cli: /bin/sh\ninvoke_template: |\n  printf '%s\\n' '{{bead_id}}' >> '{}'\n  exec '{}'\ntimeout_secs: 30\nenvironment:\n  NEEDLE_ATTEMPT_LOG: '{}'\n",
+                self.dispatch_log().display(),
                 self.instant_agent.display(),
                 self.failure_log.display(),
             ),
         )?;
         Ok(())
+    }
+
+    /// One line per instant-exit dispatch, naming the dispatched bead.
+    fn dispatch_log(&self) -> PathBuf {
+        self.failure_log.with_file_name("dispatch.log")
+    }
+
+    fn dispatches_of(&self, id: &str) -> usize {
+        fs::read_to_string(self.dispatch_log())
+            .map(|contents| contents.lines().filter(|line| *line == id).count())
+            .unwrap_or(0)
     }
 
     fn cli(&self, args: &[&str]) -> Command {
@@ -734,7 +746,7 @@ async fn escalation_ladder_end_to_end() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn immediate_exit_agent_quarantines_within_bounded_attempts() -> Result<()> {
+async fn immediate_exit_agent_counts_toward_quarantine_instead_of_looping() -> Result<()> {
     let fixture = Fixture::new()?;
     fixture.write_instant_exit_adapter()?;
     let parent = fixture.create_bead(
@@ -742,24 +754,43 @@ async fn immediate_exit_agent_quarantines_within_bounded_attempts() -> Result<()
         "The fixture agent terminates before producing a normal exit status.",
     )?;
 
-    // One worker process owns the retry loop. A failed spawn/abnormal process
-    // must not release the bead forever: the fifth attempt reaches the same
-    // quarantine ceiling as an ordinary repeated failure and the worker then
-    // exits cleanly because no ready bead remains.
-    fixture
-        .run_worker_until_idle(
-            "instant-exit-loop",
-            &fixture.normal_path,
-            Duration::from_secs(10),
-        )
-        .await?;
+    // GitHub #22: an agent that dies before doing any work (exit=-1, 0ms)
+    // used to be released without a failure count and re-claimed in a tight
+    // loop forever. A crash now counts like an ordinary failure: each one
+    // defers the bead behind the retry cooldown, so a worker dispatches it
+    // once and then goes idle instead of spinning, and the fifth crash
+    // reaches the quarantine ceiling. The cooldown is expired by a real
+    // label edit between rounds so the test does not sleep.
+    for attempt in 1..=5 {
+        fixture
+            .run_worker_until_idle(
+                &format!("instant-exit-{attempt}"),
+                &fixture.normal_path,
+                Duration::from_secs(30),
+            )
+            .await?;
+        assert_eq!(
+            fixture.dispatches_of(&parent),
+            attempt as usize,
+            "each worker run must dispatch the crashing bead exactly once, not loop"
+        );
+        assert_failure_count(&fixture, &parent, attempt)?;
+        if attempt < 5 {
+            let labels = fixture.labels(&parent)?;
+            assert!(
+                !labels.iter().any(|label| label == "quarantined"),
+                "crash {attempt} is below the quarantine ceiling"
+            );
+            assert!(
+                labels
+                    .iter()
+                    .any(|label| label.starts_with("quarantine-until:")),
+                "crash {attempt} must defer the bead behind the retry cooldown"
+            );
+            fixture.expire_and_allow_redispatch(&parent)?;
+        }
+    }
 
-    assert_eq!(
-        Fixture::log_lines(&fixture.failure_log),
-        5,
-        "the worker must stop at the quarantine ceiling instead of spinning"
-    );
-    assert_failure_count(&fixture, &parent, 5)?;
     assert_quarantine_window(&fixture, &parent, 1, 2 * 60 * 60)?;
     assert_manual_blocked_is_false(&fixture.why(&parent)?, &parent);
     Ok(())
