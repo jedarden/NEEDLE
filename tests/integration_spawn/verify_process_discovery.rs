@@ -32,11 +32,13 @@ fn assert_exact_list_object_shape(value: &serde_json::Value) {
     let keys = object.keys().map(String::as_str).collect::<BTreeSet<_>>();
     assert_eq!(
         keys,
-        BTreeSet::from(["discovered", "tmux_sessions"]),
+        BTreeSet::from(["discovered", "stale_sessions", "tmux_sessions"]),
         "list JSON has one stable top-level schema: {value}"
     );
     assert!(value["tmux_sessions"].is_array());
     assert!(value["discovered"].is_array());
+    // Reported since 1bbbb724: tmux sessions whose worker process is gone.
+    assert!(value["stale_sessions"].is_array());
 }
 
 #[test]

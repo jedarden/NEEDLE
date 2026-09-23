@@ -73,7 +73,6 @@ use needle::bead_store::{BeadStore, RepairReport};
 use needle::config::Config;
 use needle::dispatch::{AgentAdapter, Dispatcher, TokenExtraction};
 use needle::log_writer::DEFAULT_MAX_LINE_BYTES;
-use needle::telemetry::Telemetry;
 use needle::types::{Bead, BeadId, BeadStatus, ClaimResult, IdleAction, InputMethod, WorkerState};
 use needle::worker::Worker;
 
@@ -241,11 +240,14 @@ impl BeadStore for CycleStore {
             .find(|b| &b.id == id)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("bead not found: {id}"))?;
+        // Every claim mints a new epoch, as bead-rs does; pre-spawn
+        // verification requires the held claim to carry one.
+        let epoch = self.claim_count() as u64;
         Ok(needle::types::ClaimStatus {
             status: bead.status,
             assignee: bead.assignee,
-            revision: None,
-            claim_epoch: None,
+            revision: Some(epoch),
+            claim_epoch: Some(epoch),
         })
     }
 
@@ -554,7 +556,7 @@ fn claim_cycles_keep_bead_span_depth_constant() {
         // closed on pre-spawn claim verification without them
         // (docs/testing-mitosis-patterns.md, pattern 1).
         worker.set_dispatcher(
-            Dispatcher::with_adapters(adapters, Telemetry::new("span-depth".to_string()), 10)
+            Dispatcher::with_adapters(adapters, worker.telemetry().clone(), 10)
                 .with_bead_store(store.clone())
                 .with_worker_id("claude-sonnet-span-depth".to_string()),
         );

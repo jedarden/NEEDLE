@@ -136,11 +136,12 @@ async fn hard_timeout_fires_regardless_of_activity() {
 
     // Execute the agent - should hard timeout after 2 seconds despite activity
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &bead_id,
             &test_prompt(),
             dispatcher.adapter("test-hard-activity").unwrap(),
             workspace,
+            &crate::pre_spawn_pass_store::claimed_context(workspace),
         )
         .await;
 
@@ -224,11 +225,12 @@ async fn hard_deadline_never_resets_on_activity() {
     let start = Instant::now();
 
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &bead_id,
             &test_prompt(),
             dispatcher.adapter("test-hard-noreseat").unwrap(),
             workspace,
+            &crate::pre_spawn_pass_store::claimed_context(workspace),
         )
         .await;
 
@@ -277,11 +279,12 @@ async fn hard_timeout_disabled_when_config_is_zero() {
     let workspace = Path::new("/tmp");
 
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &bead_id,
             &test_prompt(),
             dispatcher.adapter("test-hard-disabled").unwrap(),
             workspace,
+            &crate::pre_spawn_pass_store::claimed_context(workspace),
         )
         .await;
 
@@ -331,11 +334,12 @@ async fn hard_timeout_shorter_than_idle_timeout_fires_first() {
     let start = Instant::now();
 
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &bead_id,
             &test_prompt(),
             dispatcher.adapter("test-hard-shorter").unwrap(),
             workspace,
+            &crate::pre_spawn_pass_store::claimed_context(workspace),
         )
         .await;
 
@@ -399,11 +403,12 @@ async fn idle_timeout_shorter_than_hard_timeout_fires_first() {
     let start = Instant::now();
 
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &bead_id,
             &test_prompt(),
             dispatcher.adapter("test-idle-shorter").unwrap(),
             workspace,
+            &crate::pre_spawn_pass_store::claimed_context(workspace),
         )
         .await;
 
@@ -485,11 +490,12 @@ async fn hard_timeout_very_short_deadline_fires_immediately() {
     let start = Instant::now();
 
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &bead_id,
             &test_prompt(),
             dispatcher.adapter("test-hard-very-short").unwrap(),
             workspace,
+            &crate::pre_spawn_pass_store::claimed_context(workspace),
         )
         .await;
 
@@ -548,11 +554,12 @@ async fn hard_timeout_with_silent_process() {
     let start = Instant::now();
 
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &bead_id,
             &test_prompt(),
             dispatcher.adapter("test-hard-silent").unwrap(),
             workspace,
+            &crate::pre_spawn_pass_store::claimed_context(workspace),
         )
         .await;
 

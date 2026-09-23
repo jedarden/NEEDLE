@@ -19,8 +19,9 @@ use async_trait::async_trait;
 use chrono::Utc;
 
 use needle::bead_store::{BeadStore, Filters, RepairReport};
+use needle::claim::{ClaimIdentity, ResolvedStoreContext};
 use needle::config::Config;
-use needle::dispatch::{AgentAdapter, Dispatcher, TokenExtraction};
+use needle::dispatch::{AgentAdapter, DispatchContext, Dispatcher, TokenExtraction};
 use needle::outcome::OutcomeHandler;
 use needle::prompt::BuiltPrompt;
 use needle::telemetry::Telemetry;
@@ -181,8 +182,8 @@ impl BeadStore for OutcomeStore {
         Ok(ClaimStatus {
             status: BeadStatus::InProgress,
             assignee: Some(WORKER.to_string()),
-            revision: None,
-            claim_epoch: None,
+            revision: Some(1),
+            claim_epoch: Some(1),
         })
     }
 
@@ -1100,14 +1101,25 @@ async fn assert_armor_no_config_dispatch_reopens_non_compiling_commit(
         template_name: "armor-fixture".to_string(),
         template_version: "1".to_string(),
     };
+    // Pre-spawn verification is context-only: carry the claim this fixture
+    // store confirms.
+    let context = DispatchContext::new(
+        ResolvedStoreContext::new(store.clone(), workspace.path().to_path_buf()),
+        ClaimIdentity {
+            actor: WORKER.to_string(),
+            revision: Some(1),
+            claim_epoch: Some(1),
+        },
+    );
     let execution = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &bead.id,
             &prompt,
             dispatcher
                 .adapter("armor-agent-fixture")
                 .expect("fixture adapter"),
             workspace.path(),
+            &context,
         )
         .await
         .expect("fixture agent dispatch");

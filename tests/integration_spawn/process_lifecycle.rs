@@ -17,7 +17,8 @@ use needle::strand::Strand;
 use needle::supervisor::reap_exited_child;
 use needle::telemetry::{Telemetry, TelemetryEvent};
 use needle::types::{
-    Bead, BeadId, BeadStatus, ClaimResult, IdleAction, InputMethod, StrandResult, WorkerState,
+    Bead, BeadId, BeadStatus, ClaimResult, ClaimStatus, IdleAction, InputMethod, StrandResult,
+    WorkerState,
 };
 use needle::worker::Worker;
 use std::collections::{HashMap, HashSet};
@@ -52,6 +53,9 @@ impl Drop for EnvGuard {
 struct LifecycleStore {
     beads: Mutex<Vec<Bead>>,
     created: Mutex<Vec<(String, String, Vec<String>)>>,
+    /// Monotonic claim epoch, minted per claim like bead-rs: pre-spawn
+    /// verification requires a revision and epoch on the held claim.
+    claim_epoch: Mutex<u64>,
 }
 
 impl LifecycleStore {
@@ -59,6 +63,7 @@ impl LifecycleStore {
         Self {
             beads: Mutex::new(beads),
             created: Mutex::new(Vec::new()),
+            claim_epoch: Mutex::new(0),
         }
     }
 
@@ -108,6 +113,17 @@ impl BeadStore for LifecycleStore {
             .ok_or_else(|| anyhow!("fixture has no bead {id}"))
     }
 
+    async fn claim_status(&self, id: &BeadId) -> Result<ClaimStatus> {
+        let bead = self.show(id).await?;
+        let epoch = *self.claim_epoch.lock().unwrap();
+        Ok(ClaimStatus {
+            status: bead.status,
+            assignee: bead.assignee,
+            revision: Some(epoch),
+            claim_epoch: Some(epoch),
+        })
+    }
+
     async fn claim(&self, id: &BeadId, actor: &str) -> Result<ClaimResult> {
         let mut beads = self.beads.lock().unwrap();
         let bead = beads
@@ -121,6 +137,7 @@ impl BeadStore for LifecycleStore {
         }
         bead.status = BeadStatus::InProgress;
         bead.assignee = Some(actor.to_string());
+        *self.claim_epoch.lock().unwrap() += 1;
         Ok(ClaimResult::Claimed(bead.clone()))
     }
 
@@ -136,6 +153,7 @@ impl BeadStore for LifecycleStore {
         };
         bead.status = BeadStatus::InProgress;
         bead.assignee = Some(actor.to_string());
+        *self.claim_epoch.lock().unwrap() += 1;
         Ok(ClaimResult::Claimed(bead.clone()))
     }
 
@@ -398,7 +416,7 @@ async fn worker_processes_a_bead_through_the_real_dispatch_lifecycle() {
     let adapter = blocking_adapter("echo-test", &dispatch_started, &release_dispatch, "done");
     let dispatcher = Dispatcher::with_adapters(
         HashMap::from([(adapter.name.clone(), adapter)]),
-        Telemetry::new("process-lifecycle-dispatch".to_string()),
+        worker.telemetry().clone(),
         5,
     )
     .with_bead_store(store.clone())

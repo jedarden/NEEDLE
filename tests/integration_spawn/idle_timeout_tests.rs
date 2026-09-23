@@ -89,11 +89,12 @@ async fn idle_timeout_fires_when_no_activity_occurs() {
 
     // Execute the agent - should timeout after 1 second of no activity
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &bead_id,
             &test_prompt(),
             dispatcher.adapter("test-idle").unwrap(),
             workspace,
+            &crate::pre_spawn_pass_store::claimed_context(workspace),
         )
         .await;
 
@@ -190,11 +191,12 @@ async fn idle_deadline_resets_on_activity_prevents_timeout() {
 
     // Execute the agent - should complete successfully without timeout
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &bead_id,
             &test_prompt(),
             dispatcher.adapter("test-activity").unwrap(),
             workspace,
+            &crate::pre_spawn_pass_store::claimed_context(workspace),
         )
         .await;
 
@@ -246,11 +248,12 @@ async fn idle_timeout_disabled_when_config_is_zero() {
 
     // Execute the agent - should complete normally without timeout
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &bead_id,
             &test_prompt(),
             dispatcher.adapter("test-disabled").unwrap(),
             workspace,
+            &crate::pre_spawn_pass_store::claimed_context(workspace),
         )
         .await;
 
@@ -307,11 +310,12 @@ async fn idle_timeout_with_config_none_falls_back_to_global() {
 
     // Execute the agent - should use global timeout
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &bead_id,
             &test_prompt(),
             dispatcher.adapter("test-fallback").unwrap(),
             workspace,
+            &crate::pre_spawn_pass_store::claimed_context(workspace),
         )
         .await;
 
@@ -352,11 +356,12 @@ async fn idle_timeout_very_short_deadline_fires_immediately() {
     // Note: Tokio's minimum sleep resolution is typically 1ms, so 0.1s should be fine
     // However, if this test is flaky, we may need to increase the timeout
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &bead_id,
             &test_prompt(),
             dispatcher.adapter("test-short").unwrap(),
             workspace,
+            &crate::pre_spawn_pass_store::claimed_context(workspace),
         )
         .await;
 
@@ -411,11 +416,12 @@ async fn idle_timeout_mixed_activity_pattern() {
 
     // Execute the agent - should timeout during the 3-second silence
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &bead_id,
             &test_prompt(),
             dispatcher.adapter("test-mixed").unwrap(),
             workspace,
+            &crate::pre_spawn_pass_store::claimed_context(workspace),
         )
         .await;
 

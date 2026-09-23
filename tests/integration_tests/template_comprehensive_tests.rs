@@ -832,6 +832,9 @@ fn mock_values_for_operation(operation: &str) -> HashMap<&'static str, &'static 
             .into_iter()
             .collect(),
         "query" => [("query", "status:open")].into_iter().collect(),
+        "manifest" => [("input", "/tmp/needle-manifest.json")]
+            .into_iter()
+            .collect(),
         "changes" => [("since", "2024-01-01")].into_iter().collect(),
         "ref_add" => [
             ("id", "test-id"),

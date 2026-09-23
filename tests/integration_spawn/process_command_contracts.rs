@@ -1507,11 +1507,12 @@ async fn dispatch_telemetry_process_contracts_e2e_all_template_variables_substit
     let _ = std::fs::create_dir_all(&workspace);
 
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("needle-tmpl"),
             &process_contract_prompt("irrelevant"),
             &adapter,
             &workspace,
+            &crate::pre_spawn_pass_store::claimed_context(&workspace),
         )
         .await
         .unwrap();
@@ -1565,11 +1566,12 @@ async fn dispatch_telemetry_process_contracts_e2e_adapter_with_custom_env_and_ba
     let adapter = dispatcher.adapter("custom-env").unwrap().clone();
 
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-baseurl"),
             &process_contract_prompt("t"),
             &adapter,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -1600,11 +1602,12 @@ async fn dispatch_telemetry_process_contracts_activity_detection_on_rapid_output
 
     let adapter_ref = dispatcher.adapter("rapid-test").unwrap().clone();
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-rapid-test"),
             &process_contract_prompt("test"),
             &adapter_ref,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -1633,11 +1636,12 @@ async fn dispatch_telemetry_process_contracts_activity_detection_on_normal_stdou
 
     let adapter_ref = dispatcher.adapter("echo-test").unwrap().clone();
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-echo-test"),
             &process_contract_prompt("test"),
             &adapter_ref,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -1660,11 +1664,12 @@ async fn dispatch_telemetry_process_contracts_activity_detection_during_transfor
 
     let adapter_ref = dispatcher.adapter("transform-test").unwrap().clone();
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-transform-test"),
             &process_contract_prompt("test"),
             &adapter_ref,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -1699,11 +1704,12 @@ async fn dispatch_telemetry_process_contracts_hard_timeout_kills_entire_process_
     let adapter_ref = dispatcher.adapter("hard-pgkill").unwrap().clone();
 
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-hard-pgkill"),
             &process_contract_prompt("test"),
             &adapter_ref,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -1752,11 +1758,12 @@ async fn dispatch_telemetry_process_contracts_e2e_workspace_directory_is_correct
     let adapter = dispatcher.adapter("pwd").unwrap().clone();
 
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-wsdir"),
             &process_contract_prompt("t"),
             &adapter,
             &workspace,
+            &crate::pre_spawn_pass_store::claimed_context(&workspace),
         )
         .await
         .unwrap();
@@ -1787,11 +1794,12 @@ async fn dispatch_telemetry_process_contracts_e2e_exit_code_137_is_crash() {
     let adapter = dispatcher.adapter("crash").unwrap().clone();
 
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-exit137"),
             &process_contract_prompt("t"),
             &adapter,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -1814,11 +1822,12 @@ async fn dispatch_telemetry_process_contracts_dispatch_template_renders_bead_id(
     let adapter = dispatcher.adapter("id").unwrap().clone();
 
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("needle-xyz"),
             &process_contract_prompt("test"),
             &adapter,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -1838,11 +1847,12 @@ async fn dispatch_telemetry_process_contracts_dispatch_stdin_redirect_from_promp
     let adapter = dispatcher.adapter("cat").unwrap().clone();
 
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-stdin"),
             &process_contract_prompt("prompt-content-here"),
             &adapter,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -1862,11 +1872,12 @@ async fn dispatch_telemetry_process_contracts_dispatch_captures_stderr() {
     let adapter = dispatcher.adapter("err").unwrap().clone();
 
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-stderr"),
             &process_contract_prompt("test"),
             &adapter,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -1888,11 +1899,12 @@ async fn dispatch_telemetry_process_contracts_e2e_prompt_with_newlines_preserved
     let adapter = dispatcher.adapter("wc").unwrap().clone();
 
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-newlines"),
             &process_contract_prompt(multiline),
             &adapter,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -1922,11 +1934,12 @@ async fn dispatch_telemetry_process_contracts_activity_detection_on_binary_data(
     let adapter = dispatcher.adapter("binary-output").unwrap().clone();
 
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-activity-binary"),
             &process_contract_prompt("t"),
             &adapter,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -1959,11 +1972,12 @@ async fn dispatch_telemetry_process_contracts_activity_detection_large_output_bu
     let adapter = dispatcher.adapter("large-burst").unwrap().clone();
 
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-activity-burst"),
             &process_contract_prompt("t"),
             &adapter,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -1995,11 +2009,12 @@ async fn dispatch_telemetry_process_contracts_activity_detection_on_stdout_reset
     let adapter = dispatcher.adapter("chatty-stdout").unwrap().clone();
 
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-activity-stdout"),
             &process_contract_prompt("t"),
             &adapter,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -2033,11 +2048,12 @@ async fn dispatch_telemetry_process_contracts_activity_detection_on_multiline_ou
 
     let adapter_ref = dispatcher.adapter("multiline-test").unwrap().clone();
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-multiline-test"),
             &process_contract_prompt("test"),
             &adapter_ref,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -2071,11 +2087,12 @@ async fn dispatch_telemetry_process_contracts_e2e_multiple_environment_variables
     let adapter = dispatcher.adapter("multienv").unwrap().clone();
 
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-env-multi"),
             &process_contract_prompt("test"),
             &adapter,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -2103,11 +2120,12 @@ async fn dispatch_telemetry_process_contracts_e2e_json_output_capture_and_token_
     let adapter = dispatcher.adapter("json-agent").unwrap().clone();
 
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-json"),
             &process_contract_prompt("t"),
             &adapter,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -2128,11 +2146,12 @@ async fn dispatch_telemetry_process_contracts_e2e_exit_code_2_is_failure() {
     let adapter = dispatcher.adapter("f2").unwrap().clone();
 
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-exit2"),
             &process_contract_prompt("t"),
             &adapter,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -2149,11 +2168,12 @@ async fn dispatch_telemetry_process_contracts_e2e_exit_code_1_is_failure() {
     let adapter = dispatcher.adapter("f1").unwrap().clone();
 
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-exit1"),
             &process_contract_prompt("t"),
             &adapter,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -2172,11 +2192,12 @@ async fn dispatch_telemetry_process_contracts_dispatch_stdin_input_method_delive
     let prompt = "prompt delivered through configured stdin";
 
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-stdin-method"),
             &process_contract_prompt(prompt),
             &adapter,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -2209,11 +2230,12 @@ async fn dispatch_telemetry_process_contracts_hard_timeout_kills_active_agent() 
 
     let start = Instant::now();
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-hard-timeout-active"),
             &process_contract_prompt("test"),
             &adapter_ref,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -2259,11 +2281,12 @@ async fn dispatch_telemetry_process_contracts_hard_timeout_disabled_when_zero() 
     let adapter_ref = dispatcher.adapter("hard-disabled").unwrap().clone();
 
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-hard-disabled"),
             &process_contract_prompt("test"),
             &adapter_ref,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -2283,11 +2306,12 @@ async fn dispatch_telemetry_process_contracts_dispatch_timeout_returns_124() {
     let adapter = dispatcher.adapter("slow").unwrap().clone();
 
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-timeout"),
             &process_contract_prompt("test"),
             &adapter,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -2320,11 +2344,12 @@ async fn dispatch_telemetry_process_contracts_idle_timeout_resets_on_activity_ha
 
     let start = Instant::now();
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-idle-resets-hard-does-not"),
             &process_contract_prompt("test"),
             &adapter_ref,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -2377,11 +2402,12 @@ async fn dispatch_telemetry_process_contracts_e2e_outer_cancellation_still_kills
     // shorter than the agent's own, wrapping the whole dispatch call.
     let outer = tokio::time::timeout(
         Duration::from_millis(500),
-        dispatcher.dispatch(
+        dispatcher.dispatch_with_context(
             &BeadId::from("nd-outercancel"),
             &process_contract_prompt("t"),
             &adapter,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         ),
     )
     .await;
@@ -2433,11 +2459,12 @@ async fn dispatch_telemetry_process_contracts_dispatch_environment_variables() {
     let adapter = dispatcher.adapter("env").unwrap().clone();
 
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-env"),
             &process_contract_prompt("test"),
             &adapter,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -2458,11 +2485,12 @@ async fn dispatch_telemetry_process_contracts_activity_detection_timestamps_befo
 
     let adapter_ref = dispatcher.adapter("timestamp-order-test").unwrap().clone();
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-timestamp-order-test"),
             &process_contract_prompt("test"),
             &adapter_ref,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -2495,11 +2523,12 @@ async fn dispatch_telemetry_process_contracts_activity_detection_on_partial_chun
     let adapter = dispatcher.adapter("small-chunks").unwrap().clone();
 
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-activity-chunks"),
             &process_contract_prompt("t"),
             &adapter,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -2524,11 +2553,12 @@ async fn dispatch_telemetry_process_contracts_e2e_timeout_kills_agent_returns_12
 
     let start = Instant::now();
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-timeout"),
             &process_contract_prompt("t"),
             &adapter,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -2555,11 +2585,12 @@ async fn dispatch_telemetry_process_contracts_dispatch_cleans_up_temp_file() {
     let adapter = dispatcher.adapter("true").unwrap().clone();
 
     let _ = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &bead_id,
             &process_contract_prompt("cleanup test"),
             &adapter,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -2587,11 +2618,12 @@ async fn dispatch_telemetry_process_contracts_activity_timestamp_tracked_per_pro
     // First dispatch
     let adapter1 = dispatcher.adapter("timestamped").unwrap().clone();
     let result1 = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-timestamp-1"),
             &process_contract_prompt("t"),
             &adapter1,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -2604,11 +2636,12 @@ async fn dispatch_telemetry_process_contracts_activity_timestamp_tracked_per_pro
     // Second dispatch
     let adapter2 = dispatcher.adapter("timestamped").unwrap().clone();
     let result2 = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-timestamp-2"),
             &process_contract_prompt("t"),
             &adapter2,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -2629,11 +2662,12 @@ async fn dispatch_telemetry_process_contracts_activity_detection_on_stderr_outpu
 
     let adapter_ref = dispatcher.adapter("stderr-test").unwrap().clone();
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-stderr-test"),
             &process_contract_prompt("test"),
             &adapter_ref,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -2658,11 +2692,12 @@ async fn dispatch_telemetry_process_contracts_activity_detection_on_chunked_outp
 
     let adapter_ref = dispatcher.adapter("chunked-test").unwrap().clone();
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-chunked-test"),
             &process_contract_prompt("test"),
             &adapter_ref,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -2692,11 +2727,12 @@ async fn dispatch_telemetry_process_contracts_e2e_prompt_with_shell_metacharacte
     let adapter = dispatcher.adapter("catprompt").unwrap().clone();
 
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-meta"),
             &process_contract_prompt(dangerous_prompt),
             &adapter,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -2741,11 +2777,12 @@ async fn dispatch_telemetry_process_contracts_activity_detection_on_stderr_reset
     let adapter = dispatcher.adapter("chatty-stderr").unwrap().clone();
 
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-activity-stderr"),
             &process_contract_prompt("t"),
             &adapter,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -2780,11 +2817,12 @@ async fn dispatch_telemetry_process_contracts_idle_timeout_fires_when_no_activit
 
     let start = Instant::now();
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-idle-timeout"),
             &process_contract_prompt("t"),
             &adapter,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -2832,11 +2870,12 @@ async fn dispatch_telemetry_process_contracts_hard_timeout_shorter_than_idle_tim
 
     let start = Instant::now();
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-hard-before-idle"),
             &process_contract_prompt("test"),
             &adapter_ref,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -2876,11 +2915,12 @@ async fn dispatch_telemetry_process_contracts_e2e_timeout_kills_entire_process_g
     let adapter = dispatcher.adapter("pgkill").unwrap().clone();
 
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-pgkill"),
             &process_contract_prompt("t"),
             &adapter,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -2928,11 +2968,12 @@ async fn dispatch_telemetry_process_contracts_dispatch_echo_captures_stdout() {
     let adapter = dispatcher.adapter("echo").unwrap().clone();
 
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-echo"),
             &process_contract_prompt("test"),
             &adapter,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -2959,11 +3000,12 @@ async fn dispatch_telemetry_process_contracts_activity_detection_with_mixed_stdo
     let adapter = dispatcher.adapter("mixed-streams").unwrap().clone();
 
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-activity-mixed"),
             &process_contract_prompt("t"),
             &adapter,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -2996,11 +3038,12 @@ async fn dispatch_telemetry_process_contracts_activity_detection_happens_before_
     let adapter = dispatcher.adapter("no-newlines").unwrap().clone();
 
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-activity-nonewline"),
             &process_contract_prompt("t"),
             &adapter,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -3024,11 +3067,12 @@ async fn dispatch_telemetry_process_contracts_dispatch_captures_exit_code() {
     let adapter = dispatcher.adapter("fail").unwrap().clone();
 
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-exit"),
             &process_contract_prompt("test"),
             &adapter,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -3044,11 +3088,12 @@ async fn dispatch_telemetry_process_contracts_e2e_exit_code_0_is_success() {
     let adapter = dispatcher.adapter("ok").unwrap().clone();
 
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-exit0"),
             &process_contract_prompt("t"),
             &adapter,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();
@@ -3068,11 +3113,12 @@ async fn dispatch_telemetry_process_contracts_dispatch_missing_binary_returns_12
     let adapter = dispatcher.adapter("missing").unwrap().clone();
 
     let result = dispatcher
-        .dispatch(
+        .dispatch_with_context(
             &BeadId::from("nd-missing"),
             &process_contract_prompt("test"),
             &adapter,
             Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
         )
         .await
         .unwrap();

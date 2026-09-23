@@ -6,11 +6,43 @@
 //! store so verification passes and the tested spawn behavior runs.
 //! Verification-specific behavior belongs to the fail-closed tests, never
 //! here.
+//!
+//! Since pre-spawn verification became context-only (77e0ef9b), a dispatch
+//! must carry the claim identity it holds: use [`claimed_context`] with
+//! `Dispatcher::dispatch_with_context`. The context-free `dispatch()` refuses
+//! every spawn.
+
+use std::path::Path;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 
 use needle::bead_store::{BeadStore, Filters, RepairReport};
+use needle::claim::{ClaimIdentity, ResolvedStoreContext};
+use needle::dispatch::DispatchContext;
 use needle::types::{Bead, BeadId, BeadStatus, ClaimResult, ClaimStatus};
+
+/// The claim identity every [`AlwaysClaimedStore`] reports and every
+/// [`claimed_context`] carries.
+pub const PASS_WORKER_ID: &str = "pre-spawn-pass-worker";
+const PASS_REVISION: u64 = 1;
+const PASS_EPOCH: u64 = 1;
+
+/// A dispatch context whose held claim the target store confirms exactly, so
+/// the final pre-spawn verification passes and the spawn under test runs.
+pub fn claimed_context(workspace: impl AsRef<Path>) -> DispatchContext {
+    DispatchContext::new(
+        ResolvedStoreContext::new(
+            Arc::new(AlwaysClaimedStore::new(PASS_WORKER_ID)),
+            workspace.as_ref().to_path_buf(),
+        ),
+        ClaimIdentity {
+            actor: PASS_WORKER_ID.to_string(),
+            revision: Some(PASS_REVISION),
+            claim_epoch: Some(PASS_EPOCH),
+        },
+    )
+}
 
 /// Answers every `claim_status` with an `in_progress` claim owned by the
 /// configured worker, so pre-spawn verification passes.
@@ -44,8 +76,8 @@ impl BeadStore for AlwaysClaimedStore {
         Ok(ClaimStatus {
             status: BeadStatus::InProgress,
             assignee: Some(self.worker_id.clone()),
-            revision: None,
-            claim_epoch: None,
+            revision: Some(PASS_REVISION),
+            claim_epoch: Some(PASS_EPOCH),
         })
     }
 

@@ -9081,6 +9081,16 @@ impl Worker {
         self.dispatcher = dispatcher;
     }
 
+    /// The worker's telemetry handle.
+    ///
+    /// A replacement dispatcher passed to [`Self::set_dispatcher`] must be
+    /// built on a clone of this handle: the attempt identity the worker mints
+    /// before each claim lives on it, and dispatch refuses a context whose
+    /// attempt identity its telemetry does not carry.
+    pub fn telemetry(&self) -> &Telemetry {
+        &self.telemetry
+    }
+
     /// Request a graceful shutdown (sets the internal shutdown flag).
     /// A handle that can request this worker stop from another task.
     ///
