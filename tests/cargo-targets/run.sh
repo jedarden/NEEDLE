@@ -166,35 +166,41 @@ actual_toolchain="$(rustc -vV | sed -n 's/^release: //p')"
 [[ "$source_toolchain" == "$actual_toolchain" ]] || fail \
   "local rustc release $actual_toolchain differs from source pin $source_toolchain"
 
-# P2/P3 fixtures need bead-rs at test runtime. Keep its builder-image release
-# contract exact and ordered: HTTPS download, checksum verification, executable
-# install, then a version assertion. A runtime fallback would multiply this
-# download across every parallel cargo-target pod.
+# P2/P3 fixtures need bead-rs at test runtime. Keep its builder-image contract
+# exact and ordered: one pinned source revision that includes bead-rs 7addba8
+# (update-path claims mint a claim_epoch; the v0.2.6 release asset predates it
+# and fails NEEDLE's pre-spawn claim verification), built after the pinned
+# toolchain layers, then a version assertion. A runtime fallback would
+# multiply the build across every parallel cargo-target pod.
 grep -Fq 'ARG BEAD_RS_VERSION=0.2.6' "$BASE_DOCKERFILE" \
   || fail 'base image must pin bead-rs 0.2.6'
 [[ "$(grep -c '^ARG BEAD_RS_VERSION=' "$BASE_DOCKERFILE")" -eq 1 ]] \
   || fail 'base image must declare exactly one bead-rs version pin'
-grep -Fq 'ARG BEAD_RS_SHA256=15324894af38a8ffce8ad54da47ac067c7fd198779a7744f967bcf56a9aa3aee' "$BASE_DOCKERFILE" \
-  || fail 'base image must pin the bead-rs 0.2.6 checksum'
-[[ "$(grep -c '^ARG BEAD_RS_SHA256=' "$BASE_DOCKERFILE")" -eq 1 ]] \
-  || fail 'base image must declare exactly one bead-rs checksum pin'
-grep -Fq '"https://github.com/jedarden/bead-rs/releases/download/v${BEAD_RS_VERSION}/bead-x86_64-unknown-linux-gnu"' "$BASE_DOCKERFILE" \
-  || fail 'base image must download the pinned bead-rs Linux release over HTTPS'
-grep -Fq 'echo "${BEAD_RS_SHA256}  /tmp/bead-dl" | sha256sum --check --strict' "$BASE_DOCKERFILE" \
-  || fail 'base image must verify bead-rs before installation'
-grep -Fq 'install -m 0755 /tmp/bead-dl /usr/local/bin/bead' "$BASE_DOCKERFILE" \
-  || fail 'base image must install bead-rs with executable permissions'
+grep -Fq 'ARG BEAD_RS_REV=e0bd976c3c7901b5af7b785c317d33c87362d33b' "$BASE_DOCKERFILE" \
+  || fail 'base image must pin the bead-rs source revision the fleet runs'
+[[ "$(grep -c '^ARG BEAD_RS_REV=' "$BASE_DOCKERFILE")" -eq 1 ]] \
+  || fail 'base image must declare exactly one bead-rs revision pin'
+! grep -Fq 'bead-rs/releases/download' "$BASE_DOCKERFILE" \
+  || fail 'base image must not install the pre-7addba8 bead-rs release asset'
+grep -Fq -- '--git https://github.com/jedarden/bead-rs.git --rev "${BEAD_RS_REV}"' "$BASE_DOCKERFILE" \
+  || fail 'base image must build bead-rs from the pinned revision over HTTPS'
+grep -Fq -- '--bin bead --root /usr/local bead-rs' "$BASE_DOCKERFILE" \
+  || fail 'base image must install only the bead binary into /usr/local/bin'
 grep -Fq 'test "$(bead --version | cut -d'\'' '\'' -f1-2)" = "bead ${BEAD_RS_VERSION}"' "$BASE_DOCKERFILE" \
   || fail 'base image must assert the exact installed bead-rs version'
 
-bead_download_line="$(grep -nF '"https://github.com/jedarden/bead-rs/releases/download/v${BEAD_RS_VERSION}/bead-x86_64-unknown-linux-gnu"' "$BASE_DOCKERFILE" | cut -d: -f1)"
-bead_checksum_line="$(grep -nF 'echo "${BEAD_RS_SHA256}  /tmp/bead-dl" | sha256sum --check --strict' "$BASE_DOCKERFILE" | cut -d: -f1)"
-bead_install_line="$(grep -nF 'install -m 0755 /tmp/bead-dl /usr/local/bin/bead' "$BASE_DOCKERFILE" | cut -d: -f1)"
+bead_rev_line="$(grep -n '^ARG BEAD_RS_REV=' "$BASE_DOCKERFILE" | cut -d: -f1)"
+bead_install_line="$(grep -nF -- '--git https://github.com/jedarden/bead-rs.git --rev "${BEAD_RS_REV}"' "$BASE_DOCKERFILE" | cut -d: -f1)"
 bead_assert_line="$(grep -nF 'test "$(bead --version | cut -d'\'' '\'' -f1-2)" = "bead ${BEAD_RS_VERSION}"' "$BASE_DOCKERFILE" | cut -d: -f1)"
-[[ "$bead_download_line" -lt "$bead_checksum_line" && \
-   "$bead_checksum_line" -lt "$bead_install_line" && \
-   "$bead_install_line" -lt "$bead_assert_line" ]] || fail \
-  'base image must verify bead-rs before installing and version-checking it'
+bead_toolchain_line="$(grep -n '^RUN rustup toolchain install ' "$BASE_DOCKERFILE" | cut -d: -f1)"
+bead_workdir_line="$(grep -n '^WORKDIR /workspace' "$BASE_DOCKERFILE" | cut -d: -f1)"
+[[ -n "$bead_rev_line" && -n "$bead_install_line" && -n "$bead_assert_line" && \
+   -n "$bead_toolchain_line" && -n "$bead_workdir_line" && \
+   "$bead_toolchain_line" -lt "$bead_rev_line" && \
+   "$bead_rev_line" -lt "$bead_install_line" && \
+   "$bead_install_line" -lt "$bead_assert_line" && \
+   "$bead_assert_line" -lt "$bead_workdir_line" ]] || fail \
+  'base image must build bead-rs after the toolchain layers, then version-check it'
 
 # cargo-nextest is part of the runner image contract, not something each
 # archive producer/consumer is allowed to download independently. Verify the
@@ -245,7 +251,7 @@ workdir_line="$(grep -nF 'WORKDIR /workspace' "$BASE_DOCKERFILE" | cut -d: -f1)"
    "$nextest_assert_line" -lt "$workdir_line" ]] || fail \
   'base image must add cargo-nextest after the pinned Rust toolchain layer and before WORKDIR'
 
-[[ "$(tr -d '\n' < "$CI_VERSION_FILE")" == "0.1.12" ]] \
+[[ "$(tr -d '\n' < "$CI_VERSION_FILE")" == "0.1.13" ]] \
   || fail 'ci/VERSION must move with the exact-profile dependency image contents'
 grep -Fq 'nextest-version = { required = "0.9.144" }' "$NEXTEST_CONFIG" \
   || fail 'nextest config must set the minimum supported runner version'
@@ -320,9 +326,9 @@ echo 'PASS: a stray tests/scratch.rs is not auto-discovered'
 echo 'PASS: dependency-image stubs cover every declared Cargo target'
 echo 'PASS: dependency image preserves its target tree outside /workspace'
 echo "PASS: rustc release matches the source toolchain pin ($source_toolchain)"
-echo 'PASS: base image pins and verifies bead-rs 0.2.6 before installation'
+echo 'PASS: base image builds bead-rs 0.2.6 from the pinned fleet revision'
 echo 'PASS: base image pins and verifies cargo-nextest 0.9.144 before installation'
 echo 'PASS: nextest CI profile emits stable, non-duplicated JUnit output'
-echo 'PASS: CI image version is 0.1.12'
+echo 'PASS: CI image version is 0.1.13'
 
 "$REPO_ROOT/tests/nextest-shard-plan/run.sh"
