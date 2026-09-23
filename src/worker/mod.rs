@@ -14193,9 +14193,17 @@ mod tests {
         let default_workspace = temp_root.path().join("home");
         fs::create_dir(&default_workspace).unwrap();
 
-        worker.config.workspace.default = default_workspace;
+        worker.config.workspace.default = default_workspace.clone();
         worker.config.strands.explore.workspaces.clear();
         worker.config.strands.explore.workspace_root = temp_root.path().to_path_buf();
+        // Backdate the watched directories so the creation below advances
+        // the signal even on filesystems with coarse timestamp granularity.
+        let past = filetime::FileTime::from_system_time(
+            std::time::SystemTime::now() - std::time::Duration::from_secs(60),
+        );
+        for dir in [temp_root.path(), default_workspace.as_path()] {
+            filetime::set_file_mtime(dir, past).unwrap();
+        }
 
         let before = worker
             .check_workspace_mtimes()
