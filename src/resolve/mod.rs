@@ -1527,21 +1527,19 @@ mod tests {
 
     #[test]
     fn resolver_with_custom_template_path() {
+        let template = fixture_root("resolve-template.txt");
         let prompt_builder =
             crate::prompt::PromptBuilder::new(&crate::config::PromptConfig::default());
 
         let config = crate::config::ResolveConfig {
             enabled: true,
             timeout_secs: 60,
-            custom_template_path: Some(fixture_root("resolve-template.txt")),
+            custom_template_path: Some(template.clone()),
             use_default_template: false,
         };
 
         let resolver = Resolver::with_config(prompt_builder, config);
-        assert_eq!(
-            resolver.config.custom_template_path,
-            Some(fixture_root("resolve-template.txt"))
-        );
+        assert_eq!(resolver.config.custom_template_path, Some(template));
         assert!(!resolver.config.use_default_template);
     }
 

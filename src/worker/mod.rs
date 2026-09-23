@@ -14116,6 +14116,9 @@ mod tests {
         let nonexistent = temp_dir.path().join("nonexistent");
         worker.config.workspace.default = nonexistent.clone();
         worker.config.strands.explore.workspaces = vec![];
+        // An empty workspace list also watches the auto-discovery root, which
+        // the isolated config points at a real directory.
+        worker.config.strands.explore.workspace_root = temp_dir.path().join("no-discovery-root");
 
         let mtime = worker.check_workspace_mtimes();
         assert!(

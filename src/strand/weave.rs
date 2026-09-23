@@ -1997,7 +1997,8 @@ timeout_secs: 5
 
     #[test]
     fn state_load_missing_file_returns_default() {
-        let path = fixture_root("nonexistent-weave-state-12345.json");
+        // A path inside a fresh fixture root that was never written.
+        let path = fixture_root("missing-weave-state").join("state.json");
         let state = WeaveState::load(&path).unwrap();
         assert!(state.last_run.is_none());
         assert!(state.seen_titles.is_empty());

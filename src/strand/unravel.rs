@@ -1122,13 +1122,16 @@ mod tests {
 
     #[tokio::test]
     async fn cooldown_skips_recently_analyzed() {
+        // One root for both the strand and the state-file hash:
+        // fixture_root() returns a fresh directory on every call.
+        let workspace = fixture_root("test");
         let state_dir = tempfile::tempdir().unwrap();
         let telemetry = Telemetry::new("test".to_string());
 
         // Pre-populate state with recent analysis.
         let mut state = UnravelState::default();
         state.mark_analyzed(&BeadId::from("nd-cooldown".to_string()));
-        let hash = workspace_hash(&fixture_root("test"));
+        let hash = workspace_hash(&workspace);
         let state_path = state_dir.path().join(format!("{hash}.json"));
         state.save(&state_path).unwrap();
 
@@ -1140,7 +1143,7 @@ mod tests {
         let response = r#"[{"title": "Alt", "body": "body"}]"#;
         let strand = UnravelStrand::new(
             config,
-            fixture_root("test"),
+            workspace.clone(),
             state_dir.path().to_path_buf(),
             Box::new(MockAgent::new(response)),
             telemetry,
@@ -1159,6 +1162,9 @@ mod tests {
 
     #[tokio::test]
     async fn cooldown_elapsed_after_7_days() {
+        // One root for both the strand and the state-file hash:
+        // fixture_root() returns a fresh directory on every call.
+        let workspace = fixture_root("test");
         let state_dir = tempfile::tempdir().unwrap();
         let telemetry = Telemetry::new("test".to_string());
 
@@ -1169,7 +1175,7 @@ mod tests {
             "nd-expired".to_string(),
             Utc::now() - chrono::Duration::days(8),
         );
-        let hash = workspace_hash(&fixture_root("test"));
+        let hash = workspace_hash(&workspace);
         let state_path = state_dir.path().join(format!("{hash}.json"));
         state.save(&state_path).unwrap();
 
@@ -1181,7 +1187,7 @@ mod tests {
         let response = r#"[{"title": "Alt", "body": "body"}]"#;
         let strand = UnravelStrand::new(
             config,
-            fixture_root("test"),
+            workspace.clone(),
             state_dir.path().to_path_buf(),
             Box::new(MockAgent::new(response)),
             telemetry,
@@ -1266,13 +1272,16 @@ mod tests {
 
     #[tokio::test]
     async fn state_persisted_after_run() {
+        // One root for both the strand and the state-file hash:
+        // fixture_root() returns a fresh directory on every call.
+        let workspace = fixture_root("test");
         let state_dir = tempfile::tempdir().unwrap();
         let telemetry = Telemetry::new("test".to_string());
 
         let response = r#"[{"title": "Alt", "body": "body"}]"#;
         let strand = UnravelStrand::new(
             make_enabled_config(),
-            fixture_root("test"),
+            workspace.clone(),
             state_dir.path().to_path_buf(),
             Box::new(MockAgent::new(response)),
             telemetry,
@@ -1283,7 +1292,7 @@ mod tests {
         let _ = strand.evaluate(&store, &HashSet::new()).await;
 
         // Verify state was saved.
-        let hash = workspace_hash(&fixture_root("test"));
+        let hash = workspace_hash(&workspace);
         let state_path = state_dir.path().join(format!("{hash}.json"));
         let state = UnravelState::load(&state_path).unwrap();
         assert!(
@@ -1372,7 +1381,8 @@ mod tests {
 
     #[test]
     fn state_load_missing_file_returns_default() {
-        let path = fixture_root("nonexistent-unravel-state-12345.json");
+        // A path inside a fresh fixture root that was never written.
+        let path = fixture_root("missing-unravel-state").join("state.json");
         let state = UnravelState::load(&path).unwrap();
         assert!(state.analyzed.is_empty());
     }

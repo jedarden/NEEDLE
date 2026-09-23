@@ -949,8 +949,12 @@ mod tests {
     #[tokio::test]
     async fn invisible_emits_telemetry_after_threshold() {
         // Open beads exist but Pluck returned nothing → INVISIBLE.
+        // The diagnosis reports the first bead's workspace; each fixture bead
+        // gets its own fixture_root().
+        let open = make_bead("open-1", BeadStatus::Open, None);
+        let expected_workspace = open.workspace.display().to_string();
         let store = KnotTestStore::new(vec![
-            make_bead("open-1", BeadStatus::Open, None),
+            open,
             make_bead("ip-1", BeadStatus::InProgress, Some("worker-1")),
             make_bead("done-1", BeadStatus::Done, None), // excluded bead
         ]);
@@ -997,7 +1001,7 @@ mod tests {
         );
         let event = events_guard[0];
         assert_eq!(event.event_type, "strand.knot.starvation_detected");
-        assert_eq!(event.data["workspace"], "/tmp/test");
+        assert_eq!(event.data["workspace"], expected_workspace.as_str());
         assert_eq!(event.data["open_count"], 1);
         assert_eq!(event.data["excluded_count"], 1);
     }
@@ -1163,8 +1167,12 @@ mod tests {
 
     #[tokio::test]
     async fn diagnose_invisible() {
+        // The diagnosis reports the first bead's workspace; each fixture bead
+        // gets its own fixture_root().
+        let open = make_bead("open-1", BeadStatus::Open, None);
+        let expected_workspace = open.workspace.display().to_string();
         let store = KnotTestStore::new(vec![
-            make_bead("open-1", BeadStatus::Open, None),
+            open,
             make_bead("ip-1", BeadStatus::InProgress, Some("w1")),
         ]);
         let knot = make_test_knot(default_knot_config());
@@ -1181,7 +1189,7 @@ mod tests {
                 assert_eq!(open_count, 1);
                 assert_eq!(in_progress_count, 1);
                 assert_eq!(claimed_by, vec!["w1"]);
-                assert_eq!(workspace, "/tmp/test");
+                assert_eq!(workspace, expected_workspace);
             }
             other => panic!("expected Invisible, got: {other:?}"),
         }

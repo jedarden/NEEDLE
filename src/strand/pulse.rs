@@ -808,7 +808,8 @@ mod tests {
 
     #[test]
     fn state_load_missing_returns_default() {
-        let path = fixture_root("nonexistent-pulse-state-12345.json");
+        // A path inside a fresh fixture root that was never written.
+        let path = fixture_root("missing-pulse-state").join("state.json");
         let state = PulseState::load(&path).unwrap();
         assert!(state.last_run.is_none());
         assert!(state.seen_fingerprints.is_empty());
@@ -909,13 +910,16 @@ mod tests {
 
     #[tokio::test]
     async fn cooldown_skips_scan() {
+        // One root for both the strand and the state-file hash:
+        // fixture_root() returns a fresh directory on every call.
+        let workspace = fixture_root("test");
         let state_dir = tempfile::tempdir().unwrap();
         let telemetry = Telemetry::new("test".to_string());
 
         // Pre-populate state with recent run
         let mut state = PulseState::default();
         state.touch();
-        let hash = workspace_hash(&fixture_root("test"));
+        let hash = workspace_hash(&workspace);
         let state_path = state_dir.path().join(format!("{hash}.json"));
         state.save(&state_path).unwrap();
 
@@ -932,7 +936,7 @@ mod tests {
 
         let strand = PulseStrand::new(
             config,
-            fixture_root("test"),
+            workspace.clone(),
             state_dir.path().to_path_buf(),
             telemetry,
         );

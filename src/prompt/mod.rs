@@ -1776,7 +1776,8 @@ mod tests {
                 "bead dep add <blocked-id> <blocker-id> --kind blocks",
             )
             .replace("{failure_history}", "")
-            .replace("{prior_fixes}", "");
+            .replace("{prior_fixes}", "")
+            .replace("{deadline_notice}", "");
         assert_eq!(legacy.content, expected);
         assert!(legacy.content.contains("## Workspace Learnings"));
         assert!(!legacy.content.contains("(no context files found)"));

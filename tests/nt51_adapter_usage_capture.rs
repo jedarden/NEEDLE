@@ -5,6 +5,7 @@
 //! table, then verifies that a resolved Codex row is visible to the CLI's
 //! adapter statistics without touching the real home or state directory.
 
+use std::path::PathBuf;
 use std::process::Command;
 
 use needle::adapter_usage::{resolve_usage, stream_usage};
@@ -125,7 +126,7 @@ fn stats_by_adapter_reads_costed_codex_fixture_row() {
     )
     .expect("write fixture ledger");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_needle"))
+    let output = Command::new(needle_binary())
         .args(["stats", "--by", "adapter", "--format", "json"])
         .env("HOME", &home)
         .env("NEEDLE_STATE_DIR", &state)
@@ -148,4 +149,12 @@ fn stats_by_adapter_reads_costed_codex_fixture_row() {
         })
         .expect("codex adapter row");
     assert_eq!(codex["avg_cost_usd"], serde_json::json!(0.0507));
+}
+
+/// The `needle` binary under test. Nextest archive runs relocate it, so the
+/// compile-time `CARGO_BIN_EXE_needle` path does not exist there.
+fn needle_binary() -> PathBuf {
+    std::env::var_os("NEXTEST_BIN_EXE_needle")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_needle")))
 }

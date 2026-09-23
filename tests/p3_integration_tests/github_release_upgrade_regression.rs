@@ -61,7 +61,7 @@ fn run_upgrade_from_file(home: &Path, candidate: &Path) -> anyhow::Result<Output
     let path = std::env::join_paths(path_entries)
         .map_err(|error| anyhow::anyhow!("failed to construct candidate PATH: {error}"))?;
 
-    Ok(Command::new(env!("CARGO_BIN_EXE_needle"))
+    Ok(Command::new(current_candidate())
         .args([
             "upgrade",
             "--from-file",
@@ -78,8 +78,12 @@ fn run_upgrade_from_file(home: &Path, candidate: &Path) -> anyhow::Result<Output
         .output()?)
 }
 
+/// The `needle` binary under test. Nextest archive runs relocate it, so the
+/// compile-time `CARGO_BIN_EXE_needle` path does not exist there.
 fn current_candidate() -> PathBuf {
-    PathBuf::from(env!("CARGO_BIN_EXE_needle"))
+    std::env::var_os("NEXTEST_BIN_EXE_needle")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_needle")))
 }
 
 fn create_stable(home: &Path, content: &[u8]) -> anyhow::Result<()> {

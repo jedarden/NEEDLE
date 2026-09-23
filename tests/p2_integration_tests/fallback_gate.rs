@@ -639,8 +639,22 @@ fn fallback_marker_selection_covers_all_language_branches_and_fallthrough() {
     assert_eq!(select_verifier(root.path()), Verifier::NoVerifier);
 }
 
+/// The Go gate tests need a real toolchain. The needle-ci builder image does
+/// not ship one yet (needle-006d29c3), so skip loudly instead of reporting
+/// the missing `go` binary as a gate verdict.
+fn go_toolchain_missing() -> bool {
+    if which::which("go").is_ok() {
+        return false;
+    }
+    eprintln!("skipping: no `go` toolchain on PATH (needle-006d29c3)");
+    true
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn builtin_go_gates_pass_in_gitless_clean_extractions() {
+    if go_toolchain_missing() {
+        return;
+    }
     let _environment = IsolatedEnvironment::new(false);
 
     for (id, config, expected_gate) in [
@@ -669,6 +683,9 @@ async fn builtin_go_gates_pass_in_gitless_clean_extractions() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn builtin_go_gates_reject_a_deliberate_compile_error() {
+    if go_toolchain_missing() {
+        return;
+    }
     let _environment = IsolatedEnvironment::new(false);
 
     for (id, config, expected_gate) in [

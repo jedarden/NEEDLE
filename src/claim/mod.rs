@@ -3221,12 +3221,18 @@ mod tests {
     }
 
     fn circuit_gate(run: Option<CiWorkflowRun>) -> CircuitGate {
+        circuit_gate_at(fixture_root("claim-circuit-home"), run)
+    }
+
+    /// A gate for `home`, for tests that assert on the gated workspace path:
+    /// fixture_root() returns a fresh directory on every call.
+    fn circuit_gate_at(home: PathBuf, run: Option<CiWorkflowRun>) -> CircuitGate {
         CircuitGate::new(
             BuildStatusChecker::with_source(
                 600,
                 Arc::new(StaticCircuitSource { run, error: None }),
             ),
-            fixture_root("claim-circuit-home"),
+            home,
             vec!["fix-build".to_string(), "ci-red".to_string()],
         )
         .with_template("needle-ci")
@@ -3266,6 +3272,7 @@ mod tests {
 
     #[tokio::test]
     async fn circuit_gate_records_the_refusal_as_telemetry() {
+        let home = fixture_root("claim-circuit-home");
         let (sink, events) = MemorySink::new();
         let bead = make_bead("needle-open-2", "");
         let claimer = Claimer::new(
@@ -3275,7 +3282,7 @@ mod tests {
             10,
             Telemetry::with_sink("test-worker".to_string(), sink),
         )
-        .with_circuit_gate(circuit_gate(Some(ci_run("Error"))));
+        .with_circuit_gate(circuit_gate_at(home.clone(), Some(ci_run("Error"))));
 
         let result = claimer
             .claim_one(&bead.id, "worker-a", &HashSet::new(), Some("pluck"))
@@ -3299,7 +3306,7 @@ mod tests {
             .expect("the strand circuit event must be recorded");
         assert_eq!(
             circuit.data["workspace"],
-            serde_json::json!("/tmp/claim-circuit-home")
+            serde_json::json!(home.display().to_string())
         );
         assert_eq!(circuit.data["sha"], serde_json::json!("deadbeef"));
     }
@@ -3393,9 +3400,12 @@ mod tests {
     #[tokio::test]
     async fn circuit_gate_matches_its_own_workspace_path() {
         let home = fixture_root("claim-circuit-home");
-        let mut bead = make_bead("needle-ws-1", "/tmp/claim-circuit-home");
+        let mut bead = make_bead("needle-ws-1", "");
         bead.workspace = home.clone();
-        let claimer = claimer_with_gate(vec![bead.clone()], circuit_gate(Some(ci_run("Failed"))));
+        let claimer = claimer_with_gate(
+            vec![bead.clone()],
+            circuit_gate_at(home.clone(), Some(ci_run("Failed"))),
+        );
 
         let result = claimer
             .claim_one(&bead.id, "worker-a", &HashSet::new(), Some("pluck"))

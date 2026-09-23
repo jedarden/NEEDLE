@@ -2005,7 +2005,7 @@ mod tests {
 
         let runner = CanaryRunner::new(
             needle_home,
-            fixture_root("nonexistent-canary-workspace"),
+            fixture_root("canary-root").join("missing-workspace"),
             300,
         );
 
