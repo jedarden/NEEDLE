@@ -18,12 +18,16 @@ fn needle_subprocesses_pin_home_and_explore_root() {
             let binary = needle_binary_path();
             let _ = Command::new(binary);
         }
+        async fn tokio_aliased() {
+            let binary = needle_binary_path();
+            let _ = TokioCommand::new(binary);
+        }
     "#;
     let synthetic_masked = mask_non_code(synthetic);
     assert_eq!(
         needle_constructors(synthetic, &synthetic_masked).len(),
-        2,
-        "the audit must recognize literal and aliased NEEDLE launches"
+        3,
+        "the audit must recognize literal, aliased, and async NEEDLE launches"
     );
 
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -59,9 +63,9 @@ fn needle_subprocesses_pin_home_and_explore_root() {
 fn needle_constructors(source: &str, masked: &str) -> Vec<(usize, String)> {
     let mut constructors = Vec::new();
     let mut cursor = 0;
-    while let Some(relative) = masked[cursor..].find("Command::new(") {
+    while let Some((relative, constructor)) = find_command_constructor(&masked[cursor..]) {
         let start = cursor + relative;
-        let open = start + "Command::new".len();
+        let open = start + constructor.len();
         let end = matching_delimiter(masked, open, b'(', b')');
         let argument = &source[open..end];
         let function = function_source(source, masked, start);
@@ -94,6 +98,23 @@ fn needle_constructors(source: &str, masked: &str) -> Vec<(usize, String)> {
     }
 
     constructors
+}
+
+/// Return the next process-command constructor, including aliases used by
+/// synchronous and asynchronous integration tests. Keeping this list explicit
+/// avoids treating unrelated `Type::new(...)` calls as subprocess launches.
+fn find_command_constructor(source: &str) -> Option<(usize, &'static str)> {
+    [
+        "tokio::process::Command::new",
+        "std::process::Command::new",
+        "ProcessCommand::new",
+        "AsyncCommand::new",
+        "TokioCommand::new",
+        "Command::new",
+    ]
+    .into_iter()
+    .filter_map(|constructor| source.find(constructor).map(|offset| (offset, constructor)))
+    .min_by_key(|(offset, _)| *offset)
 }
 
 fn function_source<'a>(source: &'a str, masked: &str, offset: usize) -> &'a str {

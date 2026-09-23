@@ -6,7 +6,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
 
 use tempfile::TempDir;
@@ -128,13 +128,20 @@ impl Drop for ChildGuard {
 }
 
 #[test]
-fn isolated_child_pins_home_and_explore_root_to_fixture() {
+fn isolated_child_cannot_discover_or_mutate_outside_bead_store() {
     let fixture = IsolatedChildEnv::new();
-    let outside = tempfile::tempdir().expect("create outside workspace fixture");
-    std::fs::create_dir_all(outside.path().join(".beads"))
-        .expect("create outside workspace marker");
-    std::fs::write(outside.path().join("marker"), "must remain untouched")
-        .expect("write outside workspace marker");
+    let production = tempfile::tempdir().expect("create production-store fixture");
+    let production_workspace = production.path().join("production-workspace");
+    let production_store = production_workspace.join(".beads");
+    std::fs::create_dir_all(&production_store).expect("create production bead store fixture");
+    std::fs::write(
+        production_store.join("config.json"),
+        r#"{"created_at":"fixture","prefix":"production","uuid":"fixture","version":1}"#,
+    )
+    .expect("write production bead store config");
+    let marker = production_store.join("production-marker");
+    std::fs::write(&marker, "must remain untouched").expect("write production bead store marker");
+    let store_before = snapshot_directory(&production_store);
 
     let output = fixture
         .needle()
@@ -153,12 +160,30 @@ fn isolated_child_pins_home_and_explore_root_to_fixture() {
         "effective config must use the fixture as Explore root: {config}"
     );
     assert!(
-        !config.contains(&outside.path().display().to_string()),
-        "effective config must not discover an outside workspace: {config}"
+        !config.contains(&production_workspace.display().to_string()),
+        "effective config must not discover the production workspace: {config}"
     );
     assert_eq!(
-        std::fs::read_to_string(outside.path().join("marker"))
-            .expect("read outside workspace marker"),
-        "must remain untouched"
+        snapshot_directory(&production_store),
+        store_before,
+        "an isolated subprocess must not mutate an outside bead store"
     );
+}
+
+fn snapshot_directory(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(root).expect("read store fixture") {
+        let entry = entry.expect("read store fixture entry");
+        let path = entry.path();
+        if path.is_file() {
+            entries.push((
+                path.strip_prefix(root)
+                    .expect("store entry is below store root")
+                    .to_path_buf(),
+                std::fs::read(&path).expect("read store fixture file"),
+            ));
+        }
+    }
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    entries
 }
