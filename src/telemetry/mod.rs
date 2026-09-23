@@ -5135,6 +5135,10 @@ pub struct Telemetry {
     /// This is cached separately for efficient access in OTLP and other contexts
     /// where only the workspace name (not the full path) is needed.
     current_workspace_basename: Arc<std::sync::Mutex<Option<String>>>,
+    /// Shared state for the Explore starvation alarm. Explore emits scan
+    /// summaries through this handle and claim-success events clear the
+    /// episode, so all cloned handles observe one worker-wide liveness view.
+    explore_starvation: Arc<std::sync::Mutex<ExploreStarvationState>>,
     /// Wrapped in Arc<Mutex<Option<...>>> so that `shutdown()` can drop the
     /// sender explicitly (closing the channel) even while clones still exist.
     sender: Arc<std::sync::Mutex<Option<mpsc::UnboundedSender<WriterMessage>>>>,
@@ -5149,6 +5153,15 @@ pub struct Telemetry {
     /// OTLP sink shutdown handle (feature-gated).
     /// Stored separately so we can call its async shutdown method.
     otlp_shutdown: Arc<std::sync::Mutex<Option<OtlpShutdown>>>,
+}
+
+#[derive(Debug, Default)]
+struct ExploreStarvationState {
+    threshold_minutes: u64,
+    ready_since: Option<DateTime<Utc>>,
+    alarm_emitted: bool,
+    ready_beads_count: usize,
+    workspaces_with_ready: Vec<String>,
 }
 
 /// Worker identity used to populate OTLP resource attributes.
@@ -5230,6 +5243,117 @@ impl Telemetry {
         Arc::new(std::sync::Mutex::new(None))
     }
 
+    fn new_explore_starvation_cell() -> Arc<std::sync::Mutex<ExploreStarvationState>> {
+        Arc::new(std::sync::Mutex::new(ExploreStarvationState::default()))
+    }
+
+    /// Configure the Explore starvation threshold for this worker's shared
+    /// telemetry stream. A zero threshold disables the alarm.
+    pub fn configure_explore_starvation(&self, threshold_minutes: u64) {
+        let mut state = self
+            .explore_starvation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.threshold_minutes != threshold_minutes {
+            *state = ExploreStarvationState {
+                threshold_minutes,
+                ..ExploreStarvationState::default()
+            };
+        }
+    }
+
+    fn reset_explore_starvation(state: &mut ExploreStarvationState) {
+        state.ready_since = None;
+        state.alarm_emitted = false;
+        state.ready_beads_count = 0;
+        state.workspaces_with_ready.clear();
+    }
+
+    fn excluded_ready_count(reasons: &[String]) -> usize {
+        const PREFIXES: [&str; 3] = [
+            "filtered_",
+            "retry_filtered_",
+            "split_out_of_scope_ineligible_",
+        ];
+
+        reasons
+            .iter()
+            .filter_map(|reason| {
+                PREFIXES
+                    .iter()
+                    .find_map(|prefix| reason.strip_prefix(prefix))
+                    .and_then(|count| count.parse::<usize>().ok())
+            })
+            .sum()
+    }
+
+    /// Update the worker-wide Explore liveness state and return an alarm when
+    /// a ready-work episode first crosses its configured threshold.
+    fn observe_explore_event(
+        &self,
+        kind: &EventKind,
+        timestamp: DateTime<Utc>,
+    ) -> Option<EventKind> {
+        let mut state = self
+            .explore_starvation
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        match kind {
+            EventKind::ClaimSuccess { .. } => {
+                // A successful claim anywhere proves that the worker is making
+                // progress. The next Explore summary starts a fresh episode.
+                Self::reset_explore_starvation(&mut state);
+                None
+            }
+            EventKind::ExploreScanSummary {
+                workspaces_visited,
+                workspaces_with_candidates,
+                total_candidates,
+                exclusion_reasons,
+                ..
+            } => {
+                let excluded = Self::excluded_ready_count(exclusion_reasons);
+                let ready_beads_count = total_candidates.saturating_add(excluded);
+                if ready_beads_count == 0 {
+                    Self::reset_explore_starvation(&mut state);
+                    return None;
+                }
+
+                state.ready_since.get_or_insert(timestamp);
+                state.ready_beads_count = ready_beads_count;
+                state.workspaces_with_ready = if workspaces_with_candidates.is_empty() {
+                    workspaces_visited.clone()
+                } else {
+                    workspaces_with_candidates.clone()
+                };
+
+                if state.threshold_minutes == 0 || state.alarm_emitted {
+                    return None;
+                }
+
+                let ready_since = state.ready_since?;
+                let elapsed_seconds = timestamp
+                    .signed_duration_since(ready_since)
+                    .num_seconds()
+                    .max(0) as u64;
+                let threshold_seconds = state.threshold_minutes.saturating_mul(60);
+                if elapsed_seconds < threshold_seconds {
+                    return None;
+                }
+
+                state.alarm_emitted = true;
+                Some(EventKind::ExploreStarvationAlarm {
+                    minutes_without_claim: elapsed_seconds / 60,
+                    threshold_minutes: state.threshold_minutes,
+                    ready_beads_count: state.ready_beads_count,
+                    workspaces_with_ready: state.workspaces_with_ready.clone(),
+                })
+            }
+            _ => None,
+        }
+    }
+
     /// Create a telemetry emitter that writes to a `FileSink`.
     ///
     /// Does not spawn any async tasks. Call [`start()`](Self::start) from
@@ -5279,6 +5403,7 @@ impl Telemetry {
             current_workspace: Self::new_workspace_cell(),
             current_attempt_id: Self::new_attempt_cell(),
             current_workspace_basename: Self::new_basename_cell(),
+            explore_starvation: Self::new_explore_starvation_cell(),
             sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
             writer_handle: Arc::new(std::sync::Mutex::new(None)),
@@ -5337,6 +5462,7 @@ impl Telemetry {
             current_workspace: Self::new_workspace_cell(),
             current_attempt_id: Self::new_attempt_cell(),
             current_workspace_basename: Self::new_basename_cell(),
+            explore_starvation: Self::new_explore_starvation_cell(),
             sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
             writer_handle: Arc::new(std::sync::Mutex::new(None)),
@@ -5402,6 +5528,7 @@ impl Telemetry {
             current_workspace: Self::new_workspace_cell(),
             current_attempt_id: Self::new_attempt_cell(),
             current_workspace_basename: Self::new_basename_cell(),
+            explore_starvation: Self::new_explore_starvation_cell(),
             sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
             writer_handle: Arc::new(std::sync::Mutex::new(None)),
@@ -5533,6 +5660,7 @@ impl Telemetry {
             current_workspace: Self::new_workspace_cell(),
             current_attempt_id: Self::new_attempt_cell(),
             current_workspace_basename: Self::new_basename_cell(),
+            explore_starvation: Self::new_explore_starvation_cell(),
             sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
             writer_handle: Arc::new(std::sync::Mutex::new(None)),
@@ -5570,6 +5698,7 @@ impl Telemetry {
                 current_workspace: Self::new_workspace_cell(),
                 current_attempt_id: Self::new_attempt_cell(),
                 current_workspace_basename: Self::new_basename_cell(),
+                explore_starvation: Self::new_explore_starvation_cell(),
                 sender: Arc::new(std::sync::Mutex::new(Some(sender))),
                 pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
                 writer_handle: Arc::new(std::sync::Mutex::new(None)),
@@ -5593,6 +5722,7 @@ impl Telemetry {
             current_workspace: Self::new_workspace_cell(),
             current_attempt_id: Self::new_attempt_cell(),
             current_workspace_basename: Self::new_basename_cell(),
+            explore_starvation: Self::new_explore_starvation_cell(),
             sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
             writer_handle: Arc::new(std::sync::Mutex::new(None)),
@@ -5645,6 +5775,7 @@ impl Telemetry {
             current_workspace: Self::new_workspace_cell(),
             current_attempt_id: Self::new_attempt_cell(),
             current_workspace_basename: Self::new_basename_cell(),
+            explore_starvation: Self::new_explore_starvation_cell(),
             sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(None)),
             writer_handle: Arc::new(std::sync::Mutex::new(None)),
@@ -5821,6 +5952,7 @@ impl Telemetry {
     ///
     /// Returns `Err` only if the channel is disconnected (background task died).
     pub fn emit(&self, kind: EventKind, timestamp: DateTime<Utc>) -> Result<()> {
+        let starvation_alarm = self.observe_explore_event(&kind, timestamp);
         let event = self.make_event(&kind, timestamp);
         let seq = event.sequence;
         tracing::debug!(event_type = %event.event_type, seq, "telemetry event");
@@ -5831,6 +5963,10 @@ impl Telemetry {
             Ok(guard) => {
                 if let Some(ref s) = *guard {
                     s.send(WriterMessage::Event(event)).ok(); // ok() — never block, never panic
+                    if let Some(alarm) = starvation_alarm {
+                        let alarm_event = self.make_event(&alarm, timestamp);
+                        s.send(WriterMessage::Event(alarm_event)).ok();
+                    }
                 }
                 Ok(())
             }
@@ -5857,6 +5993,7 @@ impl Telemetry {
     /// Use this in timeout recovery paths where blocking on emit() would
     /// prevent the worker from recovering.
     pub fn emit_try_lock(&self, kind: EventKind, timestamp: DateTime<Utc>) -> Result<()> {
+        let starvation_alarm = self.observe_explore_event(&kind, timestamp);
         let event = self.make_event(&kind, timestamp);
         let seq = event.sequence;
         // Use try_lock() to avoid blocking indefinitely if the telemetry writer
@@ -5869,6 +6006,15 @@ impl Telemetry {
                 };
                 s.send(WriterMessage::Event(event))
                     .map_err(|_| anyhow::anyhow!("telemetry writer channel is disconnected"))
+                    .and_then(|_| {
+                        if let Some(alarm) = starvation_alarm {
+                            s.send(WriterMessage::Event(self.make_event(&alarm, timestamp)))
+                                .map_err(|_| {
+                                    anyhow::anyhow!("telemetry writer channel is disconnected")
+                                })?;
+                        }
+                        Ok(())
+                    })
             }
             Err(_) => {
                 tracing::warn!(
@@ -5963,15 +6109,24 @@ impl Telemetry {
     /// Returns `Err` if the pending writer is not available (already started)
     /// or if writing to the file fails.
     pub fn emit_sync(&self, kind: EventKind, timestamp: DateTime<Utc>) -> Result<()> {
+        let starvation_alarm = self.observe_explore_event(&kind, timestamp);
         let event = self.make_event(&kind, timestamp);
 
         // Take the pending writer temporarily to write directly to sinks.
         let pending_guard = self.pending_writer.lock().unwrap();
         if let Some(ref pending) = *pending_guard {
+            let alarm_event = starvation_alarm
+                .as_ref()
+                .map(|alarm| self.make_event(alarm, timestamp));
             // Write directly to each sink (typically just FileSink).
             for sink in &pending.sinks {
                 if let Err(e) = sink.accept(&event) {
                     tracing::warn!(error = %e, "sync emit to sink failed");
+                }
+                if let Some(ref alarm_event) = alarm_event {
+                    if let Err(e) = sink.accept(alarm_event) {
+                        tracing::warn!(error = %e, "sync emit Explore starvation alarm failed");
+                    }
                 }
             }
             Ok(())
@@ -6016,6 +6171,7 @@ impl Telemetry {
             current_workspace: Self::new_workspace_cell(),
             current_attempt_id: Self::new_attempt_cell(),
             current_workspace_basename: Self::new_basename_cell(),
+            explore_starvation: Self::new_explore_starvation_cell(),
             sender: Arc::new(std::sync::Mutex::new(Some(sender))),
             pending_writer: Arc::new(std::sync::Mutex::new(Some(pending))),
             writer_handle: Arc::new(std::sync::Mutex::new(None)),
@@ -8035,6 +8191,28 @@ mod tests {
             )
             .unwrap();
 
+        telemetry.configure_explore_starvation(15);
+        let start = Utc::now();
+        let scan = |timestamp: DateTime<Utc>| {
+            telemetry
+                .emit(
+                    EventKind::ExploreScanSummary {
+                        workspaces_visited: vec!["/remote/workspace".to_string()],
+                        workspaces_with_candidates: Vec::new(),
+                        total_candidates: 0,
+                        exclusion_reasons: vec!["filtered_2".to_string()],
+                        duration_ms: 1,
+                        scan_start_at: timestamp.to_rfc3339(),
+                    },
+                    timestamp,
+                )
+                .unwrap();
+        };
+        scan(start);
+        scan(start + chrono::Duration::minutes(14));
+        scan(start + chrono::Duration::minutes(15));
+        scan(start + chrono::Duration::minutes(16));
+
         // Drop to close channel and drain
         drop(telemetry);
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -8042,8 +8220,8 @@ mod tests {
         let collected = events.lock().unwrap();
         assert_eq!(
             collected.len(),
-            2,
-            "expected 2 events, got {}",
+            7,
+            "expected 7 events, got {}",
             collected.len()
         );
         assert_eq!(collected[0].event_type, "worker.started");
@@ -8051,6 +8229,18 @@ mod tests {
         assert_eq!(collected[1].event_type, "bead.claim.attempted");
         assert_eq!(collected[1].sequence, 1);
         assert_eq!(collected[1].bead_id, Some(BeadId::from("nd-test")));
+        let alarms: Vec<_> = collected
+            .iter()
+            .filter(|event| event.event_type == "explore.starvation_alarm")
+            .collect();
+        assert_eq!(alarms.len(), 1);
+        assert_eq!(alarms[0].data["minutes_without_claim"], 15);
+        assert_eq!(alarms[0].data["threshold_minutes"], 15);
+        assert_eq!(alarms[0].data["ready_beads_count"], 2);
+        assert_eq!(
+            alarms[0].data["workspaces_with_ready"],
+            serde_json::json!(["/remote/workspace"])
+        );
     }
 
     #[tokio::test]

@@ -145,6 +145,7 @@ impl StrandRunner {
         registry: crate::registry::Registry,
         telemetry: crate::telemetry::Telemetry,
     ) -> Self {
+        telemetry.configure_explore_starvation(config.strands.explore.starvation_threshold_minutes);
         // StrandRunner is also constructed directly by embedders and tests;
         // publish the config value before any strand resolves a state path.
         crate::state_dir::set_configured(config.paths.state_dir.clone());
