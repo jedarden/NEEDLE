@@ -232,6 +232,14 @@ write_bead_checksums() {
     fi
     printf '%s  %s\n' "$hash" "$BEAD_ASSET_NAME" > "$MOCK_ROOT/beadrs/files/checksums.txt"
 }
+
+write_bundled_bead() {
+    local asset="${BEAD_ASSET_NAME}"
+    printf '#!%s\necho "bead 0.2.6-compat-mock"\n' "$BASH_BIN" > "$MOCK_ROOT/files/$asset"
+    chmod +x "$MOCK_ROOT/files/$asset"
+    printf '%s  %s\n' "$(sha256sum "$MOCK_ROOT/files/$asset" | awk '{print $1}')" "$asset" \
+        >> "$MOCK_ROOT/files/checksums.txt"
+}
 bead_installed() { [[ -f "$MOCK_HOME/bin/bead" ]]; }
 
 # run_installer [--env NAME=VALUE ...] [--] [args...]
@@ -701,6 +709,20 @@ test_bead_installed_alongside_needle() {
     teardown
 }
 
+test_bundled_bead_is_preferred_over_legacy_release() {
+    echo "TEST: release-local bead backend is preferred over the legacy bead-rs asset"
+    setup
+    write_checksums correct
+    write_bundled_bead
+    run_installer
+    assert_rc_zero
+    assert_installed
+    record "$(bead_installed; echo $?)" "bundled bead installed next to needle"
+    assert_output_contains "bundled bead install reported" "bead 0.2.6-compat-mock installed"
+    assert_output_lacks "legacy bead fallback not used" "bead v0.2.2 installed"
+    teardown
+}
+
 test_bead_checksum_tamper_aborts() {
     echo "TEST: tampered bead checksum aborts and leaves bead uninstalled"
     setup
@@ -822,6 +844,7 @@ main() {
             test_transform_missing_entry_skippable
             test_transform_absent_from_release_is_nonfatal
             test_bead_installed_alongside_needle
+            test_bundled_bead_is_preferred_over_legacy_release
             test_bead_checksum_tamper_aborts
             test_skip_bead_flag_leaves_bead_absent
             test_skip_bead_env_leaves_bead_absent

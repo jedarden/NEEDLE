@@ -409,13 +409,17 @@ version_ge() {
     return 0
 }
 
-# install_bead <arch> <os> <install_dir> <temp_dir>
-# Install the bead-rs backend (`bead`) next to needle. needle cannot open a
-# workspace without it (GitHub #16). Unreachable release or no build for this
-# platform: warn and continue. Checksum problems: same fail-closed rules as the
-# needle binary.
+# install_bead <arch> <os> <install_dir> <temp_dir> <needle_version> <checksums_file>
+# Install the bead-rs backend (`bead`) next to needle. New NEEDLE releases carry
+# a compatibility-pinned backend built from the same source line as CI; use it
+# first so a NEEDLE release never silently pairs with an older bead-rs release
+# that lacks a claim capability NEEDLE requires. Legacy releases without the
+# bundled asset retain the bead-rs release fallback for backwards compatibility.
+# Unreachable release or no build for this platform: warn and continue.
+# Checksum problems: same fail-closed rules as the needle binary.
 install_bead() {
     local arch="$1" os="$2" install_dir="$3" temp_dir="$4"
+    local needle_version="$5" checksums_file="$6"
 
     if [[ "$SKIP_BEAD" == "true" ]]; then
         info "Skipping bead backend install (--skip-bead / NEEDLE_SKIP_BEAD)"
@@ -423,6 +427,38 @@ install_bead() {
     fi
 
     info "Installing bead backend (bead-rs)..."
+
+    local asset="bead-${arch}-${os}"
+    local bead_tmp="$temp_dir/bead-rs"
+    mkdir -p "$bead_tmp"
+    local temp_bead="$bead_tmp/bead"
+
+    # NEEDLE's CI builder pins a bead-rs source revision that mints the claim
+    # epoch required by NEEDLE's fail-closed pre-spawn verification. The public
+    # bead-rs v0.2.6 release predates that change even though it has the same
+    # semver, so prefer the exact backend shipped in this NEEDLE release.
+    if download_file "https://github.com/${REPO}/releases/download/${needle_version}/${asset}" "$temp_bead" 2>/dev/null; then
+        if [[ ! -s "$checksums_file" ]]; then
+            if [[ "$SKIP_CHECKSUM" != "true" ]]; then
+                error "Could not verify bundled ${asset}: checksums.txt is unavailable. Installation aborted for security reasons."
+            fi
+            warn_checksum_skipped
+            warn "Skipping checksum verification for bundled ${asset} (checksums.txt unavailable)"
+        else
+            verify_against_manifest "$temp_bead" "$asset" "$checksums_file"
+        fi
+        chmod +x "$temp_bead"
+        if ! "$temp_bead" --version &>/dev/null; then
+            error "Downloaded bundled bead binary is not executable or corrupted."
+        fi
+        mv "$temp_bead" "${install_dir}/bead"
+        BEAD_INSTALLED_VERSION=$("${install_dir}/bead" --version 2>/dev/null | awk '{print $2}')
+        success "bead ${BEAD_INSTALLED_VERSION:-bundled} installed to ${install_dir}/bead"
+        return 0
+    fi
+    rm -f "$temp_bead"
+
+    info "Bundled bead backend not present; checking the bead-rs release fallback..."
     local api_output bead_version
     if ! api_output=$(fetch_release_json "$BEAD_API"); then
         warn "Could not reach the GitHub API for ${BEAD_REPO}; bead not installed."
@@ -446,16 +482,12 @@ install_bead() {
         fi
     fi
 
-    local asset="bead-${arch}-${os}"
     if ! asset_listed "$api_output" "$asset"; then
         warn "No prebuilt bead for ${arch}-${os} in ${bead_version}; bead not installed."
         warn "Build it from source: cargo install --git https://github.com/${BEAD_REPO} --bin bead"
         return 0
     fi
 
-    local bead_tmp="$temp_dir/bead-rs"
-    mkdir -p "$bead_tmp"
-    local temp_bead="$bead_tmp/bead"
     if ! download_file "https://github.com/${BEAD_REPO}/releases/download/${bead_version}/${asset}" "$temp_bead" 2>/dev/null; then
         warn "Could not download ${asset} from ${BEAD_REPO} ${bead_version}; bead not installed."
         return 0
@@ -591,7 +623,7 @@ main() {
     fi
 
     # The bead backend goes next to needle (GitHub #16).
-    install_bead "$arch" "$os" "$install_dir" "$temp_dir"
+    install_bead "$arch" "$os" "$install_dir" "$temp_dir" "$version" "$checksums_file"
 
     # Check if install dir is in PATH
     local path_has_dir=false

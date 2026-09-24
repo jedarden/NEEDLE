@@ -40,10 +40,14 @@ their logs expire.
 ## Release quickstart gate
 
 The `needle-ci` WorkflowTemplate runs the `needle-quickstart-gate` step after
-each newly published release. It starts in a pinned `alpine:3.22.1` container
-with no Rust toolchain or bead binary, downloads that release's published
-`install.sh` asset, and executes the README quickstart against a disposable
-workspace:
+each newly published release. It starts in the pinned
+`debian:13.1-slim@sha256:a347fd7510ee31a84387619a492ad6c8eb0af2f2682b916ff3e643eb076f925a`
+container with no Rust toolchain or bead binary, downloads that release's
+published `install.sh` asset, and executes the README quickstart against a
+disposable workspace. The release also carries the compatibility-pinned bead
+backend built from the same claim-epoch-capable source revision as the CI
+builder; this avoids pairing a current NEEDLE binary with the older public
+bead-rs v0.2.6 asset:
 
 ```text
 needle init --backend bead-rs
