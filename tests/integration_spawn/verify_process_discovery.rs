@@ -40,7 +40,7 @@ fn run_status_json(fixture: &IsolatedChildEnv) -> serde_json::Value {
 }
 
 fn write_stale_registry(fixture: &IsolatedChildEnv) {
-    let state_dir = fixture.path().join(".needle/state");
+    let state_dir = fixture.path().join(".needle/state/state");
     std::fs::create_dir_all(&state_dir).expect("create isolated registry directory");
     let registry = serde_json::json!({
         "workers": [{
