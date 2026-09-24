@@ -24,6 +24,7 @@
 //! - Timeout: Agent times out, bead deferred
 //! - State machine integrity: Worker state transitions are valid
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -358,6 +359,12 @@ impl CanaryRunner {
             );
         }
 
+        // Keep canary-owned runtime files out of the workspace's tracked
+        // status. This uses the repository-local exclude file instead of
+        // writing a tracked .gitignore, so a fresh canary stays clean after
+        // repeated runs without changing the fixture commit.
+        self.ensure_runtime_artifacts_ignored()?;
+
         // Validate canary workspace has authoritative bead_cli.backend binding.
         // This prevents the canary from inheriting a machine-local legacy binding
         // that may not exist in production environments (2026-08-15 incident).
@@ -431,6 +438,60 @@ impl CanaryRunner {
             results,
             suite_passed,
         })
+    }
+
+    /// Ensure runtime artifacts created by a canary worker are ignored by the
+    /// canary repository without modifying its tracked fixture files.
+    fn ensure_runtime_artifacts_ignored(&self) -> Result<()> {
+        let output = Command::new("git")
+            .args(["rev-parse", "--git-path", "info/exclude"])
+            .current_dir(&self.canary_workspace)
+            .output()
+            .context("failed to inspect canary git metadata")?;
+        if !output.status.success() {
+            // A git-less workspace cannot report tracked dirt to the fallback
+            // gate, so there is no exclude file to maintain.
+            return Ok(());
+        }
+
+        let exclude_path = PathBuf::from(String::from_utf8(output.stdout)?.trim());
+        let exclude_path = if exclude_path.is_absolute() {
+            exclude_path
+        } else {
+            self.canary_workspace.join(exclude_path)
+        };
+        let existing = std::fs::read_to_string(&exclude_path).unwrap_or_default();
+        const RUNTIME_PATTERNS: &[&str] = &["/.hoop/", "/.needle/", "/.needle-predispatch-sha"];
+        let missing: Vec<&str> = RUNTIME_PATTERNS
+            .iter()
+            .copied()
+            .filter(|pattern| !existing.lines().any(|line| line.trim() == *pattern))
+            .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+
+        let mut additions = String::new();
+        if !existing.is_empty() && !existing.ends_with('\n') {
+            additions.push('\n');
+        }
+        additions.push_str("# NEEDLE canary runtime artifacts\n");
+        for pattern in missing {
+            additions.push_str(pattern);
+            additions.push('\n');
+        }
+        if let Some(parent) = exclude_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&exclude_path)
+            .with_context(|| format!("failed to open {}", exclude_path.display()))?
+            .write_all(additions.as_bytes())
+            .with_context(|| format!("failed to update {}", exclude_path.display()))?;
+        Ok(())
     }
 
     /// Validate that the canary workspace has an authoritative bead_cli.backend binding.
@@ -897,6 +958,7 @@ impl CanaryRunner {
                         "1",
                     ])
                     .env("NEEDLE_INNER", "1")
+                    .env("NEEDLE_STATE_DIR", isolated_home.path())
                     .env("NEEDLE_STRANDS__EXPLORE__ENABLED", "false")
                     .env(
                         "NEEDLE_STRANDS__EXPLORE__WORKSPACE_ROOT",

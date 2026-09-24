@@ -52,7 +52,7 @@ use crate::validation::{GateReport, GateResult};
 /// dispatch being judged (checkpoint writes, heartbeats) and is committed by
 /// the fleet's own checkpoint protocol, not by the agent; the predispatch
 /// snapshot filter excludes exactly these and so does the shipped-work gate.
-const TREE_NOISE_PREFIXES: &[&str] = &[".beads/", ".needle-predispatch-sha"];
+const TREE_NOISE_PREFIXES: &[&str] = &[".beads/", ".needle-predispatch-sha", ".hoop/", ".needle/"];
 
 /// Worker segment for extraction directory names.
 ///
@@ -743,11 +743,33 @@ mod tests {
 
     #[tokio::test]
     async fn bead_bookkeeping_noise_does_not_fail_the_clean_tree_check() {
-        let workspace = git_workspace(&[("README.md", "docs only\n")]);
+        let workspace = git_workspace(&[
+            ("README.md", "docs only\n"),
+            (".needle-predispatch-sha", "committed-predispatch-sha\n"),
+        ]);
         // A dispatch's own bead operations dirty `.beads/` as a side effect;
         // the checkpoint protocol commits that separately.
         std::fs::create_dir_all(workspace.path().join(".beads")).unwrap();
         std::fs::write(workspace.path().join(".beads/events.jsonl"), "{}\n").unwrap();
+        // Canary workers own these paths. They may be tracked, modified, or
+        // newly created while the no-verifier fallback judges the dispatch.
+        std::fs::write(
+            workspace.path().join(".needle-predispatch-sha"),
+            "current-predispatch-sha\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(workspace.path().join(".hoop/workers")).unwrap();
+        std::fs::write(
+            workspace
+                .path()
+                .join(".hoop/workers/canary-needle-test.ack"),
+            "ack\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(workspace.path().join(".needle/logs")).unwrap();
+        std::fs::write(workspace.path().join(".needle/logs/canary.jsonl"), "{}\n").unwrap();
+        std::fs::create_dir_all(workspace.path().join(".needle/state")).unwrap();
+        std::fs::write(workspace.path().join(".needle/state/workers.json"), "{}\n").unwrap();
 
         match FallbackVerificationRuntime::production()
             .verify(
