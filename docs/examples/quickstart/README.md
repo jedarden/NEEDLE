@@ -128,28 +128,32 @@ bead init --prefix quickstart
 needle doctor
 ```
 
-**Expected `needle doctor` output** (real output from needle 0.6.0 + bead 0.2.6 on a clean host, 2026-09-09; paths shortened, disk figure elided):
+**Expected `needle doctor` output** (real output from needle 0.6.1 + bead 0.2.6 on a clean host, 2026-09-17; paths shortened, disk figure elided):
 
 ```
 NEEDLE Doctor
 ────────────────────────────────────────────────────────────
 [PASS]  Config                        valid
+[PASS]  Quickstart config             matches the quickstart example, and no other NEEDLE workspaces live here
 [PASS]  Gate commands                 none configured
 [PASS]  Workspace                     /tmp/needle-quickstart-project
 [WARN]  SQLite integrity              sqlite3 not on PATH — skipped
 [PASS]  Lock files                    none
 [PASS]  DoD bypasses                  none recorded
 [PASS]  Bead CLI Backend              bead-rs
-         └─ CLI path: ~/.local/bin/bead
+         └─ CLI path: ~/.cargo/bin/bead
          └─ source: config file
          └─ verified against: bead 0.1.3 (commit 85f36ac)
          └─ capability gap: split/mitosis is sequential, not atomic
          └─ capability gap: claim omits model/harness velocity metadata
 [PASS]  Bead store                    ok
 [PASS]  Checkpoint                    native pointer is valid JSON
+[PASS]  Permanent deferrals           none
+[PASS]  Dependency graph              0 open bead(s), 0 ready
 [PASS]  Worker registry               empty
 [WARN]  Heartbeat dir                 missing: ~/.needle/state/heartbeats
 [PASS]  Heartbeat files               no heartbeat directory
+[PASS]  Gate-health records           0 inspected, all workspaces exist
 [PASS]  Peers                         no workers running
 [PASS]  Agent binary                  claude at ~/.local/bin/claude
 [PASS]  Adapter transforms            ok
@@ -157,7 +161,7 @@ NEEDLE Doctor
 [PASS]  Disk space                    <n> MB available
 [PASS]  Telemetry logs                no log directory yet
 ────────────────────────────────────────────────────────────
-16 passed, 2 warning(s), 0 failure(s).
+20 passed, 2 warning(s), 0 failure(s).
 Run `needle doctor --repair` to attempt automatic fixes.
 ```
 
@@ -175,10 +179,20 @@ bash "$NEEDLE_REPO/docs/examples/quickstart/seed-beads.sh"
 Or create them manually:
 
 ```bash
-# Create three sequential beads
-contributing_id=$(bead create --title "Add CONTRIBUTING.md" --priority 2 --issue-type task)
-license_id=$(bead create --title "Add LICENSE file" --priority 2 --issue-type task)
-makefile_id=$(bead create --title "Add simple Makefile" --priority 1 --issue-type task)
+# Create three sequential beads. Each title names one deliverable and its one
+# acceptance command; each description keeps the worker on this bead.
+contributing_id=$(bead create \
+  --title 'Create CONTRIBUTING.md so that test -s CONTRIBUTING.md passes. Work on this issue directly.' \
+  --description 'Create CONTRIBUTING.md with contribution guidelines. Acceptance: `test -s CONTRIBUTING.md`. Do not create sub-issues, split this work, or decompose it.' \
+  --priority 2 --issue-type task)
+license_id=$(bead create \
+  --title 'Create LICENSE so that test -s LICENSE passes. Work on this issue directly.' \
+  --description 'Create LICENSE with the project license text. Acceptance: `test -s LICENSE`. Do not create sub-issues, split this work, or decompose it.' \
+  --priority 2 --issue-type task)
+makefile_id=$(bead create \
+  --title 'Create Makefile so that test -s Makefile passes. Work on this issue directly.' \
+  --description 'Create a simple Makefile with the project command. Acceptance: `test -s Makefile`. Do not create sub-issues, split this work, or decompose it.' \
+  --priority 1 --issue-type task)
 
 # Add a dependency: Makefile depends on LICENSE
 bead dep add "$makefile_id" "$license_id"
@@ -217,12 +231,23 @@ ls -la
 
 # See the git history
 git log --oneline
+
+# Re-run each bead's acceptance command
+test -s CONTRIBUTING.md
+test -s LICENSE
+test -s Makefile
+
+# Confirm the shipped commits are upstream
+git rev-list origin/main..HEAD
 ```
 
 **Expected final state:**
 - Three beads with status `closed`
 - Three new files: `CONTRIBUTING.md`, `LICENSE`, `Makefile`
 - Three git commits, one per bead, all pushed to the remote — `git log --oneline origin/main..HEAD` prints nothing
+
+Each `test -s` command exits 0, `bead list --status closed` shows all three
+beads as closed, and `git rev-list origin/main..HEAD` prints nothing.
 
 ## What Just Happened?
 
