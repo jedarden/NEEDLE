@@ -10,7 +10,7 @@ bash -n "$SRC_DIR/apply-ex44-fleet.sh" "$SRC_DIR/backlog-slo.sh" "$SRC_DIR/needl
 rows=$(awk -F'\t' '$1 !~ /^#/ && NF == 5 {print}' "$MANIFEST")
 [[ "$(wc -l <<<"$rows")" -eq 32 ]]
 [[ "$(cut -f1 <<<"$rows" | sort -u | wc -l)" -eq 32 ]]
-[[ "$(awk -F'\t' '$5 == "true" {n++} END {print n+0}' <<<"$rows")" -eq 28 ]]
+[[ "$(awk -F'\t' '$5 == "true" {n++} END {print n+0}' <<<"$rows")" -eq 27 ]]
 grep -q $'^codex-luna-tradegraph\t/home/coding/.needle/roam-only\t.*\ttrue$' "$MANIFEST"
 grep -q $'^codex-luna-adc\t/home/coding/.needle/roam-only\t.*\ttrue$' "$MANIFEST"
 [[ "$(awk -F'\t' '$3 == "codex-gpt-5.6-luna-xhigh" {n++} END {print n+0}' <<<"$rows")" -eq 8 ]]
@@ -20,6 +20,7 @@ grep -q $'^codex-needle-01\t/home/coding/NEEDLE\tcodex-gpt-5.6-luna-xhigh\t0\ttr
 grep -q $'^codex-luna-tradegraph\t/home/coding/.needle/roam-only\tcodex-gpt-5.6-luna-xhigh\t90\ttrue$' "$MANIFEST"
 grep -q $'^codex-luna-adc\t/home/coding/.needle/roam-only\tcodex-gpt-5.6-luna-xhigh\t135\ttrue$' "$MANIFEST"
 grep -q $'^codex-luna-needle-01\t/home/coding/NEEDLE\tcodex-gpt-6-luna-xhigh\t315\tfalse$' "$MANIFEST"
+grep -q $'^codex-luna-warp\t/home/coding/WARP\tcodex-gpt-5.6-luna-xhigh\t45\tfalse$' "$MANIFEST"
 ! grep -Eq $'^(glm-tradegraph|glm53-adc|glm-needle-01)\t' "$MANIFEST"
 grep -q 'NEEDLE_AGENT__EVIDENCE_ROUTING__ENABLED=false' "$SRC_DIR/apply-ex44-fleet.sh"
 grep -q '^  backend: bead-rs$' "$SRC_DIR/roam-home.yaml"
