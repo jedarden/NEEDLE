@@ -2665,6 +2665,7 @@ mod tests {
         let mut b = poison_bead();
         b.title = "Fix the retry backoff in the HTTP client".to_string();
         b.body = Some("Exponential backoff with jitter.".to_string());
+        b.labels = vec!["failure-count:3".to_string()];
         assert!(!would_release_as_split_out_of_scope(&b, 3));
     }
 
@@ -2844,6 +2845,7 @@ mod tests {
         valid.id = BeadId::from("vista-valid-001");
         valid.title = "Add a retry test for the uploader".to_string();
         valid.body = Some("Cover the 503 path.".to_string());
+        valid.labels = vec!["failure-count:3".to_string()];
         valid.priority = 2;
 
         let mut candidates = vec![poison, valid];
