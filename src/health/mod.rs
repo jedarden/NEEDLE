@@ -1813,6 +1813,14 @@ fn emitter_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Every test below that mutates or depends on process-global env state —
+    // `isolate_test_home`/`HomeGuard` for HOME, `lock_supervisor_socket_env`
+    // for NEEDLE_SUPERVISOR_SOCKET — carries `#[serial]`: serial_test's one
+    // process-wide lock keeps those tests from interleaving with each other
+    // (and with the config/panic_capture serial groups in the same test
+    // binary) while HOME is swapped underneath them. Tests that touch no
+    // global state stay parallel.
+    use serial_test::serial;
     use std::time::Duration;
 
     /// Serialise `NEEDLE_SUPERVISOR_SOCKET` with every other test that mutates
@@ -1881,6 +1889,7 @@ mod tests {
         config
     }
 
+    #[serial]
     #[tokio::test]
     async fn heartbeat_file_written_on_start() {
         let _home_guard = isolate_test_home();
@@ -1908,6 +1917,7 @@ mod tests {
         monitor.stop();
     }
 
+    #[serial]
     #[test]
     fn heartbeat_carries_completion_count() {
         let _home_guard = isolate_test_home();
@@ -1936,6 +1946,7 @@ mod tests {
         monitor.stop();
     }
 
+    #[serial]
     #[test]
     fn heartbeat_updates_with_shared_state() {
         let _home_guard = isolate_test_home();
@@ -1971,6 +1982,7 @@ mod tests {
         monitor.stop();
     }
 
+    #[serial]
     #[tokio::test]
     async fn heartbeat_file_removed_on_stop() {
         let _home_guard = isolate_test_home();
@@ -2240,6 +2252,7 @@ mod tests {
         assert!(!HealthMonitor::check_pid_alive(99_999_999));
     }
 
+    #[serial]
     #[test]
     fn atomic_write_never_produces_partial() {
         let _home_guard = isolate_test_home();
@@ -2307,6 +2320,7 @@ mod tests {
         assert_eq!(parsed.beads_processed, data.beads_processed);
     }
 
+    #[serial]
     #[tokio::test]
     async fn detect_stale_peers_excludes_self() {
         let _home_guard = isolate_test_home();
@@ -2435,6 +2449,7 @@ mod tests {
         let _ = std::fs::set_permissions(&hb_dir, std::fs::Permissions::from_mode(0o755));
     }
 
+    #[serial]
     #[tokio::test]
     async fn heartbeat_path_uses_qualified_id_not_bare_worker_id() {
         let _home_guard = isolate_test_home();
@@ -2486,6 +2501,7 @@ mod tests {
         assert_eq!(monitor2.qualified_id(), "claude-code-glm-4_7-foxtrot");
     }
 
+    #[serial]
     #[test]
     fn heartbeat_files_dont_collide_across_adapter_pools() {
         let _home_guard = isolate_test_home();
@@ -2559,6 +2575,7 @@ mod tests {
         monitor2.stop();
     }
 
+    #[serial]
     #[test]
     fn heartbeat_uses_cross_workspace_bead_workspace() {
         let _home_guard = isolate_test_home();
@@ -2609,6 +2626,7 @@ mod tests {
     /// The emitter is a native thread, so Tokio's paused clock cannot drive it.
     /// Its manual-time channel advances the real scheduling loop and waits for
     /// the real atomic file writer to finish.
+    #[serial]
     #[test]
     fn heartbeat_creates_and_refreshes_every_30_seconds() {
         let dir = tempfile::tempdir().unwrap();
@@ -2691,6 +2709,7 @@ mod tests {
     /// - Normal exit leaves no stale file
     ///
     /// Validation: launch worker, kill with SIGTERM, verify file removed.
+    #[serial]
     #[tokio::test]
     async fn heartbeat_cleanup_on_graceful_shutdown() {
         let _home_guard = isolate_test_home();
@@ -2732,6 +2751,7 @@ mod tests {
     /// Test that heartbeat cleanup happens even if Worker is dropped without calling stop().
     ///
     /// This validates the Drop trait implementation as a fallback cleanup mechanism.
+    #[serial]
     #[tokio::test]
     async fn heartbeat_cleanup_on_worker_drop() {
         let _home_guard = isolate_test_home();
@@ -2778,6 +2798,7 @@ mod tests {
     ///
     /// This is the first step in ensuring the shutdown handler has access to
     /// the heartbeat file path for cleanup on graceful shutdown.
+    #[serial]
     #[tokio::test]
     async fn heartbeat_path_computed_during_construction() {
         let dir = tempfile::tempdir().unwrap();
@@ -2851,6 +2872,7 @@ mod tests {
     }
 
     /// Test supervisor detection with no other workers (standalone mode).
+    #[serial]
     #[tokio::test]
     async fn detect_supervisor_no_other_workers() {
         let _home_guard = isolate_test_home();
@@ -2875,6 +2897,7 @@ mod tests {
     }
 
     /// Test supervisor detection with multiple active workers.
+    #[serial]
     #[tokio::test]
     async fn detect_supervisor_multiple_workers() {
         let _home_guard = isolate_test_home();
@@ -2924,6 +2947,7 @@ mod tests {
     }
 
     /// Test supervisor detection ignores stale heartbeats.
+    #[serial]
     #[tokio::test]
     async fn detect_supervisor_ignores_stale_heartbeats() {
         let _home_guard = isolate_test_home();
@@ -2971,6 +2995,7 @@ mod tests {
     }
 
     /// Test supervisor detection with recent spawn activity.
+    #[serial]
     #[tokio::test]
     async fn detect_supervisor_recent_spawn_activity() {
         let _home_guard = isolate_test_home();
@@ -3221,6 +3246,7 @@ mod tests {
     ///
     /// CRITICAL: This test does NOT set config.health.heartbeat_dir, ensuring
     /// that resolve_heartbeat_dir() reads std::env::var("HOME") at runtime.
+    #[serial]
     #[tokio::test]
     async fn heartbeat_respects_isolated_home_directory() {
         // Step 1: Record the real HOME path before isolation
@@ -3342,6 +3368,7 @@ mod tests {
     /// Unlike `heartbeat_respects_isolated_home_directory`, this test does NOT pass an
     /// explicit heartbeat_dir to the config, so it tests the actual default behavior
     /// where `resolve_heartbeat_dir()` reads `std::env::var("HOME")` at runtime.
+    #[serial]
     #[tokio::test]
     async fn heartbeat_uses_isolated_home_with_default_config() {
         // Record the real HOME before isolation
@@ -3913,6 +3940,7 @@ mod tests {
     }
 
     /// Test that check_supervisor_socket returns true when socket exists.
+    #[serial]
     #[test]
     fn check_supervisor_socket_exists_returns_true() {
         let _env_guard = lock_supervisor_socket_env();
@@ -3947,6 +3975,7 @@ mod tests {
     }
 
     /// Test that check_supervisor_socket returns false when socket doesn't exist.
+    #[serial]
     #[test]
     fn check_supervisor_socket_missing_returns_false() {
         let _env_guard = lock_supervisor_socket_env();
@@ -3962,6 +3991,7 @@ mod tests {
     }
 
     /// Test that check_supervisor_socket uses default path when env var not set.
+    #[serial]
     #[test]
     fn check_supervisor_socket_default_path() {
         let _env_guard = lock_supervisor_socket_env();
@@ -4003,6 +4033,7 @@ mod tests {
     }
 
     /// Test that detect_supervisor_direct returns true when socket is present.
+    #[serial]
     #[test]
     fn detect_supervisor_direct_with_socket_returns_true() {
         let _env_guard = lock_supervisor_socket_env();
@@ -4043,6 +4074,7 @@ mod tests {
     }
 
     /// Test that detect_supervisor_direct returns false when no supervisor detected.
+    #[serial]
     #[test]
     fn detect_supervisor_direct_no_supervisor_returns_false() {
         let _env_guard = lock_supervisor_socket_env();
@@ -4110,6 +4142,7 @@ mod tests {
     /// A corrupt heartbeat must not disable the idle_action guard: before the
     /// fix, the read/parse error propagated and the worker boot silently
     /// skipped validation entirely.
+    #[serial]
     #[test]
     fn detect_supervisor_direct_corrupt_heartbeat_returns_false() {
         let _env_guard = lock_supervisor_socket_env();
@@ -4146,6 +4179,7 @@ mod tests {
     /// Test that a corrupt heartbeat still falls through to the socket check,
     /// so a live supervisor remains detectable when only its heartbeat file
     /// is degraded (needle-d00f58d3).
+    #[serial]
     #[test]
     fn detect_supervisor_direct_corrupt_heartbeat_falls_back_to_socket() {
         let _env_guard = lock_supervisor_socket_env();
@@ -4544,6 +4578,7 @@ mod tests {
     /// This test verifies the acceptance criteria:
     /// - Liveness check returns Ok(true) for fresh heartbeat
     /// - Heartbeat file exists and is within TTL
+    #[serial]
     #[tokio::test]
     async fn check_worker_alive_fresh_heartbeat_returns_true() {
         let _home_guard = isolate_test_home();
@@ -4598,6 +4633,7 @@ mod tests {
     /// This test verifies the acceptance criteria:
     /// - Liveness check returns Ok(false) for stale heartbeat
     /// - Heartbeat file exists but age exceeds TTL
+    #[serial]
     #[tokio::test]
     async fn check_worker_alive_stale_heartbeat_returns_false() {
         let _home_guard = isolate_test_home();
@@ -4652,6 +4688,7 @@ mod tests {
     /// This test verifies the acceptance criteria:
     /// - Liveness check returns Ok(false) for missing heartbeat
     /// - Heartbeat file does not exist
+    #[serial]
     #[tokio::test]
     async fn check_worker_alive_missing_heartbeat_returns_false() {
         let _home_guard = isolate_test_home();
@@ -4683,6 +4720,7 @@ mod tests {
     /// This test verifies the acceptance criteria:
     /// - Liveness check returns Err for malformed heartbeat
     /// - Heartbeat file exists but cannot be parsed
+    #[serial]
     #[tokio::test]
     async fn check_worker_alive_malformed_heartbeat_returns_error() {
         let _home_guard = isolate_test_home();
@@ -4723,6 +4761,7 @@ mod tests {
     /// This test verifies the acceptance criteria:
     /// - Liveness check returns Err for heartbeat with invalid timestamp
     /// - Heartbeat file is valid JSON but timestamp cannot be parsed
+    #[serial]
     #[tokio::test]
     async fn check_worker_alive_invalid_timestamp_returns_error() {
         let _home_guard = isolate_test_home();
@@ -4782,6 +4821,7 @@ mod tests {
     /// This test verifies the acceptance criteria:
     /// - verify_heartbeat returns Ok(true) for fresh heartbeat
     /// - Checks this worker's own heartbeat file
+    #[serial]
     #[tokio::test]
     async fn verify_heartbeat_fresh_returns_true() {
         let _home_guard = isolate_test_home();
@@ -4816,6 +4856,7 @@ mod tests {
     /// This test verifies the acceptance criteria:
     /// - verify_heartbeat returns Ok(false) for missing heartbeat
     /// - Heartbeat file does not exist
+    #[serial]
     #[tokio::test]
     async fn verify_heartbeat_missing_returns_false() {
         let _home_guard = isolate_test_home();
@@ -4847,6 +4888,7 @@ mod tests {
     /// This test verifies the acceptance criteria:
     /// - verify_heartbeat returns Ok(false) for stale heartbeat
     /// - Heartbeat file exists but age exceeds TTL
+    #[serial]
     #[tokio::test]
     async fn verify_heartbeat_stale_returns_false() {
         let _home_guard = isolate_test_home();
@@ -4889,6 +4931,7 @@ mod tests {
     /// This test verifies the acceptance criteria:
     /// - verify_heartbeat returns Err for malformed heartbeat
     /// - Heartbeat file exists but cannot be parsed
+    #[serial]
     #[tokio::test]
     async fn verify_heartbeat_malformed_returns_error() {
         let _home_guard = isolate_test_home();
@@ -4933,6 +4976,7 @@ mod tests {
     ///
     /// This ensures the shutdown handler will have access to the correct file path
     /// for cleanup on graceful shutdown.
+    #[serial]
     #[tokio::test]
     async fn heartbeat_path_field_correct_for_shutdown_handler() {
         let dir = tempfile::tempdir().unwrap();
@@ -5295,6 +5339,7 @@ mod tests {
     }
 
     /// Test that check_worker_alive returns true for fresh heartbeats.
+    #[serial]
     #[tokio::test]
     async fn check_worker_alive_fresh_heartbeat() {
         let _home_guard = isolate_test_home();
@@ -5342,6 +5387,7 @@ mod tests {
     }
 
     /// Test that check_worker_alive returns false for stale heartbeats.
+    #[serial]
     #[tokio::test]
     async fn check_worker_alive_stale_heartbeat() {
         let _home_guard = isolate_test_home();
@@ -5389,6 +5435,7 @@ mod tests {
     }
 
     /// Test that check_worker_alive returns false when heartbeat file doesn't exist.
+    #[serial]
     #[tokio::test]
     async fn check_worker_alive_no_heartbeat_file() {
         let _home_guard = isolate_test_home();
@@ -5414,6 +5461,7 @@ mod tests {
     }
 
     /// Test that check_worker_alive returns error for unparseable heartbeat file.
+    #[serial]
     #[tokio::test]
     async fn check_worker_alive_unparseable_heartbeat() {
         let _home_guard = isolate_test_home();
@@ -5443,6 +5491,7 @@ mod tests {
     }
 
     /// Test that check_worker_alive handles edge cases at TTL boundary.
+    #[serial]
     #[tokio::test]
     async fn check_worker_alive_ttl_boundary() {
         let _home_guard = isolate_test_home();
@@ -5493,6 +5542,7 @@ mod tests {
     }
 
     /// Test that check_worker_alive uses qualified_worker_id correctly.
+    #[serial]
     #[tokio::test]
     async fn check_worker_alive_qualified_id_format() {
         let _home_guard = isolate_test_home();
@@ -5544,6 +5594,7 @@ mod tests {
     /// 2. Verify worker is detected as alive via heartbeat freshness
     /// 3. Kill the worker and verify it's detected as dead/stale
     /// 4. Uses proper test isolation (temp HOME, heartbeat dir)
+    #[serial]
     #[test]
     fn worker_liveness_detection_integration() {
         let _home_guard = isolate_test_home();
@@ -5738,6 +5789,7 @@ mod tests {
         );
     }
 
+    #[serial]
     #[test]
     fn reported_activity_reaches_the_heartbeat_file_and_coalesces() {
         let _home_guard = isolate_test_home();
@@ -5803,6 +5855,7 @@ mod tests {
         monitor.stop();
     }
 
+    #[serial]
     #[test]
     fn clear_activity_drops_the_view_and_rejects_late_reports() {
         let _home_guard = isolate_test_home();
@@ -5836,6 +5889,7 @@ mod tests {
         assert!(monitor.current_activity().is_none());
     }
 
+    #[serial]
     #[test]
     fn late_event_from_a_prior_attempt_cannot_refresh_a_successor() {
         let _home_guard = isolate_test_home();
