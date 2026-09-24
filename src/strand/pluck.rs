@@ -12,11 +12,12 @@ use crate::build_status::{BuildStatusChecker, CircuitDecision, CircuitPolicy};
 use crate::deferral::{holds as deferral_holds, until as deferred_until};
 use crate::mitosis::detects_needle_internal_config;
 use crate::telemetry::Telemetry;
-use crate::types::{Bead, BeadId, BrDependency, Comment, StrandError, StrandResult};
+use crate::types::{Bead, BeadId, BrDependency, StrandError, StrandResult};
 use anyhow::{Context, Result};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{atomic::AtomicUsize, atomic::Ordering, Mutex};
 
@@ -36,6 +37,13 @@ const DEFAULT_EXCLUDE_LABELS: &[&str] = &["deferred", "human", "blocked", "escal
 /// `outcome.quarantine_after_failures`; this default only exists so a
 /// hand-constructed strand in a test still re-evaluates expiries sensibly.
 const DEFAULT_QUARANTINE_THRESHOLD: u32 = 5;
+
+/// Maximum size of one starvation event JSONL file. Rotation happens between
+/// complete records so no JSON object is ever split across files.
+const STARVATION_EVENT_FILE_MAX_BYTES: u64 = 64 * 1024 * 1024;
+/// The active file plus seven rotated files makes eight files total.
+const STARVATION_EVENT_MAX_FILES: usize = 8;
+const STARVATION_EVENT_MAX_ROTATED_FILES: usize = STARVATION_EVENT_MAX_FILES - 1;
 
 /// Constraint relaxation level used when the normal ready query is empty.
 ///
@@ -489,18 +497,9 @@ fn open_bead_diagnostic(
     };
     OpenBeadDiagnostic {
         id: bead.id.to_string(),
-        title: bead.title.clone(),
-        description: bead.body.clone(),
         status: bead.status.to_string(),
-        assignee: bead.assignee.clone(),
         priority: bead.priority,
-        labels: bead.labels.clone(),
         workspace: bead.workspace.display().to_string(),
-        dependencies: bead.dependencies.clone(),
-        dependents: bead.dependents.clone(),
-        comments: bead.comments.clone(),
-        created_at: bead.created_at,
-        updated_at: bead.updated_at,
         is_ready,
         exclusion_reasons,
     }
@@ -1076,24 +1075,17 @@ struct NamedBeadDiagnostic {
     title: String,
 }
 
-/// Complete point-in-time state for one open work bead.
+/// Claimability facts for one open work bead.
+///
+/// Keep this projection deliberately small: the persistent JSONL stream is
+/// evidence about why work was not claimable, not a second bead database.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct OpenBeadDiagnostic {
     id: String,
-    title: String,
-    description: Option<String>,
-    status: String,
-    assignee: Option<String>,
-    priority: u8,
-    labels: Vec<String>,
-    workspace: String,
-    dependencies: Vec<BrDependency>,
-    dependents: Vec<BrDependency>,
-    comments: Vec<Comment>,
-    created_at: chrono::DateTime<chrono::Utc>,
-    updated_at: chrono::DateTime<chrono::Utc>,
-    /// Whether the state itself looks claimable despite the empty ready result.
     is_ready: bool,
+    priority: u8,
+    status: String,
+    workspace: String,
     /// All reasons this bead was not claimable in this snapshot.
     exclusion_reasons: Vec<String>,
 }
@@ -1204,6 +1196,169 @@ pub struct PluckStrand {
     heartbeat_dir: Option<PathBuf>,
     /// Freshness bound for heartbeat evidence used by capacity admission.
     heartbeat_ttl: std::time::Duration,
+}
+
+fn starvation_rotated_path(record_path: &Path, index: usize) -> PathBuf {
+    let mut file_name = record_path
+        .file_name()
+        .expect("starvation record path must have a file name")
+        .to_os_string();
+    file_name.push(format!(".{index}"));
+    record_path.with_file_name(file_name)
+}
+
+fn remove_starvation_file_if_present(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| {
+            format!(
+                "failed to remove rotated starvation file: {}",
+                path.display()
+            )
+        }),
+    }
+}
+
+/// Keep the newest complete JSONL records from an oversized rotated file.
+///
+/// Normally every rotated file is already below the limit. This also handles
+/// the first write after upgrading from the unbounded legacy file: the legacy
+/// file is renamed first, then reduced to a complete-record tail so migration
+/// preserves recent evidence without retaining gigabytes outside the cap.
+fn trim_starvation_file_to_limit(path: &Path) -> Result<()> {
+    let length = std::fs::metadata(path)
+        .with_context(|| {
+            format!(
+                "failed to inspect rotated starvation file: {}",
+                path.display()
+            )
+        })?
+        .len();
+    if length <= STARVATION_EVENT_FILE_MAX_BYTES {
+        return Ok(());
+    }
+
+    let mut source = std::fs::File::open(path)
+        .with_context(|| format!("failed to open rotated starvation file: {}", path.display()))?;
+    source
+        .seek(SeekFrom::Start(
+            length.saturating_sub(STARVATION_EVENT_FILE_MAX_BYTES),
+        ))
+        .with_context(|| format!("failed to seek rotated starvation file: {}", path.display()))?;
+    let mut tail = Vec::new();
+    source
+        .read_to_end(&mut tail)
+        .with_context(|| format!("failed to read rotated starvation file: {}", path.display()))?;
+
+    // The first newline after the seek point terminates the partial record at
+    // the start of the tail. If no complete record follows that boundary,
+    // retain the file rather than cutting its only record in half.
+    let Some(first_newline) = tail.iter().position(|byte| *byte == b'\n') else {
+        return Ok(());
+    };
+    let retained = &tail[first_newline + 1..];
+    if retained.is_empty() {
+        return Ok(());
+    }
+
+    let file_name = path
+        .file_name()
+        .expect("rotated starvation path must have a file name")
+        .to_string_lossy();
+    let temporary_path = path.with_file_name(format!(".{file_name}.trim-{}", std::process::id()));
+    remove_starvation_file_if_present(&temporary_path)?;
+    let write_result = (|| -> Result<()> {
+        let mut temporary = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temporary_path)
+            .with_context(|| {
+                format!(
+                    "failed to create trimmed starvation file: {}",
+                    temporary_path.display()
+                )
+            })?;
+        temporary.write_all(retained).with_context(|| {
+            format!(
+                "failed to write trimmed starvation file: {}",
+                temporary_path.display()
+            )
+        })?;
+        temporary.sync_data().with_context(|| {
+            format!(
+                "failed to persist trimmed starvation file: {}",
+                temporary_path.display()
+            )
+        })?;
+        Ok(())
+    })();
+    if let Err(error) = write_result {
+        let _ = remove_starvation_file_if_present(&temporary_path);
+        return Err(error);
+    }
+
+    std::fs::rename(&temporary_path, path).with_context(|| {
+        format!(
+            "failed to install trimmed starvation file: {}",
+            path.display()
+        )
+    })?;
+    Ok(())
+}
+
+/// Rotate the active starvation stream before a record would exceed 64 MiB.
+///
+/// The active file plus `.1` through `.7` are the eight retained files. The
+/// oldest rotated file ages out, and each retained rotated file is trimmed at
+/// a complete JSONL record boundary when necessary.
+fn rotate_starvation_diagnostic_files(record_path: &Path) -> Result<()> {
+    // Remove any `.8` left by an older implementation before enforcing the
+    // current eight-file contract (active plus seven rotated files).
+    remove_starvation_file_if_present(&starvation_rotated_path(
+        record_path,
+        STARVATION_EVENT_MAX_ROTATED_FILES + 1,
+    ))?;
+
+    // The oldest retained rotated file ages out first. Shift from newest to
+    // oldest so every rename has a free destination.
+    remove_starvation_file_if_present(&starvation_rotated_path(
+        record_path,
+        STARVATION_EVENT_MAX_ROTATED_FILES,
+    ))?;
+    for index in (1..STARVATION_EVENT_MAX_ROTATED_FILES).rev() {
+        let source = starvation_rotated_path(record_path, index);
+        if source.exists() {
+            let destination = starvation_rotated_path(record_path, index + 1);
+            remove_starvation_file_if_present(&destination)?;
+            std::fs::rename(&source, &destination).with_context(|| {
+                format!(
+                    "failed to rotate starvation file {} to {}",
+                    source.display(),
+                    destination.display()
+                )
+            })?;
+        }
+    }
+
+    if record_path.exists() {
+        let first_rotated = starvation_rotated_path(record_path, 1);
+        std::fs::rename(record_path, &first_rotated).with_context(|| {
+            format!(
+                "failed to rotate starvation file {} to {}",
+                record_path.display(),
+                first_rotated.display()
+            )
+        })?;
+    }
+
+    for index in 1..=STARVATION_EVENT_MAX_ROTATED_FILES {
+        let rotated_path = starvation_rotated_path(record_path, index);
+        if rotated_path.exists() {
+            trim_starvation_file_to_limit(&rotated_path)?;
+        }
+    }
+    Ok(())
 }
 
 impl PluckStrand {
@@ -1938,8 +2093,8 @@ impl PluckStrand {
     }
 
     /// Append a complete starvation snapshot to NEEDLE's durable diagnostic
-    /// stream.  The lock covers serialization and the newline write so two
-    /// workers cannot interleave JSON objects in the same JSONL file.
+    /// stream. The lock covers rotation, serialization, and the newline write
+    /// so two workers cannot interleave JSON objects or rotate concurrently.
     fn write_starvation_diagnostic(&self, snapshot: &StarvationDiagnosticSnapshot) -> Result<()> {
         let needle_home = self
             .needle_workspace
@@ -1954,30 +2109,66 @@ impl PluckStrand {
         })?;
 
         let record_path = state_dir.join("starvation_events.jsonl");
-        let mut file = std::fs::OpenOptions::new()
+        let mut record = serde_json::to_vec(snapshot)
+            .context("failed to serialize starvation diagnostic snapshot")?;
+        record.push(b'\n');
+
+        // Keep the lock path stable across rotations. Locking the active file
+        // itself would let another process open the old pathname after it was
+        // renamed and write concurrently to a new active file.
+        let lock_path = state_dir.join(".starvation_events.lock");
+        let lock_file = std::fs::OpenOptions::new()
             .create(true)
-            .append(true)
-            .open(&record_path)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
             .with_context(|| {
                 format!(
-                    "failed to open starvation diagnostics file: {}",
-                    record_path.display()
+                    "failed to open starvation diagnostics lock: {}",
+                    lock_path.display()
                 )
             })?;
 
         use fs2::FileExt;
-        file.lock_exclusive().with_context(|| {
+        lock_file.lock_exclusive().with_context(|| {
             format!(
-                "failed to lock starvation diagnostics file: {}",
-                record_path.display()
+                "failed to lock starvation diagnostics lock: {}",
+                lock_path.display()
             )
         })?;
 
         let write_result = (|| -> Result<()> {
-            use std::io::Write;
-            serde_json::to_writer(&mut file, snapshot)
-                .context("failed to serialize starvation diagnostic snapshot")?;
-            file.write_all(b"\n").with_context(|| {
+            let active_size = match std::fs::metadata(&record_path) {
+                Ok(metadata) => metadata.len(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "failed to inspect starvation diagnostics file: {}",
+                            record_path.display()
+                        )
+                    });
+                }
+            };
+
+            if active_size > 0
+                && active_size.saturating_add(record.len() as u64) > STARVATION_EVENT_FILE_MAX_BYTES
+            {
+                rotate_starvation_diagnostic_files(&record_path)?;
+            }
+
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&record_path)
+                .with_context(|| {
+                    format!(
+                        "failed to open starvation diagnostics file: {}",
+                        record_path.display()
+                    )
+                })?;
+            file.write_all(&record).with_context(|| {
                 format!(
                     "failed to write starvation diagnostic snapshot to: {}",
                     record_path.display()
@@ -1998,10 +2189,10 @@ impl PluckStrand {
             Ok(())
         })();
 
-        let unlock_result = fs2::FileExt::unlock(&file).with_context(|| {
+        let unlock_result = fs2::FileExt::unlock(&lock_file).with_context(|| {
             format!(
-                "failed to unlock starvation diagnostics file: {}",
-                record_path.display()
+                "failed to unlock starvation diagnostics lock: {}",
+                lock_path.display()
             )
         });
 
@@ -6057,14 +6248,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn starvation_diagnostic_snapshot_captures_full_state_and_constraints() {
+    async fn starvation_diagnostic_snapshot_captures_compact_state_and_constraints() {
         use crate::telemetry::test_utils::TestHelper;
 
         let helper = TestHelper::new("diagnostic-worker");
         let needle_workspace = tempfile::tempdir().unwrap();
 
         let mut assigned = make_bead_with_assignee("assigned-bead", "other-worker");
-        assigned.body = Some("Keep the complete description in the snapshot.".to_string());
+        assigned.body = Some("This description must not enter the snapshot.".to_string());
         assigned.labels = vec!["deferred".to_string()];
 
         let mut dependency_blocked = make_bead_with_labels("dependency-bead", 2, vec!["blocked"]);
@@ -6131,26 +6322,35 @@ mod tests {
             .find(|bead| bead["id"] == "assigned-bead")
             .expect("assigned bead should be captured");
         assert_eq!(assigned_snapshot["status"], "open");
-        assert_eq!(assigned_snapshot["assignee"], "other-worker");
-        assert_eq!(
-            assigned_snapshot["description"],
-            "Keep the complete description in the snapshot."
-        );
-        assert_eq!(assigned_snapshot["labels"], serde_json::json!(["deferred"]));
+        assert_eq!(assigned_snapshot["is_ready"], false);
+        assert_eq!(assigned_snapshot["priority"], 1);
+        assert_eq!(assigned_snapshot["workspace"], "/tmp/test");
         assert!(assigned_snapshot["exclusion_reasons"]
             .as_array()
             .unwrap()
             .iter()
             .any(|reason| reason == "assignee:other-worker"));
+        for field in [
+            "title",
+            "description",
+            "assignee",
+            "labels",
+            "dependencies",
+            "dependents",
+            "comments",
+            "created_at",
+            "updated_at",
+        ] {
+            assert!(
+                assigned_snapshot.get(field).is_none(),
+                "compact open bead unexpectedly contains {field}"
+            );
+        }
 
         let dependency_snapshot = open_beads
             .iter()
             .find(|bead| bead["id"] == "dependency-bead")
             .expect("dependency bead should be captured");
-        assert_eq!(
-            dependency_snapshot["dependencies"][0]["id"],
-            "missing-blocker"
-        );
         assert!(dependency_snapshot["exclusion_reasons"]
             .as_array()
             .unwrap()
@@ -6183,6 +6383,128 @@ mod tests {
             record["summary"]["exclusion_reason_counts"]["dependency:missing-blocker"],
             1
         );
+
+        starvation_snapshot_for_700_open_beads_stays_under_60_kib();
+        starvation_records_rotate_without_splitting_json_lines();
+    }
+
+    fn starvation_snapshot_for_700_open_beads_stays_under_60_kib() {
+        let beads: Vec<Bead> = (0..700)
+            .map(|index| {
+                let mut bead = make_bead(&format!("b{index}"), 1, "2026-01-01 00:00:00");
+                bead.workspace = PathBuf::new();
+                bead
+            })
+            .collect();
+        let exclude_labels = DEFAULT_EXCLUDE_LABELS
+            .iter()
+            .map(|label| (*label).to_string())
+            .collect::<Vec<_>>();
+        let stats = FilteringStats::from_inventory(&beads, &exclude_labels, &HashSet::new());
+        let snapshot = starvation_diagnostic_snapshot(
+            &beads,
+            &stats,
+            &exclude_labels,
+            &HashSet::new(),
+            "compact-test-worker",
+            RelaxationTier::Initial,
+            3,
+        );
+        let serialized = serde_json::to_vec(&snapshot).expect("snapshot should serialize");
+
+        assert_eq!(snapshot.schema_version, 2);
+        assert_eq!(snapshot.open_beads.len(), 700);
+        assert!(
+            serialized.len() <= 60 * 1024,
+            "700-bead snapshot is {} bytes",
+            serialized.len()
+        );
+    }
+
+    fn starvation_records_rotate_without_splitting_json_lines() {
+        use crate::telemetry::test_utils::TestHelper;
+
+        let helper = TestHelper::new("rotation-worker");
+        let needle_workspace = tempfile::tempdir().expect("temporary workspace");
+        let strand = PluckStrand::with_persistent_records(
+            vec![],
+            3,
+            helper.telemetry().clone(),
+            needle_workspace.path().to_path_buf(),
+            true,
+        );
+        let beads: Vec<Bead> = (0..700)
+            .map(|index| make_bead(&format!("b{index}"), 1, "2026-01-01 00:00:00"))
+            .collect();
+        let exclude_labels = DEFAULT_EXCLUDE_LABELS
+            .iter()
+            .map(|label| (*label).to_string())
+            .collect::<Vec<_>>();
+        let stats = FilteringStats::from_inventory(&beads, &exclude_labels, &HashSet::new());
+        let mut snapshot = starvation_diagnostic_snapshot(
+            &beads,
+            &stats,
+            &exclude_labels,
+            &HashSet::new(),
+            "compact-test-worker",
+            RelaxationTier::Initial,
+            3,
+        );
+        // Cross 64 MiB while keeping each synthetic record well below it.
+        snapshot.worker_constraints.worker_id = "x".repeat(100 * 1024);
+
+        for _ in 0..1_000 {
+            strand
+                .write_starvation_diagnostic(&snapshot)
+                .expect("synthetic starvation record should write");
+        }
+
+        let state_dir = needle_workspace.path().join("state");
+        let mut event_files = Vec::new();
+        let mut total_bytes = 0_u64;
+        for entry in std::fs::read_dir(&state_dir).expect("state directory should exist") {
+            let entry = entry.expect("state entry should be readable");
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name == "starvation_events.jsonl" || name.starts_with("starvation_events.jsonl.") {
+                event_files.push(path.clone());
+            }
+            total_bytes += entry
+                .metadata()
+                .expect("state entry metadata should exist")
+                .len();
+        }
+
+        assert!(
+            event_files.len() <= STARVATION_EVENT_MAX_FILES,
+            "{} event files were retained",
+            event_files.len()
+        );
+        assert!(
+            total_bytes <= 512 * 1024 * 1024,
+            "starvation state uses {} bytes",
+            total_bytes
+        );
+
+        let mut records = 0;
+        for path in event_files {
+            let content = std::fs::read(&path).expect("event file should be readable");
+            assert!(
+                content.ends_with(b"\n"),
+                "event file {} does not end at a record boundary",
+                path.display()
+            );
+            for line in content
+                .split(|byte| *byte == b'\n')
+                .filter(|line| !line.is_empty())
+            {
+                serde_json::from_slice::<serde_json::Value>(line).unwrap_or_else(|error| {
+                    panic!("{} has a partial JSON record: {error}", path.display())
+                });
+                records += 1;
+            }
+        }
+        assert_eq!(records, 1_000);
     }
 
     /// Regression test for the 2026-08-28 alert shape: an empty frontier whose

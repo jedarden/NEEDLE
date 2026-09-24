@@ -4071,6 +4071,13 @@ pub struct PluckConfig {
     /// enabled, local selection diagnostics are appended to NEEDLE's own
     /// `~/.needle/state/starvation_events.jsonl`; they are not terminal
     /// starvation verdicts and are never written to target workspaces.
+    ///
+    /// The stream is size-bounded: since schema v2 each `open_beads` entry
+    /// carries only the claimability facts (id, is_ready, priority, status,
+    /// workspace, exclusion_reasons), the active file rotates at 64 MiB, and
+    /// at most 8 files are kept — an on-disk total of at most 512 MiB. A file
+    /// written by an older binary is rotated, not deleted, on the first write
+    /// and ages out under the cap.
     #[serde(default = "PluckConfig::default_persistent_starvation_records")]
     pub persistent_starvation_records: bool,
 
@@ -6406,9 +6413,13 @@ pub struct ModelLimits {
 }
 
 /// Per-attempt spend cap (`limits.attempt.max_cost_usd`).
+///
+/// An adapter's own `max_cost_usd` overrides this for that adapter
+/// (`AgentAdapter::effective_max_cost_usd`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AttemptLimitsConfig {
-    /// Dollar amount at which a running dispatch is stopped. Off when unset.
+    /// Dollar amount at which a running dispatch is stopped as an
+    /// infrastructure-class (budget-exhausted) outcome. Off when unset.
     #[serde(default)]
     pub max_cost_usd: Option<f64>,
 }
