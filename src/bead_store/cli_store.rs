@@ -1982,6 +1982,57 @@ mod process_runner_tests {
         );
     }
 
+    /// Explore's frontier and starvation checks use all four inventory
+    /// operations. Keep the guarantee at the CLI boundary so a new caller
+    /// cannot accidentally reintroduce the backend's truncating default (or
+    /// the historical `--limit 0` empty-result behavior).
+    #[tokio::test]
+    async fn every_inventory_operation_forces_a_positive_limit_on_the_wire() {
+        let directory = tempfile::tempdir().unwrap();
+        let binary = directory.path().join("fixture-cli");
+        std::fs::write(&binary, "fixture").unwrap();
+        let backend = builtin_bead_backends()
+            .into_iter()
+            .find(|backend| backend.name == "bead-rs")
+            .unwrap();
+        let runner = Arc::new(FakeProcessRunner::new());
+        let store = CliBeadStore::new(
+            backend,
+            binary,
+            directory.path().to_path_buf(),
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .with_process_runner(runner.clone());
+
+        for operation in ["ready", "list_all", "list_in_progress", "manual_blocked"] {
+            runner.push_output(ProcessOutput::success(b"[]\n".to_vec()));
+            store
+                .run_operation(operation, &HashMap::from([("limit", "0".to_string())]))
+                .await
+                .unwrap();
+        }
+
+        let requests = runner.requests();
+        assert_eq!(requests.len(), 4);
+        for request in requests {
+            let arguments = request.arguments();
+            let limit_index = arguments
+                .iter()
+                .position(|argument| argument == "--limit")
+                .expect("every inventory operation must carry --limit");
+            let limit = arguments
+                .get(limit_index + 1)
+                .and_then(|value| value.to_str())
+                .and_then(|value| value.parse::<u64>().ok())
+                .expect("inventory --limit must be a numeric value");
+            assert!(limit > 0, "inventory --limit must be nonzero");
+            assert_eq!(limit.to_string(), EXPLICIT_QUERY_LIMIT);
+        }
+    }
+
     #[tokio::test]
     async fn claimed_and_recovery_operations_use_only_their_own_fencing_tokens() {
         let directory = tempfile::tempdir().unwrap();

@@ -1849,6 +1849,85 @@ mod tests {
             .contains("no authoritative bead backend binding"));
     }
 
+    /// The legacy compatibility probe is part of the store-open boundary, not
+    /// an optional diagnostic a caller must remember to invoke. Exercise that
+    /// boundary with an unbound legacy workspace: opening still fails closed,
+    /// but the known-incompatible bead-forge version must be visible first so
+    /// the failure cannot silently starve the workspace's low-priority tail.
+    #[cfg(unix)]
+    #[test]
+    fn opening_legacy_workspace_warns_before_rejecting_unbound_backend() {
+        use std::os::unix::fs::PermissionsExt;
+
+        #[derive(Clone, Default)]
+        struct CapturedLogs(Arc<std::sync::Mutex<Vec<u8>>>);
+
+        struct CapturedLogWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+        impl std::io::Write for CapturedLogWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+            type Writer = CapturedLogWriter;
+
+            fn make_writer(&'a self) -> Self::Writer {
+                CapturedLogWriter(Arc::clone(&self.0))
+            }
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("legacy-workspace");
+        std::fs::create_dir_all(workspace.join(".beads")).unwrap();
+        std::fs::write(
+            workspace.join(".beads/issues.jsonl"),
+            "{\"id\":\"legacy-1\",\"status\":\"open\"}\n",
+        )
+        .unwrap();
+
+        let bf = root.path().join("bf");
+        std::fs::write(&bf, "#!/bin/sh\nprintf '%s\\n' 'bf 0.2.0'\n").unwrap();
+        std::fs::set_permissions(&bf, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let config = crate::config::BeadCliConfig {
+            backend: crate::config::BeadBackend::Auto,
+            path: Some(bf),
+        };
+        let captured = CapturedLogs::default();
+        let result = tracing::subscriber::with_default(
+            tracing_subscriber::fmt()
+                .with_writer(captured.clone())
+                .with_ansi(false)
+                .without_time()
+                .finish(),
+            || open_configured(&config, workspace, None, None, None),
+        );
+
+        let error = match result {
+            Ok(_) => panic!("an unbound backend must still fail closed"),
+            Err(error) => error,
+        };
+        assert!(error
+            .to_string()
+            .contains("no authoritative bead backend binding"));
+        let logs = String::from_utf8(captured.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            logs.contains("incompatible bead-forge version detected"),
+            "store startup must surface the incompatible legacy version, got: {logs}"
+        );
+        assert!(
+            logs.contains("0.2.0") && logs.contains("--limit 0 returns empty set"),
+            "startup warning must identify both the version and starvation cause, got: {logs}"
+        );
+    }
+
     fn labeled(labels: &[&str]) -> Vec<String> {
         labels.iter().map(|s| (*s).to_string()).collect()
     }
