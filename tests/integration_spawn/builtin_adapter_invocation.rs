@@ -218,6 +218,7 @@ impl FakeCli {
                 "claude",
                 "fake-claude-ok",
                 concat!(
+                    "printf 'cwd=%s\\n' \"$PWD\" >> \"$NEEDLE_FAKE_AGENT_LOG\"\n",
                     "stdin_content=$(cat)\n",
                     "printf 'stdin=%s\\n' \"$stdin_content\" >> \"$NEEDLE_FAKE_AGENT_LOG\"\n",
                     "case \"${NEEDLE_FAKE_AGENT_MODE:-success}\" in\n",
@@ -232,6 +233,7 @@ impl FakeCli {
                 "claude-print",
                 "fake-claude-print-ok",
                 concat!(
+                    "printf 'cwd=%s\\n' \"$PWD\" >> \"$NEEDLE_FAKE_AGENT_LOG\"\n",
                     "stdin_content=$(cat)\n",
                     "printf 'stdin=%s\\n' \"$stdin_content\" >> \"$NEEDLE_FAKE_AGENT_LOG\"\n",
                     "case \"${NEEDLE_FAKE_AGENT_MODE:-success}\" in\n",
@@ -797,7 +799,11 @@ async fn documented_adapters_enforce_the_configured_timeout() {
     for name in ["claude", "claude-print", "opencode", "codex", "aider"] {
         let workspace = unique_workspace();
         let mut adapter = documented_adapter(name);
-        adapter.timeout_secs = 1;
+        // Use hard-only mode so the timeout reason is deterministic. Legacy
+        // mode arms both idle and hard deadlines and either one may win the
+        // same instant when the fake is silent.
+        adapter.timeout_secs = 0;
+        adapter.hard_timeout_secs = 1;
         let result = dispatch_adapter(
             adapter,
             name,
@@ -812,7 +818,7 @@ async fn documented_adapters_enforce_the_configured_timeout() {
         assert_eq!(result.exit_code, 124, "{name} timeout exit code");
         assert_eq!(
             result.timeout_reason,
-            Some(needle::dispatch::TimeoutReason::Legacy { timeout_secs: 1 }),
+            Some(needle::dispatch::TimeoutReason::Hard { timeout_secs: 1 }),
             "{name} timeout reason"
         );
     }
