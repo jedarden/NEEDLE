@@ -2115,6 +2115,7 @@ impl Dispatcher {
         let adapter_name_clone = adapter.name.clone();
         let input_method_clone = adapter.input_method.clone();
         let prompt_file_clone = prompt_file.to_path_buf();
+        let unclaimed_analysis = matches!(authority, SpawnAuthority::UnclaimedAnalysis);
         let mut child = spawn_with_etxtbsy_retry_child(
             || {
                 let rendered = rendered_clone.clone();
@@ -2145,6 +2146,13 @@ impl Dispatcher {
                         .stdout(std::process::Stdio::piped())
                         .stderr(std::process::Stdio::piped())
                         .envs(&child_env);
+                    if unclaimed_analysis {
+                        // `envs` overlays the inherited environment; removing
+                        // the keys from `child_env` alone would still leak a
+                        // credential supplied by the worker's parent.
+                        command.env_remove("NEEDLE_BEAD_FENCING_TOKEN");
+                        command.env_remove("NEEDLE_BEAD_REVISION");
+                    }
                     if let Some(prompt_stdin) = prompt_stdin {
                         command.stdin(std::process::Stdio::from(prompt_stdin));
                     }
