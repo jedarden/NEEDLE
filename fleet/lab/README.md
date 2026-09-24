@@ -15,6 +15,36 @@ what it deliberately never touches (credentials, systemd-managed drop-ins).
 | `needle.slice` | `~/.config/systemd/user/needle.slice` |
 | `workers.tsv` | rendered to `~/.config/needle/workers/<identifier>.env` |
 | `bin/cargo` | `~/.local/bin/cargo` (opt-in: `--install-cargo-wrapper`) |
+| `bin/cargo-remote` | `~/.local/bin/cargo-remote` (same flag; hardening below) |
+| `wrapper-drift.{service,timer}` | `~/.config/systemd/user/` + timer enabled (same flag) |
+
+## Wrapper tracking and drift detection (claudego-dd2fa6f4, 2026-09-24)
+
+Both wrappers were untracked outside this directory until 2026-09-24, and
+the consequence was real: on 2026-08-12 codinghome's `~/.local/bin/cargo`
+was clobbered to a plain `~/.cargo/bin` symlink and stayed that way for five
+weeks — every `cargo test` on the host ran real cargo locally, unbounded,
+and nobody noticed until 2026-09-19. The lab's `cargo-remote` was still the
+pre-hardening copy on 2026-09-24 (no `--slice`, no `RuntimeMaxSec`), so its
+dirty-tree fallback scopes landed in `app.slice` and were never reaped.
+
+`bin/cargo-remote` is the hardened copy (same two hardenings as `bin/cargo`:
+`--slice="$(current_slice)"` so a `needle.slice` worker's fallback scope
+stays inside the fleet ceiling, and `RuntimeMaxSec=14400` so a hung fallback
+is reaped after 4h). The wrappers are deployed byte-identical on lab and
+codinghome from here.
+
+`wrapper-drift.timer` runs `bin/check-wrapper-drift.sh` every 30 minutes on
+each host. It compares the deployed wrappers against `origin/main`'s copies
+(after a fetch, so a stale checkout cannot hide upstream movement; checkout
+tree as fallback) and **exits 1 on divergence**, failing the unit so the
+journal and unit-failure monitors surface it. Exit 2 means the tracked copy
+itself was unreachable — a blind detector, which fails harder. The service
+executes the checker straight from this checkout, so the checker cannot
+itself drift. Install: `apply-lab-fleet.sh --install-cargo-wrapper` on the
+lab; on codinghome use `--wrappers-only`, which does only the wrapper +
+drift-watch half — the fleet convergence above must never run there, since
+this manifest is lab-specific.
 
 ## CPU budget accounting (needle-3d5c65d8, documented 2026-09-10)
 

@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# Submit cargo test to iad-ci cluster via rust-verify WorkflowTemplate.
+# Falls back to local (CPU-limited) on any submission failure.
+#
+# Tracked copy of the wrapper deployed at ~/.local/bin/cargo-remote on lab
+# and codinghome (bin/cargo above delegates `cargo test` here). Deployed
+# copies were untracked until 2026-09-24 (claudego-dd2fa6f4) — the
+# 2026-08-12 codinghome clobber of this file went unnoticed for five weeks.
+# Hardening carried below:
+#   - `--slice="$(current_slice)"` (2026-08-24): without it `systemd-run
+#     --scope --user` places the scope in app.slice regardless of the
+#     caller's cgroup, so a NEEDLE worker contained in needle.slice escapes
+#     its fleet ceiling for exactly the build the ceiling exists to bound.
+#   - `-p RuntimeMaxSec=14400` (needle-3d5c65d8, as in bin/cargo): systemd
+#     reaps any hung fallback scope after 4h instead of never — the
+#     2026-09-03 lab CPU saturation was five cargo-test binaries in
+#     unbounded fallback scopes for 14-24 days.
+# The lab's deployed copy had neither hardening until 2026-09-24. Deploy
+# with: fleet/lab/apply-lab-fleet.sh --install-cargo-wrapper. Drift is
+# watched by wrapper-drift.timer (this directory).
+#!/usr/bin/env bash
+# Submit cargo test to iad-ci cluster via rust-verify WorkflowTemplate.
+# Falls back to local (CPU-limited) on any submission failure.
+set -euo pipefail
+
+REAL_CARGO="$HOME/.cargo/bin/cargo"
+KUBECONFIG_PATH="${KUBECONFIG:-$HOME/.kube/iad-ci.kubeconfig}"
+KCT="kubectl --kubeconfig=$KUBECONFIG_PATH"
+TEMPLATE="rust-verify"
+
+# Slice the caller is already contained in, e.g. needle.slice for a fleet
+# worker, app.slice for an interactive shell. Falls back to app.slice.
+current_slice() {
+    local line c
+    line=$(grep '^0::' /proc/self/cgroup 2>/dev/null)
+    # Only a slice under the USER manager is a legal --slice for a --user scope.
+    # A caller outside user@<uid>.service (a system service, a container) would
+    # otherwise yield e.g. system.slice and make systemd-run fail outright.
+    case "$line" in
+        *user@*) ;;
+        *) printf 'app.slice'; return ;;
+    esac
+    c=$(printf '%s' "$line" | awk -F/ '{for (i=NF; i>0; i--) if ($i ~ /\.slice$/) {print $i; exit}}')
+    printf '%s' "${c:-app.slice}"
+}
+
+local_limited() {
+    echo "[cargo-remote] falling back to local (CPUQuota=200%, MemoryMax=6G)"
+    # --slice is load-bearing: without it `systemd-run --scope --user` places the
+    # scope under app.slice regardless of the caller's cgroup (verified
+    # 2026-08-24), so a NEEDLE worker contained in needle.slice escapes its
+    # fleet ceiling for exactly the cargo build the ceiling exists to bound.
+    # RuntimeMaxSec=14400 (needle-3d5c65d8, as in the ~/.local/bin/cargo
+    # wrapper): systemd reaps any hung scope after 4h instead of never —
+    # the 2026-09-03 lab CPU saturation was five cargo-test binaries in
+    # unbounded fallback scopes for 14-24 days.
+    exec systemd-run --scope --user --slice="$(current_slice)" \
+        -p CPUQuota=200% -p MemoryMax=6G -p MemorySwapMax=0 \
+        -p RuntimeMaxSec=14400 -q -- \
+        "$REAL_CARGO" "$@"
+}
+
+# Require a git repo with a remote
+REPO=$(git remote get-url origin 2>/dev/null) || { echo "[cargo-remote] no git remote"; local_limited "$@"; }
+
+# Uncommitted changes can't be cloned — fall back
+if ! git diff --quiet HEAD 2>/dev/null; then
+    echo "[cargo-remote] uncommitted changes detected — running locally"
+    local_limited "$@"
+fi
+
+REVISION=$(git rev-parse HEAD)
+# TEST_ARGS = everything after the subcommand (e.g. "test -- --nocapture")
+TEST_ARGS="${*:2}"
+
+echo "[cargo-remote] pushing $REVISION..."
+git push origin HEAD --quiet 2>&1 || { echo "[cargo-remote] push failed"; local_limited "$@"; }
+
+echo "[cargo-remote] submitting $TEMPLATE (repo=${REPO} rev=${REVISION:0:8} args='${TEST_ARGS}')..."
+
+WF_OUT=$($KCT create -n argo-workflows -o name -f - 2>&1 <<EOF
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: cargo-remote-
+  namespace: argo-workflows
+spec:
+  workflowTemplateRef:
+    name: $TEMPLATE
+  arguments:
+    parameters:
+    - name: repo
+      value: "$REPO"
+    - name: revision
+      value: "$REVISION"
+    - name: test-args
+      value: "$TEST_ARGS"
+EOF
+) || { echo "[cargo-remote] submit failed: $WF_OUT"; local_limited "$@"; }
+
+WF_NAME="${WF_OUT#workflow.argoproj.io/}"
+echo "[cargo-remote] workflow: $WF_NAME"
+echo "[cargo-remote] waiting for pod..."
+
+# Poll for a running pod (up to 3 minutes)
+POD=""
+for i in $(seq 1 90); do
+    POD=$($KCT get pods -n argo-workflows \
+        -l "workflows.argoproj.io/workflow=$WF_NAME" \
+        -o jsonpath='{.items[?(@.status.phase!="Pending")].metadata.name}' 2>/dev/null | awk '{print $1}')
+    [[ -n "$POD" ]] && break
+    sleep 2
+done
+
+if [[ -z "$POD" ]]; then
+    echo "[cargo-remote] pod never started — check Argo UI at https://argo-ci.ardenone.com"
+    exit 1
+fi
+
+echo "[cargo-remote] streaming logs from $POD..."
+$KCT logs -n argo-workflows "$POD" -c main -f 2>/dev/null || true
+
+# Poll for final workflow phase (up to 35 minutes beyond log stream)
+for i in $(seq 1 210); do
+    PHASE=$($KCT get workflow "$WF_NAME" -n argo-workflows \
+        -o jsonpath='{.status.phase}' 2>/dev/null)
+    case "$PHASE" in
+        Succeeded) echo "[cargo-remote] PASSED"; exit 0 ;;
+        Failed|Error) echo "[cargo-remote] FAILED (see $WF_NAME in Argo UI)"; exit 1 ;;
+    esac
+    sleep 10
+done
+
+echo "[cargo-remote] timed out — workflow: $WF_NAME"
+exit 1

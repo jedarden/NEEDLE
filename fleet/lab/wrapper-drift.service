@@ -1,0 +1,14 @@
+[Unit]
+Description=Deployed cargo wrapper drift check (lab fleet policy)
+After=default.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/coding/NEEDLE
+Environment=PATH=/home/coding/.local/bin:/home/coding/.cargo/bin:/home/coding/bin:/run/current-system/sw/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/home/coding/NEEDLE/fleet/lab/bin/check-wrapper-drift.sh
+# Exit 1 IS the alert (a deployed wrapper diverged from the tracked copy),
+# so unlike the factory audit it must fail the unit: a finding here is never
+# routine. Exit 2 — the tracked copy was unreachable — is a blind detector
+# and fails harder.
+TimeoutStartSec=300

@@ -1,0 +1,15 @@
+[Unit]
+Description=Check deployed cargo wrappers against the tracked fleet copies
+
+[Timer]
+# A clobber is invisible until the next cargo invocation routes somewhere
+# wrong, and the 2026-08-12 one hid for five weeks. Every 30 min bounds the
+# worst-case blind window at well under a day, for two fetches an hour.
+OnCalendar=*:0/30
+RandomizedDelaySec=5m
+# A host that was down through a window checks at the next boot rather than
+# skipping it.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

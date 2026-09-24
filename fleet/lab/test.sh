@@ -18,4 +18,33 @@ grep -q 'default.target.wants"/needle-worker@\*.service' "$SRC_DIR/apply-lab-fle
 grep -q 'systemctl --user disable' "$SRC_DIR/apply-lab-fleet.sh"
 grep -q 'systemctl --user mask' "$SRC_DIR/apply-lab-fleet.sh"
 
+# Both wrappers are tracked and installed by the same flag. cargo-remote must
+# carry both hardenings — the whole reason it was tracked (claudego-dd2fa6f4):
+# the lab's untracked copy lacked --slice and RuntimeMaxSec, so dirty-tree
+# fallback scopes escaped needle.slice and were never reaped.
+for wrapper in cargo cargo-remote; do
+    [[ -f "$SRC_DIR/bin/$wrapper" ]] || { echo "missing tracked wrapper: bin/$wrapper" >&2; exit 1; }
+    bash -n "$SRC_DIR/bin/$wrapper"
+done
+grep -q 'RuntimeMaxSec=14400' "$SRC_DIR/bin/cargo" \
+    || { echo "bin/cargo lost RuntimeMaxSec" >&2; exit 1; }
+grep -q -- '--slice="$(current_slice)"' "$SRC_DIR/bin/cargo-remote" \
+    || { echo "bin/cargo-remote lost --slice hardening" >&2; exit 1; }
+grep -q 'RuntimeMaxSec=14400' "$SRC_DIR/bin/cargo-remote" \
+    || { echo "bin/cargo-remote lost RuntimeMaxSec" >&2; exit 1; }
+
+# Drift check: parses, and its comparator detects every divergence shape.
+bash -n "$SRC_DIR/bin/check-wrapper-drift.sh"
+"$SRC_DIR/bin/check-wrapper-drift.sh" --self-test > /dev/null
+grep -q 'wrapper-drift.timer' "$SRC_DIR/apply-lab-fleet.sh" \
+    || { echo "apply-lab-fleet.sh does not enable the drift timer" >&2; exit 1; }
+grep -q -- '--wrappers-only' "$SRC_DIR/apply-lab-fleet.sh" \
+    || { echo "apply-lab-fleet.sh lost --wrappers-only" >&2; exit 1; }
+# The wrappers-only exit must precede the manifest sanity loop, so codinghome
+# never converges the lab manifest.
+awk '/^if \[\[ "\$WRAPPERS_ONLY" == 1 \]\]; then/{w=NR} /^while IFS=\$.\t. read -r id ws agent delay explore; do/{if (w && NR < w) {print "wrappers-only exit is after the manifest sanity loop"; exit 1}}' "$SRC_DIR/apply-lab-fleet.sh"
+for unit in wrapper-drift.service wrapper-drift.timer; do
+    [[ -f "$SRC_DIR/$unit" ]] || { echo "missing drift unit: $unit" >&2; exit 1; }
+done
+
 echo "lab fleet policy tests passed"
