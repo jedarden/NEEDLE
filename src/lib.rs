@@ -58,6 +58,7 @@ pub mod improvement_controller;
 /// Enable with `--features integration-t` once the above are resolved.
 #[cfg(feature = "integration-t")]
 pub mod integration_t;
+pub mod internal;
 pub mod learning;
 pub mod log_prune;
 pub mod log_writer;

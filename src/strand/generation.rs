@@ -190,6 +190,7 @@ impl GeneratorGate {
                 bead.status == BeadStatus::Open
                     && bead.assignee.is_none()
                     && !exclusions.contains(&bead.id)
+                    && !crate::internal::is_internal_artifact(bead)
                     && !self.held_by_label_policy(bead, now)
             })
             .count())

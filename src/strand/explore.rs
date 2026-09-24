@@ -1106,6 +1106,7 @@ impl ExploreStrand {
                 !filters.exclude_ids.contains(&bead.id)
                     && bead.assignee.is_none()
                     && !crate::bead_store::excluded_by_labels(bead, filters, now)
+                    && !crate::internal::is_internal_artifact(bead)
                     && self.lane_admits(bead)
             })
             .collect()

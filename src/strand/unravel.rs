@@ -27,6 +27,7 @@ use crate::config::UnravelConfig;
 use crate::fingerprint::{
     append_alert_note, build_alert_labels, check_alert_deduplication, AlertDeduplication, AlertKind,
 };
+use crate::internal::is_internal_artifact;
 use crate::telemetry::{EventKind, Telemetry};
 use crate::types::{Bead, BeadId, BeadStatus, StrandResult};
 
@@ -151,6 +152,7 @@ impl UnravelStrand {
         beads
             .iter()
             .filter(|b| b.labels.iter().any(|l| l == "human"))
+            .filter(|b| !is_internal_artifact(b))
             .filter(|b| matches!(b.status, BeadStatus::Open))
             .collect()
     }
@@ -309,6 +311,30 @@ impl super::Strand for UnravelStrand {
                     EventKind::UnravelSkipped {
                         bead_id: bead.id.clone(),
                         reason: "bead_not_open".to_string(),
+                    },
+                    chrono::Utc::now(),
+                )
+                .ok();
+        }
+
+        // Control-plane alerts are never Unravel source material, even when
+        // an alert inherited the `human` label.  This check must happen before
+        // prompt construction and agent invocation so generated diagnostics
+        // cannot recursively generate target-repository children.
+        for bead in all_beads.iter().filter(|bead| {
+            bead.labels.iter().any(|label| label == "human")
+                && matches!(bead.status, BeadStatus::Open)
+                && is_internal_artifact(bead)
+        }) {
+            tracing::debug!(
+                bead_id = %bead.id,
+                "unravel strand: internal control-plane artifact skipped"
+            );
+            self.telemetry
+                .emit(
+                    EventKind::UnravelSkipped {
+                        bead_id: bead.id.clone(),
+                        reason: "internal_artifact".to_string(),
                     },
                     chrono::Utc::now(),
                 )
@@ -1401,6 +1427,14 @@ mod tests {
         blocked.status = BeadStatus::Blocked;
         let mut deferred = make_bead("nd-deferred", "Deferred human task", &["human"]);
         deferred.status = BeadStatus::Deferred;
+        let mut starvation = make_bead(
+            "bf-3b64",
+            "Starvation alert: beads invisible to worker",
+            &["human"],
+        );
+        starvation.body = Some(
+            "Workspace: \nOpen beads: 0\nReady beads: 0\nPluck found no candidates.".to_string(),
+        );
 
         let beads = vec![
             make_bead("nd-1", "Normal", &[]),
@@ -1412,6 +1446,7 @@ mod tests {
             in_progress,
             blocked,
             deferred,
+            starvation,
         ];
         let filtered = UnravelStrand::filter_human_beads(&beads);
         assert_eq!(filtered.len(), 2, "only the open human beads qualify");
@@ -1438,7 +1473,15 @@ mod tests {
 
         let mut resolved = make_bead("nd-resolved", "Resolved starvation alert", &["human"]);
         resolved.status = BeadStatus::Closed;
-        let store = MockStore::new(vec![resolved]);
+        let mut alert = make_bead(
+            "bf-3b64",
+            "Starvation alert: beads invisible to worker",
+            &["human"],
+        );
+        alert.body = Some(
+            "Workspace: \nOpen beads: 0\nReady beads: 0\nPluck found no candidates.".to_string(),
+        );
+        let store = MockStore::new(vec![resolved, alert]);
 
         let result = strand.evaluate(&store, &HashSet::new()).await;
 
@@ -1458,12 +1501,17 @@ mod tests {
             .iter()
             .filter(|e| e.event_type == "bead.unravel.skipped")
             .collect();
-        assert_eq!(skipped.len(), 1, "expected one skip event: {skipped:?}");
-        assert_eq!(
-            skipped[0].bead_id.as_ref(),
-            Some(&BeadId::from("nd-resolved"))
-        );
-        assert_eq!(skipped[0].data["reason"], "bead_not_open");
+        assert_eq!(skipped.len(), 2, "expected two skip events: {skipped:?}");
+        let closed_skip = skipped
+            .iter()
+            .find(|event| event.bead_id.as_ref() == Some(&BeadId::from("nd-resolved")))
+            .expect("closed human bead should be skipped");
+        assert_eq!(closed_skip.data["reason"], "bead_not_open");
+        let internal_skip = skipped
+            .iter()
+            .find(|event| event.bead_id.as_ref() == Some(&BeadId::from("bf-3b64")))
+            .expect("historical starvation alert should be skipped");
+        assert_eq!(internal_skip.data["reason"], "internal_artifact");
     }
 
     #[tokio::test]
@@ -1514,7 +1562,12 @@ mod tests {
         );
 
         let open_bead = make_bead("nd-open", "Still needs a human", &["human"]);
-        let store = MockStore::new(vec![open_bead]);
+        let gate_alert = make_bead(
+            "gate-alert",
+            "Gate broken: cargo check",
+            &["human", "gate-broken"],
+        );
+        let store = MockStore::new(vec![gate_alert, open_bead]);
 
         let result = strand.evaluate(&store, &HashSet::new()).await;
 

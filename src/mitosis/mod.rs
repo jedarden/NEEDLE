@@ -23,6 +23,7 @@ use crate::bead_store::{BeadStore, NewChild};
 use crate::claim::acquire_flock;
 use crate::config::MitosisConfig;
 use crate::dispatch::Dispatcher;
+use crate::internal::is_internal_artifact;
 use crate::mitosis::timeout_eligibility::classify_timeout_eligibility;
 use crate::prompt::{MitosisTimeoutContext, PromptBuilder};
 use crate::resolve::ResolveDecision;
@@ -356,7 +357,7 @@ impl MitosisEvaluator {
 
         // Check if bead references NEEDLE-internal configuration.
         // These tasks have no legitimate resolution path from inside a target repo.
-        if detects_needle_internal_config(bead) {
+        if is_internal_artifact(bead) {
             tracing::info!(
                 bead_id = %bead.id,
                 title = %bead.title,
@@ -642,7 +643,7 @@ impl MitosisEvaluator {
         }
 
         // Step 3: Check if bead references NEEDLE-internal configuration
-        if detects_needle_internal_config(bead) {
+        if is_internal_artifact(bead) {
             tracing::info!(
                 bead_id = %bead.id,
                 title = %bead.title,
@@ -848,6 +849,16 @@ impl MitosisEvaluator {
         parent: &Bead,
         proposed: &[ProposedChild],
     ) -> Result<MitosisResult> {
+        if is_internal_artifact(parent) {
+            self.telemetry.emit(
+                EventKind::MitosisOutOfScope {
+                    bead_id: parent.id.clone(),
+                },
+                chrono::Utc::now(),
+            )?;
+            return Ok(MitosisResult::OutOfScope);
+        }
+
         // Enter the bead.mitosis span for the mitosis operation.
         let mitosis_span = tracing::info_span!(
             "bead.mitosis",
@@ -1103,6 +1114,21 @@ impl MitosisEvaluator {
         child_titles: &[String],
         evidence: &str,
     ) -> Result<SplitApplication> {
+        // Resolve's split path is another child-bead boundary.  Keep the
+        // shared control-plane guard here as well as in the prompt-driven
+        // paths so a caller cannot apply a proposal to an internal alert.
+        if is_internal_artifact(parent) {
+            self.telemetry.emit(
+                EventKind::MitosisOutOfScope {
+                    bead_id: parent.id.clone(),
+                },
+                chrono::Utc::now(),
+            )?;
+            return Ok(SplitApplication::Refused {
+                reason: "parent is a NEEDLE internal artifact".to_string(),
+            });
+        }
+
         // The same validation the resolver applies before a decision may be
         // applied — re-checked here because this is the boundary where
         // titles become beads.
@@ -1882,51 +1908,12 @@ fn extract_root_label(bead: &Bead) -> String {
         .unwrap_or_else(|| format!("root-{}", bead.id))
 }
 
-/// Detect if a bead references NEEDLE-internal configuration.
+/// Compatibility wrapper for the shared NEEDLE control-plane classifier.
 ///
-/// Returns true if the bead content suggests investigating or fixing NEEDLE's own
-/// dispatch configuration (Pluck, exclude_labels, bead discovery, etc.).
-/// These tasks have no legitimate resolution path from inside a target repo.
+/// Keep this public name for callers of the older Mitosis API; new generator
+/// code should call [`crate::internal::is_internal_artifact`] directly.
 pub fn detects_needle_internal_config(bead: &Bead) -> bool {
-    let combined_text = format!(
-        "{} {}",
-        bead.title.to_lowercase(),
-        bead.body
-            .as_ref()
-            .map(|b| b.to_lowercase())
-            .unwrap_or_default()
-    );
-
-    // Patterns that indicate NEEDLE-internal configuration work.
-    // These are derived from the real ARMOR incident (bead bf-3b64 and its lineage).
-    let internal_config_patterns = [
-        "pluck configuration",
-        "pluck config",
-        "exclude_labels",
-        "exclude labels",
-        "bead discovery",
-        "starvation alert",
-        "beads invisible to worker",
-        "open beads exist but pluck found none",
-        "needle dispatch",
-        "strand configuration",
-        "worker configuration",
-        "bead filtering",
-        "candidate exclusion",
-    ];
-
-    for pattern in &internal_config_patterns {
-        if combined_text.contains(pattern) {
-            tracing::debug!(
-                bead_id = %bead.id,
-                pattern,
-                "bead references NEEDLE-internal configuration"
-            );
-            return true;
-        }
-    }
-
-    false
+    crate::internal::is_internal_artifact(bead)
 }
 
 /// Highest `failure-count:N` value encoded in a bead's labels.

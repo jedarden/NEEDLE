@@ -38,6 +38,7 @@ use sha2::{Digest, Sha256};
 
 use crate::bead_store::{awaiting_analysis_dispatch, BeadStore, NewChild};
 use crate::config::AnalyzeConfig;
+use crate::internal::is_internal_artifact;
 use crate::telemetry::{EventKind, Telemetry};
 use crate::types::{Bead, BeadId, StrandError, StrandResult};
 
@@ -367,6 +368,8 @@ impl AnalyzeStrand {
                 awaiting_analysis_dispatch(bead, now)
                     // A human-labeled bead is rung 5's already; Unravel owns it.
                     && !bead.labels.iter().any(|label| label == "human")
+                    // NEEDLE diagnostics are never rung-4 source material.
+                    && !is_internal_artifact(bead)
             })
             .cloned()
             .collect();

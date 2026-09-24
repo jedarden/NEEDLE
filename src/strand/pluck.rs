@@ -10,7 +10,7 @@
 use crate::bead_store::{active_quarantine_until, BeadStore, Filters};
 use crate::build_status::{BuildStatusChecker, CircuitDecision, CircuitPolicy};
 use crate::deferral::{holds as deferral_holds, until as deferred_until};
-use crate::mitosis::detects_needle_internal_config;
+use crate::internal::is_internal_artifact;
 use crate::telemetry::Telemetry;
 use crate::types::{Bead, BeadId, BrDependency, StrandError, StrandResult};
 use anyhow::{Context, Result};
@@ -352,14 +352,16 @@ fn classify_frontier(
     let mut classification = FrontierClassification::default();
 
     for bead in beads.iter().filter(|bead| is_open_work_bead(bead)) {
-        let operator_set_aside = matches!(
-            bead.status,
-            crate::types::BeadStatus::Blocked | crate::types::BeadStatus::Deferred
-        ) || bead.labels.iter().any(|label| {
-            is_manual_block_label(label)
-                || deferral_holds(label, now)
-                || is_human_like_label(label, exclude_labels)
-        });
+        let operator_set_aside = crate::internal::is_internal_artifact(bead)
+            || matches!(
+                bead.status,
+                crate::types::BeadStatus::Blocked | crate::types::BeadStatus::Deferred
+            )
+            || bead.labels.iter().any(|label| {
+                is_manual_block_label(label)
+                    || deferral_holds(label, now)
+                    || is_human_like_label(label, exclude_labels)
+            });
 
         let bucket = if operator_set_aside {
             &mut classification.manual_block
@@ -440,6 +442,10 @@ fn exclusion_reasons_for_bead(
         .map(|candidate| (candidate.id.clone(), candidate.status.is_done()))
         .collect();
     let mut reasons = Vec::new();
+
+    if crate::internal::is_internal_artifact(bead) {
+        reasons.push("internal_artifact".to_string());
+    }
 
     for dependency in &bead.dependencies {
         if dependency_is_blocking(dependency, &finished_by_id) {
@@ -2894,6 +2900,26 @@ impl super::Strand for PluckStrand {
             self.sort_candidates(&mut candidates, all_beads, &self.telemetry);
         }
 
+        // Internal diagnostics are never dispatch candidates, even when a
+        // backend omitted their reserved labels from the ready-filter result.
+        // Keep this guard before split selection so no generated child prompt
+        // can be built from a control-plane artifact.
+        let before_internal_filter = candidates.len();
+        let internal_ids: Vec<BeadId> = candidates
+            .iter()
+            .filter(|bead| is_internal_artifact(bead))
+            .map(|bead| bead.id.clone())
+            .collect();
+        candidates.retain(|bead| !is_internal_artifact(bead));
+        if before_internal_filter != candidates.len() {
+            stats.excluded_count += before_internal_filter - candidates.len();
+            for bead_id in internal_ids {
+                stats
+                    .exclusion_reasons
+                    .push(format!("internal_artifact:{bead_id}"));
+            }
+        }
+
         // 5. Check for split trigger: if the first candidate has accumulated
         //    enough consecutive failures, dispatch a SPLIT instruction instead
         //    of returning the bead for normal processing.
@@ -2912,7 +2938,7 @@ impl super::Strand for PluckStrand {
                     // Check if this bead references NEEDLE-internal configuration.
                     // Such beads have no legitimate resolution path from inside a target repo
                     // and should not be split into child beads there.
-                    if detects_needle_internal_config(first_candidate) {
+                    if is_internal_artifact(first_candidate) {
                         tracing::info!(
                             bead_id = %first_candidate.id,
                             title = %first_candidate.title,
@@ -5587,12 +5613,15 @@ mod tests {
         // must recognize and reject them, not create child beads.
 
         // Bead matching bf-3b64: "Starvation alert: beads invisible to worker"
-        let starvation_bead = make_bead_with_labels(
+        let mut starvation_bead = make_bead_with_labels(
             "Starvation alert: beads invisible to worker",
             1,
             vec!["failure-count:3"],
         );
-        assert!(detects_needle_internal_config(&starvation_bead));
+        starvation_bead.body = Some(
+            "Workspace: \nOpen beads: 0\nReady beads: 0\nPluck found no candidates.".to_string(),
+        );
+        assert!(is_internal_artifact(&starvation_bead));
         assert_eq!(PluckStrand::extract_failure_count(&starvation_bead), 3);
 
         let store = MemoryStore {
@@ -5618,10 +5647,14 @@ mod tests {
     #[tokio::test]
     async fn split_not_triggered_for_pluck_config_beads() {
         // Regression test for "Pluck configuration" and "exclude_labels" references
-        let config_bead = make_bead_with_labels(
+        let mut config_bead = make_bead_with_labels(
             "Fix bead discovery configuration",
             0,
             vec!["failure-count:3"],
+        );
+        config_bead.body = Some(
+            "Investigate why Pluck is not finding beads. Check exclude_labels configuration."
+                .to_string(),
         );
         let normal_bead = make_bead("normal-work", 3, "2026-01-01 00:00:00");
 
