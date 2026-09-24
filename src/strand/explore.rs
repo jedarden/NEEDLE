@@ -5581,6 +5581,87 @@ mod tests {
         );
     }
 
+    /// ADR-004: an empty list remains an auto-discovery contract after startup.
+    /// A newly created nested workspace must be admitted by re-discovery without
+    /// requiring a worker restart.
+    #[test]
+    fn adr004_empty_workspaces_rediscover_newly_created_nested_workspace() {
+        let root = tempfile::tempdir().unwrap();
+        let initial = root.path().join("initial");
+        fs::create_dir_all(initial.join(".beads")).unwrap();
+        fs::create_dir(initial.join(".git")).unwrap();
+
+        let config = ExploreConfig {
+            enabled: true,
+            workspaces: vec![],
+            workspace_root: root.path().to_path_buf(),
+            rediscovery_cycles: 1,
+            starvation_threshold_minutes: 0,
+            scan_interval_cycles: 1,
+            max_scan_interval_cycles: 8,
+            stale_claim_ttl: 300,
+        };
+        let registry_root = tempfile::tempdir().unwrap();
+        let strand = ExploreStrand::new(
+            config,
+            PathBuf::from("/home/test"),
+            crate::registry::Registry::new(registry_root.path()),
+            Telemetry::new("test-worker".to_string()),
+            "test-worker".to_string(),
+        );
+
+        let new_workspace = root.path().join("nested").join("created-after-startup");
+        fs::create_dir_all(new_workspace.join(".beads")).unwrap();
+        fs::create_dir(new_workspace.join(".git")).unwrap();
+
+        assert_eq!(strand.rediscover_workspaces(), 1);
+        assert_eq!(
+            *strand.workspaces.lock().unwrap(),
+            vec![initial, new_workspace],
+            "empty workspaces config must rediscover a newly created nested .beads workspace"
+        );
+    }
+
+    /// ADR-004: a non-empty list is a pin, including after startup. A newly
+    /// created workspace under the discovery root must remain out of scope.
+    #[test]
+    fn adr004_pinned_workspaces_ignore_newly_created_workspace() {
+        let root = tempfile::tempdir().unwrap();
+        let pinned = root.path().join("pinned");
+        fs::create_dir_all(pinned.join(".beads")).unwrap();
+        fs::create_dir(pinned.join(".git")).unwrap();
+
+        let config = ExploreConfig {
+            enabled: true,
+            workspaces: vec![pinned.clone()],
+            workspace_root: root.path().to_path_buf(),
+            rediscovery_cycles: 1,
+            starvation_threshold_minutes: 0,
+            scan_interval_cycles: 1,
+            max_scan_interval_cycles: 8,
+            stale_claim_ttl: 300,
+        };
+        let registry_root = tempfile::tempdir().unwrap();
+        let strand = ExploreStrand::new(
+            config,
+            PathBuf::from("/home/test"),
+            crate::registry::Registry::new(registry_root.path()),
+            Telemetry::new("test-worker".to_string()),
+            "test-worker".to_string(),
+        );
+
+        let new_workspace = root.path().join("created-after-startup");
+        fs::create_dir_all(new_workspace.join(".beads")).unwrap();
+        fs::create_dir(new_workspace.join(".git")).unwrap();
+
+        assert_eq!(strand.rediscover_workspaces(), 0);
+        assert_eq!(
+            *strand.workspaces.lock().unwrap(),
+            vec![pinned],
+            "non-empty workspaces config must keep the scan surface pinned"
+        );
+    }
+
     /// A workspace created after startup wakes Explore even while an empty-scan
     /// backoff would otherwise defer the next remote scan.
     #[test]

@@ -6,7 +6,7 @@ The Explore strand discovers claimable beads across multiple workspaces when the
 
 **Key Design Principles:**
 - **No upward traversal** — Only scans configured paths
-- **Static workspace list** — Captured at boot, refreshed periodically
+- **Bounded workspace list** — Auto-discovered at boot and refreshed in auto mode
 - **No permanent relocation** — Workers return home after processing one bead
 
 ---
@@ -74,9 +74,9 @@ explore:
 **Configuration:** `workspaces: []` (empty vector)
 
 **Behavior:**
-- Recursively scans immediate children of `workspace_root`
+- Recursively scans descendants of `workspace_root`
 - Discovers all directories containing a `.beads/` subdirectory
-- Re-runs discovery **every selection cycle** (as of bf-6anj4)
+- Re-runs discovery on the configured cadence, with filesystem-change wakeups
 - Automatically picks up new workspaces without worker restart
 
 **Example:**
@@ -152,15 +152,18 @@ fn discover_workspaces(root: &Path) -> Vec<PathBuf> {
         }
     };
 
-    // Filter for entries containing a `.beads/` subdirectory
-    for entry in entries {
-        let entry = match entry { Ok(e) => e, Err(_) => continue };
+    // Walk descendants, admitting every directory containing `.beads/`.
+    let mut pending = entries.filter_map(Result::ok).collect::<Vec<_>>();
+    while let Some(entry) = pending.pop() {
         let path = entry.path();
-
-        if path.is_dir() && Self::has_beads_dir(&path) {
-            tracing::debug!(workspace = %path.display(), "discovered workspace");
-            discovered.push(path);
+        if !path.is_dir() {
+            continue;
         }
+        if Self::has_beads_dir(&path) {
+            tracing::debug!(workspace = %path.display(), "discovered workspace");
+            discovered.push(path.clone());
+        }
+        pending.extend(fs::read_dir(path).into_iter().flatten().flatten());
     }
 
     discovered
@@ -168,7 +171,7 @@ fn discover_workspaces(root: &Path) -> Vec<PathBuf> {
 ```
 
 **Key Properties:**
-- **Shallow scan** — Only immediate children of `workspace_root`
+- **Recursive scan** — Descendants of `workspace_root` are searched
 - **`.beads/` detection** — A workspace is any directory with `.beads/` subdirectory
 - **Graceful degradation** — Non-existent roots return empty (not an error)
 - **Permission-safe** — Unreadable directories are skipped (not failed)
@@ -387,19 +390,17 @@ fn record_scan(&mut self, found_candidate: bool) {
 
 ### Current Behavior
 
-**As of bf-6anj4:** Workspace re-discovery runs **every selection cycle** (unconditionally in auto-discovery mode).
+Auto-discovery now refreshes on the configured cadence and wakes immediately when the bounded discovery surface changes.
 
 **Rationale:**
-- A plain `read_dir` over ~40 entries is cheap (~1-2ms)
-- Workers pick up new stores immediately without restart
-- `rediscovery_cycles` is still parsed from config for backward compatibility but no longer applied
+- Workers pick up new stores without restart
+- `rediscovery_cycles` controls periodic refreshes; filesystem changes can wake a scan earlier
 - Only pinned mode (`workspaces` non-empty) skips re-discovery
 
 **Implementation:**
 
 ```rust
-// Re-discover workspaces every cycle (bf-3peh4 / bf-6anj4)
-let _cycle = self.cycles_since_rediscovery.fetch_add(1, Ordering::Relaxed) + 1;
+// Refresh auto-discovery on the configured cadence (or a filesystem wakeup).
 let added = self.rediscover_workspaces();
 
 if added > 0 {
@@ -410,7 +411,7 @@ if added > 0 {
 ### Re-Discovery Constraints
 
 **Re-discovery preserves:**
-- **No upward traversal** — Only scans `workspace_root`'s immediate children
+- **No upward traversal** — Only scans descendants under `workspace_root`
 - **Explicit workspaces override** — Skipped when `workspaces` is non-empty (pinned mode)
 
 ```rust
@@ -569,13 +570,13 @@ pub fn discover_default(
 
 ### 1. No Upward Traversal
 
-Explore only scans configured paths. It never walks parent directories or searches beyond `workspace_root`'s immediate children.
+Explore only scans configured paths. It never walks parent directories or searches beyond `workspace_root`.
 
 **Rationale:** Prevents surprising behavior and permission issues.
 
-### 2. Static Workspace List
+### 2. Workspace List and Refresh
 
-The workspace list is read from config at boot and captured in `ExploreStrand::new()`. It is refreshed periodically (every cycle in auto-discovery mode) but not re-evaluated from config files after startup.
+The workspace list is read from config at boot. An empty list enables recursive discovery under `workspace_root`, which is refreshed on the configured cadence and on filesystem-change wakeups. A non-empty list is pinned and is not re-discovered. Config files are not re-evaluated after startup.
 
 **Rationale:** Predictable behavior; config changes require worker restart.
 
@@ -684,9 +685,9 @@ let strand = ExploreStrand::new_with_store_factory(
 
 ### Workspace Discovery
 
-1. **Auto-discovery mode (default):** Empty `workspaces` → scan `workspace_root` children for `.beads/` directories
+1. **Auto-discovery mode (default):** Empty `workspaces` → recursively scan `workspace_root` for `.beads/` directories
 2. **Pinned mode (exception):** Non-empty `workspaces` → scan only explicit paths
-3. **Re-discovery:** Runs every cycle in auto-discovery mode; skipped in pinned mode
+3. **Re-discovery:** Runs on cadence or filesystem wakeup in auto-discovery mode; skipped in pinned mode
 
 ### Scanning Behavior
 

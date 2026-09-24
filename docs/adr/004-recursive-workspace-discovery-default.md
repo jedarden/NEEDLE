@@ -8,11 +8,11 @@
 
 Found while investigating why six freshly-launched roaming workers processed zero beads over roughly two hours on 2026-07-19 (see `bf-4df1e`, "Explore strand stops scanning at the first workspace with any candidates"). That investigation explained why Explore stalls once it reaches a workspace with a false-positive candidate — but the operator identified a second, independent problem the same evidence pointed at: Explore's list of workspaces to scan was wrong to begin with.
 
-`ExploreStrand::new()` (`src/strand/explore.rs`) already contains the correct, working design, stated verbatim in its own doc comment:
+`ExploreStrand::new()` (`src/strand/explore.rs`) contains the configuration branch that defines the contract:
 
-> "The workspace list is captured at construction time and never re-read. If `workspaces` is empty, auto-discovers all dirs with `.beads/` under the configured `workspace_root`."
+> "If `workspaces` is empty, auto-discovers all dirs with `.beads/` under the configured `workspace_root`."
 
-`discover_workspaces(root)` does exactly what the operator confirmed was the intended behavior: recursively scan the parent workspace root (`/home/coding`) and treat every child directory containing a `.beads/` subdirectory as a workspace. This is real, tested, working code (`discover_workspaces_finds_dirs_with_beads_subdir` in the same file's test module).
+`discover_workspaces(root)` recursively scans the parent workspace root (`/home/coding`) and treats every descendant directory containing a `.beads/` subdirectory as a workspace. Auto-discovery is refreshed during Explore scans, including an immediate filesystem-change wakeup, so a workspace created after worker startup can become selectable without a restart. This is real, tested, working code in the same file's test module.
 
 The problem is that `explore.workspaces` in the live lab config is **not empty** — it's a hardcoded list of 24 specific repo paths (`/home/coding/miroir`, `/home/coding/HOOP`, `/home/coding/SIGIL`, ...). Because `ExploreStrand::new()`'s branch is `if config.workspaces.is_empty() { discover } else { use the static list }`, this non-empty list unconditionally short-circuits `discover_workspaces()` for every worker — the recursive-scan code path is entirely dead in the running fleet, not because it's broken, but because the config never lets it execute.
 
@@ -22,15 +22,16 @@ The operator's stated intent: the `workspaces` config field's real purpose is to
 
 ## Decision
 
-1. **Recursive discovery is the default an operator has to deliberately opt out of, not one they accidentally fall into.** `ExploreStrand::new()`'s existing empty-list-triggers-discovery logic is structurally correct and does not need to change — the fix is operational and documentational: `config.workspaces` must not be populated with a general-purpose "all known repos" enumeration. It should stay empty for the fleet as a whole, letting `discover_workspaces()` run for every worker, by default.
+1. **Recursive discovery is the default an operator has to deliberately opt out of, not one they accidentally fall into.** `ExploreStrand::new()` treats an empty list as auto-discovery under `workspace_root`; subsequent eligible scans refresh that surface. The fix is operational and documentational: `config.workspaces` must not be populated with a general-purpose "all known repos" enumeration. It should stay empty for the fleet as a whole, letting discovery run for every worker by default.
 2. **`config.workspaces` remains fully configurable**, but is re-scoped in documentation and operational practice to mean "pin this specific worker to exactly this list" — a deliberate, per-worker exception, not fleet-wide baseline config. Nothing in the code needs to change to support this; the existing branch already implements exactly this contract once the config is used as intended.
 3. **Immediate operational fix**: clear the live lab config's `explore.workspaces` back to empty. None of its current 24 entries represent a deliberate pin — restoring the default recursive-discovery path immediately makes `commitgraph`, `twitterapi-proxy`, and any future new repo visible without further config maintenance.
-4. **Open question, not resolved here**: discovery is captured once at worker construction and never re-read during that worker's lifetime, so a repo created after a long-lived worker starts still won't be picked up without a restart. Left as a follow-up decision for Phase 8.3 rather than bundled into this ADR.
+4. **Auto-discovery refresh:** an empty list is re-discovered during eligible Explore scans. A changed discovery surface wakes Explore before adaptive empty-scan backoff, while the configured periodic cadence remains the fallback. Pinned workers never re-discover and therefore remain restricted to their explicit list.
 
 ## Consequences
 
 - Every repo under `/home/coding` with a `.beads/` directory becomes reachable by roaming workers without manual config-list maintenance, present and future.
 - Combined with `bf-4df1e` landing, this fully resolves the root cause of the 2026-07-19 zero-throughput incident — `bf-4df1e` alone would still leave `commitgraph`/`twitterapi-proxy` permanently unscanned even after Explore stops giving up early.
+- A workspace created after worker startup is picked up in auto-discovery mode without a restart; the same workspace remains invisible to a worker with a non-empty pin list.
 - The pin/exception mechanism keeps working exactly as before for anyone who deliberately wants a restricted worker — this ADR does not remove or weaken that capability, only stops it from being (mis)used as the default.
 - No source code change is strictly required to realize the default behavior — the existing branch already does the right thing when the list is empty. The only mandatory action is clearing the live config; the code-level acceptance criteria in Phase 8.1/8.4 are about making this contract explicit and regression-tested so it can't silently drift back to a stale static list again.
 
@@ -40,4 +41,5 @@ The operator's stated intent: the `workspaces` config field's real purpose is to
 - `src/strand/explore.rs`, `discover_workspaces()` — confirmed via direct read: recursively lists `workspace_root`'s children, checks each for a `.beads/` subdirectory, exactly matching the operator's described intended design.
 - Live config dump (`needle config`) on the lab host, 2026-07-19/20: `explore.workspaces` populated with 24 explicit paths.
 - Confirmed via direct filesystem check on the lab host: `~/commitgraph/.beads` and `~/twitterapi-proxy/.beads` both exist, neither path appears in the static `explore.workspaces` list.
+- Regression coverage: `regression_empty_workspaces_config_triggers_full_discovery` and `regression_empty_config_discovers_nested_beads_workspaces` cover recursive startup discovery; `adr004_empty_workspaces_rediscover_newly_created_nested_workspace` and `adr004_pinned_workspaces_ignore_newly_created_workspace` cover the post-startup auto-versus-pinned split.
 - Related, compounding defect already filed: `bf-4df1e` (Explore returns as soon as it finds any workspace with a non-empty candidate list, never reaching later workspaces in the same cycle) — that bug determines what happens once a workspace IS reachable; this ADR determines which workspaces are reachable at all.

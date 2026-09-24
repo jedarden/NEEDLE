@@ -172,6 +172,9 @@ version = 1
 # The filter, the trait, and its mock are all private to src/cli/mod.rs,
 # so the unit tier is the only home that can reach them.
 # +3 for bounded Explore rediscovery and filesystem wakeup contracts (needle-1ed126bb).
+# +2 for ADR-004 discovery-versus-pinning coverage (needle-e25b2db6): an empty
+# workspaces list recursively admits a newly created nested workspace, while a
+# non-empty list keeps the same newly created workspace out of scope.
 # +3 for fleet process/session reconciliation contracts (needle-a4ac6c32).
 # +20 for the ADR-001 axis-3 limit and version-handshake coverage
 # (needle-6b860c6e): 14 descriptor-validation and version-quirk suites in
@@ -204,7 +207,7 @@ version = 1
 # +1 crash-alert stitch-label propagation regression (needle-b7c5aab9): alert
 # state and fingerprint labels must not be copied into a recursively created
 # crash alert, and propagated labels must remain unique for bead backends.
-max_tests = 3968
+max_tests = 3970
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
