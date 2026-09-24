@@ -467,30 +467,62 @@ impl CanaryRunner {
             .copied()
             .filter(|pattern| !existing.lines().any(|line| line.trim() == *pattern))
             .collect();
-        if missing.is_empty() {
-            return Ok(());
+        if !missing.is_empty() {
+            let mut additions = String::new();
+            if !existing.is_empty() && !existing.ends_with('\n') {
+                additions.push('\n');
+            }
+            additions.push_str("# NEEDLE canary runtime artifacts\n");
+            for pattern in missing {
+                additions.push_str(pattern);
+                additions.push('\n');
+            }
+            if let Some(parent) = exclude_path.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("failed to create {}", parent.display()))?;
+            }
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&exclude_path)
+                .with_context(|| format!("failed to open {}", exclude_path.display()))?
+                .write_all(additions.as_bytes())
+                .with_context(|| format!("failed to update {}", exclude_path.display()))?;
         }
 
-        let mut additions = String::new();
-        if !existing.is_empty() && !existing.ends_with('\n') {
-            additions.push('\n');
+        // Older canary commits tracked this marker. Ignore rules do not hide
+        // modifications to tracked files, so remove the runtime-only marker
+        // from the canary index as part of setup. Leave the working-tree file
+        // in place: older candidate binaries may still write it, and the
+        // exclude rule above keeps that compatibility path invisible to git.
+        let tracked = Command::new("git")
+            .args([
+                "ls-files",
+                "--error-unmatch",
+                "--",
+                ".needle-predispatch-sha",
+            ])
+            .current_dir(&self.canary_workspace)
+            .output()
+            .context("failed to inspect tracked canary runtime files")?;
+        if tracked.status.success() {
+            let removed = Command::new("git")
+                .args([
+                    "update-index",
+                    "--force-remove",
+                    "--",
+                    ".needle-predispatch-sha",
+                ])
+                .current_dir(&self.canary_workspace)
+                .output()
+                .context("failed to untrack canary predispatch marker")?;
+            if !removed.status.success() {
+                bail!(
+                    "failed to untrack canary predispatch marker: {}",
+                    String::from_utf8_lossy(&removed.stderr).trim()
+                );
+            }
         }
-        additions.push_str("# NEEDLE canary runtime artifacts\n");
-        for pattern in missing {
-            additions.push_str(pattern);
-            additions.push('\n');
-        }
-        if let Some(parent) = exclude_path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
-        }
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&exclude_path)
-            .with_context(|| format!("failed to open {}", exclude_path.display()))?
-            .write_all(additions.as_bytes())
-            .with_context(|| format!("failed to update {}", exclude_path.display()))?;
         Ok(())
     }
 
