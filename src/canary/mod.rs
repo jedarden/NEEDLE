@@ -958,7 +958,7 @@ impl CanaryRunner {
                         "1",
                     ])
                     .env("NEEDLE_INNER", "1")
-                    .env("NEEDLE_STATE_DIR", isolated_home.path())
+                    .env("NEEDLE_STATE_DIR", isolated_home.path().join(".needle"))
                     .env("NEEDLE_STRANDS__EXPLORE__ENABLED", "false")
                     .env(
                         "NEEDLE_STRANDS__EXPLORE__WORKSPACE_ROOT",
