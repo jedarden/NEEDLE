@@ -149,7 +149,7 @@ fn reconciliation_does_not_confuse_pid_metadata_with_session_liveness() {
     );
 
     let cleanup_sessions = vec![
-        session("needle-claude-wrapper", Some(505)),
+        session("needle-wrapper", Some(505)),
         session("needle-claude-stale", Some(707)),
     ];
     let live_worker_ids = live_registered_worker_ids(&discovered, &registered);
