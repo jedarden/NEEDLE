@@ -128,28 +128,32 @@ bead init --prefix quickstart
 needle doctor
 ```
 
-**Expected `needle doctor` output** (real output from needle 0.6.0 + bead 0.2.6 on a clean host, 2026-09-09; paths shortened, disk figure elided):
+**Expected `needle doctor` output** (real output from needle 0.6.1 + bead 0.2.6 on a clean host, 2026-09-17; paths shortened, disk figure elided):
 
 ```
 NEEDLE Doctor
 ────────────────────────────────────────────────────────────
 [PASS]  Config                        valid
+[PASS]  Quickstart config             matches the quickstart example, and no other NEEDLE workspaces live here
 [PASS]  Gate commands                 none configured
 [PASS]  Workspace                     /tmp/needle-quickstart-project
 [WARN]  SQLite integrity              sqlite3 not on PATH — skipped
 [PASS]  Lock files                    none
 [PASS]  DoD bypasses                  none recorded
 [PASS]  Bead CLI Backend              bead-rs
-         └─ CLI path: ~/.local/bin/bead
+         └─ CLI path: ~/.cargo/bin/bead
          └─ source: config file
          └─ verified against: bead 0.1.3 (commit 85f36ac)
          └─ capability gap: split/mitosis is sequential, not atomic
          └─ capability gap: claim omits model/harness velocity metadata
 [PASS]  Bead store                    ok
 [PASS]  Checkpoint                    native pointer is valid JSON
+[PASS]  Permanent deferrals           none
+[PASS]  Dependency graph              0 open bead(s), 0 ready
 [PASS]  Worker registry               empty
 [WARN]  Heartbeat dir                 missing: ~/.needle/state/heartbeats
 [PASS]  Heartbeat files               no heartbeat directory
+[PASS]  Gate-health records           0 inspected, all workspaces exist
 [PASS]  Peers                         no workers running
 [PASS]  Agent binary                  claude at ~/.local/bin/claude
 [PASS]  Adapter transforms            ok
@@ -157,7 +161,7 @@ NEEDLE Doctor
 [PASS]  Disk space                    <n> MB available
 [PASS]  Telemetry logs                no log directory yet
 ────────────────────────────────────────────────────────────
-16 passed, 2 warning(s), 0 failure(s).
+20 passed, 2 warning(s), 0 failure(s).
 Run `needle doctor --repair` to attempt automatic fixes.
 ```
 
