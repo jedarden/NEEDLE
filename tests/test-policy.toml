@@ -290,7 +290,9 @@ contract = 208
 # integration_spawn harness above.
 # +2 exported GenAI semantic-convention contracts (needle-7f53ca33): the
 # agent.dispatch identity/usage span assertions in the P3 harness.
-e2e = 830
+# +9 deterministic replenishment/starvation contract scenarios
+# (needle-e13204d9).
+e2e = 839
 soak = 0
 fuzz = 0
 
@@ -356,7 +358,9 @@ name = "p3_integration_tests"
 path = "tests/p3_integration_tests.rs"
 tier = "e2e"
 # +9 post-Pluck Resolve lifecycle scenarios (needle-eba55bfc).
-max_tests = 381
+# +9 deterministic replenishment/starvation contract scenarios
+# (needle-e13204d9).
+max_tests = 385
 owner = "component:weave-unravel-pulse"
 
 [[harness]]

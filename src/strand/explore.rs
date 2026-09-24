@@ -38,7 +38,7 @@
 //!
 //! ExploreStrand::new() implements the discovery contract:
 //! - If `config.workspaces` is empty → calls `discover_workspaces(&config.workspace_root)`
-//! - If `config.workspaces` is non-empty → uses the explicit list directly
+//! - If `config.workspaces` is non-empty → validates and de-duplicates the explicit list
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
@@ -1022,10 +1022,9 @@ impl ExploreStrand {
     ///
     /// Returns the number of workspaces that remain scannable.
     ///
-    /// Pinned paths are validated and reported but remain in the configured
-    /// list. Explicit configuration is a deliberate operator choice, and
-    /// preserving that list keeps the pinned-mode contract stable while
-    /// discovery itself only admits validated workspaces.
+    /// Pinned paths are validated and reported. Invalid paths remain eligible
+    /// for a later recovery, while duplicate repository identities collapse to
+    /// one canonical path so they cannot inflate ready-work counts.
     fn apply_workspace_health(&self) -> usize {
         let candidates: Vec<PathBuf> = {
             let workspaces = self.workspaces.lock().unwrap();
@@ -1052,7 +1051,14 @@ impl ExploreStrand {
                     );
                 }
             }
-            return candidates.len();
+
+            let (scannable, duplicates) = workspace_health::resolve_duplicates(&candidates);
+            for (path, reason) in duplicates {
+                self.record_workspace_failure(&path, reason);
+            }
+            let count = scannable.len();
+            *self.workspaces.lock().unwrap() = scannable;
+            return count;
         }
 
         let scannable = self.filter_healthy_workspaces(&candidates);

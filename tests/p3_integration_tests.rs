@@ -76,6 +76,8 @@ mod routing_matcher_baseline;
 mod routing_telemetry_verification;
 #[path = "p3_integration_tests/starvation_tests.rs"]
 mod starvation_tests;
+#[path = "p3_integration_tests/strand_replenishment_contract.rs"]
+mod strand_replenishment_contract;
 #[path = "p3_integration_tests/supervisor_periodic_polling.rs"]
 mod supervisor_periodic_polling;
 #[path = "p3_integration_tests/telemetry_field_verification.rs"]

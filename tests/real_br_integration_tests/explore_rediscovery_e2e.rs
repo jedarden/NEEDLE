@@ -19,6 +19,9 @@ use needle::telemetry::{Telemetry, TelemetryEvent};
 use needle::types::{BeadId, StrandResult};
 use tempfile::tempdir;
 
+#[path = "../p3_integration_tests/strand_replenishment_contract.rs"]
+mod strand_replenishment_contract;
+
 /// Locate a native bead-rs binary without depending on the operator's HOME.
 ///
 /// Some hosts put a queue-fence wrapper ahead of the native binary. Probing

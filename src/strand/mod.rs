@@ -128,9 +128,24 @@ pub struct StrandRunner {
 
 impl StrandRunner {
     pub fn new(strands: Vec<Box<dyn Strand>>) -> Self {
+        Self::with_telemetry(
+            strands,
+            crate::telemetry::Telemetry::new("strand-runner".to_string()),
+        )
+    }
+
+    /// Construct a runner with an explicit telemetry sink.
+    ///
+    /// Production uses [`Self::new`].  The injectable sink keeps embedded
+    /// runners and integration fixtures from writing their cycle evidence to
+    /// the process-wide default state directory.
+    pub fn with_telemetry(
+        strands: Vec<Box<dyn Strand>>,
+        telemetry: crate::telemetry::Telemetry,
+    ) -> Self {
         StrandRunner {
             strands,
-            telemetry: crate::telemetry::Telemetry::new("strand-runner".to_string()),
+            telemetry,
             cycle_outcome_recorded: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
