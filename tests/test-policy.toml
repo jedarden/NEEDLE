@@ -297,7 +297,8 @@ contract = 208
 # (needle-e13204d9).
 # +1 process-table list/status reconciliation with stale registry
 # (needle-3b20f336).
-e2e = 840
+# The four adapter contracts above also consume four e2e growth slots.
+e2e = 844
 soak = 0
 fuzz = 0
 
@@ -316,6 +317,11 @@ tier = "e2e"
 # aider/generic templates driven through the real dispatch spawn path.
 # These belong here because the contract is the rendered-template process
 # spawn, which only the process-spawning harness can observe.
+# +4 hermetic adapter contracts (needle-c5cfd0f0): Claude Code and Claude
+# print prompt/command construction, all five documented adapters' exit and
+# timeout behavior, and persisted exit/envelope result classification.
+# These remain in integration_spawn because they exercise the real dispatcher
+# process boundary with fake CLIs rather than pure adapter configuration.
 # +10 agent-event schema conformance contracts (needle-6fd2b6bd): the schema
 # doc executed as a contract (examples parse and round-trip, the heading
 # vocabulary, Required/Optional columns enforced against serde, additive
@@ -328,7 +334,7 @@ tier = "e2e"
 # lines whose absence from normalized stdout is asserted by that same suite.
 # +1 process-table list/status reconciliation with stale registry
 # (needle-3b20f336).
-max_tests = 424
+max_tests = 428
 owner = "component:process-integration"
 
 [[harness]]

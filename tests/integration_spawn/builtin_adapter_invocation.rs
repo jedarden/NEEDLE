@@ -33,10 +33,11 @@ use needle::bead_store::{BeadStore, Filters, RepairReport};
 use needle::claim::{ClaimIdentity, ResolvedStoreContext};
 use needle::dispatch::{
     builtin_adapters, extract_tokens, AgentAdapter, DispatchContext, Dispatcher, ExecutionResult,
+    TokenExtraction, UsageFormat,
 };
 use needle::prompt::BuiltPrompt;
 use needle::telemetry::Telemetry;
-use needle::types::{Bead, BeadId, BeadStatus, ClaimResult, ClaimStatus};
+use needle::types::{Bead, BeadId, BeadStatus, ClaimResult, ClaimStatus, InputMethod};
 
 /// The worker identity every matrix dispatch claims (and verifies) under.
 const MATRIX_WORKER: &str = "matrix-test";
@@ -213,6 +214,34 @@ impl FakeCli {
              \x20 prev=\"$a\"\n\
              done\n";
         let agents = [
+            (
+                "claude",
+                "fake-claude-ok",
+                concat!(
+                    "stdin_content=$(cat)\n",
+                    "printf 'stdin=%s\\n' \"$stdin_content\" >> \"$NEEDLE_FAKE_AGENT_LOG\"\n",
+                    "case \"${NEEDLE_FAKE_AGENT_MODE:-success}\" in\n",
+                    "  api-error) printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":503,\"terminal_reason\":\"api_error\",\"result\":\"API Error: 503\"}' ;;\n",
+                    "  success) printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"terminal_reason\":\"end_turn\",\"result\":\"done\"}' ;;\n",
+                    "  timeout) sleep 10 ;;\n",
+                    "esac\n"
+                ),
+                "",
+            ),
+            (
+                "claude-print",
+                "fake-claude-print-ok",
+                concat!(
+                    "stdin_content=$(cat)\n",
+                    "printf 'stdin=%s\\n' \"$stdin_content\" >> \"$NEEDLE_FAKE_AGENT_LOG\"\n",
+                    "case \"${NEEDLE_FAKE_AGENT_MODE:-success}\" in\n",
+                    "  api-error) printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"api_error_status\":503,\"terminal_reason\":\"api_error\",\"result\":\"API Error: 503\"}' ;;\n",
+                    "  success) printf '%s\\n' '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"terminal_reason\":\"end_turn\",\"result\":\"done\"}' ;;\n",
+                    "  timeout) sleep 10 ;;\n",
+                    "esac\n"
+                ),
+                "",
+            ),
             ("opencode", "fake-opencode-ok", "", RECORD_ARGS),
             ("codex", "fake-codex-ok", "", RECORD_ARGS),
             (
@@ -237,7 +266,7 @@ impl FakeCli {
         ];
         for (name, marker, output, record) in agents {
             let script = format!(
-                "#!/usr/bin/env bash\n{record}{output}\necho '{marker}'\nexit \"${{NEEDLE_FAKE_AGENT_EXIT:-0}}\"\n"
+                "#!/usr/bin/env bash\n{record}{output}\nif [ \"${{NEEDLE_FAKE_AGENT_MODE:-success}}\" = timeout ] && [ -z \"{output}\" ]; then sleep 10; fi\necho '{marker}'\nexit \"${{NEEDLE_FAKE_AGENT_EXIT:-0}}\"\n"
             );
             let path = bin_dir.path().join(name);
             fs::write(&path, script).expect("write fake CLI script");
@@ -249,6 +278,54 @@ impl FakeCli {
             log,
         }
     }
+}
+
+/// The documented Claude print adapter is normally installed as a user YAML
+/// file. Keep this test fixture portable: its command shape is the documented
+/// contract, while the executable resolves through the fake PATH below rather
+/// than a host-specific absolute path.
+fn claude_print_adapter() -> AgentAdapter {
+    AgentAdapter {
+        name: "claude-print".to_string(),
+        description: Some("Claude Code print mode".to_string()),
+        agent_cli: "claude-print".to_string(),
+        version_command: Some("claude-print --version".to_string()),
+        input_method: InputMethod::Stdin,
+        invoke_template: concat!(
+            "cd {workspace} && claude-print --model {model}",
+            " --max-turns 30 --output-format stream-json",
+            " --dangerously-skip-permissions < {prompt_file}",
+        )
+        .to_string(),
+        environment: HashMap::new(),
+        timeout_secs: 3600,
+        idle_timeout_secs: 0,
+        hard_timeout_secs: 0,
+        provider: Some("anthropic".to_string()),
+        model: Some("claude-sonnet-5".to_string()),
+        token_extraction: TokenExtraction::None,
+        usage_format: Some(UsageFormat::ClaudeStreamJson),
+        output_transform: None,
+        harness: Some("needle".to_string()),
+        harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+    }
+}
+
+fn documented_adapter(name: &str) -> AgentAdapter {
+    if name == "claude-print" {
+        return claude_print_adapter();
+    }
+
+    let mut adapter = builtin_adapters()
+        .into_iter()
+        .find(|adapter| adapter.name == name)
+        .unwrap_or_else(|| panic!("documented adapter {name} missing"));
+    // The contract tests below assert the dispatcher and adapter command
+    // boundary, not the separate transform binary. Keeping the child raw also
+    // makes the matrix independent of which Cargo targets the test command
+    // happened to build.
+    adapter.output_transform = None;
+    adapter
 }
 
 /// Prepend `dir` to `PATH`, restoring the previous value on drop.
@@ -299,11 +376,23 @@ async fn dispatch_builtin(
     bead_id: &str,
     workspace: &Path,
 ) -> anyhow::Result<ExecutionResult> {
-    let mut adapter: AgentAdapter = builtin_adapters()
+    let adapter: AgentAdapter = builtin_adapters()
         .into_iter()
         .find(|a| a.name == name)
         .unwrap_or_else(|| panic!("builtin adapter {name} missing from the registry"))
         .clone();
+    dispatch_adapter(adapter, name, fake, extra_env, bead_id, workspace).await
+}
+
+/// Dispatch a fixture adapter through the same production spawn path.
+async fn dispatch_adapter(
+    mut adapter: AgentAdapter,
+    name: &str,
+    fake: &FakeCli,
+    extra_env: &[(&str, String)],
+    bead_id: &str,
+    workspace: &Path,
+) -> anyhow::Result<ExecutionResult> {
     adapter
         .environment
         .insert(LOG_ENV.to_string(), fake.log.display().to_string());
@@ -328,6 +417,24 @@ async fn dispatch_builtin(
             &matrix_context(workspace),
         )
         .await
+}
+
+/// Read trace metadata emitted by the dispatcher for a workspace-backed store.
+fn trace_metadata(workspace: &Path, bead_id: &str) -> serde_json::Value {
+    let path = workspace
+        .join(".beads")
+        .join("traces")
+        .join(bead_id)
+        .join("metadata.json");
+    let text = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("trace metadata missing at {}: {e}", path.display()));
+    serde_json::from_str(&text).expect("trace metadata must be valid JSON")
+}
+
+fn trace_workspace() -> TempDir {
+    let workspace = unique_workspace();
+    fs::create_dir(workspace.path().join(".beads")).expect("create trace store marker");
+    workspace
 }
 
 /// Read the fake CLI's invocation log as flat `key=value` lines.
@@ -412,6 +519,118 @@ async fn opencode_builtin_receives_prompt_via_file() {
     assert!(
         PathBuf::from(prompt_path).starts_with(std::env::temp_dir().join("needle")),
         "prompt file lives under the dispatcher's temp prompt dir"
+    );
+}
+
+#[tokio::test]
+async fn claude_code_builtin_receives_prompt_via_stdin() {
+    let _path_lock = FAKE_PATH_LOCK.lock().await;
+    let fake = FakeCli::new();
+    let _path = FakePathGuard::prepend(fake._bin_dir.path());
+    let workspace = unique_workspace();
+
+    // The built-in Claude adapter is exercised with its output transform
+    // disabled here. This contract is about the shipped invoke template and
+    // prompt transport; the transform has its own schema conformance tests.
+    let mut adapter = builtin_adapters()
+        .into_iter()
+        .find(|a| a.name == "claude")
+        .expect("claude builtin");
+    adapter.output_transform = None;
+    let result = dispatch_adapter(
+        adapter,
+        "claude",
+        &fake,
+        &[],
+        "needle-matrix-claude",
+        workspace.path(),
+    )
+    .await
+    .expect("Claude dispatch should succeed");
+
+    assert_eq!(result.exit_code, 0);
+    assert!(result.stdout.contains("\"type\":\"result\""));
+
+    let lines = read_log(&fake);
+    assert_eq!(
+        log_values(&lines, "cwd").first().copied(),
+        Some(workspace.path().to_str().expect("utf-8 workspace"))
+    );
+    let args = log_values(&lines, "arg");
+    for expected in [
+        "-p",
+        "--model",
+        "claude-sonnet-4-6",
+        "--output-format",
+        "stream-json",
+        "--dangerously-skip-permissions",
+        "--verbose",
+    ] {
+        assert!(
+            args.contains(&expected),
+            "Claude template must render {expected}"
+        );
+    }
+    assert_eq!(
+        log_values(&lines, "stdin").first().copied(),
+        Some("matrix smoke prompt for needle-matrix-claude")
+    );
+    assert!(
+        !args.iter().any(|arg| arg.contains("matrix smoke prompt")),
+        "stdin input must not leak the prompt through argv"
+    );
+}
+
+#[tokio::test]
+async fn claude_print_contract_receives_prompt_via_stdin() {
+    let _path_lock = FAKE_PATH_LOCK.lock().await;
+    let fake = FakeCli::new();
+    let _path = FakePathGuard::prepend(fake._bin_dir.path());
+    let workspace = unique_workspace();
+
+    let adapter = claude_print_adapter();
+    assert_eq!(adapter.agent_cli, "claude-print");
+    assert!(matches!(adapter.input_method, InputMethod::Stdin));
+    assert!(adapter.invoke_template.contains("claude-print --model"));
+    assert!(adapter
+        .invoke_template
+        .contains("--output-format stream-json"));
+
+    let result = dispatch_adapter(
+        adapter,
+        "claude-print",
+        &fake,
+        &[],
+        "needle-matrix-claude-print",
+        workspace.path(),
+    )
+    .await
+    .expect("Claude print dispatch should succeed");
+
+    assert_eq!(result.exit_code, 0);
+    let lines = read_log(&fake);
+    assert_eq!(
+        log_values(&lines, "cwd").first().copied(),
+        Some(workspace.path().to_str().expect("utf-8 workspace"))
+    );
+    let args = log_values(&lines, "arg");
+    for expected in [
+        "--model",
+        "claude-sonnet-5",
+        "--max-turns",
+        "30",
+        "--output-format",
+        "stream-json",
+        "--dangerously-skip-permissions",
+    ] {
+        assert!(
+            args.contains(&expected),
+            "Claude print template must render {expected}"
+        );
+    }
+    assert_eq!(
+        log_values(&lines, "stdin").first().copied(),
+        Some("matrix smoke prompt for needle-matrix-claude-print")
     );
 }
 
@@ -547,23 +766,113 @@ async fn builtin_adapter_nonzero_exit_is_reported_verbatim() {
     let _path_lock = FAKE_PATH_LOCK.lock().await;
     let fake = FakeCli::new();
     let _path = FakePathGuard::prepend(fake._bin_dir.path());
-    let workspace = unique_workspace();
 
-    let result = dispatch_builtin(
-        "aider",
-        &fake,
-        &[(EXIT_ENV, "3".to_string())],
-        "needle-matrix-aider-fail",
-        workspace.path(),
-    )
-    .await
-    .expect("dispatch itself completes even when the agent fails");
+    for name in ["claude", "claude-print", "opencode", "codex", "aider"] {
+        let workspace = unique_workspace();
+        let result = dispatch_adapter(
+            documented_adapter(name),
+            name,
+            &fake,
+            &[(EXIT_ENV, "3".to_string())],
+            &format!("needle-matrix-{name}-fail"),
+            workspace.path(),
+        )
+        .await
+        .expect("dispatch itself completes when an agent fails");
 
-    assert_eq!(result.exit_code, 3, "agent exit code must pass through");
-    assert!(
-        result.timeout_reason.is_none(),
-        "a plain failure is not a timeout"
-    );
+        assert_eq!(result.exit_code, 3, "{name} exit code must pass through");
+        assert!(
+            result.timeout_reason.is_none(),
+            "a plain {name} failure is not a timeout"
+        );
+    }
+}
+
+#[tokio::test]
+async fn documented_adapters_enforce_the_configured_timeout() {
+    let _path_lock = FAKE_PATH_LOCK.lock().await;
+    let fake = FakeCli::new();
+    let _path = FakePathGuard::prepend(fake._bin_dir.path());
+
+    for name in ["claude", "claude-print", "opencode", "codex", "aider"] {
+        let workspace = unique_workspace();
+        let mut adapter = documented_adapter(name);
+        adapter.timeout_secs = 1;
+        let result = dispatch_adapter(
+            adapter,
+            name,
+            &fake,
+            &[("NEEDLE_FAKE_AGENT_MODE", "timeout".to_string())],
+            &format!("needle-matrix-{name}-timeout"),
+            workspace.path(),
+        )
+        .await
+        .expect("timed-out agent is still a completed dispatch");
+
+        assert_eq!(result.exit_code, 124, "{name} timeout exit code");
+        assert_eq!(
+            result.timeout_reason,
+            Some(needle::dispatch::TimeoutReason::Legacy { timeout_secs: 1 }),
+            "{name} timeout reason"
+        );
+    }
+}
+
+#[tokio::test]
+async fn documented_adapters_classify_exit_codes_and_structured_results() {
+    let _path_lock = FAKE_PATH_LOCK.lock().await;
+    let fake = FakeCli::new();
+    let _path = FakePathGuard::prepend(fake._bin_dir.path());
+
+    for name in ["claude", "claude-print", "opencode", "codex", "aider"] {
+        let workspace = trace_workspace();
+        let bead_id = format!("needle-matrix-{name}-success");
+        let result = dispatch_adapter(
+            documented_adapter(name),
+            name,
+            &fake,
+            &[],
+            &bead_id,
+            workspace.path(),
+        )
+        .await
+        .expect("successful adapter dispatch");
+
+        assert_eq!(result.exit_code, 0, "{name} success exit code");
+        let metadata = trace_metadata(workspace.path(), &bead_id);
+        assert_eq!(
+            metadata["outcome"], "success",
+            "{name} result classification"
+        );
+    }
+
+    // Claude stream-json adapters can report an API failure in a result
+    // envelope while exiting zero. The envelope must override the process
+    // status for both Claude Code and the documented Claude print adapter.
+    for name in ["claude", "claude-print"] {
+        let workspace = trace_workspace();
+        let bead_id = format!("needle-matrix-{name}-api-error");
+        let result = dispatch_adapter(
+            documented_adapter(name),
+            name,
+            &fake,
+            &[("NEEDLE_FAKE_AGENT_MODE", "api-error".to_string())],
+            &bead_id,
+            workspace.path(),
+        )
+        .await
+        .expect("structured API error is still a process result");
+
+        assert_eq!(result.exit_code, 0, "{name} API error fixture exits zero");
+        let metadata = trace_metadata(workspace.path(), &bead_id);
+        assert_eq!(metadata["trace_format"], "claude_json");
+        assert_eq!(
+            metadata["outcome"], "failure",
+            "{name} envelope classification"
+        );
+        assert_eq!(metadata["terminal_reason"], "api_error");
+        assert_eq!(metadata["api_error_status"], 503);
+    }
 }
 
 #[tokio::test]

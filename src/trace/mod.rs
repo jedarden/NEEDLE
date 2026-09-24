@@ -402,6 +402,11 @@ impl TraceCapture {
 /// Detect trace format from agent adapter name.
 pub fn detect_trace_format(agent_name: &str) -> TraceFormat {
     match agent_name {
+        // `claude` is the built-in Claude Code adapter name; the other
+        // Claude variants use names such as `claude-sonnet` and
+        // `claude-print`. Keep the exact name in the Claude stream family so
+        // its terminal result envelope participates in classification too.
+        "claude" => TraceFormat::ClaudeJson,
         n if n.starts_with("claude-") => TraceFormat::ClaudeJson,
         n if n.contains("zcode") => TraceFormat::ZcodeJsonl,
         n if n.contains("codex") || n.contains("openai") => TraceFormat::OpenaiJsonl,
