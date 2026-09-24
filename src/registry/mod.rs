@@ -334,6 +334,16 @@ impl Registry {
         Ok(self.list()?.into_iter().find(|w| w.id == worker_id))
     }
 
+    /// Read every registry entry without applying PID liveness filtering.
+    ///
+    /// Fleet-facing process reconciliation needs the raw view so it can
+    /// distinguish a registration whose PID is dead (or has been reused by a
+    /// non-NEEDLE process) from a worker that is actually running. Callers
+    /// that only need live entries should continue to use [`Registry::list`].
+    pub fn list_all(&self) -> Result<Vec<WorkerEntry>> {
+        Ok(self.read()?.workers)
+    }
+
     /// Read all registered workers, filtering out entries for dead PIDs.
     ///
     /// This lazy cleanup ensures that workers killed via SIGKILL or crashes
@@ -682,6 +692,8 @@ mod tests {
         reg.register(make_entry("alpha")).unwrap();
         reg.register(make_entry("bravo")).unwrap();
 
+        let all_workers = reg.list_all().unwrap();
+        assert_eq!(all_workers.len(), 2);
         let workers = reg.list().unwrap();
         assert_eq!(workers.len(), 2);
         assert_eq!(workers[0].id, "alpha");

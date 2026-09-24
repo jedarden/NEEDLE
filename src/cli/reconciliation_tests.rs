@@ -32,6 +32,22 @@ fn process(pid: u32, workspace: Option<&str>, agent: Option<&str>) -> Discovered
     }
 }
 
+fn worker(id: &str, pid: u32) -> WorkerEntry {
+    WorkerEntry {
+        id: id.to_string(),
+        pid,
+        workspace: PathBuf::from("/workspace"),
+        agent: "claude".to_string(),
+        model: Some("sonnet".to_string()),
+        provider: Some("anthropic".to_string()),
+        started_at: chrono::Utc::now(),
+        beads_processed: 0,
+        beads_completed: 0,
+        config_reload_generation: 0,
+        state: None,
+    }
+}
+
 #[test]
 fn reconciliation_separates_live_and_stale_sessions() {
     let sessions = vec![
@@ -94,12 +110,41 @@ fn reconciliation_does_not_confuse_pid_metadata_with_session_liveness() {
     let inspector = MockInspector {
         live_pids: HashSet::from([505]),
     };
-    let discovered = vec![process(606, Some("/workspace"), Some("claude"))];
+    let discovered = vec![
+        process(505, Some("/workspace/live"), Some("claude")),
+        process(606, Some("/workspace/unregistered"), Some("claude")),
+    ];
+    let registered = vec![worker("wrapper", 505), worker("stale", 707)];
 
     let (live, stale) = reconcile_tmux_sessions(&sessions, &inspector);
-    let unregistered = unregistered_processes(&discovered, &HashSet::new());
+    let unregistered = unregistered_processes(&discovered, &HashSet::from([505]));
+    let process_reconciliation = reconcile_process_registry(&discovered, &registered);
 
     assert_eq!(live.len(), 1, "a live pane tree is an active session");
     assert!(stale.is_empty());
     assert_eq!(unregistered[0].pid, 606, "direct workers remain visible");
+    assert_eq!(
+        process_reconciliation
+            .live_registered
+            .iter()
+            .map(|worker| worker.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["wrapper"]
+    );
+    assert_eq!(
+        process_reconciliation
+            .stale_registered
+            .iter()
+            .map(|worker| worker.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["stale"]
+    );
+    assert_eq!(
+        process_reconciliation
+            .unregistered
+            .iter()
+            .map(|process| process.pid)
+            .collect::<Vec<_>>(),
+        vec![606]
+    );
 }
