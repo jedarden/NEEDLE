@@ -175,10 +175,20 @@ bash "$NEEDLE_REPO/docs/examples/quickstart/seed-beads.sh"
 Or create them manually:
 
 ```bash
-# Create three sequential beads
-contributing_id=$(bead create --title "Add CONTRIBUTING.md" --priority 2 --issue-type task)
-license_id=$(bead create --title "Add LICENSE file" --priority 2 --issue-type task)
-makefile_id=$(bead create --title "Add simple Makefile" --priority 1 --issue-type task)
+# Create three sequential beads. Each title names one deliverable and its one
+# acceptance command; each description keeps the worker on this bead.
+contributing_id=$(bead create \
+  --title 'Create CONTRIBUTING.md so that test -s CONTRIBUTING.md passes. Work on this issue directly.' \
+  --description 'Create CONTRIBUTING.md with contribution guidelines. Acceptance: `test -s CONTRIBUTING.md`. Do not create sub-issues, split this work, or decompose it.' \
+  --priority 2 --issue-type task)
+license_id=$(bead create \
+  --title 'Create LICENSE so that test -s LICENSE passes. Work on this issue directly.' \
+  --description 'Create LICENSE with the project license text. Acceptance: `test -s LICENSE`. Do not create sub-issues, split this work, or decompose it.' \
+  --priority 2 --issue-type task)
+makefile_id=$(bead create \
+  --title 'Create Makefile so that test -s Makefile passes. Work on this issue directly.' \
+  --description 'Create a simple Makefile with the project command. Acceptance: `test -s Makefile`. Do not create sub-issues, split this work, or decompose it.' \
+  --priority 1 --issue-type task)
 
 # Add a dependency: Makefile depends on LICENSE
 bead dep add "$makefile_id" "$license_id"
@@ -217,12 +227,23 @@ ls -la
 
 # See the git history
 git log --oneline
+
+# Re-run each bead's acceptance command
+test -s CONTRIBUTING.md
+test -s LICENSE
+test -s Makefile
+
+# Confirm the shipped commits are upstream
+git rev-list origin/main..HEAD
 ```
 
 **Expected final state:**
 - Three beads with status `closed`
 - Three new files: `CONTRIBUTING.md`, `LICENSE`, `Makefile`
 - Three git commits, one per bead, all pushed to the remote — `git log --oneline origin/main..HEAD` prints nothing
+
+Each `test -s` command exits 0, `bead list --status closed` shows all three
+beads as closed, and `git rev-list origin/main..HEAD` prints nothing.
 
 ## What Just Happened?
 

@@ -12,7 +12,10 @@ cd <your-repo> && needle init --backend bead-rs
 bead init --prefix <name>
 
 ## Create first bead
-bead create --title "Add a CONTRIBUTING.md" --priority 2
+bead create \
+  --title 'Add a CONTRIBUTING.md so that test -s CONTRIBUTING.md passes. Work on this issue directly.' \
+  --description 'Create CONTRIBUTING.md with contribution guidelines. Acceptance: `test -s CONTRIBUTING.md`. Do not create sub-issues, split this work, or decompose it.' \
+  --priority 2
 
 ## Verify health
 needle doctor
@@ -26,6 +29,8 @@ tmux attach -t needle-claude-alpha
 
 ## Verify completion
 bead list --status closed
+test -s CONTRIBUTING.md
+git rev-list origin/"$(git branch --show-current)"..HEAD
 
 # Documentation
 - Agent onboarding with expected outputs: docs/agent-onboarding.md

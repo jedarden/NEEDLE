@@ -227,6 +227,10 @@ cf366b7 Initial commit
 
 $ git log --oneline origin/main..HEAD        # must print nothing: all commits pushed
 
+$ test -s CONTRIBUTING.md
+$ test -s LICENSE
+$ test -s Makefile
+
 $ ls -la
 
 drwxr-xr-x  .beads/
@@ -252,6 +256,9 @@ quickstart README.
 - Worker exits cleanly when queue is empty
 - Git commits are created with bead IDs in trailers
 - All three files are created in the workspace
+- Each acceptance command (`test -s CONTRIBUTING.md`, `test -s LICENSE`, and
+  `test -s Makefile`) exits 0
+- `bead list --status closed` shows all three beads as closed
 - `git log --oneline origin/main..HEAD` prints nothing — every commit reached the remote
 
 ❌ **Warning signs:**

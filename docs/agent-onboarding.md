@@ -75,13 +75,16 @@ Bead store ready
 ### Step 4: Create your first bead
 
 ```bash
-bead create --title "Add a CONTRIBUTING.md" --priority 2
+bead create \
+  --title 'Add a CONTRIBUTING.md so that test -s CONTRIBUTING.md passes. Work on this issue directly.' \
+  --description 'Create CONTRIBUTING.md with contribution guidelines. Acceptance: `test -s CONTRIBUTING.md`. Do not create sub-issues, split this work, or decompose it.' \
+  --priority 2
 ```
 
 **Expected output:**
 ```
 ✓ Created bead needle-xxxxxxxx (open)
-Title: Add a CONTRIBUTING.md
+Title: Add a CONTRIBUTING.md so that test -s CONTRIBUTING.md passes. Work on this issue directly.
 Priority: 2
 Status: open
 ```
@@ -101,6 +104,16 @@ bead create --title "Create scripts/money.py and scripts/__init__.py so that pyt
 
 See [Bead Authoring](bead-authoring.md) for the full rule and the experiment
 behind it.
+
+After the worker finishes, verify the acceptance command and closure:
+
+```bash
+test -s CONTRIBUTING.md
+bead list --status closed
+```
+
+Both commands must succeed; the closed bead is the worker's recorded proof that
+the deliverable was accepted.
 
 ---
 

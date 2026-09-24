@@ -35,8 +35,11 @@ git push -u origin "$(git branch --show-current)"
 # 4. Create the bead store
 bead init --prefix <name>
 
-# 5. Create your first bead
-bead create --title "Add a CONTRIBUTING.md" --priority 2
+# 5. Create your first bead with one deliverable and one acceptance command
+bead create \
+  --title 'Add a CONTRIBUTING.md so that test -s CONTRIBUTING.md passes. Work on this issue directly.' \
+  --description 'Create CONTRIBUTING.md with contribution guidelines. Acceptance: `test -s CONTRIBUTING.md`. Do not create sub-issues, split this work, or decompose it.' \
+  --priority 2
 
 # 6. Verify system health
 needle doctor
@@ -50,7 +53,13 @@ tmux attach -t needle-claude-alpha
 
 # 9. Verify completion
 bead list --status closed
+test -s CONTRIBUTING.md
+git rev-list origin/"$(git branch --show-current)"..HEAD
 ```
+
+The completed run shows the bead as `closed`, `test -s CONTRIBUTING.md` exits
+with status 0, and the final `git rev-list` prints nothing because the
+shipped commit is already pushed.
 
 **Heads-up:** the built-in `claude` adapter invokes `claude -p … --dangerously-skip-permissions`.
 Unattended operation means no permission prompts; read `needle config` before pointing a
