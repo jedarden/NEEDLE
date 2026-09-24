@@ -524,6 +524,15 @@ async fn run_fixture(
     marker: &str,
     log: &Path,
 ) -> (needle::types::HandlerResult, Vec<StoreAction>, String) {
+    run_fixture_with_config(environment, &config_without_default_gates(), marker, log).await
+}
+
+async fn run_fixture_with_config(
+    environment: &IsolatedEnvironment,
+    config: &Config,
+    marker: &str,
+    log: &Path,
+) -> (needle::types::HandlerResult, Vec<StoreAction>, String) {
     for tool in ["go", "cargo", "npm", "pytest"] {
         install_tool_shim(environment, tool, log, 0);
     }
@@ -532,7 +541,7 @@ async fn run_fixture(
     let log_dir = tempfile::tempdir().expect("telemetry log directory");
     let telemetry = Telemetry::with_log_dir(WORKER.to_string(), log_dir.path());
     telemetry.start();
-    let handler = OutcomeHandler::new(config_without_default_gates(), telemetry.clone());
+    let handler = OutcomeHandler::new(config.clone(), telemetry.clone());
     let result = handler
         .handle(
             &store,
@@ -706,6 +715,10 @@ async fn builtin_go_gates_reject_a_deliberate_compile_error() {
 #[tokio::test(flavor = "current_thread")]
 async fn fallback_marker_commands_are_selected_and_executed_in_clean_extractions() {
     let environment = IsolatedEnvironment::new(true);
+    // Node is deliberately absent: its marker carries no runnable command of
+    // its own any more (needle-bb1052d4). Both sides of that policy have
+    // their own outcome-level tests below, and the runtime verdicts are
+    // unit-covered in src/outcome/fallback_verification.rs.
     let cases = [
         (
             "go",
@@ -715,7 +728,6 @@ async fn fallback_marker_commands_are_selected_and_executed_in_clean_extractions
             "rust",
             ["cargo build --all-targets", "cargo test"].as_slice(),
         ),
-        ("node", ["npm test"].as_slice()),
         ("python-pyproject", ["pytest -q"].as_slice()),
         ("python-pytest-ini", ["pytest -q"].as_slice()),
         ("definition-of-done", ["definition-of-done"].as_slice()),
@@ -1166,6 +1178,172 @@ async fn assert_armor_no_config_dispatch_reopens_non_compiling_commit(
             .as_str()
             .is_some_and(|output| output.contains("go build ./...")),
         "ARMOR failure should identify the Go fallback command: {failures:?}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_node_workspace_without_a_configured_node_gate_is_not_released_as_gate_failed() {
+    // needle-bb1052d4, the sun-sim class: a Node marker used to send bare
+    // `npm test` into the node_modules-less extraction, where it failed
+    // every time and released shipped work as gate_failed. With no
+    // `validation.default_gates.node` configured the workspace now has no
+    // verifier: nothing runs, the clean tree passes, and the pass is
+    // counted as `gate.no_verifier` — with the reason saying the Node gate
+    // was withheld, not that nothing was detected.
+    let environment = IsolatedEnvironment::new(true);
+    let log = environment.home().join("node-no-gate.log");
+    install_tool_shim(&environment, "npm", &log, 0);
+    let workspace = marker_fixture("node", &log);
+    let store = OutcomeStore::new(bead(workspace.path(), "node-no-gate"));
+    let log_dir = tempfile::tempdir().expect("no-verifier telemetry directory");
+    let telemetry = Telemetry::with_log_dir(WORKER.to_string(), log_dir.path());
+    telemetry.start();
+    let handler = OutcomeHandler::new(config_with_default_gates(), telemetry.clone());
+
+    let result = handler
+        .handle(
+            &store,
+            &bead(workspace.path(), "node-no-gate"),
+            &AgentOutcome {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+            false,
+        )
+        .await
+        .expect("node no-gate handler");
+    telemetry
+        .force_flush_async(std::time::Duration::from_secs(2))
+        .await
+        .expect("no-verifier telemetry flush");
+    let events = read_telemetry(log_dir.path());
+    telemetry.shutdown().await;
+
+    assert_eq!(result.outcome, needle::types::Outcome::Success);
+    assert_eq!(result.bead_action, BeadAction::Closed);
+    let shim_log = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        !shim_log.lines().any(|line| line.starts_with("npm")),
+        "no verifier means npm must not run: {shim_log:?}"
+    );
+    let no_verifier_rows = telemetry_rows(&events, "gate.no_verifier");
+    assert_eq!(no_verifier_rows.len(), 1, "events: {events}");
+    assert_eq!(
+        no_verifier_rows[0]["data"]["reason"].as_str(),
+        Some("node_gate_not_configured"),
+        "the event must distinguish a withheld Node gate from an undetected workspace: {no_verifier_rows:?}"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_configured_node_gate_is_honored_and_a_failing_one_still_fails() {
+    // needle-bb1052d4 acceptance, other side: a host that names a Node gate
+    // gets exactly those commands, run once each and in order, in the clean
+    // extraction — resolved through the language-default gate the detector
+    // builds from the same config — and the verdict is real, not a WARN.
+    let environment = IsolatedEnvironment::new(true);
+    let log = environment.home().join("node-configured.log");
+    install_tool_shim(&environment, "npm", &log, 0);
+    let mut config = config_with_default_gates();
+    config.validation.default_gates.node = vec![
+        "npm ci --silent".to_string(),
+        "npm test --silent".to_string(),
+    ];
+    let workspace = marker_fixture("node", &log);
+    let store = OutcomeStore::new(bead(workspace.path(), "node-configured"));
+    let log_dir = tempfile::tempdir().expect("configured telemetry directory");
+    let telemetry = Telemetry::with_log_dir(WORKER.to_string(), log_dir.path());
+    telemetry.start();
+    let handler = OutcomeHandler::new(config.clone(), telemetry.clone());
+
+    let result = handler
+        .handle(
+            &store,
+            &bead(workspace.path(), "node-configured"),
+            &AgentOutcome {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+            false,
+        )
+        .await
+        .expect("node configured handler");
+    telemetry
+        .force_flush_async(std::time::Duration::from_secs(2))
+        .await
+        .expect("configured telemetry flush");
+    telemetry.shutdown().await;
+
+    assert_eq!(result.outcome, needle::types::Outcome::Success);
+    assert_eq!(result.bead_action, BeadAction::Closed);
+    let shim_log = std::fs::read_to_string(&log).unwrap_or_default();
+    let npm_lines: Vec<&str> = shim_log
+        .lines()
+        .filter(|line| line.starts_with("npm"))
+        .collect();
+    assert_eq!(
+        npm_lines.len(),
+        2,
+        "both configured commands run once, in order: {shim_log:?}"
+    );
+    assert!(npm_lines[0].starts_with("npm ci --silent"), "{npm_lines:?}");
+    assert!(
+        npm_lines[1].starts_with("npm test --silent"),
+        "{npm_lines:?}"
+    );
+
+    // A failing configured gate is still a verdict: the dispatch is
+    // released with `verification-failed`, not waved through.
+    install_failing_tool_shim(&environment, "npm", "suite failure", 1);
+    let failing_store = OutcomeStore::new(bead(workspace.path(), "node-configured-failing"));
+    let failing_log_dir = tempfile::tempdir().expect("failing telemetry directory");
+    let failing_telemetry = Telemetry::with_log_dir(WORKER.to_string(), failing_log_dir.path());
+    failing_telemetry.start();
+    let failing_handler = OutcomeHandler::new(config, failing_telemetry.clone());
+
+    let failing_result = failing_handler
+        .handle(
+            &failing_store,
+            &bead(workspace.path(), "node-configured-failing"),
+            &AgentOutcome {
+                exit_code: 0,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+            false,
+        )
+        .await
+        .expect("node failing handler");
+    failing_telemetry
+        .force_flush_async(std::time::Duration::from_secs(2))
+        .await
+        .expect("failing telemetry flush");
+    let failing_events = read_telemetry(failing_log_dir.path());
+    failing_telemetry.shutdown().await;
+
+    assert_eq!(failing_result.outcome, needle::types::Outcome::Failure);
+    assert_eq!(
+        failing_result.bead_action,
+        BeadAction::Released(ReleaseReason::GateFailed)
+    );
+    let failing_actions = failing_store.actions();
+    assert!(failing_actions.contains(&StoreAction::AddLabel("verification-failed".into())));
+    let failures = telemetry_rows(&failing_events, "verification.failed");
+    assert_eq!(failures.len(), 1);
+    assert_eq!(
+        failures[0]["data"]["command"].as_str(),
+        Some("default_node"),
+        "the configured commands resolve through the language-default gate: {failures:?}"
+    );
+    assert!(
+        failures[0]["data"]["output"]
+            .as_str()
+            .is_some_and(|output| {
+                output.contains("npm ci --silent") && output.contains("suite failure")
+            }),
+        "the failure must name the first configured command and carry its stderr: {failures:?}"
     );
 }
 

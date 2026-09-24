@@ -11,8 +11,15 @@
 //!   the verdict is about what shipped, not about whatever else is in flight
 //!   in the shared checkout. The timeout and the stderr cap are the host's
 //!   `validation.outcome_timeout_seconds` / `validation.stderr_cap_bytes` —
-//!   the same ceiling every command gate answers to.
-//! - Nothing detected: the only check that costs nothing and lies about
+//!   the same ceiling every command gate answers to. The one exception is a
+//!   Node marker: its command is whatever the host's
+//!   `validation.default_gates.node` configures (needle-bb1052d4 — the same
+//!   policy [`crate::validation::default_gates`] applies), and with nothing
+//!   configured the workspace has no verifier here either, because a clean
+//!   extraction carries no `node_modules` and the builtin `npm test` there
+//!   is a guaranteed false verdict.
+//! - Nothing detected (or a Node workspace with no configured Node gate): the
+//!   only check that costs nothing and lies about
 //!   nothing is that the extraction would carry the whole dispatch — i.e.
 //!   `git status --porcelain` in the workspace is empty. (The extraction
 //!   itself is built from committed state and has no `.git`, so the porcelain
@@ -57,6 +64,34 @@ const EXTRACTION_WORKER_ID: &str = "outcome-fallback";
 /// The gate name for the clean-tree check in reports and telemetry.
 pub(crate) const CLEAN_TREE_GATE_NAME: &str = "fallback_clean_tree";
 
+/// Why a gate-less workspace was passed without a verifier running.
+///
+/// [`FallbackVerdict::NoVerifierPass`] carries this so the outcome handler's
+/// `gate.no_verifier` event says what was (or was not) detected instead of
+/// flattening every no-verifier pass into one indistinguishable reason —
+/// a host debugging a recurrence of needle-bb1052d4 has to be able to tell
+/// "nothing looked like a workspace" from "a Node workspace the host has
+/// deliberately given no extraction-safe command".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NoVerifierReason {
+    /// Nothing in the workspace's files selected a verifier.
+    NotDetected,
+    /// A Node marker was detected, but the host configures no
+    /// `validation.default_gates.node` command — the builtin `npm test`
+    /// cannot pass in a clean extraction, so it is withheld.
+    NodeGateNotConfigured,
+}
+
+impl NoVerifierReason {
+    /// The value the `gate.no_verifier` telemetry event carries.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::NotDetected => "not_detected",
+            Self::NodeGateNotConfigured => "node_gate_not_configured",
+        }
+    }
+}
+
 /// Outcome of judging a gate-less workspace's dispatch.
 #[derive(Debug)]
 pub(crate) enum FallbackVerdict {
@@ -64,8 +99,9 @@ pub(crate) enum FallbackVerdict {
     Pass(GateReport),
     /// No verifier for this workspace and the tree the extraction is cut
     /// from is clean (or there is no git tree to judge at all). The caller
-    /// emits the `no verifier for this workspace` WARN and counts it.
-    NoVerifierPass,
+    /// emits the `no verifier for this workspace` WARN and counts it, with
+    /// the reason the verifier was withheld.
+    NoVerifierPass(NoVerifierReason),
     /// A verdict against the dispatch: a selected verifier failed, or the
     /// tree is dirty. Released with `verification-failed`.
     Fail(GateReport),
@@ -111,18 +147,47 @@ impl FallbackVerificationRuntime {
     ///
     /// `timeout` and `stderr_cap_bytes` are the host's standard gate values
     /// (`validation.outcome_timeout_seconds` / `validation.stderr_cap_bytes`),
-    /// passed in so this runtime stays config-free.
+    /// passed in so this runtime stays config-free. `default_gates` carries
+    /// only the Node policy ([`crate::validation::fallback::
+    /// node_verifier_command`]); every other selection keeps its builtin.
     pub(crate) async fn verify(
         &self,
         bead: &Bead,
         timeout: Duration,
         stderr_cap_bytes: usize,
+        default_gates: &crate::config::DefaultGatesConfig,
     ) -> FallbackVerdict {
-        let verifier = crate::validation::fallback::select_verifier(&bead.workspace);
-        let Some(command) = verifier.command() else {
-            return self.verify_clean_tree(bead).await;
+        let detected = crate::validation::fallback::select_verifier(&bead.workspace);
+
+        // needle-bb1052d4: a Node workspace answers to the default_gates
+        // Node policy, not to the marker's builtin `npm test`. With no
+        // configured command the workspace has no verifier at all — the
+        // clean-tree check below, the same path an undetected workspace
+        // takes — because a clean extraction carries no `node_modules` and
+        // the builtin is a guaranteed false verdict there (sun-sim, nine
+        // shipped dispatches released as gate_failed on `error: unknown
+        // command 'test'`).
+        let command: String = match &detected {
+            crate::validation::fallback::Verifier::Marker(marker) if marker.language == "node" => {
+                match crate::validation::fallback::node_verifier_command(default_gates) {
+                    Some(command) => command,
+                    None => {
+                        return self
+                            .verify_clean_tree(bead, NoVerifierReason::NodeGateNotConfigured)
+                            .await
+                    }
+                }
+            }
+            _ => match detected.command() {
+                Some(command) => command.to_string(),
+                None => {
+                    return self
+                        .verify_clean_tree(bead, NoVerifierReason::NotDetected)
+                        .await
+                }
+            },
         };
-        let gate_name = gate_name(&verifier);
+        let gate_name = gate_name(&detected);
 
         let (extraction_dir, created_here) = match &self.extraction_dir {
             Some(dir) => (dir.clone(), false),
@@ -149,9 +214,9 @@ impl FallbackVerificationRuntime {
         };
 
         let environment = crate::validation::GateEnvironment::capture();
-        let command_environment = environment.for_command(command);
+        let command_environment = environment.for_command(&command);
         let mut request = ProcessRequest::new("sh")
-            .args(["-c", command])
+            .args(["-c", command.as_str()])
             .current_dir(&extraction_dir);
         for (key, value) in command_environment.env_pairs() {
             request = request.env(key, value);
@@ -195,7 +260,7 @@ impl FallbackVerificationRuntime {
             }
             Err(e) => FallbackVerdict::ExecutionError(execution_error_report(
                 &gate_name,
-                command,
+                &command,
                 format!("{e:#}"),
             )),
         }
@@ -206,8 +271,9 @@ impl FallbackVerificationRuntime {
     /// `git status --porcelain` in the bead's workspace — not in the
     /// extraction, which is a `.git`-less archive of committed state and
     /// could not answer. Empty means the committed state the extraction
-    /// carries is the entire dispatch.
-    async fn verify_clean_tree(&self, bead: &Bead) -> FallbackVerdict {
+    /// carries is the entire dispatch. `reason` is why no verifier ran; it
+    /// travels to the caller's `gate.no_verifier` count.
+    async fn verify_clean_tree(&self, bead: &Bead, reason: NoVerifierReason) -> FallbackVerdict {
         let output = tokio::process::Command::new("git")
             .args(["status", "--porcelain", "--untracked-files=all"])
             .current_dir(&bead.workspace)
@@ -223,21 +289,23 @@ impl FallbackVerificationRuntime {
                 tracing::debug!(
                     bead_id = %bead.id,
                     workspace = %bead.workspace.display(),
+                    reason = reason.as_str(),
                     stderr = %String::from_utf8_lossy(&output.stderr),
                     "no verifier for this workspace and git could not judge its tree — \
                      passing on the agent's exit code alone"
                 );
-                return FallbackVerdict::NoVerifierPass;
+                return FallbackVerdict::NoVerifierPass(reason);
             }
             Err(error) => {
                 tracing::debug!(
                     bead_id = %bead.id,
                     workspace = %bead.workspace.display(),
+                    reason = reason.as_str(),
                     error = %error,
                     "no verifier for this workspace and git could not be spawned to judge \
                      its tree — passing on the agent's exit code alone"
                 );
-                return FallbackVerdict::NoVerifierPass;
+                return FallbackVerdict::NoVerifierPass(reason);
             }
         };
 
@@ -255,7 +323,7 @@ impl FallbackVerificationRuntime {
             .collect();
 
         if dirty.is_empty() {
-            FallbackVerdict::NoVerifierPass
+            FallbackVerdict::NoVerifierPass(reason)
         } else {
             let reason = format!(
                 "no verifier for this workspace, so the dispatch is judged on its \
@@ -336,6 +404,20 @@ mod tests {
 
     const TIMEOUT: Duration = Duration::from_secs(30);
 
+    /// The host default-gates config a non-Node test runs under — its value
+    /// is irrelevant to every marker except Node.
+    fn default_gates() -> crate::config::DefaultGatesConfig {
+        crate::config::DefaultGatesConfig::default()
+    }
+
+    /// The default-gates config with a configured Node gate.
+    fn node_gates(commands: &[&str]) -> crate::config::DefaultGatesConfig {
+        crate::config::DefaultGatesConfig {
+            node: commands.iter().map(|command| command.to_string()).collect(),
+            ..crate::config::DefaultGatesConfig::default()
+        }
+    }
+
     /// Commit `files` in a fresh git repo so the extraction has a HEAD to
     /// archive. Returns the workspace directory.
     fn git_workspace(files: &[(&str, &str)]) -> tempfile::TempDir {
@@ -398,7 +480,12 @@ mod tests {
         let workspace = git_workspace(&[("Cargo.toml", "[package]\nname = \"x\"\n")]);
 
         match runtime
-            .verify(&test_bead_in(workspace.path()), TIMEOUT, 4096)
+            .verify(
+                &test_bead_in(workspace.path()),
+                TIMEOUT,
+                4096,
+                &default_gates(),
+            )
             .await
         {
             FallbackVerdict::Fail(report) => {
@@ -437,7 +524,12 @@ mod tests {
         let workspace = git_workspace(&[("scripts/definition-of-done.sh", "#!/bin/sh\n")]);
 
         match runtime
-            .verify(&test_bead_in(workspace.path()), TIMEOUT, 4096)
+            .verify(
+                &test_bead_in(workspace.path()),
+                TIMEOUT,
+                4096,
+                &default_gates(),
+            )
             .await
         {
             FallbackVerdict::Pass(report) => {
@@ -470,7 +562,12 @@ mod tests {
         let workspace = git_workspace(&[("go.mod", "module example.com/x\n")]);
 
         match runtime
-            .verify(&test_bead_in(workspace.path()), TIMEOUT, 4096)
+            .verify(
+                &test_bead_in(workspace.path()),
+                TIMEOUT,
+                4096,
+                &default_gates(),
+            )
             .await
         {
             FallbackVerdict::ExecutionError(report) => {
@@ -501,7 +598,12 @@ mod tests {
         let workspace = git_workspace(&[("pytest.ini", "[pytest]\n")]);
 
         match runtime
-            .verify(&test_bead_in(workspace.path()), TIMEOUT, 4096)
+            .verify(
+                &test_bead_in(workspace.path()),
+                TIMEOUT,
+                4096,
+                &default_gates(),
+            )
             .await
         {
             FallbackVerdict::ExecutionError(report) => {
@@ -532,7 +634,12 @@ mod tests {
         let workspace = git_workspace(&[("Cargo.toml", "[package]\n")]);
 
         match runtime
-            .verify(&test_bead_in(workspace.path()), TIMEOUT, 512)
+            .verify(
+                &test_bead_in(workspace.path()),
+                TIMEOUT,
+                512,
+                &default_gates(),
+            )
             .await
         {
             FallbackVerdict::Fail(report) => {
@@ -561,7 +668,12 @@ mod tests {
         std::fs::write(workspace.path().join("Cargo.toml"), "[package]\n").unwrap();
 
         match FallbackVerificationRuntime::production()
-            .verify(&test_bead_in(workspace.path()), TIMEOUT, 4096)
+            .verify(
+                &test_bead_in(workspace.path()),
+                TIMEOUT,
+                4096,
+                &default_gates(),
+            )
             .await
         {
             FallbackVerdict::ExecutionError(report) => {
@@ -586,10 +698,15 @@ mod tests {
     async fn clean_committed_tree_passes_without_a_verifier() {
         let workspace = git_workspace(&[("README.md", "docs only\n")]);
         match FallbackVerificationRuntime::production()
-            .verify(&test_bead_in(workspace.path()), TIMEOUT, 4096)
+            .verify(
+                &test_bead_in(workspace.path()),
+                TIMEOUT,
+                4096,
+                &default_gates(),
+            )
             .await
         {
-            FallbackVerdict::NoVerifierPass => {}
+            FallbackVerdict::NoVerifierPass(NoVerifierReason::NotDetected) => {}
             other => panic!("expected NoVerifierPass, got {other:?}"),
         }
     }
@@ -601,7 +718,12 @@ mod tests {
         std::fs::write(workspace.path().join("README.md"), "edited, uncommitted\n").unwrap();
 
         match FallbackVerificationRuntime::production()
-            .verify(&test_bead_in(workspace.path()), TIMEOUT, 4096)
+            .verify(
+                &test_bead_in(workspace.path()),
+                TIMEOUT,
+                4096,
+                &default_gates(),
+            )
             .await
         {
             FallbackVerdict::Fail(report) => {
@@ -628,10 +750,15 @@ mod tests {
         std::fs::write(workspace.path().join(".beads/events.jsonl"), "{}\n").unwrap();
 
         match FallbackVerificationRuntime::production()
-            .verify(&test_bead_in(workspace.path()), TIMEOUT, 4096)
+            .verify(
+                &test_bead_in(workspace.path()),
+                TIMEOUT,
+                4096,
+                &default_gates(),
+            )
             .await
         {
-            FallbackVerdict::NoVerifierPass => {}
+            FallbackVerdict::NoVerifierPass(NoVerifierReason::NotDetected) => {}
             other => panic!("expected NoVerifierPass, got {other:?}"),
         }
     }
@@ -643,11 +770,140 @@ mod tests {
         // failing every dispatch on a degenerate workspace forever.
         let workspace = tempfile::tempdir().unwrap();
         match FallbackVerificationRuntime::production()
-            .verify(&test_bead_in(workspace.path()), TIMEOUT, 4096)
+            .verify(
+                &test_bead_in(workspace.path()),
+                TIMEOUT,
+                4096,
+                &default_gates(),
+            )
             .await
         {
-            FallbackVerdict::NoVerifierPass => {}
+            FallbackVerdict::NoVerifierPass(NoVerifierReason::NotDetected) => {}
             other => panic!("expected NoVerifierPass, got {other:?}"),
+        }
+    }
+
+    // ── the Node policy (needle-bb1052d4) ──
+
+    fn node_workspace() -> tempfile::TempDir {
+        git_workspace(&[(
+            "package.json",
+            r#"{"name":"x","scripts":{"test":"node test.js"}}"#,
+        )])
+    }
+
+    #[tokio::test]
+    async fn node_workspace_without_a_configured_gate_runs_nothing_and_passes() {
+        // The sun-sim failure: the node marker used to send bare `npm test`
+        // into a node_modules-less extraction, where `scripts.test` resolved
+        // to a runner-less binary and every shipped dispatch was released as
+        // gate_failed. Nothing configured now means nothing runs: the
+        // clean-tree check, the same path an undetected workspace takes.
+        let runner = Arc::new(FakeProcessRunner::new());
+        let runtime = FallbackVerificationRuntime::for_tests(runner.clone(), None);
+        let workspace = node_workspace();
+
+        match runtime
+            .verify(
+                &test_bead_in(workspace.path()),
+                TIMEOUT,
+                4096,
+                &default_gates(),
+            )
+            .await
+        {
+            FallbackVerdict::NoVerifierPass(NoVerifierReason::NodeGateNotConfigured) => {}
+            other => panic!("expected NoVerifierPass, got {other:?}"),
+        }
+        // `ProcessRequest` carries no `Debug`, so the diagnostic names each
+        // request's program and arguments itself.
+        let executed: Vec<String> = runner
+            .requests()
+            .iter()
+            .map(|request| {
+                let arguments: Vec<String> = request
+                    .arguments()
+                    .iter()
+                    .map(|argument| argument.to_string_lossy().into_owned())
+                    .collect();
+                format!("{} {arguments:?}", request.program().display())
+            })
+            .collect();
+        assert!(
+            executed.is_empty(),
+            "no verifier means no command runs, got {executed:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_node_gate_runs_in_the_clean_extraction() {
+        let runner = Arc::new(FakeProcessRunner::new());
+        runner.push_output(ProcessOutput::success(b"ok\n".to_vec()));
+        let extraction = tempfile::tempdir().unwrap();
+        let runtime = FallbackVerificationRuntime::for_tests(
+            runner.clone(),
+            Some(extraction.path().to_path_buf()),
+        );
+        let workspace = node_workspace();
+
+        match runtime
+            .verify(
+                &test_bead_in(workspace.path()),
+                TIMEOUT,
+                4096,
+                &node_gates(&["npm ci --silent", "npm test --silent"]),
+            )
+            .await
+        {
+            FallbackVerdict::Pass(report) => {
+                assert!(report.results.contains_key("fallback_node"));
+            }
+            other => panic!("expected Pass, got {other:?}"),
+        }
+
+        let requests = runner.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0].arguments(),
+            ["-c", "npm ci --silent && npm test --silent"] as [&str; 2]
+        );
+        assert_eq!(requests[0].working_directory(), Some(extraction.path()));
+    }
+
+    #[tokio::test]
+    async fn a_failing_configured_node_gate_is_still_a_verdict() {
+        let runner = Arc::new(FakeProcessRunner::new());
+        runner.push_output(ProcessOutput {
+            success: false,
+            exit_code: Some(1),
+            stdout: Vec::new(),
+            stderr: b"1 failing\n".to_vec(),
+        });
+        let extraction = tempfile::tempdir().unwrap();
+        let runtime =
+            FallbackVerificationRuntime::for_tests(runner, Some(extraction.path().to_path_buf()));
+        let workspace = node_workspace();
+
+        match runtime
+            .verify(
+                &test_bead_in(workspace.path()),
+                TIMEOUT,
+                4096,
+                &node_gates(&["npm test"]),
+            )
+            .await
+        {
+            FallbackVerdict::Fail(report) => {
+                let (name, result) = report.results.iter().next().unwrap();
+                assert_eq!(name, "fallback_node");
+                let GateResult::Fail(reason) = result else {
+                    panic!("expected Fail, got {result:?}")
+                };
+                assert!(reason.contains("npm test"));
+                assert!(reason.contains("Some(1)"));
+                assert!(reason.contains("1 failing"));
+            }
+            other => panic!("expected Fail, got {other:?}"),
         }
     }
 

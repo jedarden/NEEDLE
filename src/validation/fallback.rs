@@ -17,10 +17,19 @@
 //!    clean-tree + WARN path (`gate.no_verifier`); this module deliberately
 //!    has no opinion on it.
 //!
+//! The Node marker is policy-gated: the command it names is what the host's
+//! `validation.default_gates.node` configures, or nothing at all
+//! ([`node_verifier_command`]) — the same rule
+//! [`crate::validation::default_gates`] applies, because a clean extraction
+//! carries no `node_modules` and the builtin `npm test` is a guaranteed
+//! false verdict there.
+//!
 //! Every check is a plain filesystem read, so selection is testable without
 //! executing anything.
 
 use std::path::Path;
+
+use crate::config::DefaultGatesConfig;
 
 /// The workspace's definition-of-done script, relative to its root.
 pub const DEFINITION_OF_DONE_SCRIPT: &str = "scripts/definition-of-done.sh";
@@ -30,6 +39,9 @@ const DEFINITION_OF_DONE_COMMAND: &str = "scripts/definition-of-done.sh";
 
 const GO_COMMAND: &str = "go build ./... && go vet ./... && go test -short ./...";
 const RUST_COMMAND: &str = "cargo build --all-targets && cargo test";
+/// What a Node marker *names*; never what it runs. A selected marker's
+/// command is resolved through [`node_verifier_command`] — the builtin below
+/// must not execute in a clean extraction, which carries no `node_modules`.
 const NODE_COMMAND: &str = "npm test";
 const PYTHON_COMMAND: &str = "pytest -q";
 
@@ -108,6 +120,31 @@ pub fn select_verifier(dir: &Path) -> Verifier {
         }
     }
     Verifier::NoVerifier
+}
+
+/// The command a selected Node marker runs, under the host's default-gates
+/// policy.
+///
+/// `validation.default_gates.node` configured (and the defaults enabled):
+/// those commands, joined to run in order — a repository that wants a Node
+/// gate declares one that works in a clean extraction, typically an
+/// install-then-test step or a byte-compile. Nothing configured: `None` —
+/// there is no builtin Node verifier. A clean extraction of committed state
+/// carries no `node_modules`, so the builtin `npm test` resolved against a
+/// wrong binary or a stub and failed regardless of the work: 25 false gate
+/// failures in eleven hours on 2026-09-12 (which is why
+/// [`crate::validation::default_gates`] dropped its Node builtin), then the
+/// sun-sim repeat on 2026-09-23 (needle-bb1052d4) where `scripts.test =
+/// playwright test` resolved to a runner-less `playwright` and nine shipped
+/// dispatches were released as `gate_failed` with `error: unknown command
+/// 'test'`. The caller treats `None` exactly like [`Verifier::NoVerifier`]:
+/// the clean-tree check and the counted `gate.no_verifier` WARN, never a
+/// verdict.
+pub fn node_verifier_command(default_gates: &DefaultGatesConfig) -> Option<String> {
+    if !default_gates.enabled || default_gates.node.is_empty() {
+        return None;
+    }
+    Some(default_gates.node.join(" && "))
 }
 
 /// Whether `package.json` in `dir` declares a non-empty `test` script.
@@ -371,5 +408,46 @@ mod tests {
             Some(RUST_COMMAND)
         );
         assert_eq!(Verifier::NoVerifier.command(), None);
+    }
+
+    // ── The Node policy (needle-bb1052d4) ──
+
+    fn node_gates(enabled: bool, node: &[&str]) -> DefaultGatesConfig {
+        DefaultGatesConfig {
+            enabled,
+            node: node.iter().map(|command| command.to_string()).collect(),
+            ..DefaultGatesConfig::default()
+        }
+    }
+
+    #[test]
+    fn node_marker_without_a_configured_command_resolves_to_none() {
+        // The whole point of the policy: with nothing configured there is no
+        // builtin. `npm test` in a node_modules-less extraction failed every
+        // time (2026-09-12 defaults, 2026-09-23 fallback) and must never run.
+        assert_eq!(node_verifier_command(&node_gates(true, &[])), None);
+        assert_eq!(node_verifier_command(&node_gates(false, &[])), None);
+    }
+
+    #[test]
+    fn host_disabled_defaults_withhold_even_a_configured_node_command() {
+        // `enabled: false` is the host opting out of language-default
+        // commands in extractions; a configured `node` does not opt back in.
+        assert_eq!(
+            node_verifier_command(&node_gates(false, &["npm ci && npm test"])),
+            None
+        );
+    }
+
+    #[test]
+    fn configured_node_commands_run_in_order_in_one_shell() {
+        assert_eq!(
+            node_verifier_command(&node_gates(true, &["npm ci --silent", "npm test --silent"],)),
+            Some("npm ci --silent && npm test --silent".to_string())
+        );
+        assert_eq!(
+            node_verifier_command(&node_gates(true, &["node --test"])),
+            Some("node --test".to_string())
+        );
     }
 }

@@ -1240,7 +1240,11 @@ impl OutcomeHandler {
     ///
     /// The verifier the workspace's own files select runs in the clean
     /// extraction of committed state under the standard gate timeout and
-    /// stderr cap. A workspace whose files select nothing passes only when
+    /// stderr cap. The Node marker is policy-gated like the `default_*`
+    /// gates above (needle-bb1052d4): the host's `validation.default_gates.
+    /// node` commands when configured, no verifier at all when not — never
+    /// the builtin `npm test`, which cannot pass in an extraction without
+    /// `node_modules`. A workspace whose files select nothing passes only when
     /// its tree is clean — the extraction would otherwise silently drop the
     /// uncommitted remainder of the dispatch — and that pass is counted by
     /// `gate.no_verifier`. A failed verdict flows into the ordinary
@@ -1256,23 +1260,34 @@ impl OutcomeHandler {
         let stderr_cap_bytes = self.config.validation.stderr_cap_bytes;
         match self
             .fallback_verification
-            .verify(bead, timeout, stderr_cap_bytes)
+            .verify(
+                bead,
+                timeout,
+                stderr_cap_bytes,
+                &self.config.validation.default_gates,
+            )
             .await
         {
             fallback_verification::FallbackVerdict::Pass(report) => {
                 Ok((true, Some(report), GateResolutionTelemetry::none()))
             }
-            fallback_verification::FallbackVerdict::NoVerifierPass => {
+            fallback_verification::FallbackVerdict::NoVerifierPass(reason) => {
+                // needle-bb1052d4: the reason distinguishes an undetected
+                // workspace from a Node workspace whose gate was withheld
+                // for want of a configured extraction-safe command — a host
+                // debugging a repeat of the sun-sim releases has to be able
+                // to tell them apart in the `gate.no_verifier` stream.
+                let reason = reason.as_str();
                 tracing::warn!(
                     bead_id = %bead.id,
                     workspace = %bead.workspace.display(),
-                    reason = "not_detected",
+                    reason,
                     "no verifier for this workspace — dispatch passes on the agent's exit code alone"
                 );
                 if let Err(error) = self.telemetry.emit(
                     EventKind::GateNoVerifier {
                         workspace: bead.workspace.display().to_string(),
-                        reason: "not_detected".to_string(),
+                        reason: reason.to_string(),
                         gates_source: "none".to_string(),
                         command_gates_resolved: 0,
                     },

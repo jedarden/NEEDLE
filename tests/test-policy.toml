@@ -193,10 +193,15 @@ version = 1
 # helpers, so the unit tier is their home.
 # +1 Go clean-gate environment contract (needle-8bca1772): the unit test
 # proves GOFLAGS is extended rather than replaced.
+# +7 Node fallback-verifier policy (needle-bb1052d4): the no-builtin
+# resolution, the host-disable override, the ordered join, the three
+# runtime verdicts (pass nothing, run the configured gate, fail it), and
+# the close-evidence npm exclusion. Each names module-private state
+# (`node_verifier_command`, the default-gates seam) no other tier reaches.
 # +4 re-exec agent guard and SIGTERM health exclusion (needle-f1efbb0a): the
 # re_exec_decision matrix and the SIGTERM-only adapter-health refusal plus its
 # contrast, all pure functions private to their modules.
-max_tests = 3960
+max_tests = 3967
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
@@ -208,7 +213,9 @@ max_tests = 3960
 # +1 local/remote target-store cleanup regression (needle-55e74a46).
 # +2 Go clean-gate integration scenarios (needle-8bca1772): both default and
 # fallback gates pass a gitless extraction and reject a compile error.
-push = 673
+# +2 Node fallback-verifier policy (needle-bb1052d4): the p2 outcome-level
+# no-configured-gate / configured-gate pair.
+push = 675
 # +20 N-T07 proposal envelope contracts (needle-2b0a309b): derived-signature
 # identity, construction refusals, and the authority ceiling. The contract tier
 # is the right home — these are pure record properties with no process, no
@@ -327,7 +334,11 @@ tier = "push"
 # payload and unchanged target bead/comment/issue store snapshot.
 # +2 Go clean-gate integration scenarios (needle-8bca1772): both default and
 # fallback gates pass a gitless extraction and reject a compile error.
-max_tests = 127
+# +2 Node fallback-verifier policy (needle-bb1052d4): the outcome-level pair
+# — no configured Node gate passes as `gate.no_verifier` with nothing run
+# and is never released as gate_failed, and a configured gate is honored
+# with a real verdict in both directions.
+max_tests = 129
 owner = "component:pluck-mend-explore"
 
 [[harness]]

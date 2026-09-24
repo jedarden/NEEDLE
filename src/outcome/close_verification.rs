@@ -56,13 +56,21 @@ const FAILURE_OUTPUT_LINES: usize = 20;
 /// Everything else is ignored with a WARN and never spawned: a close reason
 /// is not a shell prompt, and `needle` must not become an execution oracle
 /// for whatever text an agent (or a bead author) pastes into a reason.
+///
+/// Bare `npm test` is deliberately absent (needle-bb1052d4): the re-run
+/// happens in a clean extraction of committed state, which carries no
+/// `node_modules`, so `npm test` there resolves against a wrong or
+/// runner-less binary and fails regardless of the work — the same false
+/// verdict that removed the Node builtin from the default gates on
+/// 2026-09-12 and released nine shipped sun-sim dispatches as `gate_failed`
+/// on 2026-09-23. A claimed `npm test` still counts as evidence; it is
+/// recorded and WARN-ed, never executed.
 const ALLOWED_PREFIXES: &[&[&str]] = &[
     &["go", "test"],
     &["go", "vet"],
     &["go", "build"],
     &["cargo", "test"],
     &["cargo", "build"],
-    &["npm", "test"],
     &["pytest"],
     &["make", "test"],
     &["scripts/definition-of-done.sh"],
@@ -611,14 +619,25 @@ mod tests {
             "go build -o bin ./cmd/x",
             "cargo test --lib",
             "cargo build --release",
-            "npm test",
-            "npm test -- --watch=false",
             "pytest -k auth",
             "make test",
             "make test TESTFLAGS=-v",
             "scripts/definition-of-done.sh --fast",
         ] {
             assert!(is_allow_listed(command), "expected allow-listed: {command}");
+        }
+    }
+
+    #[test]
+    fn bare_npm_test_is_never_re_run() {
+        // needle-bb1052d4: the re-run's clean extraction has no
+        // node_modules, so `npm test` fails there regardless of the work.
+        // A claimed `npm test` stays evidence (WARN-ed, not executed).
+        for command in ["npm test", "npm test -- --watch=false"] {
+            assert!(
+                !is_allow_listed(command),
+                "expected NOT allow-listed: {command}"
+            );
         }
     }
 
