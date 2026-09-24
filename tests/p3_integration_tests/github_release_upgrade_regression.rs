@@ -86,6 +86,22 @@ fn current_candidate() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_needle")))
 }
 
+/// Keep the fixture outside the shared system temporary directory. Bead-rs
+/// discovers an enclosing workspace by walking upward, so another worker's
+/// `/tmp/.beads` store would otherwise capture this fixture before its own
+/// `bead init` can create a local store.
+fn upgrade_fixture() -> tempfile::TempDir {
+    let test_home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let fixture_root = test_home.join(".needle/test-fixtures");
+    fs::create_dir_all(&fixture_root).expect("failed to create upgrade fixture root");
+    tempfile::Builder::new()
+        .prefix("release-upgrade-")
+        .tempdir_in(fixture_root)
+        .expect("failed to create isolated upgrade fixture")
+}
+
 fn create_stable(home: &Path, content: &[u8]) -> anyhow::Result<()> {
     let bin_dir = home.join(".needle/bin");
     fs::create_dir_all(&bin_dir)?;
@@ -95,7 +111,7 @@ fn create_stable(home: &Path, content: &[u8]) -> anyhow::Result<()> {
 
 #[test]
 fn upgrade_requires_a_canary_workspace() {
-    let temp_dir = tempfile::tempdir().expect("failed to create upgrade fixture");
+    let temp_dir = upgrade_fixture();
     let home = temp_dir.path();
     create_stable(home, b"known-good-stable").expect("failed to create stable binary");
 
@@ -119,7 +135,7 @@ fn upgrade_requires_a_canary_workspace() {
 
 #[test]
 fn upgrade_rejects_failed_canary_without_touching_stable_or_rollback() {
-    let temp_dir = tempfile::tempdir().expect("failed to create upgrade fixture");
+    let temp_dir = upgrade_fixture();
     let home = temp_dir.path();
     create_stable(home, b"stable-before-rejected-upgrade").expect("failed to create stable binary");
     fs::write(
@@ -159,7 +175,7 @@ fn upgrade_rejects_failed_canary_without_touching_stable_or_rollback() {
 
 #[test]
 fn first_promotion_creates_stable_without_a_rollback_file() {
-    let temp_dir = tempfile::tempdir().expect("failed to create upgrade fixture");
+    let temp_dir = upgrade_fixture();
     let home = temp_dir.path();
     setup_upgrade_canary(home, "type: success\nfinal_status: closed\n")
         .expect("failed to create canary fixture");
@@ -183,7 +199,7 @@ fn first_promotion_creates_stable_without_a_rollback_file() {
 
 #[test]
 fn passing_promotion_exposes_stable_to_hot_reload() {
-    let temp_dir = tempfile::tempdir().expect("failed to create upgrade fixture");
+    let temp_dir = upgrade_fixture();
     let home = temp_dir.path();
     create_stable(home, b"stable-before-upgrade").expect("failed to create stable binary");
     setup_upgrade_canary(home, "type: success\nfinal_status: closed\n")
@@ -212,7 +228,7 @@ fn passing_promotion_exposes_stable_to_hot_reload() {
 
 #[test]
 fn rollback_restores_previous_stable_and_updates_symlink() {
-    let temp_dir = tempfile::tempdir().expect("failed to create rollback fixture");
+    let temp_dir = upgrade_fixture();
     let home = temp_dir.path().to_path_buf();
     let bin_dir = home.join("bin");
     fs::create_dir_all(&bin_dir).expect("failed to create release channel");
