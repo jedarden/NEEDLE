@@ -17,7 +17,7 @@ use needle::registry::Registry;
 use needle::strand::{ExploreStrand, Strand};
 use needle::telemetry::{Telemetry, TelemetryEvent};
 use needle::types::{BeadId, StrandResult};
-use tempfile::tempdir;
+use tempfile::{Builder, TempDir};
 
 #[path = "../p3_integration_tests/strand_replenishment_contract.rs"]
 mod strand_replenishment_contract;
@@ -27,6 +27,43 @@ mod strand_replenishment_contract;
 /// Some hosts put a queue-fence wrapper ahead of the native binary. Probing
 /// each candidate with isolated state keeps these tests about Explore rather
 /// than about that host policy.
+fn isolated_tempdir() -> Result<TempDir> {
+    let mut candidates = Vec::new();
+    if let Some(home) = std::env::var_os("HOME") {
+        candidates.push(PathBuf::from(home).join(".needle"));
+    }
+    candidates.push(std::env::temp_dir());
+
+    for base in candidates {
+        if fs::create_dir_all(&base).is_err() {
+            continue;
+        }
+
+        let mut ancestor = Some(base.as_path());
+        let has_bead_store_ancestor = std::iter::from_fn(|| {
+            let current = ancestor?;
+            ancestor = current.parent();
+            Some(current.join(".beads").exists())
+        })
+        .any(|exists| exists);
+        if has_bead_store_ancestor {
+            continue;
+        }
+
+        return Builder::new()
+            .prefix("needle-explore-e2e-")
+            .tempdir_in(&base)
+            .with_context(|| {
+                format!(
+                    "failed to create isolated Explore fixture under {}",
+                    base.display()
+                )
+            });
+    }
+
+    anyhow::bail!("could not find a temporary parent without a .beads ancestor")
+}
+
 fn native_bead_path() -> PathBuf {
     static NATIVE_BEAD: OnceLock<PathBuf> = OnceLock::new();
 
@@ -47,7 +84,7 @@ fn native_bead_path() -> PathBuf {
                     continue;
                 }
 
-                let Ok(probe) = tempdir() else {
+                let Ok(probe) = isolated_tempdir() else {
                     continue;
                 };
                 let workspace = probe.path().join("workspace");
@@ -229,7 +266,7 @@ async fn stop_and_read(telemetry: &Telemetry, log_dir: &Path) -> Result<Vec<Tele
 #[tokio::test]
 async fn recursive_discovery_finds_new_bead_workspace_without_restart_and_wakes_store_scan(
 ) -> Result<()> {
-    let fixture = tempdir()?;
+    let fixture = isolated_tempdir()?;
     let scan_root = fixture.path().join("scan-root");
     let home_root = fixture.path().join("home-root");
     fs::create_dir_all(&scan_root)?;
@@ -307,7 +344,7 @@ async fn recursive_discovery_finds_new_bead_workspace_without_restart_and_wakes_
 #[tokio::test]
 async fn scan_rotation_visits_every_workspace_and_unavailable_workspace_cannot_starve_healthy_work(
 ) -> Result<()> {
-    let fixture = tempdir()?;
+    let fixture = isolated_tempdir()?;
     let scan_root = fixture.path().join("scan-root");
     let home_root = fixture.path().join("home-root");
     fs::create_dir_all(&scan_root)?;
@@ -424,7 +461,7 @@ async fn scan_rotation_visits_every_workspace_and_unavailable_workspace_cannot_s
 #[tokio::test]
 async fn excluded_candidates_retry_at_floor_and_event_driven_store_changes_do_not_starve(
 ) -> Result<()> {
-    let fixture = tempdir()?;
+    let fixture = isolated_tempdir()?;
     let scan_root = fixture.path().join("scan-root");
     let home_root = fixture.path().join("home-root");
     fs::create_dir_all(&scan_root)?;
@@ -499,7 +536,7 @@ async fn excluded_candidates_retry_at_floor_and_event_driven_store_changes_do_no
 
 #[tokio::test]
 async fn explore_scan_with_ready_work_emits_starvation_alarm_without_target_write() -> Result<()> {
-    let fixture = tempdir()?;
+    let fixture = isolated_tempdir()?;
     let scan_root = fixture.path().join("scan-root");
     let home_root = fixture.path().join("home-root");
     fs::create_dir_all(&scan_root)?;
