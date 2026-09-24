@@ -219,6 +219,7 @@ impl FakeCli {
                 "fake-claude-ok",
                 concat!(
                     "printf 'cwd=%s\\n' \"$PWD\" >> \"$NEEDLE_FAKE_AGENT_LOG\"\n",
+                    "for a in \"$@\"; do printf 'arg=%s\\n' \"$a\" >> \"$NEEDLE_FAKE_AGENT_LOG\"; done\n",
                     "stdin_content=$(cat)\n",
                     "printf 'stdin=%s\\n' \"$stdin_content\" >> \"$NEEDLE_FAKE_AGENT_LOG\"\n",
                     "case \"${NEEDLE_FAKE_AGENT_MODE:-success}\" in\n",
@@ -234,6 +235,7 @@ impl FakeCli {
                 "fake-claude-print-ok",
                 concat!(
                     "printf 'cwd=%s\\n' \"$PWD\" >> \"$NEEDLE_FAKE_AGENT_LOG\"\n",
+                    "for a in \"$@\"; do printf 'arg=%s\\n' \"$a\" >> \"$NEEDLE_FAKE_AGENT_LOG\"; done\n",
                     "stdin_content=$(cat)\n",
                     "printf 'stdin=%s\\n' \"$stdin_content\" >> \"$NEEDLE_FAKE_AGENT_LOG\"\n",
                     "case \"${NEEDLE_FAKE_AGENT_MODE:-success}\" in\n",
@@ -268,7 +270,7 @@ impl FakeCli {
         ];
         for (name, marker, output, record) in agents {
             let script = format!(
-                "#!/usr/bin/env bash\n{record}{output}\nif [ \"${{NEEDLE_FAKE_AGENT_MODE:-success}}\" = timeout ] && [ -z \"{output}\" ]; then sleep 10; fi\necho '{marker}'\nexit \"${{NEEDLE_FAKE_AGENT_EXIT:-0}}\"\n"
+                "#!/usr/bin/env bash\n{record}{output}\nif [ \"${{NEEDLE_FAKE_AGENT_MODE:-success}}\" = timeout ]; then sleep 10; fi\necho '{marker}'\nexit \"${{NEEDLE_FAKE_AGENT_EXIT:-0}}\"\n"
             );
             let path = bin_dir.path().join(name);
             fs::write(&path, script).expect("write fake CLI script");
