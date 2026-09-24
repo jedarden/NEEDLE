@@ -2771,32 +2771,13 @@ fn filter_sessions_for_cleanup_impl(
             .map(|s| s.name.clone())
             .collect()
     } else {
-        // Default: only truly orphaned sessions (no live backing process).
-        //
-        // ADR-003: bare cleanup must match its own documentation. The liveness
-        // oracle is the session's whole pane process tree, not needle-process
-        // membership: tmux `pane_pid` is the shell wrapper, the real worker is
-        // a child (the stderr redirection defeats bash's exec optimization),
-        // and any identity-keyed comparison between those two PIDs
-        // misclassifies live sessions — that bug shipped twice (bf-1ep0s
-        // keyed on `pane_pid`, bf-45go0 on `needle run` membership, which
-        // still killed the live `needle supervise` daemon). Checking the tree
-        // for ANY live process is fail-closed in the direction that matters:
-        // a session is killed only when nothing behind it is alive, and a PID
-        // we cannot inspect preserves the session. Dead-pane sessions are
-        // still removed, so `remain-on-exit` ghosts — the only session shape
-        // tmux keeps after its process exits — stay cleanable.
-        sessions
-            .iter()
-            .filter(|s| {
-                // Session is orphaned if:
-                // - It has no PID at all (tmux could not tell us anything), OR
-                // - Its whole pane process tree is dead (or zombied)
-                s.pid
-                    .map_or(true, |pane_pid| !inspector.tree_has_live_process(pane_pid))
-            })
-            .map(|s| s.name.clone())
-            .collect()
+        // Bare cleanup shares the same reconciliation result as list/status.
+        // The shared pane-tree oracle is deliberately identity-blind: a live
+        // worker may sit behind tmux's shell wrapper, and a live supervisor is
+        // not necessarily a `needle run` process. Only the reconciled stale
+        // sessions are safe cleanup targets.
+        let (_, stale_sessions) = reconcile_tmux_sessions(sessions, inspector);
+        stale_sessions.iter().map(|s| s.name.clone()).collect()
     }
 }
 

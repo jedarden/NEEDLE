@@ -58,6 +58,16 @@ fn reconciliation_separates_live_and_stale_sessions() {
             .collect::<Vec<_>>(),
         vec!["needle-claude-stale", "needle-claude-no-pane"]
     );
+
+    let cleanup_targets = filter_sessions_for_cleanup_impl(&sessions, &inspector, false, &None);
+    assert_eq!(
+        cleanup_targets,
+        vec![
+            "needle-claude-stale".to_string(),
+            "needle-claude-no-pane".to_string(),
+        ],
+        "bare cleanup must preserve live sessions and select reconciled orphans"
+    );
 }
 
 #[test]
