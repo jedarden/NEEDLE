@@ -491,8 +491,8 @@ impl CanaryRunner {
         }
 
         // Older canary commits tracked this marker. Ignore rules do not hide
-        // modifications to tracked files, so remove the runtime-only marker
-        // from the canary index as part of setup. Leave the working-tree file
+        // modifications to tracked files, so mark the runtime-only marker
+        // assume-unchanged in the canary index. Leave the working-tree file
         // in place: older candidate binaries may still write it, and the
         // exclude rule above keeps that compatibility path invisible to git.
         let tracked = Command::new("git")
@@ -506,20 +506,20 @@ impl CanaryRunner {
             .output()
             .context("failed to inspect tracked canary runtime files")?;
         if tracked.status.success() {
-            let removed = Command::new("git")
+            let marked = Command::new("git")
                 .args([
                     "update-index",
-                    "--force-remove",
+                    "--assume-unchanged",
                     "--",
                     ".needle-predispatch-sha",
                 ])
                 .current_dir(&self.canary_workspace)
                 .output()
-                .context("failed to untrack canary predispatch marker")?;
-            if !removed.status.success() {
+                .context("failed to mark canary predispatch marker runtime-only")?;
+            if !marked.status.success() {
                 bail!(
-                    "failed to untrack canary predispatch marker: {}",
-                    String::from_utf8_lossy(&removed.stderr).trim()
+                    "failed to mark canary predispatch marker runtime-only: {}",
+                    String::from_utf8_lossy(&marked.stderr).trim()
                 );
             }
         }
