@@ -5708,6 +5708,106 @@ mod tests {
     // ──────────────────────────────────────────────────────────────────────────
 
     #[tokio::test]
+    async fn pluck_starvation_telemetry_matches_documented_contract() {
+        use crate::telemetry::test_utils::TestHelper;
+
+        let helper = TestHelper::new("pluck-contract-worker");
+        let target_workspace = tempfile::tempdir().unwrap();
+        let target_workspace_path = target_workspace.path().to_string_lossy().to_string();
+        let store = MemoryStore {
+            beads: vec![
+                make_bead_with_workspace_and_labels(
+                    "deferred-bead",
+                    1,
+                    &target_workspace_path,
+                    vec!["deferred"],
+                ),
+                make_bead_with_workspace_and_labels(
+                    "blocked-bead",
+                    2,
+                    &target_workspace_path,
+                    vec!["blocked"],
+                ),
+            ],
+        };
+        let strand = PluckStrand::new(vec![], helper.telemetry().clone());
+        assert!(matches!(
+            strand.evaluate(&store, &HashSet::new()).await,
+            StrandResult::NoWork
+        ));
+        helper.sync().await;
+        let events = helper.events_by_type("strand.pluck.starvation_detected");
+        assert_eq!(events.len(), 1, "Pluck should emit one starvation event");
+        let data = events[0]
+            .data
+            .as_object()
+            .expect("starvation event data should be an object");
+
+        let mut actual_fields: Vec<&str> = data.keys().map(String::as_str).collect();
+        actual_fields.sort_unstable();
+        assert_eq!(
+            actual_fields,
+            vec![
+                "candidate_exclusion_reasons",
+                "excluded_count",
+                "open_count",
+                "workspace",
+            ],
+            "starvation data must contain exactly the documented fields"
+        );
+        assert_eq!(data["workspace"], serde_json::json!(target_workspace_path));
+        assert_eq!(data["open_count"], serde_json::json!(2));
+        assert_eq!(data["excluded_count"], serde_json::json!(2));
+        let reasons = data["candidate_exclusion_reasons"]
+            .as_array()
+            .expect("candidate exclusion reasons should be an array");
+        let mut reason_strings: Vec<&str> =
+            reasons.iter().filter_map(|value| value.as_str()).collect();
+        reason_strings.sort_unstable();
+        assert_eq!(reason_strings, vec!["label:blocked", "label:deferred"]);
+    }
+
+    #[tokio::test]
+    async fn pluck_starvation_never_writes_an_alert_to_target_workspace() {
+        use crate::telemetry::test_utils::TestHelper;
+
+        let helper = TestHelper::new("pluck-isolation-worker");
+        let target_workspace = tempfile::tempdir().unwrap();
+        let target_workspace_path = target_workspace.path().to_string_lossy().to_string();
+        let initial_entries = sorted_directory_entries(target_workspace.path());
+        let store = RecoverableFrontierStore::hiding(
+            vec![make_bead_with_workspace_and_labels(
+                "deferred-bead",
+                1,
+                &target_workspace_path,
+                vec!["deferred"],
+            )],
+            &[],
+        );
+        let strand = PluckStrand::new(vec![], helper.telemetry().clone());
+        assert!(matches!(
+            strand.evaluate(&store, &HashSet::new()).await,
+            StrandResult::NoWork
+        ));
+        helper.sync().await;
+        assert!(
+            store
+                .created_beads
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty(),
+            "starvation telemetry must not create an alert bead in the target store"
+        );
+        assert_eq!(
+            sorted_directory_entries(target_workspace.path()),
+            initial_entries,
+            "starvation telemetry must not write files in the target workspace"
+        );
+        assert!(!target_workspace.path().join(".beads").exists());
+        assert!(!target_workspace.path().join("state").exists());
+    }
+
+    #[tokio::test]
     async fn starvation_when_all_beads_excluded_by_labels_emits_telemetry() {
         use crate::telemetry::test_utils::TestHelper;
 

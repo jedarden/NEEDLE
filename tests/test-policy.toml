@@ -207,7 +207,9 @@ version = 1
 # +1 crash-alert stitch-label propagation regression (needle-b7c5aab9): alert
 # state and fingerprint labels must not be copied into a recursively created
 # crash alert, and propagated labels must remain unique for bead backends.
-max_tests = 3970
+# +2 Pluck starvation telemetry contract tests (needle-e9f9bc50): exact
+# event payload shape and target-workspace write isolation.
+max_tests = 3972
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
