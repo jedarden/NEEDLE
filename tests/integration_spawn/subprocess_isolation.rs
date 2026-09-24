@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 #[test]
 fn needle_subprocesses_pin_home_and_explore_root() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = repository_root();
     let mut violations = Vec::new();
 
     for file in rust_files(&root.join("tests")) {
@@ -25,7 +25,7 @@ fn needle_subprocesses_pin_home_and_explore_root() {
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", file.display()));
         let masked = mask_non_code(&source);
         let label = file
-            .strip_prefix(root)
+            .strip_prefix(&root)
             .unwrap_or(&file)
             .display()
             .to_string();
@@ -37,6 +37,32 @@ fn needle_subprocesses_pin_home_and_explore_root() {
         "unsafe needle subprocess test configuration detected:\n{}",
         violations.join("\n")
     );
+}
+
+/// Locate the source checkout even when the shared Cargo target contains a
+/// test binary compiled from another extraction. Cargo records
+/// `CARGO_MANIFEST_DIR` in the binary, but that path may no longer exist when
+/// a worker reuses the shared target cache; the current checkout is the next
+/// source of truth.
+fn repository_root() -> PathBuf {
+    let mut candidates = vec![PathBuf::from(env!("CARGO_MANIFEST_DIR"))];
+    if let Ok(current_dir) = std::env::current_dir() {
+        candidates.extend(current_dir.ancestors().map(Path::to_path_buf));
+    }
+    if let Ok(current_exe) = std::env::current_exe() {
+        candidates.extend(current_exe.ancestors().map(Path::to_path_buf));
+    }
+
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.join("Cargo.toml").is_file() && candidate.join("tests").is_dir())
+        .unwrap_or_else(|| {
+            panic!(
+                "could not locate the NEEDLE source checkout from CARGO_MANIFEST_DIR={}, current_dir={:?}",
+                env!("CARGO_MANIFEST_DIR"),
+                std::env::current_dir().ok()
+            )
+        })
 }
 
 #[test]

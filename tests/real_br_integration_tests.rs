@@ -2556,6 +2556,7 @@ fn saturated_host_worker_stays_resident_until_load_clears() -> Result<()> {
             "false",
         ])
         .env("HOME", &home)
+        .env("NEEDLE_STRANDS__EXPLORE__WORKSPACE_ROOT", &home)
         .env("NEEDLE_INNER", "1")
         .env("NEEDLE_LAUNCH_RESOURCE_PROBE", &probe)
         .env("NEEDLE_ADMISSION_BACKOFF_BASE_MS", "100")
