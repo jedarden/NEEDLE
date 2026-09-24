@@ -5,7 +5,10 @@ SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MANIFEST="$SRC_DIR/workers.tsv"
 
 bash -n "$SRC_DIR/apply-ex44-fleet.sh" "$SRC_DIR/backlog-slo.sh" "$SRC_DIR/needle-zai-governor" "$SRC_DIR/needle-release-upgrade"
-[[ -r "$SRC_DIR/required-explore-workspaces.txt" ]]
+! grep -q 'required-explore-workspaces' "$SRC_DIR/apply-ex44-fleet.sh" "$SRC_DIR/README.md"
+! grep -q 'explicit Explore list' "$SRC_DIR/apply-ex44-fleet.sh"
+grep -q 'leaves Explore.*workspace list empty' "$SRC_DIR/README.md"
+grep -q 'deliberate pinning exception' "$SRC_DIR/README.md"
 
 rows=$(awk -F'\t' '$1 !~ /^#/ && NF == 5 {print}' "$MANIFEST")
 [[ "$(wc -l <<<"$rows")" -eq 32 ]]
@@ -26,7 +29,6 @@ grep -q 'NEEDLE_AGENT__EVIDENCE_ROUTING__ENABLED=false' "$SRC_DIR/apply-ex44-fle
 grep -q '^  backend: bead-rs$' "$SRC_DIR/roam-home.yaml"
 [[ "$(awk -F'\t' '$3 == "claude-code-glm-5.3" {n++} END {print n+0}' <<<"$rows")" -le 9 ]]
 ! grep -Eq '/(CLASP|agentists-quickstart-deprecated|commitgraph-deprecated)([[:space:]]|$)' "$MANIFEST"
-grep -qx '/home/coding/FABRIC' "$SRC_DIR/required-explore-workspaces.txt"
 
 grep -qx 'NEEDLE_STRANDS__GENERATION__LOW_WATER_RESERVE=6' "$SRC_DIR/fleet-policy.env"
 ! grep -q 'NEEDLE_STRANDS__GENERATION__ENABLED' "$SRC_DIR/apply-ex44-fleet.sh"

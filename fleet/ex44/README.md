@@ -24,9 +24,10 @@ exploration sample.
 3. **Fix routing.** `workers.tsv` removes the superseded CLASP route, keeps
    SEAM and irreversible-command-gate as the home-first routes for their
    assigned workers, and lets every worker fall back to roaming. This avoids
-   idling a pinned worker while eligible work exists elsewhere.
-   `required-explore-workspaces.txt` restores maintained FABRIC to the explicit
-   roaming set.
+   idling a pinned worker while eligible work exists elsewhere. The home paths
+   in `workers.tsv` are Pluck-first routes, not an Explore allowlist; the fleet
+   leaves Explore's workspace list empty so recursive discovery also reaches
+   repositories created after this manifest was written.
 4. **Replenish automatically.** `fleet-policy.env` enables the low-water
    generation gate with six eligible beads in reserve and a five-minute
    workspace/strand lease, preventing a thundering herd of generators. Workers
@@ -50,7 +51,7 @@ exploration sample.
 7. **Recover stuck routes.** Workers whose home queues repeatedly fail before
    Explore use the managed `~/.needle/roam-only` home. It has an explicit bead
    backend binding and no bead store, so home strands skip cleanly and Explore
-   selects work from the maintained-workspace allowlist.
+   selects work from the recursive Explore discovery surface.
 8. **Follow published releases.** The workers are standalone systemd units,
    so they do not run the release poller built into `needle supervise`.
    `needle-release-upgrade.timer` checks every six hours under a host-local
@@ -67,6 +68,19 @@ exploration sample.
 The backlog audit intentionally counts selection eligibility rather than raw
 open beads. It excludes active timed holds, manual/human work, and ordinary
 deferred work while admitting an expired automatic quarantine marking.
+
+## Explore scope
+
+The fleet's general-purpose Explore configuration intentionally leaves
+`strands.explore.workspaces` empty (or omitted), which enables recursive
+discovery under `workspace_root`. A repository with a `.beads/` directory is
+therefore picked up without editing this roster, including when it is created
+after workers start.
+
+An explicit, non-empty `workspaces` list is a deliberate pinning exception.
+Use it only when a particular worker must be restricted to a fixed set of
+repositories; it disables recursive discovery for that worker. The apply
+script does not populate or maintain such a list.
 
 ## Validate and apply
 

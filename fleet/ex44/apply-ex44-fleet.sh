@@ -10,8 +10,6 @@ SYSTEMD_DIR="$NEEDLE_HOST_HOME/.config/systemd/user"
 NEEDLE_CONFIG_DIR="$NEEDLE_HOST_HOME/.config/needle"
 WORKERS_DIR="$NEEDLE_CONFIG_DIR/workers"
 MANIFEST="$SRC_DIR/workers.tsv"
-REQUIRED_EXPLORE="$SRC_DIR/required-explore-workspaces.txt"
-GLOBAL_CONFIG="$NEEDLE_CONFIG_DIR/config.yaml"
 ROAM_HOME="$NEEDLE_HOST_HOME/.needle/roam-only"
 ROAM_HOME_CONFIG="$SRC_DIR/roam-home.yaml"
 FLEET_POLICY="$SRC_DIR/fleet-policy.env"
@@ -79,11 +77,6 @@ if manifest_rows | awk -F'\t' -v home="$ROAM_HOME" '$2 == home { found=1 } END {
     fi
 fi
 
-[[ -r "$GLOBAL_CONFIG" ]] || {
-    echo "global NEEDLE config is not readable: $GLOBAL_CONFIG" >&2
-    exit 1
-}
-
 while IFS=$'\t' read -r id workspace agent delay explore; do
     [[ "$id" =~ ^[a-z0-9][a-z0-9-]*$ ]] || {
         echo "invalid worker identifier: $id" >&2
@@ -106,36 +99,6 @@ while IFS=$'\t' read -r id workspace agent delay explore; do
         exit 1
     }
 done < <(manifest_rows)
-
-# The host deliberately uses an explicit Explore list so roaming workers do
-# not enter retired/scratch repositories. Merge newly-required workspaces into
-# that list without reformatting or replacing the rest of the operator config.
-while IFS= read -r workspace; do
-    [[ -n "$workspace" && "$workspace" != \#* ]] || continue
-    [[ -d "$workspace" ]] || {
-        echo "required Explore workspace does not exist: $workspace" >&2
-        exit 1
-    }
-    if grep -Eq "^[[:space:]]+-[[:space:]]+$workspace[[:space:]]*$" "$GLOBAL_CONFIG"; then
-        echo "- Explore workspace already reachable: $workspace"
-        continue
-    fi
-    echo "- adding Explore workspace to $GLOBAL_CONFIG: $workspace"
-    if [[ "$DRY_RUN" != 1 ]]; then
-        cp "$GLOBAL_CONFIG" "$GLOBAL_CONFIG.bak-$(date -u +%Y%m%dT%H%M%SZ)"
-        tmp_config=$(mktemp "$NEEDLE_CONFIG_DIR/config.yaml.XXXXXX")
-        awk -v workspace="$workspace" '
-            /^    workspace_root:/ && !inserted {
-                print "      - " workspace
-                inserted=1
-            }
-            { print }
-            END { if (!inserted) exit 1 }
-        ' "$GLOBAL_CONFIG" >"$tmp_config"
-        chmod --reference="$GLOBAL_CONFIG" "$tmp_config"
-        mv "$tmp_config" "$GLOBAL_CONFIG"
-    fi
-done <"$REQUIRED_EXPLORE"
 
 mkdir -p "$SYSTEMD_DIR" "$WORKERS_DIR" "$NEEDLE_CONFIG_DIR/adapters" "$NEEDLE_HOST_HOME/.local/bin"
 

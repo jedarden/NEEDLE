@@ -227,7 +227,8 @@ async fn stop_and_read(telemetry: &Telemetry, log_dir: &Path) -> Result<Vec<Tele
 }
 
 #[tokio::test]
-async fn new_workspace_is_found_without_restart_and_store_changes_wake_scan() -> Result<()> {
+async fn recursive_discovery_finds_new_bead_workspace_without_restart_and_wakes_store_scan(
+) -> Result<()> {
     let fixture = tempdir()?;
     let scan_root = fixture.path().join("scan-root");
     let home_root = fixture.path().join("home-root");
@@ -243,8 +244,13 @@ async fn new_workspace_is_found_without_restart_and_store_changes_wake_scan() ->
     fs::create_dir_all(&log_dir)?;
     let telemetry = Telemetry::with_log_dir("explore-rediscovery-e2e".to_string(), &log_dir);
     telemetry.start_and_wait().await?;
+    let config = explore_config(&scan_root, 60, 8, 8);
+    assert!(
+        config.workspaces.is_empty(),
+        "recursive discovery coverage must exercise the empty workspace-list default"
+    );
     let explore = ExploreStrand::new(
-        explore_config(&scan_root, 60, 8, 8),
+        config,
         home_workspace.clone(),
         Registry::new(&fixture.path().join("state")),
         telemetry.clone(),
