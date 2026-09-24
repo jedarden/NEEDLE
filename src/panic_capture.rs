@@ -345,9 +345,11 @@ pub fn has_captured_backtrace() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::panic::catch_unwind;
     use std::panic::AssertUnwindSafe;
 
+    #[serial]
     #[test]
     fn test_install_panic_hook_is_idempotent() {
         // First install
@@ -359,6 +361,7 @@ mod tests {
         assert!(is_hook_installed());
     }
 
+    #[serial]
     #[test]
     fn test_set_full_backtrace_env() {
         // Clear existing value
@@ -372,6 +375,7 @@ mod tests {
         std::env::remove_var("RUST_BACKTRACE");
     }
 
+    #[serial]
     #[test]
     fn test_set_full_backtrace_env_respects_existing() {
         // Set existing value
@@ -385,6 +389,7 @@ mod tests {
         std::env::remove_var("RUST_BACKTRACE");
     }
 
+    #[serial]
     #[test]
     fn test_capture_panic_info_with_string() {
         let payload = Box::new("test panic message") as Box<dyn std::any::Any + Send>;
@@ -392,6 +397,7 @@ mod tests {
         assert!(captured.contains("test panic message"));
     }
 
+    #[serial]
     #[test]
     fn test_capture_panic_info_with_string_type() {
         let payload = Box::new(String::from("another panic")) as Box<dyn std::any::Any + Send>;
@@ -399,6 +405,7 @@ mod tests {
         assert!(captured.contains("another panic"));
     }
 
+    #[serial]
     #[test]
     fn test_capture_panic_info_with_unknown() {
         let payload = Box::new(12345) as Box<dyn std::any::Any + Send>;
@@ -406,6 +413,7 @@ mod tests {
         assert!(captured.contains("Unknown panic payload"));
     }
 
+    #[serial]
     #[test]
     fn test_panic_hook_captures_location() {
         install_panic_hook();
@@ -414,6 +422,7 @@ mod tests {
         assert!(is_hook_installed());
     }
 
+    #[serial]
     #[test]
     fn test_backtrace_capture_in_panic_hook() {
         // Install the panic hook
@@ -470,6 +479,7 @@ mod tests {
         assert!(duration_since.as_secs() < 10, "Timestamp should be recent");
     }
 
+    #[serial]
     #[test]
     fn test_clear_captured_backtrace() {
         install_panic_hook();
@@ -491,6 +501,7 @@ mod tests {
         assert!(get_captured_backtrace().is_none());
     }
 
+    #[serial]
     #[test]
     fn test_multiple_panics_captures_latest() {
         install_panic_hook();
@@ -518,6 +529,7 @@ mod tests {
         );
     }
 
+    #[serial]
     #[test]
     fn test_backtrace_not_truncated() {
         install_panic_hook();
@@ -560,6 +572,7 @@ mod tests {
         }
     }
 
+    #[serial]
     #[test]
     fn test_captured_panic_fields_are_complete() {
         install_panic_hook();
