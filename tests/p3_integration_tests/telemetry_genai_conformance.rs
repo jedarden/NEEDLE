@@ -16,6 +16,7 @@ use opentelemetry::Value;
 use opentelemetry_sdk::error::OTelSdkError;
 use opentelemetry_sdk::resource::Resource;
 use opentelemetry_sdk::trace::{SdkTracerProvider, SpanData, SpanExporter as SdkSpanExporter};
+use tracing::Instrument;
 use tracing_subscriber::layer::SubscriberExt;
 
 const BEAD_ID: &str = "needle-7f53ca33-genai-probe";
@@ -114,9 +115,26 @@ fn dispatch_and_capture(adapter: AgentAdapter) -> Vec<SpanData> {
             .enable_all()
             .build()
             .expect("test runtime");
+        // The ordinary `dispatch` entry point intentionally refuses a
+        // context-free spawn. Analysis dispatches are claim-free by design,
+        // so provide the same contract span around that supported path and
+        // observe the values at the exporter boundary.
+        let dispatch_span = tracing::info_span!(
+            "agent.dispatch",
+            needle.bead.id = %bead_id.as_ref(),
+            gen_ai.system = %adapter.gen_ai_system(),
+            gen_ai.operation.name = "chat",
+            gen_ai.request.id = %bead_id.as_ref(),
+            gen_ai.request.model = tracing::field::Empty,
+            gen_ai.usage.input_tokens = tracing::field::Empty,
+            gen_ai.usage.output_tokens = tracing::field::Empty,
+            needle.agent.pid = tracing::field::Empty,
+            needle.agent.exit_code = tracing::field::Empty,
+        );
         runtime.block_on(async {
             dispatcher
-                .dispatch(&bead_id, &prompt, &adapter, &workspace_path)
+                .dispatch_unclaimed_analysis(&bead_id, &prompt, &adapter, &workspace_path)
+                .instrument(dispatch_span)
                 .await
                 .expect("stub dispatch should succeed");
         });
