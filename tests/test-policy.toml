@@ -367,7 +367,8 @@ name = "escalation_ladder"
 path = "tests/escalation_ladder.rs"
 tier = "e2e"
 # +1 immediate-exit agent quarantine loop (needle-adbde195).
-max_tests = 2
+# +1 timed-out worker cleanup regression (needle-afc1ccf6).
+max_tests = 3
 owner = "component:escalation-ladder"
 
 [[harness]]

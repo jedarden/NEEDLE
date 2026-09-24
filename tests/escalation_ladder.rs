@@ -12,9 +12,10 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::time::{Duration as StdDuration, Instant as StdInstant};
 use tempfile::TempDir;
 use tokio::process::Command as TokioCommand;
-use tokio::time::{timeout, Duration};
+use tokio::time::{sleep, timeout, Duration};
 
 fn needle_binary_path() -> PathBuf {
     std::env::var_os("NEXTEST_BIN_EXE_needle")
@@ -96,6 +97,7 @@ struct Fixture {
     instant_agent: PathBuf,
     normal_path: OsString,
     gate_path: OsString,
+    worker_timeout: Duration,
 }
 
 impl Fixture {
@@ -186,6 +188,7 @@ impl Fixture {
             instant_agent,
             normal_path,
             gate_path,
+            worker_timeout: Duration::from_secs(120),
         };
         fixture.write_adapter()?;
         fixture.write_global_config(false)?;
@@ -210,6 +213,15 @@ impl Fixture {
                 self.analysis_log.display(),
                 self.gate_log.display(),
             ),
+        )?;
+        Ok(())
+    }
+
+    fn write_sleeping_adapter(&self) -> Result<()> {
+        fs::write(
+            self.home
+                .join(".config/needle/adapters/ladder-agent.yaml"),
+            "name: ladder-agent\ndescription: sleeping timeout fixture\nagent_cli: bash\ninvoke_template: |\n  sleep 30\ntimeout_secs: 30\n",
         )?;
         Ok(())
     }
@@ -438,7 +450,8 @@ impl Fixture {
                 "--identifier",
                 identifier,
             ]);
-        let output = timeout(Duration::from_secs(120), command.output())
+        command.kill_on_drop(true);
+        let output = timeout(self.worker_timeout, command.output())
             .await
             .with_context(|| format!("worker {identifier} timed out"))??;
         if !output.status.success() {
@@ -509,6 +522,45 @@ impl Fixture {
         fs::read_to_string(path)
             .map(|contents| contents.lines().count())
             .unwrap_or(0)
+    }
+}
+
+fn process_ids_with_identifier(identifier: &str) -> Result<Vec<String>> {
+    let mut matches = Vec::new();
+    for entry in fs::read_dir("/proc")? {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        if !file_name
+            .to_string_lossy()
+            .bytes()
+            .all(|byte| byte.is_ascii_digit())
+        {
+            continue;
+        }
+        let Ok(command_line) = fs::read(entry.path().join("cmdline")) else {
+            continue;
+        };
+        if command_line
+            .split(|byte| *byte == 0)
+            .any(|argument| argument == identifier.as_bytes())
+        {
+            matches.push(file_name.to_string_lossy().into_owned());
+        }
+    }
+    Ok(matches)
+}
+
+async fn assert_no_process_with_identifier(identifier: &str) -> Result<()> {
+    let deadline = StdInstant::now() + StdDuration::from_secs(5);
+    loop {
+        let matches = process_ids_with_identifier(identifier)?;
+        if matches.is_empty() {
+            return Ok(());
+        }
+        if StdInstant::now() >= deadline {
+            bail!("processes still matched {identifier}: {matches:?}");
+        }
+        sleep(Duration::from_millis(20)).await;
     }
 }
 
@@ -750,6 +802,30 @@ async fn escalation_ladder_end_to_end() -> Result<()> {
         .context("Gate broken alert had no labels")?;
     assert!(gate_alert_labels.iter().any(|label| label == "infra"));
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_worker_kills_timed_out_child() -> Result<()> {
+    let mut fixture = Fixture::new()?;
+    fixture.write_sleeping_adapter()?;
+    fixture.worker_timeout = Duration::from_millis(250);
+    let identifier = "ladder-timeout-regression";
+
+    let error = fixture
+        .run_worker(identifier, &fixture.normal_path)
+        .await
+        .expect_err("a sleeping worker must hit the harness timeout");
+    assert!(
+        error
+            .to_string()
+            .contains("worker ladder-timeout-regression timed out"),
+        "unexpected timeout error: {error:#}"
+    );
+    assert_no_process_with_identifier(identifier).await?;
+
+    drop(fixture);
+    assert_no_process_with_identifier(identifier).await?;
     Ok(())
 }
 
