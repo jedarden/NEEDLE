@@ -47,9 +47,10 @@ needle doctor
 # 7. Run a worker
 needle run --agent claude --identifier alpha
 
-# 8. Check status and attach to the session
+# 8. List, check status, and attach to the session
+needle list
 needle status
-tmux attach -t needle-claude-alpha
+needle attach alpha
 
 # 9. Verify completion
 bead list --status closed
@@ -60,6 +61,10 @@ git rev-list origin/"$(git branch --show-current)"..HEAD
 The completed run shows the bead as `closed`, `test -s CONTRIBUTING.md` exits
 with status 0, and the final `git rev-list` prints nothing because the
 shipped commit is already pushed.
+
+For the complete lifecycle—including `stop`, `resume`, safe orphan cleanup,
+scoped versus global actions, and workers that outlive tmux—see [Worker
+Lifecycle and Safe Cleanup](docs/operations/worker-lifecycle.md).
 
 **Heads-up:** the built-in `claude` adapter invokes `claude -p … --dangerously-skip-permissions`.
 Unattended operation means no permission prompts; read `needle config` before pointing a
@@ -471,6 +476,7 @@ If you want to run NEEDLE in your own workflow, open an issue and I'll help.
 - **[Agent Onboarding](docs/agent-onboarding.md)** — Complete walkthrough from install to first closed bead, with expected output and failure modes (see also `llms.txt` for the agent-readable quickstart)
 - **[Documentation Index](docs/README.md)** — Complete index of all 148 documentation files (ADRs, architecture, operations, investigations, reference)
 - **[Configuration Reference](docs/configuration.md)** — Adapter YAML schema, all config options
+- **[Worker Lifecycle and Safe Cleanup](docs/operations/worker-lifecycle.md)** — run, list, attach, stop, resume, and cleanup, including live-process recovery
 - **[Binary Freshness Verification](docs/binary-freshness-verification.md)** — Guide for verifying automatic worker rotation when new binaries are deployed
 - **[Plan](docs/plan/plan.md)** — Complete project architecture and implementation plan
 - **[Integration Tests](tests/)** — Comprehensive test suite demonstrating all core functionality

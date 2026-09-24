@@ -62,8 +62,40 @@ $ needle run --agent claude -i alpha
 [2026-08-29 12:34:56] Worker identity: needle-claude-alpha
 [2026-08-29 12:34:56] Workspace: /tmp/needle-quickstart-project
 [2026-08-29 12:34:56] Agent: claude
-[2026-08-29 12:34:56] Attaching to tmux session: needle-alpha-quickstart-1693302896
+[2026-08-29 12:34:56] Attaching to tmux session: needle-claude-alpha
 ```
+
+### Watching and Managing the Worker
+
+Illustrative output from a second terminal while the worker is running. `list`
+shows both the tmux session and the process-table discovery; `status` is the
+read-only worker-state view:
+
+```bash
+$ needle list
+SESSION                                  CREATED              STATUS
+----------------------------------------------------------------------
+needle-claude-alpha                      1787920496           detached
+
+Discovered Workers (1):
+  All running needle run processes found via process table scan
+  PID 4021 — workspace: /tmp/needle-quickstart-project, agent: claude, identifier: alpha (tmux)
+
+$ needle status --by-worker
+
+Fleet Summary
+--------------------------------------------------
+  Active tmux sessions: 1
+  Stale tmux sessions:   0
+  Registered workers:     1
+  Discovered workers:     1
+```
+
+If an operator needs to stop a waiting worker, `needle stop -i alpha` stops its
+process tree and removes its session. A survivor is reported as an error and
+must be reconciled with another `needle list` before `needle cleanup` is run.
+Use `needle cleanup --all` only when removing every local NEEDLE session,
+including live ones, is intentional.
 
 ### Processing First Bead
 

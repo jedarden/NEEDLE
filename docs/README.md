@@ -91,6 +91,7 @@ Running, maintaining, and operating NEEDLE fleets.
 
 | Document | Description |
 |----------|-------------|
+| **[Worker Lifecycle and Safe Cleanup](operations/worker-lifecycle.md)** | Run, observe, attach, stop, resume, and safely clean up workers; explains scoped/global actions and live-process recovery |
 | **[Binary Freshness Verification](binary-freshness-verification.md)** | Verifying automatic worker rotation on binary updates |
 | **[Binary Freshness Status](binary-freshness-verification-status.md)** | Status tracking for binary freshness feature |
 | **[Upgrade Channels](upgrade.md)** | Canary-gated GitHub releases, rollback, and hot reload |

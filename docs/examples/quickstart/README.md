@@ -218,7 +218,45 @@ The worker will:
 6. Move to the next bead
 7. Exit when no work remains
 
-## Step 6: Verify Results
+## Step 6: Watch and Manage the Worker
+
+While the worker runs, open a second terminal and point it at the same sandbox
+HOME. NEEDLE keeps its registry, heartbeat, and tmux state under that HOME:
+
+```bash
+export HOME="$(ls -dt /tmp/needle-quickstart-home.* | head -1)"
+
+needle list
+needle status --by-worker
+needle attach alpha              # detach with Ctrl-b, then d
+```
+
+The example config uses `idle_action: exit`, so the worker exits after the
+last bead closes. For a worker configured to wait for more work, use the safe
+stop-and-clean sequence:
+
+```bash
+needle stop -i alpha             # stop the process tree and its session
+needle list                      # confirm no live process remains
+needle cleanup                   # remove only orphaned sessions
+```
+
+`needle cleanup` removes sessions, not necessarily the worker process inside
+one. If `needle list` still shows a `(non-tmux)` worker, reconcile that PID and
+stop it before cleaning up or starting another worker with the same identifier.
+For a hot-reload-style continuation after the old PID is gone, the resume form
+is:
+
+```bash
+needle run --resume --identifier alpha
+```
+
+Use ordinary `needle run --agent claude --identifier alpha` for a fresh managed
+tmux restart; never start either form beside a still-live `alpha` process.
+The full [worker lifecycle and safe cleanup guide](../../operations/worker-lifecycle.md)
+covers global `--all` actions, `--resume`, and survivor handling.
+
+## Step 7: Verify Results
 
 After the worker exits, check what was accomplished:
 
