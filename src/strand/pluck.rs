@@ -484,17 +484,9 @@ fn open_bead_diagnostic(
     exclude_ids: &HashSet<BeadId>,
     now: chrono::DateTime<Utc>,
 ) -> OpenBeadDiagnostic {
-    let inferred_exclusion_reasons =
+    let exclusion_reasons =
         exclusion_reasons_for_bead(bead, beads, exclude_labels, exclude_ids, now);
-    let is_ready = inferred_exclusion_reasons.is_empty();
-    let exclusion_reasons = if is_ready {
-        // The backend can omit a bead from ready() without exposing a
-        // corresponding state predicate.  Preserve that fact instead of
-        // recording an empty explanation.
-        vec!["not_in_ready_frontier".to_string()]
-    } else {
-        inferred_exclusion_reasons
-    };
+    let is_ready = exclusion_reasons.is_empty();
     OpenBeadDiagnostic {
         id: bead.id.to_string(),
         status: bead.status.to_string(),
@@ -1082,12 +1074,29 @@ struct NamedBeadDiagnostic {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct OpenBeadDiagnostic {
     id: String,
+    /// Absent means true: no inventory predicate excludes this bead. The
+    /// summary's invisible_beads list records ready-frontier omissions.
+    #[serde(
+        default = "default_diagnostic_ready",
+        skip_serializing_if = "diagnostic_ready"
+    )]
     is_ready: bool,
     priority: u8,
     status: String,
+    /// Empty source paths are represented once by target_workspace above.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     workspace: String,
-    /// All reasons this bead was not claimable in this snapshot.
+    /// Empty means the inventory exposes no reason to exclude this bead.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     exclusion_reasons: Vec<String>,
+}
+
+fn default_diagnostic_ready() -> bool {
+    true
+}
+
+fn diagnostic_ready(value: &bool) -> bool {
+    *value
 }
 
 /// The worker-local constraints that can make an otherwise open bead
