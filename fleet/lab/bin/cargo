@@ -135,14 +135,14 @@ if [[ -d "$BUILD_ROOT" ]]; then
 fi
 
 local_limited() {
-    if systemd-run --scope --user --description="cargo $SUBCOMMAND" \
-            -p CPUQuota=200% -p MemoryMax=6G -p MemorySwapMax=0 \
-            -p RuntimeMaxSec=14400 -q -- \
-            "$REAL_CARGO" "$@" 2>/dev/null; then
-        return $?
+    if ! systemd-run --user --scope --quiet -- true 2>/dev/null; then
+        # systemd-run unavailable (container/non-session env) — run directly
+        exec "$REAL_CARGO" "$@"
     fi
-    # systemd-run unavailable (container/non-session env) — run directly
-    exec "$REAL_CARGO" "$@"
+    exec systemd-run --scope --user --description="cargo $SUBCOMMAND" \
+        -p CPUQuota=200% -p MemoryMax=6G -p MemorySwapMax=0 \
+        -p RuntimeMaxSec=14400 -q -- \
+        "$REAL_CARGO" "$@"
 }
 
 # Enable rust-verify for cargo test on git repos with remotes
