@@ -86,19 +86,23 @@ fn current_candidate() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_needle")))
 }
 
-/// Keep the fixture outside the shared system temporary directory. Bead-rs
-/// discovers an enclosing workspace by walking upward, so another worker's
-/// `/tmp/.beads` store would otherwise capture this fixture before its own
-/// `bead init` can create a local store.
+/// Keep the fixture outside any enclosing bead workspace. Bead-rs discovers a
+/// workspace by walking upward, so another worker's `/tmp/.beads` store would
+/// otherwise capture this fixture before its own `bead init` can create a
+/// local store.
 fn upgrade_fixture() -> tempfile::TempDir {
-    let test_home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    let fixture_root = test_home.join(".needle/test-fixtures");
-    fs::create_dir_all(&fixture_root).expect("failed to create upgrade fixture root");
+    let temp_root = [std::env::temp_dir(), PathBuf::from("/var/tmp")]
+        .into_iter()
+        .find(|candidate| {
+            candidate.is_dir()
+                && !candidate
+                    .ancestors()
+                    .any(|ancestor| ancestor.join(".beads").is_dir())
+        })
+        .expect("no temporary root outside an enclosing bead workspace");
     tempfile::Builder::new()
         .prefix("release-upgrade-")
-        .tempdir_in(fixture_root)
+        .tempdir_in(temp_root)
         .expect("failed to create isolated upgrade fixture")
 }
 
