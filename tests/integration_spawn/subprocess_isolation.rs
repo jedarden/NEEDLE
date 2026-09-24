@@ -71,6 +71,22 @@ fn guard_recognizes_literal_and_aliased_needle_launches() {
         0,
         "constructors of unrelated types must not be audited"
     );
+
+    let helper_indirection = r#"
+        fn current_candidate() -> PathBuf {
+            PathBuf::from(env!("CARGO_BIN_EXE_needle"))
+        }
+        fn upgrade_fixture() {
+            let _ = Command::new(current_candidate())
+                .env("HOME", home.path())
+                .env("NEEDLE_STRANDS__EXPLORE__WORKSPACE_ROOT", home.path());
+        }
+    "#;
+    assert_eq!(
+        subprocess_constructors(helper_indirection, &mask_non_code(helper_indirection)).len(),
+        1,
+        "the audit must recognize a compiled NEEDLE path returned by a helper"
+    );
 }
 
 #[test]
@@ -228,6 +244,7 @@ fn subprocess_constructors(source: &str, masked: &str) -> Vec<(usize, String)> {
             || argument.contains("NEXTEST_BIN_EXE_needle")
             || argument.contains("needle_binary")
             || argument.contains("needle_path")
+            || argument.contains("current_candidate")
             || argument.contains("&needle")
             || argument.contains("needle)")
             || argument.contains("\"needle\"");
@@ -239,7 +256,8 @@ fn subprocess_constructors(source: &str, masked: &str) -> Vec<(usize, String)> {
             || function.contains("NEXTEST_BIN_EXE_needle")
             || function.contains("needle_binary_path")
             || function.contains("needle_binary")
-            || function.contains("needle_path");
+            || function.contains("needle_path")
+            || function.contains("current_candidate");
         // A cargo-based launch is also a real NEEDLE subprocess even though
         // its constructor argument is `cargo`, not the binary path itself.
         let cargo_runs_needle = argument.contains("\"cargo\"")
