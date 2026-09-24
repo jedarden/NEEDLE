@@ -1101,12 +1101,13 @@ fn subprocess_agent_timeout_carries_the_attempt_identity_and_releases() {
 }
 
 #[test]
-fn subprocess_concurrent_claim_race_mints_distinct_attempt_ids() {
+fn subprocess_concurrent_workers_dispatch_once_with_distinct_claim_identities() {
     let fixture = Fixture::new(FixtureLayout::Local);
 
     // Each worker first reads the same ready bead. The fixture CLI holds
     // those results until both reads have completed, then the production
-    // claim path races without a test-owned lock or timing window.
+    // claim path races without a test-owned lock or timing window. A worker
+    // may still recheck the bead after its peer claims it and skip claim_one.
     let barrier = fixture.root.path().join("ready-candidate-barrier");
     fs::create_dir(&barrier).expect("create ready-candidate barrier");
 
@@ -1142,13 +1143,26 @@ fn subprocess_concurrent_claim_race_mints_distinct_attempt_ids() {
             String::from_utf8_lossy(&output.stderr)
         );
     }
-    let attempted = claim_events
+    let attempted: Vec<&str> = claim_events
         .iter()
-        .filter(|event| event["event_type"] == "bead.claim.attempted")
-        .count();
+        .filter(|event| {
+            event["event_type"] == "bead.claim.attempted" && event["data"]["attempt"] == 1
+        })
+        .map(|event| {
+            event["attempt_id"]
+                .as_str()
+                .expect("a claim attempt must carry its identity")
+        })
+        .collect();
+    assert!(
+        (1..=2).contains(&attempted.len()),
+        "one or both workers must enter the claim path: {claim_events:?}"
+    );
+    let unique_attempts: std::collections::HashSet<&str> = attempted.iter().copied().collect();
     assert_eq!(
-        attempted, 2,
-        "both workers must attempt the claim: {claim_events:?}"
+        unique_attempts.len(),
+        attempted.len(),
+        "workers that enter the claim path must mint distinct identities: {claim_events:?}"
     );
 
     // The atomic backend claim let exactly one worker dispatch an agent.
@@ -1163,8 +1177,9 @@ fn subprocess_concurrent_claim_race_mints_distinct_attempt_ids() {
         String::from_utf8_lossy(&out_b.stderr),
     );
 
-    // Both workers minted before claiming: two distinct identities in
-    // telemetry, only the winner's reached an agent.
+    // The winning claim's identity reached the agent. If both workers
+    // entered claim_one, the assertions above also prove they minted
+    // separate identities before the atomic claim.
     let stamped: std::collections::HashSet<String> = fixture
         .telemetry()
         .into_iter()
@@ -1175,8 +1190,8 @@ fn subprocess_concurrent_claim_race_mints_distinct_attempt_ids() {
         "the winner's identity must be stamped on its events: {stamped:?}"
     );
     assert!(
-        stamped.len() >= 2,
-        "the race loser minted its own identity before claiming: {stamped:?}"
+        unique_attempts.contains(ids[0].as_str()),
+        "the winner must have entered the claim path: {claim_events:?}"
     );
 
     // The winner's external deliverable closed the bead under its identity.
