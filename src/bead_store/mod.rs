@@ -457,6 +457,12 @@ fn verify_backend_identity(
         );
     }
 
+    // ADR-001 axis 3, detection half: the probe that proved identity also
+    // carried the version. Classify it against the descriptor's declared
+    // defect ranges so an incompatible backend is named at startup instead
+    // of silently leaning on the workarounds its quirks keep in effect.
+    version_handshake::warn_for_backend_quirks_once(&descriptor, trimmed_output);
+
     Ok(())
 }
 

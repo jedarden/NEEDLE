@@ -1,13 +1,28 @@
-//! Startup diagnostics for workspaces that still use bead-forge's legacy store.
+//! Startup diagnostics for backend versions known to misbehave.
 //!
-//! NEEDLE no longer drives the bead-forge command dialect, but an old
-//! `.beads/issues.jsonl` store can still be encountered during migration. ADR-001
-//! requires those workspaces to receive an actionable warning when the installed
-//! `bf` version is known to have the historical `--limit 0` bug.
+//! Two handshakes run at store open, one per store shape:
+//!
+//! - A workspace still on bead-forge's legacy `.beads/issues.jsonl` store is
+//!   probed with `bf --version` and warned about when the installed `bf` is
+//!   known to have the historical `--limit 0` bug (`warn_for_legacy_workspace`).
+//!   NEEDLE no longer drives the bead-forge command dialect, but such stores
+//!   are still encountered during migration.
+//! - A bead-rs store's running binary has already answered the descriptor's
+//!   `version_command` by the time the identity check passes; that output is
+//!   classified against the version ranges the descriptor itself declares
+//!   incompatible — its version-scoped quirks (`warn_for_backend_quirks`).
+//!
+//! Both serve ADR-001 axis 3's second half: an incompatible backend version
+//! is named at startup instead of silently relying on the workarounds that
+//! keep its defects harmless.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+use crate::bead_store::backend::{BackendVersion, BeadBackend};
 
 /// Versions of bead-forge with known compatibility problems.
 const KNOWN_INCOMPATIBLE_VERSIONS: &[(&str, &str)] = &[
@@ -129,6 +144,87 @@ pub(crate) fn warn_for_legacy_workspace(workspace: &Path, configured_path: Optio
     };
 
     run_version_handshake_sync(&bf_path);
+}
+
+/// Classify a backend's `version_command` output against the version ranges
+/// its own descriptor declares incompatible (its version-scoped quirks,
+/// ADR-013 §4) and warn once per applying quirk.
+///
+/// This is the bead-rs half of ADR-001 axis 3's version handshake. The legacy
+/// bead-forge handshake above has to spawn its own probe because legacy
+/// stores are not opened through a descriptor; a bead-rs store open has
+/// already run the descriptor's `version_command` for the identity check
+/// (`verify_backend_identity`), so that output is classified here rather
+/// than probed a second time. The declaration lives in the descriptor — not
+/// in a second table here — so narrowing a quirk's range retires both the
+/// workaround and the warning with one edit.
+///
+/// Two shapes stay silent: output without a parseable `major.minor.patch`
+/// triple cannot be classified (the identity check has already proven the
+/// binary is the expected one, and the quirk workarounds stay in effect
+/// either way), and a quirk without a `version_requirement` is a permanent
+/// part of the store contract rather than a defect an upgrade can retire —
+/// warning about it on every store open would be noise, not signal.
+pub(crate) fn warn_for_backend_quirks(descriptor: &BeadBackend, version_output: &str) {
+    let Some(version) = BackendVersion::parse(version_output) else {
+        tracing::debug!(
+            backend = %descriptor.name,
+            version_output = %version_output.trim(),
+            "backend version output carried no parseable major.minor.patch triple; skipping known-defect classification"
+        );
+        return;
+    };
+
+    for quirk in descriptor
+        .quirks
+        .iter()
+        .filter(|quirk| quirk.version_requirement.is_some())
+        .filter(|quirk| quirk.applies_to(Some(version)))
+    {
+        tracing::warn!(
+            backend = %descriptor.name,
+            version = %version,
+            declared_range = quirk.version_requirement.as_deref().unwrap_or_default(),
+            quirk = %quirk.name,
+            "incompatible backend version detected at startup; the descriptor's workaround stays in effect — upgrade past the declared range and narrow the quirk to retire the warning"
+        );
+        // The quirk description is the retirement contract — the why, the
+        // observed versions, and the evidence that narrows the range. It is
+        // a paragraph, so it rides at debug to keep the warning one line.
+        tracing::debug!(
+            backend = %descriptor.name,
+            quirk = %quirk.name,
+            description = %quirk.description,
+            "quirk retirement contract"
+        );
+    }
+}
+
+/// [`warn_for_backend_quirks`], at most once per process.
+///
+/// The condition depends only on the installed backend binary, so every
+/// store open in one process classifies the same version; without the
+/// guard a worker that reopens a workspace every Explore cycle would emit
+/// the identical warning each cycle for the lifetime of the process. The
+/// unguarded function stays separate so tests can assert on it directly.
+pub(crate) fn warn_for_backend_quirks_once(descriptor: &BeadBackend, version_output: &str) {
+    static WARNED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let version = BackendVersion::parse(version_output);
+    let key = format!(
+        "{}:{}",
+        descriptor.name,
+        version
+            .map(|version| version.to_string())
+            .unwrap_or_else(|| version_output.trim().to_string())
+    );
+    let seen = WARNED.get_or_init(|| Mutex::new(HashSet::new()));
+    let should_warn = seen
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(key);
+    if should_warn {
+        warn_for_backend_quirks(descriptor, version_output);
+    }
 }
 
 fn classify_version_output(output: Output) -> VersionCheck {
@@ -475,6 +571,68 @@ mod tests {
         assert!(
             !logs.contains("WARN"),
             "a non-legacy workspace must not warn, got: {logs}"
+        );
+    }
+
+    fn bead_rs_descriptor() -> crate::bead_store::backend::BeadBackend {
+        crate::bead_store::builtin_bead_backends()
+            .into_iter()
+            .find(|backend| backend.name == "bead-rs")
+            .expect("the built-in bead-rs descriptor must exist")
+    }
+
+    /// ADR-001 axis 3, bead-rs emission half: the version output already
+    /// collected by the startup identity probe must produce an actionable
+    /// warning when it falls in a descriptor-declared incompatible range.
+    #[test]
+    fn bead_rs_known_bad_version_warns_actionably() {
+        let captured = CapturedLogs::default();
+        let descriptor = bead_rs_descriptor();
+
+        tracing::subscriber::with_default(captured_logs_subscriber(&captured), || {
+            warn_for_backend_quirks(&descriptor, "bead 0.2.6 (commit test)");
+        });
+
+        let logs = captured_text(&captured);
+        assert!(logs.contains("WARN"), "expected a warning, got: {logs}");
+        assert!(
+            logs.contains("incompatible backend version detected at startup"),
+            "warning must identify the condition, got: {logs}"
+        );
+        assert!(
+            logs.contains("0.2.6"),
+            "warning must identify the offending version, got: {logs}"
+        );
+        assert!(
+            logs.contains("limit_zero_returns_empty_set"),
+            "warning must identify the active compatibility quirk, got: {logs}"
+        );
+        assert!(
+            logs.contains("upgrade past the declared range"),
+            "warning must carry remediation guidance, got: {logs}"
+        );
+    }
+
+    /// A version outside the declared defect range must not be reported as
+    /// incompatible; the descriptor's quirk range is the compatibility source
+    /// of truth rather than a permanent warning for every startup.
+    #[test]
+    fn bead_rs_supported_version_stays_quiet() {
+        let captured = CapturedLogs::default();
+        let descriptor = bead_rs_descriptor();
+
+        tracing::subscriber::with_default(captured_logs_subscriber(&captured), || {
+            warn_for_backend_quirks(&descriptor, "bead 0.3.0 (commit test)");
+        });
+
+        let logs = captured_text(&captured);
+        assert!(
+            !logs.contains("WARN"),
+            "a supported version must not warn, got: {logs}"
+        );
+        assert!(
+            !logs.contains("incompatible backend version"),
+            "a supported version must not be reported as incompatible, got: {logs}"
         );
     }
 }

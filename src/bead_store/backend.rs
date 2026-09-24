@@ -132,6 +132,12 @@ impl BackendVersion {
     }
 }
 
+impl std::fmt::Display for BackendVersion {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}.{}.{}", self.major, self.minor, self.patch)
+    }
+}
+
 /// Comparison operator of a quirk's version requirement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum VersionOp {
