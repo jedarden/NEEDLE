@@ -25,6 +25,68 @@ fn run_list_json(fixture: &IsolatedChildEnv) -> serde_json::Value {
     serde_json::from_slice(&output.stdout).expect("needle list output is valid JSON")
 }
 
+fn run_status_json(fixture: &IsolatedChildEnv) -> serde_json::Value {
+    let output = fixture
+        .needle()
+        .args(["status", "--format", "json"])
+        .output()
+        .expect("run isolated needle status");
+    assert!(
+        output.status.success(),
+        "needle status failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("needle status output is valid JSON")
+}
+
+fn write_stale_registry(fixture: &IsolatedChildEnv) {
+    let state_dir = fixture.path().join(".needle/state");
+    std::fs::create_dir_all(&state_dir).expect("create isolated registry directory");
+    let registry = serde_json::json!({
+        "workers": [{
+            "id": "stale-worker",
+            "pid": u32::MAX,
+            "workspace": fixture.path(),
+            "agent": "stale-agent",
+            "model": null,
+            "provider": null,
+            "started_at": "2026-09-24T00:00:00Z",
+            "beads_processed": 4,
+            "beads_completed": 2,
+            "config_reload_generation": 0,
+            "state": null
+        }],
+        "updated_at": "2026-09-24T00:00:00Z"
+    });
+    std::fs::write(
+        state_dir.join("workers.json"),
+        serde_json::to_vec_pretty(&registry).expect("serialize stale registry fixture"),
+    )
+    .expect("write stale registry fixture");
+}
+
+fn spawn_fake_worker(fixture: &IsolatedChildEnv, identifier: &str) -> ChildGuard {
+    // A copied shell has the exact argv shape of a worker process while its
+    // script blocks on stdin. This exercises the real process-table scanner
+    // without needing a bead store or a second worker lifecycle.
+    let fake_needle = fixture.path().join("needle");
+    let shell = which::which("sh").expect("sh executable is available");
+    std::fs::copy(shell, &fake_needle).expect("copy process fixture");
+    std::fs::write(fixture.path().join("run"), "read ignored\n")
+        .expect("write blocking process fixture");
+    let child = fixture
+        .command(&fake_needle)
+        .args(["run", "--workspace"])
+        .arg(fixture.path())
+        .args(["--agent", "process-test-agent", "--identifier", identifier])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn process fixture");
+    ChildGuard::new(child)
+}
+
 fn assert_exact_list_object_shape(value: &serde_json::Value) {
     let object = value
         .as_object()
@@ -32,7 +94,13 @@ fn assert_exact_list_object_shape(value: &serde_json::Value) {
     let keys = object.keys().map(String::as_str).collect::<BTreeSet<_>>();
     assert_eq!(
         keys,
-        BTreeSet::from(["discovered", "stale_sessions", "tmux_sessions"]),
+        BTreeSet::from([
+            "discovered",
+            "stale_registrations",
+            "stale_sessions",
+            "tmux_sessions",
+            "unregistered_workers",
+        ]),
         "list JSON has one stable top-level schema: {value}"
     );
     assert!(value["tmux_sessions"].is_array());
@@ -61,7 +129,13 @@ fn test_process_table_reconciliation() {
     {
         assert_eq!(
             empty_or_host_populated,
-            serde_json::json!({"tmux_sessions": [], "discovered": [], "stale_sessions": []}),
+            serde_json::json!({
+                "tmux_sessions": [],
+                "discovered": [],
+                "stale_sessions": [],
+                "stale_registrations": [],
+                "unregistered_workers": [],
+            }),
             "an empty fleet still emits the complete object schema"
         );
     }
@@ -159,6 +233,73 @@ fn test_status_command_reconciliation() {
     assert!(
         value["unregistered_workers"].is_u64(),
         "status JSON includes unregistered_workers count: {value}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn live_unregistered_worker_and_stale_registration_are_reconciled() {
+    let fixture = IsolatedChildEnv::new();
+    write_stale_registry(&fixture);
+
+    let worker = spawn_fake_worker(&fixture, "live-unregistered-worker");
+    let worker_pid = worker.id();
+
+    let mut list = run_list_json(&fixture);
+    for _ in 0..100 {
+        let found = list["discovered"]
+            .as_array()
+            .is_some_and(|workers| workers.iter().any(|entry| entry["pid"] == worker_pid));
+        if found {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        list = run_list_json(&fixture);
+    }
+
+    assert!(
+        list["discovered"]
+            .as_array()
+            .is_some_and(|workers| workers.iter().any(|entry| entry["pid"] == worker_pid)),
+        "live process-table worker must be visible in list: {list}"
+    );
+    assert!(
+        list["unregistered_workers"]
+            .as_array()
+            .is_some_and(|workers| workers.iter().any(|entry| entry["pid"] == worker_pid)),
+        "worker without registry metadata must be identified by list: {list}"
+    );
+    assert!(
+        list["stale_registrations"]
+            .as_array()
+            .is_some_and(|entries| { entries.iter().any(|entry| entry["id"] == "stale-worker") }),
+        "list must identify registry entries with no live process: {list}"
+    );
+
+    let status = run_status_json(&fixture);
+    assert!(
+        status["discovered"]
+            .as_array()
+            .is_some_and(|workers| workers.iter().any(|entry| entry["pid"] == worker_pid)),
+        "live process-table worker must be visible in status: {status}"
+    );
+    assert!(
+        status["unregistered_workers"]
+            .as_u64()
+            .is_some_and(|count| count >= 1),
+        "status must report an unregistered live worker: {status}"
+    );
+    assert!(
+        status["stale_registrations"]
+            .as_u64()
+            .is_some_and(|count| count >= 1),
+        "status must report the stale registration: {status}"
+    );
+    assert!(
+        status["stale_registration_details"]
+            .as_array()
+            .is_some_and(|entries| { entries.iter().any(|entry| entry["id"] == "stale-worker") }),
+        "status must expose stale registration details: {status}"
     );
 }
 

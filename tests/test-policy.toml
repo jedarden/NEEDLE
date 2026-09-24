@@ -294,7 +294,9 @@ contract = 208
 # agent.dispatch identity/usage span assertions in the P3 harness.
 # +9 deterministic replenishment/starvation contract scenarios
 # (needle-e13204d9).
-e2e = 839
+# +1 process-table list/status reconciliation with stale registry
+# (needle-3b20f336).
+e2e = 840
 soak = 0
 fuzz = 0
 
@@ -323,7 +325,9 @@ tier = "e2e"
 # rather than splitting the schema contract across tiers.
 # Each adapter fixture also carries malformed, missing-type, and future-type
 # lines whose absence from normalized stdout is asserted by that same suite.
-max_tests = 423
+# +1 process-table list/status reconciliation with stale registry
+# (needle-3b20f336).
+max_tests = 424
 owner = "component:process-integration"
 
 [[harness]]

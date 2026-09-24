@@ -2361,6 +2361,29 @@ fn reconcile_tmux_sessions(
     })
 }
 
+/// Find the actual NEEDLE worker PIDs backed by the supplied tmux sessions.
+///
+/// tmux reports the pane's shell PID, not necessarily the worker PID. Resolve
+/// the worker through that process tree so a live worker is marked as tmux
+/// backed even when the session metadata does not point directly at `needle`.
+#[cfg(unix)]
+fn tmux_worker_pids(sessions: &[TmuxSession]) -> HashSet<u32> {
+    sessions
+        .iter()
+        .filter_map(|session| session.pid)
+        .filter_map(|pane_pid| {
+            std::iter::once(pane_pid)
+                .chain(find_all_descendants(pane_pid))
+                .find(|&pid| is_needle_run_process(pid))
+        })
+        .collect()
+}
+
+#[cfg(not(unix))]
+fn tmux_worker_pids(_sessions: &[TmuxSession]) -> HashSet<u32> {
+    HashSet::new()
+}
+
 /// The process-table view of registry state.
 ///
 /// The registry is append/update state and can outlive a worker after a crash,
@@ -2892,7 +2915,7 @@ fn cmd_list(format: ListFormat) -> Result<()> {
     // ALWAYS scan process table for ALL needle run processes (both tmux and non-tmux).
     // This ensures we discover workers regardless of how they were started.
     let discovered = scan_needle_processes().unwrap_or_default();
-    let tmux_pids: HashSet<u32> = sessions.iter().filter_map(|s| s.pid).collect();
+    let tmux_pids = tmux_worker_pids(&sessions);
 
     // Reconciliation check: compare the process table against the raw
     // registry. Do not use Registry::list here: its PID-only liveness filter
@@ -3856,7 +3879,7 @@ fn cmd_status(
     let stale_registrations = reconciliation.stale_registered;
     let unregistered = reconciliation.unregistered;
     let registered_pids: HashSet<u32> = workers.iter().map(|worker| worker.pid).collect();
-    let _tmux_pids: HashSet<u32> = sessions.iter().filter_map(|s| s.pid).collect();
+    let tmux_pids = tmux_worker_pids(&sessions);
 
     if !unregistered.is_empty() {
         tracing::warn!(
@@ -4225,6 +4248,7 @@ fn cmd_status(
                         "agent": p.agent,
                         "identifier": p.identifier,
                         "cmdline": p.cmdline,
+                        "in_tmux": tmux_pids.contains(&p.pid),
                         "registered": registered,
                     })
                 }).collect::<Vec<_>>(),
@@ -7917,7 +7941,7 @@ fn scan_needle_processes() -> Result<Vec<DiscoveredProcess>> {
             if let Ok(content) = fs::read_to_string(&status_path) {
                 content
                     .lines()
-                    .find(|line| line.starts_with("PPID:\t"))
+                    .find(|line| line.starts_with("PPid:\t") || line.starts_with("PPID:\t"))
                     .and_then(|line| line.split(':').nth(1))
                     .and_then(|v| v.trim().parse().ok())
             } else {
