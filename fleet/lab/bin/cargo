@@ -21,9 +21,82 @@ SUBCOMMAND="${1:-}"
 # shmem pinned app.slice at memory.high (load 232, 94% sys CPU). Builds for one
 # repo now serialize on that lock, which also bounds their memory.
 # <repo> is the origin URL's basename, so throwaway clones share their repo's
-# dir. A value already inside /build/<repo>/ is kept. Hosts without /build
-# (lab) are left alone.
+# dir. `git archive | tar -x` extractions have no .git, so they are matched to
+# a repo by their Cargo.toml identity (see manifest_identity). A value already
+# inside /build/<repo>/ is kept. Hosts without /build (lab) are left alone.
 BUILD_ROOT=/build
+REPO_MAP="$BUILD_ROOT/.cargo-repo-map"
+
+url_basename() {
+    local u="${1%/}"
+    u="${u%.git}"; u="${u##*/}"; u="${u##*:}"
+    printf '%s' "${u,,}"
+}
+
+# Identity of the Cargo workspace containing $1, readable without .git:
+# repo:<repository field>, else pkg:<root package name>, else
+# member:<first workspace member>.
+manifest_identity() {
+    local d root="" ws=""
+    d=$(realpath -m -- "$1")
+    while :; do
+        if [[ -f "$d/Cargo.toml" ]]; then
+            [[ -z "$root" ]] && root="$d/Cargo.toml"
+            grep -qE '^\[workspace\]' "$d/Cargo.toml" && ws="$d/Cargo.toml"
+        fi
+        [[ "$d" == / ]] && break
+        d=$(dirname "$d")
+    done
+    [[ -n "$ws" ]] && root="$ws"
+    [[ -n "$root" ]] || return 1
+    awk '
+        function quoted(line) { sub(/^[^"]*"/, "", line); sub(/".*/, "", line); return line }
+        /^\[/ { sec = $0; sub(/[ \t]*(#.*)?$/, "", sec) }
+        /^[ \t]*repository[ \t]*=/ && !repo { repo = quoted($0) }
+        sec == "[package]" && /^[ \t]*name[ \t]*=/ && !pkg { pkg = quoted($0) }
+        sec == "[workspace]" && /^[ \t]*members[ \t]*=/ { inm = 1 }
+        inm && !mem && /"/ { mem = quoted($0) }
+        inm && /\]/ && sec == "[workspace]" && !/^\[workspace\]/ { inm = 0 }
+        END {
+            if (repo) print "repo:" repo
+            else if (pkg) print "pkg:" pkg
+            else if (mem) print "member:" mem
+            else exit 1
+        }' "$root"
+}
+
+# identity<TAB>repo for every shared checkout in $HOME; rebuilt every 6h.
+refresh_repo_map() {
+    [[ -n "$(find "$REPO_MAP" -mmin -360 2>/dev/null)" ]] && return 0
+    local tmp d o id
+    tmp=$(mktemp "$REPO_MAP.XXXXXX") || return 1
+    for d in "$HOME"/*/; do
+        [[ -d "${d}.git" && -f "${d}Cargo.toml" ]] || continue
+        o=$(git -C "$d" remote get-url origin 2>/dev/null) || continue
+        id=$(manifest_identity "$d") || continue
+        printf '%s\t%s\n' "$id" "$(url_basename "$o")"
+    done > "$tmp"
+    mv -f "$tmp" "$REPO_MAP"
+}
+
+resolve_repo() {
+    local top id r
+    if top=$(git -C "$1" rev-parse --show-toplevel 2>/dev/null); then
+        r=$(git -C "$1" remote get-url origin 2>/dev/null) || r="$top"
+        url_basename "$r"
+        return 0
+    fi
+    id=$(manifest_identity "$1") || return 1
+    if [[ "$id" == repo:* ]]; then
+        url_basename "${id#repo:}"
+        return 0
+    fi
+    refresh_repo_map
+    r=$(awk -F'\t' -v k="$id" '$1 == k { print $2; exit }' "$REPO_MAP" 2>/dev/null)
+    [[ -n "$r" ]] || r=$(url_basename "${id#*:}")
+    printf '%s' "$r"
+}
+
 if [[ -d "$BUILD_ROOT" ]]; then
     repo_dir="."
     target_flag=""
@@ -40,32 +113,25 @@ if [[ -d "$BUILD_ROOT" ]]; then
         esac
         prev="$arg"
     done
-    if toplevel=$(git -C "$repo_dir" rev-parse --show-toplevel 2>/dev/null); then
-        repo=$(git -C "$repo_dir" remote get-url origin 2>/dev/null) || repo="$toplevel"
-        repo="${repo%/}"
-        repo="${repo%.git}"
-        repo="${repo##*/}"
-        repo="${repo##*:}"
-        repo="${repo,,}"
-        if [[ -n "$repo" ]]; then
-            repo_target="$BUILD_ROOT/$repo"
-            inside_repo_target() {
-                [[ "$1" == /* ]] || return 1
-                case "$(realpath -m -- "$1")/" in
-                    "$(realpath -m -- "$repo_target")"/*) return 0 ;;
-                esac
-                return 1
-            }
-            if [[ -n "$target_flag" ]] && ! inside_repo_target "$target_flag"; then
-                echo "cargo wrapper: --target-dir $target_flag refused; build output for this repo goes in $repo_target (or a subdir of it). See needle-d6b685b4." >&2
-                exit 2
-            fi
-            if [[ -z "${CARGO_TARGET_DIR:-}" ]] || ! inside_repo_target "$CARGO_TARGET_DIR"; then
-                export CARGO_TARGET_DIR="$repo_target"
-            fi
+    repo=$(resolve_repo "$repo_dir")
+    if [[ "$repo" =~ ^[a-z0-9][a-z0-9._-]*$ ]]; then
+        repo_target="$BUILD_ROOT/$repo"
+        inside_repo_target() {
+            [[ "$1" == /* ]] || return 1
+            case "$(realpath -m -- "$1")/" in
+                "$(realpath -m -- "$repo_target")"/*) return 0 ;;
+            esac
+            return 1
+        }
+        if [[ -n "$target_flag" ]] && ! inside_repo_target "$target_flag"; then
+            echo "cargo wrapper: --target-dir $target_flag refused; build output for this repo goes in $repo_target (or a subdir of it). See needle-d6b685b4." >&2
+            exit 2
+        fi
+        if [[ -z "${CARGO_TARGET_DIR:-}" ]] || ! inside_repo_target "$CARGO_TARGET_DIR"; then
+            export CARGO_TARGET_DIR="$repo_target"
         fi
     fi
-    unset repo_dir target_flag prev arg toplevel repo repo_target
+    unset repo_dir target_flag prev arg repo repo_target
 fi
 
 local_limited() {
