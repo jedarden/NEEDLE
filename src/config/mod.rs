@@ -7269,7 +7269,7 @@ pub type SourceMap = BTreeMap<String, ConfigSource>;
 ///
 /// Only these sections are allowed at the workspace level:
 /// - `agent.default`, `agent.timeout`
-/// - `strands` (generation, weave, pulse, unravel)
+/// - `strands` (workspace-owned waterfall policy)
 /// - `prompt.*`
 /// - `verification` (legacy) or `gates` (new pluggable system)
 ///
@@ -7338,15 +7338,27 @@ pub struct WorkspaceAgentOverrides {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct WorkspaceStrandsOverrides {
     #[serde(default)]
+    pub pluck: Option<PluckConfig>,
+    #[serde(default)]
+    pub explore: Option<ExploreConfig>,
+    #[serde(default)]
     pub generation: Option<GenerationConfig>,
     #[serde(default)]
+    pub knot: Option<KnotConfig>,
+    #[serde(default)]
     pub weave: Option<serde_yaml::Value>,
+    #[serde(default)]
+    pub analyze: Option<AnalyzeConfig>,
     #[serde(default)]
     pub pulse: Option<serde_yaml::Value>,
     #[serde(default)]
     pub unravel: Option<serde_yaml::Value>,
     #[serde(default)]
+    pub reflect: Option<ReflectConfig>,
+    #[serde(default)]
     pub resolve: Option<ResolveConfig>,
+    #[serde(default)]
+    pub splice: Option<SpliceConfig>,
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -9119,15 +9131,31 @@ impl ConfigLoader {
         }
 
         if let Some(ref strands) = overrides.strands {
+            if let Some(ref pluck) = strands.pluck {
+                config.strands.pluck = pluck.clone();
+                sources.insert("strands.pluck".to_string(), source.clone());
+            }
+            if let Some(ref explore) = strands.explore {
+                config.strands.explore = explore.clone();
+                sources.insert("strands.explore".to_string(), source.clone());
+            }
             if let Some(ref generation) = strands.generation {
                 config.strands.generation = generation.clone();
                 sources.insert("strands.generation".to_string(), source.clone());
+            }
+            if let Some(ref knot) = strands.knot {
+                config.strands.knot = knot.clone();
+                sources.insert("strands.knot".to_string(), source.clone());
             }
             if let Some(ref weave_val) = strands.weave {
                 if let Ok(weave_cfg) = serde_yaml::from_value::<WeaveConfig>(weave_val.clone()) {
                     config.strands.weave = weave_cfg;
                 }
                 sources.insert("strands.weave".to_string(), source.clone());
+            }
+            if let Some(ref analyze) = strands.analyze {
+                config.strands.analyze = analyze.clone();
+                sources.insert("strands.analyze".to_string(), source.clone());
             }
             if let Some(ref pulse_val) = strands.pulse {
                 if let Ok(pulse_cfg) = serde_yaml::from_value::<PulseConfig>(pulse_val.clone()) {
@@ -9142,6 +9170,18 @@ impl ConfigLoader {
                     config.strands.unravel = unravel_cfg;
                 }
                 sources.insert("strands.unravel".to_string(), source.clone());
+            }
+            if let Some(ref reflect) = strands.reflect {
+                config.strands.reflect = reflect.clone();
+                sources.insert("strands.reflect".to_string(), source.clone());
+            }
+            if let Some(ref resolve) = strands.resolve {
+                config.strands.resolve = resolve.clone();
+                sources.insert("strands.resolve".to_string(), source.clone());
+            }
+            if let Some(ref splice) = strands.splice {
+                config.strands.splice = splice.clone();
+                sources.insert("strands.splice".to_string(), source.clone());
             }
         }
 
@@ -11341,23 +11381,115 @@ strands:
     }
 
     #[test]
-    fn workspace_config_overrides_strands_weave() {
+    fn workspace_config_applies_declared_strands() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join(".needle.yaml"),
-            "strands:\n  weave:\n    enabled: true\n",
+            r#"strands:
+  pluck:
+    exclude_labels: [human-gate, deferred]
+    split_after_failures: 7
+  explore:
+    enabled: false
+    workspaces: [/home/coding/WARP]
+    workspace_root: /home/coding
+  generation:
+    enabled: true
+    low_water_reserve: 3
+    lease_ttl_secs: 240
+  knot:
+    exhaustion_threshold: 4
+    starvation_backoff_minutes: 6
+    alert_cooldown_minutes: 70
+  weave:
+    enabled: true
+    max_beads_per_run: 4
+    cooldown_hours: 12
+  analyze:
+    enabled: false
+    max_beads_per_run: 2
+  unravel:
+    enabled: true
+    max_beads_per_run: 4
+  pulse:
+    enabled: true
+    max_beads_per_run: 3
+  reflect:
+    enabled: false
+    min_beads_since_last: 12
+  resolve:
+    enabled: true
+    timeout_secs: 90
+  splice:
+    enabled: true
+    stale_threshold_secs: 420
+"#,
         )
         .unwrap();
 
         let overrides = ConfigLoader::load_workspace(dir.path()).unwrap().unwrap();
         let mut config = Config::default();
+        config.strands.reflect.enabled = true;
+        config.strands.splice.enabled = false;
         let mut sources = SourceMap::new();
         ConfigLoader::apply_workspace(&mut config, &overrides, dir.path(), &mut sources);
 
-        assert!(
-            sources.contains_key("strands.weave"),
-            "strands.weave should be tracked in sources"
+        assert_eq!(
+            config.strands.pluck.exclude_labels,
+            vec!["human-gate".to_string(), "deferred".to_string()]
         );
+        assert_eq!(config.strands.pluck.split_after_failures, 7);
+        assert!(!config.strands.explore.enabled);
+        assert_eq!(
+            config.strands.explore.workspaces,
+            vec![PathBuf::from("/home/coding/WARP")]
+        );
+        assert_eq!(
+            config.strands.explore.workspace_root,
+            PathBuf::from("/home/coding")
+        );
+        assert_eq!(config.strands.generation.low_water_reserve, 3);
+        assert_eq!(config.strands.generation.lease_ttl_secs, 240);
+        assert_eq!(config.strands.knot.exhaustion_threshold, 4);
+        assert_eq!(config.strands.knot.starvation_backoff_minutes, 6);
+        assert_eq!(config.strands.knot.alert_cooldown_minutes, 70);
+        assert!(config.strands.weave.enabled);
+        assert_eq!(config.strands.weave.max_beads_per_run, 4);
+        assert_eq!(config.strands.weave.cooldown_hours, 12);
+        assert!(!config.strands.analyze.enabled);
+        assert_eq!(config.strands.analyze.max_beads_per_run, 2);
+        assert!(config.strands.unravel.enabled);
+        assert_eq!(config.strands.unravel.max_beads_per_run, 4);
+        assert!(config.strands.pulse.enabled);
+        assert_eq!(config.strands.pulse.max_beads_per_run, 3);
+        assert!(!config.strands.reflect.enabled);
+        assert_eq!(config.strands.reflect.min_beads_since_last, 12);
+        assert!(config.strands.resolve.enabled);
+        assert_eq!(config.strands.resolve.timeout_secs, 90);
+        assert!(config.strands.splice.enabled);
+        assert_eq!(config.strands.splice.stale_threshold_secs, 420);
+
+        for key in [
+            "strands.pluck",
+            "strands.explore",
+            "strands.generation",
+            "strands.knot",
+            "strands.weave",
+            "strands.analyze",
+            "strands.unravel",
+            "strands.pulse",
+            "strands.reflect",
+            "strands.resolve",
+            "strands.splice",
+        ] {
+            assert_eq!(
+                sources.get(key),
+                Some(&ConfigSource::WorkspaceFile(
+                    dir.path().join(".needle.yaml")
+                )),
+                "{key} source should be the workspace config"
+            );
+        }
     }
 
     #[test]
