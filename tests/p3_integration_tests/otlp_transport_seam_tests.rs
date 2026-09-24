@@ -233,6 +233,24 @@ fn assert_resource_attributes(resource: &Resource) {
             "wrong or missing {key}"
         );
     }
+
+    let process_pid = resource
+        .iter()
+        .find(|(attribute, _)| attribute.as_str() == "process.pid")
+        .map(|(_, value)| value.as_str().to_string())
+        .expect("process.pid is a documented resource attribute");
+    assert_eq!(
+        process_pid,
+        std::process::id().to_string(),
+        "process.pid must identify the exporting worker"
+    );
+
+    let hostname = resource
+        .iter()
+        .find(|(attribute, _)| attribute.as_str() == "host.name")
+        .map(|(_, value)| value.as_str().to_string())
+        .expect("host.name is a documented resource attribute");
+    assert!(!hostname.is_empty(), "host.name must not be empty");
 }
 
 fn wait_for_resource(resource: &Arc<Mutex<Option<Resource>>>, signal: &str) -> Resource {

@@ -3905,6 +3905,8 @@ impl Worker {
             gen_ai.system = %provider.unwrap_or("unknown"),
             gen_ai.request.model = %model.unwrap_or("unknown"),
             needle.attempt.id = %attempt_id,
+            gen_ai.usage.input_tokens = tracing::field::Empty,
+            gen_ai.usage.output_tokens = tracing::field::Empty,
             needle.agent.pid = tracing::field::Empty, // Will be set when process starts
             needle.agent.exit_code = tracing::field::Empty, // Will be set after execution
         );

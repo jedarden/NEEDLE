@@ -1493,6 +1493,9 @@ impl Dispatcher {
             gen_ai.system = %adapter.gen_ai_system(),
             gen_ai.operation.name = "chat",
             gen_ai.request.id = %bead_id.as_ref(),
+            gen_ai.request.model = tracing::field::Empty,
+            gen_ai.usage.input_tokens = tracing::field::Empty,
+            gen_ai.usage.output_tokens = tracing::field::Empty,
             needle.agent.pid = tracing::field::Empty,
             needle.agent.exit_code = tracing::field::Empty,
         )
@@ -1591,10 +1594,11 @@ impl Dispatcher {
             }
         }
 
-        // Set gen_ai.request.model if available
-        if let Some(ref model) = adapter.model {
-            tracing::Span::current().record("gen_ai.request.model", model.as_str());
-        }
+        // Keep the documented model attribute present even for adapters that
+        // do not declare one. The field is declared on the instrumented span
+        // so later records reach the exporter rather than being discarded.
+        let model = adapter.model.as_deref().unwrap_or("unknown");
+        tracing::Span::current().record("gen_ai.request.model", model);
 
         // Log timeout policy for this dispatch
         let timeout_policy = adapter.timeout_policy();

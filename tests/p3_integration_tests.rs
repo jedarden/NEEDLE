@@ -60,6 +60,8 @@ mod post_dispatch_audit_test;
 mod post_pluck_resolution;
 #[path = "p3_integration_tests/query_integration_test.rs"]
 mod query_integration_test;
+#[path = "p3_integration_tests/telemetry_genai_conformance.rs"]
+mod telemetry_genai_conformance;
 // The remote-workspace claim-verification matrix is shared with P2 because it
 // exercises dispatch admission, but P3 is also an acceptance target for this
 // real-binary fixture. Keep one subprocess fixture so HOME and Explore-root

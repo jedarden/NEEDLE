@@ -285,7 +285,9 @@ contract = 208
 # +4 alias-aware subprocess-guard contracts (needle-b946b519).
 # +10 agent-event schema conformance contracts (needle-6fd2b6bd), all in the
 # integration_spawn harness above.
-e2e = 828
+# +2 exported GenAI semantic-convention contracts (needle-7f53ca33): the
+# agent.dispatch identity/usage span assertions in the P3 harness.
+e2e = 830
 soak = 0
 fuzz = 0
 
