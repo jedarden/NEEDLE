@@ -13,9 +13,12 @@
 //! ADR-006 isolation rule.
 
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::time::{Duration, Instant};
 
+use fs2::FileExt;
 use serde_json::Value;
 use tempfile::TempDir;
 
@@ -624,22 +627,6 @@ if [ "$mode" = "unavailable-cli" ]; then
   exit 127
 fi
 
-# Hold both racing workers at the claim command. Both have already minted
-# their attempt IDs, and neither can close the only bead before its peer
-# reaches the same point.
-if [ "${1:-}" = "claim" ] && [ -n "${NEEDLE_FIXTURE_CLAIM_BARRIER:-}" ]; then
-  touch "$NEEDLE_FIXTURE_CLAIM_BARRIER/$$"
-  count=0
-  while [ "$(find "$NEEDLE_FIXTURE_CLAIM_BARRIER" -type f | wc -l)" -lt 2 ]; do
-    count=$((count + 1))
-    if [ "$count" -ge 200 ]; then
-      printf '%s\n' 'timed out waiting for both claim contenders' >&2
-      exit 124
-    fi
-    sleep 0.05
-  done
-fi
-
 if [ "${1:-}" = "--version" ] && [ "$mode" = "wrong-backend-identity" ]; then
   printf '%s\n' 'not-a-bead-cli 9.9.9'
   exit 0
@@ -1099,25 +1086,70 @@ fn subprocess_agent_timeout_carries_the_attempt_identity_and_releases() {
 fn subprocess_concurrent_claim_race_mints_distinct_attempt_ids() {
     let fixture = Fixture::new(FixtureLayout::Local);
 
-    let claim_barrier = fixture.root.path().join("claim-barrier");
-    fs::create_dir(&claim_barrier).expect("create claim race barrier");
+    // NEEDLE emits bead.claim.attempted after minting the attempt ID and
+    // before acquiring this workspace flock. Hold the lock until both
+    // contenders have emitted that event, then let the real claim path race.
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    fixture.home_workspace.hash(&mut hasher);
+    let lock_path =
+        std::env::temp_dir().join(format!("needle-claim-{:016x}.lock", hasher.finish()));
+    let claim_lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .expect("open claim race lock");
+    claim_lock.lock_exclusive().expect("hold claim race lock");
 
-    // Both workers must reach the claim command before either can close the
-    // only bead. Each mints its attempt identity before that command.
     let mut first_command = fixture.command(FixtureMode::Success);
     let mut second_command = fixture.command(FixtureMode::Success);
-    let first = first_command
-        .env("NEEDLE_FIXTURE_CLAIM_BARRIER", &claim_barrier)
-        .spawn()
-        .expect("spawn first racing worker");
-    let second = second_command
-        .env("NEEDLE_FIXTURE_CLAIM_BARRIER", &claim_barrier)
-        .spawn()
-        .expect("spawn second racing worker");
+    let first = first_command.spawn().expect("spawn first racing worker");
+    let second = second_command.spawn().expect("spawn second racing worker");
+
+    let deadline = Instant::now() + Duration::from_secs(7);
+    let log_dir = fixture.root.path().join("logs");
+    let mut attempted = 0;
+    while Instant::now() < deadline {
+        attempted = fs::read_dir(&log_dir)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .filter_map(|entry| fs::read_to_string(entry.path()).ok())
+            .map(|content| {
+                content
+                    .matches("\"event_type\":\"bead.claim.attempted\"")
+                    .count()
+            })
+            .sum();
+        if attempted >= 2 {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    FileExt::unlock(&claim_lock).expect("release claim race lock");
+
     let out_a = first.wait_with_output().expect("wait first racing worker");
     let out_b = second
         .wait_with_output()
         .expect("wait second racing worker");
+    match fs::remove_file(lock_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!("remove claim race lock: {error}"),
+    }
+    let claim_events: Vec<Value> = fixture
+        .telemetry()
+        .into_iter()
+        .filter(|event| {
+            event["event_type"]
+                .as_str()
+                .is_some_and(|kind| kind.starts_with("bead.claim."))
+        })
+        .collect();
+    assert_eq!(
+        attempted, 2,
+        "both workers must attempt the claim: {claim_events:?}"
+    );
     for (name, output) in [("first", &out_a), ("second", &out_b)] {
         assert!(
             output.status.success(),
@@ -1129,7 +1161,15 @@ fn subprocess_concurrent_claim_race_mints_distinct_attempt_ids() {
 
     // The atomic backend claim let exactly one worker dispatch an agent.
     let ids = fixture.marker_attempt_ids(&fixture.home_workspace);
-    assert_eq!(ids.len(), 1, "a claim race must yield exactly one dispatch");
+    assert_eq!(
+        ids.len(),
+        1,
+        "a claim race must yield exactly one dispatch; first stdout={} stderr={}; second stdout={} stderr={}; claim events={claim_events:?}",
+        String::from_utf8_lossy(&out_a.stdout),
+        String::from_utf8_lossy(&out_a.stderr),
+        String::from_utf8_lossy(&out_b.stdout),
+        String::from_utf8_lossy(&out_b.stderr),
+    );
 
     // Both workers minted before claiming: two distinct identities in
     // telemetry, only the winner's reached an agent.
