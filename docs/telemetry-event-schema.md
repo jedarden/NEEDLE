@@ -51,8 +51,25 @@ Additional fields are event-specific and documented per type below.
   `max_workers`, and `active_workers`
 - `strand.resolve.evaluated` — Resolve strand evaluation
 - `strand.pluck.no_candidate` — Pluck found no local candidate; diagnostic only, waterfall continues
+- `strand.pluck.starvation_detected` — Pluck found open work excluded from its local candidate frontier; diagnostic only, and the waterfall continues
 - `strand.knot.starvation_detected` — terminal starvation verdict after the full strand waterfall
-- `strand.pluck.starvation_detected` — legacy compatibility event; no longer emitted by strand selection
+
+#### `strand.pluck.starvation_detected`
+
+This event is emitted through NEEDLE's telemetry pipeline when Pluck observes
+open work but no locally claimable candidate. It never creates, updates, or
+deletes a bead or file in the scanned workspace.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `workspace` | string | Path of the scanned workspace whose Pluck frontier was empty. |
+| `open_count` | number | Open beads observed before Pluck filtering. |
+| `excluded_count` | number | Open beads excluded from the candidate frontier. |
+| `candidate_exclusion_reasons` | array of strings | Reason strings for the exclusions, such as `label:deferred`, `status:blocked`, `assignee:<worker>`, or `dependency:<bead-id>`. |
+
+This local diagnostic is distinct from the terminal
+`strand.knot.starvation_detected` event, which is emitted only after the full
+strand waterfall confirms invisible work.
 
 ### Bead Processing
 - `bead.resolution.applied` — A post-Pluck Resolve decision reached its

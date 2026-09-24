@@ -540,6 +540,7 @@ async fn pluck_starvation_uses_telemetry_without_mutating_target_store() {
     blocked.labels = vec!["deferred".to_string()];
     let store = MockBeadStore::new(vec![blocked]);
     let before_beads = store.all_beads();
+    let before_target_beads = snapshot_workspace(&target_beads);
     let before_workspace = snapshot_workspace(target_workspace.path());
 
     let telemetry_dir = tempfile::tempdir().expect("telemetry directory");
@@ -574,7 +575,16 @@ async fn pluck_starvation_uses_telemetry_without_mutating_target_store() {
         })
         .collect();
     assert_eq!(events.len(), 1, "Pluck should emit one starvation event");
+    assert_eq!(events[0]["event_type"], "strand.pluck.starvation_detected");
     let payload = &events[0]["data"];
+    let payload_fields = payload
+        .as_object()
+        .expect("starvation payload should be a JSON object");
+    assert_eq!(payload_fields.len(), 4);
+    assert!(payload_fields.contains_key("workspace"));
+    assert!(payload_fields.contains_key("open_count"));
+    assert!(payload_fields.contains_key("excluded_count"));
+    assert!(payload_fields.contains_key("candidate_exclusion_reasons"));
     assert_eq!(
         payload["workspace"],
         target_workspace.path().display().to_string()
@@ -600,5 +610,10 @@ async fn pluck_starvation_uses_telemetry_without_mutating_target_store() {
         snapshot_workspace(target_workspace.path()),
         before_workspace,
         "starvation diagnostics must not write any target-workspace file"
+    );
+    assert_eq!(
+        snapshot_workspace(&target_beads),
+        before_target_beads,
+        "starvation diagnostics must leave the target .beads store unchanged"
     );
 }

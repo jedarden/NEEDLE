@@ -21,6 +21,24 @@ Both bugs share a root theme: NEEDLE's own operational state (what it's confused
 ## Decision
 
 1. **Redirect Pluck's starvation self-diagnostic to NEEDLE's own telemetry.** Never write it as a bead into the scanned workspace. Emit a structured `pluck.starvation_detected` telemetry event (workspace, open count, excluded count, candidate reasons) through the existing telemetry pipeline (the same one `ExploreStrand`'s Phase-5 starvation alarm uses — see ADR-001 §5.4). If a persistent, actionable record is wanted, file it as a bead in **NEEDLE's own** workspace, never the target's.
+
+### Pluck starvation telemetry contract
+
+The emitted event is serialized by the telemetry envelope as
+`strand.pluck.starvation_detected`. Its `data` object contains exactly these
+fields:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `workspace` | string | Path of the scanned workspace whose Pluck frontier was empty. |
+| `open_count` | number | Number of open beads observed before Pluck filtering. |
+| `excluded_count` | number | Number of open beads excluded from the candidate frontier. |
+| `candidate_exclusion_reasons` | array of strings | Stable reason strings explaining the exclusions, such as `label:deferred`, `status:blocked`, `assignee:<worker>`, or `dependency:<bead-id>`. |
+
+This is a diagnostic signal only: it does not create, update, or delete a bead
+or file in the scanned workspace. Terminal starvation after the complete
+waterfall remains the separate `strand.knot.starvation_detected` event.
+
 2. **Treat "Pluck configuration is unreachable from a target-scoped worker" as a structural constraint, not a solvable task.** A target-repo worker must never be prompted to investigate or fix NEEDLE's own dispatch configuration — that class of work has no legitimate resolution path from inside the target repo and should be filtered out of what gets auto-decomposed there.
 3. **`needle stop` must kill the full process tree**, not just detach/remove the tmux registry entry: parent `needle run` process, its `bash -c` prompt wrapper, and the dispatched `claude` subprocess. Verify the PID is actually gone before reporting success, not just that the tmux session no longer lists it.
 4. **`needle status`/`needle list` must not have registry blind spots.** Every `needle run` process, however it was started (tmux-wrapped, bare `NEEDLE_INNER=1` background, etc.), must be discoverable through standard fleet commands. Reconcile the process-table view (`ps aux`) against the registry view as a health check, and WARN on any process matching `needle run --workspace` that isn't in the registry.
