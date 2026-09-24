@@ -40,13 +40,14 @@ fn isolated_tempdir() -> Result<TempDir> {
         }
 
         let mut ancestor = Some(base.as_path());
-        let has_bead_store_ancestor = std::iter::from_fn(|| {
+        let has_recognized_bead_store_ancestor = std::iter::from_fn(|| {
             let current = ancestor?;
             ancestor = current.parent();
-            Some(current.join(".beads").exists())
+            let bead_dir = current.join(".beads");
+            Some(bead_dir.join("config.json").is_file() || bead_dir.join("beads.db").is_file())
         })
         .any(|exists| exists);
-        if has_bead_store_ancestor {
+        if has_recognized_bead_store_ancestor {
             continue;
         }
 
@@ -61,7 +62,7 @@ fn isolated_tempdir() -> Result<TempDir> {
             });
     }
 
-    anyhow::bail!("could not find a temporary parent without a .beads ancestor")
+    anyhow::bail!("could not find a temporary parent without a recognized .beads ancestor")
 }
 
 fn native_bead_path() -> PathBuf {
