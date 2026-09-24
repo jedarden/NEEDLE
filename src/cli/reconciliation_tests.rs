@@ -147,4 +147,25 @@ fn reconciliation_does_not_confuse_pid_metadata_with_session_liveness() {
             .collect::<Vec<_>>(),
         vec![606]
     );
+
+    let cleanup_sessions = vec![
+        session("needle-claude-wrapper", Some(505)),
+        session("needle-claude-stale", Some(707)),
+    ];
+    let live_worker_ids = live_registered_worker_ids(&discovered, &registered);
+    let inspector = MockInspector {
+        live_pids: HashSet::new(),
+    };
+    let cleanup_targets = filter_sessions_for_cleanup_with_live_workers(
+        &cleanup_sessions,
+        &inspector,
+        &live_worker_ids,
+        false,
+        &None,
+    );
+    assert_eq!(
+        cleanup_targets,
+        vec!["needle-claude-stale".to_string()],
+        "bare cleanup must keep the registered worker whose PID is live"
+    );
 }

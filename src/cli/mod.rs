@@ -2417,6 +2417,40 @@ fn reconcile_process_registry<'a>(
     }
 }
 
+/// Return the registered worker IDs whose PIDs are backed by a live NEEDLE
+/// worker process.
+///
+/// The registry is useful for mapping a tmux session back to its worker, but
+/// it is not itself a liveness source: entries survive crashes and PIDs can be
+/// reused.  The process-table reconciliation is therefore the authoritative
+/// signal for ordinary workers.  A registered supervisor (or a worker that
+/// has reparented away from its tmux pane) is checked directly as a fallback;
+/// the pane-tree liveness check remains the final fail-safe for processes that
+/// cannot be classified.
+fn live_registered_worker_ids(
+    discovered: &[DiscoveredProcess],
+    registered: &[WorkerEntry],
+) -> HashSet<String> {
+    let reconciliation = reconcile_process_registry(discovered, registered);
+    let mut live_ids: HashSet<String> = reconciliation
+        .live_registered
+        .into_iter()
+        .map(|worker| worker.id.clone())
+        .collect();
+
+    // `scan_needle_processes` intentionally reports `needle run` workers.
+    // The registry also contains the long-lived `needle supervise` process,
+    // so recognize a registered NEEDLE process directly for that case and for
+    // workers that have escaped the original tmux process tree.
+    for worker in registered {
+        if is_needle_process(worker.pid) {
+            live_ids.insert(worker.id.clone());
+        }
+    }
+
+    live_ids
+}
+
 fn unregistered_processes<'a>(
     discovered: &'a [DiscoveredProcess],
     registered_pids: &HashSet<u32>,
@@ -2438,6 +2472,48 @@ fn is_needle_binary_name(name: &str) -> bool {
         name,
         "needle" | "needle-stable" | "needle-stable.prev" | "needle-testing"
     )
+}
+
+/// Check whether a PID is a live NEEDLE command that owns a worker session.
+///
+/// This is deliberately stricter than checking PID existence.  A stale
+/// registry entry may point at an unrelated process after PID reuse, and that
+/// process must not make its old session look active.
+#[cfg(unix)]
+fn is_needle_process(pid: u32) -> bool {
+    let cmdline_path = Path::new("/proc").join(pid.to_string()).join("cmdline");
+    let cmdline_bytes = match std::fs::read(cmdline_path) {
+        Ok(bytes) => bytes,
+        Err(_) => return false,
+    };
+    let args: Vec<String> = cmdline_bytes
+        .split(|&byte| byte == 0)
+        .map(|arg| String::from_utf8_lossy(arg).to_string())
+        .filter(|arg| !arg.is_empty())
+        .collect();
+
+    let binary_idx = if args.first().is_some_and(|arg| arg == "NEEDLE_INNER=1") {
+        1
+    } else {
+        0
+    };
+    let Some(binary) = args.get(binary_idx) else {
+        return false;
+    };
+    let Some(command) = args.get(binary_idx + 1) else {
+        return false;
+    };
+    let binary_name = Path::new(binary)
+        .file_name()
+        .map(|name| name.to_string_lossy())
+        .unwrap_or_default();
+
+    is_needle_binary_name(&binary_name) && matches!(command.as_str(), "run" | "supervise")
+}
+
+#[cfg(not(unix))]
+fn is_needle_process(_pid: u32) -> bool {
+    false
 }
 
 impl ProcessInspector for RealProcessInspector {
@@ -2810,9 +2886,32 @@ fn cmd_stop(all: bool, identifier: Option<String>) -> Result<()> {
 ///
 /// # Returns
 /// Vector of session names to clean up
+#[cfg(test)]
 fn filter_sessions_for_cleanup_impl(
     sessions: &[TmuxSession],
     inspector: &dyn ProcessInspector,
+    all: bool,
+    identifier: &Option<String>,
+) -> Vec<String> {
+    filter_sessions_for_cleanup_with_live_workers(
+        sessions,
+        inspector,
+        &HashSet::new(),
+        all,
+        identifier,
+    )
+}
+
+/// Filter sessions for cleanup with the live registry view already resolved.
+///
+/// The registry view handles the important case where a worker is live but no
+/// longer appears beneath tmux's pane PID.  The process-tree oracle remains a
+/// conservative fallback for unregistered workers and non-worker NEEDLE
+/// sessions such as the supervisor.
+fn filter_sessions_for_cleanup_with_live_workers(
+    sessions: &[TmuxSession],
+    inspector: &dyn ProcessInspector,
+    live_worker_ids: &HashSet<String>,
     all: bool,
     identifier: &Option<String>,
 ) -> Vec<String> {
@@ -2828,32 +2927,67 @@ fn filter_sessions_for_cleanup_impl(
             .collect()
     } else {
         // Bare cleanup shares the same reconciliation result as list/status.
-        // The shared pane-tree oracle is deliberately identity-blind: a live
-        // worker may sit behind tmux's shell wrapper, and a live supervisor is
-        // not necessarily a `needle run` process. Only the reconciled stale
-        // sessions are safe cleanup targets.
-        let (_, stale_sessions) = reconcile_tmux_sessions(sessions, inspector);
-        stale_sessions.iter().map(|s| s.name.clone()).collect()
+        // The registered-PID view handles workers that have moved out of the
+        // pane tree. The shared pane-tree oracle is deliberately identity-
+        // blind: a live worker may sit behind tmux's shell wrapper, and a live
+        // supervisor is not necessarily a `needle run` process. Only sessions
+        // with neither signal are safe cleanup targets.
+        sessions
+            .iter()
+            .filter(|session| {
+                let registered_worker_is_live = session
+                    .name
+                    .strip_prefix("needle-")
+                    .is_some_and(|worker_id| live_worker_ids.contains(worker_id));
+                !registered_worker_is_live
+                    && session
+                        .pid
+                        .map_or(true, |pane_pid| !inspector.tree_has_live_process(pane_pid))
+            })
+            .map(|session| session.name.clone())
+            .collect()
     }
 }
 
 /// Filter sessions for cleanup based on liveness and flags.
 ///
 /// Convenience wrapper that uses the real process inspector.
+#[cfg(test)]
 fn filter_sessions_for_cleanup(
     sessions: &[TmuxSession],
     all: bool,
     identifier: &Option<String>,
 ) -> Vec<String> {
-    filter_sessions_for_cleanup_impl(sessions, &RealProcessInspector, all, identifier)
+    filter_sessions_for_cleanup_with_live_workers(
+        sessions,
+        &RealProcessInspector,
+        &HashSet::new(),
+        all,
+        identifier,
+    )
+}
+
+fn filter_sessions_for_cleanup_with_registry(
+    sessions: &[TmuxSession],
+    live_worker_ids: &HashSet<String>,
+    all: bool,
+    identifier: &Option<String>,
+) -> Vec<String> {
+    filter_sessions_for_cleanup_with_live_workers(
+        sessions,
+        &RealProcessInspector,
+        live_worker_ids,
+        all,
+        identifier,
+    )
 }
 
 /// `needle cleanup` — remove orphaned tmux sessions.
 ///
 /// Bare (no-flags) cleanup removes only truly orphaned sessions: sessions
-/// with no live process behind them, verified per session by walking the
-/// pane's process tree (ADR-003). With --all, removes all needle sessions
-/// regardless of worker status. With -i, filters sessions by
+/// whose registered worker PID is not a live NEEDLE process and whose pane
+/// process tree is also dead (ADR-003). With --all, removes all needle
+/// sessions regardless of worker status. With -i, filters sessions by
 /// name/identifier substring (bypasses the liveness check — naming a
 /// specific session is itself the operator's deliberate choice).
 fn cmd_cleanup(all: bool, identifier: Option<String>) -> Result<()> {
@@ -2864,13 +2998,22 @@ fn cmd_cleanup(all: bool, identifier: Option<String>) -> Result<()> {
         return Ok(());
     }
 
-    // Only bare cleanup consults the process inspector, and it does so per
-    // session rather than through a whole-table scan: a session is removed
-    // only when its own pane tree is provably dead, so an unreadable pane
-    // preserves the session instead of licensing a kill. Explicit identifiers
-    // are already deliberate operator targets, and --all is intentionally
-    // destructive; neither pays for liveness checks it does not use.
-    let targets = filter_sessions_for_cleanup(&sessions, all, &identifier);
+    // Only bare cleanup consults the registry and process table. Explicit
+    // identifiers are already deliberate operator targets, and --all is
+    // intentionally destructive; neither pays for liveness checks it does
+    // not use.
+    let live_worker_ids = if !all && identifier.is_none() {
+        let config = ConfigLoader::load_global().unwrap_or_default();
+        let registry =
+            Registry::default_location(&crate::state_dir::root_for(&config.workspace.home));
+        let registered_workers = registry.list_all().unwrap_or_default();
+        let discovered = scan_needle_processes().unwrap_or_default();
+        live_registered_worker_ids(&discovered, &registered_workers)
+    } else {
+        HashSet::new()
+    };
+    let targets =
+        filter_sessions_for_cleanup_with_registry(&sessions, &live_worker_ids, all, &identifier);
 
     if targets.is_empty() {
         println!("No matching sessions found.");
