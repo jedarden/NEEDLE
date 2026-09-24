@@ -86,14 +86,16 @@ Complete these steps in order and include evidence for each one in the close rea
 
 1. Run `git status --short` before staging and confirm that every listed change is
    yours for this bead. Do not stage or commit another worker's changes.
-2. Verify the committed state, not the working tree. Extract `HEAD` with
-   `git archive HEAD | tar -x -C $(mktemp -d)` (a named temporary directory is fine
-   when you need to run several commands there), then run the repository's own
-   definition of done from that extraction. Run `scripts/definition-of-done.sh --fast`
-   when the script exists; otherwise use the language default (`go build ./... && go
-   vet ./... && go test -short ./...`, `cargo build --all-targets && cargo test`,
-   `npm test`, or `pytest -q`). It must pass. Never run this verification from the
-   shared working tree.
+2. Verify the committed state, not the working tree. Extract `HEAD` into a named
+   temporary directory, run the repository's own definition of done there, and
+   remove the directory only after verification succeeds:
+   `D=$(mktemp -d) && git archive HEAD | tar -x -C \"$D\" && ( cd \"$D\" && <definition of done> ) && rm -rf \"$D\"`
+   If extraction or verification fails, leave `\"$D\"` in place for diagnosis and
+   record the retained path in the close-reason evidence. Run
+   `scripts/definition-of-done.sh --fast` when the script exists; otherwise use the
+   language default (`go build ./... && go vet ./... && go test -short ./...`,
+   `cargo build --all-targets && cargo test`, `npm test`, or `pytest -q`). It must
+   pass. Never run this verification from the shared working tree.
 3. In that same clean extraction, run every test or command named in the bead's
    acceptance criteria. Every one must pass and its command and exit code must be
    recorded in the evidence below.
@@ -1967,7 +1969,7 @@ mod tests {
         let ordered_markers = [
             "1. Run `git status --short`",
             "2. Verify the committed state",
-            "git archive HEAD | tar -x -C $(mktemp -d)",
+            "D=$(mktemp -d) && git archive HEAD | tar -x -C \"$D\" && ( cd \"$D\" && <definition of done> ) && rm -rf \"$D\"",
             "scripts/definition-of-done.sh --fast",
             "3. In that same clean extraction",
             "4. Push the commits with `git push`",
@@ -1988,6 +1990,15 @@ mod tests {
             );
             previous = position;
         }
+        assert!(pluck
+            .content
+            .contains("remove the directory only after verification succeeds"));
+        assert!(pluck
+            .content
+            .contains("leave `\"$D\"` in place for diagnosis"));
+        assert!(pluck
+            .content
+            .contains("record the retained path in the close-reason evidence"));
         assert!(pluck.content.contains("every listed change is"));
         assert!(pluck.content.contains("yours for this bead"));
         assert!(pluck
