@@ -5221,8 +5221,10 @@ fn parse_abort_count(line: &str) -> Option<usize> {
 /// Extract labels suitable for propagation to child or related beads.
 ///
 /// Returns labels that represent project/domain context. Excludes ephemeral
-/// state labels ("in-progress", "ready", "alert", "crash", "signal-*") that
-/// are set per-bead by NEEDLE and would be inappropriate on a derived bead.
+/// state labels ("in-progress", "ready", "alert", "crash", "signal-*", and
+/// "fingerprint:*") that are set per-bead by NEEDLE and would be inappropriate
+/// on a derived bead. The result is also unique because bead backends enforce
+/// uniqueness for labels within one bead.
 pub fn extract_stitch_labels(labels: &[String]) -> Vec<String> {
     const EXCLUDED: &[&str] = &[
         "alert",
@@ -5233,14 +5235,35 @@ pub fn extract_stitch_labels(labels: &[String]) -> Vec<String> {
         "done",
         "closed",
     ];
-    labels
-        .iter()
-        .filter(|l| {
-            let lower = l.to_lowercase();
-            !EXCLUDED.contains(&lower.as_str()) && !lower.starts_with("signal-")
-        })
-        .cloned()
-        .collect()
+    let mut propagated = Vec::new();
+    for label in labels.iter().filter(|l| {
+        let lower = l.to_lowercase();
+        !EXCLUDED.contains(&lower.as_str())
+            && !lower.starts_with("signal-")
+            && !lower.starts_with("fingerprint:")
+    }) {
+        if !propagated.iter().any(|existing| existing == label) {
+            propagated.push(label.clone());
+        }
+    }
+    propagated
+}
+
+#[test]
+fn extract_stitch_labels_omits_alert_state_and_deduplicates() {
+    let labels = vec![
+        "alert".to_string(),
+        "crash".to_string(),
+        "signal-11".to_string(),
+        "fingerprint:abc123".to_string(),
+        "stitch:incident-42".to_string(),
+        "stitch:incident-42".to_string(),
+    ];
+
+    assert_eq!(
+        extract_stitch_labels(&labels),
+        vec!["stitch:incident-42".to_string()]
+    );
 }
 
 /// Extract only `stitch:`-prefixed labels for propagation to a derived bead

@@ -22,11 +22,14 @@ use std::sync::{atomic::AtomicUsize, atomic::Ordering, Mutex};
 
 /// Default labels excluded from Pluck selection when not configured.
 ///
-/// `escalation` (N-T60) marks work the fleet has already failed to move: a
-/// stalled learning loop is escalated precisely because workers did not
-/// advance it, so letting a worker claim the escalation would hand the problem
-/// back to the thing that caused it.
-const DEFAULT_EXCLUDE_LABELS: &[&str] = &["deferred", "human", "blocked", "escalation"];
+/// `alert` and `escalation` mark control-plane work for human/operator
+/// triage. `escalation` (N-T60) marks work the fleet has already failed to
+/// move: a stalled learning loop is escalated precisely because workers did
+/// not advance it, so letting a worker claim the escalation would hand the
+/// problem back to the thing that caused it. Alerts follow the same rule: an
+/// alert bead reports a worker/system failure and must not become new agent
+/// work.
+const DEFAULT_EXCLUDE_LABELS: &[&str] = &["deferred", "human", "blocked", "escalation", "alert"];
 
 /// Failure count at which an ADR-022 quarantine triggers, used when a caller
 /// does not wire the configured threshold explicitly. Production wiring passes
@@ -70,7 +73,8 @@ impl RelaxationTier {
                 "backend ready-frontier constraints",
             ],
             // Never dropped by any tier: assignee (claim ownership, ADR-018),
-            // dependency safety, blocked/deferred/human labels, active quarantine.
+            // dependency safety, blocked/deferred/human/alert labels, active
+            // quarantine.
             Self::OldestOpen => &[
                 "worker label constraints",
                 "priority constraints",
@@ -675,7 +679,8 @@ fn is_human_like_label(label: &str, exclude_labels: &[String]) -> bool {
         return false;
     }
 
-    label == "human"
+    label == "alert"
+        || label == "human"
         || label.starts_with("human:")
         || label == "human-owned"
         || label == "owner:human"
@@ -1205,7 +1210,7 @@ impl PluckStrand {
     /// Create a new PluckStrand with the given exclude labels and telemetry.
     ///
     /// If `exclude_labels` is empty, the default set (`deferred`, `human`,
-    /// `blocked`) is used.
+    /// `blocked`, `escalation`, `alert`) is used.
     pub fn new(exclude_labels: Vec<String>, telemetry: Telemetry) -> Self {
         let labels = if exclude_labels.is_empty() {
             DEFAULT_EXCLUDE_LABELS
@@ -1238,7 +1243,7 @@ impl PluckStrand {
     /// Create a new PluckStrand with the given exclude labels, split threshold, and telemetry.
     ///
     /// If `exclude_labels` is empty, the default set (`deferred`, `human`,
-    /// `blocked`) is used.
+    /// `blocked`, `escalation`, `alert`) is used.
     pub fn with_split_threshold(
         exclude_labels: Vec<String>,
         split_after_failures: u32,
@@ -4580,6 +4585,7 @@ mod tests {
                 make_bead_with_labels("deferred-bead", 1, vec!["deferred"]),
                 make_bead_with_labels("human-bead", 1, vec!["human"]),
                 make_bead_with_labels("blocked-bead", 1, vec!["blocked"]),
+                make_bead_with_labels("alert-bead", 1, vec!["alert"]),
                 make_bead_with_labels("normal-bead", 1, vec![]),
             ],
         };
@@ -5031,11 +5037,15 @@ mod tests {
         let store = UnfilteredStore {
             beads: vec![
                 make_bead_with_labels("deferred-bead", 1, vec!["deferred"]),
+                make_bead_with_labels("alert-bead", 1, vec!["alert"]),
                 make_bead_with_labels("normal-bead", 1, vec![]),
             ],
         };
 
-        let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()));
+        let strand = PluckStrand::new(
+            vec!["custom-worker-label".to_string()],
+            Telemetry::new("test-worker".to_string()),
+        );
         let result = strand.evaluate(&store, &HashSet::new()).await;
 
         match result {
@@ -5183,7 +5193,7 @@ mod tests {
         let strand = PluckStrand::new(vec![], Telemetry::new("test-worker".to_string()));
         assert_eq!(
             strand.exclude_labels,
-            vec!["deferred", "human", "blocked", "escalation"]
+            vec!["deferred", "human", "blocked", "escalation", "alert"]
         );
     }
 
@@ -6149,9 +6159,9 @@ mod tests {
 
         assert_eq!(
             record["worker_constraints"]["exclude_labels"],
-            // `escalation` joined the defaults with N-T60: an escalation is
-            // work the fleet already failed to move, so no worker claims it.
-            serde_json::json!(["deferred", "human", "blocked", "escalation"])
+            // `escalation` joined the defaults with N-T60 and `alert` is
+            // control-plane work for human triage, so no worker claims either.
+            serde_json::json!(["deferred", "human", "blocked", "escalation", "alert"])
         );
         assert_eq!(
             record["worker_constraints"]["exclude_ids"],

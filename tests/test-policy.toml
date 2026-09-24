@@ -201,7 +201,10 @@ version = 1
 # +4 re-exec agent guard and SIGTERM health exclusion (needle-f1efbb0a): the
 # re_exec_decision matrix and the SIGTERM-only adapter-health refusal plus its
 # contrast, all pure functions private to their modules.
-max_tests = 3967
+# +1 crash-alert stitch-label propagation regression (needle-b7c5aab9): alert
+# state and fingerprint labels must not be copied into a recursively created
+# crash alert, and propagated labels must remain unique for bead backends.
+max_tests = 3968
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
