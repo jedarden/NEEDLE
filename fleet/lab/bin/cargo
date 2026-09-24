@@ -14,6 +14,60 @@
 REAL_CARGO="$HOME/.cargo/bin/cargo"
 SUBCOMMAND="${1:-}"
 
+# One target dir per repo: /build/<repo> (needle-d6b685b4). A single shared
+# dir made concurrent workers invent per-run CARGO_TARGET_DIRs to dodge
+# cargo's per-dir lock; on 2026-09-24 that left 190 dirs / 830G on /data,
+# filled it to 100%, and pushed builds onto tmpfs, where 9.5G of unreclaimable
+# shmem pinned app.slice at memory.high (load 232, 94% sys CPU). Builds for one
+# repo now serialize on that lock, which also bounds their memory.
+# <repo> is the origin URL's basename, so throwaway clones share their repo's
+# dir. A value already inside /build/<repo>/ is kept. Hosts without /build
+# (lab) are left alone.
+BUILD_ROOT=/build
+if [[ -d "$BUILD_ROOT" ]]; then
+    repo_dir="."
+    target_flag=""
+    prev=""
+    for arg in "$@"; do
+        [[ "$arg" == "--" ]] && break
+        case "$prev" in
+            --manifest-path) repo_dir="$(dirname "$arg")" ;;
+            --target-dir) target_flag="$arg" ;;
+        esac
+        case "$arg" in
+            --manifest-path=*) repo_dir="$(dirname "${arg#*=}")" ;;
+            --target-dir=*) target_flag="${arg#*=}" ;;
+        esac
+        prev="$arg"
+    done
+    if toplevel=$(git -C "$repo_dir" rev-parse --show-toplevel 2>/dev/null); then
+        repo=$(git -C "$repo_dir" remote get-url origin 2>/dev/null) || repo="$toplevel"
+        repo="${repo%/}"
+        repo="${repo%.git}"
+        repo="${repo##*/}"
+        repo="${repo##*:}"
+        repo="${repo,,}"
+        if [[ -n "$repo" ]]; then
+            repo_target="$BUILD_ROOT/$repo"
+            inside_repo_target() {
+                [[ "$1" == /* ]] || return 1
+                case "$(realpath -m -- "$1")/" in
+                    "$(realpath -m -- "$repo_target")"/*) return 0 ;;
+                esac
+                return 1
+            }
+            if [[ -n "$target_flag" ]] && ! inside_repo_target "$target_flag"; then
+                echo "cargo wrapper: --target-dir $target_flag refused; build output for this repo goes in $repo_target (or a subdir of it). See needle-d6b685b4." >&2
+                exit 2
+            fi
+            if [[ -z "${CARGO_TARGET_DIR:-}" ]] || ! inside_repo_target "$CARGO_TARGET_DIR"; then
+                export CARGO_TARGET_DIR="$repo_target"
+            fi
+        fi
+    fi
+    unset repo_dir target_flag prev arg toplevel repo repo_target
+fi
+
 local_limited() {
     if systemd-run --scope --user --description="cargo $SUBCOMMAND" \
             -p CPUQuota=200% -p MemoryMax=6G -p MemorySwapMax=0 \
