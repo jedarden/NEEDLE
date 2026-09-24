@@ -24,6 +24,46 @@ All notable changes to NEEDLE are documented in this file.
   template shipped by `needle init`, the agent onboarding guide, and the new
   `docs/bead-authoring.md`.
 
+## [0.6.13] - 2026-09-24
+
+Incident release for autonomous backlog replenishment and terminal starvation
+handling. Built and published from the Forgejo main revision recorded in the
+release footer.
+
+### Changed
+
+- Selection cycles now have explicit terminal semantics. `cycle.outcome` emits
+  exactly one of `selected`, `generated`, `creator_failed`, `terminal_idle`, or
+  `terminal_starvation`; terminal starvation means open work exists but every
+  candidate is invisible to the selection waterfall, while terminal idle means
+  the frontier is genuinely empty or ineligible.
+- Low-water generation replenishes a depleted eligible-ready frontier by
+  leasing one workspace/strand generation slot. Only the lease holder may
+  bypass the generator cooldown, and the waterfall restarts when real work is
+  created. Watch `generation.gate_evaluated`, `generation.work_created`, and
+  `generation.creator_failed` for reserve, contention, and creator health.
+- NEEDLE-owned control-plane records are quarantined from target work. Alert,
+  starvation, gate, worker, generation, and other internal artifacts are not
+  selectable backlog and are not fed back into generation or mitigation.
+- Explore validates workspace shape, Git identity, backend capabilities, and
+  store readability before counting a workspace. Failed validation quarantines
+  the workspace without writing to it, and a later healthy validation restores
+  it to discovery.
+
+### Operations
+
+- Upgrade a published artifact with `needle upgrade`, then inspect
+  `needle canary --status`; the release is promoted through `needle-testing`
+  only after the configured canary passes. For a controlled local artifact,
+  use `needle upgrade --from-file PATH`.
+- Roll back the last promoted binary with `needle rollback`. Confirm the
+  `rollback.completed`, `canary.rejected`, and `worker.upgrade.*` telemetry
+  before restarting or re-enabling promotion.
+- Monitor `cycle.outcome` for `terminal_starvation`, the Pluck/Knot and
+  supervisor starvation events, `generation.*` for low-water replenishment,
+  `explore.workspace_quarantined` for workspace-health failures, and
+  `bead.quarantined` for work being removed from the eligible frontier.
+
 ## [0.6.0] - 2026-08-30
 
 Closes the GitHub #16 onboarding gap: the README quickstart is now completable
