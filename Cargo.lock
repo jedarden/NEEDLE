@@ -1351,7 +1351,7 @@ dependencies = [
 
 [[package]]
 name = "needle"
-version = "0.6.7"
+version = "0.6.8"
 dependencies = [
  "aho-corasick",
  "anyhow",
