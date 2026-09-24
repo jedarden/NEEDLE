@@ -624,6 +624,22 @@ if [ "$mode" = "unavailable-cli" ]; then
   exit 127
 fi
 
+# Hold both racing workers at the claim command. Both have already minted
+# their attempt IDs, and neither can close the only bead before its peer
+# reaches the same point.
+if [ "${1:-}" = "claim" ] && [ -n "${NEEDLE_FIXTURE_CLAIM_BARRIER:-}" ]; then
+  touch "$NEEDLE_FIXTURE_CLAIM_BARRIER/$$"
+  count=0
+  while [ "$(find "$NEEDLE_FIXTURE_CLAIM_BARRIER" -type f | wc -l)" -lt 2 ]; do
+    count=$((count + 1))
+    if [ "$count" -ge 200 ]; then
+      printf '%s\n' 'timed out waiting for both claim contenders' >&2
+      exit 124
+    fi
+    sleep 0.05
+  done
+fi
+
 if [ "${1:-}" = "--version" ] && [ "$mode" = "wrong-backend-identity" ]; then
   printf '%s\n' 'not-a-bead-cli 9.9.9'
   exit 0
@@ -1083,14 +1099,19 @@ fn subprocess_agent_timeout_carries_the_attempt_identity_and_releases() {
 fn subprocess_concurrent_claim_race_mints_distinct_attempt_ids() {
     let fixture = Fixture::new(FixtureLayout::Local);
 
-    // Two workers race for the single bead. Each mints its attempt identity
-    // BEFORE the claim mutation, so even the loser's identity is observable.
-    let first = fixture
-        .command(FixtureMode::Success)
+    let claim_barrier = fixture.root.path().join("claim-barrier");
+    fs::create_dir(&claim_barrier).expect("create claim race barrier");
+
+    // Both workers must reach the claim command before either can close the
+    // only bead. Each mints its attempt identity before that command.
+    let mut first_command = fixture.command(FixtureMode::Success);
+    let mut second_command = fixture.command(FixtureMode::Success);
+    let first = first_command
+        .env("NEEDLE_FIXTURE_CLAIM_BARRIER", &claim_barrier)
         .spawn()
         .expect("spawn first racing worker");
-    let second = fixture
-        .command(FixtureMode::Success)
+    let second = second_command
+        .env("NEEDLE_FIXTURE_CLAIM_BARRIER", &claim_barrier)
         .spawn()
         .expect("spawn second racing worker");
     let out_a = first.wait_with_output().expect("wait first racing worker");
