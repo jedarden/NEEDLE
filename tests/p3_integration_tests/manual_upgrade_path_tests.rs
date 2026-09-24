@@ -262,6 +262,8 @@ fn upgrade_check_returns_update_check_struct() {
         latest_version: "1.0.1".to_string(),
         update_available: true,
         release_notes: Some("test notes".to_string()),
+        stable_commit: None,
+        release_commit: None,
     };
 
     assert_eq!(_check.current_version, "1.0.0");

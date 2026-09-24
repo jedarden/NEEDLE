@@ -49,6 +49,13 @@ struct ReleaseAsset {
 #[allow(dead_code)]
 struct ReleaseInfo {
     tag_name: String,
+    /// Commit (or branch name) from which GitHub created the release tag.
+    ///
+    /// GitHub returns this as `target_commitish`. Releases created from an
+    /// existing tag may report a full SHA; branch names are deliberately not
+    /// treated as comparable build identities below.
+    #[serde(default)]
+    target_commitish: Option<String>,
     name: Option<String>,
     body: Option<String>,
     assets: Vec<ReleaseAsset>,
@@ -65,6 +72,10 @@ pub struct UpdateCheck {
     pub update_available: bool,
     /// Release notes (if any).
     pub release_notes: Option<String>,
+    /// Commit reported by the installed :stable binary, when readable.
+    pub stable_commit: Option<String>,
+    /// Release target commit, when GitHub reported a comparable SHA.
+    pub release_commit: Option<String>,
 }
 
 /// Result of downloading to the testing channel.
@@ -176,14 +187,97 @@ fn check_for_update_internal() -> Result<UpdateCheck> {
         .unwrap_or(&release.tag_name)
         .to_string();
 
-    let update_available = is_newer_version(&latest_version, CURRENT_VERSION);
+    let stable_metadata = stable_binary_metadata();
+    let installed_version = stable_metadata
+        .as_ref()
+        .map(|metadata| metadata.version.as_str())
+        .filter(|version| !version.is_empty() && *version != "unknown")
+        .unwrap_or(CURRENT_VERSION);
+    let stable_commit = stable_metadata
+        .as_ref()
+        .filter(|metadata| metadata.has_known_commit())
+        .map(|metadata| metadata.commit_sha.clone());
+    let release_commit = release
+        .target_commitish
+        .as_deref()
+        .and_then(normalize_commit_sha);
+    let update_available = release_update_available(
+        &latest_version,
+        installed_version,
+        stable_commit.as_deref(),
+        release_commit.as_deref(),
+    );
 
     Ok(UpdateCheck {
         current_version: CURRENT_VERSION.to_string(),
         latest_version,
         update_available,
         release_notes: release.body,
+        stable_commit,
+        release_commit,
     })
+}
+
+/// Read metadata from the installed stable binary without making an unreadable
+/// channel block a normal version check. A malformed or non-executable stable
+/// is treated as having no comparable commit, so the version comparison still
+/// works and the operator can use `needle canary --status` for diagnostics.
+fn stable_binary_metadata() -> Option<crate::build_metadata::BuildMetadata> {
+    let path = needle_home().join("bin/needle-stable");
+    if !path.is_file() {
+        return None;
+    }
+
+    match crate::build_metadata::BuildMetadata::from_binary_version(
+        &path,
+        std::time::Duration::from_secs(10),
+    ) {
+        Ok(metadata) => Some(metadata),
+        Err(error) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %error,
+                "could not read installed stable build metadata"
+            );
+            None
+        }
+    }
+}
+
+/// Normalize a release target to a comparable commit SHA.
+fn normalize_commit_sha(commit: &str) -> Option<String> {
+    let commit = commit.trim();
+    if commit.len() < 7 || !commit.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(commit.to_ascii_lowercase())
+}
+
+/// Compare release and installed build identities while accepting a short
+/// commit embedded by `build.rs` against GitHub's full target SHA.
+fn commits_match(left: &str, right: &str) -> bool {
+    let left = left.trim().to_ascii_lowercase();
+    let right = right.trim().to_ascii_lowercase();
+    left == right
+        || (left.len() >= 7 && right.starts_with(&left))
+        || (right.len() >= 7 && left.starts_with(&right))
+}
+
+/// Decide whether the latest release should be installed.
+fn release_update_available(
+    latest_version: &str,
+    installed_version: &str,
+    stable_commit: Option<&str>,
+    release_commit: Option<&str>,
+) -> bool {
+    if is_newer_version(latest_version, installed_version) {
+        return true;
+    }
+
+    latest_version == installed_version
+        && stable_commit
+            .zip(release_commit)
+            .is_some_and(|(stable, release)| !commits_match(stable, release))
 }
 
 /// Classify an upgrade error into a category for telemetry.
@@ -539,22 +633,32 @@ pub fn perform_upgrade() -> Result<PathBuf> {
 ///
 /// Returns the path to the new binary.
 pub fn perform_upgrade_with_telemetry(telemetry: Option<&Telemetry>) -> Result<PathBuf> {
-    perform_upgrade_internal(telemetry)
+    perform_upgrade_with_options(telemetry, false)
+}
+
+/// Download and install the latest release, optionally reinstalling it even
+/// when the installed version and release commit already match.
+pub fn perform_upgrade_with_options(telemetry: Option<&Telemetry>, force: bool) -> Result<PathBuf> {
+    perform_upgrade_internal(telemetry, force)
 }
 
 /// Internal implementation of perform_upgrade.
-fn perform_upgrade_internal(telemetry: Option<&Telemetry>) -> Result<PathBuf> {
+fn perform_upgrade_internal(telemetry: Option<&Telemetry>, force: bool) -> Result<PathBuf> {
     let check = check_for_update_with_telemetry(telemetry)?;
 
-    if !check.update_available {
+    if !check.update_available && !force {
         println!("Already up to date (version {})", check.current_version);
         return get_current_binary_path();
     }
 
-    println!(
-        "Upgrading from {} to {}...",
-        check.current_version, check.latest_version
-    );
+    if force && !check.update_available {
+        println!("Reinstalling release {} (--force)...", check.latest_version);
+    } else {
+        println!(
+            "Upgrading from {} to {}...",
+            check.current_version, check.latest_version
+        );
+    }
 
     let asset_name = get_asset_name()?;
     let download_url = asset_download_url(&asset_name);
@@ -1065,6 +1169,29 @@ mod tests {
     #[test]
     fn is_newer_version_equal() {
         assert!(!is_newer_version("1.0.0", "1.0.0"));
+
+        assert!(release_update_available(
+            "0.6.7",
+            "0.6.7",
+            Some("41ad4e32"),
+            Some("a3e63c85"),
+        ));
+        assert!(!release_update_available(
+            "0.6.7",
+            "0.6.7",
+            Some("a3e63c85"),
+            Some("a3e63c85f1c3b1d9b7a4e1c2d3f4a5b6c7d8e9f0"),
+        ));
+        assert!(!release_update_available(
+            "0.6.7",
+            "0.6.7",
+            Some("41ad4e32"),
+            None,
+        ));
+        assert!(release_update_available("0.6.8", "0.6.7", None, None));
+        assert_eq!(normalize_commit_sha("a3e63c85"), Some("a3e63c85".into()));
+        assert_eq!(normalize_commit_sha(" main "), None);
+        assert_eq!(normalize_commit_sha("short"), None);
     }
 
     #[test]

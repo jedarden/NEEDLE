@@ -362,6 +362,10 @@ pub enum CliCommand {
         /// Show channel status instead of running tests.
         #[arg(long)]
         status: bool,
+
+        /// Discard the unpromoted :testing candidate without touching :stable.
+        #[arg(long, conflicts_with = "status")]
+        reject: bool,
     },
 
     /// Check for and install updates from GitHub releases.
@@ -384,6 +388,10 @@ pub enum CliCommand {
         /// With --from-file: promote without running the canary suite.
         #[arg(long, requires = "from_file")]
         skip_canary: bool,
+
+        /// Reinstall the latest GitHub release even when it is already current.
+        #[arg(long)]
+        force: bool,
     },
 
     /// Rollback to the previous :stable binary.
@@ -752,12 +760,13 @@ pub fn run() -> Result<()> {
         CliCommand::BeadBackendBind { backend, workspace } => {
             cmd_bead_backend_bind(&backend, &workspace)
         }
-        CliCommand::Canary { status } => cmd_canary(status),
+        CliCommand::Canary { status, reject } => cmd_canary(status, reject),
         CliCommand::Upgrade {
             check,
             from_file,
             skip_canary,
-        } => cmd_upgrade(check, from_file, skip_canary),
+            force,
+        } => cmd_upgrade(check, from_file, skip_canary, force),
         CliCommand::Rollback => cmd_rollback(),
         CliCommand::Gates { workspace } => cmd_gates(workspace),
         CliCommand::Reflect { workspace, force } => cmd_reflect(workspace, force),
@@ -8163,8 +8172,9 @@ fn shell_escape(s: &str) -> String {
 // canary, upgrade, rollback
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// `needle canary` — run canary tests or show channel status.
-fn cmd_canary(show_status: bool) -> Result<()> {
+/// `needle canary` — run canary tests, show channel status, or discard a
+/// stuck unpromoted candidate.
+fn cmd_canary(show_status: bool, reject_candidate: bool) -> Result<()> {
     let mut config = ConfigLoader::load_global()?;
     // `canary` is commonly enabled for one command while the fleet-wide
     // self-modification switch remains off. `load_global()` intentionally
@@ -8206,15 +8216,34 @@ fn cmd_canary(show_status: bool) -> Result<()> {
         return Ok(());
     }
 
-    if !config.self_modification.enabled {
-        bail!("self-modification is disabled — set self_modification.enabled = true in config");
-    }
-
     let tel = crate::telemetry::Telemetry::from_config("canary".to_string(), &config.telemetry)
         .unwrap_or_else(|e| {
             tracing::warn!(error = %e, "hook telemetry init failed, falling back");
             crate::telemetry::Telemetry::new("canary".to_string())
         });
+
+    if reject_candidate {
+        let had_candidate = runner.testing_binary().exists();
+        runner
+            .reject()
+            .context("failed to discard the :testing binary")?;
+        tel.emit(
+            crate::telemetry::EventKind::CanaryRejected {
+                reason: "rejected by operator via needle canary --reject".to_string(),
+            },
+            chrono::Utc::now(),
+        )?;
+        if had_candidate {
+            println!("Testing binary discarded. :stable is unchanged.");
+        } else {
+            println!("No :testing binary present — nothing to discard.");
+        }
+        return Ok(());
+    }
+
+    if !config.self_modification.enabled {
+        bail!("self-modification is disabled — set self_modification.enabled = true in config");
+    }
 
     let suite_id = runner.testing_binary().display().to_string();
     tel.emit(
@@ -8320,7 +8349,12 @@ fn cmd_canary(show_status: bool) -> Result<()> {
 }
 
 /// `needle upgrade` — check for and install updates.
-fn cmd_upgrade(check_only: bool, from_file: Option<PathBuf>, skip_canary: bool) -> Result<()> {
+fn cmd_upgrade(
+    check_only: bool,
+    from_file: Option<PathBuf>,
+    skip_canary: bool,
+    force: bool,
+) -> Result<()> {
     if let Some(path) = from_file {
         let stable = crate::upgrade::perform_upgrade_from_file(&path, skip_canary)?;
         println!("Stable binary: {}", stable.display());
@@ -8342,9 +8376,17 @@ fn cmd_upgrade(check_only: bool, from_file: Option<PathBuf>, skip_canary: bool) 
                 "Update available: {} → {}",
                 check.current_version, check.latest_version
             );
+            if let (Some(stable), Some(release)) = (&check.stable_commit, &check.release_commit) {
+                println!("  :stable is build {stable}; release is build {release}");
+            }
             if let Some(notes) = &check.release_notes {
                 println!("\nRelease notes:\n{notes}");
             }
+        } else if force {
+            println!(
+                "Already at version {} — --force will reinstall the release build",
+                check.current_version
+            );
         } else {
             println!("Already up to date (version {})", check.current_version);
         }
@@ -8352,7 +8394,7 @@ fn cmd_upgrade(check_only: bool, from_file: Option<PathBuf>, skip_canary: bool) 
     }
 
     // For full upgrade, use the telemetry version so we emit events
-    crate::upgrade::perform_upgrade_with_telemetry(Some(&tel))?;
+    crate::upgrade::perform_upgrade_with_options(Some(&tel), force)?;
     Ok(())
 }
 
@@ -9589,11 +9631,22 @@ WORKSPACE                                  R1 RETRY  R2 DECOMPOSE  R3 QUARANTINE
         let cli = Cli::try_parse_from(["needle", "canary", "--status"]);
         assert!(cli.is_ok(), "needle canary --status should parse");
         if let Ok(Cli {
-            command: CliCommand::Canary { status },
+            command: CliCommand::Canary { status, reject },
         }) = cli
         {
             assert!(status);
+            assert!(!reject);
         }
+        let cli = Cli::try_parse_from(["needle", "canary", "--reject"]);
+        assert!(cli.is_ok(), "needle canary --reject should parse: {cli:?}");
+        if let Ok(Cli {
+            command: CliCommand::Canary { status, reject },
+        }) = cli
+        {
+            assert!(!status);
+            assert!(reject);
+        }
+        assert!(Cli::try_parse_from(["needle", "canary", "--status", "--reject"]).is_err());
     }
 
     #[test]
@@ -9633,10 +9686,12 @@ WORKSPACE                                  R1 RETRY  R2 DECOMPOSE  R3 QUARANTINE
                     check,
                     from_file,
                     skip_canary,
+                    force,
                 },
         }) = cli
         {
             assert!(!check);
+            assert!(!force);
             assert_eq!(
                 from_file.as_deref(),
                 Some(Path::new("/tmp/needle-build/needle"))
@@ -9648,6 +9703,14 @@ WORKSPACE                                  R1 RETRY  R2 DECOMPOSE  R3 QUARANTINE
         assert!(
             Cli::try_parse_from(["needle", "upgrade", "--check", "--from-file", "/x"]).is_err()
         );
+        let cli = Cli::try_parse_from(["needle", "upgrade", "--force"]);
+        assert!(cli.is_ok(), "needle upgrade --force should parse: {cli:?}");
+        if let Ok(Cli {
+            command: CliCommand::Upgrade { force, .. },
+        }) = cli
+        {
+            assert!(force);
+        }
     }
 
     #[test]
