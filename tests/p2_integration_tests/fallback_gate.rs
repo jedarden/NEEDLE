@@ -652,7 +652,7 @@ fn fallback_marker_selection_covers_all_language_branches_and_fallthrough() {
 async fn builtin_go_gates_pass_in_gitless_clean_extractions() {
     let _environment = IsolatedEnvironment::new(false);
 
-    for (id, config, expected_gate) in [
+    for (id, mut config, expected_gate) in [
         (
             "default-go-clean",
             config_with_default_gates(),
@@ -664,9 +664,17 @@ async fn builtin_go_gates_pass_in_gitless_clean_extractions() {
             "fallback_go",
         ),
     ] {
+        // Real Go compilation runs beside four other nextest shards in CI.
+        // Keep the gate's short timeout coverage in its dedicated test; this
+        // integration case needs enough time to finish a cold module build.
+        config.validation.outcome_timeout_seconds = 120;
         let workspace = go_module_fixture(true);
         let (result, actions, events) = run_real_go_fixture(config, workspace.path(), id).await;
-        assert_eq!(result.outcome, needle::types::Outcome::Success, "{id}");
+        assert_eq!(
+            result.outcome,
+            needle::types::Outcome::Success,
+            "{id}: actions={actions:?}; events={events}"
+        );
         assert_eq!(result.bead_action, BeadAction::Closed, "{id}");
         assert!(actions.contains(&StoreAction::Flush), "{id}: {actions:?}");
         assert!(
