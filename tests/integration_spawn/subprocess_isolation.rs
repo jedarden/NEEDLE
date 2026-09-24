@@ -5,31 +5,18 @@
 //! `needle` subprocess constructor in the test sources and requires both
 //! overrides on the same function. The shared `IsolatedChildEnv` helper is
 //! checked separately by its runtime regression test in `isolation.rs`.
+//!
+//! Constructor detection is alias-aware: `use tokio::process::Command as
+//! WorkerCommand;` followed by `WorkerCommand::new(...)` is scanned exactly
+//! like a plain `Command::new(...)`, so an import alias cannot hide a launch
+//! from this audit. The negative self-tests below pin that behavior — if the
+//! detector ever stops recognizing a launch shape, they fail instead of the
+//! fleet's guard silently passing everything.
 
 use std::path::{Path, PathBuf};
 
 #[test]
 fn needle_subprocesses_pin_home_and_explore_root() {
-    let synthetic = r#"
-        fn literal() {
-            let _ = Command::new("needle");
-        }
-        fn aliased() {
-            let binary = needle_binary_path();
-            let _ = Command::new(binary);
-        }
-        async fn tokio_aliased() {
-            let binary = needle_binary_path();
-            let _ = TokioCommand::new(binary);
-        }
-    "#;
-    let synthetic_masked = mask_non_code(synthetic);
-    assert_eq!(
-        needle_constructors(synthetic, &synthetic_masked).len(),
-        3,
-        "the audit must recognize literal, aliased, and async NEEDLE launches"
-    );
-
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut violations = Vec::new();
 
@@ -37,20 +24,12 @@ fn needle_subprocesses_pin_home_and_explore_root() {
         let source = std::fs::read_to_string(&file)
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", file.display()));
         let masked = mask_non_code(&source);
-        for (offset, function) in needle_constructors(&source, &masked) {
-            let body = function_source(&source, &masked, offset);
-            let has_home = body.contains(".env(\"HOME\"");
-            let has_explore_root = body.contains("NEEDLE_STRANDS__EXPLORE__WORKSPACE_ROOT")
-                || body.contains(".env(\"NEEDLE_STRANDS__EXPLORE__ENABLED\", \"false\")")
-                || body.contains("enabled: false");
-            if !has_home || !has_explore_root {
-                violations.push(format!(
-                    "{}:{}: `{function}` must set HOME and pin or disable Explore",
-                    file.strip_prefix(root).unwrap_or(&file).display(),
-                    line_number(&source, offset),
-                ));
-            }
-        }
+        let label = file
+            .strip_prefix(root)
+            .unwrap_or(&file)
+            .display()
+            .to_string();
+        violations.extend(audit_source(&label, &source, &masked));
     }
 
     assert!(
@@ -60,15 +39,190 @@ fn needle_subprocesses_pin_home_and_explore_root() {
     );
 }
 
-fn needle_constructors(source: &str, masked: &str) -> Vec<(usize, String)> {
+#[test]
+fn guard_recognizes_literal_and_aliased_needle_launches() {
+    let synthetic = r#"
+        use tokio::process::Command as WorkerCommand;
+        fn literal() {
+            let _ = Command::new("needle");
+        }
+        fn aliased() {
+            let binary = needle_binary_path();
+            let _ = Command::new(binary);
+        }
+        fn worker() {
+            let _ = WorkerCommand::new(needle_binary_path());
+        }
+    "#;
+    let synthetic_masked = mask_non_code(synthetic);
+    assert_eq!(
+        subprocess_constructors(synthetic, &synthetic_masked).len(),
+        3,
+        "the audit must recognize literal, aliased-path, and import-aliased NEEDLE launches"
+    );
+
+    let unrelated = r#"
+        fn other() {
+            let _ = TempDir::new();
+        }
+    "#;
+    assert_eq!(
+        subprocess_constructors(unrelated, &mask_non_code(unrelated)).len(),
+        0,
+        "constructors of unrelated types must not be audited"
+    );
+}
+
+#[test]
+fn guard_rejects_a_launch_without_isolation_overrides() {
+    let unisolated = r#"
+        fn bare_launch() {
+            let output = Command::new(needle_binary_path())
+                .args(["version"])
+                .output();
+        }
+    "#;
+    let violations = audit_source("synthetic.rs", unisolated, &mask_non_code(unisolated));
+    assert_eq!(
+        violations.len(),
+        1,
+        "an unpinned launch must be flagged: {violations:?}"
+    );
+    assert!(
+        violations[0].contains("must set HOME and pin or disable Explore"),
+        "the violation must name both missing overrides: {}",
+        violations[0]
+    );
+}
+
+#[test]
+fn guard_accepts_pinned_and_disabled_explore_variants() {
+    let pinned_root = r#"
+        fn pinned() {
+            let mut command = Command::new(needle_binary_path());
+            command
+                .env("HOME", home.path())
+                .env("NEEDLE_STRANDS__EXPLORE__WORKSPACE_ROOT", home.path());
+        }
+    "#;
+    assert!(
+        audit_source("synthetic.rs", pinned_root, &mask_non_code(pinned_root)).is_empty(),
+        "a launch pinning HOME and the Explore root must pass"
+    );
+
+    let disabled = r#"
+        fn disabled() {
+            let mut command = WorkerCommand::new(needle_binary_path());
+            command
+                .env("HOME", home.path())
+                .env("NEEDLE_STRANDS__EXPLORE__ENABLED", "false");
+        }
+    "#;
+    assert!(
+        audit_source("synthetic.rs", disabled, &mask_non_code(disabled)).is_empty(),
+        "a launch disabling Explore must pass"
+    );
+}
+
+#[test]
+fn guard_rejects_an_import_aliased_launch_without_overrides() {
+    // The alias alone must not hide the launch: `Command as WorkerCommand`
+    // puts `WorkerCommand::new` under the same audit as `Command::new`.
+    let aliased = r#"
+        use tokio::process::Command as WorkerCommand;
+
+        fn aliased_bare_launch() {
+            let output = WorkerCommand::new(needle_binary_path())
+                .args(["version"])
+                .output();
+        }
+    "#;
+    let violations = audit_source("synthetic.rs", aliased, &mask_non_code(aliased));
+    assert_eq!(
+        violations.len(),
+        1,
+        "an import-aliased unpinned launch must still be flagged: {violations:?}"
+    );
+}
+
+/// Audit one source file: every needle subprocess constructor must pin HOME
+/// and pin or disable Explore within the same function.
+fn audit_source(label: &str, source: &str, masked: &str) -> Vec<String> {
+    subprocess_constructors(source, masked)
+        .into_iter()
+        .filter_map(|(offset, constructor)| {
+            let body = function_source(source, masked, offset);
+            let has_home = body.contains(".env(\"HOME\"");
+            let has_explore_root = body.contains("NEEDLE_STRANDS__EXPLORE__WORKSPACE_ROOT")
+                || body.contains(".env(\"NEEDLE_STRANDS__EXPLORE__ENABLED\", \"false\")")
+                || body.contains("enabled: false");
+            if has_home && has_explore_root {
+                return None;
+            }
+            let line = line_number(source, offset);
+            Some(format!(
+                "{label}:{line}: `{constructor}` must set HOME and pin or disable Explore"
+            ))
+        })
+        .collect()
+}
+
+/// Every `Command`-family constructor site in `source`: `Command::new` plus
+/// any `use ...::Command as <Alias>` import alias's `<Alias>::new`.
+fn command_aliases(masked: &str) -> Vec<String> {
+    let mut aliases = Vec::new();
+    let mut cursor = 0;
+    while let Some(relative) = masked[cursor..].find("Command as ") {
+        let name_start = cursor + relative;
+        let alias_start = name_start + "Command as ".len();
+        // The pattern must begin an identifier: `SubCommand as X` must not
+        // register `X` for the wrong type.
+        let begins_identifier = name_start == 0
+            || !masked
+                .as_bytes()
+                .get(name_start - 1)
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_');
+        if begins_identifier {
+            let alias = masked[alias_start..]
+                .chars()
+                .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
+                .collect::<String>();
+            if !alias.is_empty() && alias != "Command" && !aliases.contains(&alias) {
+                aliases.push(alias);
+            }
+        }
+        cursor = alias_start;
+    }
+    aliases
+}
+
+fn subprocess_constructors(source: &str, masked: &str) -> Vec<(usize, String)> {
+    let aliases = command_aliases(masked);
     let mut constructors = Vec::new();
     let mut cursor = 0;
-    while let Some((relative, constructor)) = find_command_constructor(&masked[cursor..]) {
-        let start = cursor + relative;
-        let open = start + constructor.len();
-        let end = matching_delimiter(masked, open, b'(', b')');
-        let argument = &source[open..end];
-        let function = function_source(source, masked, start);
+    while let Some(relative) = masked[cursor..].find("::new(") {
+        let open = cursor + relative;
+        // Walk back over the type name so `TokioCommand::new(` is attributed
+        // to its own identifier rather than to the `Command::new(` substring.
+        let name_end = open;
+        let name_start = masked[..name_end]
+            .char_indices()
+            .rev()
+            .take_while(|(_, character)| character.is_ascii_alphanumeric() || *character == '_')
+            .map(|(index, _)| index)
+            .last()
+            .unwrap_or(name_end);
+        cursor = open + "::new(".len();
+        if name_start == name_end {
+            continue;
+        }
+        let type_name = &masked[name_start..name_end];
+        if type_name != "Command" && !aliases.iter().any(|alias| alias == type_name) {
+            continue;
+        }
+        let argument_end = matching_delimiter(masked, open + "::new(".len() - 1, b'(', b')');
+        let argument = &source[open + "::new(".len() - 1..argument_end];
+        let function = function_source(source, masked, name_start);
         let is_transform = argument.contains("needle_transform");
         let direct_needle_path = argument.contains("CARGO_BIN_EXE_needle")
             || argument.contains("NEXTEST_BIN_EXE_needle")
@@ -92,29 +246,11 @@ fn needle_constructors(source: &str, masked: &str) -> Vec<(usize, String)> {
             && function.contains("--bin")
             && function.contains("\"needle\"");
         if !is_transform && (direct_needle_path || function_resolves_needle || cargo_runs_needle) {
-            constructors.push((start, "Command::new".to_string()));
+            constructors.push((name_start, format!("{type_name}::new")));
         }
-        cursor = end;
     }
 
     constructors
-}
-
-/// Return the next process-command constructor, including aliases used by
-/// synchronous and asynchronous integration tests. Keeping this list explicit
-/// avoids treating unrelated `Type::new(...)` calls as subprocess launches.
-fn find_command_constructor(source: &str) -> Option<(usize, &'static str)> {
-    [
-        "tokio::process::Command::new",
-        "std::process::Command::new",
-        "ProcessCommand::new",
-        "AsyncCommand::new",
-        "TokioCommand::new",
-        "Command::new",
-    ]
-    .into_iter()
-    .filter_map(|constructor| source.find(constructor).map(|offset| (offset, constructor)))
-    .min_by_key(|(offset, _)| *offset)
 }
 
 fn function_source<'a>(source: &'a str, masked: &str, offset: usize) -> &'a str {

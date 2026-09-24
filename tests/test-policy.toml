@@ -282,9 +282,10 @@ contract = 208
 # (needle-eba55bfc).
 # +1 immediate-exit agent quarantine loop (needle-adbde195).
 # +2 subprocess HOME/Explore isolation contracts (needle-11c4fb97).
+# +4 alias-aware subprocess-guard contracts (needle-b946b519).
 # +10 agent-event schema conformance contracts (needle-6fd2b6bd), all in the
 # integration_spawn harness above.
-e2e = 824
+e2e = 828
 soak = 0
 fuzz = 0
 
@@ -297,6 +298,7 @@ tier = "e2e"
 # +2 status/doctor integration contracts (needle-e896b565): oversized-root
 # doctor exit and root-to-C transitive pinning.
 # +2 subprocess HOME/Explore isolation contracts (needle-11c4fb97).
+# +4 alias-aware subprocess-guard contracts (needle-b946b519).
 # +6 fake-CLI invocation, exit-status, and failure contracts for the
 # documented built-in adapter matrix (needle-55a93f6b): opencode/codex/
 # aider/generic templates driven through the real dispatch spawn path.
@@ -312,7 +314,7 @@ tier = "e2e"
 # rather than splitting the schema contract across tiers.
 # Each adapter fixture also carries malformed, missing-type, and future-type
 # lines whose absence from normalized stdout is asserted by that same suite.
-max_tests = 419
+max_tests = 423
 owner = "component:process-integration"
 
 [[harness]]
