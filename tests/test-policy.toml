@@ -176,10 +176,11 @@ version = 1
 # workspaces list recursively admits a newly created nested workspace, while a
 # non-empty list keeps the same newly created workspace out of scope.
 # +3 for fleet process/session reconciliation contracts (needle-a4ac6c32).
-# +20 for the ADR-001 axis-3 limit and version-handshake coverage
-# (needle-6b860c6e): 14 descriptor-validation and version-quirk suites in
-# src/bead_store/backend.rs, 5 legacy-workspace handshake warning suites in
-# src/bead_store/version_handshake.rs (they assert captured tracing output,
+# +22 for the ADR-001 axis-3 limit and version-handshake coverage
+# (needle-6b860c6e, needle-6019f86b): 14 descriptor-validation and
+# version-quirk suites in src/bead_store/backend.rs, 7 backend-version
+# handshake warning suites in src/bead_store/version_handshake.rs (they assert
+# captured tracing output,
 # which only the unit tier can intercept), and 1 default-limit truncation
 # contract in src/bead_store/cli_store.rs built on an argument-sensitive
 # ProcessRunner.
@@ -209,7 +210,7 @@ version = 1
 # crash alert, and propagated labels must remain unique for bead backends.
 # +2 Pluck starvation telemetry contract tests (needle-e9f9bc50): exact
 # event payload shape and target-workspace write isolation.
-max_tests = 3972
+max_tests = 3974
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
