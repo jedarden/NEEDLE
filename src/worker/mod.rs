@@ -4499,13 +4499,19 @@ impl Worker {
             predispatch_dirty_paths = dirty_paths;
 
             // Now we're back in the agent.dispatch span. Record the execution results.
-            tracing::Span::current().record("needle.agent.pid", result.pid);
+            tracing::Span::current().record("needle.agent.pid", i64::from(result.pid));
             tracing::Span::current().record("needle.agent.exit_code", result.exit_code);
             if let Some(input_tokens) = exec_tokens.input_tokens {
-                tracing::Span::current().record("gen_ai.usage.input_tokens", input_tokens);
+                tracing::Span::current().record(
+                    "gen_ai.usage.input_tokens",
+                    i64::try_from(input_tokens).unwrap_or(i64::MAX),
+                );
             }
             if let Some(output_tokens) = exec_tokens.output_tokens {
-                tracing::Span::current().record("gen_ai.usage.output_tokens", output_tokens);
+                tracing::Span::current().record(
+                    "gen_ai.usage.output_tokens",
+                    i64::try_from(output_tokens).unwrap_or(i64::MAX),
+                );
             }
 
             // Set agent.dispatch span status based on exit code: 0 = Ok, non-zero = Error

@@ -1634,16 +1634,22 @@ impl Dispatcher {
         let agent_provider = adapter.provider.clone();
         match &result {
             Ok(exec) => {
-                tracing::Span::current().record("needle.agent.pid", exec.pid);
+                tracing::Span::current().record("needle.agent.pid", i64::from(exec.pid));
                 tracing::Span::current().record("needle.agent.exit_code", exec.exit_code);
 
                 // Extract token usage and set gen_ai.usage attributes
                 let usage = extract_tokens(&adapter.token_extraction, &exec.stdout, &exec.stderr);
                 if let Some(input_tokens) = usage.input_tokens {
-                    tracing::Span::current().record("gen_ai.usage.input_tokens", input_tokens);
+                    tracing::Span::current().record(
+                        "gen_ai.usage.input_tokens",
+                        i64::try_from(input_tokens).unwrap_or(i64::MAX),
+                    );
                 }
                 if let Some(output_tokens) = usage.output_tokens {
-                    tracing::Span::current().record("gen_ai.usage.output_tokens", output_tokens);
+                    tracing::Span::current().record(
+                        "gen_ai.usage.output_tokens",
+                        i64::try_from(output_tokens).unwrap_or(i64::MAX),
+                    );
                 }
 
                 // Set span status: Ok for exit_code 0, Error otherwise
