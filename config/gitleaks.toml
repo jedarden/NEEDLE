@@ -662,6 +662,12 @@ regexes = [
     '''(?i)\bAPI[ \t]+digest:[ \t]*[0-9a-f]{64}\b''',
 ]
 [[rules.allowlists]]
+description = "NEEDLE noncredential apiserver measurements in checkpoint notes"
+regexTarget = "match"
+regexes = [
+    '''(?i)^apiserver[ \t]+measurements:''',
+]
+[[rules.allowlists]]
 description = "Allowlist for Generic API Keys"
 regexTarget = "match"
 regexes = [
