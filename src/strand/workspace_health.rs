@@ -174,6 +174,13 @@ pub enum QuarantineTransition {
     Silent,
 }
 
+impl QuarantineTransition {
+    /// Whether this transition should produce an operator-facing diagnostic.
+    pub fn should_emit_diagnostic(self) -> bool {
+        !matches!(self, Self::Silent)
+    }
+}
+
 impl QuarantineRegistry {
     /// Check if a workspace is quarantined.
     #[allow(dead_code)] // registry API kept whole for the strands that will read it
@@ -1121,21 +1128,21 @@ mod tests {
             details: "no binding".to_string(),
         };
 
-        assert_eq!(
-            registry.record_failure(ws, reason.clone()),
-            QuarantineTransition::Report
-        );
+        let first = registry.record_failure(ws, reason.clone());
+        assert_eq!(first, QuarantineTransition::Report);
+        assert!(first.should_emit_diagnostic());
         for _ in 2..QUARANTINE_REMINDER_INTERVAL {
-            assert_eq!(
-                registry.record_failure(ws, reason.clone()),
-                QuarantineTransition::Silent
-            );
+            let transition = registry.record_failure(ws, reason.clone());
+            assert_eq!(transition, QuarantineTransition::Silent);
+            assert!(!transition.should_emit_diagnostic());
         }
+        let reminder = registry.record_failure(ws, reason);
         assert_eq!(
-            registry.record_failure(ws, reason),
+            reminder,
             QuarantineTransition::Reminder,
             "the tenth consecutive failure re-reports"
         );
+        assert!(reminder.should_emit_diagnostic());
     }
 
     #[test]

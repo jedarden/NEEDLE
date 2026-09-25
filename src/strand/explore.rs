@@ -1188,6 +1188,10 @@ impl ExploreStrand {
             (transition, failures)
         };
 
+        if !transition.should_emit_diagnostic() {
+            return;
+        }
+
         tracing::warn!(
             worker = %self.qualified_id,
             workspace = %workspace.display(),
@@ -1196,10 +1200,6 @@ impl ExploreStrand {
             transient = reason.is_transient(),
             "workspace failed Explore health validation"
         );
-
-        if transition == workspace_health::QuarantineTransition::Silent {
-            return;
-        }
 
         let explanation = match &reason {
             workspace_health::QuarantineReason::BackendConfigInvalid { details }
