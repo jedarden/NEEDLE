@@ -303,7 +303,10 @@ contract = 208
 # The four adapter contracts above also consume four e2e growth slots.
 # +8 for the ADR-021 bead-forge removal-contract lane (needle-6ad0773e),
 # all in the integration_spawn harness below.
-e2e = 852
+# +2 adapter dispatch-routing contracts (needle-e7160119): README model
+# families resolve to the OpenCode/Codex/Aider built-ins and dispatch their
+# own fake CLI, and unrouted models fall back to the default adapter.
+e2e = 854
 soak = 0
 fuzz = 0
 
@@ -344,7 +347,11 @@ tier = "e2e"
 # config resolution that refuses bead-forge, and the bead-rs positive
 # controls. The contract is the process boundary an operator hits, which
 # only the spawned binary can observe.
-max_tests = 436
+# +2 adapter dispatch-routing contracts (needle-e7160119): routing rules
+# resolve qwen/gpt/sonnet models to the shipped opencode/codex/aider
+# built-ins whose CLIs then run with the prompt delivered by each input
+# method, and unrouted models fall back to the configured default adapter.
+max_tests = 438
 owner = "component:process-integration"
 
 [[harness]]

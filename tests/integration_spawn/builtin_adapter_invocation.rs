@@ -14,6 +14,11 @@
 //!    stdout; a non-zero exit is reported verbatim.
 //! 3. **Failures** — a CLI named by the template but missing from PATH
 //!    surfaces as exit 127 with "command not found" on stderr.
+//! 4. **Routing** — model→adapter routing rules resolve the README's
+//!    non-Claude model families (qwen, gpt, sonnet) to the OpenCode, Codex,
+//!    and Aider adapters, the routed adapter dispatches its own CLI with the
+//!    prompt delivered by its input method, and unmatched models fall back
+//!    to the configured default adapter.
 //!
 //! The fake CLIs resolve through `PATH`, so tests that prepend a fake bin
 //! directory serialize on a shared mutex: concurrent `set_var` from sibling
@@ -31,6 +36,7 @@ use tokio::sync::Mutex;
 
 use needle::bead_store::{BeadStore, Filters, RepairReport};
 use needle::claim::{ClaimIdentity, ResolvedStoreContext};
+use needle::config::{AgentConfig, Config, RoutingConfig, RoutingRule};
 use needle::dispatch::{
     builtin_adapters, extract_tokens, AgentAdapter, DispatchContext, Dispatcher, ExecutionResult,
     TokenExtraction, UsageFormat,
@@ -935,4 +941,161 @@ async fn missing_agent_cli_reports_command_not_found() {
         !fake.log.exists(),
         "the fake CLI must not have been invoked"
     );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Dispatch routing: README-named models reach the OpenCode/Codex/Aider adapters
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// The model→adapter routing a mixed fleet from the README's parallel-workers
+/// diagram implies: qwen models on OpenCode, gpt models on Codex CLI, sonnet
+/// models on Aider, and everything unmatched on the default Claude adapter.
+fn fleet_routing() -> RoutingConfig {
+    RoutingConfig {
+        rules: vec![
+            RoutingRule {
+                match_model: "qwen.*".to_string(),
+                adapter: "opencode".to_string(),
+            },
+            RoutingRule {
+                match_model: "gpt-.*".to_string(),
+                adapter: "codex".to_string(),
+            },
+            RoutingRule {
+                match_model: ".*sonnet.*".to_string(),
+                adapter: "aider".to_string(),
+            },
+        ],
+        default_adapter: Some("claude".to_string()),
+        strict: false,
+    }
+}
+
+/// A config carrying [`fleet_routing`] over the README's recommended default.
+fn fleet_config() -> Config {
+    Config {
+        agent: AgentConfig {
+            default: "claude".to_string(),
+            args: vec![],
+            timeout: 3600,
+            adapters_dir: PathBuf::from("/nonexistent"),
+            routing: Some(fleet_routing()),
+            evidence_routing: Default::default(),
+        },
+        ..Default::default()
+    }
+}
+
+/// A dispatcher wiring the shipped built-in adapters the README names, with
+/// the fake-CLI log destination injected through each adapter's own
+/// environment map (the same mechanism the invocation tests above use).
+fn fleet_dispatcher(fake: &FakeCli) -> Dispatcher {
+    let mut adapters = HashMap::new();
+    for name in ["claude", "opencode", "codex", "aider"] {
+        let mut adapter = builtin_adapters()
+            .into_iter()
+            .find(|a| a.name == name)
+            .unwrap_or_else(|| panic!("builtin adapter {name} missing from the registry"))
+            .clone();
+        adapter.output_transform = None;
+        adapter
+            .environment
+            .insert(LOG_ENV.to_string(), fake.log.display().to_string());
+        adapters.insert(name.to_string(), adapter);
+    }
+    Dispatcher::with_adapters(adapters, Telemetry::new(MATRIX_WORKER.to_string()), 3600)
+        .with_worker_id(MATRIX_WORKER.to_string())
+}
+
+#[tokio::test]
+async fn readme_models_route_to_and_dispatch_the_named_adapters() {
+    let _path_lock = FAKE_PATH_LOCK.lock().await;
+    let fake = FakeCli::new();
+    let _path = FakePathGuard::prepend(fake._bin_dir.path());
+    let dispatcher = fleet_dispatcher(&fake);
+    let config = fleet_config();
+
+    // (model, expected adapter, the flag only that adapter's CLI receives).
+    // The model families mirror the README's parallel-worker names:
+    // qwen→OpenCode, gpt→Codex, sonnet→Aider. The sonnet case also pins that
+    // a matching rule beats `default_adapter` ("claude"), the first-match
+    // contract the Claude routing tests pin from the other side.
+    let cases: [(&str, &str, &str); 3] = [
+        ("qwen3.6-35b", "opencode", "--prompt-file"),
+        ("gpt-5.6-terra", "codex", "exec"),
+        ("claude-sonnet-4-6", "aider", "--message"),
+    ];
+
+    for (model, expected_adapter, distinguishing_flag) in cases {
+        let routed = dispatcher.resolve_adapter_name(model, &config);
+        assert_eq!(
+            routed, expected_adapter,
+            "model {model} must route to the {expected_adapter} adapter"
+        );
+
+        let bead_id = format!("needle-matrix-route-{expected_adapter}");
+        let workspace = unique_workspace();
+        let adapter_ref = dispatcher
+            .adapter(&routed)
+            .expect("routed adapter must be wired in the registry");
+        let result = dispatcher
+            .dispatch_with_context(
+                &BeadId::from(bead_id.as_str()),
+                &test_prompt(&bead_id),
+                adapter_ref,
+                workspace.path(),
+                &matrix_context(workspace.path()),
+            )
+            .await
+            .expect("routed dispatch should complete");
+
+        assert_eq!(
+            result.exit_code, 0,
+            "{expected_adapter} routed dispatch exits 0"
+        );
+        assert!(
+            result
+                .stdout
+                .contains(&format!("fake-{expected_adapter}-ok")),
+            "routing must land on the {expected_adapter} CLI, not another adapter's"
+        );
+
+        let expected_prompt = format!("matrix smoke prompt for {bead_id}");
+        let lines = read_log(&fake);
+        let args = log_values(&lines, "arg");
+        assert!(
+            args.contains(&distinguishing_flag),
+            "{expected_adapter} invocation must carry {distinguishing_flag}"
+        );
+        match expected_adapter {
+            // OpenCode's file input method hands the prompt over as a file.
+            "opencode" => assert!(
+                log_values(&lines, "file_content").contains(&expected_prompt.as_str()),
+                "opencode must receive the prompt through its prompt file"
+            ),
+            // Codex's args template and Aider's --message render the prompt
+            // itself into argv.
+            _ => assert!(
+                args.contains(&expected_prompt.as_str()),
+                "{expected_adapter} must receive the rendered prompt in argv"
+            ),
+        }
+    }
+}
+
+#[test]
+fn unrouted_models_fall_back_to_the_configured_default_adapter() {
+    // Adapters are wired for registry realism, but nothing spawns and PATH is
+    // untouched, so no PATH lock is needed.
+    let fake = FakeCli::new();
+    let dispatcher = fleet_dispatcher(&fake);
+    let config = fleet_config();
+
+    for model in ["llama-3-70b", "mistral-large", "deepseek-coder"] {
+        assert_eq!(
+            dispatcher.resolve_adapter_name(model, &config),
+            "claude",
+            "unrouted model {model} must land on the configured default adapter"
+        );
+    }
 }
