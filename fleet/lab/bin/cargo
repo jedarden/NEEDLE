@@ -3,12 +3,20 @@
 #
 # Tracked copy of the wrapper deployed at ~/.local/bin/cargo on lab and
 # codinghome (upstream lives in operator dotfiles; no repo claimed it as of
-# 2026-09-10). Only delta vs upstream: `-p RuntimeMaxSec=14400` below —
-# needle-3d5c65d8. The 2026-09-03 lab CPU saturation was five hung SIGIL
-# cargo-test binaries living in unbounded scopes for 14-24 days (one spun at
-# ~7 effective cores). RuntimeMaxSec makes systemd reap any orphaned scope
-# after 4h instead of never; a legitimate build under CPUQuota=200% has
-# hours of headroom, and CI-offloaded `cargo test` never reaches this path.
+# 2026-09-10). Deltas vs upstream:
+#   - `-p RuntimeMaxSec=14400` — needle-3d5c65d8. The 2026-09-03 lab CPU
+#     saturation was five hung SIGIL cargo-test binaries living in unbounded
+#     scopes for 14-24 days (one spun at ~7 effective cores). RuntimeMaxSec
+#     makes systemd reap any orphaned scope after 4h instead of never; a
+#     legitimate build under CPUQuota=200% has hours of headroom, and
+#     CI-offloaded `cargo test` never reaches this path.
+#   - `--slice="$(current_slice)"` (claudego-4746d945, 2026-09-25, as in
+#     cargo-remote since 2026-08-24): without it `systemd-run --scope
+#     --user` places the scope in app.slice regardless of the caller's
+#     cgroup, so a NEEDLE worker contained in needle.slice escapes its fleet
+#     ceiling for exactly the non-test command the ceiling exists to bound
+#     (verified live 2026-09-25: `cargo metadata` from a needle-worker shell
+#     scoped into app.slice before this, needle.slice after).
 #
 # Install with: fleet/lab/apply-lab-fleet.sh --install-cargo-wrapper
 REAL_CARGO="$HOME/.cargo/bin/cargo"
@@ -134,12 +142,35 @@ if [[ -d "$BUILD_ROOT" ]]; then
     unset repo_dir target_flag prev arg repo repo_target
 fi
 
+# Slice the caller is already contained in, e.g. needle.slice for a fleet
+# worker, app.slice for an interactive shell. Falls back to app.slice.
+# Kept byte-identical to the copy in cargo-remote.
+current_slice() {
+    local line c
+    line=$(grep '^0::' /proc/self/cgroup 2>/dev/null)
+    # Only a slice under the USER manager is a legal --slice for a --user scope.
+    # A caller outside user@<uid>.service (a system service, a container) would
+    # otherwise yield e.g. system.slice and make systemd-run fail outright.
+    case "$line" in
+        *user@*) ;;
+        *) printf 'app.slice'; return ;;
+    esac
+    c=$(printf '%s' "$line" | awk -F/ '{for (i=NF; i>0; i--) if ($i ~ /\.slice$/) {print $i; exit}}')
+    printf '%s' "${c:-app.slice}"
+}
+
 local_limited() {
     if ! systemd-run --user --scope --quiet -- true 2>/dev/null; then
         # systemd-run unavailable (container/non-session env) — run directly
         exec "$REAL_CARGO" "$@"
     fi
-    exec systemd-run --scope --user --description="cargo $SUBCOMMAND" \
+    # --slice is load-bearing: without it `systemd-run --scope --user` places
+    # the scope under app.slice regardless of the caller's cgroup (verified
+    # 2026-08-24 for cargo-remote, 2026-09-25 here), so a NEEDLE worker
+    # contained in needle.slice escapes its fleet ceiling for exactly the
+    # non-test command the ceiling exists to bound.
+    exec systemd-run --scope --user --slice="$(current_slice)" \
+        --description="cargo $SUBCOMMAND" \
         -p CPUQuota=200% -p MemoryMax=6G -p MemorySwapMax=0 \
         -p RuntimeMaxSec=14400 -q -- \
         "$REAL_CARGO" "$@"

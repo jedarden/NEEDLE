@@ -18,20 +18,22 @@ grep -q 'default.target.wants"/needle-worker@\*.service' "$SRC_DIR/apply-lab-fle
 grep -q 'systemctl --user disable' "$SRC_DIR/apply-lab-fleet.sh"
 grep -q 'systemctl --user mask' "$SRC_DIR/apply-lab-fleet.sh"
 
-# Both wrappers are tracked and installed by the same flag. cargo-remote must
-# carry both hardenings — the whole reason it was tracked (claudego-dd2fa6f4):
-# the lab's untracked copy lacked --slice and RuntimeMaxSec, so dirty-tree
-# fallback scopes escaped needle.slice and were never reaped.
+# Both wrappers are tracked and installed by the same flag. Both must carry
+# both hardenings: --slice keeps a needle.slice-contained worker's scope in
+# needle.slice instead of app.slice (claudego-dd2fa6f4 for cargo-remote —
+# the whole reason it was tracked — and claudego-4746d945 for bin/cargo's
+# non-test fallback), and RuntimeMaxSec reaps a hung scope after 4h instead
+# of never (needle-3d5c65d8).
 for wrapper in cargo cargo-remote; do
     [[ -f "$SRC_DIR/bin/$wrapper" ]] || { echo "missing tracked wrapper: bin/$wrapper" >&2; exit 1; }
     bash -n "$SRC_DIR/bin/$wrapper"
 done
-grep -q 'RuntimeMaxSec=14400' "$SRC_DIR/bin/cargo" \
-    || { echo "bin/cargo lost RuntimeMaxSec" >&2; exit 1; }
-grep -q -- '--slice="$(current_slice)"' "$SRC_DIR/bin/cargo-remote" \
-    || { echo "bin/cargo-remote lost --slice hardening" >&2; exit 1; }
-grep -q 'RuntimeMaxSec=14400' "$SRC_DIR/bin/cargo-remote" \
-    || { echo "bin/cargo-remote lost RuntimeMaxSec" >&2; exit 1; }
+for wrapper in cargo cargo-remote; do
+    grep -q -- '--slice="$(current_slice)"' "$SRC_DIR/bin/$wrapper" \
+        || { echo "bin/$wrapper lost --slice hardening" >&2; exit 1; }
+    grep -q 'RuntimeMaxSec=14400' "$SRC_DIR/bin/$wrapper" \
+        || { echo "bin/$wrapper lost RuntimeMaxSec" >&2; exit 1; }
+done
 
 # Drift check: parses, and its comparator detects every divergence shape.
 bash -n "$SRC_DIR/bin/check-wrapper-drift.sh"
