@@ -16,12 +16,13 @@
 # The durable fix belongs in the builder image — put RUSTUP_HOME and rustup's
 # temp dir on the same filesystem — and is tracked separately.
 #
-# NOTE: 1.95.0 is the known-good toolchain this repo currently builds with, not
-# the MSRV. CLAUDE.md states an MSRV of 1.75 and says it is pinned here, which
-# was never the case while this file read `channel = "stable"`. If the MSRV is
-# meant to be enforced it needs its own CI job building against 1.75; pinning
-# this file to 1.75 would instead force everyone onto a toolchain the current
-# code has not been verified against.
+# NOTE: 1.95.0 is the known-good BUILD toolchain this repo compiles with, not
+# the MSRV. The MSRV lives in Cargo.toml `rust-version` (1.88 since 2026-09-25,
+# re-derived from the locked dependency graph after 1.75 proved unenforceable)
+# and is enforced by needle-ci's verify-msrv lane, which builds and unit-tests
+# under exactly that toolchain. Keep this file on the newer build toolchain;
+# pinning it to the MSRV would force every lane onto the oldest supported
+# compiler.
 [toolchain]
 channel = "1.95.0"
 components = ["rustfmt", "clippy"]

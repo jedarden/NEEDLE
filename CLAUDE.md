@@ -8,10 +8,30 @@ select, claim, dispatch an AI agent, and handle outcomes.
 
 ## MSRV
 
-Minimum Supported Rust Version: **1.75** (2023-12-28).
+Minimum Supported Rust Version: **1.88** (2025-06-26).
 
-Pinned in `rust-toolchain.toml`. Do not add dependencies that require a newer
-Rust edition without updating MSRV and rust-toolchain.toml.
+Declared in `Cargo.toml` (`rust-version`) and enforced by the `verify-msrv`
+lane of the `needle-ci` WorkflowTemplate on iad-ci, which fails the run when
+the declaration and the lane's `MSRV_TOOLCHAIN` drift apart. The authoritative
+MSRV check is the exact command pair that lane runs:
+
+```bash
+RUSTUP_TOOLCHAIN=<msrv> cargo build --workspace --all-targets
+RUSTUP_TOOLCHAIN=<msrv> cargo test --workspace --lib
+```
+
+with `<msrv>` = the `rust-version` above (currently 1.88.0).
+`rust-toolchain.toml` is NOT the MSRV — it pins the newer build toolchain
+(currently 1.95.0) that development and the other CI lanes compile with; a
+plain `cargo build` honours that pin and proves nothing about the MSRV.
+
+The declaration read 1.75 from project scaffolding until 2026-09-25, when it
+was found unenforceable: 55 locked crates declare a higher `rust-version` and
+`clap v4.6.6` uses edition2024, which cargo 1.75 cannot even parse. The floor
+was re-derived from the locked dependency graph rather than downgrading the
+core stack (bead needle-c63fbb7f). Do not add dependencies that require a
+newer Rust edition without updating `rust-version` and the lane's
+`MSRV_TOOLCHAIN` together.
 
 ## Module Dependency Graph
 
