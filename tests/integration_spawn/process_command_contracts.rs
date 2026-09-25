@@ -1727,10 +1727,22 @@ async fn dispatch_telemetry_process_contracts_hard_timeout_kills_entire_process_
         .parse()
         .expect("PID file should contain a valid integer PID");
 
+    // Liveness is judged by the crate's own definition
+    // (`registry::is_pid_alive`, ADR-010 / GH #12), not by a raw
+    // `kill(pid, 0)`: on Linux that syscall also succeeds for a zombie, and
+    // in iad-ci nothing ever reaps one. The killed `sleep`'s parent shell is
+    // reaped by the dispatcher above, so the orphan is reparented to PID 1
+    // of the container's PID namespace — `argoexec` under the emissary
+    // executor, which does not reap orphans (argoproj/argo-workflows#9446).
+    // The grandchild therefore parks as a zombie indefinitely in CI, while a
+    // host with a reaping init (systemd) clears it in milliseconds — the
+    // exact passes-locally/fails-in-pod split of needle-2a15a0a0. A zombie
+    // has received the group SIGKILL and terminated, which is what this
+    // assertion exists to prove; only a process still scheduled (state
+    // R/S/D/T, which `is_pid_alive` reports as alive) is a kill that missed.
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     let dead = loop {
-        let alive = unsafe { libc::kill(grandchild_pid, 0) == 0 };
-        if !alive {
+        if !needle::registry::is_pid_alive(grandchild_pid as u32) {
             break true;
         }
         if std::time::Instant::now() >= deadline {
@@ -1738,7 +1750,11 @@ async fn dispatch_telemetry_process_contracts_hard_timeout_kills_entire_process_
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
-    assert!(dead);
+    assert!(
+        dead,
+        "grandchild {grandchild_pid} still alive 3s after the hard-timeout \
+         group kill — the kill never reached it"
+    );
 
     let _ = std::fs::remove_file(&pid_file);
 }
