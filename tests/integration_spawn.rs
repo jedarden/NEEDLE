@@ -29,6 +29,10 @@
 // caught alongside the adapter process tests.
 #[path = "integration_spawn/agent_event_schema_conformance.rs"]
 mod agent_event_schema_conformance;
+#[path = "integration_spawn/bead_forge_removal_contract.rs"]
+// Keep the removed-backend contract in the subprocess lane so config refusal
+// is tested at the same process boundary operators encounter.
+mod bead_forge_removal_contract;
 #[path = "integration_spawn/binary_freshness_fix_loop_e2e.rs"]
 mod binary_freshness_fix_loop_e2e;
 #[path = "integration_spawn/builtin_adapter_invocation.rs"]

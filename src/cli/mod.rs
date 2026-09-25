@@ -332,7 +332,7 @@ pub enum CliCommand {
     /// Resolve and verify a bead backend descriptor against a workspace.
     #[command(name = "bead-backend")]
     BeadBackend {
-        /// Builtin backend name (`bead-rs` or `bead-forge`).
+        /// Builtin backend name (`bead-rs`; `bead-forge` is refused with a migration hint).
         name: String,
         /// Workspace used for the capability probe.
         #[arg(short = 'w', long, default_value = ".")]
@@ -350,7 +350,7 @@ pub enum CliCommand {
     /// Explicitly bind one repository to a bead backend descriptor.
     #[command(name = "bead-backend-bind")]
     BeadBackendBind {
-        /// Builtin backend name (`bead-rs` or `bead-forge`).
+        /// Builtin backend name (`bead-rs`; `bead-forge` is refused with a migration hint).
         backend: String,
         /// Repository to update.
         #[arg(default_value = ".")]
@@ -3679,9 +3679,16 @@ fabric:
         }
     }
 
-    // Validate backend parameter.
-    if !matches!(backend, "bead-rs" | "bead-forge") {
-        bail!("unknown backend '{backend}' -- must be 'bead-rs' or 'bead-forge'");
+    // Validate backend parameter. bead-forge is still accepted as a token so
+    // the refusal carries the ADR-021 migration message instead of clap's
+    // generic invalid-value error — but it must never reach the write below:
+    // every later open rejects that binding, so accepting it here would mint
+    // a workspace that cannot be opened.
+    if !matches!(backend, "bead-rs" | "bead-forge" | "bf") {
+        bail!("unknown backend '{backend}' -- must be 'bead-rs'");
+    }
+    if matches!(backend, "bead-forge" | "bf") {
+        bail!("bead-forge backend is no longer supported; use 'bead-rs' instead");
     }
 
     // Check if we're in a workspace and bind backend if needed.
@@ -3901,8 +3908,14 @@ fn cmd_bead_backend_audit(root: &Path) -> Result<()> {
 }
 
 fn cmd_bead_backend_bind(backend: &str, workspace: &Path) -> Result<()> {
-    if !matches!(backend, "bead-rs" | "bead-forge") {
+    if !matches!(backend, "bead-rs" | "bead-forge" | "bf") {
         bail!("unknown builtin bead backend '{backend}'");
+    }
+    if matches!(backend, "bead-forge" | "bf") {
+        // Refuse before any canonicalize/write (ADR-021): every later open
+        // rejects a bead-forge binding, so writing one would poison the
+        // workspace rather than fail fast.
+        bail!("bead-forge backend is no longer supported; use 'bead-rs' instead");
     }
     let workspace = workspace
         .canonicalize()

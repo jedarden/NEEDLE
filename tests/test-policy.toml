@@ -213,7 +213,7 @@ version = 1
 # crash alert, and propagated labels must remain unique for bead backends.
 # +2 Pluck starvation telemetry contract tests (needle-e9f9bc50): exact
 # event payload shape and target-workspace write isolation.
-max_tests = 3976
+max_tests = 3980
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
@@ -301,7 +301,9 @@ contract = 208
 # +1 process-table list/status reconciliation with stale registry
 # (needle-3b20f336).
 # The four adapter contracts above also consume four e2e growth slots.
-e2e = 844
+# +8 for the ADR-021 bead-forge removal-contract lane (needle-6ad0773e),
+# all in the integration_spawn harness below.
+e2e = 852
 soak = 0
 fuzz = 0
 
@@ -337,7 +339,12 @@ tier = "e2e"
 # lines whose absence from normalized stdout is asserted by that same suite.
 # +1 process-table list/status reconciliation with stale registry
 # (needle-3b20f336).
-max_tests = 428
+# +8 for the ADR-021 bead-forge removal-contract lane (needle-6ad0773e):
+# init/bind/verify refusals that never write a binding, bound-workspace
+# config resolution that refuses bead-forge, and the bead-rs positive
+# controls. The contract is the process boundary an operator hits, which
+# only the spawned binary can observe.
+max_tests = 436
 owner = "component:process-integration"
 
 [[harness]]
@@ -588,7 +595,7 @@ reason = "Grandfathered unit-tier debt; replace with an injected boundary."
 [[unit_exception]]
 path = "src/config/mod.rs"
 kind = "global-env"
-max_occurrences = 280
+max_occurrences = 284
 owner = "component:config"
 reason = "Grandfathered unit-tier debt plus two isolated reload-interval environment contracts; replace remaining debt with an injected boundary."
 

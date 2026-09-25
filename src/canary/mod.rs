@@ -549,8 +549,8 @@ impl CanaryRunner {
             Some(cli) if !matches!(cli.backend, crate::config::BeadBackend::Auto) => cli,
             _ => bail!(
                 "canary workspace {} has no authoritative bead_cli.backend binding (currently set to 'auto'). \
-                 This causes environmental failures when the canary inherits a machine-local legacy binding. \
-                 Fix by adding to {}/.needle.yaml:\n  bead_cli:\n    backend: bead-rs\nor\n    backend: bead-forge",
+                 This causes environmental failures when the canary inherits a machine-local removed legacy binding. \
+                 Fix by adding to {}/.needle.yaml:\n  bead_cli:\n    backend: bead-rs",
                 self.canary_workspace.display(),
                 self.canary_workspace.display()
             ),

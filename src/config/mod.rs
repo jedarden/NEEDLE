@@ -3020,6 +3020,86 @@ path: /path with spaces/to/bead
 
     #[serial]
     #[test]
+    fn test_detect_bead_backend_config_rejects_bead_forge() {
+        let (_env, _tmp_dir) = isolate_bead_cli_env();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let ws_root = tmp_dir.path();
+
+        std::env::set_var("PATH", "");
+        std::env::set_var("HOME", ws_root);
+
+        // ADR-021: the removed backend must fail closed with the migration
+        // message, not the generic unknown-value error and never a fallback.
+        let needle_yaml = ws_root.join(".needle.yaml");
+        std::fs::write(&needle_yaml, "bead_cli:\n  backend: bead-forge\n").unwrap();
+
+        let result = detect_bead_backend(ws_root);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("no longer supported"));
+        assert!(err_msg.contains("bead-rs"));
+    }
+
+    #[serial]
+    #[test]
+    fn test_detect_bead_backend_config_rejects_bf_alias() {
+        let (_env, _tmp_dir) = isolate_bead_cli_env();
+        let tmp_dir = tempfile::tempdir().unwrap();
+        let ws_root = tmp_dir.path();
+
+        std::env::set_var("PATH", "");
+        std::env::set_var("HOME", ws_root);
+
+        // The legacy short alias binds the same refused backend.
+        let needle_yaml = ws_root.join(".needle.yaml");
+        std::fs::write(&needle_yaml, "bead_cli:\n  backend: bf\n").unwrap();
+
+        let result = detect_bead_backend(ws_root);
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("no longer supported"));
+        assert!(err_msg.contains("bead-rs"));
+    }
+
+    #[test]
+    fn test_load_workspace_rejects_bead_forge_binding() {
+        // The production parse surface (global → workspace → env resolution
+        // runs this on every worker start) must refuse the removed backend
+        // too, independently of the detection helper above.
+        let tmp_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp_dir.path().join(".needle.yaml"),
+            "bead_cli:\n  backend: bead-forge\n",
+        )
+        .unwrap();
+
+        let result = ConfigLoader::load_workspace(tmp_dir.path());
+        assert!(result.is_err());
+        let err_msg = format!("{:#}", result.unwrap_err());
+        assert!(err_msg.contains("invalid YAML in workspace config"));
+        assert!(err_msg.contains("unknown variant"));
+        assert!(err_msg.contains("bead-forge"));
+    }
+
+    #[test]
+    fn test_load_workspace_rejects_bf_alias() {
+        let tmp_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp_dir.path().join(".needle.yaml"),
+            "bead_cli:\n  backend: bf\n",
+        )
+        .unwrap();
+
+        let result = ConfigLoader::load_workspace(tmp_dir.path());
+        assert!(result.is_err());
+        let err_msg = format!("{:#}", result.unwrap_err());
+        assert!(err_msg.contains("invalid YAML in workspace config"));
+        assert!(err_msg.contains("unknown variant"));
+        assert!(err_msg.contains("bf"));
+    }
+
+    #[serial]
+    #[test]
     fn test_detect_bead_backend_config_uses_bead_alias() {
         let (_env, _tmp_dir) = isolate_bead_cli_env();
         let tmp_dir = tempfile::tempdir().unwrap();
