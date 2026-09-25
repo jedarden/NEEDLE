@@ -1130,19 +1130,7 @@ fn cmd_run(
             }
         }
 
-        let tel = crate::telemetry::Telemetry::from_config(worker_id.clone(), &config.telemetry)
-            .unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "hook telemetry init failed, falling back");
-                crate::telemetry::Telemetry::new(worker_id.clone())
-            });
-        tel.emit(
-            crate::telemetry::EventKind::UpgradeCompleted {
-                new_hash: current_hash,
-            },
-            chrono::Utc::now(),
-        )?;
-
-        return run_worker(config, worker_id, sources);
+        return run_worker(config, worker_id, sources, Some(current_hash));
     }
 
     if is_needle_inner() {
@@ -1154,7 +1142,7 @@ fn cmd_run(
         let agent_name = agent.as_deref().unwrap_or(&config.agent.default);
         let session_name = sanitize_session_name(&format!("needle-{agent_name}-{worker_id}"));
         tracing::info!(worker = %worker_id, session = %session_name, "starting worker (inner re-entrant invocation)");
-        run_worker(config, worker_id, sources)
+        run_worker(config, worker_id, sources, None)
     } else {
         // Always create dedicated tmux sessions, even if already inside tmux.
         launch_workers(
@@ -1634,7 +1622,12 @@ fn generate_session_id_for_worker() -> String {
 /// so that `worker.booting` is the very first JSONL event. Each subsequent
 /// init step is wrapped with `init.step.started` / `init.step.completed` so a
 /// silent hang pinpoints the exact blocking call.
-fn run_worker(config: Config, worker_name: String, config_sources: SourceMap) -> Result<()> {
+fn run_worker(
+    config: Config,
+    worker_name: String,
+    config_sources: SourceMap,
+    upgrade_completed_hash: Option<String>,
+) -> Result<()> {
     let boot_start = Instant::now();
     let qualified_id = format!("{}-{}", config.agent.default, worker_name);
     let telemetry_identity = worker_telemetry_identity(&config);
@@ -1682,6 +1675,14 @@ fn run_worker(config: Config, worker_name: String, config_sources: SourceMap) ->
         chrono::Utc::now(),
     )?;
     eprintln!("NEEDLE worker boot: worker.booting written to disk");
+
+    // A resume completion belongs to this worker session. Persist it through
+    // the worker telemetry's synchronous startup path before the async writer
+    // starts, so the event cannot be stranded in an unstarted emitter.
+    if let Some(new_hash) = upgrade_completed_hash {
+        emit_upgrade_completed(&telemetry, new_hash)
+            .context("failed to write worker.upgrade.completed event")?;
+    }
 
     // Start the async writer thread after worker.booting is on disk.
     eprintln!("NEEDLE worker boot: starting telemetry writer thread...");
@@ -1901,6 +1902,12 @@ fn run_worker(config: Config, worker_name: String, config_sources: SourceMap) ->
 
     tracing::info!(final_state = %result, "worker finished");
     Ok(())
+}
+
+/// Persist a hot-reload resume attestation before the worker telemetry writer
+/// starts. This uses the same synchronous sink path as `worker.booting`.
+fn emit_upgrade_completed(telemetry: &Telemetry, new_hash: String) -> Result<()> {
+    telemetry.emit_sync(EventKind::UpgradeCompleted { new_hash }, chrono::Utc::now())
 }
 
 fn effective_boot_elapsed(
@@ -8845,6 +8852,27 @@ mod tests {
     #[test]
     fn last_nato_is_zulu() {
         assert_eq!(NATO_ALPHABET[25], "zulu");
+    }
+
+    #[test]
+    fn resumed_worker_persists_upgrade_completion_before_writer_start() {
+        let log_dir = tempfile::tempdir().expect("temporary telemetry directory");
+        let (telemetry, log_path) =
+            Telemetry::with_log_dir_and_path("resume-test-worker".to_string(), log_dir.path())
+                .expect("create file-backed telemetry");
+
+        emit_upgrade_completed(&telemetry, "new-binary-hash".to_string())
+            .expect("persist upgrade completion");
+
+        let contents = std::fs::read_to_string(log_path).expect("read telemetry JSONL");
+        let events: Vec<serde_json::Value> = contents
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("parse telemetry event"))
+            .collect();
+
+        assert_eq!(events[0]["event_type"], "worker.booting");
+        assert_eq!(events[1]["event_type"], "worker.upgrade.completed");
+        assert_eq!(events[1]["data"]["new_hash"], "new-binary-hash");
     }
 
     #[test]

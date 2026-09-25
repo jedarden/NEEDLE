@@ -213,7 +213,8 @@ version = 1
 # crash alert, and propagated labels must remain unique for bead backends.
 # +2 Pluck starvation telemetry contract tests (needle-e9f9bc50): exact
 # event payload shape and target-workspace write isolation.
-max_tests = 3980
+# +1 hot-reload completion telemetry persistence contract (needle-ea583f48).
+max_tests = 3981
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
