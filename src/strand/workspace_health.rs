@@ -224,7 +224,7 @@ impl QuarantineRegistry {
 
         let failures = entry.consecutive_failures;
         let threshold_met = failures == TRANSIENT_FAILURE_THRESHOLD;
-        let reminder_due = failures % QUARANTINE_REMINDER_INTERVAL == 0;
+        let reminder_due = failures.is_multiple_of(QUARANTINE_REMINDER_INTERVAL);
 
         if transient && failures < TRANSIENT_FAILURE_THRESHOLD {
             // A single lock error is noise. Wait for a pattern.

@@ -284,7 +284,7 @@ fn emit_tool_result(
             // treat presence of changes as success.
             item.get("changes")
                 .and_then(|c| c.as_array())
-                .map_or(true, |a| !a.is_empty())
+                .is_none_or(|a| !a.is_empty())
         }
         _ => {
             // mcp_tool_call / collab_tool_call — check for an error field.

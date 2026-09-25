@@ -2949,7 +2949,7 @@ fn filter_sessions_for_cleanup_with_live_workers(
                 !registered_worker_is_live
                     && session
                         .pid
-                        .map_or(true, |pane_pid| !inspector.tree_has_live_process(pane_pid))
+                        .is_none_or(|pane_pid| !inspector.tree_has_live_process(pane_pid))
             })
             .map(|session| session.name.clone())
             .collect()

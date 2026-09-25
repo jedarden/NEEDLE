@@ -16138,7 +16138,7 @@ agent:
 
         // When path is None, it should not appear in serialized output (skip_serializing_if)
         assert!(
-            parsed.get("path").map_or(true, |v| v.is_null()),
+            parsed.get("path").is_none_or(|v| v.is_null()),
             "None path should be omitted or null in JSON"
         );
     }

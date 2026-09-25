@@ -560,7 +560,7 @@ impl Supervisor {
             total_polls += 1;
 
             // Emit summary every 60 ticks (approximately 10 minutes at default interval)
-            if total_polls % 60 == 0 {
+            if total_polls.is_multiple_of(60) {
                 let active_workers = self.registry.list().unwrap_or_default();
                 let ready_beads = self
                     .store

@@ -4636,7 +4636,7 @@ impl StdoutSink {
                     .map(|b| format!(" {}", b.as_ref()))
                     .unwrap_or_default();
                 let data_part = if event.data.is_object()
-                    && event.data.as_object().map_or(true, |m| m.is_empty())
+                    && event.data.as_object().is_none_or(|m| m.is_empty())
                 {
                     String::new()
                 } else {

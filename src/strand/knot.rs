@@ -171,7 +171,7 @@ impl KnotStrand {
                         all_beads
                             .iter()
                             .find(|candidate| candidate.id == dependency.id)
-                            .map_or(true, |blocker| {
+                            .is_none_or(|blocker| {
                                 !matches!(blocker.status, BeadStatus::Done | BeadStatus::Closed)
                             })
                     });

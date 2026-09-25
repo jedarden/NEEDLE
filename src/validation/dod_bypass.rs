@@ -140,7 +140,7 @@ fn select_bypassed_events(
     events
         .iter()
         .filter(|e| !e.commit_sha.trim().is_empty())
-        .filter(|e| captured_at.map_or(true, |t| e.timestamp > t))
+        .filter(|e| captured_at.is_none_or(|t| e.timestamp > t))
         .filter(|e| commits_since_dispatch.contains(normalize_sha(&e.commit_sha).as_str()))
         .cloned()
         .collect()
