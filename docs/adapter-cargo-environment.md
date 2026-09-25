@@ -54,3 +54,14 @@ output on bead `needle-2020b478`:
 ```sh
 find /data/build/target-workers/debug/.fingerprint -name 'lib-tokio.json' -newer /home/coding/.needle/needle-2020b478-rustflags-marker | xargs jq -c .rustflags | sort | uniq -c
 ```
+
+Workers load the adapter table at process start. Until every `needle-worker@*`
+user service on codinghome has been restarted after the 2026-09-25 change,
+dispatches from older workers keep receiving the retired `-C codegen-units=1`
+block from their in-memory cache, and the shared target keeps both cache
+halves warm (live evidence on bead `needle-2020b478`; the restart is tracked
+as `needle-5e0e1ee7`). Refresh the marker at restart time
+(`touch /home/coding/.needle/needle-2020b478-rustflags-marker`) before
+running the check above: fingerprint directories written under the old flags
+keep their own hashes forever and stay `-newer` than the original marker, so
+an unrefreshed marker would keep reporting the stale units.
