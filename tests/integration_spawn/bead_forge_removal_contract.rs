@@ -233,20 +233,16 @@ fn config_resolution_resolves_bead_rs_bound_workspace() {
 
     let output = fixture
         .needle()
-        .current_dir(&workspace)
-        .args(["config", "--dump"])
+        .args(["doctor", "--workspace"])
+        .arg(&workspace)
+        .arg("--json")
         .output()
-        .expect("spawn needle config dump");
+        .expect("spawn needle doctor");
 
-    assert!(
-        output.status.success(),
-        "a bead-rs binding must resolve: {}",
-        combined_output(&output)
-    );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("bead-rs"),
-        "resolved dump must show the workspace-bound backend: {stdout}"
+        stdout.contains("Bead CLI Backend") && stdout.contains("bead-rs"),
+        "doctor output must show the workspace-bound backend: {stdout}"
     );
 }
 

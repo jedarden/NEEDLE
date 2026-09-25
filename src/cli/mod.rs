@@ -308,7 +308,7 @@ pub enum CliCommand {
     /// .needle.yaml with an explicit bead backend binding.
     Init {
         /// Bead backend to bind in .needle.yaml (default: bead-rs).
-        #[arg(long, default_value = "bead-rs", value_parser = clap::builder::PossibleValuesParser::new(["bead-rs", "bead-forge"]))]
+        #[arg(long, default_value = "bead-rs", value_parser = clap::builder::PossibleValuesParser::new(["bead-rs", "bead-forge", "bf"]))]
         backend: String,
 
         /// Skip creating/updating AGENTS.md with bead workflow instructions.
