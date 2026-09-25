@@ -164,7 +164,7 @@ Claiming next bead...
 
 ```bash
 needle status
-tmux attach -t needle-claude-alpha
+needle attach alpha
 ```
 
 **Expected output from `needle status`:**
@@ -173,7 +173,7 @@ Active workers:
   needle-claude-alpha  (running)  working on needle-xxxxxxxx
 ```
 
-**Expected output from tmux attach:**
+**Expected output from `needle attach alpha`:**
 ```
 [needle-claude-alpha] Claimed bead needle-xxxxxxxx
 [needle-claude-alpha] Dispatching to claude...

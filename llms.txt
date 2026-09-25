@@ -25,7 +25,7 @@ needle run --agent claude --identifier alpha
 
 ## Check status
 needle status
-tmux attach -t needle-claude-alpha
+needle attach alpha
 
 ## Verify completion
 bead list --status closed
