@@ -822,6 +822,12 @@ if [[ "$LANE" == "fast" ]] || [[ "$LANE" == "all" ]]; then
   # else's breakage, so it is itself part of the gate. Pure bash, milliseconds.
   run_check "attribution tests" bash tests/dod-attribution/run.sh
 
+  # Keep compiled NEEDLE subprocess tests isolated from real HOME and Explore
+  # scan roots. Run the static guard as a small standalone Rust test binary so
+  # this source-only policy stays in the fast lane without building the full
+  # integration_spawn harness.
+  run_check "subprocess test isolation" bash tests/subprocess-isolation/run.sh
+
   # Keep Cargo's declared MSRV and the needle-ci verify-msrv contract aligned.
   run_check "MSRV configuration drift" bash scripts/check-msrv-drift.sh
   run_check "MSRV drift checker tests" bash tests/msrv-drift/run.sh

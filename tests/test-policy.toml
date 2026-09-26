@@ -871,6 +871,10 @@ pattern = "tests/msrv-drift/*"
 owner = "component:msrv-drift-guard"
 
 [[artifact]]
+pattern = "tests/subprocess-isolation/*"
+owner = "component:subprocess-test-isolation"
+
+[[artifact]]
 pattern = "tests/e2e/*"
 owner = "component:e2e"
 
