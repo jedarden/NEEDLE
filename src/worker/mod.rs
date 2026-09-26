@@ -3900,16 +3900,7 @@ impl Worker {
             "dispatch",
             serde_json::json!({"adapter": adapter.name, "model": model, "attempt_id": attempt_id}),
         );
-        let dispatch_span = tracing::info_span!(
-            "agent.dispatch",
-            gen_ai.system = %provider.unwrap_or("unknown"),
-            gen_ai.request.model = %model.unwrap_or("unknown"),
-            needle.attempt.id = %attempt_id,
-            gen_ai.usage.input_tokens = tracing::field::Empty,
-            gen_ai.usage.output_tokens = tracing::field::Empty,
-            needle.agent.pid = tracing::field::Empty, // Will be set when process starts
-            needle.agent.exit_code = tracing::field::Empty, // Will be set after execution
-        );
+        let dispatch_span = crate::span::agent_dispatch_span(provider, model, &attempt_id);
 
         self.do_dispatch_inner(adapter)
             .instrument(dispatch_span)
@@ -12844,14 +12835,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn set_state_uses_home_workspace_when_no_current_bead() {
+    async fn documented_state_transitions_emit_telemetry_and_use_home_workspace_without_bead() {
         let store: Arc<dyn BeadStore> = Arc::new(MockStore::empty());
         let dir = tempfile::tempdir().unwrap();
         let home_ws = dir.path().join("home");
         let mut config = valid_test_config();
         config.workspace.home = home_ws.clone();
         config.workspace.default = home_ws.clone();
-        let mut worker = Worker::new(config, "test-no-bead".to_string(), store);
+        config.health.heartbeat_dir = Some(dir.path().join("heartbeats"));
+        let helper = crate::telemetry::test_utils::TestHelper::new("state-transition-contract");
+        let mut worker = Worker::new_with_telemetry(
+            config,
+            "state-transition-contract".to_string(),
+            store,
+            helper.telemetry().clone(),
+        );
         worker.boot().await.unwrap();
 
         // No current bead, current_workspace is unset
@@ -12861,6 +12859,53 @@ mod tests {
 
         // Verify that current_workspace was updated with the home workspace
         assert_eq!(worker.current_workspace, home_ws);
+        helper.sync().await;
+        helper.clear();
+
+        // This matrix follows the documented state-machine transitions. The
+        // admission hold is included because it extends the shipped graph.
+        let transitions = [
+            (WorkerState::Booting, WorkerState::Selecting),
+            (WorkerState::Booting, WorkerState::Errored),
+            (WorkerState::Selecting, WorkerState::Claiming),
+            (WorkerState::Selecting, WorkerState::Exhausted),
+            (WorkerState::Selecting, WorkerState::Stopped),
+            (WorkerState::Selecting, WorkerState::AdmissionBlocked),
+            (WorkerState::AdmissionBlocked, WorkerState::Selecting),
+            (WorkerState::Claiming, WorkerState::Building),
+            (WorkerState::Claiming, WorkerState::Retrying),
+            (WorkerState::Claiming, WorkerState::Selecting),
+            (WorkerState::Retrying, WorkerState::Claiming),
+            (WorkerState::Retrying, WorkerState::Selecting),
+            (WorkerState::Retrying, WorkerState::Exhausted),
+            (WorkerState::Building, WorkerState::Dispatching),
+            (WorkerState::Building, WorkerState::Handling),
+            (WorkerState::Building, WorkerState::Retrying),
+            (WorkerState::Dispatching, WorkerState::Executing),
+            (WorkerState::Dispatching, WorkerState::Handling),
+            (WorkerState::Dispatching, WorkerState::Retrying),
+            (WorkerState::Executing, WorkerState::Handling),
+            (WorkerState::Handling, WorkerState::Logging),
+            (WorkerState::Handling, WorkerState::Stopped),
+            (WorkerState::Logging, WorkerState::Selecting),
+        ];
+
+        for (from, to) in &transitions {
+            worker.state = from.clone();
+            worker.set_state(to.clone()).unwrap();
+        }
+        helper.sync().await;
+
+        let events = helper.events_by_type("worker.state_transition");
+        assert_eq!(
+            events.len(),
+            transitions.len(),
+            "each documented transition must emit one worker.state_transition event"
+        );
+        for (event, (from, to)) in events.iter().zip(transitions.iter()) {
+            assert_eq!(event.data["from"], format!("{from}"));
+            assert_eq!(event.data["to"], format!("{to}"));
+        }
     }
 
     // ── do_log tests ──

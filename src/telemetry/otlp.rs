@@ -2194,14 +2194,15 @@ mod tests {
 
     #[test]
     fn test_build_resource_has_all_required_attributes() {
-        let config = make_test_config();
+        let mut config = make_test_config();
+        config.resource_attributes = vec!["deployment.environment=production".to_string()];
         let resource = OtlpSink::build_resource(
             "test-worker-id",
             "test-session-id",
             &config,
             Some("claude-anthropic-sonnet"),
             Some("claude-sonnet-4-6"),
-            None,
+            Some("anthropic"),
             Some("/test/workspace"),
         )
         .expect("build_resource should succeed");
@@ -2226,6 +2227,10 @@ mod tests {
         assert!(attr_keys.contains(&"needle.agent"), "missing needle.agent");
         assert!(attr_keys.contains(&"needle.model"), "missing needle.model");
         assert!(
+            attr_keys.contains(&"needle.model.provider"),
+            "missing needle.model.provider"
+        );
+        assert!(
             attr_keys.contains(&"needle.session_id"),
             "missing needle.session_id"
         );
@@ -2233,6 +2238,31 @@ mod tests {
             attr_keys.contains(&"needle.workspace"),
             "missing needle.workspace"
         );
+        assert!(
+            attr_keys.contains(&"deployment.environment"),
+            "configured deployment.environment must be exported"
+        );
+
+        let attr = |name: &str| {
+            resource
+                .iter()
+                .find(|(key, _)| key.as_str() == name)
+                .unwrap_or_else(|| panic!("missing resource attribute {name}"))
+                .1
+                .as_str()
+                .to_string()
+        };
+        assert_eq!(attr("service.name"), "needle");
+        assert_eq!(attr("service.version"), env!("CARGO_PKG_VERSION"));
+        assert_eq!(attr("service.instance.id"), "test-worker-id");
+        assert_eq!(attr("service.namespace"), "needle-fleet");
+        assert_eq!(attr("needle.session_id"), "test-session-id");
+        assert_eq!(attr("needle.agent"), "claude-anthropic-sonnet");
+        assert_eq!(attr("needle.model"), "claude-sonnet-4-6");
+        assert_eq!(attr("needle.model.provider"), "anthropic");
+        assert_eq!(attr("process.pid"), std::process::id().to_string());
+        assert_eq!(attr("deployment.environment"), "production");
+        assert!(!attr("host.name").is_empty());
 
         let workspace_attr = resource
             .iter()

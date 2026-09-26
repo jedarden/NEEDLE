@@ -105,6 +105,22 @@ pub mod outcomes {
     pub const INTERRUPTED: &str = "interrupted";
 }
 
+/// Create the worker-level `agent.dispatch` span with the GenAI attributes
+/// required by the telemetry mapping. Usage and process fields are declared
+/// empty here because the worker records them after execution completes.
+pub fn agent_dispatch_span(provider: Option<&str>, model: Option<&str>, attempt_id: &str) -> Span {
+    tracing::info_span!(
+        "agent.dispatch",
+        gen_ai.system = %provider.unwrap_or("unknown"),
+        gen_ai.request.model = %model.unwrap_or("unknown"),
+        needle.attempt.id = %attempt_id,
+        gen_ai.usage.input_tokens = tracing::field::Empty,
+        gen_ai.usage.output_tokens = tracing::field::Empty,
+        needle.agent.pid = tracing::field::Empty,
+        needle.agent.exit_code = tracing::field::Empty,
+    )
+}
+
 /// Record an error on a span with a description.
 ///
 /// This sets the span status to Error with the given description,
@@ -247,7 +263,7 @@ mod tests {
     }
 
     #[test]
-    fn attribute_keys_follow_conventions() {
+    fn attribute_keys_follow_conventions_and_dispatch_span_declares_gen_ai() {
         // Worker session
         assert_eq!(attrs::NEEDLE_BEADS_PROCESSED, "needle.beads_processed");
         assert_eq!(attrs::NEEDLE_UPTIME_SECONDS, "needle.uptime_seconds");
@@ -269,6 +285,25 @@ mod tests {
             attrs::GEN_AI_USAGE_INPUT_TOKENS,
             "gen_ai.usage.input_tokens"
         );
+        tracing::subscriber::with_default(tracing_subscriber::registry(), || {
+            let span =
+                agent_dispatch_span(Some("anthropic"), Some("claude-sonnet-4-6"), "attempt-1");
+            let fields = span.metadata().expect("dispatch span metadata").fields();
+
+            for field in [
+                attrs::GEN_AI_SYSTEM,
+                attrs::GEN_AI_REQUEST_MODEL,
+                attrs::GEN_AI_USAGE_INPUT_TOKENS,
+                attrs::GEN_AI_USAGE_OUTPUT_TOKENS,
+                attrs::NEEDLE_AGENT_PID,
+                attrs::NEEDLE_AGENT_EXIT_CODE,
+            ] {
+                assert!(
+                    fields.field(field).is_some(),
+                    "agent.dispatch must declare documented attribute {field}"
+                );
+            }
+        });
     }
 
     #[test]

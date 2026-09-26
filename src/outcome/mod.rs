@@ -5812,24 +5812,63 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_failure_releases_and_increments_count() {
-        let handler = test_handler();
-        let store = test_store(BeadStatus::InProgress);
-        let bead = test_bead(BeadStatus::InProgress);
+    async fn documented_terminal_outcomes_emit_classified_and_handled_events() {
+        let (_guard, _home) = isolated_home();
+        let helper = crate::telemetry::test_utils::TestHelper::new("outcome-telemetry-contract");
+        let mut config = Config::default();
+        config.worker.enforce_shipped_work = false;
+        let handler = OutcomeHandler::new(config, helper.telemetry().clone());
+        let cases = [
+            ("success", 0, false),
+            ("failure", 1, false),
+            ("timeout", 124, false),
+            ("agent_not_found", 127, false),
+            ("crash", 137, false),
+            ("interrupted", 130, true),
+        ];
+        let mut failure_actions = None;
 
-        let result = handler
-            .handle(&store, &bead, &test_output(1), false)
-            .await
-            .unwrap();
+        for (index, (expected_outcome, exit_code, interrupted)) in cases.iter().enumerate() {
+            let status = if *expected_outcome == "success" {
+                BeadStatus::Done
+            } else {
+                BeadStatus::InProgress
+            };
+            let store = MockBeadStore::new(status);
+            let mut bead = test_bead(BeadStatus::InProgress);
+            bead.bead.id = BeadId::from(format!("needle-outcome-{index}"));
 
-        assert_eq!(result.outcome, Outcome::Failure);
-        assert!(matches!(result.bead_action, BeadAction::Released(_)));
-        assert!(!result.telemetry_events.is_empty());
+            let result = handler
+                .handle(&store, &bead, &test_output(*exit_code), *interrupted)
+                .await
+                .unwrap();
+            assert_eq!(
+                result.outcome.as_str(),
+                *expected_outcome,
+                "fixture should exercise the documented {expected_outcome} outcome"
+            );
+            if *expected_outcome == "failure" {
+                assert!(matches!(result.bead_action, BeadAction::Released(_)));
+                failure_actions = Some(store.actions());
+            }
+            helper.sync().await;
+        }
 
-        let actions = store.actions();
-        // NOTE: the handler no longer calls store.release() -- release is applied by
-        // the worker via apply_bead_action(). The release intent is asserted above as
-        // result.bead_action; a StoreAction::Release here would now never appear.
+        let classified = helper.events_by_type("outcome.classified");
+        let handled = helper.events_by_type("outcome.handled");
+        assert_eq!(classified.len(), cases.len());
+        assert_eq!(handled.len(), cases.len());
+        for ((expected_outcome, _, _), event) in cases.iter().zip(classified.iter()) {
+            assert_eq!(event.data["outcome"], *expected_outcome);
+        }
+        for ((expected_outcome, _, _), event) in cases.iter().zip(handled.iter()) {
+            assert_eq!(event.data["outcome"], *expected_outcome);
+            assert!(
+                event.data["action"].as_str().is_some(),
+                "terminal handling must record its action"
+            );
+        }
+        let actions = failure_actions.expect("failure case ran");
         assert!(
             actions.iter().any(
                 |a| matches!(a, StoreAction::AddLabel(_, label) if label == "failure-count:1")
