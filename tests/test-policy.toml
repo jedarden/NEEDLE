@@ -940,5 +940,9 @@ pattern = "tests/documentation/*"
 owner = "component:test-documentation"
 
 [[artifact]]
+pattern = "tests/retired-cli-additions/*"
+owner = "component:definition-of-done"
+
+[[artifact]]
 pattern = "tests/real_br_integration_tests/*"
 owner = "component:bead-rs-contract"
