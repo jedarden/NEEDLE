@@ -1350,8 +1350,8 @@ fn backend_probe_capability_script(version: &str, capabilities: &str) -> String 
     )
 }
 
-#[test]
-fn backend_probe_process_contracts_identity_and_capabilities() {
+#[tokio::test]
+async fn backend_probe_process_contracts_identity_and_capabilities() {
     const VALID: &str = r#"{"implementation":"bead-rs","atomic_claim":true,"statuses":["open","in_progress","deferred","closed"],"schemas":[{"schema_ref":"urn:bead-rs:schema:issue:native-v1"},{"schema_ref":"urn:bead-rs:schema:event:native-v1"},{"schema_ref":"urn:bead-rs:schema:field-guide:native-v1"}],"commands":["ref","data","query"]}"#;
     let cases = [
         ("bead 0.2.6", VALID, None),
@@ -1412,6 +1412,12 @@ fn backend_probe_process_contracts_identity_and_capabilities() {
             }
         }
     }
+
+    super::capabilities_negotiation_conformance::verify_required_identity_status_schema_and_command_capabilities();
+    super::capabilities_negotiation_conformance::verify_optional_and_static_capability_projection();
+    super::capabilities_negotiation_conformance::verify_each_transition_capability_gate();
+    super::capabilities_negotiation_conformance::verify_worker_blocks_incompatible_capability_probes()
+        .await;
 }
 
 #[tokio::test]
@@ -2731,8 +2737,7 @@ async fn dispatch_telemetry_process_contracts_activity_detection_on_chunked_outp
 async fn dispatch_telemetry_process_contracts_e2e_prompt_with_shell_metacharacters() {
     // Verify that shell metacharacters in the prompt body are safely
     // delivered via the temp file without shell injection or corruption.
-    let dangerous_prompt =
-        "Hello $USER\nLine with `backticks`\nQuotes: 'single' \"double\"\nBackslash: \\\nDollar: $(echo injected)";
+    let dangerous_prompt = "Hello $USER\nLine with `backticks`\nQuotes: 'single' \"double\"\nBackslash: \\\nDollar: $(echo injected)";
 
     let mut adapters = HashMap::new();
     adapters.insert(

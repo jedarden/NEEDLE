@@ -37,6 +37,8 @@ mod bead_forge_removal_contract;
 mod binary_freshness_fix_loop_e2e;
 #[path = "integration_spawn/builtin_adapter_invocation.rs"]
 mod builtin_adapter_invocation;
+#[path = "integration_spawn/capabilities_negotiation_conformance.rs"]
+mod capabilities_negotiation_conformance;
 #[path = "integration_spawn/cargo_test_execution.rs"]
 mod cargo_test_execution;
 #[path = "integration_spawn/cleanup_function_error_handling_tests.rs"]
