@@ -219,6 +219,7 @@ fn fixture_registry(fixture: &Fixture, config: &Config) -> AuthorityRegistry {
             PolicyScope::directory(&fixture.workspace),
         ),
     );
+    add_inherited_instruction_sources(&fixture.workspace, &mut registry);
 
     if let Some(instructions) = &config.prompt.instructions {
         insert(
@@ -256,6 +257,55 @@ fn fixture_registry(fixture: &Fixture, config: &Config) -> AuthorityRegistry {
         );
     }
     registry
+}
+
+fn add_inherited_instruction_sources(workspace: &Path, registry: &mut AuthorityRegistry) {
+    let mut directory = workspace.parent().map(Path::to_path_buf);
+    while let Some(current) = directory {
+        let mut files = fs::read_dir(&current)
+            .expect("read inherited policy directory")
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| {
+                path.is_file()
+                    && path.extension().and_then(|extension| extension.to_str()) == Some("md")
+                    && path
+                        .file_stem()
+                        .and_then(|stem| stem.to_str())
+                        .map(|stem| {
+                            stem == "AGENTS"
+                                || stem.starts_with("AGENTS.")
+                                || stem == "CLAUDE"
+                                || stem.starts_with("CLAUDE.")
+                        })
+                        .unwrap_or(false)
+            })
+            .collect::<Vec<_>>();
+        files.sort();
+
+        for path in files {
+            let is_agents = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(|stem| stem.starts_with("AGENTS"))
+                .unwrap_or(false);
+            let kind = if is_agents {
+                PolicyKind::RepositoryInstructions
+            } else {
+                PolicyKind::AdapterInstructions
+            };
+            registry
+                .insert(source(&path, kind, PolicyScope::directory(&current)))
+                .expect("inherited fixture source is unique");
+        }
+
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        if parent == current {
+            break;
+        }
+        directory = Some(parent.to_path_buf());
+    }
 }
 
 fn resolved_hash(registry: &AuthorityRegistry, workspace: &Path, adapter: &str) -> String {
