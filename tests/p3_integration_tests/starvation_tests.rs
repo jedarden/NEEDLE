@@ -413,7 +413,11 @@ async fn pluck_starvation_schema_and_no_target_diagnostic_bead() {
     let session_id = telemetry.session_id().to_string();
     telemetry.start();
 
-    let strand = PluckStrand::new(vec![], telemetry.clone());
+    let strand = PluckStrand::new(vec![], telemetry.clone()).with_workspace_capacity(
+        workspace.path().to_path_buf(),
+        workspace.path().join(".needle/heartbeats"),
+        std::time::Duration::from_secs(300),
+    );
     let result = strand.evaluate(&store, &HashSet::new()).await;
     assert!(
         matches!(result, StrandResult::NoWork),

@@ -3001,6 +3001,12 @@ impl super::Strand for PluckStrand {
             let workspace_path = all_beads
                 .as_deref()
                 .map(extract_workspace_path)
+                .filter(|workspace| workspace != "unknown")
+                .or_else(|| {
+                    self.workspace
+                        .as_deref()
+                        .map(|workspace| workspace.display().to_string())
+                })
                 .unwrap_or_else(|| "unknown".to_string());
 
             if let Some(beads) = all_beads.as_deref() {
