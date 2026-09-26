@@ -216,7 +216,11 @@ version = 1
 # +1 hot-reload completion telemetry persistence contract (needle-ea583f48).
 # +4 adapter usage parser unit tests (needle-7a93d078): malformed, cached,
 # abbreviated, and legacy-regex Aider summary cases.
-max_tests = 3985
+# +2 Explore scan-root hygiene regressions (needle-8a6a8c53): the
+# hidden-directory descent skip across the four garbage shapes from the
+# starvation burn-in telemetry, and discovery-snapshot stability under
+# hidden-root churn.
+max_tests = 3987
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

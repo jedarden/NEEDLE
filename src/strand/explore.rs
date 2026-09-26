@@ -10,7 +10,14 @@
 //!
 //! When `config.workspaces` is empty (the default), Explore runs recursive
 //! workspace discovery under `config.workspace_root`. All directories containing
-//! a `.beads/` subdirectory are automatically scanned for beads.
+//! a `.beads/` subdirectory are automatically scanned for beads — except that
+//! discovery never descends into hidden (`.`-prefixed) directories or build
+//! outputs (`target`, `node_modules`). Under a home scan root those are
+//! tooling territory — session scratchpads, dependency checkouts, caches,
+//! NEEDLE's own state — and the 2026-09 starvation burn-in measured every
+//! `.beads/` found there as transient garbage that only produced quarantine
+//! noise. A workspace under such a path stays reachable through an explicit
+//! `workspaces` entry.
 //!
 //! This is the **intended default for the fleet as a whole** — new workspaces
 //! are picked up automatically without configuration changes. Operators should
@@ -805,7 +812,12 @@ impl ExploreStrand {
     /// configured root or loop back into itself. Known repository/store
     /// internals are skipped because they cannot contain independent
     /// workspaces and can be very large (`.git`, `.beads`, `target`, and
-    /// `node_modules`).
+    /// `node_modules`). Hidden directories are skipped everywhere below the
+    /// root (scan-root hygiene): a `.beads/` under `.tmp/`-style scratchpads,
+    /// `.cargo/git/checkouts`, caches, or `~/.needle` artifacts is transient
+    /// tooling output, not a fleet workspace, and validating it only emits
+    /// quarantine noise. The root itself may be hidden — only the names of
+    /// descendants are considered.
     pub(super) fn discover_workspaces(root: &Path) -> Vec<PathBuf> {
         let mut discovered = Vec::new();
 
@@ -868,6 +880,16 @@ impl ExploreStrand {
     }
 
     /// Return a real directory entry that is worth descending into.
+    ///
+    /// Every hidden directory is skipped, not just `.git`/`.beads`: under a
+    /// home scan root the other dot-directories (`.tmp`, `.cargo`, `.cache`,
+    /// `.needle`, ...) hold session scratchpads, dependency checkouts, and
+    /// agent artifacts. A `.beads/` created inside one of those is transient
+    /// tooling output, and the 2026-09 starvation burn-in measured the fleet
+    /// quarantining ~1,800 such "workspaces" per hour — ~100% scanner garbage
+    /// with zero operator-actionable entries. A real workspace under a hidden
+    /// path remains usable through an explicit `workspaces` entry, which keeps
+    /// full diagnostics because an operator chose it.
     fn directory_entry_path(entry: &fs::DirEntry) -> Option<PathBuf> {
         let file_type = entry.file_type().ok()?;
         if !file_type.is_dir() {
@@ -875,11 +897,10 @@ impl ExploreStrand {
         }
 
         let name = entry.file_name();
-        if matches!(
-            name.to_str(),
-            Some(".beads" | ".git" | "target" | "node_modules")
-        ) {
-            return None;
+        if let Some(name) = name.to_str() {
+            if name.starts_with('.') || matches!(name, "target" | "node_modules") {
+                return None;
+            }
         }
 
         Some(entry.path())
@@ -891,17 +912,20 @@ impl ExploreStrand {
     }
 
     /// Capture the bounded filesystem surface used by auto-discovery.
+    ///
+    /// The entry set mirrors the discovery frontier exactly (see
+    /// [`directory_entry_path`]): a directory discovery would never descend
+    /// into must not appear here either, because churn inside it — session
+    /// scratchpads under a `.tmp` root alone touch the tree many times per
+    /// hour — would otherwise wake Explore for re-discoveries that can never
+    /// find anything.
     fn capture_workspace_discovery_snapshot(root: &Path) -> Option<WorkspaceDiscoverySnapshot> {
         let root_mtime = fs::metadata(root).ok()?.modified().ok();
         let entries = fs::read_dir(root)
             .ok()?
             .filter_map(Result::ok)
             .filter_map(|entry| {
-                let path = entry.path();
-                if !path.is_dir() {
-                    return None;
-                }
-
+                let path = Self::directory_entry_path(&entry)?;
                 let mtime = entry
                     .metadata()
                     .ok()
@@ -2951,6 +2975,106 @@ mod tests {
     fn discover_workspaces_returns_empty_for_nonexistent_root() {
         let discovered = ExploreStrand::discover_workspaces(Path::new("/nonexistent/path/xyz"));
         assert!(discovered.is_empty());
+    }
+
+    /// Scan-root hygiene: auto-discovery must not descend into hidden
+    /// directories, where `.beads/` markers are transient tooling output
+    /// (session scratchpads, dependency checkouts, caches) rather than fleet
+    /// workspaces. Regression guard for the 2026-09 starvation burn-in, where
+    /// ~1,800 such directories per hour were quarantined fleet-wide with zero
+    /// operator-actionable entries among them.
+    #[test]
+    fn discover_workspaces_skips_hidden_directories() {
+        let root = tempfile::tempdir().unwrap();
+
+        // Real workspaces: top-level and nested inside a visible tree.
+        let visible_ws = root.path().join("NEEDLE-like-repo");
+        let nested_ws = root.path().join("team").join("nested-repo");
+        fs::create_dir_all(visible_ws.join(".beads")).unwrap();
+        fs::create_dir_all(nested_ws.join(".beads")).unwrap();
+
+        // Garbage shapes observed in the burn-in telemetry, each with a
+        // `.beads/` marker that used to be discovered and then quarantined.
+        let session_scratchpad = root
+            .path()
+            .join(".tmp")
+            .join("claude-1000")
+            .join("abc123")
+            .join("scratchpad")
+            .join("session-work");
+        let cargo_checkout = root
+            .path()
+            .join(".cargo")
+            .join("git")
+            .join("checkouts")
+            .join("some-crate-1234")
+            .join("dep-repo");
+        let cache_extraction = root.path().join(".cache").join("needle-extraction");
+        let needle_artifact = root.path().join(".needle").join("state-artifact");
+        for garbage in [
+            &session_scratchpad,
+            &cargo_checkout,
+            &cache_extraction,
+            &needle_artifact,
+        ] {
+            fs::create_dir_all(garbage.join(".beads")).unwrap();
+        }
+
+        let discovered = ExploreStrand::discover_workspaces(root.path());
+
+        assert!(discovered.contains(&visible_ws), "visible workspace found");
+        assert!(
+            discovered.contains(&nested_ws),
+            "workspace nested in a visible tree found"
+        );
+        assert_eq!(
+            discovered.len(),
+            2,
+            "no hidden-directory path may be discovered: {discovered:?}"
+        );
+    }
+
+    /// The discovery snapshot must ignore hidden roots: churn inside them
+    /// (new session scratchpads alone touch `.tmp` many times per hour) must
+    /// not wake Explore for a re-discovery that can never find anything,
+    /// while a new visible top-level directory still does.
+    #[test]
+    fn discovery_snapshot_ignores_hidden_roots() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join("visible-ws").join(".beads")).unwrap();
+        fs::create_dir_all(root.path().join(".tmp").join("claude-1000")).unwrap();
+
+        let before = ExploreStrand::capture_workspace_discovery_snapshot(root.path())
+            .expect("snapshot over a readable root");
+
+        // Scratchpad churn under the hidden root: new nested directories
+        // (with their own `.beads/` markers) plus a new direct child of
+        // `.tmp`, which bumps the hidden root's own mtime.
+        fs::create_dir_all(
+            root.path()
+                .join(".tmp")
+                .join("claude-1000")
+                .join("scratchpad-42")
+                .join(".beads"),
+        )
+        .unwrap();
+        fs::create_dir(root.path().join(".tmp").join("agent-77")).unwrap();
+
+        let after_churn = ExploreStrand::capture_workspace_discovery_snapshot(root.path())
+            .expect("snapshot over a readable root");
+        assert_eq!(
+            before, after_churn,
+            "hidden-root churn must not change the discovery surface"
+        );
+
+        // A new visible top-level workspace still wakes re-discovery.
+        fs::create_dir_all(root.path().join("new-visible-ws").join(".beads")).unwrap();
+        let after_new_ws = ExploreStrand::capture_workspace_discovery_snapshot(root.path())
+            .expect("snapshot over a readable root");
+        assert_ne!(
+            after_churn, after_new_ws,
+            "a new visible workspace must change the discovery surface"
+        );
     }
 
     #[test]
