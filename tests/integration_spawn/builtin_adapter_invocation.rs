@@ -790,6 +790,153 @@ async fn generic_builtin_delivers_prompt_via_stdin() {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Cross-adapter execution contract: shipped model, exact argv, and headless mode
+// ──────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn every_documented_builtin_preserves_its_execution_contract() {
+    let _path_lock = FAKE_PATH_LOCK.lock().await;
+    let fake = FakeCli::new();
+    let _path = FakePathGuard::prepend(fake._bin_dir.path());
+
+    // `generic` is a copy-me YAML template, not one of the runnable adapters
+    // advertised in the README. Keep every concrete built-in profile in this
+    // table, including the two Claude model variants.
+    let cases: [(&str, Option<&str>, &[&str]); 6] = [
+        (
+            "claude",
+            Some("claude-sonnet-4-6"),
+            &[
+                "-p",
+                "--model",
+                "claude-sonnet-4-6",
+                "--max-turns",
+                "30",
+                "--output-format",
+                "stream-json",
+                "--dangerously-skip-permissions",
+                "--verbose",
+            ],
+        ),
+        (
+            "claude-sonnet",
+            Some("claude-sonnet-4-6"),
+            &[
+                "-p",
+                "--model",
+                "claude-sonnet-4-6",
+                "--max-turns",
+                "30",
+                "--output-format",
+                "stream-json",
+                "--dangerously-skip-permissions",
+                "--verbose",
+            ],
+        ),
+        (
+            "claude-opus",
+            Some("claude-opus-4-6"),
+            &[
+                "-p",
+                "--model",
+                "claude-opus-4-6",
+                "--max-turns",
+                "50",
+                "--output-format",
+                "stream-json",
+                "--dangerously-skip-permissions",
+                "--verbose",
+            ],
+        ),
+        // OpenCode deliberately delegates model choice to its configured
+        // provider; `None` means no `--model` argument should be rendered.
+        ("opencode", None, &["run", "--format", "json", "--auto"]),
+        (
+            "codex",
+            Some("gpt-5.6-terra"),
+            &[
+                "exec",
+                "--model",
+                "gpt-5.6-terra",
+                "--sandbox",
+                "workspace-write",
+                "--json",
+            ],
+        ),
+        (
+            "aider",
+            Some("claude-sonnet-4-6"),
+            &["--model", "claude-sonnet-4-6", "--yes-always", "--message"],
+        ),
+    ];
+
+    for (name, expected_model, expected_args) in cases {
+        let workspace = unique_workspace();
+        let bead_id = format!("needle-matrix-{name}-execution-contract");
+        let adapter = documented_adapter(name);
+        assert_eq!(
+            adapter.model.as_deref(),
+            expected_model,
+            "{name} built-in model selection"
+        );
+
+        // A distinctive nonzero status verifies that the real dispatcher
+        // returns the CLI's exit code unchanged while the same invocation
+        // verifies command construction and noninteractive flags.
+        fs::write(&fake.log, "").expect("reset invocation log");
+        let result = dispatch_adapter(
+            adapter,
+            name,
+            &fake,
+            &[(EXIT_ENV, "23".to_string())],
+            &bead_id,
+            workspace.path(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{name} dispatch failed: {error:#}"));
+
+        assert_eq!(result.exit_code, 23, "{name} exit status propagation");
+        let lines = read_log(&fake);
+        assert_eq!(
+            log_values(&lines, "cwd").first().copied(),
+            Some(workspace.path().to_str().expect("utf-8 workspace")),
+            "{name} must execute in the bead workspace"
+        );
+
+        let args = log_values(&lines, "arg");
+        assert!(
+            args.starts_with(expected_args),
+            "{name} fixed command arguments must match its documented headless contract; got {args:?}"
+        );
+
+        let prompt = format!("matrix smoke prompt for {bead_id}");
+        match name {
+            "claude" | "claude-sonnet" | "claude-opus" | "opencode" => {
+                assert_eq!(args.len(), expected_args.len(), "{name} stdin argv");
+                assert_eq!(
+                    log_values(&lines, "stdin").first().copied(),
+                    Some(prompt.as_str()),
+                    "{name} must receive its prompt on stdin"
+                );
+            }
+            "codex" => {
+                assert_eq!(args.len(), expected_args.len() + 1, "codex argv");
+                assert_eq!(args.last().copied(), Some(prompt.as_str()));
+            }
+            "aider" => {
+                assert_eq!(args.len(), expected_args.len() + 1, "aider argv");
+                assert_eq!(
+                    value_after_flag(&args, "--message"),
+                    Some(prompt.as_str()),
+                    "aider one-shot mode must receive its prompt via --message"
+                );
+            }
+            _ => unreachable!("every matrix entry above is a concrete built-in"),
+        }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Exit status and failures
 // ──────────────────────────────────────────────────────────────────────────────
 
@@ -963,6 +1110,54 @@ async fn missing_agent_cli_reports_command_not_found() {
         !fake.log.exists(),
         "the fake CLI must not have been invoked"
     );
+}
+
+#[tokio::test]
+async fn every_documented_builtin_reports_its_missing_executable() {
+    let _path_lock = FAKE_PATH_LOCK.lock().await;
+    let fake = FakeCli::new();
+    let _path = FakePathGuard::prepend(fake._bin_dir.path());
+
+    for name in [
+        "claude",
+        "claude-sonnet",
+        "claude-opus",
+        "opencode",
+        "codex",
+        "aider",
+    ] {
+        let workspace = unique_workspace();
+        let mut adapter = documented_adapter(name);
+        let missing_executable = format!("needle-matrix-missing-{name}");
+        let command = format!("&& {}", adapter.agent_cli);
+        let missing_command = format!("&& {missing_executable}");
+        adapter.invoke_template = adapter.invoke_template.replace(&command, &missing_command);
+        adapter.agent_cli = missing_executable.clone();
+
+        let result = dispatch_adapter(
+            adapter,
+            name,
+            &fake,
+            &[],
+            &format!("needle-matrix-{name}-missing-executable"),
+            workspace.path(),
+        )
+        .await
+        .unwrap_or_else(|error| {
+            panic!("{name} dispatch failed before reporting missing CLI: {error:#}")
+        });
+
+        assert_eq!(
+            result.exit_code, 127,
+            "{name} missing executable must propagate the shell's 127 status"
+        );
+        assert!(
+            result.stderr.contains(&missing_executable)
+                && result.stderr.contains("command not found"),
+            "{name} diagnostic should name `{missing_executable}` and say command not found; got {:?}",
+            result.stderr
+        );
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

@@ -313,6 +313,9 @@ contract = 208
 # +2 adapter dispatch-routing contracts (needle-e7160119): README model
 # families resolve to the OpenCode/Codex/Aider built-ins and dispatch their
 # own fake CLI, and unrouted models fall back to the default adapter.
+# +2 cross-adapter execution-contract cases (needle-4f8b1547): exact
+# command/model/headless-mode and exit-status checks, plus per-adapter
+# missing-executable diagnostics for every concrete README built-in.
 # +4 adapter conformance contracts (needle-58fe701e): adapter environment
 # and claim-credential passing with both-stream output capture, unclaimed
 # analysis stripping planted fencing credentials, idle-timeout enforcement,
@@ -320,7 +323,7 @@ contract = 208
 # +4 isolated adapter smoke contracts (needle-7a93d078): recorded CLI flag
 # fixtures, README/registry parity, ready probes for each built-in adapter,
 # and fail-closed checks for the generic placeholder and unknown names.
-e2e = 862
+e2e = 864
 soak = 0
 fuzz = 0
 
@@ -365,6 +368,9 @@ tier = "e2e"
 # resolve qwen/gpt/sonnet models to the shipped opencode/codex/aider
 # built-ins whose CLIs then run with the prompt delivered by each input
 # method, and unrouted models fall back to the configured default adapter.
+# +2 cross-adapter execution-contract cases (needle-4f8b1547): exact
+# command/model/headless-mode and exit-status checks, plus per-adapter
+# missing-executable diagnostics for every concrete README built-in.
 # +4 adapter conformance contracts (needle-58fe701e): environment and claim
 # credentials reach the dispatched CLI (with stdout and stderr capture
 # asserted on the same run), an unclaimed analysis dispatch strips planted
@@ -372,7 +378,7 @@ tier = "e2e"
 # structured reason, and a hard-deadline kill takes down the agent's whole
 # process group. Same harness as the matrix above: the contract is the
 # spawned process boundary.
-max_tests = 442
+max_tests = 444
 owner = "component:process-integration"
 
 [[harness]]
