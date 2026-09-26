@@ -682,16 +682,36 @@ mod tests {
     }
 
     fn isolated_home_in(parent: &Path) -> (crate::util::test_env::EnvGuard, TempDir) {
+        let parent = parent.to_path_buf();
+        isolated_home_from(|| parent)
+    }
+
+    fn isolated_home_from(
+        parent: impl FnOnce() -> PathBuf,
+    ) -> (crate::util::test_env::EnvGuard, TempDir) {
         let env_guard = crate::util::test_env::isolate_env();
-        let home = TempDir::new_in(parent).unwrap();
+        let home = TempDir::new_in(parent()).unwrap();
         std::env::set_var("HOME", home.path());
         (env_guard, home)
     }
 
+    /// Create a test HOME below the operator's durable NEEDLE state root.
+    ///
+    /// This test must distinguish a durable HOME from the temporary workspace
+    /// it rejects. The repository's clean-archive verification runs from a
+    /// temporary extraction, so using the current directory as the parent
+    /// would accidentally make both paths temporary and disable the guard.
+    fn isolated_durable_home() -> (crate::util::test_env::EnvGuard, TempDir) {
+        isolated_home_from(|| {
+            let parent = home_dir().join(".needle");
+            fs::create_dir_all(&parent).unwrap();
+            parent
+        })
+    }
+
     #[test]
     fn durable_home_refuses_all_temporary_workspace_recording() {
-        let current_dir = std::env::current_dir().unwrap();
-        let (_env_guard, home) = isolated_home_in(&current_dir);
+        let (_env_guard, home) = isolated_durable_home();
         let workspace = TempDir::new().unwrap();
 
         let gate_error = record_error(
