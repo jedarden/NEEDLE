@@ -867,6 +867,10 @@ pattern = "tests/dod-modes/*"
 owner = "component:definition-of-done"
 
 [[artifact]]
+pattern = "tests/msrv-drift/*"
+owner = "component:msrv-drift-guard"
+
+[[artifact]]
 pattern = "tests/e2e/*"
 owner = "component:e2e"
 

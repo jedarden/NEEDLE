@@ -822,6 +822,10 @@ if [[ "$LANE" == "fast" ]] || [[ "$LANE" == "all" ]]; then
   # else's breakage, so it is itself part of the gate. Pure bash, milliseconds.
   run_check "attribution tests" bash tests/dod-attribution/run.sh
 
+  # Keep Cargo's declared MSRV and the needle-ci verify-msrv contract aligned.
+  run_check "MSRV configuration drift" bash scripts/check-msrv-drift.sh
+  run_check "MSRV drift checker tests" bash tests/msrv-drift/run.sh
+
   # Same for the CI modes: --gate and --target are what keep a rejected change
   # from paying to compile a test suite. Pure bash, milliseconds.
   run_check "dod mode tests" bash tests/dod-modes/run.sh
