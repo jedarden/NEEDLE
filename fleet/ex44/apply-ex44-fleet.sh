@@ -14,6 +14,7 @@ ROAM_HOME="$NEEDLE_HOST_HOME/.needle/roam-only"
 ROAM_HOME_CONFIG="$SRC_DIR/roam-home.yaml"
 FLEET_POLICY="$SRC_DIR/fleet-policy.env"
 MANAGED_ADAPTERS_DIR="$SRC_DIR/adapters"
+ADAPTER_POLICY_CHECK="$SRC_DIR/../../scripts/check-adapter-cargo-environment.sh"
 
 DRY_RUN=0
 START_NEW=0
@@ -26,6 +27,13 @@ for arg in "$@"; do
         *) echo "unknown argument: $arg" >&2; exit 2 ;;
     esac
 done
+
+# Validate both the host-local adapter counterparts and the tracked templates
+# before changing any deployed files. Host-local adapters cover GLM and other
+# fleet entries that are intentionally not source-controlled here.
+"$ADAPTER_POLICY_CHECK" \
+    --label codinghome --adapters-dir "$NEEDLE_CONFIG_DIR/adapters" \
+    --label tracked-ex44 --adapters-dir "$MANAGED_ADAPTERS_DIR"
 
 run() {
     if [[ "$DRY_RUN" == 1 ]]; then

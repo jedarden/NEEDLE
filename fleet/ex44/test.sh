@@ -3,8 +3,10 @@ set -euo pipefail
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MANIFEST="$SRC_DIR/workers.tsv"
+ADAPTER_POLICY_CHECK="$SRC_DIR/../../scripts/check-adapter-cargo-environment.sh"
 
-bash -n "$SRC_DIR/apply-ex44-fleet.sh" "$SRC_DIR/backlog-slo.sh" "$SRC_DIR/needle-zai-governor" "$SRC_DIR/needle-release-upgrade"
+bash -n "$ADAPTER_POLICY_CHECK" "$SRC_DIR/apply-ex44-fleet.sh" "$SRC_DIR/backlog-slo.sh" "$SRC_DIR/needle-zai-governor" "$SRC_DIR/needle-release-upgrade"
+"$ADAPTER_POLICY_CHECK" --self-test
 ! grep -q 'required-explore-workspaces' "$SRC_DIR/apply-ex44-fleet.sh" "$SRC_DIR/README.md"
 ! grep -q 'explicit Explore list' "$SRC_DIR/apply-ex44-fleet.sh"
 grep -q 'leaves Explore.*workspace list empty' "$SRC_DIR/README.md"

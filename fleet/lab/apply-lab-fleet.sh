@@ -37,6 +37,7 @@ SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SYSTEMD_DIR="$HOME/.config/systemd/user"
 WORKERS_DIR="$HOME/.config/needle/workers"
 MANIFEST="$SRC_DIR/workers.tsv"
+ADAPTER_POLICY_CHECK="$SRC_DIR/../../scripts/check-adapter-cargo-environment.sh"
 
 DRY_RUN=0
 INSTALL_CARGO_WRAPPER=0
@@ -97,6 +98,7 @@ install_cargo_wrappers() {
 # the lab needle-worker convergence below.
 if [[ "$WRAPPERS_ONLY" == 1 ]]; then
     echo "== wrapper + drift-watch install only (src: $SRC_DIR)"
+    "$ADAPTER_POLICY_CHECK" --label codinghome --adapters-dir "$HOME/.config/needle/adapters"
     install_cargo_wrappers
     echo "== wrappers current"
     exit 0
@@ -107,6 +109,10 @@ manifest_ids() {
 }
 
 echo "== lab fleet converge (src: $SRC_DIR)"
+
+# Lab keeps its adapter YAMLs machine-local, so validate the counterpart set
+# on this host before converging any units or worker environment files.
+"$ADAPTER_POLICY_CHECK" --label lab --adapters-dir "$HOME/.config/needle/adapters"
 
 # --- sanity: manifest rows are well-formed and workspaces exist -------------
 while IFS=$'\t' read -r id ws agent delay explore; do

@@ -23,6 +23,26 @@ uses machine-local adapter YAMLs under `~/.config/needle/adapters`; keep those
 counterparts on the same unset value. `fleet/lab/workers.tsv` tracks worker
 membership, not those host-local adapter files.
 
+## Automated pre-deployment check
+
+Run `scripts/check-adapter-cargo-environment.sh` against each host-local
+adapter directory before applying a fleet. It checks every declared Cargo
+policy assignment, reports all violations in the directory, and fails the
+deployment gate if any value is wrong, a partial Cargo block is present, or
+`RUSTFLAGS` is set. An adapter with no Cargo block is allowed for adapters that
+do not use this build policy.
+
+The codinghome and lab apply scripts invoke the same checker before changing
+deployed files. To check a counterpart manually:
+
+```sh
+scripts/check-adapter-cargo-environment.sh \
+  --label codinghome --adapters-dir "$HOME/.config/needle/adapters"
+```
+
+Run `scripts/check-adapter-cargo-environment.sh --self-test` to exercise the
+valid, no-policy, partial, wrong-value, and forbidden-`RUSTFLAGS` cases.
+
 ## Measurement used for the decision
 
 On 2026-09-24, `cargo build --all-targets` was measured in clean source

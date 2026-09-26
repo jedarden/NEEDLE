@@ -3,8 +3,10 @@ set -euo pipefail
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MANIFEST="$SRC_DIR/workers.tsv"
+ADAPTER_POLICY_CHECK="$SRC_DIR/../../scripts/check-adapter-cargo-environment.sh"
 
-bash -n "$SRC_DIR/apply-lab-fleet.sh"
+bash -n "$ADAPTER_POLICY_CHECK" "$SRC_DIR/apply-lab-fleet.sh"
+"$ADAPTER_POLICY_CHECK" --self-test
 
 rows=$(awk -F'\t' '$1 !~ /^#/ && NF == 5 {print}' "$MANIFEST")
 [[ "$(wc -l <<<"$rows")" -eq 7 ]]
