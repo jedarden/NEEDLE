@@ -129,11 +129,16 @@ value wins. This fallback is the **INTERIM** mechanism. The
 declare their own Definition of Done; that runner is intended to replace this
 fallback gate rather than add another permanent gate layer.
 
-**Build from source** (Rust 1.85+; NEEDLE pins its toolchain in `rust-toolchain.toml`):
+**Build from source** (Rust 1.85+; NEEDLE pins its toolchain in `rust-toolchain.toml`) — from the canonical Forgejo remotes, or from the read-only GitHub mirror by swapping the hostname:
 
 ```bash
-cargo install --git https://github.com/jedarden/NEEDLE
-cargo install --git https://github.com/jedarden/bead-rs --bin bead
+# canonical (git.ardenone.com — see "Hosting — Forgejo First" below)
+cargo install --git https://git.ardenone.com/jedarden/NEEDLE
+cargo install --git https://git.ardenone.com/jedarden/bead-rs --bin bead
+
+# mirror equivalent
+# cargo install --git https://github.com/jedarden/NEEDLE
+# cargo install --git https://github.com/jedarden/bead-rs --bin bead
 ```
 
 The installer drops binaries in `~/.local/bin` (override with `NEEDLE_INSTALL_PATH`). An existing `bead` at or above the release version is kept.
@@ -489,6 +494,45 @@ If you want to run NEEDLE in your own workflow, open an issue and I'll help.
 
 ---
 
+## 🌐 Hosting — Forgejo First
+
+NEEDLE is hosted **Forgejo-first**: [`git.ardenone.com`](https://git.ardenone.com/jedarden/NEEDLE) is the authoritative source and GitHub is a read-only mirror. Each surface has exactly one home:
+
+| Surface | Where it lives | Notes |
+|---------|----------------|-------|
+| **Authoritative repository** | [`git.ardenone.com/jedarden/NEEDLE`](https://git.ardenone.com/jedarden/NEEDLE) | `origin` on every machine. All commits, branches, and `v*` release tags are pushed here. Publicly cloneable — the web UI asks for a login, `git clone` does not |
+| **Read-only mirror** | [`github.com/jedarden/NEEDLE`](https://github.com/jedarden/NEEDLE) | Synced by a Forgejo **server-side** push mirror on every push (`sync_on_commit`). Nothing is ever pushed to GitHub from a client |
+| **CI** | Argo Workflows on the `iad-ci` cluster (`needle-ci` pipeline) | GitHub Actions are disabled. The pipeline triggers on push and posts its verdict as a commit status on the mirror — the `iad-ci` badge at the top of this README reads that status. See [post-push CI](docs/post-push-ci.md) |
+| **Releases** | [GitHub Releases](https://github.com/jedarden/NEEDLE/releases/latest) on the mirror | The `release` lane of `needle-ci` pushes the `v*` tag to Forgejo, then publishes the built binaries to GitHub Releases — the public download surface the one-line installer fetches from |
+
+In short: **clone and push to Forgejo; read and download from either.**
+
+### The workflow for a new repository
+
+1. **Push-to-create.** Forgejo auto-creates the repo on first push — no manual
+   repo-creation step, no `POST /api/v1/user/repos`:
+   ```bash
+   cd <repo-dir>
+   git branch -m main                     # git init defaults to master
+   git remote add origin https://git.ardenone.com/jedarden/<repo>.git
+   git push -u origin main                # auto-creates the repo
+   ```
+2. **Visibility.** Push-created repos start private (instance default). Public
+   portfolio repos are flipped with a `PATCH` to
+   `/api/v1/repos/jedarden/<repo>` (`{"private": false}`) using the stored
+   Forgejo token. Deliberately private repos stay private and skip the GitHub
+   mirror entirely — the mirror exists for the public portfolio.
+3. **Mirroring.** The GitHub repo is created empty (`gh repo create --public`),
+   then a Forgejo **server-side** push mirror (`remote_name: github-mirror`,
+   `sync_on_commit: true`) populates it on every push. The mirror is configured
+   once, on the server — never as a second remote in a client's `.git/config`.
+4. **No dual-push.** Clients push only to Forgejo `origin`. Never add a second
+   push remote and never push to GitHub by hand; the mirror lands every commit
+   on push. Never force-push either host — if Forgejo and GitHub ever diverge,
+   reconcile with a merge commit and let the mirror carry it over.
+
+---
+
 ## 📚 Documentation
 
 - **[Agent Onboarding](docs/agent-onboarding.md)** — Complete walkthrough from install to first closed bead, with expected output and failure modes (see also `llms.txt` for the agent-readable quickstart)
@@ -518,4 +562,4 @@ MIT
 
 Part of [jedarden.com](https://jedarden.com) · Read the write-up: [jedarden.com/projects/needle/](https://jedarden.com/projects/needle/)
 
-*This GitHub repo is a read-only mirror of git.ardenone.com/jedarden/NEEDLE — issues and PRs are welcome here either way.*
+*This GitHub repo is a read-only mirror of git.ardenone.com/jedarden/NEEDLE — the "Hosting — Forgejo First" section above covers push-to-create, visibility, mirroring, and the no-dual-push rule. Issues and PRs are welcome here either way.*
