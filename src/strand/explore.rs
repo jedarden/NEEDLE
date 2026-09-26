@@ -996,7 +996,11 @@ impl ExploreStrand {
 
             let validation = workspace_health::validate_workspace(workspace);
             if validation.is_healthy {
-                self.record_workspace_success(workspace);
+                // Structural validity does not prove that the configured
+                // backend can read this workspace's inventory. Keep any
+                // backend or duplicate quarantine until the later `ready`
+                // query succeeds; clearing it here turns every rediscovery
+                // of a broken store into a new first-failure diagnostic.
                 validated.push(workspace.clone());
                 continue;
             }
@@ -1058,21 +1062,17 @@ impl ExploreStrand {
         if !self.auto_discovery_mode {
             for workspace in &candidates {
                 let validation = workspace_health::validate_workspace(workspace);
-                if validation.is_healthy
-                    || validation
-                        .quarantine_reason()
-                        .is_some_and(|reason| reason.is_excluded_shape())
-                {
+                let Some(reason) = validation.quarantine_reason() else {
+                    // A structural pass only establishes `.git` and `.beads`
+                    // shape. A successful backend `ready` query below is
+                    // what clears an earlier store quarantine.
+                    continue;
+                };
+
+                if reason.is_excluded_shape() {
                     self.record_workspace_success(workspace);
-                } else if let Some(reason) = validation.quarantine_reason() {
-                    self.record_workspace_failure(workspace, reason.clone());
                 } else {
-                    tracing::warn!(
-                        worker = %self.qualified_id,
-                        workspace = %workspace.display(),
-                        explanation = %validation.explanation,
-                        "pinned workspace validation returned an unhealthy result without a quarantine reason"
-                    );
+                    self.record_workspace_failure(workspace, reason.clone());
                 }
             }
 
@@ -2915,6 +2915,49 @@ mod tests {
                     Some("schema_incompatible")
                 );
             }
+
+            // Re-discovery and pinned validation are only structural. They
+            // must not clear a quarantine raised by a failed backend
+            // inventory query; otherwise each scan repeats the same issue as
+            // a first failure instead of following the reminder interval.
+            let schema_reason = inventory_strand
+                .quarantine_registry
+                .lock()
+                .unwrap()
+                .reason(&bad_workspace)
+                .cloned()
+                .expect("failed inventory retains its quarantine reason");
+            inventory_strand.apply_workspace_health();
+            assert_eq!(
+                inventory_strand
+                    .quarantine_registry
+                    .lock()
+                    .unwrap()
+                    .consecutive_failures(&bad_workspace),
+                1,
+                "pinned structural validation must preserve the backend failure"
+            );
+            inventory_strand
+                .filter_healthy_workspaces(&[bad_workspace.clone(), healthy_workspace.clone()]);
+            assert_eq!(
+                inventory_strand
+                    .quarantine_registry
+                    .lock()
+                    .unwrap()
+                    .consecutive_failures(&bad_workspace),
+                1,
+                "auto-discovery structural validation must preserve the backend failure"
+            );
+            inventory_strand.record_workspace_failure(&bad_workspace, schema_reason);
+            assert_eq!(
+                inventory_strand
+                    .quarantine_registry
+                    .lock()
+                    .unwrap()
+                    .consecutive_failures(&bad_workspace),
+                2,
+                "a repeated failed inventory advances the existing quarantine"
+            );
 
             repaired.store(true, std::sync::atomic::Ordering::SeqCst);
             let second = inventory_strand
