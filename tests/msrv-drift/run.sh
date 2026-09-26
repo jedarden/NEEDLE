@@ -24,6 +24,7 @@ fresh_fixture() {
   mkdir -p "$destination/scripts"
   cp "$REPO_ROOT/scripts/check-msrv-drift.sh" "$destination/scripts/"
   cp "$REPO_ROOT/Cargo.toml" "$destination/"
+  cp "$REPO_ROOT/rust-toolchain.toml" "$destination/"
   cp "$REPO_ROOT/CLAUDE.md" "$destination/"
 }
 
@@ -52,6 +53,14 @@ fresh_fixture "$case_root"
 expect_failure "Cargo MSRV drift from needle-ci is rejected" \
   "Cargo.toml declares Rust 1.88 but needle-ci MSRV_TOOLCHAIN is 1.89.0" \
   "$case_root" 1.89.0
+
+case_root="$TMP_ROOT/build-toolchain-drift"
+fresh_fixture "$case_root"
+sed -i 's/channel = "1.95.0"/channel = "1.87.0"/' \
+  "$case_root/rust-toolchain.toml"
+expect_failure "build toolchain older than Cargo MSRV is rejected" \
+  "rust-toolchain.toml pins Rust 1.87.0, which must be newer than Cargo.toml MSRV 1.88" \
+  "$case_root"
 
 case_root="$TMP_ROOT/missing-build"
 fresh_fixture "$case_root"
