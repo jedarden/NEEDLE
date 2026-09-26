@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "needle"
-version = "0.6.15"
+version = "0.6.16"
 edition = "2021"
 # MSRV — enforced by needle-ci's verify-msrv lane (iad-ci), which builds and
 # unit-tests under exactly this toolchain and fails the run if it drifts from
