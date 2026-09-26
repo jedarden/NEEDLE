@@ -67,21 +67,37 @@ For TRACE analytics, the unset median was 61.52 seconds faster than
 The flag increased bead-rs median peak RSS from 0.830 GiB to 1.387 GiB, while
 neither build needed it to stay under the threshold.
 
-After a day of fleet traffic, verify the shared target fingerprints using the
-marker `/home/coding/.needle/needle-2020b478-rustflags-marker` and record the
-output on bead `needle-2020b478`:
+After a day of fleet traffic, verify Cargo fingerprints newer than the marker
+`/home/coding/.needle/needle-2020b478-rustflags-marker` and record the output
+on bead `needle-2020b478`. The cargo wrapper now gives each repository its own
+target under `/build/<repo>`, so search those targets rather than the retired
+shared target path:
 
 ```sh
-find /data/build/target-workers/debug/.fingerprint -name 'lib-tokio.json' -newer /home/coding/.needle/needle-2020b478-rustflags-marker | xargs jq -c .rustflags | sort | uniq -c
+find /build -type f -path '*/debug/.fingerprint/*/lib-tokio.json' -newer /home/coding/.needle/needle-2020b478-rustflags-marker -print0 | xargs -0 -r jq -c .rustflags | sort | uniq -c
 ```
 
-Workers load the adapter table at process start. Until every `needle-worker@*`
-user service on codinghome has been restarted after the 2026-09-25 change,
-dispatches from older workers keep receiving the retired `-C codegen-units=1`
-block from their in-memory cache, and the shared target keeps both cache
-halves warm (live evidence on bead `needle-2020b478`; the restart is tracked
-as `needle-5e0e1ee7`). Refresh the marker at restart time
-(`touch /home/coding/.needle/needle-2020b478-rustflags-marker`) before
-running the check above: fingerprint directories written under the old flags
-keep their own hashes forever and stay `-newer` than the original marker, so
-an unrefreshed marker would keep reporting the stale units.
+Workers load the adapter table at process start. Restart all active
+`needle-worker@*` user services on codinghome after the adapter change, then
+refresh the marker before running the check above. Fingerprint directories
+written under the old flags keep their own hashes forever; an unrefreshed
+marker would keep reporting them.
+
+## 2026-09-25 fleet restart snapshot
+
+At 2026-09-26T03:46:19Z, all 32 active codinghome worker services had
+`ActiveEnterTimestamp` values later than the 2026-09-25T01:26:53Z adapter
+cutover, and systemd had no restart jobs pending. Two retired units remained
+masked and inactive. The 33-adapter policy check passed. A live environment
+scan of 156 processes in the 32 worker service cgroups found no `RUSTFLAGS`
+assignments, so no active worker was observed using the retired
+`-C codegen-units=1` flag.
+
+The documented legacy target `/data/build/target-workers/debug/.fingerprint`
+was absent during this audit. The equivalent query over the current
+per-repository targets under `/build` exited 0 and produced no output: no
+`lib-tokio.json` fingerprint had been written after the refreshed marker yet.
+This immediate post-restart snapshot identifies no worker using the retired
+flag, but it contains no post-marker Cargo fingerprint; repeat the query after
+workers have built with the refreshed adapter table to collect fingerprint
+evidence from fleet traffic.
