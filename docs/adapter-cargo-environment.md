@@ -74,8 +74,13 @@ target under `/build/<repo>`, so search those targets rather than the retired
 shared target path:
 
 ```sh
-find /build -type f -path '*/debug/.fingerprint/*/lib-tokio.json' -newer /home/coding/.needle/needle-2020b478-rustflags-marker -print0 | xargs -0 -r jq -c .rustflags | sort | uniq -c
+find -L /build -type f -path '*/debug/.fingerprint/*/lib-tokio.json' -newer /home/coding/.needle/needle-2020b478-rustflags-marker -print0 | xargs -0 -r jq -c .rustflags | sort | uniq -c
 ```
+
+Pass `-L`: `/build` is a symlink to `/data/build`, and without it `find`
+treats the start point as a lone file, silently returning no fingerprints at
+all — an empty result from the unflagged command means the query never ran
+over the tree, not that no fingerprints are newer than the marker.
 
 Workers load the adapter table at process start. Restart all active
 `needle-worker@*` user services on codinghome after the adapter change, then
@@ -102,3 +107,15 @@ this marker yet. This snapshot identifies no active worker using the retired
 flag, but contains no post-marker Cargo fingerprint. Repeat the query after
 workers have built with the refreshed adapter table to collect fingerprint
 evidence from fleet traffic.
+
+The post-traffic repeat ran at 2026-09-26T08:55Z, 4h51m after the marker
+refresh. The verbatim unflagged command again exited 0 with empty output —
+exposed as the `/build` symlink false negative described above, not a real
+absence. The corrected query exited 0 with `20 []`: twenty post-marker
+`lib-tokio.json` fingerprints across five repositories (needle, loom,
+pdftract, reddit-media-player, agent-archivist), every one written with
+`rustflags` unset. The all-crate post-marker tally was 4,119 `[]` and zero
+flagged; the newest fingerprint carrying `-C codegen-units=1` anywhere
+remained the 2026-09-25T13:51Z pdftract write. The 33-adapter policy check
+passed and no live `cargo`/`rustc` process carried `RUSTFLAGS`. Full output
+is recorded on bead `needle-2020b478`.
