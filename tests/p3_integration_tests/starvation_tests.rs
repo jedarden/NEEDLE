@@ -394,6 +394,7 @@ async fn pluck_starvation_schema_and_no_target_diagnostic_bead() {
     // serialized event envelope rather than constructing the event directly.
     use std::io::BufRead;
 
+    use needle::bead_store::BeadStore;
     use needle::strand::{PluckStrand, Strand};
     use needle::telemetry::Telemetry;
     use needle::types::StrandResult;
@@ -408,7 +409,7 @@ async fn pluck_starvation_schema_and_no_target_diagnostic_bead() {
 
     let worker_id = "pluck-starvation-schema-test";
     let log_dir = workspace.path().join(".needle/logs");
-    let telemetry = Telemetry::with_log_dir(worker_id, &log_dir);
+    let telemetry = Telemetry::with_log_dir(worker_id.to_string(), &log_dir);
     let session_id = telemetry.session_id().to_string();
     telemetry.start();
 
