@@ -1100,9 +1100,19 @@ fn archive_and_status_process_contracts_version_basic_spawn() {
 
 #[tokio::test]
 async fn archive_and_status_process_contracts_workspace_template() {
-    let template = template_for_workspace(Path::new(env!("CARGO_MANIFEST_DIR")))
+    let repository = GitRepo::new();
+    git_ok(
+        repository.path(),
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://git.ardenone.com/jedarden/NEEDLE.git",
+        ],
+    );
+    let template = template_for_workspace(repository.path())
         .await
-        .expect("manifest directory has a Git remote");
+        .expect("fixture repository has a Git remote");
     assert_eq!(template, "needle-ci");
 }
 
