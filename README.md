@@ -11,7 +11,7 @@
 
 > Deterministic bead processing with explicit outcome paths.
 
-NEEDLE is a universal wrapper for headless coding CLI agents. It processes a shared bead queue in deterministic order, dispatching work to any headless CLI (Claude Code, OpenCode, Codex, Aider) and handling every outcome through an explicit, predefined path.
+NEEDLE is a wrapper for headless coding CLI agents. It processes a shared bead queue in deterministic order, dispatching work through its supported built-in adapters (Claude Code, OpenCode, Codex, and Aider) and handling every outcome through an explicit, predefined path.
 
 ---
 
@@ -326,19 +326,37 @@ Multiple NEEDLE workers run independently with **no central orchestrator**. Coor
 
 ## 🏗️ Supported Agents
 
-NEEDLE is agent-agnostic. Any CLI that accepts a prompt and exits works.
+The built-in adapters below are the supported command contracts. Each CLI must
+be installed on `PATH` and authenticated with its provider before a worker is
+started. Run `needle test-agent <adapter>` after installing a CLI; the command
+checks the executable, version probe, prompt transport, and any output
+transform without sending a model request.
 
-| Agent | CLI | Input Method | Notes |
-|-------|-----|-------------|-------|
-| Claude Code (interactive) | `claude-interactive` | stdin | **Recommended** — uses subscription billing; see [plugin](#-claude-interactive-plugin) |
-| Claude Code (API) | `claude --print` | stdin | Uses programmatic/API billing |
-| ZCode Agent (headless) | `zcode-headless` | file | Uses the CLI bundled with ZCode; see [`plugins/zcode-headless/`](plugins/zcode-headless/) |
-| OpenCode | `opencode` | file | |
-| Codex CLI | `codex` | args | |
-| Aider | `aider --message` | args | |
-| *Custom* | *any* | *configurable via YAML adapter* | |
+| Agent | Adapter and prerequisites | Prompt transport and invocation | Output/usage |
+|-------|---------------------------|--------------------------------|--------------|
+| Claude Code | Built-in `claude`, `claude-sonnet`, or `claude-opus`; install `claude` and the `needle-transform-claude` helper | stdin; `claude -p --model <configured model> --max-turns <limit> --output-format stream-json --dangerously-skip-permissions --verbose < {prompt_file}` | `needle-transform-claude`; Claude stream-json usage |
+| OpenCode | Built-in `opencode`; install `opencode` and configure its provider, model, and credentials | stdin; `opencode run --format json --auto < {prompt_file}` | OpenCode JSONL usage; the configured OpenCode model is used |
+| Codex CLI | Built-in `codex`; install `codex`, authenticate it, and keep the configured model available | argument; `codex exec --model {model} --sandbox workspace-write --json "$(cat {prompt_file})"` | `needle-transform-codex`; Codex JSONL usage |
+| Aider | Built-in `aider`; install `aider` and authenticate the configured provider/model | argument; `aider --model {model} --yes-always --message "$(cat {prompt_file})"` | Aider `Tokens: … sent, … received.` summary usage |
 
-Adding a new agent requires **only a YAML configuration file** — no code changes.
+The built-in defaults are `claude-sonnet-4-6` for Claude, `gpt-5.6-terra`
+for Codex, and `claude-sonnet-4-6` for Aider. OpenCode uses its own configured
+default unless a custom adapter adds `--model`. The unattended permission
+flags are intentional: review the command and provider credentials before
+pointing a worker at a repository you care about.
+
+Two separately installed adapters are also supported, but are not built into
+the binary:
+
+| Extension | Install/configure | Invocation contract |
+|-----------|------------------|----------------------|
+| Claude Code interactive | [`plugins/claude-interactive/`](plugins/claude-interactive/) | PTY wrapper around Claude Code; see [the plugin instructions](#-claude-interactive-plugin) |
+| ZCode Agent headless | [`plugins/zcode-headless/`](plugins/zcode-headless/) | File-based prompt through `needle-zcode-headless`; see the [plugin README](plugins/zcode-headless/README.md) |
+
+The `generic` built-in is only a copy-me YAML template whose placeholder
+`my-agent` is not a supported executable. Custom CLIs can be added with a YAML
+adapter in `agent.adapters_dir`; they are outside this matrix until their
+installation, invocation, and isolated smoke test are documented.
 
 ---
 

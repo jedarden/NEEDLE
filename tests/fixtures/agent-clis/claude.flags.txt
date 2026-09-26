@@ -1,0 +1,84 @@
+# NEEDLE adapter smoke fixture - flags accepted by the real CLI.
+# cli: claude (claude -p)
+# version: 2.1.283 (Claude Code)
+# source: recorded live from `claude --help` on codinghome, 2026-09-26
+# One flag per line. The adapter smoke harness asserts every flag a
+# built-in adapter's invoke_template passes appears in this list.
+# The built-in matrix currently exercises print mode and stream-json output.
+# NOTE: --max-turns is accepted (verified live 2026-09-26 with
+# `-p` is the short alias of --print, from the same help listing.
+# `claude -p --max-turns 1 ...`) but omitted from `claude --help`;
+# it is listed below from that live verification.
+--add-dir
+--agent
+--agents
+--all
+--allow-dangerously-skip-permissions
+--allowed
+--allowed-tools
+--append-system-prompt
+--autocompact
+--ax-screen-reader
+--background
+--bare
+--betas
+--bg
+--brief
+--chrome
+--client-data-url
+--cloud
+--continue
+--dangerously-skip-permissions
+--debug
+--debug-file
+--disable-slash-commands
+--disallowed
+--disallowed-tools
+--effort
+--environment
+--exclude-dynamic-system-prompt-sections
+--fallback-model
+--file
+--fork-session
+--forward-subagent-text
+--from-pr
+--help
+--ide
+--include-hook-events
+--include-partial-messages
+--input-format
+--json-schema
+--max-budget-usd
+--max-turns
+--mcp-config
+--model
+--name
+--no-chrome
+--no-session-persistence
+--output-format
+--permission-mode
+--permission-prompt-tool
+--permission-prompts
+--plugin-dir
+--plugin-url
+--print
+--prompt-suggestions
+--remote-control
+--remote-control-session-name-prefix
+--replay-user-messages
+--restricted
+--resume
+--safe-mode
+--session-id
+--setting-sources
+--settings
+--strict-mcp-config
+--system-prompt
+--system-prompt-snapshot
+--teleport
+--tmux
+--tools
+--verbose
+--version
+--worktree
+-p

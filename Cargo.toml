@@ -298,6 +298,12 @@ name = "nt07_executable_admission"
 path = "tests/nt07_executable_admission.rs"
 harness = true
 
+# Isolated support-matrix smoke tests for the documented built-in adapters.
+[[test]]
+name = "adapter_smoke"
+path = "tests/adapter_smoke.rs"
+harness = true
+
 [[bench]]
 name = "sanitize"
 harness = false

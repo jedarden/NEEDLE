@@ -10,6 +10,7 @@ TOOLCHAIN_FILE="$REPO_ROOT/rust-toolchain.toml"
 NEXTEST_CONFIG="$REPO_ROOT/.config/nextest.toml"
 CI_VERSION_FILE="$REPO_ROOT/ci/VERSION"
 EXPECTED_TARGETS="$(printf '%s\n' \
+  adapter_smoke \
   escalation_ladder \
   integration_spawn \
   integration_tests \
@@ -147,7 +148,7 @@ for marker_fragment in \
   'nextest_profile=ci' \
   'features=default' \
   'target_triple=' \
-  'target_set=lib,integration_spawn,integration_tests,p2_integration_tests,p3_integration_tests,real_br_integration_tests,escalation_ladder,nt45_failure_evidence_capture,nt50_exception_lessons,nt51_adapter_usage_capture,nt10_policy_precedence,nt10_policy_hashing,nt10_context_manifest,nt10_context_adapter_parity,nt10_policy_doctor,nt10_policy_admission,nt51_gateway_health,nt52_state_dir_isolation,nt07_admission_policy,nt07_admission_budgets,nt53_improvement_proposals,nt54_proposal_admission,nt55_impact_receipts,nt56_improvements_cli,nt07_proposal_contract,nt07_impact_contract,nt07_impact_scoring,nt07_executable_admission' \
+  'target_set=lib,adapter_smoke,integration_spawn,integration_tests,p2_integration_tests,p3_integration_tests,real_br_integration_tests,escalation_ladder,nt45_failure_evidence_capture,nt50_exception_lessons,nt51_adapter_usage_capture,nt10_policy_precedence,nt10_policy_hashing,nt10_context_manifest,nt10_context_adapter_parity,nt10_policy_doctor,nt10_policy_admission,nt51_gateway_health,nt52_state_dir_isolation,nt07_admission_policy,nt07_admission_budgets,nt53_improvement_proposals,nt54_proposal_admission,nt55_impact_receipts,nt56_improvements_cli,nt07_proposal_contract,nt07_impact_contract,nt07_impact_scoring,nt07_executable_admission' \
   'workspace_root=/workspace' \
   'target_dir=/opt/needle-ci-target' \
   'cargo_build_jobs=2'; do

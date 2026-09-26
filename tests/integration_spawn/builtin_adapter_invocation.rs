@@ -8,7 +8,7 @@
 //! [`Dispatcher::dispatch`] spawn path against a fake agent CLI, checking:
 //!
 //! 1. **Invocation** — the rendered template hands the prompt to the CLI the
-//!    way the adapter's input method promises (file path, argv, or stdin),
+//!    way the adapter's input method promises (stdin, argv, or a prompt file),
 //!    from the bead's workspace, with `{model}` rendered.
 //! 2. **Exit status** — a zero exit is reported as success with captured
 //!    stdout; a non-zero exit is reported verbatim.
@@ -34,12 +34,13 @@ use async_trait::async_trait;
 use tempfile::TempDir;
 use tokio::sync::Mutex;
 
+use needle::adapter_usage::stream_usage;
 use needle::bead_store::{BeadStore, Filters, RepairReport};
 use needle::claim::{ClaimIdentity, ResolvedStoreContext};
 use needle::config::{AgentConfig, Config, RoutingConfig, RoutingRule};
 use needle::dispatch::{
-    builtin_adapters, extract_tokens, AgentAdapter, DispatchContext, Dispatcher, ExecutionResult,
-    TokenExtraction, UsageFormat,
+    builtin_adapters, AgentAdapter, DispatchContext, Dispatcher, ExecutionResult, TokenExtraction,
+    UsageFormat,
 };
 use needle::prompt::BuiltPrompt;
 use needle::telemetry::Telemetry;
@@ -252,13 +253,23 @@ impl FakeCli {
                 ),
                 "",
             ),
-            ("opencode", "fake-opencode-ok", "", RECORD_ARGS),
+            (
+                "opencode",
+                "fake-opencode-ok",
+                "",
+                concat!(
+                    "printf 'cwd=%s\n' \"$PWD\" >> \"$NEEDLE_FAKE_AGENT_LOG\"\n",
+                    "for a in \"$@\"; do printf 'arg=%s\n' \"$a\" >> \"$NEEDLE_FAKE_AGENT_LOG\"; done\n",
+                    "stdin_content=$(cat)\n",
+                    "printf 'stdin=%s\n' \"$stdin_content\" >> \"$NEEDLE_FAKE_AGENT_LOG\"\n",
+                ),
+            ),
             ("codex", "fake-codex-ok", "", RECORD_ARGS),
             (
                 "aider",
                 "fake-aider-ok",
-                // The token line the shipped regex extraction config parses.
-                "echo 'Tokens: 1,234 sent, 567 received'",
+                // The token summary the shipped usage parser consumes.
+                "echo 'Tokens: 12.5k sent, 8.1k cache write, 2.1k cache hit, 4.3k received.'",
                 RECORD_ARGS,
             ),
             (
@@ -480,7 +491,7 @@ fn unique_workspace() -> TempDir {
 // ──────────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn opencode_builtin_receives_prompt_via_file() {
+async fn opencode_builtin_receives_prompt_via_stdin() {
     let _path_lock = FAKE_PATH_LOCK.lock().await;
     let fake = FakeCli::new();
     let _path = FakePathGuard::prepend(fake._bin_dir.path());
@@ -516,19 +527,26 @@ async fn opencode_builtin_receives_prompt_via_file() {
         Some("run"),
         "opencode run subcommand"
     );
-    assert!(args.contains(&"--non-interactive"), "non-interactive flag");
-
-    let prompt_path = value_after_flag(&args, "--prompt-file")
-        .expect("--prompt-file must be followed by the prompt path");
-    let logged_content = log_values(&lines, "file_content");
+    assert!(args.contains(&"--format"), "JSON output format flag");
+    assert!(args.contains(&"json"), "JSON output format");
+    assert!(args.contains(&"--auto"), "headless auto-approve flag");
+    assert!(
+        !args.contains(&"--prompt-file"),
+        "OpenCode has no prompt-file flag"
+    );
+    assert!(
+        !args.contains(&"--non-interactive"),
+        "OpenCode has no non-interactive flag"
+    );
+    let logged_content = log_values(&lines, "stdin");
     assert_eq!(
         logged_content.first().copied(),
         Some("matrix smoke prompt for needle-matrix-opencode"),
-        "prompt file must carry the built prompt"
+        "stdin must carry the built prompt"
     );
     assert!(
-        PathBuf::from(prompt_path).starts_with(std::env::temp_dir().join("needle")),
-        "prompt file lives under the dispatcher's temp prompt dir"
+        !args.iter().any(|arg| arg.contains("matrix smoke prompt")),
+        "stdin input must not leak the prompt through argv"
     );
 }
 
@@ -710,7 +728,7 @@ async fn aider_builtin_receives_prompt_via_message_flag() {
     );
 
     let args = log_values(&lines, "arg");
-    for expected in ["--model", "claude-sonnet-4-6", "--yes", "--message"] {
+    for expected in ["--model", "claude-sonnet-4-6", "--yes-always", "--message"] {
         assert!(
             args.contains(&expected),
             "aider template must render {expected}"
@@ -722,15 +740,19 @@ async fn aider_builtin_receives_prompt_via_message_flag() {
         "--message must carry the rendered prompt"
     );
 
-    // The shipped regex extraction config must parse the token line the real
-    // aider prints (and this fake reproduces) from the captured stdout.
+    // The shipped summary parser must parse the token line the real aider
+    // prints (and this fake reproduces) from the captured stdout.
     let adapter = builtin_adapters()
         .into_iter()
         .find(|a| a.name == "aider")
         .expect("aider builtin");
-    let usage = extract_tokens(&adapter.token_extraction, &result.stdout, "");
-    assert_eq!(usage.input_tokens, Some(1234));
-    assert_eq!(usage.output_tokens, Some(567));
+    assert_eq!(adapter.usage_format, Some(UsageFormat::AiderSummary));
+    let usage = stream_usage(adapter.effective_usage_format(), &result.stdout)
+        .expect("aider summary should carry usage");
+    assert_eq!(usage.input, 12_500);
+    assert_eq!(usage.output, 4_300);
+    assert_eq!(usage.cache_write, 8_100);
+    assert_eq!(usage.cache_read, 2_100);
 }
 
 #[tokio::test]
@@ -1021,7 +1043,7 @@ async fn readme_models_route_to_and_dispatch_the_named_adapters() {
     // a matching rule beats `default_adapter` ("claude"), the first-match
     // contract the Claude routing tests pin from the other side.
     let cases: [(&str, &str, &str); 3] = [
-        ("qwen3.6-35b", "opencode", "--prompt-file"),
+        ("qwen3.6-35b", "opencode", "--format"),
         ("gpt-5.6-terra", "codex", "exec"),
         ("claude-sonnet-4-6", "aider", "--message"),
     ];
@@ -1068,10 +1090,11 @@ async fn readme_models_route_to_and_dispatch_the_named_adapters() {
             "{expected_adapter} invocation must carry {distinguishing_flag}"
         );
         match expected_adapter {
-            // OpenCode's file input method hands the prompt over as a file.
+            // OpenCode's stdin input method receives the prompt through its
+            // stdin stream, just like the Claude adapter.
             "opencode" => assert!(
-                log_values(&lines, "file_content").contains(&expected_prompt.as_str()),
-                "opencode must receive the prompt through its prompt file"
+                log_values(&lines, "stdin").contains(&expected_prompt.as_str()),
+                "opencode must receive the prompt through stdin"
             ),
             // Codex's args template and Aider's --message render the prompt
             // itself into argv.

@@ -1,0 +1,17 @@
+# NEEDLE adapter usage fixture: aider's end-of-run token summary lines.
+# Shape verified against Aider-AI/aider@main on 2026-09-26 (no released CLI
+# was installed for a live recording):
+#   aider/coders/base_coder.py assembles
+#     "Tokens: {format_tokens(sent)} sent"
+#       + optional ", {format_tokens(n)} cache write"
+#       + optional ", {format_tokens(n)} cache hit"
+#       + ", {format_tokens(received)} received."
+#   and aider/utils.py format_tokens prints counts below 1,000 in full and
+#   abbreviates larger ones to "1.5k" / "15k".
+# The adapter smoke matrix replays this fixture without invoking Aider.
+# Line 1 is the cached form every Anthropic-model session prints (prompt
+# caching is on by default); line 2 the uncached form; line 3 the sub-1,000
+# edge case. The parser takes the first parseable line.
+Tokens: 12.5k sent, 8.1k cache write, 2.1k cache hit, 4.3k received.
+Tokens: 3.2k sent, 1.1k received.
+Tokens: 850 sent, 120 received.

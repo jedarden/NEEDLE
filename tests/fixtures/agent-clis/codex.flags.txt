@@ -1,0 +1,35 @@
+# NEEDLE adapter smoke fixture - flags accepted by the real CLI.
+# cli: codex (codex exec)
+# version: codex-cli 0.157.0
+# source: recorded live from `codex exec --help` on codinghome, 2026-09-26
+# One flag per line. The adapter smoke harness asserts every flag a
+# built-in adapter's invoke_template passes appears in this list.
+# The built-in matrix currently exercises `codex exec` JSON output.
+--add-dir
+--approve-for-me
+--cd
+--color
+--config
+--dangerously-bypass-approvals-and-sandbox
+--dangerously-bypass-hook-trust
+--disable
+--enable
+--ephemeral
+--help
+--ignore-rules
+--ignore-user-config
+--image
+--json
+--last
+--local-provider
+--model
+--oss
+--output-last-message
+--output-schema
+--profile
+--sandbox
+--skip-git-repo-check
+--strict-config
+--thread-source
+--version
+--worktree

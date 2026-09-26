@@ -617,6 +617,8 @@ pub enum UsageFormat {
     OpencodeJsonl,
     /// oh-my-pi JSON message events.
     OmpJsonl,
+    /// Aider `Tokens: … sent, … received.` session summary line.
+    AiderSummary,
     /// No known usage extractor.
     #[default]
     Unknown,
@@ -632,6 +634,8 @@ impl UsageFormat {
             Self::OpencodeJsonl
         } else if cli == "omp" || cli.starts_with("omp-") || cli.starts_with("oh-my-pi") {
             Self::OmpJsonl
+        } else if cli == "aider" || cli.starts_with("aider-") {
+            Self::AiderSummary
         } else if cli == "claude" || cli.starts_with("claude-") {
             Self::ClaudeStreamJson
         } else {
@@ -957,18 +961,26 @@ fn builtin_claude_opus() -> AgentAdapter {
 }
 
 /// OpenCode built-in adapter.
+///
+/// The invoke template is the shape verified live against opencode 1.18.29
+/// (2026-09-26): `opencode run` takes the prompt as positional args or on
+/// stdin — it has no `--prompt-file` or `--non-interactive` flag — and
+/// `--format json` selects the JSONL event stream the declared
+/// [`UsageFormat::OpencodeJsonl`] parses. `--auto` auto-approves permissions,
+/// the headless equivalent of the Claude adapter's
+/// `--dangerously-skip-permissions`. The model is opencode's own configured
+/// default; pin one with a custom adapter override that adds `--model`.
 fn builtin_opencode() -> AgentAdapter {
     AgentAdapter {
         name: "opencode".to_string(),
-        description: Some("OpenCode with file-based prompt input".to_string()),
+        description: Some(
+            "OpenCode headless run with JSONL output and provider-configured model".to_string(),
+        ),
         agent_cli: "opencode".to_string(),
         version_command: Some("opencode --version".to_string()),
-        input_method: InputMethod::File {
-            path_template: "{prompt_file}".to_string(),
-        },
-        invoke_template:
-            "cd {workspace} && opencode run --prompt-file {prompt_file} --non-interactive"
-                .to_string(),
+        input_method: InputMethod::Stdin,
+        invoke_template: "cd {workspace} && opencode run --format json --auto < {prompt_file}"
+            .to_string(),
         environment: HashMap::new(),
         timeout_secs: 3600,
         idle_timeout_secs: 0,
@@ -1015,10 +1027,24 @@ fn builtin_codex() -> AgentAdapter {
 }
 
 /// Aider built-in adapter.
+///
+/// `--message` is aider's one-shot mode (process one reply, then exit) and
+/// `--yes-always` its exact always-confirm flag — the template previously
+/// passed `--yes`, which argparse only accepted as an ambiguous-prefix
+/// abbreviation of `--yes-always`. Token usage comes from the
+/// `Tokens: … sent, … received.` summary line via
+/// [`UsageFormat::AiderSummary`]; the legacy regex extraction could not match
+/// real output, because aider abbreviates counts ≥1,000 (`1.5k`) and
+/// interleaves `cache write`/`cache hit` segments between `sent` and
+/// `received` on cached models. Flags verified against the aider `main`
+/// branch's `args.py` (2026-09-26); the CLI was not installed for a live run.
 fn builtin_aider() -> AgentAdapter {
     AgentAdapter {
         name: "aider".to_string(),
-        description: Some("Aider with Claude Sonnet, message-based input".to_string()),
+        description: Some(
+            "Aider one-shot message mode with Claude Sonnet, usage from the summary line"
+                .to_string(),
+        ),
         agent_cli: "aider".to_string(),
         version_command: Some("aider --version".to_string()),
         input_method: InputMethod::Args {
@@ -1026,7 +1052,7 @@ fn builtin_aider() -> AgentAdapter {
         },
         invoke_template: concat!(
             "cd {workspace} && aider --model {model}",
-            " --yes --message \"$(cat {prompt_file})\"",
+            " --yes-always --message \"$(cat {prompt_file})\"",
         )
         .to_string(),
         environment: HashMap::new(),
@@ -1035,12 +1061,8 @@ fn builtin_aider() -> AgentAdapter {
         hard_timeout_secs: 0,
         provider: Some("anthropic".to_string()),
         model: Some("claude-sonnet-4-6".to_string()),
-        token_extraction: TokenExtraction::Regex {
-            pattern: r"Tokens:\s+([\d,]+)\s+sent,\s+([\d,]+)\s+received".to_string(),
-            input_group: 1,
-            output_group: 2,
-        },
-        usage_format: None,
+        token_extraction: TokenExtraction::None,
+        usage_format: Some(UsageFormat::AiderSummary),
         output_transform: None,
         harness: Some("needle".to_string()),
         harness_version: Some(env!("CARGO_PKG_VERSION").to_string()),
@@ -4240,9 +4262,18 @@ output_transform: "needle-transform-custom"
         let adapter = builtin_opencode();
         assert_eq!(adapter.name, "opencode");
         assert_eq!(adapter.agent_cli, "opencode");
-        assert!(matches!(adapter.input_method, InputMethod::File { .. }));
-        assert!(adapter.invoke_template.contains("--prompt-file"));
+        assert!(matches!(adapter.input_method, InputMethod::Stdin));
+        // The verified 1.18.29 invocation: `run` with the JSONL stream format
+        // and headless auto-approve, prompt on stdin. `--prompt-file` and
+        // `--non-interactive` are not opencode flags.
+        assert!(adapter.invoke_template.contains("opencode run"));
+        assert!(adapter.invoke_template.contains("--format json"));
+        assert!(adapter.invoke_template.contains("--auto"));
+        assert!(adapter.invoke_template.contains("< {prompt_file}"));
+        assert!(!adapter.invoke_template.contains("--prompt-file"));
+        assert!(!adapter.invoke_template.contains("--non-interactive"));
         assert_eq!(adapter.token_extraction, TokenExtraction::None);
+        assert_eq!(adapter.usage_format, Some(UsageFormat::OpencodeJsonl));
     }
 
     #[test]
@@ -4269,12 +4300,14 @@ output_transform: "needle-transform-custom"
         let adapter = builtin_aider();
         assert_eq!(adapter.name, "aider");
         assert_eq!(adapter.agent_cli, "aider");
-        assert!(adapter.invoke_template.contains("--yes --message"));
+        // `--yes-always` is the exact flag; `--yes` only worked as an
+        // argparse prefix abbreviation of it.
+        assert!(adapter.invoke_template.contains("--yes-always --message"));
         assert_eq!(adapter.provider, Some("anthropic".to_string()));
-        assert!(matches!(
-            adapter.token_extraction,
-            TokenExtraction::Regex { .. }
-        ));
+        // Usage comes from the summary-line parser, not the legacy regex the
+        // real abbreviated output (`1.5k sent`) never matched.
+        assert_eq!(adapter.token_extraction, TokenExtraction::None);
+        assert_eq!(adapter.usage_format, Some(UsageFormat::AiderSummary));
     }
 
     // ── Adapter loading ──

@@ -1,0 +1,31 @@
+# NEEDLE adapter smoke fixture - flags accepted by the real CLI.
+# cli: opencode (opencode run)
+# version: 1.18.29
+# source: recorded live from `opencode run --help` on codinghome, 2026-09-26
+# One flag per line. The adapter smoke harness asserts every flag a
+# built-in adapter's invoke_template passes appears in this list.
+# The built-in matrix currently exercises `opencode run --format json --auto`.
+--agent
+--attach
+--auto
+--command
+--continue
+--dir
+--file
+--fork
+--format
+--help
+--interactive
+--log-level
+--model
+--password
+--port
+--print-logs
+--pure
+--session
+--share
+--thinking
+--title
+--username
+--variant
+--version

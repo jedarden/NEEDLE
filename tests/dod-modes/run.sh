@@ -118,19 +118,20 @@ else
 fi
 
 # ── needle_slow_targets ──────────────────────────────────────────────────────
-assert_lines "target table lists 29 names" 29 needle_slow_targets
+assert_lines "target table lists 30 names" 30 needle_slow_targets
 
 # Exact set, asserted literally: a renamed or dropped target must be caught
 # here rather than silently accepted by every consumer of the table.
-WANT_TABLE="$(printf '%s\n' lib integration_spawn integration_tests p2_integration_tests p3_integration_tests real_br_integration_tests escalation_ladder nt45_failure_evidence_capture nt50_exception_lessons nt51_adapter_usage_capture nt10_policy_precedence nt10_policy_hashing nt10_context_manifest nt10_context_adapter_parity nt10_policy_doctor nt10_policy_admission nt51_gateway_health nt52_state_dir_isolation nt07_admission_policy nt07_admission_budgets nt53_improvement_proposals nt54_proposal_admission nt55_impact_receipts nt56_improvements_cli nt07_proposal_contract nt07_impact_contract nt07_impact_scoring nt07_executable_admission installer)"
+WANT_TABLE="$(printf '%s\n' lib integration_spawn integration_tests p2_integration_tests p3_integration_tests real_br_integration_tests escalation_ladder nt45_failure_evidence_capture nt50_exception_lessons nt51_adapter_usage_capture nt10_policy_precedence nt10_policy_hashing nt10_context_manifest nt10_context_adapter_parity nt10_policy_doctor nt10_policy_admission nt51_gateway_health nt52_state_dir_isolation nt07_admission_policy nt07_admission_budgets nt53_improvement_proposals nt54_proposal_admission nt55_impact_receipts nt56_improvements_cli nt07_proposal_contract nt07_impact_contract nt07_impact_scoring nt07_executable_admission adapter_smoke installer)"
 GOT_TABLE="$(needle_slow_targets)"
 if [[ "$GOT_TABLE" == "$WANT_TABLE" ]]; then
-  ok "target table is exactly the 26 cargo targets plus installer"
+  ok "target table is exactly the 29 cargo targets plus installer"
 else
   bad "target table drifted (got: $(echo "$GOT_TABLE" | tr '\n' ' '))"
 fi
 
 # ── needle_cargo_selector ────────────────────────────────────────────────────
+assert_selector "adapter smoke selects its target" "--test adapter_smoke" adapter_smoke
 assert_selector "lib selects the unit-test target" "--lib" lib
 assert_selector "integration_spawn selects its target" "--test integration_spawn" integration_spawn
 assert_selector "integration_tests selects its target" "--test integration_tests" integration_tests
@@ -153,6 +154,7 @@ assert_fails "unknown target has no selector" needle_cargo_selector nope
 assert_fails "installer is not a cargo target" needle_cargo_selector installer
 
 # ── needle_nextest_filter ────────────────────────────────────────────────────
+assert_nextest_filter "adapter smoke has an exact nextest binary ID" "binary_id(=needle::adapter_smoke)" adapter_smoke
 assert_nextest_filter "lib has an exact nextest binary ID" "binary_id(=needle)" lib
 assert_nextest_filter "integration_spawn has an exact nextest binary ID" "binary_id(=needle::integration_spawn)" integration_spawn
 assert_nextest_filter "integration_tests has an exact nextest binary ID" "binary_id(=needle::integration_tests)" integration_tests
@@ -176,7 +178,7 @@ assert_fails "installer has no nextest filter" needle_nextest_filter installer
 
 # ── selected_cargo_targets ───────────────────────────────────────────────────
 SLOW_TARGET=""
-assert_lines "default selection is all 28 cargo targets" 28 selected_cargo_targets
+assert_lines "default selection is all 29 cargo targets" 29 selected_cargo_targets
 
 WANT_DEFAULT="$(needle_expected_slow_targets | grep -vx installer)"
 GOT_DEFAULT="$(selected_cargo_targets)"
@@ -323,10 +325,11 @@ WANT_HARNESSES="$(printf '%s\t%s\n' \
   nt07_proposal_contract tests/nt07_proposal_contract.rs \
   nt07_impact_contract tests/nt07_impact_contract.rs \
   nt07_impact_scoring tests/nt07_impact_scoring.rs \
-  nt07_executable_admission tests/nt07_executable_admission.rs)"
+  nt07_executable_admission tests/nt07_executable_admission.rs \
+  adapter_smoke tests/adapter_smoke.rs)"
 GOT_HARNESSES="$(needle_declared_test_harnesses)"
 if [[ "$GOT_HARNESSES" == "$WANT_HARNESSES" ]]; then
-  ok "Clippy reads the 23 declared test harness roots from Cargo.toml"
+  ok "Clippy reads every declared test harness root from Cargo.toml"
 else
   bad "declared test harness parsing drifted (got: $(echo "$GOT_HARNESSES" | tr '\n' ' '))"
 fi

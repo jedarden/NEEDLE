@@ -193,11 +193,13 @@ needle_slow_targets() {
     nt07_impact_contract \
     nt07_impact_scoring \
     nt07_executable_admission \
+    adapter_smoke \
     installer
 }
 
 needle_cargo_selector() {
   case "$1" in
+    adapter_smoke) printf '%s\n' --test adapter_smoke ;;
     lib) printf '%s
 ' --lib ;;
     integration_spawn) printf '%s
@@ -258,6 +260,7 @@ needle_cargo_selector() {
 # deliberate: contains/glob matching could silently run a newly added binary.
 needle_nextest_filter() {
   case "$1" in
+    adapter_smoke) printf '%s\n' 'binary_id(=needle::adapter_smoke)' ;;
     lib) printf '%s
 ' 'binary_id(=needle)' ;;
     integration_spawn) printf '%s

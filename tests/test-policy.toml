@@ -214,7 +214,9 @@ version = 1
 # +2 Pluck starvation telemetry contract tests (needle-e9f9bc50): exact
 # event payload shape and target-workspace write isolation.
 # +1 hot-reload completion telemetry persistence contract (needle-ea583f48).
-max_tests = 3981
+# +4 adapter usage parser unit tests (needle-7a93d078): malformed, cached,
+# abbreviated, and legacy-regex Aider summary cases.
+max_tests = 3985
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
@@ -307,7 +309,14 @@ contract = 208
 # +2 adapter dispatch-routing contracts (needle-e7160119): README model
 # families resolve to the OpenCode/Codex/Aider built-ins and dispatch their
 # own fake CLI, and unrouted models fall back to the default adapter.
-e2e = 854
+# +4 adapter conformance contracts (needle-58fe701e): adapter environment
+# and claim-credential passing with both-stream output capture, unclaimed
+# analysis stripping planted fencing credentials, idle-timeout enforcement,
+# and hard-deadline termination of the agent's whole process group.
+# +4 isolated adapter smoke contracts (needle-7a93d078): recorded CLI flag
+# fixtures, README/registry parity, ready probes for each built-in adapter,
+# and fail-closed checks for the generic placeholder and unknown names.
+e2e = 862
 soak = 0
 fuzz = 0
 
@@ -352,7 +361,21 @@ tier = "e2e"
 # resolve qwen/gpt/sonnet models to the shipped opencode/codex/aider
 # built-ins whose CLIs then run with the prompt delivered by each input
 # method, and unrouted models fall back to the configured default adapter.
-max_tests = 438
+# +4 adapter conformance contracts (needle-58fe701e): environment and claim
+# credentials reach the dispatched CLI (with stdout and stderr capture
+# asserted on the same run), an unclaimed analysis dispatch strips planted
+# fencing credentials, the idle timeout kills a silent agent with a
+# structured reason, and a hard-deadline kill takes down the agent's whole
+# process group. Same harness as the matrix above: the contract is the
+# spawned process boundary.
+max_tests = 442
+owner = "component:process-integration"
+
+[[harness]]
+name = "adapter_smoke"
+path = "tests/adapter_smoke.rs"
+tier = "e2e"
+max_tests = 4
 owner = "component:process-integration"
 
 [[harness]]

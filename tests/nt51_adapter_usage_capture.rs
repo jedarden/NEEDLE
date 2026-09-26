@@ -16,6 +16,9 @@ use tempfile::tempdir;
 const CODEX: &str = include_str!("fixtures/adapter-usage/codex.jsonl");
 const OPENCODE: &str = include_str!("fixtures/adapter-usage/opencode.jsonl");
 const OMP: &str = include_str!("fixtures/adapter-usage/omp.jsonl");
+// The adapter smoke matrix and this usage replay share the same recorded
+// summary, so invocation and accounting cannot silently drift apart.
+const AIDER: &str = include_str!("fixtures/adapter-usage/aider-summary.txt");
 
 fn resolved(format: UsageFormat, output: &str) -> needle::attempt_accounting::AttemptUsage {
     resolve_usage(
@@ -34,6 +37,9 @@ fn each_adapter_fixture_extracts_tokens_and_estimates_cost() {
         (UsageFormat::CodexJsonl, CODEX, 600, 500),
         (UsageFormat::OpencodeJsonl, OPENCODE, 1500, 200),
         (UsageFormat::OmpJsonl, OMP, 1500, 140),
+        // First line of the fixture: the cached form every Anthropic-model
+        // aider session prints, with abbreviated counts.
+        (UsageFormat::AiderSummary, AIDER, 12_500, 4_300),
     ];
 
     for (format, output, input, expected_output) in cases {
