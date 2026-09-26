@@ -4539,14 +4539,12 @@ output_transform: "needle-transform-custom"
     }
 
     #[test]
-    fn token_extraction_regex_yaml_roundtrip() {
+    fn token_extraction_aider_yaml_roundtrip() {
         let adapter = builtin_aider();
         let yaml = serde_yaml::to_string(&adapter).unwrap();
         let parsed: AgentAdapter = serde_yaml::from_str(&yaml).unwrap();
-        assert!(matches!(
-            parsed.token_extraction,
-            TokenExtraction::Regex { .. }
-        ));
+        assert_eq!(parsed.token_extraction, TokenExtraction::None);
+        assert_eq!(parsed.usage_format, Some(UsageFormat::AiderSummary));
     }
 
     #[test]
