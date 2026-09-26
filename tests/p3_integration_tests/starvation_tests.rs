@@ -358,7 +358,9 @@ pub fn assert_exclusion_reasons(helper: &TestHelper, expected_reasons: &[&str]) 
 // ═════════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn pluck_starvation_when_all_beads_blocked() {
+async fn pluck_starvation_schema_and_no_target_diagnostic_bead() {
+    use std::collections::HashSet;
+
     // Setup: Create a scenario where all beads have the "blocked" label
     let _scenario_beads = StarvationScenarioBuilder::new()
         .with_open_beads(5)
@@ -387,6 +389,82 @@ async fn pluck_starvation_when_all_beads_blocked() {
     // Verify: Starvation event was emitted
     assert_starvation_detected(&helper, "/test/workspace");
     helper.assert_event_emitted("strand.pluck.starvation_detected");
+
+    // Drive Pluck against a real, isolated bead-rs target and inspect its
+    // serialized event envelope rather than constructing the event directly.
+    use std::io::BufRead;
+
+    use needle::strand::{PluckStrand, Strand};
+    use needle::telemetry::Telemetry;
+    use needle::types::StrandResult;
+
+    let workspace = super::create_test_workspace("pluck-starvation-schema").unwrap();
+    let target_bead = super::create_bead(workspace.path(), "Deferred target work").unwrap();
+    super::add_label(workspace.path(), &target_bead, "deferred").unwrap();
+
+    let store = super::store_for_workspace(workspace.path()).unwrap();
+    let before = store.list_all().await.unwrap();
+    assert_eq!(before.len(), 1, "fixture should contain only target work");
+
+    let worker_id = "pluck-starvation-schema-test";
+    let log_dir = workspace.path().join(".needle/logs");
+    let telemetry = Telemetry::with_log_dir(worker_id, &log_dir);
+    let session_id = telemetry.session_id().to_string();
+    telemetry.start();
+
+    let strand = PluckStrand::new(vec![], telemetry.clone());
+    let result = strand.evaluate(&store, &HashSet::new()).await;
+    assert!(
+        matches!(result, StrandResult::NoWork),
+        "a deferred bead should be excluded, got {result:?}"
+    );
+    telemetry.shutdown().await;
+
+    let log_prefix = format!("{worker_id}-{session_id}-");
+    let log_file = std::fs::read_dir(&log_dir)
+        .unwrap()
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(&log_prefix) && name.ends_with(".jsonl"))
+        })
+        .expect("Pluck telemetry JSONL should be written");
+    let events: Vec<serde_json::Value> =
+        std::io::BufReader::new(std::fs::File::open(log_file).expect("open Pluck telemetry JSONL"))
+            .lines()
+            .map_while(std::result::Result::ok)
+            .filter_map(|line| serde_json::from_str(&line).ok())
+            .collect();
+    let starvation_events: Vec<_> = events
+        .iter()
+        .filter(|event| event["event_type"] == "strand.pluck.starvation_detected")
+        .collect();
+    assert_eq!(starvation_events.len(), 1, "Pluck should emit one event");
+    assert_eq!(
+        starvation_events[0]["data"],
+        serde_json::json!({
+            "workspace": workspace.path().display().to_string(),
+            "open_count": 1,
+            "excluded_count": 1,
+            "candidate_exclusion_reasons": ["label:deferred"],
+        }),
+        "the documented envelope data has exactly four fields"
+    );
+
+    let after = store.list_all().await.unwrap();
+    let ids = |beads: &[Bead]| {
+        beads
+            .iter()
+            .map(|bead| bead.id.as_ref().to_string())
+            .collect::<HashSet<_>>()
+    };
+    assert_eq!(
+        ids(&after),
+        ids(&before),
+        "Pluck must not create a diagnostic bead in the scanned target workspace"
+    );
 }
 
 #[tokio::test]
