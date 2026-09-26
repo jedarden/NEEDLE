@@ -83,21 +83,22 @@ refresh the marker before running the check above. Fingerprint directories
 written under the old flags keep their own hashes forever; an unrefreshed
 marker would keep reporting them.
 
-## 2026-09-25 fleet restart snapshot
+## 2026-09-26 post-restart fleet fingerprint audit
 
-At 2026-09-26T03:46:19Z, all 32 active codinghome worker services had
+At 2026-09-26T04:04:22Z, all 32 active codinghome worker services had
 `ActiveEnterTimestamp` values later than the 2026-09-25T01:26:53Z adapter
-cutover, and systemd had no restart jobs pending. Two retired units remained
-masked and inactive. The 33-adapter policy check passed. A live environment
-scan of 156 processes in the 32 worker service cgroups found no `RUSTFLAGS`
-assignments, so no active worker was observed using the retired
-`-C codegen-units=1` flag.
+cutover. Their start times ranged from 2026-09-25T03:09:50Z through
+2026-09-26T03:13:39Z, and systemd had no restart jobs pending. The retired
+`glm-hopt` and `glm-tunnel` units remained masked and inactive. The
+33-adapter policy check passed. A live environment scan of 148 readable
+processes in the 32 worker service cgroups found no `RUSTFLAGS` assignments;
+no active worker was observed using the retired `-C codegen-units=1` flag.
 
-The documented legacy target `/data/build/target-workers/debug/.fingerprint`
-was absent during this audit. The equivalent query over the current
-per-repository targets under `/build` exited 0 and produced no output: no
-`lib-tokio.json` fingerprint had been written after the refreshed marker yet.
-This immediate post-restart snapshot identifies no worker using the retired
-flag, but it contains no post-marker Cargo fingerprint; repeat the query after
+The marker `/home/coding/.needle/needle-2020b478-rustflags-marker` was
+refreshed at 2026-09-26T04:04:22Z after the service rollout. The documented
+query over the current per-repository targets under `/build` exited 0 and
+produced no output: no `lib-tokio.json` fingerprint had been written after
+this marker yet. This snapshot identifies no active worker using the retired
+flag, but contains no post-marker Cargo fingerprint. Repeat the query after
 workers have built with the refreshed adapter table to collect fingerprint
 evidence from fleet traffic.
