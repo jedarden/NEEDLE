@@ -6,6 +6,7 @@
 //! tracing/OpenTelemetry bridge.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use needle::dispatch::{builtin_adapters, AgentAdapter, Dispatcher, TokenExtraction};
@@ -22,6 +23,7 @@ use tracing_subscriber::layer::SubscriberExt;
 const BEAD_ID: &str = "needle-7f53ca33-genai-probe";
 const WORKER_ID: &str = "genai-conformance-worker";
 const USAGE_JSON: &str = r#"{"usage":{"input_tokens":123,"output_tokens":456}}"#;
+static NEXT_PROBE_ID: AtomicU64 = AtomicU64::new(0);
 
 /// The built-in adapters advertised by the README, with the values that the
 /// dispatch span must export for each one. OpenCode deliberately leaves its
@@ -112,7 +114,15 @@ fn probe_prompt() -> BuiltPrompt {
     }
 }
 
-fn dispatch_and_capture(adapter: AgentAdapter) -> Vec<SpanData> {
+fn next_probe_bead_id() -> String {
+    format!(
+        "{BEAD_ID}-{}-{}",
+        std::process::id(),
+        NEXT_PROBE_ID.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+fn dispatch_and_capture(adapter: AgentAdapter, bead_id: &str) -> Vec<SpanData> {
     let telemetry_dir = tempfile::tempdir().expect("telemetry tempdir");
     let workspace = tempfile::tempdir().expect("workspace tempdir");
     let telemetry = Telemetry::with_log_dir(WORKER_ID.to_string(), telemetry_dir.path());
@@ -138,7 +148,7 @@ fn dispatch_and_capture(adapter: AgentAdapter) -> Vec<SpanData> {
         ));
 
     let prompt = probe_prompt();
-    let bead_id = BeadId::from(BEAD_ID);
+    let bead_id = BeadId::from(bead_id);
     let workspace_path = workspace.path().to_path_buf();
     tracing::subscriber::with_default(subscriber, || {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -202,19 +212,23 @@ fn integer_attribute(span: &SpanData, key: &str) -> Option<i64> {
 
 #[test]
 fn exported_agent_dispatch_span_conforms_to_gen_ai_contract() {
-    let spans = dispatch_and_capture(stub_adapter(
-        &format!("printf '%s' '{USAGE_JSON}'"),
-        Some("acme"),
-        Some("acme-test-model"),
-    ));
+    let bead_id = next_probe_bead_id();
+    let spans = dispatch_and_capture(
+        stub_adapter(
+            &format!("printf '%s' '{USAGE_JSON}'"),
+            Some("acme"),
+            Some("acme-test-model"),
+        ),
+        &bead_id,
+    );
     let span = &spans[0];
 
     for (key, expected) in [
         ("gen_ai.system", "acme"),
         ("gen_ai.operation.name", "chat"),
-        ("gen_ai.request.id", BEAD_ID),
+        ("gen_ai.request.id", &bead_id),
         ("gen_ai.request.model", "acme-test-model"),
-        ("needle.bead.id", BEAD_ID),
+        ("needle.bead.id", &bead_id),
     ] {
         assert_eq!(
             string_attribute(span, key),
@@ -249,7 +263,7 @@ fn exported_agent_dispatch_span_conforms_to_gen_ai_contract() {
 #[test]
 fn exported_agent_dispatch_uses_expected_gen_ai_values_for_supported_builtins() {
     for (adapter_name, expected_system, expected_model) in SUPPORTED_BUILTIN_SEMANTICS {
-        let spans = dispatch_and_capture(stub_builtin_adapter(adapter_name));
+        let spans = dispatch_and_capture(stub_builtin_adapter(adapter_name), &next_probe_bead_id());
         let span = &spans[0];
 
         assert_eq!(
@@ -277,7 +291,10 @@ fn exported_agent_dispatch_uses_expected_gen_ai_values_for_supported_builtins() 
 
 #[test]
 fn exported_agent_dispatch_uses_documented_placeholders_without_optional_identity() {
-    let spans = dispatch_and_capture(stub_adapter("echo 'no usage reported'", None, None));
+    let spans = dispatch_and_capture(
+        stub_adapter("echo 'no usage reported'", None, None),
+        &next_probe_bead_id(),
+    );
     let span = &spans[0];
 
     assert_eq!(
