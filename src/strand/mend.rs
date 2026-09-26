@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use chrono::{DateTime, Utc};
 
 use crate::bead_store::{BeadStore, RecoveryReleaseOutcome};
@@ -20,7 +20,7 @@ use crate::config::{LimitsConfig, MendConfig};
 use crate::health::{ExecutorLookup, HealthMonitor};
 use crate::learning::LearningsFile;
 use crate::peer::PeerMonitor;
-use crate::registry::Registry;
+use crate::registry::{Registry, WorkerEntry};
 use crate::telemetry::{EventKind, Telemetry};
 use crate::trace::cleanup_traces;
 use crate::types::{Bead, BeadId, BeadStatus, StrandError, StrandResult};
@@ -29,10 +29,13 @@ use crate::types::{Bead, BeadId, BeadStatus, StrandError, StrandResult};
 // Store-scoped orphan cleanup (shared between Mend and Explore)
 // ──────────────────────────────────────────────────────────────────────────────
 
-/// Scan all in-progress beads in a store and release any whose assignee does
-/// not correspond to a live worker. This catches beads orphaned by workers
-/// that died without leaving a heartbeat file (or whose heartbeat was already
-/// cleaned up).
+/// Scan all in-progress beads in a store and release any whose claim ownership
+/// is positively confirmed to have ended: a fresh live heartbeat from the same
+/// qualified worker naming a different bead (or idling) supersedes the claim,
+/// and positively dead process evidence (the heartbeat's or the registry
+/// entry's PID) kills it. Every other outcome — missing, unparseable, stale,
+/// clock-skewed, or failed heartbeat/registry reads — leaves the claim
+/// untouched and emits the decisive evidence as telemetry.
 ///
 /// This is a store-scoped function that can be called against any BeadStore,
 /// not just the home workspace. Used by both MendStrand (for home) and
@@ -41,19 +44,18 @@ use crate::types::{Bead, BeadId, BeadStatus, StrandError, StrandResult};
 /// # Arguments
 /// * `store` - The bead store to scan (can be home or remote)
 /// * `registry` - Worker registry for live worker lookup
-/// * `telemetry` - Telemetry emitter for orphan release events
-/// * `qualified_id` - This worker's fully-qualified identity (excluded from orphan detection)
-/// * `claim_ttl` - Optional claim TTL for age-based reclaim (None = dead-PID reclaim only)
+/// * `telemetry` - Telemetry emitter for claim ownership and release events
+/// * `claim_ttl` - Optional claim TTL, carried as a diagnostic on unknown-
+///   ownership telemetry (never itself permission to release)
 /// * `heartbeat_ttl` - Maximum heartbeat age that can prove a claim is active
 ///
 /// # Returns
-/// * `Ok(u32)` - Number of orphans released
+/// * `Ok(u32)` - Number of claims released on confirmed evidence
 /// * `Err(anyhow::Error)` - Store read failure
 pub async fn cleanup_orphaned_in_progress(
     store: &dyn BeadStore,
     registry: &Registry,
     telemetry: &Telemetry,
-    qualified_id: &str,
     claim_ttl: Option<Duration>,
     heartbeat_ttl: Duration,
 ) -> Result<u32> {
@@ -65,44 +67,9 @@ pub async fn cleanup_orphaned_in_progress(
         store,
         registry,
         telemetry,
-        qualified_id,
         claim_ttl,
         heartbeat_dir.as_deref(),
         heartbeat_ttl,
-    )
-    .await
-}
-
-/// Test-only version that uses dead-PID reclaim only (no age-based threshold).
-///
-/// This version is intended for tests that need to verify dead-PID detection
-/// without age-based cleanup interfering. It passes `None` for `claim_ttl`,
-/// so only beads whose assignee has no live worker are released.
-///
-/// # Arguments
-/// * `store` - The bead store to scan
-/// * `registry` - Worker registry for live worker lookup
-/// * `telemetry` - Telemetry emitter for orphan release events
-/// * `qualified_id` - This worker's fully-qualified identity (excluded from orphan detection)
-///
-/// # Returns
-/// * `Ok(u32)` - Number of orphans released
-/// * `Err(anyhow::Error)` - Store read failure
-#[cfg(test)]
-pub async fn cleanup_orphaned_in_progress_test_no_ttl(
-    store: &dyn BeadStore,
-    registry: &Registry,
-    telemetry: &Telemetry,
-    qualified_id: &str,
-) -> Result<u32> {
-    cleanup_in_progress(
-        store,
-        registry,
-        telemetry,
-        qualified_id,
-        None,
-        None,
-        Duration::from_secs(300),
     )
     .await
 }
@@ -116,6 +83,11 @@ pub async fn cleanup_orphaned_in_progress_test_no_ttl(
 ///
 /// This catches dispatch leaks where a worker ends up with multiple simultaneous
 /// claims on different beads, even if the worker is still alive.
+///
+/// This is a pure predicate over store state. Since needle-26205003 it is no
+/// longer Mend's release authority: timestamp order is not ownership
+/// evidence, so `cleanup_in_progress` releases a claim only on the
+/// heartbeat-confirmed verdicts of [`classify_claim_ownership`].
 ///
 /// # Arguments
 /// * `all_beads` - All beads from the store (will be filtered for InProgress status)
@@ -196,16 +168,237 @@ fn get_stale_by_assignee_overlap_with_active(
     stale_by_overlap
 }
 
-/// Scan all in-progress beads in a store and release any whose assignee is
-/// orphaned, whose claim is older than `claim_ttl`, or whose claim was
-/// superseded by a newer claim from the same assignee. Claim age and claim
-/// recency are independent of worker liveness so a worker name that is reused
-/// by a relaunch cannot pin an abandoned bead forever.
+// ──────────────────────────────────────────────────────────────────────────────
+// Claim-ownership evidence classification (needle-26205003)
+// ──────────────────────────────────────────────────────────────────────────────
+
+/// How far a heartbeat timestamp may sit in the future before it is treated as
+/// clock-skewed rather than trusted as fresh evidence (seconds).
+///
+/// A heartbeat written moments ago can carry a timestamp slightly ahead of the
+/// reader's clock (read/write race, a small clock step). Beyond this tolerance
+/// the heartbeat can no longer be ordered against the claim at all — it
+/// neither proves the claim current nor superseded — so it classifies as
+/// unknown instead of fresh.
+const MAX_HEARTBEAT_CLOCK_SKEW_SECS: i64 = 60;
+
+/// What the worker registry says about one claim assignee, pre-resolved.
+///
+/// Only a registry entry whose PID was positively verified dead is release
+/// evidence. An absent entry is absence of evidence: the registry is a
+/// projection that lags registration and is itself cleaned of dead workers,
+/// so "unregistered" must not masquerade as "dead".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegistryLiveness {
+    /// The registry read itself failed — no registry verdict is possible.
+    Unread,
+    /// The assignee has no registry entry.
+    Unregistered,
+    /// Registered, and the registered PID no longer exists.
+    RegisteredDead,
+    /// Registered, and the registered PID is alive.
+    RegisteredAlive,
+}
+
+impl RegistryLiveness {
+    fn as_str(self) -> &'static str {
+        match self {
+            RegistryLiveness::Unread => "registry_unread",
+            RegistryLiveness::Unregistered => "unregistered",
+            RegistryLiveness::RegisteredDead => "registry_pid_dead",
+            RegistryLiveness::RegisteredAlive => "registered_alive",
+        }
+    }
+}
+
+/// Why the heartbeat projection could not decide ownership of a claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UndeterminedHeartbeat {
+    /// The heartbeat lookup itself failed or no heartbeat directory exists.
+    LookupUnavailable,
+    /// No heartbeat file exists for the assignee.
+    Missing,
+    /// A heartbeat file exists but could not be read or parsed.
+    Unparseable,
+    /// The heartbeat parsed but is older than the configured TTL.
+    Stale,
+    /// The heartbeat timestamp sits in the future beyond the skew tolerance.
+    ClockSkewed,
+}
+
+impl UndeterminedHeartbeat {
+    fn as_str(self) -> &'static str {
+        match self {
+            UndeterminedHeartbeat::LookupUnavailable => "heartbeat_lookup_unavailable",
+            UndeterminedHeartbeat::Missing => "heartbeat_missing",
+            UndeterminedHeartbeat::Unparseable => "heartbeat_unparseable",
+            UndeterminedHeartbeat::Stale => "heartbeat_stale",
+            UndeterminedHeartbeat::ClockSkewed => "heartbeat_clock_skewed",
+        }
+    }
+}
+
+/// Which positive signal proved the process behind a claim is gone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeadProcessEvidence {
+    /// The PID recorded in the assignee's heartbeat no longer exists.
+    HeartbeatPid,
+    /// The PID in the assignee's registry entry no longer exists.
+    RegistryPid,
+}
+
+impl DeadProcessEvidence {
+    fn as_str(self) -> &'static str {
+        match self {
+            DeadProcessEvidence::HeartbeatPid => "heartbeat_pid_dead",
+            DeadProcessEvidence::RegistryPid => "registry_pid_dead",
+        }
+    }
+}
+
+/// Classified evidence about who owns one in-progress claim (needle-26205003).
+///
+/// Mend may only release an in-progress claim on a *confirmed* verdict;
+/// [`ClaimOwnership::Unknown`] must never mutate the claim. Claim age is
+/// diagnostic input to the telemetry that accompanies these verdicts and is
+/// never allowed to promote an Unknown into a release.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ClaimOwnership {
+    /// A fresh heartbeat from a live process names this exact bead: the claim
+    /// is actively held.
+    ConfirmedCurrent,
+    /// A fresh heartbeat from a live process carrying this claim's assignee
+    /// names a different bead (`Some`) or reports being idle between beads
+    /// (`None`): the assignee has verifiably moved on.
+    ConfirmedSuperseded { named: Option<BeadId> },
+    /// Positive process evidence shows the process behind the claim is dead.
+    ConfirmedDead { evidence: DeadProcessEvidence },
+    /// Ownership could not be determined. The decisive reason is carried for
+    /// telemetry; the claim must be left untouched.
+    Unknown {
+        heartbeat: UndeterminedHeartbeat,
+        registry: RegistryLiveness,
+    },
+}
+
+/// Classify the ownership evidence for one in-progress claim.
+///
+/// `heartbeat` is the assignee's entry from the shared heartbeat projection
+/// (`None` when the lookup failed or was not configured — an undetermined
+/// outcome, not an acquittal). `registry` is the pre-resolved registry view of
+/// the same assignee. Both inputs are keyed by the claim's exact assignee, so
+/// "the same qualified worker" holds by construction and a worker from
+/// another adapter pool that shares a NATO name cannot collide.
+///
+/// Precedence, most authoritative first:
+///
+/// 1. A dead heartbeat PID is positive process evidence regardless of the
+///    heartbeat's timestamp — the process that wrote it provably no longer
+///    exists and so cannot still own the claim.
+/// 2. A clock-skewed or stale heartbeat from a *live* PID is unknown, even
+///    when the registry says the assignee is dead: a live-but-silent process
+///    under the assignee's name is exactly the "stuck peer" state
+///    [`crate::peer::PeerMonitor`] refuses to reap, and Mend must not be the
+///    strand that releases it.
+/// 3. A fresh heartbeat from a live PID decides outright: naming this bead is
+///    [`ClaimOwnership::ConfirmedCurrent`], naming another bead or idling is
+///    [`ClaimOwnership::ConfirmedSuperseded`].
+/// 4. With no heartbeat verdict (missing, unparseable, or lookup failure),
+///    only a registry entry whose PID was positively verified dead confirms
+///    death; anything else — including an unregistered assignee and an
+///    unreadable registry — is [`ClaimOwnership::Unknown`].
+fn classify_claim_ownership(
+    bead_id: &BeadId,
+    heartbeat: Option<&ExecutorLookup>,
+    registry: RegistryLiveness,
+    now: DateTime<Utc>,
+) -> ClaimOwnership {
+    // With no readable heartbeat, a positively dead registry PID is the only
+    // signal that can still confirm the claim ended.
+    let fall_through_to_registry = |undetermined: UndeterminedHeartbeat| {
+        if registry == RegistryLiveness::RegisteredDead {
+            ClaimOwnership::ConfirmedDead {
+                evidence: DeadProcessEvidence::RegistryPid,
+            }
+        } else {
+            ClaimOwnership::Unknown {
+                heartbeat: undetermined,
+                registry,
+            }
+        }
+    };
+
+    match heartbeat {
+        None => fall_through_to_registry(UndeterminedHeartbeat::LookupUnavailable),
+        Some(ExecutorLookup::Missing) => fall_through_to_registry(UndeterminedHeartbeat::Missing),
+        Some(ExecutorLookup::Unparseable) => {
+            fall_through_to_registry(UndeterminedHeartbeat::Unparseable)
+        }
+        Some(ExecutorLookup::Present(execution)) => {
+            if !execution.pid_alive {
+                return ClaimOwnership::ConfirmedDead {
+                    evidence: DeadProcessEvidence::HeartbeatPid,
+                };
+            }
+            if execution.last_heartbeat
+                > now + chrono::Duration::seconds(MAX_HEARTBEAT_CLOCK_SKEW_SECS)
+            {
+                return ClaimOwnership::Unknown {
+                    heartbeat: UndeterminedHeartbeat::ClockSkewed,
+                    registry,
+                };
+            }
+            if !execution.heartbeat_fresh {
+                return ClaimOwnership::Unknown {
+                    heartbeat: UndeterminedHeartbeat::Stale,
+                    registry,
+                };
+            }
+            if execution.current_bead.as_ref() == Some(bead_id) {
+                ClaimOwnership::ConfirmedCurrent
+            } else {
+                ClaimOwnership::ConfirmedSuperseded {
+                    named: execution.current_bead.clone(),
+                }
+            }
+        }
+    }
+}
+
+/// Resolve the per-assignee registry view used by the ownership classifier.
+///
+/// First entry for an identity wins (the registry is keyed by worker id, so
+/// duplicates are not expected), and every entry's PID is checked live.
+fn registry_liveness_map(workers: &[WorkerEntry]) -> HashMap<String, RegistryLiveness> {
+    let mut liveness: HashMap<String, RegistryLiveness> = HashMap::new();
+    for worker in workers {
+        let entry = if HealthMonitor::check_pid_alive(worker.pid) {
+            RegistryLiveness::RegisteredAlive
+        } else {
+            RegistryLiveness::RegisteredDead
+        };
+        liveness.entry(worker.id.clone()).or_insert(entry);
+    }
+    liveness
+}
+
+/// Scan all in-progress beads in a store and release any whose claim ownership
+/// is positively confirmed to have ended: a fresh live heartbeat from the same
+/// qualified worker naming a different bead (or idling) supersedes the claim,
+/// and positively dead process evidence (the heartbeat's or the registry
+/// entry's PID) kills it. Every other outcome — missing, unparseable, stale,
+/// clock-skewed, or failed heartbeat/registry reads — is unknown ownership:
+/// the claim is left untouched and the decisive evidence is emitted as
+/// telemetry. Claim age rides along on that telemetry as a diagnostic and is
+/// never itself permission to release (needle-26205003).
+///
+/// The release path itself (re-read of the observed claim, recovery release
+/// with conflict handling) is unchanged lease-aware mechanics; see the
+/// lease-aware recovery work for the epoch contract on top of these verdicts.
 async fn cleanup_in_progress(
     store: &dyn BeadStore,
     registry: &Registry,
     telemetry: &Telemetry,
-    qualified_id: &str,
     claim_ttl: Option<Duration>,
     heartbeat_dir: Option<&Path>,
     heartbeat_ttl: Duration,
@@ -221,20 +414,35 @@ async fn cleanup_in_progress(
         return Ok(0);
     }
 
-    // Registry::list() does blocking file I/O and PID checks.
-    // Use spawn_blocking to avoid blocking the async executor.
+    // Registry::list_all() does blocking file I/O (and the liveness map below
+    // adds the PID checks), so run it through spawn_blocking to keep the
+    // async executor free. It must be the *unfiltered* read: `Registry::list()`
+    // lazily drops dead-PID entries and persists that cleanup, so a liveness
+    // map built from it could never contain `RegisteredDead` and a dead
+    // registered worker would silently degrade to "unregistered" — unknown
+    // ownership, claim held forever. A failed read is unknown registry
+    // evidence, not an abort: heartbeat evidence may still decide each claim,
+    // and an unread registry must never become permission to release
+    // (needle-26205003).
     let registry_for_blocking = registry.clone();
-    let workers = tokio::task::spawn_blocking(move || registry_for_blocking.list())
-        .await
-        .context("spawn_blocking task for registry.list() failed")?
-        .context("registry.list() failed")?;
-
-    // Build a set of fully-qualified worker IDs for registered, alive workers.
-    let live_worker_ids: HashSet<String> = workers
-        .iter()
-        .filter(|w| HealthMonitor::check_pid_alive(w.pid))
-        .map(|w| w.id.clone())
-        .collect();
+    let registry_liveness: Option<HashMap<String, RegistryLiveness>> =
+        match tokio::task::spawn_blocking(move || registry_for_blocking.list_all()).await {
+            Ok(Ok(workers)) => Some(registry_liveness_map(&workers)),
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    error = %error,
+                    "registry read failed; registry claim-ownership evidence is unknown for this sweep"
+                );
+                None
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "registry read task failed; registry claim-ownership evidence is unknown for this sweep"
+                );
+                None
+            }
+        };
 
     let assignee_ids: Vec<String> = all_beads
         .iter()
@@ -245,44 +453,28 @@ async fn cleanup_in_progress(
         .into_iter()
         .collect();
 
-    // Query the shared heartbeat projection once for every assignee. Missing,
-    // unreadable and stale heartbeats remain explicit outcomes; none of them
-    // may protect an age-stale claim.
-    let executor_lookup = if let Some(heartbeat_dir) = heartbeat_dir {
+    // Query the shared heartbeat projection once for every assignee. A failed
+    // lookup leaves every claim unclassified — held, never released — and the
+    // per-assignee verdict records why.
+    let heartbeat_lookup: Option<HashMap<String, ExecutorLookup>> = if let Some(heartbeat_dir) =
+        heartbeat_dir
+    {
         match HealthMonitor::lookup_bead_executors(heartbeat_dir, &assignee_ids, heartbeat_ttl)
             .await
         {
-            Ok(lookup) => lookup,
+            Ok(lookup) => Some(lookup),
             Err(error) => {
                 tracing::warn!(
                     path = %heartbeat_dir.display(),
                     error = %error,
-                    "failed to look up heartbeat claim ownership; no claim will be protected by unreadable evidence"
+                    "failed to look up heartbeat claim ownership; claims stay unclassified rather than released"
                 );
-                HashMap::new()
+                None
             }
         }
     } else {
-        HashMap::new()
+        None
     };
-
-    // Only a fresh heartbeat from a live PID can name the authoritative claim
-    // for overlap handling. This ensures a newer leaked claim never displaces
-    // the older bead the worker is actually executing.
-    let mut worker_current_beads: HashMap<String, Option<BeadId>> = HashMap::new();
-    for (assignee, lookup) in &executor_lookup {
-        if let ExecutorLookup::Present(execution) = lookup {
-            if execution.heartbeat_fresh && execution.pid_alive {
-                worker_current_beads.insert(assignee.clone(), execution.current_bead.clone());
-            }
-        }
-    }
-
-    // Pass 1: Identify claims stale by assignee overlap.
-    // For each assignee with multiple in_progress beads, only the newest is valid.
-    // Older beads are stale regardless of worker liveness or claim age.
-    let stale_by_overlap =
-        get_stale_by_assignee_overlap_with_active(&all_beads, &worker_current_beads);
 
     let mut released = 0u32;
     let now = Utc::now();
@@ -298,105 +490,90 @@ async fn cleanup_in_progress(
         };
 
         let claim_age = now.signed_duration_since(bead.updated_at).to_std().ok();
-
-        // Pass 2: Apply staleness threshold to claims not already marked in Pass 1.
-        // The threshold check only applies to beads that are NOT stale by overlap.
-        let stale_by_age =
+        let age_secs = claim_age.map_or(0, |age| age.as_secs());
+        // Claim age is diagnostic only: it rides along on telemetry so an
+        // operator can see a suspiciously old claim, but it must never turn
+        // undetermined ownership evidence into a release verdict.
+        let stale_by_ttl =
             claim_ttl.is_some_and(|ttl| claim_age.map(|age| age >= ttl).unwrap_or(false));
 
-        // Union of Pass 1 (overlap) and Pass 2 (threshold) for reap eligibility.
-        // A bead is reap-eligible if it is stale by overlap OR stale by age.
-        let is_superseded = stale_by_overlap.contains(&bead.id);
+        let registry_evidence = match &registry_liveness {
+            Some(liveness) => liveness
+                .get(assignee.as_str())
+                .copied()
+                .unwrap_or(RegistryLiveness::Unregistered),
+            None => RegistryLiveness::Unread,
+        };
+        let heartbeat_evidence = heartbeat_lookup
+            .as_ref()
+            .and_then(|lookup| lookup.get(assignee.as_str()));
 
-        let worker_is_live =
-            assignee == qualified_id || live_worker_ids.contains(assignee.as_str());
-        let heartbeat_matches_claim = worker_current_beads
-            .get(assignee.as_str())
-            .and_then(Option::as_ref)
-            == Some(&bead.id);
+        let ownership =
+            classify_claim_ownership(&bead.id, heartbeat_evidence, registry_evidence, now);
 
-        // A live heartbeat naming this exact bead is authoritative. Neither a
-        // long dispatch nor a newer leaked claim may cause Mend to steal it.
-        if heartbeat_matches_claim {
-            continue;
-        }
-
-        if is_superseded {
-            // For beads stale by overlap, we need to find the newest bead for this assignee
-            // to provide helpful diagnostic information.
-            // Re-compute the newest bead for this specific assignee.
-            let newest_for_assignee = all_beads
-                .iter()
-                .filter(|b| {
-                    b.status == BeadStatus::InProgress && b.assignee.as_ref() == Some(assignee)
-                })
-                .max_by_key(|b| b.updated_at);
-
-            if let Some(newest_bead) = newest_for_assignee {
-                tracing::info!(
+        let reason = match ownership {
+            ClaimOwnership::ConfirmedCurrent => {
+                // A live heartbeat naming this exact bead is authoritative.
+                // Neither a long dispatch nor a newer leaked claim may cause
+                // Mend to steal it.
+                tracing::debug!(
                     bead_id = %bead.id,
                     assignee = %assignee,
-                    age_secs = claim_age.map_or(0, |age| age.as_secs()),
-                    newest_bead_id = %newest_bead.id,
-                    "releasing in-progress bead superseded by newer claim from same assignee"
+                    age_secs,
+                    "fresh live heartbeat names this in-progress claim; keeping it"
                 );
+                continue;
             }
-        }
-
-        // Claim age is an independent release condition. A live worker may
-        // still hold an abandoned claim, especially when --count 1 relaunches
-        // under the same worker name indefinitely.
-        // Skip if the assignee matches a registered, alive worker unless the
-        // heartbeat proves this is a superseded or age-stale claim. Workers
-        // register with fully-qualified IDs ({adapter}-{worker_id}), so this
-        // comparison prevents collisions between adapter pools.
-        if !is_superseded && !stale_by_age && worker_is_live {
-            continue;
-        }
-
-        // Determine the newest bead for this assignee for the reason message
-        let newest_claim = all_beads
-            .iter()
-            .filter(|b| b.status == BeadStatus::InProgress && b.assignee.as_ref() == Some(assignee))
-            .max_by_key(|b| b.updated_at);
-
-        let reap_signal = match executor_lookup.get(assignee.as_str()) {
-            Some(ExecutorLookup::Present(execution)) if !execution.pid_alive => "pid_dead",
-            Some(ExecutorLookup::Present(execution)) if !execution.heartbeat_fresh => {
-                "heartbeat_stale"
+            ClaimOwnership::Unknown {
+                heartbeat,
+                registry,
+            } => {
+                tracing::info!(
+                    event_type = "mend.claim_ownership_unknown",
+                    bead_id = %bead.id,
+                    assignee = %assignee,
+                    age_secs,
+                    stale_by_ttl,
+                    evidence = heartbeat.as_str(),
+                    registry = registry.as_str(),
+                    workspace = %bead.workspace.display(),
+                    "claim ownership undetermined; leaving the claim untouched"
+                );
+                let _ = telemetry.emit(
+                    EventKind::MendClaimOwnershipUnknown {
+                        bead_id: bead.id.clone(),
+                        assignee: assignee.clone(),
+                        evidence: heartbeat.as_str().to_string(),
+                        registry: registry.as_str().to_string(),
+                        age_secs,
+                        stale_by_ttl,
+                    },
+                    chrono::Utc::now(),
+                );
+                continue;
             }
-            Some(ExecutorLookup::Present(execution)) if execution.current_bead.is_none() => {
-                "heartbeat_idle"
+            ClaimOwnership::ConfirmedSuperseded { named } => match named {
+                Some(current) => format!(
+                    "superseded: fresh live heartbeat from same assignee names bead {current}"
+                ),
+                None => {
+                    "superseded: fresh live heartbeat from same assignee reports idle".to_string()
+                }
+            },
+            ClaimOwnership::ConfirmedDead { evidence } => {
+                format!("orphaned: claiming process is dead ({})", evidence.as_str())
             }
-            Some(ExecutorLookup::Present(_)) => "heartbeat_different_bead",
-            Some(ExecutorLookup::Missing) => "heartbeat_missing",
-            Some(ExecutorLookup::Unparseable) => "heartbeat_unparseable",
-            None if !worker_is_live => "pid_dead_or_unregistered",
-            None => "heartbeat_lookup_unavailable",
-        };
-
-        let reason = match (is_superseded, newest_claim) {
-            (true, Some(newest_bead)) => {
-                format!(
-                    "superseded by another in-progress claim {} from same assignee ({reap_signal})",
-                    newest_bead.id,
-                )
-            }
-            (false, _) if stale_by_age => {
-                let age_secs = claim_age.map_or(0, |age| age.as_secs());
-                format!("stale claim: age {age_secs}s exceeds configured claim TTL ({reap_signal})")
-            }
-            _ => format!("orphaned: assignee {assignee} has no live worker ({reap_signal})"),
         };
 
         tracing::info!(
+            event_type = "mend.bead_released",
             bead_id = %bead.id,
             assignee = %assignee,
-            age_secs = claim_age.map_or(0, |age| age.as_secs()),
-            stale_by_age,
-            reap_signal,
+            age_secs,
+            stale_by_ttl,
+            reason = %reason,
             workspace = %bead.workspace.display(),
-            "releasing stale in-progress bead"
+            "releasing in-progress claim on confirmed ownership evidence"
         );
 
         let observed = match store.claim_status(&bead.id).await {
@@ -667,10 +844,11 @@ impl MendStrand {
 
     // ── Step 1.5: Orphaned in-progress bead recovery ────────────────────────
 
-    /// Scan all in-progress beads and release any whose assignee does not
-    /// correspond to a live worker. This catches beads orphaned by workers
-    /// that died without leaving a heartbeat file (or whose heartbeat was
-    /// already cleaned up).
+    /// Scan all in-progress beads and release any whose claim ownership is
+    /// positively confirmed to have ended (superseded by a fresh live
+    /// heartbeat naming other work, or a positively dead claiming process).
+    /// Undetermined evidence holds the claim and emits telemetry; see
+    /// [`cleanup_orphaned_in_progress`] for the full contract.
     async fn cleanup_orphaned_in_progress(
         &self,
         store: &dyn BeadStore,
@@ -680,7 +858,6 @@ impl MendStrand {
             store,
             &self.registry,
             &self.telemetry,
-            &self.qualified_id,
             Some(Duration::from_secs(self.config.stale_claim_ttl)),
             Some(&self.heartbeat_dir),
             self.heartbeat_ttl,
@@ -2693,8 +2870,8 @@ fn try_acquire_flock(path: &Path) -> Result<Option<std::fs::File>> {
 mod tests {
     use super::*;
     use crate::bead_store::{Filters, RepairReport};
-    use crate::health::HeartbeatData;
-    use crate::telemetry::test_utils::MemorySink;
+    use crate::health::{BeadExecution, HeartbeatData};
+    use crate::telemetry::test_utils::{MemorySink, TestHelper};
     use crate::test_fixtures::fixture_root;
     use crate::types::{Bead, BeadId, BrDependency, ClaimResult, ClaimStatus, WorkerState};
 
@@ -3216,13 +3393,278 @@ mod tests {
 
     // ── Orphaned in-progress bead tests ─────────────────────────────────────
 
+    /// Full unit matrix of [`classify_claim_ownership`], the classification
+    /// needle-26205003 made Mend's only release authority for in-progress
+    /// claims. Every (heartbeat, registry) evidence pair maps to exactly one
+    /// verdict; in particular, no column of the matrix turns claim age into a
+    /// release — the classifier never sees age, so it cannot promote an
+    /// Unknown into a confirmed verdict.
+    #[test]
+    fn claim_ownership_evidence_matrix() {
+        let claim = BeadId::from("nd-matrix-claim");
+        let other = BeadId::from("nd-matrix-other");
+        let now = Utc::now();
+
+        /// Build heartbeat evidence exactly as the health lookup would:
+        /// `heartbeat_fresh` mirrors the lookup's TTL verdict on
+        /// `last_heartbeat`, so the pair stays self-consistent.
+        fn hb(
+            current_bead: Option<&BeadId>,
+            last_heartbeat: DateTime<Utc>,
+            heartbeat_fresh: bool,
+            pid_alive: bool,
+        ) -> Option<ExecutorLookup> {
+            Some(ExecutorLookup::Present(BeadExecution {
+                current_bead: current_bead.cloned(),
+                last_heartbeat,
+                heartbeat_fresh,
+                pid_alive,
+            }))
+        }
+
+        // ── ConfirmedCurrent: a fresh live heartbeat names this exact bead ──
+        // Current wins against every registry view, including a registry that
+        // says the assignee is dead — the registry is a lagging projection,
+        // the heartbeat is the worker itself speaking.
+        for registry in [
+            RegistryLiveness::RegisteredAlive,
+            RegistryLiveness::RegisteredDead,
+            RegistryLiveness::Unregistered,
+            RegistryLiveness::Unread,
+        ] {
+            let evidence = hb(Some(&claim), now, true, true);
+            assert_eq!(
+                classify_claim_ownership(&claim, evidence.as_ref(), registry, now),
+                ClaimOwnership::ConfirmedCurrent,
+                "fresh live heartbeat naming the claim is current regardless of {registry:?}"
+            );
+        }
+
+        // ── ConfirmedSuperseded: a fresh live heartbeat from the same
+        // qualified worker verifiably moved on — naming another bead…
+        let superseded_bead = hb(Some(&other), now, true, true);
+        assert_eq!(
+            classify_claim_ownership(
+                &claim,
+                superseded_bead.as_ref(),
+                RegistryLiveness::RegisteredAlive,
+                now
+            ),
+            ClaimOwnership::ConfirmedSuperseded {
+                named: Some(other.clone())
+            }
+        );
+        // …or reporting idle between beads.
+        let superseded_idle = hb(None, now, true, true);
+        assert_eq!(
+            classify_claim_ownership(
+                &claim,
+                superseded_idle.as_ref(),
+                RegistryLiveness::RegisteredAlive,
+                now
+            ),
+            ClaimOwnership::ConfirmedSuperseded { named: None }
+        );
+
+        // ── ConfirmedDead: positive process evidence ────────────────────────
+        // A dead heartbeat PID is authoritative regardless of the heartbeat's
+        // timestamp — even a heartbeat naming this very claim, and even when
+        // the registry still lists the assignee as alive.
+        let dead_pid_stale_naming_claim = hb(
+            Some(&claim),
+            now - chrono::Duration::seconds(600),
+            false,
+            false,
+        );
+        for registry in [
+            RegistryLiveness::RegisteredAlive,
+            RegistryLiveness::RegisteredDead,
+            RegistryLiveness::Unregistered,
+            RegistryLiveness::Unread,
+        ] {
+            assert_eq!(
+                classify_claim_ownership(
+                    &claim,
+                    dead_pid_stale_naming_claim.as_ref(),
+                    registry,
+                    now
+                ),
+                ClaimOwnership::ConfirmedDead {
+                    evidence: DeadProcessEvidence::HeartbeatPid
+                },
+                "dead heartbeat PID is release evidence regardless of {registry:?}"
+            );
+        }
+        // With no readable heartbeat at all, a registry entry whose PID was
+        // positively verified dead is the remaining death confirmation.
+        for evidence in [
+            None,
+            Some(ExecutorLookup::Missing),
+            Some(ExecutorLookup::Unparseable),
+        ] {
+            assert_eq!(
+                classify_claim_ownership(
+                    &claim,
+                    evidence.as_ref(),
+                    RegistryLiveness::RegisteredDead,
+                    now
+                ),
+                ClaimOwnership::ConfirmedDead {
+                    evidence: DeadProcessEvidence::RegistryPid
+                },
+                "no heartbeat + dead registry PID confirms death ({evidence:?})"
+            );
+        }
+
+        // ── Unknown: everything that does not prove ownership ended ────────
+        // Each row pins both discriminants — they are the decisive evidence
+        // the Unknown telemetry emits.
+        let unknown_cases: Vec<(
+            Option<ExecutorLookup>,
+            UndeterminedHeartbeat,
+            RegistryLiveness,
+        )> = vec![
+            // Lookup unavailable (not configured or the read itself failed).
+            (
+                None,
+                UndeterminedHeartbeat::LookupUnavailable,
+                RegistryLiveness::RegisteredAlive,
+            ),
+            (
+                None,
+                UndeterminedHeartbeat::LookupUnavailable,
+                RegistryLiveness::Unregistered,
+            ),
+            (
+                None,
+                UndeterminedHeartbeat::LookupUnavailable,
+                RegistryLiveness::Unread,
+            ),
+            // No heartbeat file for the assignee — absence of evidence,
+            // including the classic "unregistered assignee" that used to be
+            // reaped as an orphan.
+            (
+                Some(ExecutorLookup::Missing),
+                UndeterminedHeartbeat::Missing,
+                RegistryLiveness::RegisteredAlive,
+            ),
+            (
+                Some(ExecutorLookup::Missing),
+                UndeterminedHeartbeat::Missing,
+                RegistryLiveness::Unregistered,
+            ),
+            (
+                Some(ExecutorLookup::Missing),
+                UndeterminedHeartbeat::Missing,
+                RegistryLiveness::Unread,
+            ),
+            // A heartbeat file exists but will not parse.
+            (
+                Some(ExecutorLookup::Unparseable),
+                UndeterminedHeartbeat::Unparseable,
+                RegistryLiveness::RegisteredAlive,
+            ),
+            (
+                Some(ExecutorLookup::Unparseable),
+                UndeterminedHeartbeat::Unparseable,
+                RegistryLiveness::Unregistered,
+            ),
+            // Stale heartbeat from a live PID: a live-but-silent worker under
+            // the assignee's name is the stuck-peer state Mend must not reap.
+            // It stays unknown even naming this claim, even past any age, and
+            // even when the registry says the assignee is dead.
+            (
+                hb(
+                    Some(&claim),
+                    now - chrono::Duration::seconds(600),
+                    false,
+                    true,
+                ),
+                UndeterminedHeartbeat::Stale,
+                RegistryLiveness::RegisteredAlive,
+            ),
+            (
+                hb(
+                    Some(&claim),
+                    now - chrono::Duration::seconds(600),
+                    false,
+                    true,
+                ),
+                UndeterminedHeartbeat::Stale,
+                RegistryLiveness::RegisteredDead,
+            ),
+            (
+                hb(None, now - chrono::Duration::seconds(600), false, true),
+                UndeterminedHeartbeat::Stale,
+                RegistryLiveness::Unregistered,
+            ),
+            // A heartbeat timestamped beyond the skew tolerance cannot be
+            // ordered against the claim at all — also not when the registry
+            // says dead, and not even though it names this claim.
+            (
+                hb(
+                    Some(&claim),
+                    now + chrono::Duration::seconds(MAX_HEARTBEAT_CLOCK_SKEW_SECS + 60),
+                    true,
+                    true,
+                ),
+                UndeterminedHeartbeat::ClockSkewed,
+                RegistryLiveness::RegisteredAlive,
+            ),
+            (
+                hb(
+                    Some(&claim),
+                    now + chrono::Duration::seconds(MAX_HEARTBEAT_CLOCK_SKEW_SECS + 60),
+                    true,
+                    true,
+                ),
+                UndeterminedHeartbeat::ClockSkewed,
+                RegistryLiveness::RegisteredDead,
+            ),
+        ];
+        for (evidence, expected_heartbeat, expected_registry) in unknown_cases {
+            assert_eq!(
+                classify_claim_ownership(&claim, evidence.as_ref(), expected_registry, now),
+                ClaimOwnership::Unknown {
+                    heartbeat: expected_heartbeat,
+                    registry: expected_registry,
+                },
+                "undetermined evidence must stay Unknown and carry its decisive reason"
+            );
+        }
+
+        // A heartbeat just inside the skew tolerance is still orderable: it
+        // decides rather than degrading to Unknown. (The boundary itself is
+        // exercised above through the stale and fresh rows.)
+        let slight_future = hb(
+            Some(&claim),
+            now + chrono::Duration::seconds(MAX_HEARTBEAT_CLOCK_SKEW_SECS / 2),
+            true,
+            true,
+        );
+        assert_eq!(
+            classify_claim_ownership(
+                &claim,
+                slight_future.as_ref(),
+                RegistryLiveness::RegisteredAlive,
+                now
+            ),
+            ClaimOwnership::ConfirmedCurrent,
+            "small forward skew stays decidable evidence"
+        );
+    }
+
+    /// A missing heartbeat plus an unregistered assignee is absence of
+    /// evidence, not proof of death: since needle-26205003 such a claim is
+    /// held (ownership unknown) rather than released as an orphan.
     #[tokio::test]
-    async fn orphaned_in_progress_bead_released() {
+    async fn in_progress_bead_with_no_ownership_evidence_held() {
         let hb_dir = tempfile::tempdir().unwrap();
         let lock_dir = tempfile::tempdir().unwrap();
         let reg_dir = tempfile::tempdir().unwrap();
 
-        // An in-progress bead assigned to a worker that doesn't exist.
+        // An in-progress bead assigned to a worker that doesn't exist: no
+        // heartbeat file, no registry entry.
         let bead = make_in_progress_bead("nd-orphan", "dead-worker");
 
         let (store, release_count, _) = MockBeadStore::new(vec![bead]);
@@ -3230,10 +3672,14 @@ mod tests {
 
         let result = mend.evaluate(&store, &HashSet::new()).await;
         assert!(
-            matches!(result, StrandResult::WorkCreated),
-            "expected WorkCreated after releasing orphaned in-progress bead, got: {result:?}"
+            matches!(result, StrandResult::NoWork),
+            "expected NoWork — undetermined ownership must not release, got: {result:?}"
         );
-        assert_eq!(release_count.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            release_count.load(Ordering::Relaxed),
+            0,
+            "missing heartbeat + unregistered assignee is unknown ownership, not an orphan verdict"
+        );
     }
 
     #[tokio::test]
@@ -3356,23 +3802,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_claim_is_released_for_every_non_active_heartbeat_verdict() {
+    async fn superseding_heartbeats_release_the_claim() {
+        // A fresh live heartbeat from the claim's own assignee that names
+        // other work supersedes the claim: both naming a different bead and
+        // idling release it, even with the worker registered and alive.
         #[derive(Clone, Copy, Debug)]
         enum HeartbeatCase {
             DifferentBead,
             Idle,
-            Stale,
-            Missing,
-            Unparseable,
         }
 
-        for case in [
-            HeartbeatCase::DifferentBead,
-            HeartbeatCase::Idle,
-            HeartbeatCase::Stale,
-            HeartbeatCase::Missing,
-            HeartbeatCase::Unparseable,
-        ] {
+        for case in [HeartbeatCase::DifferentBead, HeartbeatCase::Idle] {
             let hb_dir = tempfile::tempdir().unwrap();
             let lock_dir = tempfile::tempdir().unwrap();
             let reg_dir = tempfile::tempdir().unwrap();
@@ -3396,28 +3836,15 @@ mod tests {
                 })
                 .unwrap();
 
-            match case {
-                HeartbeatCase::Missing => {}
-                HeartbeatCase::Unparseable => {
-                    std::fs::write(hb_dir.path().join(format!("{assignee}.json")), "{not json")
-                        .unwrap();
-                }
-                _ => {
-                    let current_bead = match case {
-                        HeartbeatCase::DifferentBead => Some("nd-other"),
-                        HeartbeatCase::Idle => None,
-                        HeartbeatCase::Stale => Some("nd-stale-candidate"),
-                        HeartbeatCase::Missing | HeartbeatCase::Unparseable => unreachable!(),
-                    };
-                    let mut heartbeat =
-                        make_stale_heartbeat("alive-worker", std::process::id(), current_bead);
-                    heartbeat.qualified_id = assignee.to_string();
-                    if !matches!(case, HeartbeatCase::Stale) {
-                        heartbeat.last_heartbeat = Utc::now();
-                    }
-                    write_heartbeat(hb_dir.path(), &heartbeat);
-                }
-            }
+            let current_bead = match case {
+                HeartbeatCase::DifferentBead => Some("nd-other"),
+                HeartbeatCase::Idle => None,
+            };
+            let mut heartbeat =
+                make_stale_heartbeat("alive-worker", std::process::id(), current_bead);
+            heartbeat.qualified_id = assignee.to_string();
+            heartbeat.last_heartbeat = Utc::now();
+            write_heartbeat(hb_dir.path(), &heartbeat);
 
             let (store, release_count, _) = MockBeadStore::new(vec![bead]);
             let mend = MendStrand::new(
@@ -3445,24 +3872,145 @@ mod tests {
             let result = mend.evaluate(&store, &HashSet::new()).await;
             assert!(
                 matches!(result, StrandResult::WorkCreated),
-                "{case:?} must not protect an abandoned claim: {result:?}"
+                "{case:?} must not protect an abandoned claim: got: {result:?}"
             );
             assert_eq!(
                 release_count.load(Ordering::Relaxed),
                 1,
-                "{case:?} must release exactly one stale claim"
+                "{case:?} must release exactly one superseded claim"
             );
         }
     }
 
     #[tokio::test]
-    async fn stale_claim_ttl_spelling_drives_claim_release() {
+    async fn undetermined_heartbeats_hold_the_claim_at_any_age() {
+        // Stale, missing, and unparseable heartbeats are undetermined
+        // ownership evidence: the claim is held, nothing is mutated, and the
+        // decisive evidence is emitted — even when the claim is far older
+        // than the configured TTL. Claim age never promotes Unknown to a
+        // release (needle-26205003).
+        #[derive(Clone, Copy, Debug)]
+        enum HeartbeatCase {
+            Stale,
+            Missing,
+            Unparseable,
+        }
+
+        for (case, expected_evidence) in [
+            (HeartbeatCase::Stale, "heartbeat_stale"),
+            (HeartbeatCase::Missing, "heartbeat_missing"),
+            (HeartbeatCase::Unparseable, "heartbeat_unparseable"),
+        ] {
+            let hb_dir = tempfile::tempdir().unwrap();
+            let lock_dir = tempfile::tempdir().unwrap();
+            let reg_dir = tempfile::tempdir().unwrap();
+            let assignee = "claude-alive-worker";
+            // updated_at is 2026-01-01, so the claim is far older than the
+            // 60s TTL below: age must still not release it.
+            let bead = make_in_progress_bead("nd-stale-candidate", assignee);
+
+            let registry = Registry::new(reg_dir.path());
+            registry
+                .register(crate::registry::WorkerEntry {
+                    id: assignee.to_string(),
+                    pid: std::process::id(),
+                    workspace: fixture_root("test"),
+                    agent: "test".to_string(),
+                    model: None,
+                    provider: None,
+                    started_at: Utc::now(),
+                    beads_processed: 1,
+                    beads_completed: 0,
+                    config_reload_generation: 0,
+                    state: None,
+                })
+                .unwrap();
+
+            match case {
+                HeartbeatCase::Missing => {}
+                HeartbeatCase::Unparseable => {
+                    std::fs::write(hb_dir.path().join(format!("{assignee}.json")), "{not json")
+                        .unwrap();
+                }
+                HeartbeatCase::Stale => {
+                    // make_stale_heartbeat leaves last_heartbeat 600s in the
+                    // past — beyond the 300s heartbeat TTL.
+                    let heartbeat = make_stale_heartbeat(
+                        "alive-worker",
+                        std::process::id(),
+                        Some("nd-stale-candidate"),
+                    );
+                    let mut heartbeat = heartbeat;
+                    heartbeat.qualified_id = assignee.to_string();
+                    write_heartbeat(hb_dir.path(), &heartbeat);
+                }
+            }
+
+            let (store, release_count, _) = MockBeadStore::new(vec![bead]);
+            let helper = TestHelper::new("test-worker");
+            let mend = MendStrand::new(
+                MendConfig {
+                    stale_claim_ttl: 60,
+                    ..MendConfig::default()
+                },
+                hb_dir.path().to_path_buf(),
+                Duration::from_secs(300),
+                lock_dir.path().to_path_buf(),
+                "test-worker".to_string(),
+                registry,
+                helper.telemetry_handle(),
+                fixture_root("needle-test-logs"),
+                0,
+                fixture_root("test-traces"),
+                30,
+                7,
+                fixture_root("test-workspace"),
+                80,
+                tempfile::tempdir().unwrap().path().to_path_buf(),
+                LimitsConfig::default(),
+            );
+
+            let result = mend.evaluate(&store, &HashSet::new()).await;
+            assert!(
+                matches!(result, StrandResult::NoWork),
+                "{case:?} is undetermined ownership and must hold the claim: {result:?}"
+            );
+            assert_eq!(
+                release_count.load(Ordering::Relaxed),
+                0,
+                "{case:?} must not mutate a claim with undetermined ownership"
+            );
+
+            // Deterministically drain the telemetry writer before asserting.
+            helper.sync().await;
+            let unknown = helper.events_by_type("mend.claim_ownership_unknown");
+            assert_eq!(
+                unknown.len(),
+                1,
+                "{case:?} must emit exactly one unknown-ownership event"
+            );
+            let event = &unknown[0];
+            assert_eq!(event.data["evidence"], expected_evidence);
+            assert_eq!(event.data["registry"], "registered_alive");
+            assert_eq!(
+                event.data["stale_by_ttl"],
+                serde_json::json!(true),
+                "{case:?}: the age diagnostic must be visible without releasing"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_claim_ttl_spelling_reaches_the_age_diagnostic() {
         // `stale_claim_ttl` is the canonical key and `stuck_threshold_secs`
         // its deprecated alias. Both spellings must reach the cleanup as the
-        // claim TTL: the same 90s-old claim from a live, registered worker is
-        // released under a 60s TTL and held under a 600s one. A silently
-        // ignored spelling would release in both.
-        for (yaml, expect_release) in [
+        // claim TTL. Since needle-26205003 the TTL no longer authorizes a
+        // release on its own, so both spellings are verified through the
+        // `stale_by_ttl` diagnostic on the emitted unknown-ownership event:
+        // the same 90s-old claim from a live, registered worker reports true
+        // under a 60s TTL and false under a 600s one. A silently ignored
+        // spelling would report false in both. The claim is held either way.
+        for (yaml, expect_stale_by_ttl) in [
             ("stale_claim_ttl: 60", true),
             ("stale_claim_ttl: 600", false),
             ("stuck_threshold_secs: 60", true),
@@ -3493,9 +4041,10 @@ mod tests {
                 })
                 .unwrap();
 
-            // No heartbeat file: nothing protects the claim except the TTL.
+            // No heartbeat file: ownership is Unknown regardless of age.
             let (store, release_count, _) = MockBeadStore::new(vec![bead]);
             let config: MendConfig = serde_yaml::from_str(yaml).unwrap();
+            let helper = TestHelper::new("test-worker");
             let mend = MendStrand::new(
                 config,
                 hb_dir.path().to_path_buf(),
@@ -3503,7 +4052,7 @@ mod tests {
                 lock_dir.path().to_path_buf(),
                 "test-worker".to_string(),
                 registry,
-                Telemetry::new("test-worker".to_string()),
+                helper.telemetry_handle(),
                 fixture_root("needle-test-logs"),
                 0,
                 fixture_root("test-traces"),
@@ -3516,36 +4065,40 @@ mod tests {
             );
 
             let result = mend.evaluate(&store, &HashSet::new()).await;
-            if expect_release {
-                assert!(
-                    matches!(result, StrandResult::WorkCreated),
-                    "{yaml} must release the stale claim: {result:?}"
-                );
-                assert_eq!(
-                    release_count.load(Ordering::Relaxed),
-                    1,
-                    "{yaml} must release exactly one stale claim"
-                );
-            } else {
-                assert!(
-                    matches!(result, StrandResult::NoWork),
-                    "{yaml} must hold a claim younger than the TTL: {result:?}"
-                );
-                assert_eq!(
-                    release_count.load(Ordering::Relaxed),
-                    0,
-                    "{yaml} must not release a claim younger than the TTL"
-                );
-            }
+            assert!(
+                matches!(result, StrandResult::NoWork),
+                "{yaml}: undetermined ownership must hold the claim: {result:?}"
+            );
+            assert_eq!(
+                release_count.load(Ordering::Relaxed),
+                0,
+                "{yaml}: the TTL must not mutate the claim"
+            );
+
+            // Deterministically drain the telemetry writer before asserting.
+            helper.sync().await;
+            let unknown = helper.events_by_type("mend.claim_ownership_unknown");
+            assert_eq!(
+                unknown.len(),
+                1,
+                "{yaml}: exactly one unknown-ownership event must be emitted"
+            );
+            assert_eq!(
+                unknown[0].data["stale_by_ttl"],
+                serde_json::json!(expect_stale_by_ttl),
+                "{yaml}: the TTL spelling must reach the age diagnostic"
+            );
         }
     }
 
     #[tokio::test]
-    async fn config_yaml_stale_claim_ttl_reaches_the_reaper() {
+    async fn config_yaml_stale_claim_ttl_reaches_the_age_diagnostic() {
         // The spelling an operator writes in config.yaml — under the
         // `strands.mend` section, not the bare `MendConfig` fragment — must
-        // be the value the cleanup enforces. A silently dropped key would
-        // hold an abandoned claim forever at the default.
+        // be the value the cleanup applies. Since needle-26205003 the TTL is
+        // a diagnostic carried on the unknown-ownership event, so a silently
+        // dropped key would report `stale_by_ttl: false` at the 600s default
+        // instead of the configured 60s.
         let hb_dir = tempfile::tempdir().unwrap();
         let lock_dir = tempfile::tempdir().unwrap();
         let reg_dir = tempfile::tempdir().unwrap();
@@ -3578,8 +4131,9 @@ mod tests {
             })
             .unwrap();
 
-        // No heartbeat file: nothing protects the claim except the TTL.
+        // No heartbeat file: ownership is Unknown regardless of age.
         let (store, release_count, _) = MockBeadStore::new(vec![bead]);
+        let helper = TestHelper::new("test-worker");
         let mend = MendStrand::new(
             full_config.strands.mend.clone(),
             hb_dir.path().to_path_buf(),
@@ -3587,7 +4141,7 @@ mod tests {
             lock_dir.path().to_path_buf(),
             "test-worker".to_string(),
             registry,
-            Telemetry::new("test-worker".to_string()),
+            helper.telemetry_handle(),
             fixture_root("needle-test-logs"),
             0,
             fixture_root("test-traces"),
@@ -3601,13 +4155,27 @@ mod tests {
 
         let result = mend.evaluate(&store, &HashSet::new()).await;
         assert!(
-            matches!(result, StrandResult::WorkCreated),
-            "the config.yaml TTL must release the abandoned claim: {result:?}"
+            matches!(result, StrandResult::NoWork),
+            "undetermined ownership must hold the claim: {result:?}"
         );
         assert_eq!(
             release_count.load(Ordering::Relaxed),
+            0,
+            "the config.yaml TTL must not mutate the claim"
+        );
+
+        // Deterministically drain the telemetry writer before asserting.
+        helper.sync().await;
+        let unknown = helper.events_by_type("mend.claim_ownership_unknown");
+        assert_eq!(
+            unknown.len(),
             1,
-            "exactly one abandoned claim must be released"
+            "exactly one unknown-ownership event must be emitted"
+        );
+        assert_eq!(
+            unknown[0].data["stale_by_ttl"],
+            serde_json::json!(true),
+            "the config.yaml TTL must reach the age diagnostic"
         );
     }
 

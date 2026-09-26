@@ -220,7 +220,11 @@ version = 1
 # hidden-directory descent skip across the four garbage shapes from the
 # starvation burn-in telemetry, and discovery-snapshot stability under
 # hidden-root churn.
-max_tests = 3987
+# +2 Mend claim-ownership contracts (needle-26205003): the full
+# classify_claim_ownership evidence matrix, and the superseding-heartbeat
+# release suite (different-bead + idle). Both exercise the strand's private
+# classifier directly, so the unit tier is the only tier that can call it.
+max_tests = 3989
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

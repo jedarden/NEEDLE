@@ -116,6 +116,14 @@ impl TestHelper {
         &self.telemetry
     }
 
+    /// A clone of the helper's emitter, for code that consumes `Telemetry` by
+    /// value (e.g. a strand constructed with `MendStrand::new`). All clones
+    /// share one writer channel, so events emitted through the handle are
+    /// still acknowledged by [`TestHelper::sync`].
+    pub fn telemetry_handle(&self) -> Telemetry {
+        self.telemetry.clone()
+    }
+
     /// Get all captured events as a vector.
     ///
     /// Returns a copy of all events collected so far. This acquires a lock

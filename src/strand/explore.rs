@@ -2003,7 +2003,6 @@ impl ExploreStrand {
                             remote_store.as_ref(),
                             &self.registry,
                             &self.telemetry,
-                            &self.qualified_id,
                             Some(Duration::from_secs(self.stale_claim_ttl)),
                             self.heartbeat_ttl,
                         )
@@ -2013,7 +2012,7 @@ impl ExploreStrand {
                                 tracing::info!(
                                     workspace = %workspace.display(),
                                     released,
-                                    "cross-workspace mend released orphans, re-querying"
+                                    "cross-workspace mend released claims on confirmed ownership evidence, re-querying"
                                 );
 
                                 // Re-query ready after cleanup.

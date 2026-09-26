@@ -1135,6 +1135,24 @@ pub enum EventKind {
         assignee: String,
         error: String,
     },
+    /// An in-progress claim's ownership could not be determined, so Mend left
+    /// it untouched (needle-26205003). Carries the decisive evidence — why the
+    /// heartbeat projection was undetermined and what the registry said — plus
+    /// the claim age and whether it exceeds the configured claim TTL, both
+    /// diagnostic only.
+    ///
+    /// `evidence` and `registry` are the string forms of closed sets —
+    /// `heartbeat_{lookup_unavailable,missing,unparseable,stale,clock_skewed}`
+    /// and `{registry_unread,unregistered,registry_pid_dead,registered_alive}`
+    /// respectively — matching the reason a confirmed verdict was impossible.
+    MendClaimOwnershipUnknown {
+        bead_id: BeadId,
+        assignee: String,
+        evidence: String,
+        registry: String,
+        age_secs: u64,
+        stale_by_ttl: bool,
+    },
     MendDependencyCleanupFailed {
         bead_id: String,
         blocker_id: String,
@@ -1961,6 +1979,7 @@ impl EventKind {
             EventKind::MendOrphanedHeartbeatRemoved { .. } => "mend.orphaned_heartbeat_removed",
             EventKind::MendDependencyRemoved { .. } => "mend.dependency_removed",
             EventKind::MendBeadReleaseFailed { .. } => "mend.bead_release_failed",
+            EventKind::MendClaimOwnershipUnknown { .. } => "mend.claim_ownership_unknown",
             EventKind::MendDependencyCleanupFailed { .. } => "mend.dependency_cleanup_failed",
             EventKind::MendLockRemoveFailed { .. } => "mend.lock_remove_failed",
             EventKind::MendRateLimitCleaned { .. } => "mend.rate_limit_cleaned",
@@ -2116,6 +2135,7 @@ impl EventKind {
             | EventKind::StuckReleased { bead_id, .. }
             | EventKind::MendDependencyCleaned { bead_id, .. }
             | EventKind::MendDependencyRemoved { bead_id, .. }
+            | EventKind::MendClaimOwnershipUnknown { bead_id, .. }
             | EventKind::EffortRecorded { bead_id, .. }
             | EventKind::MitosisEvaluated { bead_id, .. }
             | EventKind::VerificationFailed { bead_id, .. }
@@ -4030,6 +4050,23 @@ impl EventKind {
                 "bead_id": bead_id,
                 "assignee": assignee,
             }),
+            EventKind::MendClaimOwnershipUnknown {
+                bead_id,
+                assignee,
+                evidence,
+                registry,
+                age_secs,
+                stale_by_ttl,
+            } => {
+                serde_json::json!({
+                    "bead_id": bead_id,
+                    "assignee": assignee,
+                    "evidence": evidence,
+                    "registry": registry,
+                    "age_secs": age_secs,
+                    "stale_by_ttl": stale_by_ttl,
+                })
+            }
             EventKind::MendAssigneeClearFailed {
                 bead_id,
                 assignee,
@@ -4398,6 +4435,7 @@ impl EventKind {
             | EventKind::RateLimitWait { .. }
             | EventKind::RateLimitAllowed { .. }
             | EventKind::MitosisEvaluated { .. }
+            | EventKind::MendClaimOwnershipUnknown { .. }
             | EventKind::MitosisSplit { .. }
             | EventKind::MitosisSkipped { .. }
             | EventKind::MitosisChildCountWarning { .. }
