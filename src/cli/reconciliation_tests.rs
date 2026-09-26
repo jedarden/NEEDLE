@@ -74,16 +74,6 @@ fn reconciliation_separates_live_and_stale_sessions() {
             .collect::<Vec<_>>(),
         vec!["needle-claude-stale", "needle-claude-no-pane"]
     );
-
-    let cleanup_targets = filter_sessions_for_cleanup_impl(&sessions, &inspector, false, &None);
-    assert_eq!(
-        cleanup_targets,
-        vec![
-            "needle-claude-stale".to_string(),
-            "needle-claude-no-pane".to_string(),
-        ],
-        "bare cleanup must preserve live sessions and select reconciled orphans"
-    );
 }
 
 #[test]
@@ -106,23 +96,37 @@ fn reconciliation_keeps_live_processes_even_without_registry_metadata() {
 
 #[test]
 fn reconciliation_does_not_confuse_pid_metadata_with_session_liveness() {
+    const LIVE_WORKER_PID: u32 = u32::MAX - 2;
+    const UNREGISTERED_PID: u32 = u32::MAX - 1;
+    const STALE_WORKER_PID: u32 = u32::MAX;
+
     let sessions = vec![session("needle-claude-wrapper", Some(505))];
     let inspector = MockInspector {
         live_pids: HashSet::from([505]),
     };
     let discovered = vec![
-        process(505, Some("/workspace/live"), Some("claude")),
-        process(606, Some("/workspace/unregistered"), Some("claude")),
+        process(LIVE_WORKER_PID, Some("/workspace/live"), Some("claude")),
+        process(
+            UNREGISTERED_PID,
+            Some("/workspace/unregistered"),
+            Some("claude"),
+        ),
     ];
-    let registered = vec![worker("wrapper", 505), worker("stale", 707)];
+    let registered = vec![
+        worker("wrapper", LIVE_WORKER_PID),
+        worker("stale", STALE_WORKER_PID),
+    ];
 
     let (live, stale) = reconcile_tmux_sessions(&sessions, &inspector);
-    let unregistered = unregistered_processes(&discovered, &HashSet::from([505]));
+    let unregistered = unregistered_processes(&discovered, &HashSet::from([LIVE_WORKER_PID]));
     let process_reconciliation = reconcile_process_registry(&discovered, &registered);
 
     assert_eq!(live.len(), 1, "a live pane tree is an active session");
     assert!(stale.is_empty());
-    assert_eq!(unregistered[0].pid, 606, "direct workers remain visible");
+    assert_eq!(
+        unregistered[0].pid, UNREGISTERED_PID,
+        "direct workers remain visible"
+    );
     assert_eq!(
         process_reconciliation
             .live_registered
@@ -145,7 +149,7 @@ fn reconciliation_does_not_confuse_pid_metadata_with_session_liveness() {
             .iter()
             .map(|process| process.pid)
             .collect::<Vec<_>>(),
-        vec![606]
+        vec![UNREGISTERED_PID]
     );
 
     let cleanup_sessions = vec![
@@ -167,5 +171,46 @@ fn reconciliation_does_not_confuse_pid_metadata_with_session_liveness() {
         cleanup_targets,
         vec!["needle-claude-stale".to_string()],
         "bare cleanup must keep the registered worker whose PID is live"
+    );
+}
+
+#[test]
+fn bare_cleanup_preserves_live_registered_worker_and_removes_orphan() {
+    const LIVE_WORKER_PID: u32 = u32::MAX - 1;
+    const ORPHAN_WORKER_PID: u32 = u32::MAX;
+
+    let sessions = vec![
+        session("needle-claude-live", Some(101)),
+        session("needle-claude-orphan", Some(202)),
+    ];
+    // Both tmux panes have live processes, but the orphan's process is only a
+    // shell. Bare cleanup must use NEEDLE process discovery plus the registry
+    // PID, rather than treating any live pane process as a live worker.
+    let inspector = MockInspector {
+        live_pids: HashSet::from([101, 202]),
+    };
+    let discovered = vec![process(
+        LIVE_WORKER_PID,
+        Some("/workspace/live"),
+        Some("claude"),
+    )];
+    let registered = vec![
+        worker("claude-live", LIVE_WORKER_PID),
+        worker("claude-orphan", ORPHAN_WORKER_PID),
+    ];
+    let live_worker_ids = live_registered_worker_ids(&discovered, &registered);
+
+    let cleanup_targets = filter_sessions_for_cleanup_with_live_workers(
+        &sessions,
+        &inspector,
+        &live_worker_ids,
+        false,
+        &None,
+    );
+
+    assert_eq!(
+        cleanup_targets,
+        vec!["needle-claude-orphan".to_string()],
+        "bare cleanup must keep the session with a live registered NEEDLE PID and remove the orphan"
     );
 }

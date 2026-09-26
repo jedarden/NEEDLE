@@ -2337,13 +2337,14 @@ fn find_descendants_recursive(
 trait ProcessInspector {
     /// Whether any live (non-zombie) process — the root itself or a
     /// descendant — backs the given pane PID.
-    ///
-    /// Cleanup uses this as its liveness oracle: a tmux session is only
-    /// truly orphaned when the answer is `false`. It is deliberately NOT
-    /// keyed on needle process identity — the 2026-07-19 incident also
-    /// killed `needle-supervisor`, whose pane runs `needle supervise`, not
-    /// `needle run`, so an identity-keyed check would repeat the harm.
     fn tree_has_live_process(&self, root_pid: u32) -> bool;
+
+    /// Whether a live NEEDLE process — the root itself or a descendant —
+    /// backs the given pane PID. Bare cleanup uses this identity-aware check
+    /// so an unrelated long-lived shell does not keep an orphaned session.
+    fn tree_has_live_needle_process(&self, _root_pid: u32) -> bool {
+        false
+    }
 }
 
 /// Real process inspector using /proc filesystem.
@@ -2539,6 +2540,12 @@ impl ProcessInspector for RealProcessInspector {
         find_all_descendants(root_pid)
             .iter()
             .any(|&pid| !process_is_gone(pid))
+    }
+
+    fn tree_has_live_needle_process(&self, root_pid: u32) -> bool {
+        std::iter::once(root_pid)
+            .chain(find_all_descendants(root_pid))
+            .any(|pid| !process_is_gone(pid) && is_needle_process(pid))
     }
 }
 
@@ -2887,7 +2894,7 @@ fn cmd_stop(all: bool, identifier: Option<String>) -> Result<()> {
 ///
 /// # Arguments
 /// * `sessions` - All discovered tmux sessions
-/// * `inspector` - Process inspector for checking pane-tree liveness
+/// * `inspector` - Process inspector for checking live NEEDLE processes in pane trees
 /// * `all` - If true, include all sessions regardless of liveness
 /// * `identifier` - If set, filter by identifier substring (bypasses liveness check)
 ///
@@ -2912,9 +2919,9 @@ fn filter_sessions_for_cleanup_impl(
 /// Filter sessions for cleanup with the live registry view already resolved.
 ///
 /// The registry view handles the important case where a worker is live but no
-/// longer appears beneath tmux's pane PID.  The process-tree oracle remains a
-/// conservative fallback for unregistered workers and non-worker NEEDLE
-/// sessions such as the supervisor.
+/// longer appears beneath tmux's pane PID. The pane-tree check is restricted
+/// to NEEDLE processes, so an unrelated live shell does not keep an orphaned
+/// session around.
 fn filter_sessions_for_cleanup_with_live_workers(
     sessions: &[TmuxSession],
     inspector: &dyn ProcessInspector,
@@ -2933,12 +2940,10 @@ fn filter_sessions_for_cleanup_with_live_workers(
             .map(|s| s.name.clone())
             .collect()
     } else {
-        // Bare cleanup shares the same reconciliation result as list/status.
-        // The registered-PID view handles workers that have moved out of the
-        // pane tree. The shared pane-tree oracle is deliberately identity-
-        // blind: a live worker may sit behind tmux's shell wrapper, and a live
-        // supervisor is not necessarily a `needle run` process. Only sessions
-        // with neither signal are safe cleanup targets.
+        // Registered PIDs are checked against scan_needle_processes(). The
+        // pane-tree check handles live NEEDLE processes that are not in the
+        // worker registry, including a supervisor behind a shell wrapper.
+        // Ordinary live shell processes do not make a session non-orphaned.
         sessions
             .iter()
             .filter(|session| {
@@ -2949,7 +2954,7 @@ fn filter_sessions_for_cleanup_with_live_workers(
                 !registered_worker_is_live
                     && session
                         .pid
-                        .is_none_or(|pane_pid| !inspector.tree_has_live_process(pane_pid))
+                        .is_none_or(|pane_pid| !inspector.tree_has_live_needle_process(pane_pid))
             })
             .map(|session| session.name.clone())
             .collect()
@@ -2991,9 +2996,9 @@ fn filter_sessions_for_cleanup_with_registry(
 
 /// `needle cleanup` — remove orphaned tmux sessions.
 ///
-/// Bare (no-flags) cleanup removes only truly orphaned sessions: sessions
-/// whose registered worker PID is not a live NEEDLE process and whose pane
-/// process tree is also dead (ADR-003). With --all, removes all needle
+/// Bare (no-flags) cleanup removes only orphaned sessions: sessions whose
+/// registered worker PID is not a live NEEDLE process and whose pane tree has
+/// no other live NEEDLE process. With --all, removes all needle
 /// sessions regardless of worker status. With -i, filters sessions by
 /// name/identifier substring (bypasses the liveness check — naming a
 /// specific session is itself the operator's deliberate choice).
@@ -3008,13 +3013,14 @@ fn cmd_cleanup(all: bool, identifier: Option<String>) -> Result<()> {
     // Only bare cleanup consults the registry and process table. Explicit
     // identifiers are already deliberate operator targets, and --all is
     // intentionally destructive; neither pays for liveness checks it does
-    // not use.
+    // not use. Errors reading either liveness source abort cleanup instead
+    // of treating an incomplete scan as proof that every worker is dead.
     let live_worker_ids = if !all && identifier.is_none() {
-        let config = ConfigLoader::load_global().unwrap_or_default();
+        let config = ConfigLoader::load_global()?;
         let registry =
             Registry::default_location(&crate::state_dir::root_for(&config.workspace.home));
-        let registered_workers = registry.list_all().unwrap_or_default();
-        let discovered = scan_needle_processes().unwrap_or_default();
+        let registered_workers = registry.list_all()?;
+        let discovered = scan_needle_processes()?;
         live_registered_worker_ids(&discovered, &registered_workers)
     } else {
         HashSet::new()
@@ -10816,25 +10822,26 @@ WORKSPACE                                  R1 RETRY  R2 DECOMPOSE  R3 QUARANTINE
 
     /// Mock process inspector for testing.
     ///
-    /// Models liveness the way `RealProcessInspector` observes it: a set of
-    /// PIDs whose /proc status reads as live, plus the pane-tree edges a
-    /// descendant walk would traverse. A pane counts as backed when the root
-    /// or anything reachable beneath it is live — the shape that matters for
-    /// ADR-003, where the live worker is usually a *child* of the shell PID
-    /// tmux reports, or a non-`run` needle process entirely.
+    /// Models liveness the way `RealProcessInspector` observes it: live
+    /// process PIDs, NEEDLE process PIDs, and pane-tree edges for descendant
+    /// walks. Cleanup only treats a pane as backed when it finds a live
+    /// NEEDLE process; generic shell processes remain eligible for cleanup.
     struct MockProcessInspector {
         /// Pane-tree edges: parent PID -> its children.
         children: std::collections::HashMap<u32, Vec<u32>>,
         /// PIDs whose /proc status reads as live (non-zombie).
         live: std::collections::HashSet<u32>,
+        /// Live PIDs whose process identity is a NEEDLE command.
+        needle: std::collections::HashSet<u32>,
     }
 
     impl MockProcessInspector {
-        /// A pane whose root process itself is live.
-        fn live_root(pane_pid: u32) -> Self {
+        /// A pane whose root is a live NEEDLE process.
+        fn live_needle_root(pane_pid: u32) -> Self {
             Self {
                 children: std::collections::HashMap::new(),
                 live: std::collections::HashSet::from([pane_pid]),
+                needle: std::collections::HashSet::from([pane_pid]),
             }
         }
 
@@ -10844,6 +10851,7 @@ WORKSPACE                                  R1 RETRY  R2 DECOMPOSE  R3 QUARANTINE
             Self {
                 children: std::collections::HashMap::from([(pane_pid, children.to_vec())]),
                 live: live.iter().copied().collect(),
+                needle: std::collections::HashSet::new(),
             }
         }
     }
@@ -10857,6 +10865,23 @@ WORKSPACE                                  R1 RETRY  R2 DECOMPOSE  R3 QUARANTINE
                     continue;
                 }
                 if self.live.contains(&pid) {
+                    return true;
+                }
+                if let Some(kids) = self.children.get(&pid) {
+                    stack.extend(kids.iter().copied());
+                }
+            }
+            false
+        }
+
+        fn tree_has_live_needle_process(&self, root_pid: u32) -> bool {
+            let mut stack = vec![root_pid];
+            let mut visited = std::collections::HashSet::new();
+            while let Some(pid) = stack.pop() {
+                if !visited.insert(pid) {
+                    continue;
+                }
+                if self.live.contains(&pid) && self.needle.contains(&pid) {
                     return true;
                 }
                 if let Some(kids) = self.children.get(&pid) {
@@ -10885,18 +10910,18 @@ WORKSPACE                                  R1 RETRY  R2 DECOMPOSE  R3 QUARANTINE
     fn cleanup_no_flags_filters_orphaned_sessions() {
         // Regression Test 1: cleanup with no flags removes only dead sessions.
         //
-        // Test: Given one session whose pane process tree is live and one
-        // whose tree is fully dead, the default cleanup (no flags) should
-        // only remove the dead session.
+        // Test: Given one session backed by a live NEEDLE process and one
+        // whose tree is fully dead, default cleanup should remove only the
+        // orphan.
         //
         // This is the core safety fix: the no-flags path must check process
         // liveness before killing sessions.
 
         let sessions = vec![
-            tmux_session("needle-claude-alpha", Some(1001)), // Live pane tree
+            tmux_session("needle-claude-alpha", Some(1001)), // Live NEEDLE process
             tmux_session("needle-claude-bravo", Some(9999)), // Dead pane tree
         ];
-        let inspector = MockProcessInspector::live_root(1001);
+        let inspector = MockProcessInspector::live_needle_root(1001);
 
         let targets = filter_sessions_for_cleanup_impl(&sessions, &inspector, false, &None);
 
@@ -10927,6 +10952,7 @@ WORKSPACE                                  R1 RETRY  R2 DECOMPOSE  R3 QUARANTINE
         let inspector = MockProcessInspector {
             children: std::collections::HashMap::new(),
             live: std::collections::HashSet::from([1001, 1002, 1003]),
+            needle: std::collections::HashSet::from([1001, 1002, 1003]),
         };
 
         let targets = filter_sessions_for_cleanup_impl(&sessions, &inspector, false, &None);
@@ -10952,7 +10978,8 @@ WORKSPACE                                  R1 RETRY  R2 DECOMPOSE  R3 QUARANTINE
         let sessions = vec![tmux_session("needle-claude-alpha", Some(2001))];
         // Pane root 2001 (the shell) is dead, but the worker it spawned is
         // still alive beneath it.
-        let inspector = MockProcessInspector::dead_root_with(2001, &[2002], &[2002]);
+        let mut inspector = MockProcessInspector::dead_root_with(2001, &[2002], &[2002]);
+        inspector.needle.insert(2002);
 
         let targets = filter_sessions_for_cleanup_impl(&sessions, &inspector, false, &None);
 
@@ -10965,10 +10992,9 @@ WORKSPACE                                  R1 RETRY  R2 DECOMPOSE  R3 QUARANTINE
     #[test]
     fn cleanup_preserves_live_supervisor_session() {
         // bf-45go0 regression: the 2026-07-19 incident also killed
-        // `needle-supervisor`, whose pane runs `needle supervise` — a needle
-        // process, but never a `needle run`. Liveness is identity-blind: any
-        // live process behind the pane preserves the session, whether the
-        // live process is the pane root itself or a non-run descendant.
+        // `needle-supervisor`, whose pane runs `needle supervise` — a NEEDLE
+        // process, but never a `needle run`. The identity-aware pane scan
+        // must preserve it whether it is the root or a live descendant.
 
         let sessions = vec![
             tmux_session("needle-supervisor", Some(3001)),
@@ -10980,6 +11006,7 @@ WORKSPACE                                  R1 RETRY  R2 DECOMPOSE  R3 QUARANTINE
             // still alive beneath it.
             children: std::collections::HashMap::from([(3002, vec![3003])]),
             live: std::collections::HashSet::from([3001, 3003]),
+            needle: std::collections::HashSet::from([3001, 3003]),
         };
 
         let targets = filter_sessions_for_cleanup_impl(&sessions, &inspector, false, &None);
@@ -11005,6 +11032,7 @@ WORKSPACE                                  R1 RETRY  R2 DECOMPOSE  R3 QUARANTINE
         let inspector = MockProcessInspector {
             children: std::collections::HashMap::from([(4002, vec![4003, 4004])]),
             live: std::collections::HashSet::new(),
+            needle: std::collections::HashSet::new(),
         };
 
         let targets = filter_sessions_for_cleanup_impl(&sessions, &inspector, false, &None);
@@ -11098,7 +11126,7 @@ WORKSPACE                                  R1 RETRY  R2 DECOMPOSE  R3 QUARANTINE
             tmux_session("needle-claude-alpha", Some(1001)), // Live session
             tmux_session("needle-claude-orphan", None),      // No PID = orphaned
         ];
-        let inspector = MockProcessInspector::live_root(1001);
+        let inspector = MockProcessInspector::live_needle_root(1001);
 
         let targets = filter_sessions_for_cleanup_impl(&sessions, &inspector, false, &None);
 

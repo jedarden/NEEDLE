@@ -224,7 +224,10 @@ version = 1
 # classify_claim_ownership evidence matrix, and the superseding-heartbeat
 # release suite (different-bead + idle). Both exercise the strand's private
 # classifier directly, so the unit tier is the only tier that can call it.
-max_tests = 3989
+# +1 registered-PID cleanup regression (needle-790cdbc2): a live worker and
+# orphan share live tmux panes, so only process-scan-to-registry matching
+# distinguishes the session that bare cleanup must preserve.
+max_tests = 3990
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
