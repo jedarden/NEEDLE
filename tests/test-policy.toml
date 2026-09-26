@@ -418,7 +418,9 @@ tier = "e2e"
 # +9 post-Pluck Resolve lifecycle scenarios (needle-eba55bfc).
 # +9 deterministic replenishment/starvation contract scenarios
 # (needle-e13204d9).
-max_tests = 385
+# +1 GenAI semantic-convention matrix across the supported built-in adapters
+# (needle-758bfd1d).
+max_tests = 386
 owner = "component:weave-unravel-pulse"
 
 [[harness]]

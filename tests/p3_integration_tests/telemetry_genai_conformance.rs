@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use needle::dispatch::{AgentAdapter, Dispatcher, TokenExtraction};
+use needle::dispatch::{builtin_adapters, AgentAdapter, Dispatcher, TokenExtraction};
 use needle::prompt::BuiltPrompt;
 use needle::telemetry::Telemetry;
 use needle::types::{BeadId, InputMethod};
@@ -22,6 +22,19 @@ use tracing_subscriber::layer::SubscriberExt;
 const BEAD_ID: &str = "needle-7f53ca33-genai-probe";
 const WORKER_ID: &str = "genai-conformance-worker";
 const USAGE_JSON: &str = r#"{"usage":{"input_tokens":123,"output_tokens":456}}"#;
+
+/// The built-in adapters advertised by the README, with the values that the
+/// dispatch span must export for each one. OpenCode deliberately leaves its
+/// provider and model configurable, so the adapter's documented fallbacks are
+/// the expected semantic-convention values for that entry.
+const SUPPORTED_BUILTIN_SEMANTICS: [(&str, &str, &str); 6] = [
+    ("claude", "anthropic", "claude-sonnet-4-6"),
+    ("claude-sonnet", "anthropic", "claude-sonnet-4-6"),
+    ("claude-opus", "anthropic", "claude-opus-4-6"),
+    ("opencode", "local", "unknown"),
+    ("codex", "openai", "gpt-5.6-terra"),
+    ("aider", "anthropic", "claude-sonnet-4-6"),
+];
 
 #[derive(Debug, Clone, Default)]
 struct CapturingSpanExporter {
@@ -70,6 +83,23 @@ fn stub_adapter(command: &str, provider: Option<&str>, model: Option<&str>) -> A
         harness: None,
         harness_version: None,
     }
+}
+
+fn stub_builtin_adapter(name: &str) -> AgentAdapter {
+    let mut adapter = builtin_adapters()
+        .into_iter()
+        .find(|adapter| adapter.name == name)
+        .unwrap_or_else(|| panic!("supported built-in adapter {name} should be registered"));
+    adapter.agent_cli = "bash".to_string();
+    adapter.invoke_template = format!("printf '%s' '{USAGE_JSON}'");
+    adapter.timeout_secs = 30;
+    adapter.usage_format = None;
+    adapter.output_transform = None;
+    adapter.token_extraction = TokenExtraction::JsonField {
+        input_path: "usage.input_tokens".to_string(),
+        output_path: "usage.output_tokens".to_string(),
+    };
+    adapter
 }
 
 fn probe_prompt() -> BuiltPrompt {
@@ -214,6 +244,35 @@ fn exported_agent_dispatch_span_conforms_to_gen_ai_contract() {
         pid > 0,
         "the recorded agent pid must be positive, got {pid}"
     );
+}
+
+#[test]
+fn exported_agent_dispatch_uses_expected_gen_ai_values_for_supported_builtins() {
+    for (adapter_name, expected_system, expected_model) in SUPPORTED_BUILTIN_SEMANTICS {
+        let spans = dispatch_and_capture(stub_builtin_adapter(adapter_name));
+        let span = &spans[0];
+
+        assert_eq!(
+            string_attribute(span, "gen_ai.system"),
+            Some(expected_system.to_string()),
+            "exported system for {adapter_name}"
+        );
+        assert_eq!(
+            string_attribute(span, "gen_ai.request.model"),
+            Some(expected_model.to_string()),
+            "exported model for {adapter_name}"
+        );
+        assert_eq!(
+            integer_attribute(span, "gen_ai.usage.input_tokens"),
+            Some(123),
+            "exported input token usage for {adapter_name}"
+        );
+        assert_eq!(
+            integer_attribute(span, "gen_ai.usage.output_tokens"),
+            Some(456),
+            "exported output token usage for {adapter_name}"
+        );
+    }
 }
 
 #[test]
