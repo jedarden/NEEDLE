@@ -214,3 +214,61 @@ fn bare_cleanup_preserves_live_registered_worker_and_removes_orphan() {
         "bare cleanup must keep the session with a live registered NEEDLE PID and remove the orphan"
     );
 }
+
+#[test]
+fn bare_cleanup_treats_unmatched_registered_pids_as_orphans() {
+    // The full registered-PID trio (ADR-003): live, dead, and unmatched.
+    //
+    // "Unmatched" is the PID-reuse shape `is_needle_process` exists for: the
+    // registry entry survived a crash, and the OS has since handed its number
+    // to an unrelated process. A merely-alive PID must not make the stale
+    // session look backed. This test process is itself live and not a NEEDLE
+    // command, so its own PID stands in for the reused number — a real /proc
+    // entry, exercised without spawning anything.
+    const LIVE_WORKER_PID: u32 = u32::MAX - 2;
+    const DEAD_WORKER_PID: u32 = u32::MAX; // no such process exists
+    let reused_worker_pid = std::process::id();
+
+    let sessions = vec![
+        session("needle-live", Some(101)),
+        session("needle-dead", Some(202)),
+        session("needle-reused", Some(303)),
+    ];
+    // Pane trees are empty so the registry view is the only live signal under
+    // test; the pane-tree fallback has its own suites in the cli module.
+    let inspector = MockInspector {
+        live_pids: HashSet::new(),
+    };
+    let discovered = vec![process(
+        LIVE_WORKER_PID,
+        Some("/workspace/live"),
+        Some("claude"),
+    )];
+    let registered = vec![
+        worker("live", LIVE_WORKER_PID),
+        worker("dead", DEAD_WORKER_PID),
+        worker("reused", reused_worker_pid),
+    ];
+
+    let live_worker_ids = live_registered_worker_ids(&discovered, &registered);
+
+    assert_eq!(
+        live_worker_ids,
+        HashSet::from(["live".to_string()]),
+        "only the scan-matched PID is live; a dead PID and a PID held by an unrelated live process are both unmatched"
+    );
+
+    let cleanup_targets = filter_sessions_for_cleanup_with_live_workers(
+        &sessions,
+        &inspector,
+        &live_worker_ids,
+        false,
+        &None,
+    );
+
+    assert_eq!(
+        cleanup_targets,
+        vec!["needle-dead".to_string(), "needle-reused".to_string()],
+        "bare cleanup must preserve the live worker's session and treat both unmatched registrations as orphans"
+    );
+}

@@ -227,7 +227,11 @@ version = 1
 # +1 registered-PID cleanup regression (needle-790cdbc2): a live worker and
 # orphan share live tmux panes, so only process-scan-to-registry matching
 # distinguishes the session that bare cleanup must preserve.
-max_tests = 3990
+# +1 unmatched registered-PID cleanup regression (needle-de72f544): the
+# PID-reuse shape — a registry entry whose number now belongs to a live
+# non-NEEDLE process — must classify as an orphan, not a live worker. Uses
+# the test process's own PID as the reused number, so no spawn is involved.
+max_tests = 3991
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
