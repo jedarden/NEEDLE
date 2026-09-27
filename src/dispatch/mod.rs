@@ -2632,9 +2632,10 @@ impl Dispatcher {
         // Compute timeout configuration based on adapter policy.
         let (idle_dur, hard_dur, use_legacy) = match adapter.timeout_policy() {
             TimeoutPolicy::Legacy => {
-                // Legacy mode: single timeout, treated as both idle and hard.
+                // Legacy mode is one absolute wall-clock deadline, so output
+                // activity must not enable or extend an idle timer.
                 let legacy_dur = adapter.effective_timeout(self.global_timeout_secs);
-                (legacy_dur, legacy_dur, true)
+                (Duration::ZERO, legacy_dur, true)
             }
             TimeoutPolicy::New {
                 idle_enabled,
@@ -2829,8 +2830,14 @@ impl Dispatcher {
                         let _ = guard.wait().await;
                         kill_guard.disarm();
 
-                        let reason = TimeoutReason::Hard {
-                            timeout_secs: hard_dur.as_secs(),
+                        let reason = if use_legacy {
+                            TimeoutReason::Legacy {
+                                timeout_secs: hard_dur.as_secs(),
+                            }
+                        } else {
+                            TimeoutReason::Hard {
+                                timeout_secs: hard_dur.as_secs(),
+                            }
                         };
                         break (124, Some(reason));
                     }

@@ -100,7 +100,7 @@ fn test_prompt() -> BuiltPrompt {
 // ──────────────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn hard_timeout_fires_regardless_of_activity() {
+async fn hard_and_legacy_timeouts_are_absolute_under_activity() {
     // Create an adapter with a 2 second hard timeout
     // The process produces output every 0.5 seconds (frequent activity)
     // but should still be killed at the 2 second hard deadline
@@ -181,6 +181,45 @@ async fn hard_timeout_fires_regardless_of_activity() {
     assert!(
         !exec_result.stdout.is_empty(),
         "stdout should contain output before hard timeout"
+    );
+
+    // Legacy timeout_secs remains an absolute wall-clock limit even when
+    // stdout continues streaming and no new timeout fields are configured.
+    let mut legacy_adapter = test_adapter_with_hard_timeout("test-legacy-activity", "", 0);
+    legacy_adapter.invoke_template =
+        "for i in $(seq 1 100); do printf 'legacy-output-%s\\n' \"$i\"; sleep 0.1; done"
+            .to_string();
+    legacy_adapter.timeout_secs = 2;
+    let mut legacy_adapters = HashMap::new();
+    legacy_adapters.insert("test-legacy-activity".to_string(), legacy_adapter);
+    let legacy_dispatcher = wired_dispatcher(
+        legacy_adapters,
+        Telemetry::new("legacy-worker".to_string()),
+        3600,
+    );
+    let legacy_workspace = Path::new("/tmp");
+    let legacy_start = Instant::now();
+    let legacy_result = legacy_dispatcher
+        .dispatch_with_context(
+            &BeadId::from("needle-legacy-timeout"),
+            &test_prompt(),
+            legacy_dispatcher.adapter("test-legacy-activity").unwrap(),
+            legacy_workspace,
+            &crate::pre_spawn_pass_store::claimed_context(legacy_workspace),
+        )
+        .await
+        .expect("legacy timeout dispatch should complete with a timeout result");
+    let legacy_elapsed = legacy_start.elapsed();
+
+    assert_eq!(legacy_result.exit_code, 124);
+    assert!(legacy_result.stdout.contains("legacy-output-"));
+    assert_eq!(
+        legacy_result.timeout_reason,
+        Some(TimeoutReason::Legacy { timeout_secs: 2 })
+    );
+    assert!(
+        legacy_elapsed >= Duration::from_secs(2) && legacy_elapsed < Duration::from_secs(4),
+        "legacy timeout must stay absolute despite output activity, elapsed {legacy_elapsed:?}"
     );
 }
 

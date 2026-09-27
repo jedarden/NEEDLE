@@ -75,8 +75,15 @@ fn test_prompt() -> BuiltPrompt {
 
 #[tokio::test]
 async fn idle_timeout_fires_when_no_activity_occurs() {
-    // Create an adapter with a very short idle timeout (1 second)
-    let adapter = test_adapter_with_idle_timeout("test-idle", "sleep 10", 1);
+    // The fixture stays silent and writes its child PID out of band so this
+    // test also proves that idle timeout kills the entire process group.
+    let pid_file = std::env::temp_dir().join(format!(
+        "needle-idle-process-group-{}.pid",
+        std::process::id()
+    ));
+    let pid_file_str = pid_file.display().to_string();
+    let command = format!("sleep 10 & child=$!; printf '%s' \"$child\" > {pid_file_str}; wait");
+    let adapter = test_adapter_with_idle_timeout("test-idle", &command, 1);
 
     let telemetry = Telemetry::new("test-worker".to_string());
     let mut adapters = HashMap::new();
@@ -153,6 +160,21 @@ async fn idle_timeout_fires_when_no_activity_occurs() {
         "idle timeout should wait at least the configured duration, took {:?} (expected >= 1s)",
         elapsed
     );
+
+    let child_pid = std::fs::read_to_string(&pid_file)
+        .expect("fixture should report its background child PID")
+        .trim()
+        .parse::<u32>()
+        .expect("fixture child PID should be numeric");
+    std::fs::remove_file(&pid_file).expect("remove the fixture PID file");
+    let reaped_by = Instant::now() + Duration::from_secs(3);
+    while needle::registry::is_pid_alive(child_pid) {
+        assert!(
+            Instant::now() < reaped_by,
+            "idle timeout must kill the whole process group; child {child_pid} remained alive"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────────────────

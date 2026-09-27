@@ -6269,8 +6269,38 @@ Route GitHub releases through the *existing* `:testing` slot instead of building
 - A legacy adapter containing only `timeout_secs` retains the current absolute-timeout behavior, and a mixed legacy/new configuration fails validation with an actionable message.
 
 ### 15.5 Deployment
-- Update the GLM-4.7 adapter to opt into activity-aware execution only after the deterministic dispatcher tests pass. Choose initial limits from observed fleet traces (expected starting point: a short inactivity bound and a 30–60 minute hard cap), then compare completion, idle-timeout, hard-timeout, and bead-orphan rates against the 2026-08-06 baseline before applying the policy to other adapters.
+- After the deterministic dispatcher tests pass, opt the explicit `claude-code-glm-5.3-flash` profile into activity-aware execution. The former GLM-4.7 alias is retired by Z.AI and currently routes to GLM-5.3-Flash, so it must not be restored as a runtime adapter. The active profile uses a 900-second idle bound and a 3600-second hard cap; leave other adapters on their existing timeout policy.
 - Version bump, `needle-ci` (fmt + Clippy + test on iad-ci), and staged canary rollout through `needle-testing` to `needle-stable`.
+
+#### Timeout rollout comparison (2026-09-27)
+
+The 2026-08-06 baseline is the fixed 600-second wall-clock policy. The incident
+record says GLM-4.7 dispatches reached that deadline while still streaming
+events and invoking tools, but the retained baseline contains no per-attempt
+completion, timeout-reason, or matched orphan denominators. The local worker
+event archive begins on 2026-09-07 for the Flash fleet, so it cannot produce a
+numeric before/after rate for that baseline.
+
+For a measurable post-migration reference, the retained GLM-5.3-Flash worker
+events from 2026-09-07 through 2026-09-27 contain 7,941 completed process
+runs and 8,217 successful claim events. Rates below use terminal process runs
+as the timeout and completion denominator; orphan events are shown against
+successful claims as an event-rate ratio, not as a per-claim cohort outcome.
+
+| Measure | 2026-08-06 baseline | Flash profile events, 2026-09-07 to 2026-09-27 |
+| --- | --- | --- |
+| Successful process completion | Not measurable from the retained baseline | 6,664 / 7,941 exit code 0 (83.9%) |
+| Idle timeout | Not classified separately from the absolute timeout | 5 / 7,941 (0.063%) at 900 seconds |
+| Hard timeout | Not classified separately from the absolute timeout | 934 / 7,941 (11.76%) at 3,600 seconds |
+| Orphan rate | No retained matched numerator and denominator | 612 orphan events / 8,217 successful claims (7.45% event-rate ratio) |
+
+The current window is a fleet observation, not a controlled canary, and is not
+directly comparable to the incomplete baseline. Keep this policy scoped to the
+explicit Flash profile; collect matched attempt and claim cohorts before
+extending activity-aware limits to another adapter. Recompute the four rates
+over equal-length windows from `agent.completed`, `agent.timeout`,
+`bead.claim.succeeded`, and `bead.orphaned` events when the 2026-08-06 source
+cohort is available.
 
 ## Exit criteria
 - A streaming agent can run beyond its former fixed ten-minute adapter timeout as long as it continues producing stdout/stderr activity and remains below the hard cap.
