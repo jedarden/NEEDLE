@@ -371,7 +371,10 @@ contract = 208
 # +4 isolated adapter smoke contracts (needle-7a93d078): recorded CLI flag
 # fixtures, README/registry parity, ready probes for each built-in adapter,
 # and fail-closed checks for the generic placeholder and unknown names.
-e2e = 865
+# +4 timeout activity contracts (needle-2f658c5a): stderr and partial stdout
+# activity reset idle deadlines, closed output pipes retain timeout enforcement,
+# and worker cancellation kills and reaps the process group.
+e2e = 869
 soak = 0
 fuzz = 0
 
@@ -426,7 +429,10 @@ tier = "e2e"
 # structured reason, and a hard-deadline kill takes down the agent's whole
 # process group. Same harness as the matrix above: the contract is the
 # spawned process boundary.
-max_tests = 444
+# +4 timeout activity contracts (needle-2f658c5a): stderr and partial stdout
+# activity reset idle deadlines, closed output pipes retain timeout enforcement,
+# and worker cancellation kills and reaps the process group.
+max_tests = 448
 owner = "component:process-integration"
 
 [[harness]]

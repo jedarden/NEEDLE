@@ -109,6 +109,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -1437,6 +1438,9 @@ pub struct Dispatcher {
     bead_store: Option<Arc<dyn BeadStore>>,
     /// Worker ID for atomic claim verification.
     worker_id: Option<String>,
+    /// Optional worker shutdown flag. When set, process execution observes it
+    /// alongside exit, stream activity, and both timeout deadlines.
+    cancellation_flag: Option<Arc<AtomicBool>>,
 }
 
 impl Dispatcher {
@@ -1463,6 +1467,7 @@ impl Dispatcher {
             tsnet_config,
             bead_store: None,
             worker_id: None,
+            cancellation_flag: None,
         })
     }
 
@@ -1482,6 +1487,7 @@ impl Dispatcher {
             tsnet_config: TsnetConfig::default(),
             bead_store: None,
             worker_id: None,
+            cancellation_flag: None,
         }
     }
 
@@ -1513,6 +1519,18 @@ impl Dispatcher {
     /// Set the worker ID for atomic claim verification.
     pub fn with_worker_id(mut self, worker_id: String) -> Self {
         self.worker_id = Some(worker_id);
+        self
+    }
+
+    /// Observe a worker-owned cancellation flag while an agent is running.
+    ///
+    /// The flag is intentionally shared rather than copied so a shutdown
+    /// request can interrupt a process even while `run_process` is awaiting a
+    /// deadline or a child exit. Tests and claim-loss callers that already
+    /// cancel by dropping the dispatch future retain the process-group guard
+    /// fallback when no flag is configured.
+    pub fn with_cancellation_flag(mut self, flag: Arc<AtomicBool>) -> Self {
+        self.cancellation_flag = Some(flag);
         self
     }
 
@@ -2646,9 +2664,10 @@ impl Dispatcher {
         let has_idle_deadline = !idle_dur.is_zero();
         let has_hard_deadline = !hard_dur.is_zero();
         let has_any_deadline = has_idle_deadline || has_hard_deadline;
+        let cancellation_flag = self.cancellation_flag.clone();
 
         // Exit code and optional timeout reason.
-        let (exit_code, timeout_reason) = if !has_any_deadline {
+        let (exit_code, timeout_reason) = if !has_any_deadline && cancellation_flag.is_none() {
             // No deadlines: wait indefinitely.
             let status = ProcessGuard::new(child)
                 .wait()
@@ -2680,6 +2699,12 @@ impl Dispatcher {
 
             // Activity receiver for idle deadline resets.
             let mut activity_rcv = activity_rx;
+            // Once both capture tasks have reached EOF, no further activity
+            // can arrive. Disable the watch branch after it reports closure;
+            // treating a closed receiver as activity would otherwise create a
+            // permanently-ready select branch that can starve deadlines while
+            // a child that closed its pipes is still running.
+            let mut activity_open = true;
 
             // Outcome: (exit_code, timeout_reason).
             // We loop to handle idle deadline resets on activity.
@@ -2703,20 +2728,69 @@ impl Dispatcher {
                     }
 
                     // Branch 2: activity detected (stdout/stderr byte read)
-                    _result = activity_rcv.changed() => {
-                        // Reset idle deadline on activity (if active).
-                        if has_idle_deadline {
-                            idle_deadline = Some(tokio::time::Instant::now() + idle_dur);
+                    activity = activity_rcv.changed(), if activity_open => {
+                        match activity {
+                            Ok(()) => {
+                                // Reset idle deadline on activity (if active).
+                                if has_idle_deadline {
+                                    idle_deadline = Some(tokio::time::Instant::now() + idle_dur);
+                                }
+                            }
+                            Err(_) => activity_open = false,
                         }
                         // Continue the loop to re-evaluate deadlines.
                         continue;
                     }
 
-                    // Branch 3: idle deadline expired
+                    // Branch 3: worker cancellation. The process-group guard
+                    // still covers cancellation by dropping the dispatch
+                    // future (for example, claim ownership loss); this branch
+                    // handles a cooperative worker shutdown without relying
+                    // on future-drop timing.
+                    () = wait_for_cancellation(cancellation_flag.clone()) => {
+                        if pid > 0 {
+                            unsafe {
+                                libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+                            }
+                        }
+                        let _ = guard.wait().await;
+                        kill_guard.disarm();
+                        break (130, None);
+                    }
+
+                    // Branch 4: idle deadline expired
                     () = async {
                         let deadline = idle_deadline.unwrap();
                         tokio::time::sleep_until(deadline).await;
                     }, if has_idle_deadline => {
+                        // If output arrived just before the timer became
+                        // ready, the activity branch may lose the select race.
+                        // Re-check the byte-read timestamp before killing so a
+                        // successfully-read byte always resets the deadline.
+                        let now = Instant::now();
+                        if let Some(hard_deadline) = hard_deadline {
+                            if tokio::time::Instant::now() >= hard_deadline {
+                                if pid > 0 {
+                                    unsafe {
+                                        libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+                                    }
+                                }
+                                let _ = guard.wait().await;
+                                kill_guard.disarm();
+                                break (
+                                    124,
+                                    Some(TimeoutReason::Hard {
+                                        timeout_secs: hard_dur.as_secs(),
+                                    }),
+                                );
+                            }
+                        }
+                        let last_output = *activity_rcv.borrow();
+                        if last_output + idle_dur > now {
+                            idle_deadline = Some(tokio::time::Instant::now() + idle_dur);
+                            continue;
+                        }
+
                         // Idle timeout: kill the process group.
                         if pid > 0 {
                             unsafe {
@@ -2741,7 +2815,7 @@ impl Dispatcher {
                         break (124, Some(reason));
                     }
 
-                    // Branch 4: hard deadline expired
+                    // Branch 5: hard deadline expired
                     () = async {
                         let deadline = hard_deadline.unwrap();
                         tokio::time::sleep_until(deadline).await;
@@ -3025,6 +3099,19 @@ impl Dispatcher {
 // ──────────────────────────────────────────────────────────────────────────────
 // Helpers
 // ──────────────────────────────────────────────────────────────────────────────
+
+/// Wait for the optional worker cancellation flag without making the common
+/// no-cancellation path allocate a task or hold a runtime lock.
+async fn wait_for_cancellation(flag: Option<Arc<AtomicBool>>) {
+    let Some(flag) = flag else {
+        std::future::pending::<()>().await;
+        return;
+    };
+
+    while !flag.load(Ordering::Acquire) {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
 
 /// Compute the per-bead agent log path: `~/.needle/logs/<worker>-<bead_id>.agent.jsonl`.
 ///

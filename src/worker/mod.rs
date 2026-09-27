@@ -1270,6 +1270,7 @@ impl Worker {
         // it sets the worker's shutdown flag (not its own private flag), allowing
         // the main worker loop to gracefully stop with worker.stopped telemetry.
         let shutdown = Arc::new(AtomicBool::new(false));
+        let dispatcher = dispatcher.with_cancellation_flag(shutdown.clone());
 
         // Phase: HealthMonitor setup
         let _ = telemetry.emit(
@@ -7276,6 +7277,7 @@ impl Worker {
             let rebuilt = rebuilt.map(|d| {
                 d.with_bead_store(self.home_store.clone())
                     .with_worker_id(self.worker_name.clone())
+                    .with_cancellation_flag(self.shutdown.clone())
             });
 
             if install_rebuilt_component(&mut self.dispatcher, "Dispatcher", rebuilt, &mut report) {
@@ -9319,7 +9321,7 @@ impl Worker {
 
     /// Replace the dispatcher (for testing with custom adapters).
     pub fn set_dispatcher(&mut self, dispatcher: Dispatcher) {
-        self.dispatcher = dispatcher;
+        self.dispatcher = dispatcher.with_cancellation_flag(self.shutdown.clone());
     }
 
     /// The worker's telemetry handle.

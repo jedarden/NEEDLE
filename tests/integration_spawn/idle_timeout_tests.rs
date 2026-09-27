@@ -7,6 +7,8 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use needle::dispatch::{AgentAdapter, Dispatcher, TimeoutReason, TokenExtraction};
@@ -448,4 +450,126 @@ async fn idle_timeout_mixed_activity_pattern() {
         exec_result.stdout.contains("first"),
         "stdout should contain 'first' output before timeout"
     );
+}
+
+#[tokio::test]
+async fn stderr_activity_resets_idle_deadline() {
+    let adapter = test_adapter_with_idle_timeout(
+        "test-stderr-activity",
+        "for i in $(seq 1 4); do printf 'stderr-%s' \"$i\" >&2; sleep 1; done",
+        2,
+    );
+
+    let telemetry = Telemetry::new("test-worker".to_string());
+    let mut adapters = HashMap::new();
+    adapters.insert("test-stderr-activity".to_string(), adapter);
+    let dispatcher = wired_dispatcher(adapters, telemetry, 3600);
+
+    let result = dispatcher
+        .dispatch_with_context(
+            &BeadId::from("needle-stderr-activity"),
+            &test_prompt(),
+            dispatcher.adapter("test-stderr-activity").unwrap(),
+            Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
+        )
+        .await
+        .expect("stderr activity dispatch should complete");
+
+    assert_eq!(result.exit_code, 0);
+    assert!(result.timeout_reason.is_none());
+    assert!(result.stderr.contains("stderr-1"));
+    assert!(result.stderr.contains("stderr-4"));
+}
+
+#[tokio::test]
+async fn partial_stdout_without_newlines_resets_idle_deadline() {
+    let adapter = test_adapter_with_idle_timeout(
+        "test-partial-stdout",
+        "for i in $(seq 1 4); do printf 'partial-%s' \"$i\"; sleep 1; done",
+        2,
+    );
+
+    let telemetry = Telemetry::new("test-worker".to_string());
+    let mut adapters = HashMap::new();
+    adapters.insert("test-partial-stdout".to_string(), adapter);
+    let dispatcher = wired_dispatcher(adapters, telemetry, 3600);
+
+    let result = dispatcher
+        .dispatch_with_context(
+            &BeadId::from("needle-partial-stdout"),
+            &test_prompt(),
+            dispatcher.adapter("test-partial-stdout").unwrap(),
+            Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
+        )
+        .await
+        .expect("partial stdout dispatch should complete");
+
+    assert_eq!(result.exit_code, 0);
+    assert!(result.timeout_reason.is_none());
+    assert!(result.stdout.contains("partial-1"));
+    assert!(result.stdout.contains("partial-4"));
+}
+
+#[tokio::test]
+async fn closed_output_pipes_do_not_disable_idle_timeout() {
+    let adapter =
+        test_adapter_with_idle_timeout("test-closed-pipes", "exec 1>&- 2>&-; sleep 10", 1);
+
+    let telemetry = Telemetry::new("test-worker".to_string());
+    let mut adapters = HashMap::new();
+    adapters.insert("test-closed-pipes".to_string(), adapter);
+    let dispatcher = wired_dispatcher(adapters, telemetry, 3600);
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(3),
+        dispatcher.dispatch_with_context(
+            &BeadId::from("needle-closed-pipes"),
+            &test_prompt(),
+            dispatcher.adapter("test-closed-pipes").unwrap(),
+            Path::new("/tmp"),
+            &crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp")),
+        ),
+    )
+    .await
+    .expect("closed output pipes must not starve the timeout");
+
+    let result = result.expect("idle timeout dispatch should complete");
+    assert_eq!(result.exit_code, 124);
+    assert!(matches!(
+        result.timeout_reason,
+        Some(TimeoutReason::Idle { .. })
+    ));
+}
+
+#[tokio::test]
+async fn cancellation_kills_and_reaps_agent_without_timeout_reason() {
+    let adapter = test_adapter_with_idle_timeout("test-cancellation", "sleep 10", 0);
+    let telemetry = Telemetry::new("test-worker".to_string());
+    let mut adapters = HashMap::new();
+    adapters.insert("test-cancellation".to_string(), adapter);
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let dispatcher =
+        wired_dispatcher(adapters, telemetry, 3600).with_cancellation_flag(cancellation.clone());
+    let adapter = dispatcher.adapter("test-cancellation").unwrap().clone();
+    let context = crate::pre_spawn_pass_store::claimed_context(Path::new("/tmp"));
+    let dispatch = dispatcher.dispatch_with_context(
+        &BeadId::from("needle-cancellation"),
+        &test_prompt(),
+        &adapter,
+        Path::new("/tmp"),
+        &context,
+    );
+    tokio::pin!(dispatch);
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    cancellation.store(true, Ordering::Release);
+    let result = tokio::time::timeout(Duration::from_secs(3), &mut dispatch)
+        .await
+        .expect("cancellation must interrupt the running agent")
+        .expect("cancelled dispatch should return an execution result");
+
+    assert_eq!(result.exit_code, 130);
+    assert!(result.timeout_reason.is_none());
 }
