@@ -36,6 +36,8 @@ mod bead_cli_config_serde;
 mod benchmark_harness_smoke;
 #[path = "integration_tests/benchmark_output_format.rs"]
 mod benchmark_output_format;
+#[path = "integration_tests/cleanup_liveness.rs"]
+mod cleanup_liveness;
 #[path = "integration_tests/compilation_error_detection.rs"]
 mod compilation_error_detection;
 #[path = "integration_tests/config_key_path_integration.rs"]
