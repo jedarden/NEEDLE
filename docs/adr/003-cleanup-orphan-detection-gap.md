@@ -2,7 +2,7 @@
 
 **Status:** Accepted — 2026-07-19
 **Deciders:** operator (jedarden), via Claude Code
-**Tracking:** plan.md Phase 7; implementation beads in this repo's workspace (genesis TBD — see plan.md Phase 7)
+**Tracking:** plan.md Phase 7; implemented 2026-09-24..26 by beads needle-78263eba, needle-790cdbc2, needle-de72f544, and needle-156e8a08 — no genesis bead was ever created; the work arrived as weave-spun per-fix beads. See Resolution below.
 
 ## Context
 
@@ -85,3 +85,65 @@ bash(3322398)---sleep(3322399)
 **Consequence:** `s.pid` (always the shell wrapper's PID) can never appear in `live_pids` (which structurally excludes shell wrappers) for *any* tmux-launched session — the liveness check's `!live_pids.contains(&pid)` is `true` unconditionally. Bare `needle cleanup` still classifies every live tmux-backed session as orphaned; the fix does not reduce the 2026-07-19 incident's blast radius, it just changes which line of code produces the same result. `cmd_stop` already solves exactly this shell-vs-child ambiguity via `find_needle_process_in_tree()` (`src/cli/mod.rs:1198-1213`, walks the descendant tree from `pane_pid` looking for the actual `needle run` process) — `cmd_cleanup`'s liveness check does not call it, or any equivalent tree-walk, at all.
 
 No test caught this because the existing/planned regression tests (ADR-003 Decision #4, plan.md §7.2) test `scan_needle_processes()`'s filtering logic and `cmd_cleanup`'s selection logic against constructed fixtures, not against a real tmux session — the exact indirection that hides the bug. See plan.md Phase 7 §7.1a for the fix and an updated test requirement (an actual tmux-session-based regression test, not a unit-level one).
+
+## Resolution (2026-09-26)
+
+Implemented and covered. The Tracking line no longer defers to a "genesis TBD"
+bead that was never created — the work landed as weave-spun per-fix beads
+(needle-78263eba, needle-790cdbc2, needle-de72f544, needle-156e8a08), and this
+section records what each Decision item looks like in the code.
+
+1. **Liveness-based default (Decision 1):** `cmd_cleanup`'s bare path resolves
+   liveness from two sources — registered workers reconciled against
+   `scan_needle_processes()` via `live_registered_worker_ids()`
+   (`src/cli/mod.rs`), and a pane-tree check
+   (`ProcessInspector::tree_has_live_needle_process`) that walks descendants of
+   the session's `pane_pid` looking for a live NEEDLE process. The pane-tree
+   walk is the primitive the 2026-07-21 addendum demanded in place of the
+   broken direct-`pane_pid` containment: a tmux-launched worker survives
+   cleanup even though its PID always differs from the shell wrapper's. An
+   ordinary live shell does not keep an orphaned session alive, because the
+   tree check only counts NEEDLE processes. Registry/config/process-scan
+   errors abort cleanup (fail closed) instead of treating an incomplete scan
+   as proof that every worker is dead. Commits: `a0b79366`, `ed371bbb`
+   (+ fixture alignment `1460f3bc`).
+2. **`--all` unchanged, honestly documented (Decision 2):** the `Cleanup`
+   command's `all` help text reads "Remove every needle session, including
+   live sessions with active workers … This is destructive" (`CliCommand::Cleanup`,
+   `src/cli/mod.rs`).
+3. **`-i` targeted bypass (Decision 3):** unchanged — the identifier filter
+   never consults liveness. It is pinned only at the CLI-parse level
+   (`cleanup_command_invocation_compiles`); no dedicated behavioral test of the
+   bypass exists yet.
+4. **Regression coverage (Decision 4):**
+   - Unit (`src/cli/reconciliation_tests.rs`):
+     `bare_cleanup_preserves_live_registered_worker_and_removes_orphan` and
+     `bare_cleanup_treats_unmatched_registered_pids_as_orphans` (a registry
+     PID reused by a live non-needle process is an orphan). Commits
+     `ed371bbb`, `b9ea444e`.
+   - tmux-backed (`tests/integration_spawn/cleanup_liveness_regression.rs`,
+     commits `a0b79366`/`1460f3bc`): no-flags removes only dead sessions;
+     no-flags with only live sessions removes nothing; `--all` removes
+     everything regardless of liveness; a real tmux session survives bare
+     cleanup; and
+     `p71a_regression_tmux_session_with_shell_wrapper_split_not_removed_by_cleanup`
+     reproduces the exact shell-wrapper-vs-child PID split this ADR's
+     addendum verified empirically. These five behavioral tests are marked
+     `#[ignore = "requires a real needle run process; covered by
+     src/cli/mod.rs unit tests"]` and do **not** run by default — the
+     end-to-end test below is what actually executes this shape in a normal
+     `cargo test`/CI run.
+   - End-to-end (`tests/integration_tests/cleanup_liveness.rs::
+     cleanup_liveness_preserves_live_removes_orphan_and_all_overrides`,
+     commit `72e257e4`): a registered live `needle run` worker behind a real
+     tmux session on an isolated socket survives bare cleanup while an
+     unbacked orphan session is removed, then `--all` removes the live
+     session too. This is the running coverage that exercises the real
+     launch indirection (shell wrapper, distinct worker PID, registry
+     fixture with the actual worker PID).
+5. **Release path (Decision 5):** the commits above are on `origin/main`,
+   followed by release bumps through v0.6.24. The deployed fleet binary
+   (`~/.needle/bin/needle-stable`, 0.6.21 / `e11ca859`) predates `ed371bbb`,
+   so the staged canary rollout (plan.md §7.3) is the one item still open —
+   until it ships, §7.3's operational guidance stands: treat bare
+   `needle cleanup` on the live fleet as `--all`.
