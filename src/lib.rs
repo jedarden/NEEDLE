@@ -63,6 +63,7 @@ pub mod learning;
 pub mod log_prune;
 pub mod log_writer;
 pub mod mitosis;
+pub mod operator_override;
 pub mod outcome;
 pub mod panic_capture;
 pub mod panic_safety_tests;

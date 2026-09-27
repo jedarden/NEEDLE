@@ -28,6 +28,8 @@ mod checkpoint_dispatch_guard;
 mod checkpoint_roundtrip_fidelity;
 #[path = "real_br_integration_tests/explore_rediscovery_e2e.rs"]
 mod explore_rediscovery_e2e;
+#[path = "real_br_integration_tests/operator_overrides.rs"]
+mod nt20_operator_overrides;
 #[path = "real_br_integration_tests/workspace_equality_tests.rs"]
 mod workspace_equality_tests;
 

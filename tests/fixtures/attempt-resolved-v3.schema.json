@@ -224,6 +224,11 @@
       "type": "integer",
       "description": "Agent process exit code. Observation only: it says what the process did, never whether the work was accepted \u2014 `outcome` carries that."
     },
+    "override": {
+      "type": "string",
+      "enum": ["interrupt"],
+      "description": "Operator correction attached to the terminal attempt, when dispatch was interrupted by a human stop."
+    },
     "wip_patch": {
       "type": "object",
       "description": "Durable working-tree recovery patch captured before a timeout, crash, or interruption release.",

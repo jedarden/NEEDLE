@@ -221,6 +221,8 @@ pub struct AttemptResolvedFields {
     pub duration_ms: u64,
     pub terminal_reason: Option<String>,
     pub exit_code: i32,
+    /// Operator correction attached to this terminal attempt, if any.
+    pub override_kind: Option<String>,
     /// Durable working-tree recovery patch captured before a timeout, crash,
     /// or interruption released the bead.
     pub wip_patch: Option<WipPatch>,
@@ -1055,6 +1057,13 @@ pub enum EventKind {
     /// Emitted exactly once per dispatch from OutcomeHandler::handle.
     /// Provisional attempt IDs are UUIDv7; replaced by real IDs when needle-cafdd3af lands.
     AttemptResolved(Box<AttemptResolvedFields>),
+    /// A human correction linked to an in-flight or previously resolved attempt.
+    AttemptOverridden {
+        attempt_id: String,
+        kind: String,
+        actor: String,
+        reference: String,
+    },
     WorkerHandlingTimeout {
         bead_id: BeadId,
         outcome: String,
@@ -1986,6 +1995,7 @@ impl EventKind {
             EventKind::OutcomeClassified { .. } => "outcome.classified",
             EventKind::OutcomeHandled { .. } => "outcome.handled",
             EventKind::AttemptResolved(..) => "attempt.resolved",
+            EventKind::AttemptOverridden { .. } => "attempt.overridden",
             EventKind::WorkerHandlingTimeout { .. } => "worker.handling.timeout",
             EventKind::HeartbeatEmitted { .. } => "heartbeat.emitted",
             EventKind::StuckDetected { .. } => "peer.stale",
@@ -2332,6 +2342,7 @@ impl EventKind {
             EventKind::MendCycleBroken { .. } => None,
             EventKind::QuarantineExpired { bead_id } => Some(bead_id.clone()),
             EventKind::AttemptResolved(f) => Some(f.bead_id.clone()),
+            EventKind::AttemptOverridden { .. } => None,
         }
     }
 
@@ -4324,6 +4335,7 @@ impl EventKind {
                     duration_ms,
                     terminal_reason,
                     exit_code,
+                    override_kind,
                     wip_patch,
                 } = &**fields;
                 let mut data = serde_json::json!({
@@ -4353,6 +4365,10 @@ impl EventKind {
                     // only because this says so, never as a silent zero.
                     "costed": costed,
                 });
+
+                if let Some(kind) = override_kind {
+                    data["override"] = serde_json::json!(kind);
+                }
 
                 // Add optional fields if present
                 if let Some(rev) = bead_revision_start {
@@ -4409,6 +4425,17 @@ impl EventKind {
 
                 data
             }
+            EventKind::AttemptOverridden {
+                attempt_id,
+                kind,
+                actor,
+                reference,
+            } => serde_json::json!({
+                "attempt_id": attempt_id,
+                "kind": kind,
+                "actor": actor,
+                "reference": reference,
+            }),
         }
     }
 
@@ -4434,6 +4461,7 @@ impl EventKind {
             | EventKind::ExploreScanSummary { duration_ms, .. }
             | EventKind::TransformCompleted { duration_ms, .. } => Some(*duration_ms),
             EventKind::AttemptResolved(f) => Some(f.duration_ms),
+            EventKind::AttemptOverridden { .. } => None,
             EventKind::WorkerBooting { .. }
             | EventKind::WorkerStarted { .. }
             | EventKind::WorkerStopped { .. }
@@ -7785,6 +7813,7 @@ mod tests {
             duration_ms: 614_000,
             terminal_reason: Some("gate:clippy".to_string()),
             exit_code: 0,
+            override_kind: None,
             wip_patch: None,
         }
     }

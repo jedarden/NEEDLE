@@ -284,7 +284,8 @@ version = 1
 # max-turns terminal reasons in the attempt ledger.
 # +2 N-T23 Claude provider-error replay and hysteresis contracts.
 # +4 N-T19 prompt-canary promotion, stop, rollback, and attempt-assignment fixtures.
-max_tests = 4050
+# +9 per-attempt trace layout and retention contracts (needle-2c273c10).
+max_tests = 4059
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation
@@ -331,7 +332,7 @@ push = 676
 # scanning contracts (needle-5df91926).
 # +1 durable deduplicated alert-note occurrence contract (needle-8e4d8484).
 # +1 N-T16 provisional-row learning exclusion contract (needle-96dec90b).
-contract = 209
+contract = 210
 # +16 literal test attributes for Cargo execution isolation (needle-b31fcb27):
 # seven integration cases plus nine nested-Cargo fixture tests embedded in source.
 # +1 real-adapter contract for the injectable ProcessRunner (needle-d3f191a3).
@@ -509,7 +510,7 @@ tier = "contract"
 # +4 Explore rediscovery, rotation, exclusion cadence, and starvation-safe
 # scanning contracts (needle-5df91926).
 # +1 durable deduplicated alert-note occurrence contract (needle-8e4d8484).
-max_tests = 72
+max_tests = 73
 owner = "component:bead-rs-contract"
 
 [[harness]]

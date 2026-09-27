@@ -958,6 +958,11 @@ pub struct OutcomeHandler {
     /// methods only borrow it. `take`n by [`OutcomeHandler::handle`], so a
     /// stale context can never leak into the next attempt.
     attempt_context: Arc<std::sync::Mutex<Option<AttemptContext>>>,
+    /// Operator correction attached to the active attempt, if any.
+    attempt_override_kind: Arc<std::sync::Mutex<Option<String>>>,
+    /// Guards the live interrupt event and durable evidence against duplicate
+    /// emission when cancellation is observed by more than one wrapper.
+    interrupt_override_emitted: Arc<std::sync::Mutex<bool>>,
     /// Attempt ID of the `attempt.resolved` row this handler already emitted
     /// for the attempt in flight, if any. The exactly-once guard: the wrapper
     /// paths that end a dispatch without reaching one of `handle`'s terminal
@@ -1000,6 +1005,8 @@ impl OutcomeHandler {
             telemetry,
             timeout_reason: Arc::new(std::sync::Mutex::new(None)),
             attempt_context: Arc::new(std::sync::Mutex::new(None)),
+            attempt_override_kind: Arc::new(std::sync::Mutex::new(None)),
+            interrupt_override_emitted: Arc::new(std::sync::Mutex::new(false)),
             ledger_row_emitted: Arc::new(std::sync::Mutex::new(None)),
             attempt_provenance: Arc::new(std::sync::Mutex::new(None)),
             active_claim_handle: Arc::new(std::sync::Mutex::new(None)),
@@ -1026,6 +1033,14 @@ impl OutcomeHandler {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(context);
         *self
+            .attempt_override_kind
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        *self
+            .interrupt_override_emitted
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = false;
+        *self
             .timeout_reason
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = None;
@@ -1051,6 +1066,76 @@ impl OutcomeHandler {
             .timeout_reason
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = reason;
+    }
+
+    /// Attach a dispatch-local operator override to the terminal ledger row.
+    pub fn set_attempt_override(&self, kind: Option<&str>) {
+        *self
+            .attempt_override_kind
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = kind.map(str::to_string);
+    }
+
+    /// Emit and durably record the operator interrupt exactly once.
+    fn record_interrupt_override(&self, bead: &Bead) {
+        let mut emitted = self
+            .interrupt_override_emitted
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if *emitted {
+            return;
+        }
+        *emitted = true;
+        drop(emitted);
+
+        self.set_attempt_override(Some(
+            crate::operator_override::OverrideKind::Interrupt.as_str(),
+        ));
+        let attempt_id = self.telemetry.attempt_id().unwrap_or_else(|| {
+            let id = uuid::Uuid::now_v7().to_string();
+            self.telemetry.set_attempt_id(id.clone());
+            id
+        });
+        let context = self.peek_attempt_context();
+        let actor = if context.actor.is_empty() {
+            self.telemetry.worker_id().to_string()
+        } else {
+            context.actor
+        };
+        let reference = "runtime:interrupt";
+        let _ = self.telemetry.emit_try_lock(
+            EventKind::AttemptOverridden {
+                attempt_id: attempt_id.clone(),
+                kind: crate::operator_override::OverrideKind::Interrupt
+                    .as_str()
+                    .to_string(),
+                actor: actor.clone(),
+                reference: reference.to_string(),
+            },
+            Utc::now(),
+        );
+
+        let workspace = if bead.workspace.as_os_str().is_empty()
+            || bead.workspace == std::path::Path::new(".")
+        {
+            self.config.workspace.default.clone()
+        } else {
+            bead.workspace.clone()
+        };
+        if let Err(error) = crate::operator_override::record_interrupt(
+            &workspace,
+            &attempt_id,
+            bead.id.as_ref(),
+            &actor,
+            reference,
+        ) {
+            tracing::warn!(
+                bead_id = %bead.id,
+                attempt_id = %attempt_id,
+                error = %error,
+                "failed to persist interrupt override evidence"
+            );
+        }
     }
 
     /// Bind claim-time provenance to the next ledger row.
@@ -1671,6 +1756,9 @@ impl OutcomeHandler {
         output: &AgentOutcome,
         was_interrupted: bool,
     ) -> Result<HandlerResult> {
+        if was_interrupted {
+            self.record_interrupt_override(bead);
+        }
         // For exit code 0, run verification BEFORE classification.
         // This is the core fix: Success must mean verification passed.
         let (verified, gate_report, gate_telemetry) = if output.exit_code == 0 && !was_interrupted {
@@ -2801,6 +2889,11 @@ impl OutcomeHandler {
             // The exit code is observation only: it says what the process did,
             // not whether the work was accepted — `outcome` carries that.
             exit_code: output.exit_code,
+            override_kind: self
+                .attempt_override_kind
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
             wip_patch: attempt.wip_patch,
         };
         let event = EventKind::AttemptResolved(Box::new(fields.clone()));
@@ -2869,6 +2962,9 @@ impl OutcomeHandler {
         was_interrupted: bool,
         cancelled: Arc<AtomicBool>,
     ) -> Result<HandlerResult> {
+        if was_interrupted {
+            self.record_interrupt_override(bead);
+        }
         // Check if we've been cancelled before starting.
         if cancelled.load(Ordering::Acquire) {
             tracing::warn!(
