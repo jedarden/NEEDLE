@@ -148,6 +148,19 @@ impl Fixture {
             .expect("spawn isolated needle subprocess")
     }
 
+    /// Like [`run`](Self::run), but the worker stops after ONE dispatch.
+    ///
+    /// A failed attempt leaves only a soft retry cooldown (needle-ebe67029), so
+    /// a lone bead is retried up to the quarantine ceiling inside a single
+    /// run-until-idle invocation. A test about what ONE failed attempt leaves
+    /// behind has to bound the worker to one dispatch itself.
+    fn run_single_dispatch(&self, mode: FixtureMode) -> Output {
+        self.command(mode)
+            .args(["--count", "1"])
+            .output()
+            .expect("spawn isolated needle subprocess")
+    }
+
     /// Build (and prepare the fixture for) one worker invocation. The
     /// preparation is idempotent, so several commands built from the same
     /// fixture race over the very same stores.
@@ -360,11 +373,9 @@ impl Fixture {
             .as_array()
             .cloned()
             .unwrap_or_default();
-        for label in labels
-            .iter()
-            .filter_map(Value::as_str)
-            .filter(|label| label.starts_with("quarantine-until:"))
-        {
+        for label in labels.iter().filter_map(Value::as_str).filter(|label| {
+            label.starts_with("quarantine-until:") || label.starts_with("retry-cooldown-until:")
+        }) {
             run_checked(
                 bead_command(&self.bead_binary, &self.home_workspace, self.root.path()).args([
                     "label",
@@ -1016,7 +1027,7 @@ fn subprocess_attempt_identity_flows_from_claim_to_adapter_and_resolution() {
 fn subprocess_failed_attempt_releases_and_retry_mints_a_fresh_identity() {
     let fixture = Fixture::new(FixtureLayout::Local);
 
-    let first = fixture.run(FixtureMode::AgentFail);
+    let first = fixture.run_single_dispatch(FixtureMode::AgentFail);
     assert!(
         first.status.success(),
         "a failed agent attempt is a handled outcome, not a worker crash:\nstdout={}\nstderr={}\nevents={:?}",
