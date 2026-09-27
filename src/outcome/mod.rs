@@ -305,6 +305,139 @@ fn terminal_reason(
         }
     }
 }
+/// Prefix used for the operator-facing note written when an attempt is parked
+/// at the human rung. Keeping this machine-readable makes `human-queue` able
+/// to report the same reason that appears in the attempt ledger.
+pub(crate) const NEEDS_HUMAN_NOTE_PREFIX: &str = "analysis: needs_human:";
+
+/// Detect an operator-only handoff from all evidence available at outcome
+/// time. The order is intentional: an explicit agent handoff is the most
+/// authoritative explanation, followed by a store permission gate, followed
+/// by the bead's own operator-step description when no commit was delivered.
+pub fn detect_needs_human(
+    output: &AgentOutcome,
+    gate_report: Option<&GateReport>,
+    description: Option<&str>,
+    commits: &[String],
+) -> Option<String> {
+    if let Some(reason) = declared_handoff_reason(output) {
+        return Some(format!("agent handoff: {reason}"));
+    }
+
+    if let Some(reason) = operator_store_gate_reason(gate_report) {
+        return Some(reason);
+    }
+
+    if commits.iter().all(|commit| commit.trim().is_empty()) {
+        if let Some(reason) = operator_step_reason(description) {
+            return Some(reason);
+        }
+    }
+
+    None
+}
+
+fn declared_handoff_reason(output: &AgentOutcome) -> Option<String> {
+    for transcript in [&output.stdout, &output.stderr] {
+        for line in transcript.lines() {
+            let Some(reason) = line.trim().strip_prefix("NEEDLE-HANDOFF:") else {
+                continue;
+            };
+            let reason = reason.trim();
+            if !reason.is_empty() {
+                return Some(compact_reason(reason));
+            }
+        }
+    }
+    None
+}
+
+fn operator_store_gate_reason(gate_report: Option<&GateReport>) -> Option<String> {
+    let report = gate_report?;
+    let mut candidates: Vec<(String, String)> = report
+        .results
+        .iter()
+        .filter_map(|(gate, result)| {
+            let detail = match result {
+                GateResult::Pass => return None,
+                GateResult::Fail(reason) => reason.clone(),
+                GateResult::Unsatisfiable(reason) => reason.clone(),
+                GateResult::ExecutionError { command, reason } => {
+                    format!("{command}: {reason}")
+                }
+            };
+            let haystack = format!("{gate} {detail}").to_ascii_lowercase();
+            let compact = haystack
+                .chars()
+                .filter(|character| character.is_ascii_alphanumeric())
+                .collect::<String>();
+            let is_openbao = compact.contains("openbao") || compact.contains("vault");
+            let is_cluster_secret_store = compact.contains("clustersecretstore")
+                || haystack.contains("cluster secret store")
+                || compact.contains("secretstore");
+            let permission_denied = haystack.contains("403")
+                || haystack.contains("forbidden")
+                || haystack.contains("permission denied")
+                || haystack.contains("access denied")
+                || haystack.contains("not ready")
+                || haystack.contains("ready=false")
+                || haystack.contains("ready: false");
+            if (is_openbao || is_cluster_secret_store) && permission_denied {
+                Some((gate.clone(), compact_reason(&detail)))
+            } else {
+                None
+            }
+        })
+        .collect();
+    candidates.sort_by(|left, right| left.0.cmp(&right.0));
+    candidates
+        .into_iter()
+        .next()
+        .map(|(gate, detail)| format!("operator action required by gate {gate}: {detail}"))
+}
+
+fn operator_step_reason(description: Option<&str>) -> Option<String> {
+    let description = description?.trim();
+    if description.is_empty() {
+        return None;
+    }
+    let lower = description.to_ascii_lowercase();
+    let names_operator =
+        lower.contains("operator") || lower.contains("manual") || lower.contains("human");
+    let names_step = [
+        "step",
+        "action",
+        "required",
+        "must",
+        "needs",
+        "perform",
+        "write",
+        "apply",
+        "create",
+        "approve",
+        "configure",
+        "only",
+    ]
+    .iter()
+    .any(|word| lower.contains(word));
+    if names_operator && names_step {
+        Some(format!(
+            "operator step named in bead description: {}",
+            compact_reason(description)
+        ))
+    } else {
+        None
+    }
+}
+
+fn compact_reason(reason: &str) -> String {
+    let mut compact = reason.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.chars().count() > 240 {
+        compact = compact.chars().take(237).collect::<String>();
+        compact.push_str("...");
+    }
+    compact
+}
 
 /// A verdict `handle_success` reached after the exit code was classified.
 ///
@@ -1159,6 +1292,58 @@ impl OutcomeHandler {
         Ok(events)
     }
 
+    /// Park a bead that needs an operator-only action. This is deliberately
+    /// separate from ordinary failure handling: the claim is released, but no
+    /// failure-count or retry-cooldown mutation is made.
+    async fn handle_needs_human(
+        &self,
+        store: &dyn BeadStore,
+        bead: &Bead,
+        reason: String,
+    ) -> Result<(BeadAction, Vec<EventKind>)> {
+        let mut events = self.prepare_release_events(store, bead).await?;
+        let note = format!("{NEEDS_HUMAN_NOTE_PREFIX} {reason}");
+
+        match self
+            .timeout_op(|| store.append_notes(&bead.id, &note), "append_notes")
+            .await
+        {
+            Ok(Some(())) => {}
+            Ok(None) => tracing::warn!(
+                bead_id = %bead.id,
+                "timed out recording needs_human reason in bead notes"
+            ),
+            Err(error) => tracing::warn!(
+                bead_id = %bead.id,
+                error = %error,
+                "failed to record needs_human reason in bead notes"
+            ),
+        }
+
+        match self
+            .timeout_op(|| store.add_label(&bead.id, "human"), "add human label")
+            .await
+        {
+            Ok(Some(())) => {}
+            Ok(None) => tracing::warn!(
+                bead_id = %bead.id,
+                "timed out adding human label"
+            ),
+            Err(error) => tracing::warn!(
+                bead_id = %bead.id,
+                error = %error,
+                "failed to add human label"
+            ),
+        }
+
+        events.push(EventKind::HumanRung {
+            bead_id: bead.id.clone(),
+            analysis: reason.clone(),
+        });
+
+        Ok((BeadAction::NeedsHuman { reason }, events))
+    }
+
     /// Run verification gates for a bead, returning whether all passed.
     ///
     /// This is extracted as a helper so it can be called BEFORE outcome classification.
@@ -1499,17 +1684,27 @@ impl OutcomeHandler {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone();
+        let needs_human_reason = detect_needs_human(
+            output,
+            gate_report.as_ref(),
+            bead.body.as_deref(),
+            &attempt_context.commits,
+        );
         let attempt_provider = attempt_context.provider.clone();
         let adapter_name = attempt_context.adapter;
         let attempt_actor = attempt_context.actor;
-        let adapter_judgement = self.judge_adapter_health(
-            &adapter_name,
-            attempt_provider.as_deref(),
-            bead,
-            &outcome,
-            output,
-            gate_report.as_ref(),
-        );
+        let adapter_judgement = if needs_human_reason.is_some() {
+            None
+        } else {
+            self.judge_adapter_health(
+                &adapter_name,
+                attempt_provider.as_deref(),
+                bead,
+                &outcome,
+                output,
+                gate_report.as_ref(),
+            )
+        };
         let infra_fingerprint = match &adapter_judgement {
             Some(AdapterJudgement::Infrastructure { fingerprint }) => Some(fingerprint.clone()),
             _ => None,
@@ -1518,17 +1713,26 @@ impl OutcomeHandler {
         // Gate evidence is captured before the routing match below, which
         // moves the report into the terminal handlers (N-T16 ledger row).
         let gate_results = gate_result_entries(gate_report.as_ref());
-        let (resolved_outcome, mut resolved_reason) = match infra_fingerprint.as_deref() {
-            Some(fingerprint) => (
-                "infrastructure_failure".to_string(),
-                Some(format!("provider_degraded:{fingerprint}")),
-            ),
-            None => (
-                semantic_outcome(&outcome).to_string(),
-                terminal_reason(&outcome, output.exit_code, gate_report.as_ref()),
-            ),
+        let (resolved_outcome, mut resolved_reason) = if let Some(reason) = &needs_human_reason {
+            (
+                crate::telemetry::AttemptOutcome::NeedsHuman
+                    .as_str()
+                    .to_string(),
+                Some(reason.clone()),
+            )
+        } else {
+            match infra_fingerprint.as_deref() {
+                Some(fingerprint) => (
+                    "infrastructure_failure".to_string(),
+                    Some(format!("provider_degraded:{fingerprint}")),
+                ),
+                None => (
+                    semantic_outcome(&outcome).to_string(),
+                    terminal_reason(&outcome, output.exit_code, gate_report.as_ref()),
+                ),
+            }
         };
-        if matches!(outcome, Outcome::Timeout) {
+        if matches!(outcome, Outcome::Timeout) && needs_human_reason.is_none() {
             resolved_reason = Some(format!(
                 "timeout:{}",
                 timeout_reason
@@ -1624,103 +1828,104 @@ impl OutcomeHandler {
             Utc::now(),
         );
 
-        if matches!(outcome, Outcome::Success) {
+        if matches!(outcome, Outcome::Success) && needs_human_reason.is_none() {
             self.note_adapter_success(&adapter_name, attempt_provider.as_deref(), bead);
         }
 
         let mut late_verdict = None;
-        let (bead_action, telemetry_events) =
-            if let Some(fingerprint) = infra_fingerprint.as_deref() {
-                self.handle_infrastructure_failure(store, bead, fingerprint)
+        let (bead_action, telemetry_events) = if let Some(reason) = needs_human_reason.clone() {
+            self.handle_needs_human(store, bead, reason).await?
+        } else if let Some(fingerprint) = infra_fingerprint.as_deref() {
+            self.handle_infrastructure_failure(store, bead, fingerprint)
+                .await?
+        } else {
+            match outcome.clone() {
+                Outcome::Success => {
+                    self.handle_success(
+                        store,
+                        bead,
+                        gate_report,
+                        gate_telemetry,
+                        &mut outcome,
+                        &mut late_verdict,
+                    )
                     .await?
-            } else {
-                match outcome.clone() {
-                    Outcome::Success => {
-                        self.handle_success(
-                            store,
-                            bead,
-                            gate_report,
-                            gate_telemetry,
-                            &mut outcome,
-                            &mut late_verdict,
-                        )
-                        .await?
-                    }
-                    Outcome::Failure => {
-                        // If we have a gate report with failures, check if any gate had execution errors.
-                        if let Some(report) = gate_report {
-                            if !report.all_passed {
-                                // Check if any result is an ExecutionError
-                                let execution_error =
-                                    report.results.iter().find(|(_, r)| r.is_execution_error());
-                                if let Some((gate_name, result)) = execution_error {
-                                    if let GateResult::ExecutionError { command, reason } = result {
-                                        // A gate that could not run did not judge
-                                        // the work. Preserve that distinction in
-                                        // the ledger even though the process's
-                                        // exit-code classifier used Failure to
-                                        // route into this branch.
-                                        late_verdict = Some(LateVerdict::GateError {
-                                            gate: gate_name.clone(),
-                                        });
-                                        self.handle_gate_error(
-                                            store,
-                                            bead,
-                                            &bead.workspace.display().to_string(),
-                                            gate_name,
-                                            command,
-                                            reason,
-                                            gate_telemetry,
-                                        )
-                                        .await?
-                                    } else {
-                                        unreachable!() // We already checked is_execution_error()
-                                    }
+                }
+                Outcome::Failure => {
+                    // If we have a gate report with failures, check if any gate had execution errors.
+                    if let Some(report) = gate_report {
+                        if !report.all_passed {
+                            // Check if any result is an ExecutionError
+                            let execution_error =
+                                report.results.iter().find(|(_, r)| r.is_execution_error());
+                            if let Some((gate_name, result)) = execution_error {
+                                if let GateResult::ExecutionError { command, reason } = result {
+                                    // A gate that could not run did not judge
+                                    // the work. Preserve that distinction in
+                                    // the ledger even though the process's
+                                    // exit-code classifier used Failure to
+                                    // route into this branch.
+                                    late_verdict = Some(LateVerdict::GateError {
+                                        gate: gate_name.clone(),
+                                    });
+                                    self.handle_gate_error(
+                                        store,
+                                        bead,
+                                        &bead.workspace.display().to_string(),
+                                        gate_name,
+                                        command,
+                                        reason,
+                                        gate_telemetry,
+                                    )
+                                    .await?
                                 } else {
-                                    self.handle_gate_failure(store, bead, &report, gate_telemetry)
-                                        .await?
+                                    unreachable!() // We already checked is_execution_error()
                                 }
                             } else {
-                                self.handle_failure(store, bead).await?
+                                self.handle_gate_failure(store, bead, &report, gate_telemetry)
+                                    .await?
                             }
                         } else {
                             self.handle_failure(store, bead).await?
                         }
-                    }
-                    Outcome::Timeout => self.handle_timeout(store, bead, output).await?,
-                    Outcome::AgentNotFound => self.handle_agent_not_found(store, bead).await?,
-                    Outcome::Interrupted => self.handle_interrupted(store, bead, output).await?,
-                    Outcome::Crash(code) => self.handle_crash(store, bead, code, output).await?,
-                    Outcome::GateError => {
-                        // This should not be reached - GateError is only produced during outcome handling
-                        // when gate execution errors are detected. For now, treat as regular failure.
-                        tracing::error!(
-                            bead_id = %bead.id,
-                            "unexpected GateError outcome — treating as regular failure"
-                        );
+                    } else {
                         self.handle_failure(store, bead).await?
                     }
-                    Outcome::GateUnsatisfiable => {
-                        let reason = gate_report
-                            .as_ref()
-                            .and_then(|report| {
-                                report.results.values().find_map(|result| match result {
-                                    GateResult::Unsatisfiable(reason) => Some(reason.as_str()),
-                                    _ => None,
-                                })
-                            })
-                            .unwrap_or("gate precondition is unsatisfiable");
-                        self.handle_gate_unsatisfiable(
-                            store,
-                            bead,
-                            &bead.workspace.display().to_string(),
-                            "validation",
-                            reason,
-                        )
-                        .await?
-                    }
                 }
-            };
+                Outcome::Timeout => self.handle_timeout(store, bead, output).await?,
+                Outcome::AgentNotFound => self.handle_agent_not_found(store, bead).await?,
+                Outcome::Interrupted => self.handle_interrupted(store, bead, output).await?,
+                Outcome::Crash(code) => self.handle_crash(store, bead, code, output).await?,
+                Outcome::GateError => {
+                    // This should not be reached - GateError is only produced during outcome handling
+                    // when gate execution errors are detected. For now, treat as regular failure.
+                    tracing::error!(
+                        bead_id = %bead.id,
+                        "unexpected GateError outcome — treating as regular failure"
+                    );
+                    self.handle_failure(store, bead).await?
+                }
+                Outcome::GateUnsatisfiable => {
+                    let reason = gate_report
+                        .as_ref()
+                        .and_then(|report| {
+                            report.results.values().find_map(|result| match result {
+                                GateResult::Unsatisfiable(reason) => Some(reason.as_str()),
+                                _ => None,
+                            })
+                        })
+                        .unwrap_or("gate precondition is unsatisfiable");
+                    self.handle_gate_unsatisfiable(
+                        store,
+                        bead,
+                        &bead.workspace.display().to_string(),
+                        "validation",
+                        reason,
+                    )
+                    .await?
+                }
+            }
+        };
 
         // Emit sub-handler events (e.g. BeadCompleted, BeadOrphaned) to the
         // telemetry sink so they appear in the JSONL log.
@@ -1767,7 +1972,14 @@ impl OutcomeHandler {
         // verdict above judged the process and its gates; whether the attempt
         // delivered the work or only split the bead is decided here, once the
         // agent's own bead mutations are visible. Gate evidence is kept.
-        let (resolved_outcome, resolved_reason) = if matches!(outcome, Outcome::GateUnsatisfiable) {
+        let (resolved_outcome, resolved_reason) = if let Some(reason) = needs_human_reason {
+            (
+                crate::telemetry::AttemptOutcome::NeedsHuman
+                    .as_str()
+                    .to_string(),
+                Some(reason),
+            )
+        } else if matches!(outcome, Outcome::GateUnsatisfiable) {
             (
                 semantic_outcome(&outcome).to_string(),
                 terminal_reason(&outcome, output.exit_code, None),
@@ -5304,6 +5516,7 @@ mod tests {
         Show(String),
         CreateBead(String, String),
         AddDependency(String, String),
+        AppendNotes(String, String),
     }
 
     struct MockBeadStore {
@@ -5562,6 +5775,13 @@ mod tests {
                 .push(StoreAction::RemoveLabel(id.to_string(), label.to_string()));
             Ok(())
         }
+        async fn append_notes(&self, id: &BeadId, note: &str) -> Result<()> {
+            self.actions
+                .lock()
+                .unwrap()
+                .push(StoreAction::AppendNotes(id.to_string(), note.to_string()));
+            Ok(())
+        }
         async fn create_bead(&self, title: &str, body: &str, _labels: &[&str]) -> Result<BeadId> {
             self.actions
                 .lock()
@@ -5803,7 +6023,6 @@ mod tests {
             Outcome::Failure
         );
     }
-
     #[test]
     fn classify_with_stream_error_terminal_reason_is_failure_despite_exit_zero() {
         let stdout = r#"{"type":"result","subtype":"success","terminal_reason":"api_error"}"#;
@@ -5894,6 +6113,107 @@ mod tests {
         let outcome = classify_with_stream(1, false, false, "");
         assert_eq!(outcome, Outcome::Failure);
         assert!(outcome.is_work_attributable());
+    }
+
+    #[test]
+    fn nt28_detector_covers_handoff_gate_and_operator_step_fixtures() {
+        let handoff = AgentOutcome {
+            exit_code: 1,
+            stdout: "NEEDLE-HANDOFF: write the production secret".to_string(),
+            stderr: String::new(),
+        };
+        assert_eq!(
+            detect_needs_human(&handoff, None, None, &[]).as_deref(),
+            Some("agent handoff: write the production secret")
+        );
+
+        let mut results = std::collections::HashMap::new();
+        results.insert(
+            "openbao-write".to_string(),
+            GateResult::Fail("OpenBao returned HTTP 403 Forbidden".to_string()),
+        );
+        let report = GateReport::new(results);
+        assert!(
+            detect_needs_human(&test_output(1), Some(&report), None, &[])
+                .expect("permission gate should need a human")
+                .contains("OpenBao returned HTTP 403")
+        );
+
+        let description = "Operator step required: write the secret to OpenBao.";
+        let reason = detect_needs_human(&test_output(1), None, Some(description), &[])
+            .expect("operator description should need a human");
+        assert!(reason.contains("operator step named"));
+        assert!(detect_needs_human(
+            &test_output(1),
+            None,
+            Some(description),
+            &["commit-1".to_string()]
+        )
+        .is_none());
+    }
+
+    #[tokio::test]
+    async fn nt28_handoff_fixture_resolves_needs_human_without_failure_count() {
+        let (_guard, _home) = isolated_home();
+        let helper = crate::telemetry::test_utils::TestHelper::new("nt28-handoff");
+        let mut config = Config::default();
+        config.worker.enforce_shipped_work = false;
+        let handler = OutcomeHandler::new(config, helper.telemetry().clone());
+        let store = test_store(BeadStatus::InProgress);
+        let bead = test_bead(BeadStatus::InProgress);
+        let output = AgentOutcome {
+            exit_code: 1,
+            stdout: "NEEDLE-HANDOFF: write the production secret".to_string(),
+            stderr: String::new(),
+        };
+
+        let result = handler.handle(&store, &bead, &output, false).await.unwrap();
+        assert!(matches!(result.bead_action, BeadAction::NeedsHuman { .. }));
+        let actions = store.actions();
+        assert!(actions
+            .iter()
+            .any(|action| matches!(action, StoreAction::AddLabel(_, label) if label == "human")));
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            StoreAction::AppendNotes(_, note) if note.contains("needs_human:")
+        )));
+        assert!(!actions.iter().any(|action| matches!(
+            action,
+            StoreAction::AddLabel(_, label) if label.starts_with("failure-count:")
+        )));
+        helper.sync().await;
+        let resolved = helper.events_by_type("attempt.resolved");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].data["outcome"], "needs_human");
+        assert!(resolved[0].data["terminal_reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("write the production secret"));
+    }
+
+    #[tokio::test]
+    async fn nt28_operator_description_fixture_resolves_needs_human_without_failure_count() {
+        let (_guard, _home) = isolated_home();
+        let helper = crate::telemetry::test_utils::TestHelper::new("nt28-description");
+        let mut config = Config::default();
+        config.worker.enforce_shipped_work = false;
+        let handler = OutcomeHandler::new(config, helper.telemetry().clone());
+        let store = test_store(BeadStatus::InProgress);
+        let mut bead = test_bead(BeadStatus::InProgress);
+        bead.body = Some("Operator must write the production secret to OpenBao.".to_string());
+
+        let result = handler
+            .handle(&store, &bead, &test_output(1), false)
+            .await
+            .unwrap();
+        assert!(matches!(result.bead_action, BeadAction::NeedsHuman { .. }));
+        assert!(!store.actions().iter().any(|action| matches!(
+            action,
+            StoreAction::AddLabel(_, label) if label.starts_with("failure-count:")
+        )));
+        helper.sync().await;
+        let resolved = helper.events_by_type("attempt.resolved");
+        assert_eq!(resolved[0].data["outcome"], "needs_human");
     }
 
     // ── handle tests ──

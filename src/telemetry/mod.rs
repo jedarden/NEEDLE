@@ -253,11 +253,14 @@ pub enum AttemptOutcome {
     /// delivered on the children earns credit on their own attempts. See
     /// [`crate::attempt_accounting`].
     Decomposed,
+    /// The attempt reached an operator-only handoff and parked the bead
+    /// behind the `human` label without counting a work failure.
+    NeedsHuman,
 }
 
 impl AttemptOutcome {
     /// Every variant, for exhaustive iteration.
-    pub const ALL: [AttemptOutcome; 7] = [
+    pub const ALL: [AttemptOutcome; 8] = [
         AttemptOutcome::VerifiedSuccess,
         AttemptOutcome::WorkFailure,
         AttemptOutcome::InfrastructureFailure,
@@ -265,6 +268,7 @@ impl AttemptOutcome {
         AttemptOutcome::StaleOwnership,
         AttemptOutcome::Indeterminate,
         AttemptOutcome::Decomposed,
+        AttemptOutcome::NeedsHuman,
     ];
 
     /// The wire string stored in ledger rows.
@@ -277,6 +281,7 @@ impl AttemptOutcome {
             AttemptOutcome::StaleOwnership => "stale_ownership",
             AttemptOutcome::Indeterminate => "indeterminate",
             AttemptOutcome::Decomposed => "decomposed",
+            AttemptOutcome::NeedsHuman => "needs_human",
         }
     }
 }

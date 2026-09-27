@@ -148,7 +148,7 @@
     },
     "outcome": {
       "type": "string",
-      "description": "Semantic verdict: what the work did, separate from what the lifecycle will do about it. `decomposed` means the attempt split its bead into children instead of delivering the work: no verified credit and no failure (ADR-030).",
+      "description": "Semantic verdict: what the work did, separate from what the lifecycle will do about it. `decomposed` means the attempt split its bead into children instead of delivering the work: no verified credit and no failure (ADR-030). `needs_human` means an operator-only handoff parked the bead without a work failure.",
       "enum": [
         "verified_success",
         "work_failure",
@@ -156,7 +156,8 @@
         "cancelled",
         "stale_ownership",
         "indeterminate",
-        "decomposed"
+        "decomposed",
+        "needs_human"
       ]
     },
     "requested_action": {

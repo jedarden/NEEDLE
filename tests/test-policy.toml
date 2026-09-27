@@ -278,7 +278,8 @@ version = 1
 # rather than omitted, and the v1/v2 snapshots stay free of the v3-only
 # field. Pure serializer/fixture checks; `cargo test --lib nt25_` covers
 # them.
-max_tests = 4034
+# +5 N-T28 human-rung detector, resolution, and stable queue contracts.
+max_tests = 4039
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

@@ -406,6 +406,17 @@ pub enum CliCommand {
         workspace: Option<PathBuf>,
     },
 
+    /// List beads parked for an operator-only action.
+    HumanQueue {
+        /// Workspace whose bead store should be queried (default: configured workspace).
+        #[arg(short = 'w', long)]
+        workspace: Option<PathBuf>,
+
+        /// Output format.
+        #[arg(long, value_enum, default_value = "table")]
+        format: ListFormat,
+    },
+
     /// Run learning consolidation on demand.
     ///
     /// Reads bead close bodies since the last consolidation, extracts
@@ -769,6 +780,7 @@ pub fn run() -> Result<()> {
         } => cmd_upgrade(check, from_file, skip_canary, force),
         CliCommand::Rollback => cmd_rollback(),
         CliCommand::Gates { workspace } => cmd_gates(workspace),
+        CliCommand::HumanQueue { workspace, format } => cmd_human_queue(workspace, format),
         CliCommand::Reflect { workspace, force } => cmd_reflect(workspace, force),
         CliCommand::Lesson { command } => match command {
             LessonCommand::Promote {
@@ -1001,6 +1013,159 @@ async fn audit_run(
     }
 
     Ok(audit::exit_code(&report))
+}
+
+/// One bead in the operator queue. The fields and their order are part of the
+/// stable JSON surface consumed by small operator scripts.
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+struct HumanQueueRow {
+    id: String,
+    title: String,
+    reason: String,
+    age_seconds: u64,
+    age: String,
+    upstream: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+struct HumanQueueReport {
+    workspace: String,
+    beads: Vec<HumanQueueRow>,
+}
+
+/// `needle human-queue` — show open beads parked for operator intervention.
+fn cmd_human_queue(workspace: Option<PathBuf>, format: ListFormat) -> Result<()> {
+    let workspace = match workspace {
+        Some(path) => path.canonicalize().unwrap_or(path),
+        None => ConfigLoader::load_global()?.workspace.default,
+    };
+    let store = audit::workspace_store(&workspace)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to create the human queue runtime")?;
+    let beads = runtime.block_on(async { human_queue_rows(store.as_ref()).await })?;
+    let report = HumanQueueReport {
+        workspace: workspace.display().to_string(),
+        beads,
+    };
+
+    match format {
+        ListFormat::Json => println!("{}", serde_json::to_string_pretty(&report)?),
+        ListFormat::Table => print!("{}", render_human_queue(&report)),
+    }
+    Ok(())
+}
+
+async fn human_queue_rows(store: &dyn BeadStore) -> Result<Vec<HumanQueueRow>> {
+    let now = Utc::now();
+    let mut rows = Vec::new();
+    for bead in store.list_all().await? {
+        if bead.status.is_done()
+            || !bead
+                .labels
+                .iter()
+                .any(|label| label.trim().eq_ignore_ascii_case("human"))
+        {
+            continue;
+        }
+
+        let notes = match store.notes(&bead.id).await {
+            Ok(notes) => notes,
+            Err(error) => {
+                tracing::warn!(bead_id = %bead.id, error = %error, "human queue could not read bead notes");
+                None
+            }
+        };
+        let reason = human_queue_reason(notes.as_deref(), bead.body.as_deref());
+        let age_seconds = now
+            .signed_duration_since(bead.updated_at)
+            .num_seconds()
+            .max(0) as u64;
+        let upstream = human_queue_upstream(&bead, &reason);
+        rows.push(HumanQueueRow {
+            id: bead.id.to_string(),
+            title: bead.title,
+            reason: reason.clone(),
+            age_seconds,
+            age: format_duration(age_seconds),
+            upstream,
+        });
+    }
+    rows.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(rows)
+}
+
+fn human_queue_reason(notes: Option<&str>, description: Option<&str>) -> String {
+    if let Some(reason) = notes.and_then(|notes| {
+        notes.lines().find_map(|line| {
+            let line = line.trim();
+            line.strip_prefix(crate::outcome::NEEDS_HUMAN_NOTE_PREFIX)
+                .or_else(|| line.strip_prefix("needs_human:"))
+                .map(str::trim)
+                .filter(|reason| !reason.is_empty())
+        })
+    }) {
+        return reason.to_string();
+    }
+    if let Some(analysis) = notes.and_then(|notes| {
+        notes.lines().find_map(|line| {
+            line.trim()
+                .strip_prefix("analysis:")
+                .map(str::trim)
+                .filter(|analysis| !analysis.is_empty())
+        })
+    }) {
+        return analysis.to_string();
+    }
+    description
+        .map(str::trim)
+        .filter(|description| !description.is_empty())
+        .map(|description| format!("operator action required: {}", queue_cell(description)))
+        .unwrap_or_else(|| "operator action required".to_string())
+}
+
+fn human_queue_upstream(bead: &Bead, reason: &str) -> String {
+    let context =
+        format!("{} {}", reason, bead.body.as_deref().unwrap_or_default()).to_ascii_lowercase();
+    for (needle, upstream) in [
+        ("clustersecretstore", "ClusterSecretStore"),
+        ("cluster secret store", "ClusterSecretStore"),
+        ("openbao", "OpenBao"),
+        ("vault", "Vault"),
+    ] {
+        if context.contains(needle) {
+            return upstream.to_string();
+        }
+    }
+    bead.dependencies
+        .first()
+        .map(|dependency| format!("bead:{}", dependency.id))
+        .unwrap_or_else(|| "operator".to_string())
+}
+
+fn queue_cell(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn render_human_queue(report: &HumanQueueReport) -> String {
+    let mut output = format!(
+        "HUMAN QUEUE\nWORKSPACE: {}\nCOUNT: {}\n\nID\tTITLE\tAGE\tUPSTREAM\tREASON\n",
+        report.workspace,
+        report.beads.len()
+    );
+    for bead in &report.beads {
+        output.push_str(&format!(
+            "{}\t{}\t{}\t{}\t{}",
+            queue_cell(&bead.id),
+            queue_cell(&bead.title),
+            bead.age,
+            queue_cell(&bead.upstream),
+            queue_cell(&bead.reason)
+        ));
+        output.push('\n');
+    }
+    output
 }
 
 /// `needle ci-reconcile` — run the worker-free post-push CI reconciler.
@@ -9688,6 +9853,38 @@ WORKSPACE                                  R1 RETRY  R2 DECOMPOSE  R3 QUARANTINE
     #[test]
     fn format_duration_hours() {
         assert_eq!(format_duration(3700), "1h1m");
+    }
+
+    #[test]
+    fn nt28_human_queue_json_and_text_render_stably() {
+        let report = HumanQueueReport {
+            workspace: "/fixture/workspace".to_string(),
+            beads: vec![HumanQueueRow {
+                id: "needle-human".to_string(),
+                title: "Write secret".to_string(),
+                reason: "operator handoff".to_string(),
+                age_seconds: 90,
+                age: "1m30s".to_string(),
+                upstream: "OpenBao".to_string(),
+            }],
+        };
+        assert_eq!(
+            serde_json::to_string(&report).unwrap(),
+            r#"{"workspace":"/fixture/workspace","beads":[{"id":"needle-human","title":"Write secret","reason":"operator handoff","age_seconds":90,"age":"1m30s","upstream":"OpenBao"}]}"#
+        );
+        assert_eq!(
+            render_human_queue(&report),
+            "HUMAN QUEUE\nWORKSPACE: /fixture/workspace\nCOUNT: 1\n\nID\tTITLE\tAGE\tUPSTREAM\tREASON\nneedle-human\tWrite secret\t1m30s\tOpenBao\toperator handoff\n"
+        );
+        assert!(Cli::try_parse_from([
+            "needle",
+            "human-queue",
+            "--workspace",
+            "/tmp/workspace",
+            "--format",
+            "json"
+        ])
+        .is_ok());
     }
 
     #[test]

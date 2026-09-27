@@ -119,7 +119,11 @@ pub fn classify_decomposition(shape: &AttemptShape<'_>) -> Option<Decomposition>
 /// The outcome to record in the bead backend's own attempt ledger for a
 /// NEEDLE ledger outcome. Every outcome but [`DECOMPOSED`] passes through.
 pub fn backend_outcome(ledger_outcome: &str) -> &str {
-    if ledger_outcome == DECOMPOSED {
+    if matches!(ledger_outcome, DECOMPOSED | "needs_human") {
+        // bead-rs does not yet expose lifecycle resolution classes for
+        // decomposition or operator parking. Keep both non-failure outcomes
+        // indeterminate in the backend ledger; NEEDLE's attempt.resolved row
+        // remains the authoritative class.
         BACKEND_DECOMPOSED
     } else {
         ledger_outcome

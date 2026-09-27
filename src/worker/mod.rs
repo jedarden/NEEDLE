@@ -1897,13 +1897,14 @@ impl Worker {
                 WorkerState::Handling => {
                     let action = self.do_handle().instrument(lifecycle_span.clone()).await;
                     let superseded = action == BeadAction::Superseded;
+                    let needs_human = matches!(&action, BeadAction::NeedsHuman { .. });
                     // Always perform the post-dispatch audit, even when the
                     // ordinary action failed to apply. A failed release is
                     // precisely one way a completed Pluck can leave its
                     // claim behind, and Resolve must get a chance to recover
                     // it before this cycle can reach LOGGING/SELECTING.
                     let action_result = self.apply_bead_action(action).await;
-                    let resolution_result = if superseded {
+                    let resolution_result = if superseded || needs_human {
                         Ok(())
                     } else {
                         self.run_post_dispatch_resolution().await
@@ -5328,6 +5329,15 @@ impl Worker {
             return BeadAction::Superseded;
         }
 
+        // A needs_human resolution has already recorded the operator-facing
+        // note and label. Release the claim at the state-machine choke point,
+        // then skip mitosis, CI registration, and any other post-handler work.
+        if matches!(&handler_result.bead_action, BeadAction::NeedsHuman { .. }) {
+            cancelled.store(true, Ordering::Release);
+            heartbeat_task.abort();
+            return handler_result.bead_action;
+        }
+
         // HOOP Hook 2 (event tap): emit the outcome as a single terminal
         // event on the bead. Best-effort — see hoop_hooks module docs.
         {
@@ -6791,6 +6801,18 @@ impl Worker {
                     chrono::Utc::now(),
                 )?;
             }
+            BeadAction::NeedsHuman { reason } => {
+                if self.release_terminal_claim(&bead.id).await? == ClaimRelease::Superseded {
+                    return self.finish_superseded(&bead.id).await;
+                }
+                self.telemetry.emit(
+                    EventKind::BeadReleased {
+                        bead_id: bead.id.clone(),
+                        reason: format!("handler_action:needs_human/{reason}"),
+                    },
+                    chrono::Utc::now(),
+                )?;
+            }
             BeadAction::Deferred => {
                 // Release and hold behind an expiring deferral window. The
                 // hold is written here — the choke point for the action — in
@@ -6898,7 +6920,8 @@ impl Worker {
             | BeadAction::Alerted
             | BeadAction::Quarantined
             | BeadAction::Errored
-            | BeadAction::Superseded => self.set_state(WorkerState::Logging)?,
+            | BeadAction::Superseded
+            | BeadAction::NeedsHuman { .. } => self.set_state(WorkerState::Logging)?,
         }
 
         Ok(())

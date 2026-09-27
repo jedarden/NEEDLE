@@ -3943,6 +3943,9 @@ pub enum BeadAction {
     /// The retained fenced handle was rejected or its lease could not be
     /// renewed; ownership belongs to another actor and no mutation is safe.
     Superseded,
+    /// The attempt requires an operator-only action. The worker releases the
+    /// claim but leaves the bead parked behind the `human` label.
+    NeedsHuman { reason: String },
 }
 
 impl fmt::Display for BeadAction {
@@ -3956,6 +3959,7 @@ impl fmt::Display for BeadAction {
             BeadAction::Interrupted => write!(f, "interrupted"),
             BeadAction::Errored => write!(f, "errored"),
             BeadAction::Superseded => write!(f, "superseded"),
+            BeadAction::NeedsHuman { .. } => write!(f, "needs_human"),
         }
     }
 }
