@@ -4613,29 +4613,49 @@ impl Worker {
         // attempt.resolved ledger row can say what this attempt was (plan
         // section 4.4 step 1, N-T16). Commit listing is best-effort evidence:
         // a git failure leaves the field empty rather than failing the cycle.
-        let commits = match &self.pre_dispatch_head {
-            Some(pre_head) => tokio::time::timeout(
+        let (commits, commit_timestamps) = match &self.pre_dispatch_head {
+            Some(pre_head) => match tokio::time::timeout(
                 std::time::Duration::from_secs(10),
                 commit_hook::commits_since(dispatch_ws.to_str().unwrap_or("."), pre_head),
             )
             .await
-            .unwrap_or_else(|_| {
-                tracing::warn!(
-                    bead_id = %bead.id,
-                    "commit listing timed out — attempt ledger row will carry no commits"
-                );
-                Ok(Vec::new())
-            })
-            .unwrap_or_else(|e| {
-                tracing::debug!(
-                    bead_id = %bead.id,
-                    error = %e,
-                    "commit listing failed — attempt ledger row will carry no commits"
-                );
-                Vec::new()
-            }),
-            None => Vec::new(),
+            {
+                Ok(Ok(records)) => {
+                    let timestamps_complete =
+                        records.iter().all(|(_, timestamp)| timestamp.is_some());
+                    let commits = records.iter().map(|(sha, _)| sha.clone()).collect();
+                    let timestamps = timestamps_complete.then(|| {
+                        records
+                            .into_iter()
+                            .filter_map(|(_, timestamp)| timestamp)
+                            .collect()
+                    });
+                    (commits, timestamps)
+                }
+                Ok(Err(error)) => {
+                    tracing::debug!(
+                        bead_id = %bead.id,
+                        error = %error,
+                        "commit listing failed — attempt ledger row will carry no commits"
+                    );
+                    (Vec::new(), None)
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        bead_id = %bead.id,
+                        "commit listing timed out — attempt ledger row will carry no commits"
+                    );
+                    (Vec::new(), None)
+                }
+            },
+            None => (Vec::new(), None),
         };
+        if !commits.is_empty() && commit_timestamps.is_none() {
+            tracing::debug!(
+                bead_id = %bead.id,
+                "commit timestamps unavailable — pre-deadline commit count will be unknown"
+            );
+        }
         self.outcome_handler
             .set_attempt_context(crate::outcome::AttemptContext {
                 adapter: adapter.name.clone(),
@@ -4648,6 +4668,8 @@ impl Worker {
                 template_version: prompt.template_version.clone(),
                 bead_revision_start: self.pre_dispatch_head.clone(),
                 commits,
+                commit_timestamps,
+                adapter_timeout_secs: adapter.wall_clock_timeout_secs(self.config.agent.timeout),
                 predispatch_token,
                 predispatch_dirty_paths,
                 tokens_in,

@@ -167,7 +167,7 @@ pub struct GateResultEntry {
 
 /// Payload of [`EventKind::AttemptResolved`], boxed inside the variant.
 ///
-/// Held behind a `Box` because these 23 fields total ~470 bytes, and an enum is
+/// Held behind a `Box` because these fields make up the largest event payload,
 /// as large as its largest variant: inlining them made every `EventKind` value
 /// — including the one-word ones on the worker's hot path — pay that cost, and
 /// tripped `clippy::large_enum_variant` under `-D warnings`.
@@ -207,6 +207,9 @@ pub struct AttemptResolvedFields {
     /// means the attempt's cost is unknown, never that it was free.
     pub costed: bool,
     pub commits: Vec<String>,
+    /// Commits landed before 75% of the adapter's wall-clock deadline. `None`
+    /// means there was no cap or commit timestamps were unavailable.
+    pub commits_before_deadline: Option<usize>,
     pub duration_ms: u64,
     pub terminal_reason: Option<String>,
     pub exit_code: i32,
@@ -220,7 +223,7 @@ pub struct AttemptResolvedFields {
 /// will do about it.
 ///
 /// The wire form is snake_case and matches the `outcome` enum of
-/// `tests/fixtures/attempt-resolved-v2.schema.json`, which is the versioned
+/// `tests/fixtures/attempt-resolved-v3.schema.json`, which is the versioned
 /// contract consumers validate against — a variant added here without a
 /// fixture version bump (or vice versa) is caught by
 /// `attempt_outcome_wire_vocabulary_matches_the_schema_fixture`.
@@ -4291,6 +4294,7 @@ impl EventKind {
                     estimated_cost_usd,
                     costed,
                     commits,
+                    commits_before_deadline,
                     duration_ms,
                     terminal_reason,
                     exit_code,
@@ -4299,10 +4303,9 @@ impl EventKind {
                 let mut data = serde_json::json!({
                     // Ledger rows are read by consumers that outlive this
                     // binary; the version lets them detect field drift
-                    // instead of guessing from a missing key. 2 added the
-                    // `decomposed` outcome (N-T46) and the `costed` flag
-                    // (N-T47), both ADR-030.
-                    "schema_version": 2,
+                    // instead of guessing from a missing key. Version 3 adds
+                    // N-T25's pre-deadline commit count.
+                    "schema_version": 3,
                     "attempt_id": attempt_id,
                     "provisional": provisional,
                     "bead_id": bead_id,
@@ -4315,6 +4318,7 @@ impl EventKind {
                     "outcome": outcome,
                     "requested_action": requested_action,
                     "commits": commits,
+                    "commits_before_deadline": commits_before_deadline,
                     "duration_ms": duration_ms,
                     "exit_code": exit_code,
                     // Always present (N-T47): a missing cost reads as unknown
@@ -7736,6 +7740,7 @@ mod tests {
             estimated_cost_usd: Some(0.0921),
             costed: true,
             commits: vec!["deadbee".to_string()],
+            commits_before_deadline: Some(1),
             duration_ms: 614_000,
             terminal_reason: Some("gate:clippy".to_string()),
             exit_code: 0,
@@ -7764,7 +7769,7 @@ mod tests {
     }
 
     #[test]
-    fn nt46_decomposed_row_conforms_to_the_v2_fixture() {
+    fn nt46_decomposed_row_conforms_to_the_v3_fixture() {
         let mut fields = attempt_resolved_fields();
         fields.outcome = AttemptOutcome::Decomposed.as_str().to_string();
         fields.prompt_template = "split".to_string();
@@ -7772,7 +7777,7 @@ mod tests {
         let data = EventKind::AttemptResolved(Box::new(fields)).to_data();
         check_object_matches("attempt.resolved", &data, &fixture_spec())
             .unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(data["schema_version"], 2);
+        assert_eq!(data["schema_version"], 3);
         assert_eq!(data["outcome"], "decomposed");
     }
 
@@ -7782,7 +7787,7 @@ mod tests {
         assert_eq!(fixture["title"], "attempt.resolved");
         assert_eq!(
             fixture["$id"],
-            "https://ardenone.com/schemas/needle/attempt-resolved-v2.schema.json"
+            "https://ardenone.com/schemas/needle/attempt-resolved-v3.schema.json"
         );
         // Every field AttemptResolvedFields can emit is covered by the fixture.
         for field in [
@@ -7813,6 +7818,7 @@ mod tests {
             "estimated_cost_usd",
             "costed",
             "commits",
+            "commits_before_deadline",
             "duration_ms",
             "terminal_reason",
             "exit_code",
@@ -7828,6 +7834,7 @@ mod tests {
     #[test]
     fn attempt_resolved_row_conforms_to_the_schema_fixture() {
         let data = EventKind::AttemptResolved(Box::new(attempt_resolved_fields())).to_data();
+        assert_eq!(data["commits_before_deadline"], 1);
         check_object_matches("attempt.resolved", &data, &fixture_spec())
             .unwrap_or_else(|e| panic!("{e}"));
     }
@@ -7846,10 +7853,12 @@ mod tests {
         fields.terminal_reason = None;
         fields.gate_results = Vec::new();
         fields.commits = Vec::new();
+        fields.commits_before_deadline = None;
 
         let data = EventKind::AttemptResolved(Box::new(fields)).to_data();
         check_object_matches("attempt.resolved", &data, &fixture_spec())
             .unwrap_or_else(|e| panic!("{e}"));
+        assert!(data["commits_before_deadline"].is_null());
         assert!(
             data.get("model").is_none(),
             "absent optional fields must be omitted, not null"
@@ -7990,7 +7999,7 @@ mod tests {
             parsed.data, event.data,
             "the ledger payload must survive the JSONL round-trip byte-identically"
         );
-        assert_eq!(parsed.data["schema_version"], 2);
+        assert_eq!(parsed.data["schema_version"], 3);
         assert_eq!(parsed.data["outcome"], "work_failure");
         assert_eq!(
             parsed.data["context_manifest_hash"], "9f2b1c4d5e6a7b8c",

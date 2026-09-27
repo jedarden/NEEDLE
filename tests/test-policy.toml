@@ -264,7 +264,10 @@ version = 1
 # +5 structured timeout-reason propagation contracts (needle-47b36f6b):
 # timeout reason metadata, effective timeout limits, timeout telemetry,
 # outcome propagation, and trace round-tripping.
-max_tests = 4016
+# +4 pre-deadline attempt commit accounting (needle-4c146cc6): zero, one,
+# multiple and at/after-boundary counts, plus OutcomeHandler ledger emission.
+# All exercise the pure outcome accounting path or its in-process ledger.
+max_tests = 4020
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

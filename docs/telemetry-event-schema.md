@@ -389,7 +389,7 @@ as authoritative** — provisional rows are excluded from SLOs (plan Gate A).
 
 | Field                  | Type            | Present | Description                                                                 |
 |------------------------|-----------------|---------|-----------------------------------------------------------------------------|
-| `schema_version`       | integer         | always  | Row schema version; `2` for this contract (`1` on rows written before the `decomposed` outcome existed). |
+| `schema_version`       | integer         | always  | Row schema version; `3` for this contract (`2` before pre-deadline accounting, `1` before the `decomposed` outcome existed). |
 | `attempt_id`           | string          | always  | UUIDv7 minted at dispatch start.                                            |
 | `provisional`          | boolean         | always  | `true` until the real attempt identity exists (N-T03).                      |
 | `bead_id`              | string          | always  | Bead the attempt worked on.                                                 |
@@ -402,6 +402,7 @@ as authoritative** — provisional rows are excluded from SLOs (plan Gate A).
 | `outcome`              | string          | always  | `verified_success`, `work_failure`, `infrastructure_failure`, `cancelled`, `stale_ownership`, `indeterminate`, or `decomposed`. |
 | `requested_action`     | string          | always  | Bead lifecycle action the handler requested (e.g. `"Completed"`, `"Released"`). |
 | `commits`              | array           | always  | Commit SHAs created in the workspace during the attempt.                    |
+| `commits_before_deadline` | integer or null | always | Number of attempt commits whose committer timestamps are strictly before 75% of the effective adapter wall-clock timeout. `null` means no wall-clock cap, unknown attempt start, or unavailable commit timestamps. |
 | `duration_ms`          | integer         | always  | Wall-clock time from claim to resolution.                                   |
 | `exit_code`            | integer         | always  | Agent process exit code. Observation only.                                  |
 | `bead_revision_start`  | string          | optional| HEAD SHA captured before the agent ran.                                     |
@@ -426,11 +427,12 @@ as authoritative** — provisional rows are excluded from SLOs (plan Gate A).
 Exit code 0 is classified before the post-exit checks run — close evidence, shipped work, DoD bypass. When one of them rejects the work the row is `work_failure` with `terminal_reason: "gate:<name>"` (e.g. `gate:shipped_work`), and when one cannot run it is `infrastructure_failure` with `gate_error:<name>`, whether the agent closed the bead (reopened) or left it open (orphaned). A decomposition is decided first and is not overridden.
 - `decomposed` — the attempt split its bead into children instead of delivering the work (ADR-030, N-T46): a success of the auto-split template (`terminal_reason: "decomposed:split_template"`), or an attempt that made its bead an `auto-split-parent` and created no commit (`"decomposed:split_parent_without_commits"`). It earns no verified credit and is no failure: `needle stats` reports it in its own DECOMP column and leaves it out of PASS RATE, and evidence routing and prompt canaries count it as an attempt that is neither verified nor judged. Gate results are kept. bead-rs has no such outcome, so the backend resolution records it as `indeterminate` with the same reason.
 
-**Versioned contract:** [`tests/fixtures/attempt-resolved-v2.schema.json`](../tests/fixtures/attempt-resolved-v2.schema.json)
+**Versioned contract:** [`tests/fixtures/attempt-resolved-v3.schema.json`](../tests/fixtures/attempt-resolved-v3.schema.json)
 is the schema this row must satisfy; conformance is asserted in
 `src/telemetry/mod.rs`. Breaking changes version both the fixture and the
-row's `schema_version`. Version 2 added `decomposed` and `costed`; rows carrying
-`schema_version: 1` predate it and validate against
+row's `schema_version`. Version 3 adds `commits_before_deadline` (N-T25).
+Version 2 added `decomposed` and `costed`; rows carrying `schema_version: 1`
+predate it and validate against
 [`attempt-resolved-v1.schema.json`](../tests/fixtures/attempt-resolved-v1.schema.json).
 
 **Aggregation:** `needle stats --by adapter` and `needle stats --by outcome`
@@ -453,7 +455,7 @@ attempt ID as authoritative.
   "workspace": "/home/coding/NEEDLE",
   "attempt_id": "0198f6a1-7c2d-7cc3-98c4-dc0c0c07398f",
   "data": {
-    "schema_version": 2,
+    "schema_version": 3,
     "attempt_id": "0198f6a1-7c2d-7cc3-98c4-dc0c0c07398f",
     "provisional": true,
     "bead_id": "needle-96dec90b",
@@ -476,6 +478,7 @@ attempt ID as authoritative.
     "estimated_cost_usd": 0.0921,
     "costed": true,
     "commits": ["deadbee"],
+    "commits_before_deadline": 1,
     "duration_ms": 614000,
     "terminal_reason": "gate:clippy",
     "exit_code": 0
@@ -495,7 +498,7 @@ attempt ID as authoritative.
   "workspace": "/home/coding/NEEDLE",
   "attempt_id": "0198f6a2-e4b5-7cc3-9c2e-1f4b8d6a02c1",
   "data": {
-    "schema_version": 2,
+    "schema_version": 3,
     "attempt_id": "0198f6a2-e4b5-7cc3-9c2e-1f4b8d6a02c1",
     "provisional": true,
     "bead_id": "needle-2f97cbb5",
@@ -518,6 +521,7 @@ attempt ID as authoritative.
     "estimated_cost_usd": 0.0894,
     "costed": true,
     "commits": ["deadbee"],
+    "commits_before_deadline": 1,
     "duration_ms": 589000,
     "exit_code": 0
   }

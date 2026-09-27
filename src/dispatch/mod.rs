@@ -787,6 +787,23 @@ impl AgentAdapter {
         }
     }
 
+    /// Effective hard wall-clock deadline for one dispatch. The new timeout
+    /// mode only has a wall-clock deadline when `hard_timeout_secs` is set;
+    /// its idle timeout can reset indefinitely with agent output.
+    pub fn wall_clock_timeout_secs(&self, global_timeout_secs: u64) -> u64 {
+        match self.timeout_policy() {
+            TimeoutPolicy::Legacy => self.effective_timeout(global_timeout_secs).as_secs(),
+            TimeoutPolicy::New { hard_enabled, .. } => {
+                if hard_enabled {
+                    self.hard_timeout_secs
+                } else {
+                    0
+                }
+            }
+            TimeoutPolicy::Global => global_timeout_secs,
+        }
+    }
+
     /// Returns the GenAI system name for this adapter.
     ///
     /// Follows OTel semantic conventions for `gen_ai.system`, which identifies
@@ -4960,6 +4977,7 @@ output_transform: "needle-transform-custom"
             harness_version: None,
         };
         assert_eq!(legacy.timeout_limits(99), (12, 12));
+        assert_eq!(legacy.wall_clock_timeout_secs(99), 12);
 
         let split = AgentAdapter {
             timeout_secs: 0,
@@ -4968,6 +4986,7 @@ output_transform: "needle-transform-custom"
             ..legacy.clone()
         };
         assert_eq!(split.timeout_limits(99), (3, 20));
+        assert_eq!(split.wall_clock_timeout_secs(99), 20);
 
         let global = AgentAdapter {
             timeout_secs: 0,
@@ -4976,6 +4995,7 @@ output_transform: "needle-transform-custom"
             ..legacy
         };
         assert_eq!(global.timeout_limits(99), (99, 99));
+        assert_eq!(global.wall_clock_timeout_secs(99), 99);
     }
 
     // ── HardDeadlineTimer tests ──

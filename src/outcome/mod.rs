@@ -737,6 +737,12 @@ pub struct AttemptContext {
     /// Commit SHAs created in the workspace between `bead_revision_start` and
     /// the end of execution.
     pub commits: Vec<String>,
+    /// Committer timestamps in the same order as `commits`; `None` means git
+    /// could not provide timestamps for the attempt's commit list.
+    pub commit_timestamps: Option<Vec<chrono::DateTime<Utc>>>,
+    /// Effective adapter wall-clock timeout used for this dispatch. Zero means
+    /// the adapter had no wall-clock deadline.
+    pub adapter_timeout_secs: u64,
     /// Identity of the predispatch snapshot this dispatch wrote, as returned
     /// by `predispatch::record`. The shipped-work cleanup removes the
     /// snapshot file only when it still carries this identity: the file is
@@ -763,6 +769,33 @@ pub struct AttemptContext {
     pub wip_patch: Option<crate::wip::WipPatch>,
     /// When the cycle started (claim time), for the attempt's `duration_ms`.
     pub started_at: Option<std::time::Instant>,
+}
+
+/// Count attempt commits strictly before the adapter's 75% checkpoint mark.
+/// The count is unknown when the adapter had no wall-clock cap or when the
+/// attempt start/commit timestamps needed for attribution are unavailable.
+fn commits_before_deadline(attempt: &AttemptContext) -> Option<usize> {
+    if attempt.adapter_timeout_secs == 0 {
+        return None;
+    }
+    let timestamps = attempt.commit_timestamps.as_ref()?;
+    if timestamps.len() != attempt.commits.len() {
+        return None;
+    }
+    if attempt.commits.is_empty() {
+        return Some(0);
+    }
+
+    let started_at = attempt.started_at_wall?;
+    let mark_ms = u128::from(attempt.adapter_timeout_secs) * 750;
+    let mark_ms = i64::try_from(mark_ms).ok()?;
+    let mark = started_at + chrono::Duration::milliseconds(mark_ms);
+    Some(
+        timestamps
+            .iter()
+            .filter(|timestamp| **timestamp < mark)
+            .count(),
+    )
 }
 
 /// Routes agent outcomes to their explicit handlers.
@@ -2258,6 +2291,7 @@ impl OutcomeHandler {
         gate_results: Vec<crate::telemetry::GateResultEntry>,
     ) -> crate::telemetry::AttemptResolvedFields {
         let attempt = self.take_attempt_context();
+        let commits_before_deadline = commits_before_deadline(&attempt);
         let provenance = self
             .attempt_provenance
             .lock()
@@ -2325,6 +2359,7 @@ impl OutcomeHandler {
             estimated_cost_usd: attempt.estimated_cost_usd,
             costed: attempt.costed,
             commits: attempt.commits,
+            commits_before_deadline,
             duration_ms,
             terminal_reason: resolved_reason,
             // The exit code is observation only: it says what the process did,
@@ -5004,10 +5039,89 @@ mod tests {
     use crate::telemetry::Sink;
     use crate::types::{BeadId, ClaimResult};
     use async_trait::async_trait;
-    use chrono::Utc;
+    use chrono::{TimeZone, Utc};
     use std::ops::{Deref, DerefMut};
     use std::path::PathBuf;
     use std::sync::Mutex;
+
+    fn nt25_attempt_with_commit_offsets(offsets_ms: &[i64]) -> AttemptContext {
+        let started_at = Utc.with_ymd_and_hms(2026, 9, 27, 12, 0, 0).unwrap();
+        AttemptContext {
+            adapter_timeout_secs: 12,
+            started_at_wall: Some(started_at),
+            commits: (0..offsets_ms.len())
+                .map(|index| format!("commit-{index}"))
+                .collect(),
+            commit_timestamps: Some(
+                offsets_ms
+                    .iter()
+                    .map(|offset| started_at + chrono::Duration::milliseconds(*offset))
+                    .collect(),
+            ),
+            ..AttemptContext::default()
+        }
+    }
+
+    #[test]
+    fn nt25_pre_deadline_count_is_zero_when_commits_are_at_or_after_mark() {
+        // A 12-second adapter timeout places the checkpoint at 9 seconds.
+        let attempt = nt25_attempt_with_commit_offsets(&[9_000, 12_000]);
+        assert_eq!(commits_before_deadline(&attempt), Some(0));
+        let no_commits = nt25_attempt_with_commit_offsets(&[]);
+        assert_eq!(commits_before_deadline(&no_commits), Some(0));
+        let mut unavailable = attempt.clone();
+        unavailable.adapter_timeout_secs = 0;
+        assert_eq!(commits_before_deadline(&unavailable), None);
+        unavailable.adapter_timeout_secs = 12;
+        unavailable.commit_timestamps = None;
+        assert_eq!(commits_before_deadline(&unavailable), None);
+    }
+
+    #[test]
+    fn nt25_pre_deadline_count_counts_one_qualifying_commit() {
+        let attempt = nt25_attempt_with_commit_offsets(&[8_999]);
+        assert_eq!(commits_before_deadline(&attempt), Some(1));
+    }
+
+    #[test]
+    fn nt25_pre_deadline_count_counts_multiple_qualifying_commits() {
+        let attempt = nt25_attempt_with_commit_offsets(&[500, 4_000, 8_999, 9_000, 11_000]);
+        assert_eq!(commits_before_deadline(&attempt), Some(3));
+    }
+
+    #[tokio::test]
+    async fn nt25_commit_accounting_reaches_resolved_ledger() {
+        let (_env_guard, _home) = isolated_home();
+        let helper = crate::telemetry::test_utils::TestHelper::new("nt25-ledger-count");
+        let mut config = Config::default();
+        config.worker.enforce_shipped_work = false;
+        let handler = OutcomeHandler::new(config, helper.telemetry().clone());
+        let started_at = Utc::now();
+        handler.set_attempt_context(AttemptContext {
+            adapter_timeout_secs: 12,
+            started_at_wall: Some(started_at),
+            commits: vec!["before".to_string(), "at".to_string(), "after".to_string()],
+            commit_timestamps: Some(vec![
+                started_at + chrono::Duration::seconds(8),
+                started_at + chrono::Duration::seconds(9),
+                started_at + chrono::Duration::seconds(10),
+            ]),
+            ..AttemptContext::default()
+        });
+
+        let bead = test_bead(BeadStatus::InProgress);
+        let store = test_store(BeadStatus::Done);
+        handler
+            .handle(&store, &bead, &test_output(0), false)
+            .await
+            .unwrap();
+        helper.sync().await;
+
+        let rows = helper.events_by_type("attempt.resolved");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].data["commits_before_deadline"], 1);
+        assert_eq!(rows[0].data["schema_version"], 3);
+    }
 
     // ── Test environment isolation ──
 

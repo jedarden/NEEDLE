@@ -191,19 +191,31 @@ async fn get_staged_blob_hash(workspace: &str, path: &str) -> Result<String> {
 // ---------------------------------------------------------------------------
 
 /// List the commit SHAs created in `workspace` since `since_sha` (inclusive of
-/// HEAD, exclusive of `since_sha`), oldest first.
+/// HEAD, exclusive of `since_sha`), oldest first, paired with their committer
+/// timestamp. A timestamp is `None` only when git returned the SHA but its
+/// timestamp could not be parsed.
 ///
 /// Used to fill the `commits` field of the `attempt.resolved` ledger row: the
 /// worker captures HEAD just before dispatch and reads back what the agent
 /// added. Returns an empty list when `since_sha` is unknown, the workspace is
 /// not a git repo, or git fails — commits are ledger evidence, not a gate, so
 /// a failure here must never fail the dispatch.
-pub(crate) async fn commits_since(workspace: &str, since_sha: &str) -> Result<Vec<String>> {
+pub(crate) async fn commits_since(
+    workspace: &str,
+    since_sha: &str,
+) -> Result<Vec<(String, Option<chrono::DateTime<chrono::Utc>>)>> {
     let range = format!("{}..HEAD", since_sha);
     let out = tokio::time::timeout(
         std::time::Duration::from_secs(10),
         Command::new("git")
-            .args(["-C", workspace, "log", "--format=%H", "--reverse", &range])
+            .args([
+                "-C",
+                workspace,
+                "log",
+                "--format=%H%x1f%cI",
+                "--reverse",
+                &range,
+            ])
             .kill_on_drop(true)
             .output(),
     )
@@ -213,12 +225,19 @@ pub(crate) async fn commits_since(workspace: &str, since_sha: &str) -> Result<Ve
     if !out.status.success() {
         anyhow::bail!("git log {} failed in {}", range, workspace);
     }
-    Ok(String::from_utf8(out.stdout)?
+    String::from_utf8(out.stdout)?
         .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(str::to_string)
-        .collect())
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let (sha, timestamp) = line
+                .split_once('\u{1f}')
+                .ok_or_else(|| anyhow!("git log returned a commit without its timestamp"))?;
+            let timestamp = chrono::DateTime::parse_from_rfc3339(timestamp)
+                .ok()
+                .map(|timestamp| timestamp.with_timezone(&chrono::Utc));
+            Ok((sha.trim().to_string(), timestamp))
+        })
+        .collect()
 }
 
 /// Inject a `Bead-Id: <id>` trailer into the latest commit in `workspace`.

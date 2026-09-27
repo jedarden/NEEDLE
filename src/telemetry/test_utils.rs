@@ -341,11 +341,11 @@ impl TestHelper {
 // ── attempt.resolved schema-fixture checks (N-T16) ──────────────────────────
 //
 // Shared helpers for validating a serialized `attempt.resolved` row against
-// `tests/fixtures/attempt-resolved-v2.schema.json` — the versioned contract
-// rows are written to now (v1 stays in the tree for rows written before the
-// `decomposed` outcome existed). They live here rather than in
-// `telemetry::tests` so the outcome handler's tests and any integration test
-// can validate captured rows, not just synthetic ones.
+// `tests/fixtures/attempt-resolved-v3.schema.json` — the versioned contract
+// rows are written to now (v1 and v2 stay in the tree for older rows). They
+// live here rather than in `telemetry::tests` so the outcome handler's tests
+// and any integration test can validate captured rows, not just synthetic
+// ones.
 
 /// The versioned contract every serialized `attempt.resolved` row must
 /// satisfy. Compiled into the test binary so a moved or renamed fixture
@@ -353,7 +353,7 @@ impl TestHelper {
 #[cfg(any(test, feature = "integration"))]
 pub fn attempt_resolved_fixture() -> serde_json::Value {
     serde_json::from_str(include_str!(
-        "../../tests/fixtures/attempt-resolved-v2.schema.json"
+        "../../tests/fixtures/attempt-resolved-v3.schema.json"
     ))
     .expect("schema fixture must parse")
 }
@@ -375,10 +375,32 @@ fn check_value_matches_spec(
             ));
         }
     }
-    let spec_type = spec
+    let declared_type = spec
         .get("type")
-        .and_then(|t| t.as_str())
         .unwrap_or_else(|| panic!("fixture spec for {key} must declare a type"));
+    let spec_type = match declared_type {
+        serde_json::Value::String(spec_type) => spec_type.as_str(),
+        serde_json::Value::Array(spec_types) if value.is_null() => {
+            if spec_types.iter().any(|kind| kind.as_str() == Some("null")) {
+                return Ok(());
+            }
+            return Err(format!("{key} does not allow null"));
+        }
+        serde_json::Value::Array(spec_types) => spec_types
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .find(|kind| match *kind {
+                "string" => value.is_string(),
+                "boolean" => value.is_boolean(),
+                "integer" => value.as_i64().is_some(),
+                "number" => value.as_f64().is_some(),
+                "array" => value.is_array(),
+                "object" => value.is_object(),
+                _ => false,
+            })
+            .unwrap_or_else(|| panic!("fixture spec for {key} has no matching type")),
+        _ => panic!("fixture spec for {key} must declare a string or array type"),
+    };
     match spec_type {
         "string" => {
             if !value.is_string() {
