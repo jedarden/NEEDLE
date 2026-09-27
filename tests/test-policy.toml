@@ -282,7 +282,8 @@ version = 1
 # disabled routing, configured/missing adapter bounds, retry tier bias, and
 # provisional-aware StatsAggregator metric/interval reporting plus preserving
 # max-turns terminal reasons in the attempt ledger.
-max_tests = 4044
+# +2 N-T23 Claude provider-error replay and hysteresis contracts.
+max_tests = 4046
 
 [tier_budget]
 # +1 source-level guard for in-process Worker/Explore isolation

@@ -43,16 +43,328 @@
 //! provider-keyed write adopts any adapter-keyed file left by an earlier
 //! version, so an active degradation survives the upgrade.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::gate_health::VerificationRecording;
 use crate::verification_fingerprint::{
     normalize_output, DetectorConfig, FingerprintTracker, VerificationFailure,
 };
+
+/// Per-attempt observations extracted from Claude's stream-json output.
+///
+/// Counts are deliberately categorical: the stream is inspected while it is
+/// in flight, but no provider error body is retained in the attempt ledger or
+/// the provider-health state file.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderErrorMetrics {
+    /// Number of provider-error observations in this attempt. A record that
+    /// contains both an API error and an HTTP status is counted once.
+    pub provider_errors: u32,
+    /// Stable error classes and their counts. Keys are `api_error`, `retry`,
+    /// and `http_429`, `http_502`, `http_503`, or `http_529`.
+    pub provider_error_classes: BTreeMap<String, u32>,
+    /// Longest timestamp gap between consecutive assistant records.
+    pub max_response_gap_ms: Option<u64>,
+    /// Internal marker used to avoid treating arbitrary JSON adapters as a
+    /// Claude stream. It is never serialized or persisted.
+    #[serde(skip)]
+    saw_claude_record: bool,
+}
+
+impl ProviderErrorMetrics {
+    /// Whether this summary came from a Claude stream record.
+    pub fn saw_claude_record(&self) -> bool {
+        self.saw_claude_record
+    }
+
+    /// Whether this attempt has any provider signal worth emitting.
+    pub fn has_signal(&self) -> bool {
+        self.provider_errors > 0 || self.max_response_gap_ms.is_some()
+    }
+}
+
+/// Incremental Claude stream analyzer used by both the output transform and
+/// attempt resolution. The fallback timestamp is the transform's read time;
+/// replayed records use their own timestamp fields when present.
+#[derive(Debug, Clone, Default)]
+pub struct ProviderErrorTracker {
+    metrics: ProviderErrorMetrics,
+    last_assistant_ts: Option<f64>,
+}
+
+impl ProviderErrorTracker {
+    /// Observe one raw Claude JSON record.
+    pub fn observe_line(&mut self, line: &str, fallback_ts: f64) {
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            return;
+        };
+        self.observe_value(&value, fallback_ts);
+    }
+
+    /// Observe one already-parsed record. This is public so transform tests
+    /// can replay fixtures without going through a child process.
+    pub fn observe_value(&mut self, value: &Value, fallback_ts: f64) {
+        let record_type = value.get("type").and_then(Value::as_str).unwrap_or("");
+        let lower_type = record_type.to_ascii_lowercase();
+        let is_claude_record = matches!(
+            record_type,
+            "system" | "assistant" | "user" | "result" | "error" | "api_error"
+        ) || record_type == "stream_event"
+            || record_type == "tool_progress";
+        if is_claude_record {
+            self.metrics.saw_claude_record = true;
+        }
+
+        let timestamp = event_timestamp(value).unwrap_or(fallback_ts);
+        let assistant_record = record_type == "assistant"
+            || (record_type == "stream_event"
+                && value
+                    .get("event")
+                    .and_then(|event| event.get("type"))
+                    .and_then(Value::as_str)
+                    == Some("message_start")
+                && value
+                    .get("event")
+                    .and_then(|event| event.get("message"))
+                    .and_then(|message| message.get("role"))
+                    .and_then(Value::as_str)
+                    == Some("assistant"));
+        if assistant_record {
+            if let Some(previous) = self.last_assistant_ts {
+                let gap_ms = ((timestamp - previous).max(0.0) * 1000.0).round() as u64;
+                self.metrics.max_response_gap_ms =
+                    Some(self.metrics.max_response_gap_ms.unwrap_or(0).max(gap_ms));
+            }
+            self.last_assistant_ts = Some(timestamp);
+        }
+
+        let texts = string_values(value);
+        let has_api_error = record_type == "api_error"
+            || lower_type == "api_error"
+            || value
+                .get("subtype")
+                .and_then(Value::as_str)
+                .is_some_and(|subtype| subtype.eq_ignore_ascii_case("api_error"))
+            || value
+                .get("terminal_reason")
+                .and_then(Value::as_str)
+                .is_some_and(|reason| reason.eq_ignore_ascii_case("api_error"));
+        let has_api_error = has_api_error
+            || texts
+                .iter()
+                .any(|text| text.eq_ignore_ascii_case("api_error"));
+        let mut statuses = Vec::new();
+        for status in [429, 502, 503, 529] {
+            if value_has_http_status(value, status)
+                || texts.iter().any(|text| contains_status(text, status))
+            {
+                statuses.push(status);
+            }
+        }
+        let retry_notice = lower_type.contains("retry")
+            || texts.iter().any(|text| {
+                let lower = text.to_ascii_lowercase();
+                lower.contains("retry") || lower.contains("rate limit; retry")
+            });
+
+        if has_api_error || !statuses.is_empty() || retry_notice {
+            self.metrics.provider_errors = self.metrics.provider_errors.saturating_add(1);
+        }
+        if has_api_error {
+            self.bump_class("api_error");
+        }
+        for status in statuses {
+            self.bump_class(&format!("http_{status}"));
+        }
+        if retry_notice {
+            self.bump_class("retry");
+        }
+    }
+
+    /// Finish the tracker and return its categorical summary.
+    pub fn finish(&self) -> ProviderErrorMetrics {
+        self.metrics.clone()
+    }
+
+    fn bump_class(&mut self, class: &str) {
+        *self
+            .metrics
+            .provider_error_classes
+            .entry(class.to_string())
+            .or_default() += 1;
+    }
+}
+
+/// Analyze an entire Claude stream. Explicit timestamps are preferred; a
+/// millisecond-spaced fallback keeps timestamp-free replay deterministic and
+/// prevents parsing speed from inventing a long response gap.
+pub fn analyze_claude_stream(stream: &str) -> ProviderErrorMetrics {
+    let mut tracker = ProviderErrorTracker::default();
+    for (index, line) in stream.lines().enumerate() {
+        tracker.observe_line(line, index as f64 / 1000.0);
+    }
+    tracker.finish()
+}
+
+/// Extract a record timestamp in epoch seconds from the common Claude replay
+/// spellings. Numeric timestamps larger than epoch seconds are interpreted as
+/// milliseconds or microseconds; RFC3339 strings are also accepted.
+pub fn event_timestamp(value: &Value) -> Option<f64> {
+    for key in ["timestamp", "ts", "event_time", "created_at", "time"] {
+        if let Some(timestamp) = value.get(key).and_then(timestamp_value) {
+            return Some(timestamp);
+        }
+    }
+    if let Some(event) = value.get("event") {
+        if let Some(timestamp) = event_timestamp(event) {
+            return Some(timestamp);
+        }
+    }
+    if let Some(message) = value.get("message") {
+        if let Some(timestamp) = event_timestamp(message) {
+            return Some(timestamp);
+        }
+    }
+    None
+}
+
+fn timestamp_value(value: &Value) -> Option<f64> {
+    let number = match value {
+        Value::Number(number) => number.as_f64(),
+        Value::String(text) => {
+            if let Ok(number) = text.parse::<f64>() {
+                Some(number)
+            } else {
+                DateTime::parse_from_rfc3339(text)
+                    .ok()
+                    .map(|timestamp| timestamp.timestamp_millis() as f64 / 1000.0)
+            }
+        }
+        _ => None,
+    }?;
+    if number.abs() > 100_000_000_000_000.0 {
+        Some(number / 1_000_000.0)
+    } else if number.abs() > 100_000_000_000.0 {
+        Some(number / 1_000.0)
+    } else {
+        Some(number)
+    }
+}
+
+fn string_values(value: &Value) -> Vec<String> {
+    let mut values = Vec::new();
+    collect_string_values(value, &mut values);
+    values
+}
+
+fn collect_string_values(value: &Value, values: &mut Vec<String>) {
+    match value {
+        Value::String(text) => values.push(text.clone()),
+        Value::Array(items) => items
+            .iter()
+            .for_each(|item| collect_string_values(item, values)),
+        Value::Object(fields) => fields
+            .values()
+            .for_each(|item| collect_string_values(item, values)),
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
+fn value_has_http_status(value: &Value, status: u16) -> bool {
+    ["status", "status_code", "http_status", "api_error_status"]
+        .iter()
+        .filter_map(|key| value.get(*key))
+        .any(|candidate| {
+            candidate.as_u64() == Some(u64::from(status))
+                || candidate.as_str() == Some(&status.to_string())
+        })
+}
+
+fn contains_status(text: &str, status: u16) -> bool {
+    let needle = status.to_string();
+    text.match_indices(&needle).any(|(index, _)| {
+        let before = text[..index].chars().next_back();
+        let after = text[index + needle.len()..].chars().next();
+        !before.is_some_and(|character| character.is_ascii_digit())
+            && !after.is_some_and(|character| character.is_ascii_digit())
+    })
+}
+
+/// Sliding-window provider error-share configuration.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProviderErrorConfig {
+    pub window: std::time::Duration,
+    pub degraded_threshold: f64,
+    pub restored_threshold: f64,
+    pub min_attempts: usize,
+}
+
+impl Default for ProviderErrorConfig {
+    fn default() -> Self {
+        Self {
+            window: std::time::Duration::from_secs(30 * 60),
+            degraded_threshold: 0.5,
+            restored_threshold: 0.2,
+            min_attempts: 5,
+        }
+    }
+}
+
+/// One compact, body-free attempt observation retained by provider health.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderErrorAttempt {
+    pub at: DateTime<Utc>,
+    pub provider_errors: u32,
+    #[serde(default)]
+    pub classes: BTreeMap<String, u32>,
+}
+
+/// Persisted health state for one `(adapter, provider)` stream-error window.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderErrorHealthState {
+    pub adapter: String,
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub attempts: Vec<ProviderErrorAttempt>,
+    #[serde(default)]
+    pub error_share: f64,
+    #[serde(default)]
+    pub error_attempts: usize,
+    #[serde(default)]
+    pub degraded: bool,
+    #[serde(default)]
+    pub degraded_at: Option<String>,
+}
+
+/// Edge emitted by [`record_provider_attempt`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProviderHealthTransition {
+    None { degraded: bool, error_share: f64 },
+    Degraded { error_share: f64, attempts: usize },
+    Restored { error_share: f64, attempts: usize },
+}
+
+impl ProviderErrorHealthState {
+    fn new(adapter: &str, provider: Option<&str>) -> Self {
+        Self {
+            adapter: adapter.to_string(),
+            provider: provider.map(str::to_string),
+            attempts: Vec::new(),
+            error_share: 0.0,
+            error_attempts: 0,
+            degraded: false,
+            degraded_at: None,
+        }
+    }
+}
 
 /// Persistent health of one adapter — or, with gateway keying, of the
 /// provider a group of adapters shares (N-T51).
@@ -190,6 +502,117 @@ pub fn state_file_path(key: &str) -> PathBuf {
     let digest = hasher.finalize();
     let id: String = digest.iter().take(6).map(|b| format!("{b:02x}")).collect();
     state_dir().join(format!("{id}.json"))
+}
+
+fn provider_error_state_file_path(adapter: &str, provider: Option<&str>) -> PathBuf {
+    let provider = provider.unwrap_or("");
+    state_file_path(&format!("stream-errors\u{1f}{adapter}\u{1f}{provider}"))
+}
+
+fn read_provider_error_state(path: &Path) -> Result<Option<ProviderErrorHealthState>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    match serde_json::from_str::<ProviderErrorHealthState>(&text) {
+        Ok(state) => Ok(Some(state)),
+        Err(error) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %error,
+                "provider stream health state unreadable — starting fresh"
+            );
+            Ok(None)
+        }
+    }
+}
+
+fn write_provider_error_state(path: &Path, state: &ProviderErrorHealthState) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, serde_json::to_string_pretty(state)?)
+        .with_context(|| format!("failed to write {}", tmp.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("failed to replace {}", path.display()))?;
+    Ok(())
+}
+
+/// Record one Claude-stream attempt and update the provider's sliding error
+/// share. The denominator is attempts with a recognized Claude record; an
+/// attempt with several error records still contributes one errored attempt.
+pub fn record_provider_attempt(
+    adapter: &str,
+    provider: Option<&str>,
+    metrics: &ProviderErrorMetrics,
+    config: ProviderErrorConfig,
+) -> Result<ProviderHealthTransition> {
+    let now = Utc::now();
+    let path = provider_error_state_file_path(adapter, provider);
+    let mut state = read_provider_error_state(&path)?
+        .unwrap_or_else(|| ProviderErrorHealthState::new(adapter, provider));
+    let cutoff = now - chrono::Duration::from_std(config.window).unwrap_or(chrono::Duration::MAX);
+    state.attempts.retain(|attempt| attempt.at >= cutoff);
+    state.attempts.push(ProviderErrorAttempt {
+        at: now,
+        provider_errors: metrics.provider_errors,
+        classes: metrics.provider_error_classes.clone(),
+    });
+    state.error_attempts = state
+        .attempts
+        .iter()
+        .filter(|attempt| attempt.provider_errors > 0)
+        .count();
+    state.error_share = if state.attempts.is_empty() {
+        0.0
+    } else {
+        state.error_attempts as f64 / state.attempts.len() as f64
+    };
+
+    let transition = if !state.degraded
+        && state.attempts.len() >= config.min_attempts
+        && state.error_share > config.degraded_threshold
+    {
+        state.degraded = true;
+        state.degraded_at = Some(now.to_rfc3339());
+        ProviderHealthTransition::Degraded {
+            error_share: state.error_share,
+            attempts: state.attempts.len(),
+        }
+    } else if state.degraded
+        && state.attempts.len() >= config.min_attempts
+        && state.error_share < config.restored_threshold
+    {
+        state.degraded = false;
+        state.degraded_at = None;
+        ProviderHealthTransition::Restored {
+            error_share: state.error_share,
+            attempts: state.attempts.len(),
+        }
+    } else {
+        ProviderHealthTransition::None {
+            degraded: state.degraded,
+            error_share: state.error_share,
+        }
+    };
+    write_provider_error_state(&path, &state)?;
+    Ok(transition)
+}
+
+fn provider_error_state_as_health(state: ProviderErrorHealthState) -> ProviderHealthState {
+    ProviderHealthState {
+        adapter: state.adapter,
+        provider: state.provider.unwrap_or_default(),
+        adapters: vec![],
+        window: vec![],
+        degraded: state.degraded,
+        degraded_fingerprint: Some("provider_error_share".to_string()),
+        degraded_summary: Some(format!("error_share={:.3}", state.error_share)),
+        degraded_at: state.degraded_at,
+        last_degraded_failure_at: None,
+    }
 }
 
 /// Read one state file, `None` when it does not exist or is unreadable.
@@ -412,6 +835,12 @@ pub fn degraded_state(
     adapter: &str,
     provider: Option<&str>,
 ) -> Result<Option<ProviderHealthState>> {
+    if let Some(state) =
+        read_provider_error_state(&provider_error_state_file_path(adapter, provider))?
+            .filter(|state| state.degraded)
+    {
+        return Ok(Some(provider_error_state_as_health(state)));
+    }
     let key = resolve_key(provider, adapter);
     let state = match read_state_file(&state_file_path(key))? {
         Some(state) => Some(state),
@@ -425,7 +854,11 @@ pub fn degraded_state(
 /// any legacy adapter-keyed file (operator reset / tests).
 pub fn clear_state(adapter: &str, provider: Option<&str>) -> Result<()> {
     let key = resolve_key(provider, adapter);
-    for path in [state_file_path(key), state_file_path(adapter)] {
+    for path in [
+        state_file_path(key),
+        state_file_path(adapter),
+        provider_error_state_file_path(adapter, provider),
+    ] {
         if path.exists() {
             std::fs::remove_file(&path)
                 .with_context(|| format!("failed to remove {}", path.display()))?;
@@ -450,6 +883,10 @@ pub fn degraded_adapters() -> Vec<ProviderHealthState> {
             if let Ok(state) = serde_json::from_str::<ProviderHealthState>(&text) {
                 if state.degraded {
                     out.push(state);
+                }
+            } else if let Ok(state) = serde_json::from_str::<ProviderErrorHealthState>(&text) {
+                if state.degraded {
+                    out.push(provider_error_state_as_health(state));
                 }
             }
         }
@@ -671,5 +1108,74 @@ mod tests {
         }
         assert!(degraded_state(&adapter, None).unwrap().is_none());
         clear_state(&adapter, None).unwrap();
+    }
+
+    #[test]
+    fn claude_outage_replay_counts_errors_and_longest_response_gap() {
+        let mut stream = String::from(
+            r#"{"type":"assistant","timestamp":1725240000.0,"message":{"role":"assistant"}}
+"#,
+        );
+        for _ in 0..15 {
+            stream.push_str(
+                r#"{"type":"api_error","timestamp":1725240001.0,"message":"gateway unavailable"}
+"#,
+            );
+        }
+        stream.push_str(
+            r#"{"type":"assistant","timestamp":1725240613.0,"message":{"role":"assistant"}}
+"#,
+        );
+
+        let metrics = analyze_claude_stream(&stream);
+        assert_eq!(metrics.provider_errors, 15);
+        assert_eq!(metrics.provider_error_classes["api_error"], 15);
+        assert_eq!(metrics.max_response_gap_ms, Some(613_000));
+    }
+
+    #[test]
+    fn provider_error_share_has_minimum_sample_and_hysteresis() {
+        let (_env_guard, _home) = isolated_home();
+        let adapter = unique_adapter("stream-hysteresis");
+        let config = ProviderErrorConfig {
+            window: std::time::Duration::from_secs(1800),
+            degraded_threshold: 0.6,
+            restored_threshold: 0.2,
+            min_attempts: 5,
+        };
+        let error = ProviderErrorMetrics {
+            provider_errors: 1,
+            ..ProviderErrorMetrics::default()
+        };
+        let healthy = ProviderErrorMetrics::default();
+
+        for _ in 0..4 {
+            assert!(matches!(
+                record_provider_attempt(&adapter, Some("glm"), &error, config).unwrap(),
+                ProviderHealthTransition::None {
+                    degraded: false,
+                    ..
+                }
+            ));
+        }
+        assert!(matches!(
+            record_provider_attempt(&adapter, Some("glm"), &error, config).unwrap(),
+            ProviderHealthTransition::Degraded { .. }
+        ));
+
+        // One healthy attempt must not flap the state back to healthy.
+        assert!(matches!(
+            record_provider_attempt(&adapter, Some("glm"), &healthy, config).unwrap(),
+            ProviderHealthTransition::None { degraded: true, .. }
+        ));
+        for _ in 0..19 {
+            record_provider_attempt(&adapter, Some("glm"), &healthy, config).unwrap();
+        }
+        assert!(matches!(
+            record_provider_attempt(&adapter, Some("glm"), &healthy, config).unwrap(),
+            ProviderHealthTransition::Restored { .. }
+        ));
+        assert!(degraded_state(&adapter, Some("glm")).unwrap().is_none());
+        clear_state(&adapter, Some("glm")).unwrap();
     }
 }

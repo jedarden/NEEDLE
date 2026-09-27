@@ -183,6 +183,23 @@
       "minimum": 0,
       "description": "Estimated cost in USD: the result envelope's reported cost when the agent wrote one, otherwise the pricing table applied to the per-turn usage in its stream. Absent when it could not be established."
     },
+    "provider_errors": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Categorical provider-error observations counted from the Claude stream; error bodies are never stored."
+    },
+    "provider_error_classes": {
+      "type": "object",
+      "description": "Map of stable provider error classes to counts; raw provider bodies are never stored."
+    },
+    "max_response_gap_ms": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "description": "Longest gap between consecutive assistant records in the Claude stream, in milliseconds."
+    },
     "costed": {
       "type": "boolean",
       "description": "Whether estimated_cost_usd was established (N-T47, ADR-030). false means the cost is unknown (no usage was reported, or the model has no price), never that the attempt was free; consumers treat the row's cost as unknown."

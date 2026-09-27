@@ -14,6 +14,7 @@ use needle::agent_event::{
     AgentEvent, AgentMessageEvent, ErrorEvent, EventPayload, MessageRole, TokensEvent,
     ToolCallEvent, ToolResultEvent, SCHEMA_VERSION,
 };
+use needle::provider_health::{event_timestamp, ProviderErrorTracker};
 use serde_json::Value;
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -62,11 +63,12 @@ pub fn process_line(
         }
     };
 
+    let event_ts = event_timestamp(&value).unwrap_or(ts);
     match value.get("type").and_then(|v| v.as_str()) {
-        Some("assistant") => process_assistant(&value, tool_name_map, ts),
-        Some("user") => process_user(&value, tool_name_map, ts),
-        Some("result") => process_result(&value, ts),
-        Some("error") => process_error(&value, ts),
+        Some("assistant") => process_assistant(&value, tool_name_map, event_ts),
+        Some("user") => process_user(&value, tool_name_map, event_ts),
+        Some("result") => process_result(&value, event_ts),
+        Some("error") => process_error(&value, event_ts),
         Some(_) => vec![], // system, etc. — skip silently
         None => {
             eprintln!("needle-transform-claude: skipping line without `type` field");
@@ -335,6 +337,7 @@ fn main() {
 
     // tool_use_id → tool_name, populated as tool_use blocks are seen.
     let mut tool_name_map: HashMap<String, String> = HashMap::new();
+    let mut provider_metrics = ProviderErrorTracker::default();
 
     for line_result in stdin.lock().lines() {
         let line = match line_result {
@@ -351,6 +354,7 @@ fn main() {
         }
 
         let ts = now_ts();
+        provider_metrics.observe_line(line, ts);
         let events = process_line(line, &mut tool_name_map, ts);
 
         for event in &events {
@@ -371,6 +375,21 @@ fn main() {
         if !events.is_empty() && out.flush().is_err() {
             return;
         }
+    }
+
+    // The attempt ledger replays the raw stream through the same tracker, so
+    // this summary is also useful to transform consumers that only retain the
+    // normalized output. It contains classes and counts only, never an error
+    // body. The summary is deliberately sent to stderr rather than stdout:
+    // stdout remains the v1 AgentEvent stream consumed by FABRIC.
+    let metrics = provider_metrics.finish();
+    if metrics.has_signal() {
+        eprintln!(
+            "needle-transform-claude: provider metrics errors={} classes={:?} max_response_gap_ms={:?}",
+            metrics.provider_errors,
+            metrics.provider_error_classes,
+            metrics.max_response_gap_ms
+        );
     }
 }
 

@@ -437,6 +437,11 @@ Exit code 0 is classified before the post-exit checks run — close evidence, sh
 is the schema this row must satisfy; conformance is asserted in
 `src/telemetry/mod.rs`. Breaking changes version both the fixture and the
 row's `schema_version`. Version 3 adds `commits_before_deadline` (N-T25).
+Rows may also carry `provider_errors`, `provider_error_classes`, and
+`max_response_gap_ms` from the Claude stream transform (N-T23). These fields
+contain only categorical counts and timing; provider error bodies are never
+stored. `provider_error_classes` uses `api_error`, `retry`, and `http_429`,
+`http_502`, `http_503`, or `http_529` keys.
 Version 2 added `decomposed` and `costed`; rows carrying `schema_version: 1`
 predate it and validate against
 [`attempt-resolved-v1.schema.json`](../tests/fixtures/attempt-resolved-v1.schema.json).

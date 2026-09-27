@@ -604,15 +604,17 @@ whole fleet migrating onto it — and, for a provider without a
 
 ### Prompt-Variant Canaries (N-T19)
 
-`prompt.variants` assigns workers to template variants deterministically and
-stamps `template_version` on every attempt. `prompt.experiments` closes the
-loop the safe way round: it never promotes a variant, it **stops** one whose
-verified-success rate trails the default by more than `regression_margin`
-once both cohorts have `min_attempts` judged attempts. A stop is a receipt
-under `~/.needle/state/experiments/<template>--<variant>.stopped.json` plus
-an `experiment.stopped` event; workers then build that cohort's prompts from
-the built-in template. Removing the receipt re-arms the variant; editing
-the config promotes one — both are operator actions.
+`prompt.variants` assigns each dispatch attempt independently and stamps the
+selected `template_version` on that attempt's `attempt.resolved` row. The
+durable exposure ledger caps each candidate at its declared `weight`, including
+when workers assign concurrently. `prompt.experiments` evaluates the verified-
+success rate, cost per verified close, retry amplification, and gate-error rate
+at the configured cadence. It writes experiment records and receipts under
+`~/.needle/state/experiments/`; a regression or breached guardrail withdraws
+the candidate so later attempts use the baseline. A sufficiently better
+candidate is marked `promotable`, but the controller never edits prompt files
+or config. Operators can also roll an experiment back, which records a receipt
+and returns future attempts to the baseline.
 
 ```yaml
 prompt:
@@ -622,6 +624,10 @@ prompt:
     regression_margin: 0.15
     window_days: 14
     refresh_secs: 600
+    guardrails:
+      max_cost_per_verified_close_usd: null
+      max_retry_amplification: 3.0
+      max_gate_error_rate: 0.10
 ```
 
 ### Model-to-Adapter Routing
@@ -1224,6 +1230,15 @@ provider keep their own state under both settings, and adapter-keyed state
 files written before the flag was enabled migrate into the provider's file
 without losing an active degradation.
 
+Stream-derived provider health uses a separate `(adapter, provider)` window:
+`provider_error_window_seconds` defaults to 1800 (30 minutes),
+`provider_error_degraded_threshold` defaults to `0.50`, and
+`provider_error_restored_threshold` defaults to `0.20`. The edge is not
+evaluated until `provider_error_min_attempts` (default `5`) attempts exist,
+which prevents a single provider error from flapping routing health. The state
+stores only attempt counts and categorical classes, never provider error
+bodies.
+
 ```yaml
 workspace_health:
   fingerprint_window_seconds: 7200      # sliding window for both detectors
@@ -1234,6 +1249,10 @@ workspace_health:
   adapter_health_enabled: true          # N-T23 adapter detector
   adapter_degraded_cooldown_secs: 300   # claim hold after the last degraded failure
   provider_keyed_health: false          # N-T51: one health per provider, off by default
+  provider_error_window_seconds: 1800   # N-T23 stream-error window (30 minutes)
+  provider_error_degraded_threshold: 0.50
+  provider_error_restored_threshold: 0.20
+  provider_error_min_attempts: 5
 ```
 
 ---

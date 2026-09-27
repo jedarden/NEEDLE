@@ -205,6 +205,12 @@ pub struct AttemptResolvedFields {
     pub tokens_in: Option<u64>,
     pub tokens_out: Option<u64>,
     pub estimated_cost_usd: Option<f64>,
+    /// Counted provider-error observations from the Claude stream.
+    pub provider_errors: u32,
+    /// Provider error classes and counts; no raw provider body is retained.
+    pub provider_error_classes: std::collections::BTreeMap<String, u32>,
+    /// Longest gap between consecutive assistant records in the stream.
+    pub max_response_gap_ms: Option<u64>,
     /// Whether `estimated_cost_usd` was established (N-T47, ADR-030): `false`
     /// means the attempt's cost is unknown, never that it was free.
     pub costed: bool,
@@ -4309,6 +4315,9 @@ impl EventKind {
                     tokens_in,
                     tokens_out,
                     estimated_cost_usd,
+                    provider_errors,
+                    provider_error_classes,
+                    max_response_gap_ms,
                     costed,
                     commits,
                     commits_before_deadline,
@@ -4338,6 +4347,8 @@ impl EventKind {
                     "commits_before_deadline": commits_before_deadline,
                     "duration_ms": duration_ms,
                     "exit_code": exit_code,
+                    "provider_errors": provider_errors,
+                    "provider_error_classes": provider_error_classes,
                     // Always present (N-T47): a missing cost reads as unknown
                     // only because this says so, never as a silent zero.
                     "costed": costed,
@@ -4385,6 +4396,9 @@ impl EventKind {
                 }
                 if let Some(cost) = estimated_cost_usd {
                     data["estimated_cost_usd"] = serde_json::json!(cost);
+                }
+                if let Some(gap) = max_response_gap_ms {
+                    data["max_response_gap_ms"] = serde_json::json!(gap);
                 }
                 if let Some(reason) = terminal_reason {
                     data["terminal_reason"] = serde_json::json!(reason);
@@ -7759,6 +7773,12 @@ mod tests {
             tokens_in: Some(120_000),
             tokens_out: Some(4_500),
             estimated_cost_usd: Some(0.0921),
+            provider_errors: 15,
+            provider_error_classes: std::collections::BTreeMap::from([(
+                "api_error".to_string(),
+                15,
+            )]),
+            max_response_gap_ms: Some(613_000),
             costed: true,
             commits: vec!["deadbee".to_string()],
             commits_before_deadline: Some(1),
@@ -7913,6 +7933,9 @@ mod tests {
             "tokens_in",
             "tokens_out",
             "estimated_cost_usd",
+            "provider_errors",
+            "provider_error_classes",
+            "max_response_gap_ms",
             "costed",
             "commits",
             "commits_before_deadline",

@@ -2649,6 +2649,7 @@ impl OutcomeHandler {
         gate_results: Vec<crate::telemetry::GateResultEntry>,
     ) -> crate::telemetry::AttemptResolvedFields {
         let attempt = self.take_attempt_context();
+        let provider_metrics = crate::provider_health::analyze_claude_stream(&output.stdout);
         let commits_before_deadline = commits_before_deadline(&attempt);
         let provenance = self
             .attempt_provenance
@@ -2673,6 +2674,78 @@ impl OutcomeHandler {
             .started_at
             .map(|started| started.elapsed().as_millis() as u64)
             .unwrap_or(0);
+
+        // Keep stream-derived provider health separate from the legacy
+        // process-failure fingerprint detector. The window stores only the
+        // categorical counts and is keyed by the concrete (adapter, provider)
+        // pair, so a gateway outage cannot be mistaken for task text.
+        let health_adapter = if attempt.adapter.is_empty() {
+            provenance.adapter.as_deref()
+        } else {
+            Some(attempt.adapter.as_str())
+        };
+        if let Some(adapter) = health_adapter.filter(|adapter| !adapter.is_empty()) {
+            if provider_metrics.saw_claude_record() {
+                match crate::provider_health::record_provider_attempt(
+                    adapter,
+                    attempt.provider.as_deref(),
+                    &provider_metrics,
+                    self.config.workspace_health.provider_error_config(),
+                ) {
+                    Ok(crate::provider_health::ProviderHealthTransition::Degraded {
+                        error_share,
+                        attempts,
+                    }) => {
+                        let _ = self.telemetry.emit_try_lock(
+                            EventKind::ProviderDegraded {
+                                adapter: adapter.to_string(),
+                                provider: attempt
+                                    .provider
+                                    .clone()
+                                    .unwrap_or_else(|| adapter.to_string()),
+                                adapters: vec![adapter.to_string()],
+                                fingerprint: "provider_error_share".to_string(),
+                                summary: format!("error_share={error_share:.3}"),
+                                failures: attempts as u32,
+                                distinct_beads: attempts as u32,
+                                bead_id: bead.id.clone(),
+                            },
+                            Utc::now(),
+                        );
+                    }
+                    Ok(crate::provider_health::ProviderHealthTransition::Restored {
+                        error_share,
+                        attempts,
+                    }) => {
+                        let _ = self.telemetry.emit_try_lock(
+                            EventKind::ProviderRestored {
+                                adapter: adapter.to_string(),
+                                provider: attempt
+                                    .provider
+                                    .clone()
+                                    .unwrap_or_else(|| adapter.to_string()),
+                                adapters: vec![adapter.to_string()],
+                                bead_id: bead.id.clone(),
+                                degraded_duration_secs: 0,
+                            },
+                            Utc::now(),
+                        );
+                        tracing::info!(
+                            adapter = %adapter,
+                            attempts,
+                            error_share,
+                            "stream provider health restored"
+                        );
+                    }
+                    Ok(crate::provider_health::ProviderHealthTransition::None { .. }) => {}
+                    Err(error) => tracing::warn!(
+                        adapter = %adapter,
+                        error = %error,
+                        "could not record stream provider health"
+                    ),
+                }
+            }
+        }
 
         // Record the ID before the emit: the wrapper paths below use this to
         // keep their fallback rows from doubling a row that already exists.
@@ -2717,6 +2790,9 @@ impl OutcomeHandler {
             tokens_in: attempt.tokens_in,
             tokens_out: attempt.tokens_out,
             estimated_cost_usd: attempt.estimated_cost_usd,
+            provider_errors: provider_metrics.provider_errors,
+            provider_error_classes: provider_metrics.provider_error_classes,
+            max_response_gap_ms: provider_metrics.max_response_gap_ms,
             costed: attempt.costed,
             commits: attempt.commits,
             commits_before_deadline,
