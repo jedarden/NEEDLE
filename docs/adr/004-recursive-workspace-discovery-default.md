@@ -2,7 +2,7 @@
 
 **Status:** Accepted — 2026-07-20
 **Deciders:** operator (jedarden), via Claude Code
-**Tracking:** plan.md Phase 8; implementation beads in this repo's workspace (genesis TBD — see plan.md Phase 8)
+**Tracking:** plan.md Phase 8; implemented — no genesis bead exists. Phase 8.4 regressions landed 2026-07-20 under bf-era bead `needle-bf-443yi` (commit 77c8c215; bf store retired), §8.3 scan-time re-discovery landed 2026-07-30 (commit 73635f75), and the ADR-004 discovery-versus-pinning contract tests plus this ADR's refresh are owned by `needle-e25b2db6` (closed 2026-09-24, commit cb01d5a6). No Phase 8 work remains unowned.
 
 ## Context
 
