@@ -101,9 +101,19 @@ Remediation, in three layers:
    scope, so an orphaned cargo invocation is reaped by systemd after 4h
    instead of never (the SIGIL orphans had run 14-24 days).
 
-Fleet size: **7 workers** (`workers.tsv`), the 2026-09-09 right-size of the
-15-unit fleet — one workspace family each, ~1 core per worker against the
-7-core slice, start-staggered 15s → 150s.
+Fleet size: **8 workers** (`workers.tsv`), against the 2026-09-09 right-size
+of the 15-unit fleet down to 7 — one workspace family each, ~1 core per worker
+against the 7-core slice, start-staggered 15s → 165s.
+
+`lab-codex-tgplat` (needle-bf3a9907, 2026-09-27) is the deliberate exception to
+the "no eighth worker" rule below: it shares `tradegraph-platform` with
+`lab-tgplat` (the workspace tolerates two claimants) and exists to burn a
+shared OpenAI ChatGPT-Pro subscription's banked reset credits before they
+expire (see codinghome memory `codex-banked-reset-credits-2026-09-27`), not to
+add steady-state capacity. It drops the average to ~0.875 cores/worker against
+the same 7-core slice — a real, if modest, increase in admission pressure. If
+the banked-credit motivation goes away, retiring this slot restores the
+7-worker budget the rest of this section assumes.
 
 On 2026-09-23, the idle `lab-needle` slot was reassigned to `lab-tgplat` to
 move one build-heavy `tradegraph-platform` route off codinghome without adding
