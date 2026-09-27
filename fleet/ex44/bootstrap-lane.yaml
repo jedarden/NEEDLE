@@ -71,9 +71,11 @@ limits:
     # Six codex workers now use this provider: the original codex-needle-01
     # and codex-roam-01/02 plus codex-luna-tradegraph, codex-luna-adc, and
     # codex-luna-needle-01. Provider limits match the adapter a dispatch
-    # actually uses, so all six share this OpenAI ceiling.
+    # actually uses, so every Codex worker shares this OpenAI ceiling. The limiter
+    # counts REGISTERED Codex workers plus the caller, so this must stay above the
+    # Codex roster (12 after needle-182be85c Step 2A, 15 after 2B).
     openai:
-      max_concurrent: 10
+      max_concurrent: 16
       requests_per_minute: 60
 
 audit:
