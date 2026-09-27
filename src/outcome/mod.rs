@@ -9425,6 +9425,7 @@ mod tests {
             .iter()
             .find(|event| event.event_type == "attempt.resolved")
             .unwrap();
+        assert_eq!(control_attempt.data["model"], "glm-5.3-flash");
         assert_eq!(control_attempt.data["effective_model"], "glm-5.3-flash");
 
         let missing = resolve(
