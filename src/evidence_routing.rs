@@ -1259,7 +1259,11 @@ mod tests {
 
     /// Ledger rows shaped like the 2026-09-12..14 evidence behind N-T48
     /// (codex 33/34 and flash 9/24 in reddit-media-player; flash 11/15 and
-    /// glm 4/48 in pdftract), plus a thin workspace and a poor one.
+    /// glm 4/48 in pdftract), plus a thin workspace and a poor one. Every
+    /// row reports the same known spend, so the N-T18 metric
+    /// (`verified_success_per_usd`) ranks exactly as the incident's success
+    /// rates did — without a costed spend no candidate has a rankable
+    /// metric and every choice here would fall back to static.
     fn replay_rows() -> Vec<serde_json::Value> {
         let mut rows = Vec::new();
         let mut push = |workspace: &str, adapter: &str, verified: u64, attempts: u64| {
@@ -1269,6 +1273,8 @@ mod tests {
                     "adapter": adapter,
                     "provisional": false,
                     "outcome": if i < verified { "verified_success" } else { "work_failure" },
+                    "costed": true,
+                    "estimated_cost_usd": 1.0,
                 }));
             }
         };
