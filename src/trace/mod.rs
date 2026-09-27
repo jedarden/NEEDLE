@@ -44,6 +44,7 @@ use std::time::UNIX_EPOCH;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::cargo_test::TestMetrics;
 use crate::claim::ClaimHandleMetadata;
@@ -63,6 +64,13 @@ pub const STDERR_FILE: &str = "stderr.txt";
 
 /// Test output file name.
 pub const TEST_OUTPUT_FILE: &str = "test-output.txt";
+/// The exact prompt bytes passed to the agent adapter for this attempt.
+pub const PROMPT_FILE: &str = "prompt.md";
+
+/// Return a lowercase hexadecimal SHA-256 digest for arbitrary bytes.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
+}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Trace metadata
@@ -112,6 +120,9 @@ pub struct TraceMetadata {
     pub exit_code: i32,
     /// Classified outcome.
     pub outcome: String,
+    /// Lifecycle action requested by the resolver for this attempt.
+    #[serde(default)]
+    pub requested_action: Option<String>,
     /// Wall-clock execution time in milliseconds.
     pub duration_ms: u64,
     /// Input tokens consumed (if available).
@@ -122,12 +133,24 @@ pub struct TraceMetadata {
     pub cost_usd: Option<f64>,
     /// Trace capture timestamp.
     pub captured_at: DateTime<Utc>,
+    /// Wall-clock time at which outcome handling finalized this attempt.
+    #[serde(default)]
+    pub finished_at: Option<DateTime<Utc>>,
     /// Adapter-specific trace format.
     pub trace_format: TraceFormat,
     /// Whether the trace data has been pruned (retention policy).
     pub pruned: bool,
     /// SHA-256 hex digest of the rendered prompt (identifies template version).
     pub template_version: Option<String>,
+    /// Template name that produced the dispatched prompt.
+    #[serde(default)]
+    pub template_name: Option<String>,
+    /// SHA-256 hex digest supplied by the prompt builder before worker prefixes.
+    #[serde(default)]
+    pub prompt_hash: Option<String>,
+    /// SHA-256 hex digest of the actual bytes written to `prompt.md`.
+    #[serde(default)]
+    pub dispatched_prompt_sha256: Option<String>,
     /// Harness session id parsed from the stream-json init event.
     #[serde(default)]
     pub session_id: Option<String>,
@@ -168,14 +191,19 @@ impl Default for TraceMetadata {
             model_resolution_source: None,
             exit_code: 0,
             outcome: String::new(),
+            requested_action: None,
             duration_ms: 0,
             input_tokens: None,
             output_tokens: None,
             cost_usd: None,
             captured_at: Utc::now(),
+            finished_at: None,
             trace_format: TraceFormat::RawText,
             pruned: false,
             template_version: None,
+            template_name: None,
+            prompt_hash: None,
+            dispatched_prompt_sha256: None,
             session_id: None,
             harness_transcript: None,
             started_at: None,
@@ -433,6 +461,19 @@ impl TraceCapture {
             .with_context(|| format!("failed to write trace JSONL: {}", path.display()))
     }
 
+    /// Write the exact bytes supplied to the agent as `prompt.md` and return
+    /// their SHA-256 digest. The caller can persist the digest separately from
+    /// the prompt builder's hash to expose any worker-added prefix.
+    pub fn write_prompt(&self, prompt: &[u8]) -> Result<String> {
+        if !self.enabled {
+            return Ok(sha256_hex(prompt));
+        }
+        let path = self.trace_dir.join(PROMPT_FILE);
+        std::fs::write(&path, prompt)
+            .with_context(|| format!("failed to write dispatched prompt: {}", path.display()))?;
+        Ok(sha256_hex(prompt))
+    }
+
     /// Sanitize text if a sanitizer is configured; otherwise return as-is.
     fn sanitize<'a>(&self, text: &'a str) -> std::borrow::Cow<'a, str> {
         match &self.sanitizer {
@@ -529,7 +570,13 @@ impl TraceCapture {
         }
 
         // Delete trace data files.
-        for file in ["trace.jsonl", STDOUT_FILE, STDERR_FILE, TEST_OUTPUT_FILE] {
+        for file in [
+            "trace.jsonl",
+            STDOUT_FILE,
+            STDERR_FILE,
+            TEST_OUTPUT_FILE,
+            PROMPT_FILE,
+        ] {
             let path = self.trace_dir.join(file);
             if path.exists() {
                 match std::fs::remove_file(&path) {
@@ -984,6 +1031,7 @@ fn remove_capture_files(trace_dir: &Path) -> Result<()> {
         STDOUT_FILE,
         STDERR_FILE,
         TEST_OUTPUT_FILE,
+        PROMPT_FILE,
         "test_metrics.json",
         "compilation_errors.json",
         "metadata.json",
@@ -1044,7 +1092,13 @@ fn prune_trace_dir(trace_dir: &Path) -> Result<()> {
     // Step 2: Remove trace data files after metadata is updated.
     // Use ? to propagate errors - if file removal fails, the operator should
     // know so they can investigate. Files that don't exist are skipped.
-    for file in ["trace.jsonl", STDOUT_FILE, STDERR_FILE, TEST_OUTPUT_FILE] {
+    for file in [
+        "trace.jsonl",
+        STDOUT_FILE,
+        STDERR_FILE,
+        TEST_OUTPUT_FILE,
+        PROMPT_FILE,
+    ] {
         let path = trace_dir.join(file);
         if path.exists() {
             match std::fs::remove_file(&path) {
@@ -1218,6 +1272,14 @@ mod tests {
         std::fs::create_dir_all(beads_root.join(".beads")).unwrap();
 
         let capture = TraceCapture::new(&test_bead_id(), beads_root, None).unwrap();
+        let prompt = b"exact dispatched prompt bytes\n";
+        let prompt_digest = capture.write_prompt(prompt).unwrap();
+        assert_eq!(
+            std::fs::read(capture.trace_dir().join(PROMPT_FILE)).unwrap(),
+            prompt
+        );
+        assert_eq!(prompt_digest, sha256_hex(prompt));
+
         let metadata = TraceMetadata {
             schema_version: 1,
             attempt_id: Some("attempt-1".to_string()),
@@ -1319,6 +1381,7 @@ mod tests {
         capture.write_stdout("stdout").unwrap();
         capture.write_stderr("stderr").unwrap();
         capture.write_test_output("test output").unwrap();
+        capture.write_prompt(b"prompt").unwrap();
 
         let metadata = TraceMetadata {
             bead_id: test_bead_id(),
@@ -1358,6 +1421,7 @@ mod tests {
         assert!(!capture.trace_dir().join("stdout.txt").exists());
         assert!(!capture.trace_dir().join("stderr.txt").exists());
         assert!(!capture.trace_dir().join(TEST_OUTPUT_FILE).exists());
+        assert!(!capture.trace_dir().join(PROMPT_FILE).exists());
         assert!(capture.trace_dir().join("metadata.json").exists());
 
         // Verify metadata marked as pruned.

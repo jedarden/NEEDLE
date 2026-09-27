@@ -912,6 +912,8 @@ pub struct Worker {
 
     // Transient fields — pass data between state handlers within a single cycle.
     built_prompt: Option<BuiltPrompt>,
+    /// Hash as returned by prompt construction, before worker-added prefixes.
+    prompt_builder_hash: Option<String>,
     current_strand: Option<String>,
     exec_output: Option<(AgentOutcome, bool)>,
     /// The completed Pluck process output retained until the post-dispatch
@@ -1469,6 +1471,7 @@ impl Worker {
             last_error: None,
             boot_time: None,
             built_prompt: None,
+            prompt_builder_hash: None,
             current_strand: None,
             exec_output: None,
             last_agent_outcome: None,
@@ -3770,6 +3773,9 @@ impl Worker {
     }
 
     async fn do_build_inner(&mut self) -> Result<()> {
+        // Do not carry a prior cycle's builder digest into an attempt that
+        // fails before producing its own prompt.
+        self.prompt_builder_hash = None;
         let bead = match self.current_bead {
             Some(ref b) => b.clone(),
             None => {
@@ -4072,6 +4078,8 @@ impl Worker {
                 return Ok(());
             }
         };
+
+        self.prompt_builder_hash = Some(prompt.hash.clone());
 
         // Stop heartbeat task.
         heartbeat_handle.abort();
@@ -4915,6 +4923,10 @@ impl Worker {
                 // template identity is all the ledger needs from it.
                 prompt_template: prompt.template_name.clone(),
                 template_version: prompt.template_version.clone(),
+                prompt_hash: self.prompt_builder_hash.clone(),
+                dispatched_prompt_sha256: exec_result
+                    .as_ref()
+                    .map(|_| crate::trace::sha256_hex(prompt.content.as_bytes())),
                 bead_revision_start: self.pre_dispatch_head.clone(),
                 commits,
                 commit_timestamps,

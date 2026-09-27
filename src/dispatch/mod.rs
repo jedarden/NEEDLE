@@ -2198,6 +2198,18 @@ impl Dispatcher {
             attempt_id.as_deref(),
             self.sanitizer.clone(),
         );
+        if let Some(capture) = trace_capture.as_ref() {
+            let prompt_write = std::fs::read(prompt_file)
+                .map_err(anyhow::Error::from)
+                .and_then(|prompt| capture.write_prompt(&prompt).map(|_| ()));
+            if let Err(error) = prompt_write {
+                tracing::warn!(
+                    bead_id = %bead_id.as_ref(),
+                    error = %error,
+                    "failed to write dispatched prompt trace"
+                );
+            }
+        }
         if let (Some(capture), Some(metadata)) = (
             trace_capture.as_mut(),
             authority.claim_handle_metadata().await,
@@ -3170,12 +3182,17 @@ impl Dispatcher {
                 trace_format,
                 pruned: false,
                 template_version: None,
+                template_name: None,
+                prompt_hash: None,
+                dispatched_prompt_sha256: None,
                 session_id,
                 harness_transcript: None,
                 started_at: Some(capture.started_at()),
                 timeout_reason: timeout_reason.clone(),
                 terminal_reason,
                 api_error_status,
+                requested_action: None,
+                finished_at: None,
             };
             let _ = capture.write_metadata(&metadata);
 

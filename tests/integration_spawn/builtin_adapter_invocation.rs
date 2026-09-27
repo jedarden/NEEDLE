@@ -532,6 +532,7 @@ fn trace_metadata(workspace: &Path, bead_id: &str) -> serde_json::Value {
         .join(".beads")
         .join("traces")
         .join(bead_id)
+        .join(MATRIX_ATTEMPT)
         .join("metadata.json");
     let text = fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("trace metadata missing at {}: {e}", path.display()));
@@ -1349,6 +1350,23 @@ async fn documented_adapters_classify_exit_codes_and_structured_results() {
         .expect("successful adapter dispatch");
 
         assert_eq!(result.exit_code, 0, "{name} success exit code");
+        let prompt_path = workspace
+            .path()
+            .join(".beads/traces")
+            .join(&bead_id)
+            .join(MATRIX_ATTEMPT)
+            .join(needle::trace::PROMPT_FILE);
+        let expected_prompt = test_prompt(&bead_id).content;
+        assert_eq!(
+            fs::read(&prompt_path).unwrap_or_else(|error| {
+                panic!(
+                    "dispatched prompt missing at {}: {error}",
+                    prompt_path.display()
+                )
+            }),
+            expected_prompt.as_bytes(),
+            "{name} trace prompt must match the exact adapter input"
+        );
         let metadata = trace_metadata(workspace.path(), &bead_id);
         assert_eq!(
             metadata["outcome"], "success",

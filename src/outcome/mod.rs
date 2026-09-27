@@ -877,6 +877,10 @@ pub struct AttemptContext {
     pub prompt_template: String,
     /// Version tag of that template (e.g. `"pluck-default"`).
     pub template_version: String,
+    /// Digest produced by the prompt builder before worker-added prefixes.
+    pub prompt_hash: Option<String>,
+    /// Digest of the exact prompt bytes dispatched to the adapter.
+    pub dispatched_prompt_sha256: Option<String>,
     /// HEAD SHA captured just before agent dispatch, so downstream consumers
     /// can attribute commits made during the attempt.
     pub bead_revision_start: Option<String>,
@@ -2787,6 +2791,8 @@ impl OutcomeHandler {
             .started_at
             .map(|started| started.elapsed().as_millis() as u64)
             .unwrap_or(0);
+        let prompt_hash = attempt.prompt_hash.clone();
+        let dispatched_prompt_sha256 = attempt.dispatched_prompt_sha256.clone();
 
         // Keep stream-derived provider health separate from the legacy
         // process-failure fingerprint detector. The window stores only the
@@ -2960,7 +2966,117 @@ impl OutcomeHandler {
                 "failed to enqueue attempt.resolved ledger event"
             );
         }
+        if let Err(error) = self.finalize_attempt_trace_metadata(
+            bead,
+            &fields,
+            prompt_hash.as_deref(),
+            dispatched_prompt_sha256.as_deref(),
+        ) {
+            tracing::warn!(
+                bead_id = %bead.id,
+                attempt_id = %fields.attempt_id,
+                error = %error,
+                "failed to finalize attempt trace metadata"
+            );
+        }
         fields
+    }
+
+    /// Finalize the attempt-scoped trace from the same resolved fields emitted
+    /// to `attempt.resolved`. Keeping this at the shared ledger choke point
+    /// covers every handler route, including stale ownership and unresolved
+    /// wrapper fallbacks, exactly once per emitted row.
+    fn finalize_attempt_trace_metadata(
+        &self,
+        bead: &Bead,
+        ledger: &crate::telemetry::AttemptResolvedFields,
+        prompt_hash: Option<&str>,
+        dispatched_prompt_sha256: Option<&str>,
+    ) -> Result<()> {
+        let workspace = if bead.workspace.as_os_str().is_empty()
+            || bead.workspace == std::path::Path::new(".")
+        {
+            self.config.workspace.default.clone()
+        } else {
+            bead.workspace.clone()
+        };
+        let bead_trace_dir = workspace
+            .join(".beads")
+            .join("traces")
+            .join(bead.id.as_ref());
+        let trace_dir = crate::trace::attempt_scoped_dir(&bead_trace_dir, Some(&ledger.attempt_id));
+        std::fs::create_dir_all(&trace_dir).with_context(|| {
+            format!(
+                "failed to create attempt trace directory {}",
+                trace_dir.display()
+            )
+        })?;
+        let metadata_path = trace_dir.join("metadata.json");
+
+        let initial_metadata = || -> Result<serde_json::Value> {
+            let metadata = crate::trace::TraceMetadata {
+                schema_version: 1,
+                attempt_id: Some(ledger.attempt_id.clone()),
+                provisional: ledger.provisional,
+                bead_id: bead.id.clone(),
+                workspace: workspace.display().to_string(),
+                worker_id: ledger.worker.clone(),
+                adapter: ledger.adapter.clone(),
+                agent: ledger.adapter.clone(),
+                provider: ledger.provider.clone(),
+                model: ledger.model.clone(),
+                requested_model: ledger.requested_model.clone(),
+                effective_model: ledger.effective_model.clone(),
+                model_resolution_source: ledger.model_resolution_source.clone(),
+                trace_format: crate::trace::detect_trace_format(&ledger.adapter),
+                ..crate::trace::TraceMetadata::default()
+            };
+            serde_json::to_value(metadata).context("failed to serialize initial trace metadata")
+        };
+
+        let mut metadata = match std::fs::read(&metadata_path) {
+            Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
+                Ok(value) if value.is_object() => value,
+                Ok(_) => initial_metadata()?,
+                Err(error) => {
+                    tracing::warn!(
+                        path = %metadata_path.display(),
+                        error = %error,
+                        "replacing invalid provisional trace metadata during finalization"
+                    );
+                    initial_metadata()?
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => initial_metadata()?,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to read trace metadata {}", metadata_path.display())
+                });
+            }
+        };
+
+        let finished_at = Utc::now();
+        metadata["schema_version"] = serde_json::json!(1);
+        metadata["attempt_id"] = serde_json::json!(ledger.attempt_id);
+        metadata["bead_id"] = serde_json::json!(bead.id.as_ref());
+        metadata["workspace"] = serde_json::json!(workspace.display().to_string());
+        metadata["outcome"] = serde_json::json!(ledger.outcome);
+        metadata["requested_action"] = serde_json::json!(ledger.requested_action);
+        metadata["exit_code"] = serde_json::json!(ledger.exit_code);
+        metadata["terminal_reason"] = serde_json::json!(ledger.terminal_reason);
+        metadata["finished_at"] = serde_json::json!(finished_at);
+        metadata["prompt_hash"] = serde_json::json!(prompt_hash);
+        metadata["dispatched_prompt_sha256"] = serde_json::json!(dispatched_prompt_sha256);
+        metadata["template_name"] = serde_json::json!(ledger.prompt_template);
+        metadata["template_version"] = serde_json::json!(ledger.template_version);
+
+        let json = serde_json::to_vec_pretty(&metadata)
+            .context("failed to serialize finalized trace metadata")?;
+        let partial_path = trace_dir.join("metadata.json.partial");
+        std::fs::write(&partial_path, json)
+            .with_context(|| format!("failed to write metadata {}", partial_path.display()))?;
+        std::fs::rename(&partial_path, &metadata_path)
+            .with_context(|| format!("failed to replace metadata {}", metadata_path.display()))
     }
 
     /// Emit the ledger row for a dispatch that ended without reaching one of
@@ -6845,7 +6961,8 @@ mod tests {
         let mut failure_actions = None;
 
         for (index, (expected_outcome, exit_code, interrupted)) in cases.iter().enumerate() {
-            helper.telemetry().set_attempt_id(crate::attempt::new_id());
+            let attempt_id = crate::attempt::new_id();
+            helper.telemetry().set_attempt_id(attempt_id.clone());
             let status = if *expected_outcome == "success" {
                 BeadStatus::Done
             } else {
@@ -6854,9 +6971,32 @@ mod tests {
             let store = MockBeadStore::new(status);
             let mut bead = test_bead(BeadStatus::InProgress);
             bead.bead.id = BeadId::from(format!("needle-outcome-{index}"));
+            std::fs::create_dir_all(bead.bead.workspace.join(".beads")).unwrap();
+            let capture = crate::trace::TraceCapture::new(
+                &bead.bead.id,
+                &bead.bead.workspace,
+                Some(&attempt_id),
+            )
+            .unwrap();
+            let builder_prompt = format!("[needle-attempt:{attempt_id}]\nwork on this bead");
+            let dispatched_prompt = format!(
+                "[needle-attempt:{attempt_id}]\n[needle:test-worker:{}:pluck]\nwork on this bead",
+                bead.bead.id
+            );
+            let prompt_hash = crate::trace::sha256_hex(builder_prompt.as_bytes());
+            let dispatched_prompt_sha256 =
+                capture.write_prompt(dispatched_prompt.as_bytes()).unwrap();
+            assert_ne!(prompt_hash, dispatched_prompt_sha256);
+            handler.set_attempt_context(AttemptContext {
+                prompt_template: "pluck".to_string(),
+                template_version: "pluck-test-v1".to_string(),
+                prompt_hash: Some(prompt_hash.clone()),
+                dispatched_prompt_sha256: Some(dispatched_prompt_sha256.clone()),
+                ..AttemptContext::default()
+            });
 
             let result = handler
-                .handle(&store, &bead, &test_output(*exit_code), *interrupted)
+                .handle(&store, &bead.bead, &test_output(*exit_code), *interrupted)
                 .await
                 .unwrap();
             assert_eq!(
@@ -6869,6 +7009,46 @@ mod tests {
                 failure_actions = Some(store.actions());
             }
             helper.sync().await;
+
+            let resolved: Vec<_> = helper
+                .events_by_type("attempt.resolved")
+                .into_iter()
+                .filter(|event| event.data["attempt_id"] == attempt_id)
+                .collect();
+            assert_eq!(resolved.len(), 1, "one resolved event for {attempt_id}");
+            let metadata_path = capture.trace_dir().join("metadata.json");
+            let metadata: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&metadata_path).unwrap_or_else(|error| {
+                    panic!(
+                        "read finalized metadata {}: {error}",
+                        metadata_path.display()
+                    )
+                }))
+                .unwrap();
+            assert_eq!(metadata["outcome"], resolved[0].data["outcome"]);
+            assert_eq!(
+                metadata["requested_action"],
+                resolved[0].data["requested_action"]
+            );
+            assert_eq!(metadata["exit_code"], resolved[0].data["exit_code"]);
+            assert_eq!(
+                metadata["terminal_reason"],
+                resolved[0].data["terminal_reason"]
+            );
+            assert!(metadata["finished_at"].as_str().is_some());
+            assert_eq!(metadata["prompt_hash"], prompt_hash);
+            assert_eq!(
+                metadata["dispatched_prompt_sha256"],
+                dispatched_prompt_sha256
+            );
+            assert_eq!(metadata["template_name"], "pluck");
+            assert_eq!(metadata["template_version"], "pluck-test-v1");
+            assert_eq!(
+                crate::trace::sha256_hex(
+                    &std::fs::read(capture.trace_dir().join(crate::trace::PROMPT_FILE)).unwrap()
+                ),
+                metadata["dispatched_prompt_sha256"]
+            );
         }
 
         let classified = helper.events_by_type("outcome.classified");
@@ -8348,6 +8528,36 @@ mod tests {
             "gate_error:fallback_python"
         );
         assert_eq!(resolved[0].data["exit_code"], 0);
+        let attempt_id = resolved[0].data["attempt_id"]
+            .as_str()
+            .expect("resolved row carries its attempt id");
+        assert_eq!(
+            resolved
+                .iter()
+                .filter(|event| event.data["attempt_id"] == attempt_id)
+                .count(),
+            1,
+            "gate error finalizes one row for the attempt"
+        );
+        let metadata_path = workspace
+            .path()
+            .join(".beads/traces")
+            .join(bead.id.as_ref())
+            .join(attempt_id)
+            .join("metadata.json");
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&metadata_path).unwrap()).unwrap();
+        assert_eq!(metadata["outcome"], resolved[0].data["outcome"]);
+        assert_eq!(
+            metadata["requested_action"],
+            resolved[0].data["requested_action"]
+        );
+        assert_eq!(metadata["exit_code"], resolved[0].data["exit_code"]);
+        assert_eq!(
+            metadata["terminal_reason"],
+            resolved[0].data["terminal_reason"]
+        );
+        assert!(metadata["finished_at"].as_str().is_some());
         assert_row_satisfies_v1_contract("gate execution error row", &resolved[0]);
     }
 
@@ -9294,29 +9504,33 @@ mod tests {
 
     #[tokio::test]
     async fn handle_gate_failure_still_increments_failure_count() {
-        // Existing gate failures (verification failures) should still increment
-        // failure count. This is the positive case — we're ensuring the new
-        // GateError handling doesn't break existing gate failure behavior.
-        let handler = test_handler();
+        // A gate that ran and rejected the work resolves through the same
+        // metadata finalizer as the ordinary process outcomes.
+        let (_guard, _home) = isolated_home();
+        let helper = crate::telemetry::test_utils::TestHelper::new("gate-failure-metadata");
+        let mut config = Config::default();
+        config.worker.enforce_shipped_work = false;
+        let handler = OutcomeHandler::new(config, helper.telemetry().clone());
         let store = MockBeadStore::new(BeadStatus::InProgress)
             .with_labels(vec!["failure-count:1".to_string()]);
-        let bead = test_bead(BeadStatus::InProgress);
+        let workspace = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(workspace.path().join(".beads")).unwrap();
+        std::fs::write(
+            workspace.path().join(".needle.yaml"),
+            "gates:\n  - type: command\n    commands: [\"exit 7\"]\n    run_in: workspace\n",
+        )
+        .unwrap();
+        let mut bead = test_bead(BeadStatus::InProgress);
+        bead.bead.workspace = workspace.path().to_path_buf();
+        let attempt_id = crate::attempt::new_id();
+        helper.telemetry().set_attempt_id(attempt_id.clone());
 
-        // Create a gate report with a verification failure (gate ran but failed)
-        let mut results = std::collections::HashMap::new();
-        results.insert(
-            "test_gate".to_string(),
-            crate::validation::GateResult::Fail("test failed".to_string()),
-        );
-        let _gate_report = Some(crate::validation::GateReport::new(results));
-
-        // Simulate the outcome handling with gate failure
         let result = handler
-            .handle(&store, &bead, &test_output(1), false)
+            .handle(&store, &bead.bead, &test_output(0), false)
             .await
             .unwrap();
 
-        // The bead should be released
+        assert_eq!(result.outcome, Outcome::Failure);
         assert!(matches!(result.bead_action, BeadAction::Released(_)));
 
         // Verify failure count WAS incremented
@@ -9336,6 +9550,32 @@ mod tests {
                 .any(|e| matches!(e, EventKind::GateExecutionError { .. })),
             "gate failure should NOT emit gate.execution_error event"
         );
+
+        helper.sync().await;
+        let resolved = helper.events_by_type("attempt.resolved");
+        let row = resolved
+            .iter()
+            .find(|event| event.data["attempt_id"] == attempt_id)
+            .expect("gate failure must emit one resolved row");
+        assert_eq!(
+            resolved
+                .iter()
+                .filter(|event| event.data["attempt_id"] == attempt_id)
+                .count(),
+            1
+        );
+        let metadata_path = workspace
+            .path()
+            .join(".beads/traces")
+            .join(bead.bead.id.as_ref())
+            .join(&attempt_id)
+            .join("metadata.json");
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&metadata_path).unwrap()).unwrap();
+        assert_eq!(metadata["outcome"], row.data["outcome"]);
+        assert_eq!(metadata["requested_action"], row.data["requested_action"]);
+        assert_eq!(metadata["terminal_reason"], row.data["terminal_reason"]);
+        assert!(metadata["finished_at"].as_str().is_some());
     }
 
     // ── attempt.resolved ledger row (N-T16) ──
